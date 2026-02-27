@@ -1,0 +1,46 @@
+[package]
+name = "forge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Forge — Go's simplicity, Rust's safety, the internet built in."
+license = "MIT"
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
+[dependencies]
+# === Serialization ===
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# === Async Runtime ===
+tokio = { version = "1", features = ["full"] }
+
+# === HTTP Server (production-grade) ===
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# === HTTP Client (production-grade) ===
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# === CLI & REPL ===
+clap = { version = "4", features = ["derive"] }
+rustyline = "15"
+
+# === Error Reporting ===
+ariadne = "0.4"
+
+# === Utilities ===
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

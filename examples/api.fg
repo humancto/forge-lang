@@ -1,0 +1,30 @@
+// api.fg — A complete REST API in Forge
+// Run: forge run api.fg
+// Test: curl http://localhost:8080/hello/World
+
+@server(port: 8080)
+
+@get("/hello/:name")
+fn hello(name: String) -> Json {
+    return { greeting: "Hello, {name}!", language: "Forge", version: "0.1.0" }
+}
+
+@get("/health")
+fn health() -> Json {
+    return { status: "ok", uptime: "just started" }
+}
+
+@post("/echo")
+fn echo(body: Json) -> Json {
+    return body
+}
+
+@get("/add/:a/:b")
+fn add(a: String, b: String) -> Json {
+    let x = int(a)
+    let y = int(b)
+    let sum = x + y
+    return { a: x, b: y, sum: sum }
+}
+
+println("Forge API server starting...")

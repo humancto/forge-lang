@@ -1,0 +1,47 @@
+// hello.fg — Your first Forge program
+
+let name = "World"
+println("Hello, {name}!")
+
+// Math
+let x = 42
+let y = 3.14
+println("The answer is {x}")
+
+// Functions
+fn greet(who) {
+    println("Welcome to Forge, {who}!")
+}
+
+greet("Developer")
+
+// Arrays and iteration
+let numbers = [1, 2, 3, 4, 5]
+let total = 0
+for n in numbers {
+    total = total + n
+}
+println("Sum: {total}")
+
+// Objects (JSON-native)
+let user = {
+    name: "Odin",
+    role: "Builder",
+    level: 99
+}
+println("User: {user}")
+
+// Pattern matching
+fn describe(n) {
+    if n > 100 {
+        println("{n} is big!")
+    } else if n > 10 {
+        println("{n} is medium")
+    } else {
+        println("{n} is small")
+    }
+}
+
+describe(42)
+describe(7)
+describe(999)

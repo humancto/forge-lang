@@ -1,0 +1,29 @@
+// result_try.fg — Result values and ? propagation
+
+fn parse_positive_int(input) {
+    let n = int(input)
+    if n < 0 {
+        return Err("expected a positive integer")
+    }
+    return Ok(n)
+}
+
+fn double_positive(input) {
+    let n = parse_positive_int(input)?
+    return Ok(n * 2)
+}
+
+let good = double_positive("21")
+match good {
+    Ok(value) => println("good => {value}")
+    Err(msg) => println("good error => {msg}")
+}
+
+let bad = double_positive("-5")
+match bad {
+    Ok(value) => println("bad => {value}")
+    Err(msg) => println("bad error => {msg}")
+}
+
+println("is_ok(good) = {is_ok(good)}")
+println("is_err(bad) = {is_err(bad)}")
