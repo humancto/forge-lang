@@ -3,6 +3,7 @@ pub mod compiler;
 pub mod frame;
 pub mod gc;
 pub mod green;
+pub mod jit;
 pub mod machine;
 pub mod value;
 

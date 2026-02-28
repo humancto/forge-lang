@@ -57,6 +57,13 @@ regex = "1"
 rusqlite = { version = "0.34", features = ["bundled"] }
 tokio-postgres = "0.7"
 
+# === JIT / Native Compilation (Cranelift) ===
+cranelift-codegen = "0.129"
+cranelift-frontend = "0.129"
+cranelift-jit = "0.129"
+cranelift-module = "0.129"
+cranelift-native = "0.129"
+
 [profile.dev]
 opt-level = 1
 

@@ -48,6 +48,10 @@ struct Cli {
     /// Use the bytecode VM (experimental, faster but fewer features)
     #[arg(long = "vm")]
     use_vm: bool,
+
+    /// Use JIT compilation for hot functions (requires --vm)
+    #[arg(long = "jit")]
+    use_jit: bool,
 }
 
 #[derive(Subcommand)]
@@ -101,10 +105,15 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let use_vm = cli.use_vm;
+    let use_vm = cli.use_vm || cli.use_jit;
+    let use_jit = cli.use_jit;
 
     if let Some(code) = cli.eval_code {
         let code = code.replace(';', "\n");
+        if use_jit {
+            run_jit(&code, "<eval>");
+            return;
+        }
         run_source(&code, "<eval>", use_vm).await;
         return;
     }
@@ -251,6 +260,67 @@ async fn run_source(source: &str, filename: &str, use_vm: bool) {
         }
     }
 
+}
+
+fn run_jit(source: &str, _filename: &str) {
+    let mut lexer = Lexer::new(source);
+    let tokens = match lexer.tokenize() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}", errors::format_error(source, e.line, e.col, &e.message));
+            process::exit(1);
+        }
+    };
+
+    let mut parser = ForgeParser::new(tokens);
+    let program = match parser.parse_program() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", errors::format_error(source, e.line, e.col, &e.message));
+            process::exit(1);
+        }
+    };
+
+    let chunk = match vm::compiler::compile(&program) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e.message));
+            process::exit(1);
+        }
+    };
+
+    let mut jit = match vm::jit::jit_module::JitCompiler::new() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("JIT init error: {}", e);
+            process::exit(1);
+        }
+    };
+
+    for (i, proto) in chunk.prototypes.iter().enumerate() {
+        let name = if proto.name.is_empty() {
+            format!("fn_{}", i)
+        } else {
+            proto.name.clone()
+        };
+        match jit.compile_function(proto, &name) {
+            Ok(ptr) => {
+                eprintln!("  JIT compiled: {} ({} instructions -> native)", name, proto.code.len());
+            }
+            Err(e) => {
+                eprintln!("  JIT skip: {} ({})", name, e);
+            }
+        }
+    }
+
+    let mut vm = vm::machine::VM::new();
+    match vm.execute(&chunk) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e.message));
+            process::exit(1);
+        }
+    }
 }
 
 fn compile_to_bytecode(source: &str, filename: &str) {
