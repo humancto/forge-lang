@@ -435,12 +435,10 @@ Forge is v0.2.0. The language, interpreter, and standard library are stable and 
 
 Forge is a young language. These are documented, not hidden:
 
-- **Recursive performance** is slower than Python for deep call stacks (100K+ calls). Loops and stdlib calls run at native Rust speed. The bytecode VM in the roadmap addresses this.
-- **`timeout` keyword** parses but does not enforce time limits yet. Documented as experimental.
-- **`safe` and `when`** work as statements only, not as expressions (`let x = when ...` is not yet supported).
 - **No parameterized SQL queries** — use string concatenation for now. Be cautious with user input.
-- **Object keys** must be valid identifiers (no hyphens like `"Content-Type"`).
-- **No `null` literal** — use `None` from the Option type system.
+- **Interpreter performance** is ~20x slower than Python for deep recursion. Use `--jit` for compute-heavy workloads (11x faster than Python) or `--vm` for general bytecode execution (2x slower than Python).
+- **VM/JIT feature gap** — the JIT and VM support fewer features than the interpreter. Use the default interpreter for full stdlib, HTTP, and database access.
+- **`regex` functions** take `(text, pattern)` argument order, not `(pattern, text)`.
 
 See [ROADMAP.md](ROADMAP.md) for what's coming next.
 

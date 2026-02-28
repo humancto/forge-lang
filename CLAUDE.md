@@ -109,11 +109,8 @@ All 12 example files run successfully.
 
 ## Known Limitations (v0.2.0)
 
-- `timeout` keyword parses but does not enforce time limits (experimental)
-- `safe` and `when` work as statements only, not expressions
-- No `null` literal (use `None` from Option type)
-- Result constructors are uppercase: `Ok(42)`, `Err("msg")`
-- Object keys must be valid identifiers (no hyphens in keys)
-- Recursive performance is ~100x slower than Python (tree-walk interpreter; VM roadmap addresses this)
-- SQL queries use raw strings (no parameterized query API yet)
-- regex functions take `(text, pattern)` order, not `(pattern, text)`
+- SQL queries use raw strings (no parameterized query API yet) — be cautious with user input
+- Interpreter is ~20x slower than Python for deep recursion; use `--jit` (11x faster than Python) or `--vm` (2x slower than Python)
+- VM/JIT support fewer features than the interpreter — use interpreter (default) for full stdlib, HTTP, DB access
+- `regex` functions take `(text, pattern)` order, not `(pattern, text)`
+- Result constructors accept both cases: `Ok(42)`/`ok(42)`, `Err("msg")`/`err("msg")`
