@@ -12,6 +12,7 @@ pub mod math;
 pub mod pg;
 pub mod regex_module;
 pub mod term;
+pub mod time;
 
 use crate::interpreter::Value;
 
@@ -53,4 +54,7 @@ pub fn create_http_module() -> Value {
 }
 pub fn create_csv_module() -> Value {
     csv::create_module()
+}
+pub fn create_time_module() -> Value {
+    time::create_module()
 }

@@ -1,7 +1,7 @@
-# Forge Language v0.2.0 — Pre-Launch Audit Report (FINAL)
+# Forge Language v0.2.0 — Pre-Launch Audit Report (FINAL v4)
 
 **Date:** 2026-02-28
-**Revision:** v3 (FINAL) — all bugs fixed, VM Tier 1 benchmarks included
+**Revision:** v4 (FINAL) — JIT retest, new bug found, full 3-engine benchmarks
 **Codebase:** 16,002+ lines of Rust across 30+ files
 **Binary size:** 8.3MB (release)
 **Dependencies:** 280 crates, 0 known CVEs (cargo audit clean)
@@ -10,7 +10,7 @@
 
 ## EXECUTIVE SUMMARY
 
-**Verdict: READY FOR LAUNCH.** All 13 bugs discovered during the v1 audit have been fixed across three rounds of patches. The bytecode VM with Tier 1 Zero-Copy optimizations now runs recursive workloads at near-Python speed (fib(30): 0.21s Forge VM vs 0.14s Python — only 1.5x slower). The tree-walking interpreter also improved dramatically (fib(30): 197s → 2.3s). Security concerns remain documented as known limitations appropriate for a v0.2.0 release.
+**Verdict: READY FOR LAUNCH — with one new bug to fix.** All 13 original bugs are resolved. The JIT compiler is real and impressive — fib(30) in 10ms puts Forge alongside Node.js/V8. However, **BUG-14: `--jit` flag is silently ignored when running files** (`forge --jit run file.fg` falls back to VM with no warning). The JIT only activates via `-e` inline eval. This is a HIGH severity bug because users will think they're getting JIT performance but aren't.
 
 ---
 
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. BUG FIX VERIFICATION — ALL 13 RESOLVED
+## 2. BUG FIX VERIFICATION — 13 of 13 ORIGINAL BUGS RESOLVED
 
 ### Round 1 Fixes (v2)
 
@@ -73,46 +73,106 @@
 
 ---
 
-## 3. REMAINING ISSUES
+## 3. NEW BUG FOUND (v4 Retest)
 
-**Zero functional bugs remain.** The only remaining items are security hardening concerns appropriate for post-v0.2.0 releases:
+### BUG-14: `--jit` flag silently ignored for file execution
 
-### 3.1 Minor Code Quality
+| Field          | Details                                                                                                                                                                                              |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Severity**   | **HIGH**                                                                                                                                                                                             |
+| **File**       | `src/main.rs:122-137`                                                                                                                                                                                |
+| **Symptom**    | `forge --jit run file.fg` runs at VM speed (~250ms), not JIT speed (~10ms), with **zero warning**                                                                                                    |
+| **Root Cause** | `Command::Run` branch (line 137) calls `run_source(&source, &path_str, use_vm)` — it checks `use_vm` but never checks `use_jit`. The JIT path only triggers at line 113 inside the `-e` eval branch. |
+| **Impact**     | Users running `forge --jit run myfile.fg` silently get 25x slower execution than expected. No error, no warning — the flag is accepted but ignored.                                                  |
+| **Repro**      | See below                                                                                                                                                                                            |
 
-| Issue                                | Severity    | Details                                                                   |
-| ------------------------------------ | ----------- | ------------------------------------------------------------------------- |
-| VM unreachable patterns (2 warnings) | **TRIVIAL** | `src/vm/machine.rs:1996,2001` — `ok`/`err` aliases after `Ok`/`Err` match |
+**Reproduction:**
+
+```bash
+# JIT works via -e (10ms):
+$ time forge --jit -e 'fn fib(n) { if n <= 1 { return n }; return fib(n-1) + fib(n-2) }; say fib(30)'
+  JIT compiled: fib (19 instructions -> native)
+832040
+real    0m0.010s
+
+# JIT SILENTLY IGNORED via file (252ms — same as --vm):
+$ time forge --jit run fib.fg
+fib(30) = 832040
+real    0m0.252s    # <-- No "JIT compiled" message, no warning
+```
+
+**Fix:** In `src/main.rs`, the `Command::Run` match arm (line 122) needs to check `use_jit` and call `run_jit()` instead of `run_source()`, same as the `-e` path does at line 113-116:
+
+```rust
+Some(Command::Run { file }) => {
+    let path_str = file.display().to_string();
+    let source = match fs::read_to_string(&file) { /* ... */ };
+    if use_jit {
+        run_jit(&source, &path_str);  // <-- ADD THIS
+    } else {
+        run_source(&source, &path_str, use_vm).await;
+    }
+}
+```
 
 ---
 
-## 4. PERFORMANCE
+## 4. PERFORMANCE — Full 3-Engine Benchmarks
 
-### 4.1 VM Engine (Tier 1 Zero-Copy) — NEAR PYTHON SPEED
+### 4.1 JIT Compiler — NODE.JS-CLASS SPEED (only works via `-e`)
+
+| Benchmark | Forge JIT (`--jit -e`) | Python 3 | Ratio          | Notes                    |
+| --------- | ---------------------- | -------- | -------------- | ------------------------ |
+| fib(30)   | **10ms**               | 114ms    | **11x faster** | Competes with Node.js/V8 |
+| fib(35)   | **39ms**               | 1,313ms  | **34x faster** | Scales excellently       |
+
+The JIT compiles hot functions from bytecode to native code. Verified output: `"JIT compiled: fib (19 instructions -> native)"`. For a v0.2 language, this is exceptional — it places Forge between Go (4ms) and Node.js (10ms) in the fib(30) benchmark.
+
+**Caveat:** JIT currently only activates via `forge --jit -e '...'`, not from files. See BUG-14 above.
+
+### 4.2 VM Engine (Tier 1 Zero-Copy) — via `--vm` or `--jit run file.fg`
 
 | Benchmark | Forge VM (`--vm`) | Python 3 | Ratio           | Notes                    |
 | --------- | ----------------- | -------- | --------------- | ------------------------ |
-| fib(30)   | **0.21s**         | 0.14s    | **1.5x slower** | From 1,300x slower in v1 |
-| fib(35)   | **2.3s**          | 1.3s     | **1.8x slower** | Scales well              |
+| fib(30)   | **252ms**         | 114ms    | **2.2x slower** | From 1,300x slower in v1 |
+| fib(35)   | **2,636ms**       | 1,313ms  | **2.0x slower** | Consistent scaling       |
 
 VM Tier 1 optimizations: Arc-wrapped chunks, closure reuse, enum dispatch via transmute, GC threshold tuning.
 
-### 4.2 Interpreter Engine (Default)
+### 4.3 Interpreter Engine (Default)
 
 | Benchmark  | Forge Interp | Python 3 | Ratio           | Notes                        |
 | ---------- | ------------ | -------- | --------------- | ---------------------------- |
-| fib(30)    | **2.3s**     | 0.14s    | **~16x slower** | Was 197s in v1 (86x speedup) |
-| Loop 1M    | 0.33s        | 0.06s    | ~5x slower      | Normal for tree-walking      |
-| String 10K | 0.013s       | 0.021s   | **1.6x faster** | Rust string advantage        |
-| Array 10K  | 0.020s       | 0.022s   | **~Equal**      | Was broken/infinite in v1    |
+| fib(30)    | **2,300ms**  | 114ms    | **~20x slower** | Was 197s in v1 (86x speedup) |
+| fib(35)    | **26,963ms** | 1,313ms  | **~21x slower** | Consistent scaling           |
+| Loop 1M    | 330ms        | 60ms     | ~5x slower      | Normal for tree-walking      |
+| String 10K | 13ms         | 21ms     | **1.6x faster** | Rust string advantage        |
+| Array 10K  | 20ms         | 22ms     | **~Equal**      | Was broken/infinite in v1    |
 
-### 4.3 Performance Summary
+### 4.4 Cross-Language Comparison (fib(30), independently verified)
 
-| Engine      | fib(30) vs Python | Best For                                    |
-| ----------- | ----------------- | ------------------------------------------- |
-| VM (`--vm`) | 1.5x slower       | Compute-heavy, recursive, hot loops         |
-| Interpreter | 16x slower        | Full feature set, HTTP, DB, stdlib, scripts |
+| Language                | Time     | vs Rust  |
+| ----------------------- | -------- | -------- |
+| Rust 1.91 (-O)          | 1.46ms   | baseline |
+| C (clang -O2)           | 1.57ms   | ~1.1x    |
+| Go 1.23                 | 4.24ms   | ~2.9x    |
+| Scala 2.12 (JVM)        | 4.33ms   | ~3.0x    |
+| Java 1.8 (JVM)          | 5.77ms   | ~4.0x    |
+| JavaScript (Node 22/V8) | 9.53ms   | ~6.5x    |
+| **Forge 0.2 (JIT)**     | **10ms** | **~7x**  |
+| Python 3                | 114ms    | ~79x     |
+| Forge 0.2 (VM)          | 252ms    | ~173x    |
+| Forge 0.2 (interpreter) | 2,300ms  | ~1,575x  |
 
-The VM is **11x faster** than the interpreter for recursive workloads. For a v0.2.0 language, being within 1.5x of Python on recursive benchmarks is exceptional.
+### 4.5 Performance Summary
+
+| Engine      | fib(30) | vs Python   | Best For                                    |
+| ----------- | ------- | ----------- | ------------------------------------------- |
+| JIT         | 10ms    | 11x faster  | Compute-heavy hot functions (via `-e` only) |
+| VM (`--vm`) | 252ms   | 2.2x slower | General bytecode execution                  |
+| Interpreter | 2,300ms | 20x slower  | Full feature set, HTTP, DB, stdlib          |
+
+The JIT delivers a **230x speedup** over the interpreter and a **25x speedup** over the VM. Once BUG-14 is fixed so JIT works from files, Forge will have genuinely competitive performance for compute-heavy workloads.
 
 ---
 
@@ -155,16 +215,16 @@ The VM is **11x faster** than the interpreter for recursive workloads. For a v0.
 ## 6. WHAT WORKS GREAT
 
 1. **All 24 claimed features verified working** — retry, safe, must, when, check, wait, repeat, pipeline, spread, unpack, for each, timeout, set/change, define, say/yell/whisper, otherwise/nah, interpolation, map/filter/reduce, grab/fetch, forge/hold async, closures, string methods
-2. **Dual syntax** — Natural and classic interop seamlessly
-3. **Built-in HTTP** — Client and server work with real APIs (tested against httpbin.org, jsonplaceholder, GitHub API)
-4. **API server** — `examples/api.fg` starts a working HTTP server with 4 routes, all responding correctly
-5. **Error messages** — "did you mean X?" suggestions, line/column pointers, colored output
-6. **14 interactive tutorials** — `forge learn` is polished
-7. **SQLite works** — In-memory and file-based databases functional
-8. **Crypto, JSON, regex, CSV, fs** — All stdlib modules operational
-9. **Project scaffold** — `forge new` creates proper structure with tests
-10. **Formatter** — `forge fmt` works correctly
-11. **VM performance** — Near-Python speed for compute-heavy workloads
+2. **JIT compiler is real** — 10ms fib(30) puts Forge alongside Node.js/V8; compiles bytecode to native code
+3. **Dual syntax** — Natural and classic interop seamlessly
+4. **Built-in HTTP** — Client and server work with real APIs (tested against httpbin.org, jsonplaceholder, GitHub API)
+5. **API server** — `examples/api.fg` starts a working HTTP server with 4 routes, all responding correctly
+6. **Error messages** — "did you mean X?" suggestions, line/column pointers, colored output
+7. **14 interactive tutorials** — `forge learn` is polished
+8. **SQLite works** — In-memory and file-based databases functional
+9. **Crypto, JSON, regex, CSV, fs** — All stdlib modules operational
+10. **Project scaffold** — `forge new` creates proper structure with tests
+11. **Formatter** — `forge fmt` works correctly
 12. **safe/when as expressions** — `let r = safe { risky() }` and `let x = when val { ... }` both work
 13. **null literal** — `null` is a first-class value with proper comparison semantics
 14. **Flexible casing** — Both `Ok()`/`ok()` and `Err()`/`err()` work
@@ -176,36 +236,42 @@ The VM is **11x faster** than the interpreter for recursive workloads. For a v0.
 
 ### READY TO LAUNCH AS v0.2.0
 
-All functional bugs are resolved. No blockers remain. The language delivers on its promises.
+All 13 original bugs are resolved. The JIT is genuinely impressive. One new bug (BUG-14) should be fixed before or shortly after launch.
+
+### Must Fix (BUG-14):
+
+**Wire `--jit` flag through to `Command::Run` in `src/main.rs`.** This is a 5-line fix. Without it, every user who runs `forge --jit run file.fg` will silently get 25x slower execution than advertised. The fix is adding a `use_jit` check to the `Command::Run` match arm, identical to what already exists in the `-e` eval path.
 
 ### Document These Known Limitations in README:
 
 1. **Security**: No parameterized SQL queries (injection risk), no filesystem sandboxing, no SSRF protection — standard for a young scripting language
-2. **Performance**: Interpreter is ~16x slower than Python for recursion; use `--vm` flag for compute-heavy workloads (1.5x slower than Python)
-3. **VM feature gap**: VM supports fewer features than the interpreter — use interpreter (default) for full stdlib access
+2. **Performance**: Interpreter is ~20x slower than Python for recursion; use `--jit` for compute-heavy workloads (11x faster than Python for hot functions)
+3. **JIT limitation**: Currently JIT only works via `-e` inline eval until BUG-14 is fixed
+4. **VM feature gap**: VM/JIT support fewer features than the interpreter — use interpreter (default) for full stdlib access
 
 ### Roadmap for v0.2.1:
 
-1. Parameterized SQL query support
-2. Filesystem sandboxing options
-3. Expand VM feature coverage to match interpreter
-4. Fix 2 trivial unreachable-pattern warnings in VM
+1. **Fix BUG-14** — wire `--jit` through `Command::Run` (5-line fix in `src/main.rs`)
+2. Parameterized SQL query support
+3. Filesystem sandboxing options
+4. Expand VM/JIT feature coverage to match interpreter
+5. Fix 2 trivial unreachable-pattern warnings in VM
 
 ### The Big Picture
 
 Forge v0.2.0 is a **complete, working language** with:
 
-- 13 bugs found, 13 bugs fixed across 3 patch rounds
+- 13 bugs found and fixed across 3 patch rounds, 1 new bug discovered (BUG-14, easy fix)
 - 189 Rust tests + 25 Forge tests + 12 examples + 24 feature claims — all passing
-- Near-Python performance via VM (1.5x slower on fib(30))
+- JIT performance alongside Node.js/V8 (10ms fib(30), 11x faster than Python)
 - 15 stdlib modules with 100+ functions
 - Dual syntax that actually works
 - Built-in HTTP client/server, database, crypto, AI integration
 - 14 interactive tutorials
 - LSP, formatter, test runner, project scaffold, REPL
 
-**Verdict: Ship it.**
+**Verdict: Ship it. Fix BUG-14 same day.**
 
 ---
 
-_Final verification: 189 Rust tests + 25 Forge tests + 12 examples + 24 feature claims + live API calls + 6 benchmarks (VM + interpreter) + security code audit. All bugs from v1 audit confirmed resolved._
+_Final verification: 189 Rust tests + 25 Forge tests + 12 examples + 24 feature claims + live API calls + 9 benchmarks (JIT + VM + interpreter, fib(30) + fib(35) + loop + string + array) + security code audit + cross-language comparison. All 13 original bugs confirmed resolved. 1 new bug (BUG-14) filed._

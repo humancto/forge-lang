@@ -35,6 +35,24 @@ pub enum Value {
     Null,
 }
 
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Object(a), Value::Object(b)) => a == b,
+            (Value::ResultOk(a), Value::ResultOk(b)) => a == b,
+            (Value::ResultErr(a), Value::ResultErr(b)) => a == b,
+            (Value::BuiltIn(a), Value::BuiltIn(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 impl Value {
     pub fn type_name(&self) -> &str {
         match self {
@@ -279,6 +297,8 @@ impl Interpreter {
             .define("http".to_string(), crate::stdlib::create_http_module());
         self.env
             .define("csv".to_string(), crate::stdlib::create_csv_module());
+        self.env
+            .define("time".to_string(), crate::stdlib::create_time_module());
 
         // Prelude: Option type = Some(value) | None
         self.env.define(
@@ -343,7 +363,6 @@ impl Interpreter {
             "unwrap",
             "unwrap_or",
             "fetch",
-            "time",
             "uuid",
             "say",
             "yell",
@@ -797,7 +816,7 @@ impl Interpreter {
             Stmt::Import { path, names } => {
                 let builtin_modules = [
                     "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log",
-                    "term", "http", "csv", "exec",
+                    "term", "http", "csv", "exec", "time",
                 ];
                 if builtin_modules.contains(&path.as_str()) {
                     if self.env.get(path).is_some() {
@@ -2217,47 +2236,7 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("fetch() requires a URL string")),
             },
             "time" => {
-                let now = chrono::Utc::now();
-                let mut m = IndexMap::new();
-                m.insert("now".to_string(), Value::String(now.to_rfc3339()));
-                m.insert("unix".to_string(), Value::Int(now.timestamp()));
-                m.insert(
-                    "year".to_string(),
-                    Value::Int(i64::from(
-                        now.format("%Y").to_string().parse::<i32>().unwrap_or(0),
-                    )),
-                );
-                m.insert(
-                    "month".to_string(),
-                    Value::Int(i64::from(
-                        now.format("%m").to_string().parse::<i32>().unwrap_or(0),
-                    )),
-                );
-                m.insert(
-                    "day".to_string(),
-                    Value::Int(i64::from(
-                        now.format("%d").to_string().parse::<i32>().unwrap_or(0),
-                    )),
-                );
-                m.insert(
-                    "hour".to_string(),
-                    Value::Int(i64::from(
-                        now.format("%H").to_string().parse::<i32>().unwrap_or(0),
-                    )),
-                );
-                m.insert(
-                    "minute".to_string(),
-                    Value::Int(i64::from(
-                        now.format("%M").to_string().parse::<i32>().unwrap_or(0),
-                    )),
-                );
-                m.insert(
-                    "second".to_string(),
-                    Value::Int(i64::from(
-                        now.format("%S").to_string().parse::<i32>().unwrap_or(0),
-                    )),
-                );
-                Ok(Value::Object(m))
+                crate::stdlib::time::call("time.now", args).map_err(|e| RuntimeError::new(&e))
             }
             "json" => match args.first() {
                 Some(Value::String(s)) => match serde_json::from_str::<serde_json::Value>(s) {
@@ -2496,6 +2475,9 @@ impl Interpreter {
             }
             _ if name.starts_with("csv.") => {
                 crate::stdlib::csv::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
+            _ if name.starts_with("time.") => {
+                crate::stdlib::time::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
             "input" => {
                 use std::io::Read;
@@ -4239,7 +4221,7 @@ mod tests {
     fn time_returns_object() {
         let result = try_run_forge(
             r#"
-            let t = time()
+            let t = time.now()
             assert(t.unix > 0)
         "#,
         );
@@ -5061,5 +5043,1248 @@ mod tests {
         // Can't call exit(0) in a test, just verify the code path exists
         let result = try_run_forge(r#"let x = 42"#);
         assert!(result.is_ok());
+    }
+
+    // ============================================================
+    //  TIME MODULE — comprehensive tests for all 22 functions
+    // ============================================================
+
+    #[test]
+    fn time_now_returns_all_fields() {
+        let value = run_forge(
+            r#"
+            let t = time.now()
+            assert(t.unix > 0)
+            assert(t.year >= 2025)
+            assert(t.month >= 1)
+            assert(t.month <= 12)
+            assert(t.day >= 1)
+            assert(t.day <= 31)
+            assert(t.hour >= 0)
+            assert(t.hour <= 23)
+            assert(t.minute >= 0)
+            assert(t.minute <= 59)
+            assert(t.second >= 0)
+            assert(t.second <= 59)
+            assert(t.timezone == "UTC")
+            assert(t.unix_ms > 0)
+            assert(t.day_of_year >= 1)
+            assert(t.day_of_year <= 366)
+            t
+        "#,
+        );
+        match value {
+            Value::Object(m) => {
+                assert!(m.contains_key("iso"));
+                assert!(m.contains_key("weekday"));
+                assert!(m.contains_key("weekday_short"));
+            }
+            _ => panic!("expected object from time.now()"),
+        }
+    }
+
+    #[test]
+    fn time_now_with_timezone() {
+        let value = run_forge(
+            r#"
+            let t = time.now("America/New_York")
+            assert(t.timezone == "America/New_York")
+            assert(t.unix > 0)
+            t
+        "#,
+        );
+        match value {
+            Value::Object(m) => {
+                assert_eq!(
+                    m.get("timezone"),
+                    Some(&Value::String("America/New_York".to_string()))
+                );
+            }
+            _ => panic!("expected object"),
+        }
+    }
+
+    #[test]
+    fn time_now_tokyo() {
+        let result = try_run_forge(
+            r#"
+            let t = time.now("Asia/Tokyo")
+            assert(t.timezone == "Asia/Tokyo")
+            assert(t.year >= 2025)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_now_invalid_timezone() {
+        let result = try_run_forge(r#"time.now("Fake/Timezone")"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn time_local_returns_object() {
+        let result = try_run_forge(
+            r#"
+            let t = time.local()
+            assert(t.unix > 0)
+            assert(t.timezone == "Local")
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_unix_returns_int() {
+        let value = run_forge("time.unix()");
+        match value {
+            Value::Int(n) => assert!(n > 1700000000),
+            _ => panic!("expected int from time.unix()"),
+        }
+    }
+
+    #[test]
+    fn time_today_returns_date_string() {
+        let value = run_forge("time.today()");
+        match value {
+            Value::String(s) => {
+                assert!(s.len() == 10);
+                assert!(s.starts_with("202"));
+                assert!(s.chars().filter(|c| *c == '-').count() == 2);
+            }
+            _ => panic!("expected string from time.today()"),
+        }
+    }
+
+    #[test]
+    fn time_date_constructs_specific_date() {
+        let result = try_run_forge(
+            r#"
+            let t = time.date(2026, 12, 25)
+            assert(t.year == 2026)
+            assert(t.month == 12)
+            assert(t.day == 25)
+            assert(t.hour == 0)
+            assert(t.minute == 0)
+            assert(t.second == 0)
+            assert(t.weekday == "Friday")
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_date_invalid() {
+        let result = try_run_forge(r#"time.date(2026, 13, 1)"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn time_date_leap_day() {
+        let result = try_run_forge(
+            r#"
+            let t = time.date(2024, 2, 29)
+            assert(t.year == 2024)
+            assert(t.month == 2)
+            assert(t.day == 29)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_parse_iso_date() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-15")
+            assert(t.year == 2026)
+            assert(t.month == 1)
+            assert(t.day == 15)
+            assert(t.hour == 0)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_parse_iso_datetime() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-07-04T14:30:00")
+            assert(t.year == 2026)
+            assert(t.month == 7)
+            assert(t.day == 4)
+            assert(t.hour == 14)
+            assert(t.minute == 30)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_parse_datetime_with_space() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-03-15 09:45:00")
+            assert(t.year == 2026)
+            assert(t.month == 3)
+            assert(t.day == 15)
+            assert(t.hour == 9)
+            assert(t.minute == 45)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_parse_us_format() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("07/04/2026")
+            assert(t.year == 2026)
+            assert(t.month == 7)
+            assert(t.day == 4)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_parse_european_format() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("15.01.2026")
+            assert(t.year == 2026)
+            assert(t.month == 1)
+            assert(t.day == 15)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_parse_with_timezone() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-06-15", "Asia/Tokyo")
+            assert(t.timezone == "Asia/Tokyo")
+            assert(t.year == 2026)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_parse_unix_timestamp() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse(1700000000)
+            assert(t.year == 2023)
+            assert(t.month == 11)
+            assert(t.day == 14)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_parse_invalid_string() {
+        let result = try_run_forge(r#"time.parse("not-a-date")"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn time_format_default() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-03-15T10:30:45")
+            time.format(t)
+        "#,
+        );
+        match value {
+            Value::String(s) => {
+                assert!(s.contains("2026"));
+                assert!(s.contains("10:30:45"));
+            }
+            _ => panic!("expected formatted string"),
+        }
+    }
+
+    #[test]
+    fn time_format_custom_pattern() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-12-25")
+            time.format(t, "%B %d, %Y")
+        "#,
+        );
+        match value {
+            Value::String(s) => assert_eq!(s, "December 25, 2026"),
+            _ => panic!("expected formatted string"),
+        }
+    }
+
+    #[test]
+    fn time_format_date_only() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-07-04")
+            time.format(t, "%Y/%m/%d")
+        "#,
+        );
+        match value {
+            Value::String(s) => assert_eq!(s, "2026/07/04"),
+            _ => panic!("expected formatted string"),
+        }
+    }
+
+    #[test]
+    fn time_format_12_hour_clock() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-01-01T14:30:00")
+            time.format(t, "%I:%M %p")
+        "#,
+        );
+        match value {
+            Value::String(s) => assert_eq!(s, "02:30 PM"),
+            _ => panic!("expected formatted string"),
+        }
+    }
+
+    #[test]
+    fn time_from_unix_known_epoch() {
+        let result = try_run_forge(
+            r#"
+            let t = time.from_unix(0)
+            assert(t.year == 1970)
+            assert(t.month == 1)
+            assert(t.day == 1)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_from_unix_recent() {
+        let result = try_run_forge(
+            r#"
+            let t = time.from_unix(1700000000)
+            assert(t.year == 2023)
+            assert(t.unix == 1700000000)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_diff_positive() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2026-03-01")
+            let b = time.parse("2026-02-15")
+            time.diff(a, b)
+        "#,
+        );
+        match value {
+            Value::Object(m) => {
+                assert_eq!(m.get("seconds"), Some(&Value::Int(1209600)));
+                assert_eq!(m.get("days"), Some(&Value::Float(14.0)));
+                assert_eq!(m.get("weeks"), Some(&Value::Float(2.0)));
+            }
+            _ => panic!("expected diff object"),
+        }
+    }
+
+    #[test]
+    fn time_diff_negative() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2026-01-01")
+            let b = time.parse("2026-01-10")
+            time.diff(a, b)
+        "#,
+        );
+        match value {
+            Value::Object(m) => {
+                if let Some(Value::Int(s)) = m.get("seconds") {
+                    assert!(*s < 0);
+                } else {
+                    panic!("expected seconds field");
+                }
+            }
+            _ => panic!("expected diff object"),
+        }
+    }
+
+    #[test]
+    fn time_diff_same_date() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2026-06-15")
+            let b = time.parse("2026-06-15")
+            time.diff(a, b)
+        "#,
+        );
+        match value {
+            Value::Object(m) => {
+                assert_eq!(m.get("seconds"), Some(&Value::Int(0)));
+            }
+            _ => panic!("expected diff object"),
+        }
+    }
+
+    #[test]
+    fn time_diff_human_readable() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2026-01-03T12:00:00")
+            let b = time.parse("2026-01-01T00:00:00")
+            let d = time.diff(a, b)
+            d.human
+        "#,
+        );
+        match value {
+            Value::String(s) => assert_eq!(s, "2d 12h 0m 0s"),
+            _ => panic!("expected human-readable diff string"),
+        }
+    }
+
+    #[test]
+    fn time_add_days() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01")
+            let future = time.add(t, {days: 30})
+            assert(future.month == 1)
+            assert(future.day == 31)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_add_hours_and_minutes() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T00:00:00")
+            let future = time.add(t, {hours: 25, minutes: 30})
+            assert(future.day == 2)
+            assert(future.hour == 1)
+            assert(future.minute == 30)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_add_weeks() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01")
+            let future = time.add(t, {weeks: 2})
+            assert(future.day == 15)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_add_months() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-15")
+            let future = time.add(t, {months: 3})
+            assert(future.month == 4)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_add_seconds_integer() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T00:00:00")
+            let future = time.add(t, 3600)
+            assert(future.hour == 1)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_sub_days() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-31")
+            let past = time.sub(t, {days: 30})
+            assert(past.month == 1)
+            assert(past.day == 1)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_sub_weeks() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-03-01")
+            let past = time.sub(t, {weeks: 4})
+            assert(past.month == 2)
+            assert(past.day == 1)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_sub_seconds_integer() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T01:00:00")
+            let past = time.sub(t, 3600)
+            assert(past.hour == 0)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_zone_conversion() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T12:00:00")
+            let ny = time.zone(t, "America/New_York")
+            assert(ny.timezone == "America/New_York")
+            assert(ny.hour == 7)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_zone_tokyo() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T00:00:00")
+            let tokyo = time.zone(t, "Asia/Tokyo")
+            assert(tokyo.timezone == "Asia/Tokyo")
+            assert(tokyo.hour == 9)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_zone_london() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-07-01T12:00:00")
+            let london = time.zone(t, "Europe/London")
+            assert(london.timezone == "Europe/London")
+            assert(london.hour == 13)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_zone_kolkata() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T00:00:00")
+            let india = time.zone(t, "Asia/Kolkata")
+            assert(india.timezone == "Asia/Kolkata")
+            assert(india.hour == 5)
+            assert(india.minute == 30)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_zone_invalid() {
+        let result = try_run_forge(
+            r#"
+            let t = time.now()
+            time.zone(t, "Invalid/Zone")
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn time_zones_returns_array() {
+        let value = run_forge("time.zones()");
+        match value {
+            Value::Array(items) => assert!(items.len() > 400),
+            _ => panic!("expected array of timezone strings"),
+        }
+    }
+
+    #[test]
+    fn time_zones_filter() {
+        let value = run_forge(r#"time.zones("India")"#);
+        match value {
+            Value::Array(items) => {
+                assert!(items.len() > 0);
+                for item in &items {
+                    if let Value::String(s) = item {
+                        assert!(s.to_lowercase().contains("india"));
+                    }
+                }
+            }
+            _ => panic!("expected filtered array"),
+        }
+    }
+
+    #[test]
+    fn time_zones_filter_us() {
+        let value = run_forge(r#"time.zones("US/")"#);
+        match value {
+            Value::Array(items) => {
+                assert!(items.len() >= 5);
+                for item in &items {
+                    if let Value::String(s) = item {
+                        assert!(s.contains("US/"));
+                    }
+                }
+            }
+            _ => panic!("expected US timezone array"),
+        }
+    }
+
+    #[test]
+    fn time_zones_filter_no_match() {
+        let value = run_forge(r#"time.zones("xyznotreal")"#);
+        match value {
+            Value::Array(items) => assert_eq!(items.len(), 0),
+            _ => panic!("expected empty array"),
+        }
+    }
+
+    #[test]
+    fn time_is_before_true() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2025-01-01")
+            let b = time.parse("2026-01-01")
+            time.is_before(a, b)
+        "#,
+        );
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn time_is_before_false() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2026-01-01")
+            let b = time.parse("2025-01-01")
+            time.is_before(a, b)
+        "#,
+        );
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn time_is_after_true() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2026-06-01")
+            let b = time.parse("2026-01-01")
+            time.is_after(a, b)
+        "#,
+        );
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn time_is_after_false() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2025-01-01")
+            let b = time.parse("2026-01-01")
+            time.is_after(a, b)
+        "#,
+        );
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn time_is_before_equal_dates() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2026-01-01")
+            let b = time.parse("2026-01-01")
+            time.is_before(a, b)
+        "#,
+        );
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn time_start_of_day() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-05-15T14:30:45")
+            let s = time.start_of(t, "day")
+            assert(s.hour == 0)
+            assert(s.minute == 0)
+            assert(s.second == 0)
+            assert(s.day == 15)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_start_of_month() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-05-15T14:30:45")
+            let s = time.start_of(t, "month")
+            assert(s.day == 1)
+            assert(s.month == 5)
+            assert(s.hour == 0)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_start_of_year() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-07-15T14:30:00")
+            let s = time.start_of(t, "year")
+            assert(s.month == 1)
+            assert(s.day == 1)
+            assert(s.hour == 0)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_start_of_week() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-03-05")
+            let s = time.start_of(t, "week")
+            assert(s.weekday == "Monday")
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_start_of_hour() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T14:45:30")
+            let s = time.start_of(t, "hour")
+            assert(s.hour == 14)
+            assert(s.minute == 0)
+            assert(s.second == 0)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_start_of_minute() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T14:45:30")
+            let s = time.start_of(t, "minute")
+            assert(s.hour == 14)
+            assert(s.minute == 45)
+            assert(s.second == 0)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_end_of_day() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-05-15T10:00:00")
+            let e = time.end_of(t, "day")
+            assert(e.hour == 23)
+            assert(e.minute == 59)
+            assert(e.second == 59)
+            assert(e.day == 15)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_end_of_month_february() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-02-10")
+            let e = time.end_of(t, "month")
+            assert(e.day == 28)
+            assert(e.month == 2)
+            assert(e.hour == 23)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_end_of_month_february_leap() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2024-02-10")
+            let e = time.end_of(t, "month")
+            assert(e.day == 29)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_end_of_year() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-06-15")
+            let e = time.end_of(t, "year")
+            assert(e.month == 12)
+            assert(e.day == 31)
+            assert(e.hour == 23)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_end_of_week() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-03-02")
+            let e = time.end_of(t, "week")
+            assert(e.weekday == "Sunday")
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_end_of_hour() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T14:15:00")
+            let e = time.end_of(t, "hour")
+            assert(e.hour == 14)
+            assert(e.minute == 59)
+            assert(e.second == 59)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_is_weekend_saturday() {
+        let result = try_run_forge(
+            r#"
+            let sat = time.parse("2026-02-28")
+            assert(time.is_weekend(sat) == true)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_is_weekend_sunday() {
+        let result = try_run_forge(
+            r#"
+            let sun = time.parse("2026-03-01")
+            assert(time.is_weekend(sun) == true)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_is_weekend_weekday() {
+        let result = try_run_forge(
+            r#"
+            let mon = time.parse("2026-03-02")
+            assert(time.is_weekend(mon) == false)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_is_weekday_monday() {
+        let result = try_run_forge(
+            r#"
+            let mon = time.parse("2026-03-02")
+            assert(time.is_weekday(mon) == true)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_is_weekday_saturday() {
+        let result = try_run_forge(
+            r#"
+            let sat = time.parse("2026-02-28")
+            assert(time.is_weekday(sat) == false)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_day_of_week_known() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-12-25")
+            time.day_of_week(t)
+        "#,
+        );
+        assert_eq!(value, Value::String("Friday".to_string()));
+    }
+
+    #[test]
+    fn time_day_of_week_epoch() {
+        let value = run_forge(
+            r#"
+            let t = time.from_unix(0)
+            time.day_of_week(t)
+        "#,
+        );
+        assert_eq!(value, Value::String("Thursday".to_string()));
+    }
+
+    #[test]
+    fn time_days_in_month_february_normal() {
+        let value = run_forge("time.days_in_month(2026, 2)");
+        assert_eq!(value, Value::Int(28));
+    }
+
+    #[test]
+    fn time_days_in_month_february_leap() {
+        let value = run_forge("time.days_in_month(2024, 2)");
+        assert_eq!(value, Value::Int(29));
+    }
+
+    #[test]
+    fn time_days_in_month_january() {
+        let value = run_forge("time.days_in_month(2026, 1)");
+        assert_eq!(value, Value::Int(31));
+    }
+
+    #[test]
+    fn time_days_in_month_april() {
+        let value = run_forge("time.days_in_month(2026, 4)");
+        assert_eq!(value, Value::Int(30));
+    }
+
+    #[test]
+    fn time_days_in_month_december() {
+        let value = run_forge("time.days_in_month(2026, 12)");
+        assert_eq!(value, Value::Int(31));
+    }
+
+    #[test]
+    fn time_is_leap_year_true() {
+        assert_eq!(run_forge("time.is_leap_year(2024)"), Value::Bool(true));
+        assert_eq!(run_forge("time.is_leap_year(2000)"), Value::Bool(true));
+        assert_eq!(run_forge("time.is_leap_year(2400)"), Value::Bool(true));
+    }
+
+    #[test]
+    fn time_is_leap_year_false() {
+        assert_eq!(run_forge("time.is_leap_year(2026)"), Value::Bool(false));
+        assert_eq!(run_forge("time.is_leap_year(1900)"), Value::Bool(false));
+        assert_eq!(run_forge("time.is_leap_year(2100)"), Value::Bool(false));
+    }
+
+    #[test]
+    fn time_measure_returns_millis() {
+        let value = run_forge("time.measure()");
+        match value {
+            Value::Int(n) => assert!(n > 1700000000000i64),
+            _ => panic!("expected large int from time.measure()"),
+        }
+    }
+
+    #[test]
+    fn time_elapsed_returns_millis() {
+        let value = run_forge("time.elapsed()");
+        match value {
+            Value::Int(n) => assert!(n > 1700000000000i64),
+            _ => panic!("expected large int from time.elapsed()"),
+        }
+    }
+
+    #[test]
+    fn time_roundtrip_parse_format() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-06-15T09:30:00")
+            let formatted = time.format(t, "%Y-%m-%dT%H:%M:%S")
+            formatted
+        "#,
+        );
+        assert_eq!(value, Value::String("2026-06-15T09:30:00".to_string()));
+    }
+
+    #[test]
+    fn time_add_then_sub_identity() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-06-15")
+            let added = time.add(t, {days: 10})
+            let back = time.sub(added, {days: 10})
+            assert(back.unix == t.unix)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_chained_operations() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01")
+            let dur = {months: 6, days: 14}
+            let future = time.add(t, dur)
+            assert(future.month == 7)
+            assert(future.day == 14)
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "time_chained_operations failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn time_zone_preserves_unix() {
+        let result = try_run_forge(
+            r#"
+            let t = time.now()
+            let ny = time.zone(t, "America/New_York")
+            let tokyo = time.zone(t, "Asia/Tokyo")
+            assert(ny.unix == tokyo.unix)
+            assert(ny.unix == t.unix)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_diff_then_add_roundtrip() {
+        let value = run_forge(
+            r#"
+            let a = time.parse("2026-01-01")
+            let b = time.parse("2026-03-15")
+            let d = time.diff(b, a)
+            let secs = get(d, "seconds")
+            let restored = time.add(a, secs)
+            restored.unix == b.unix
+        "#,
+        );
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn time_start_end_of_same_day() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-04-10T12:00:00")
+            let s = time.start_of(t, "day")
+            let e = time.end_of(t, "day")
+            assert(s.day == e.day)
+            assert(s.hour == 0)
+            assert(e.hour == 23)
+            let d = time.diff(e, s)
+            let secs = get(d, "seconds")
+            secs
+        "#,
+        );
+        assert_eq!(value, Value::Int(86399));
+    }
+
+    #[test]
+    fn time_weekday_fields_on_parsed_date() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-01-01")
+            t.weekday
+        "#,
+        );
+        assert_eq!(value, Value::String("Thursday".to_string()));
+    }
+
+    #[test]
+    fn time_weekday_short_field() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-01-01")
+            t.weekday_short
+        "#,
+        );
+        assert_eq!(value, Value::String("Thu".to_string()));
+    }
+
+    #[test]
+    fn time_day_of_year_jan_1() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-01-01")
+            t.day_of_year
+        "#,
+        );
+        assert_eq!(value, Value::Int(1));
+    }
+
+    #[test]
+    fn time_day_of_year_dec_31() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-12-31")
+            t.day_of_year
+        "#,
+        );
+        assert_eq!(value, Value::Int(365));
+    }
+
+    #[test]
+    fn time_cross_year_add() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2025-12-25")
+            let future = time.add(t, {days: 10})
+            assert(future.year == 2026)
+            assert(future.month == 1)
+            assert(future.day == 4)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_cross_year_sub() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-05")
+            let past = time.sub(t, {days: 10})
+            assert(past.year == 2025)
+            assert(past.month == 12)
+            assert(past.day == 26)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_add_millis() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-01-01T00:00:00")
+            let future = time.add(t, {millis: 5000})
+            assert(future.second == 5)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_multiple_timezone_conversions() {
+        let result = try_run_forge(
+            r#"
+            let utc = time.parse("2026-06-15T12:00:00")
+            let ny = time.zone(utc, "America/New_York")
+            let la = time.zone(utc, "America/Los_Angeles")
+            let london = time.zone(utc, "Europe/London")
+            let tokyo = time.zone(utc, "Asia/Tokyo")
+            assert(ny.hour == 8)
+            assert(la.hour == 5)
+            assert(london.hour == 13)
+            assert(tokyo.hour == 21)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_end_of_month_december() {
+        let result = try_run_forge(
+            r#"
+            let t = time.parse("2026-12-01")
+            let e = time.end_of(t, "month")
+            assert(e.day == 31)
+            assert(e.month == 12)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn time_start_of_invalid_unit() {
+        let result = try_run_forge(
+            r#"
+            let t = time.now()
+            time.start_of(t, "century")
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn time_end_of_invalid_unit() {
+        let result = try_run_forge(
+            r#"
+            let t = time.now()
+            time.end_of(t, "millennium")
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn time_format_weekday_name() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-12-25")
+            time.format(t, "%A")
+        "#,
+        );
+        assert_eq!(value, Value::String("Friday".to_string()));
+    }
+
+    #[test]
+    fn time_format_month_name() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2026-07-04")
+            time.format(t, "%B")
+        "#,
+        );
+        assert_eq!(value, Value::String("July".to_string()));
+    }
+
+    #[test]
+    fn time_days_in_month_from_time_object() {
+        let value = run_forge(
+            r#"
+            let t = time.parse("2024-02-15")
+            time.days_in_month(t)
+        "#,
+        );
+        assert_eq!(value, Value::Int(29));
     }
 }

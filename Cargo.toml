@@ -39,7 +39,8 @@ rustyline = { version = "15", features = ["derive"] }
 ariadne = "0.4"
 
 # === Utilities ===
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4"] }
 indexmap = "2"
 toml = "1"

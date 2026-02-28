@@ -134,6 +134,10 @@ async fn main() {
                     process::exit(1);
                 }
             };
+            if use_jit {
+                run_jit(&source, &path_str);
+                return;
+            }
             run_source(&source, &path_str, use_vm).await;
         }
         Some(Command::Repl) => {
