@@ -17,6 +17,7 @@ Instead, report it privately:
 2. Or email: **security@forge-lang.dev**
 
 Include:
+
 - Description of the vulnerability
 - Steps to reproduce
 - Potential impact
@@ -36,6 +37,7 @@ Forge v0.2.0 is a young language. The following are documented limitations, not 
 ## Security Best Practices
 
 When using Forge:
+
 - Sanitize all user input before passing to `db.query()`, `sh()`, or `fs.*` functions
 - Use environment variables (`env.get()`) for secrets, never hardcode them
 - Bind servers to `127.0.0.1` for local development (this is the default)
