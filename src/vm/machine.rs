@@ -881,34 +881,35 @@ impl VM {
                         let chunk = closure.function.chunk.clone();
                         let func_name = closure.function.name.clone();
 
-                        // JIT dispatch: if this function is JIT-compiled, call native code
+                        // JIT dispatch: call native code with raw i64 values
                         if !func_name.is_empty() {
                             if let Some(&native_ptr) = self.jit_cache.get(&func_name) {
-                                let enc_args: Vec<i64> = args
-                                    .iter()
-                                    .map(|v| super::jit::runtime::encode_value(v) as i64)
-                                    .collect();
-                                let result_encoded = unsafe {
-                                    match enc_args.len() {
+                                let raw_args: Vec<i64> = args.iter().map(|v| match v {
+                                    Value::Int(n) => *n,
+                                    Value::Bool(b) => if *b { 1 } else { 0 },
+                                    _ => 0,
+                                }).collect();
+                                let result: i64 = unsafe {
+                                    match raw_args.len() {
                                         0 => {
-                                            let f: extern "C" fn(i64) -> u64 =
-                                                std::mem::transmute(native_ptr);
-                                            f(0)
+                                            let f: extern "C" fn() -> i64 = std::mem::transmute(native_ptr);
+                                            f()
                                         }
                                         1 => {
-                                            let f: extern "C" fn(i64, i64) -> u64 =
-                                                std::mem::transmute(native_ptr);
-                                            f(0, enc_args[0])
+                                            let f: extern "C" fn(i64) -> i64 = std::mem::transmute(native_ptr);
+                                            f(raw_args[0])
+                                        }
+                                        2 => {
+                                            let f: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(native_ptr);
+                                            f(raw_args[0], raw_args[1])
                                         }
                                         _ => {
-                                            let f: extern "C" fn(i64, i64, i64) -> u64 =
-                                                std::mem::transmute(native_ptr);
-                                            f(0, enc_args[0], enc_args.get(1).copied().unwrap_or(0))
+                                            let f: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(native_ptr);
+                                            f(raw_args[0], raw_args[1], raw_args.get(2).copied().unwrap_or(0))
                                         }
                                     }
                                 };
-                                let result = super::jit::runtime::decode_value(result_encoded);
-                                return Ok(result);
+                                return Ok(Value::Int(result));
                             }
                         }
 
