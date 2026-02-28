@@ -29,5 +29,11 @@
 # Logs
 *.log
 
+# Internal / dev-only files
+AUDIT_REPORT.md
+test-project/
+CLAUDE.md
+.claude/
+
 # Packages
 .forge/packages/

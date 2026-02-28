@@ -9,30 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Bytecode VM** with register-based architecture, mark-sweep GC, and green thread scheduler
+- **JIT compiler** via Cranelift — `--jit` flag compiles hot functions to native code (fib(30) in 10ms, alongside Node.js/V8)
+- **Bytecode VM** with register-based architecture, mark-sweep GC, and green thread scheduler (`--vm` flag)
 - **Natural language syntax**: `set`/`to`, `say`/`yell`/`whisper`, `define`, `repeat`, `otherwise`/`nah`, `grab`/`toss`, `for each`
 - **15 standard library modules**: math, fs, io, crypto, db (SQLite), pg (PostgreSQL), env, json, regex, log, exec, term, http, csv
 - **Terminal UI toolkit**: colors, tables, sparklines, bars, banners, progress, gradients, boxes, typewriter effects
 - **HTTP server** with `@server`, `@get`, `@post`, `@put`, `@delete`, `@ws` decorators (powered by axum)
 - **HTTP client** with `fetch()`, `http.get/post/put/delete/patch/head`, `download`, `crawl`
 - **Shell integration**: `shell()` for full pipe chain support, `sh()` shorthand
-- **Innovation features**: `when` guards, `must` keyword, `safe` blocks, `check` validation, `retry`/`timeout`/`schedule`/`watch` blocks
+- **Innovation features**: `when` guards, `must` keyword, `safe` blocks (usable as expressions), `check` validation, `retry`/`timeout`/`schedule`/`watch` blocks
 - **AI integration**: `ask()` for LLM calls, `prompt` templates, `agent` blocks
 - **Developer tools**: `forge fmt`, `forge test`, `forge new`, `forge build`, `forge install`, `forge lsp`, `forge learn`, `forge chat`
 - **Interactive tutorial system** with 14 lessons
 - **Type checker** with gradual type checking and warnings
 - **Algebraic data types** with pattern matching
-- **Result/Option types** with `?` operator propagation
+- **Result/Option types** with `?` operator propagation, both `Ok()`/`ok()` and `Err()`/`err()` supported
+- **`null` literal** as a first-class value with proper comparison semantics
+- **String keys in objects** — `{ "Content-Type": "json" }` works
+- **Implicit return** in closures — `[1,2,3].map(fn(x) { x * 2 })` returns `[2, 4, 6]`
 - **LSP server** for editor integration
 - **Package manager** for git-based and local package installation
-- **189 tests** (Rust unit + Forge integration)
+- **GitHub Actions CI/CD** with multi-platform builds (Linux + macOS, x86_64 + aarch64)
+- **Install script** for binary installation (`curl | bash`)
+- **287 tests** (Rust unit + Forge integration)
 
 ### Changed
 
 - Default execution engine switched from VM to interpreter for broader feature support
-- VM available via `--vm` flag for performance-critical workloads
+- VM available via `--vm` flag, JIT via `--jit` flag for performance-critical workloads
 - Improved error messages with "did you mean?" suggestions and source context
 - REPL upgraded with rustyline (history, completion, multiline)
+- `timeout` now enforces deadlines and kills runaway code
+- `safe` and `when` work as both statements and expressions
+- Spread operator properly flattens: `[...a, 4, 5]` → `[1, 2, 3, 4, 5]`
+- Pipeline operator `|>` correctly returns values
 
 ## [0.1.0] - 2026-01-15
 

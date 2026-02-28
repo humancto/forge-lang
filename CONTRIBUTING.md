@@ -13,8 +13,8 @@ Thank you for your interest in contributing to Forge! This guide will help you g
 ### Setup
 
 ```bash
-git clone https://github.com/forge-lang/forge.git
-cd forge
+git clone https://github.com/humancto/forge-lang.git
+cd forge-lang
 cargo build
 cargo test
 ```
