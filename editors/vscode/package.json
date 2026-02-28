@@ -1,0 +1,35 @@
+{
+  "name": "forge-lang",
+  "displayName": "Forge Language",
+  "description": "Syntax highlighting and language support for the Forge programming language",
+  "version": "0.1.0",
+  "publisher": "forge-lang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "forge",
+        "aliases": [
+          "Forge",
+          "forge"
+        ],
+        "extensions": [
+          ".fg"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "forge",
+        "scopeName": "source.forge",
+        "path": "./syntaxes/forge.tmLanguage.json"
+      }
+    ]
+  }
+}

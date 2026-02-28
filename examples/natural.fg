@@ -1,0 +1,78 @@
+// natural.fg — Forge's natural language syntax
+// Run: forge run examples/natural.fg
+
+// Variables with set/to
+set name to "World"
+say "Hello, {name}!"
+
+// The fun trio: say, yell, whisper
+say "This is normal output"
+yell "This is loud!"
+whisper "This is quiet..."
+
+// Mutable variables
+set mut score to 0
+say "Starting score: {score}"
+
+// Repeat loop
+repeat 3 times {
+    change score to score + 10
+    say "Score: {score}"
+}
+
+// Functions with define
+define greet(who) {
+    say "Welcome to Forge, {who}!"
+}
+
+greet("Developer")
+
+// For-each loop
+set colors to ["red", "green", "blue"]
+for each color in colors {
+    say "Color: {color}"
+}
+
+// Otherwise and nah (else alternatives)
+set age to 25
+
+if age > 60 {
+    say "senior"
+} otherwise if age > 18 {
+    say "adult"
+} otherwise {
+    say "youngster"
+}
+
+set ready to true
+if ready {
+    say "Let's go!"
+} nah {
+    say "Not ready yet"
+}
+
+// Mix with classic syntax — both styles work
+fn factorial(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+set result to factorial(10)
+say "factorial(10) = {result}"
+
+// Higher-order functions with natural style
+define is_big(n) {
+    return n > 20
+}
+
+set numbers to [5, 15, 25, 35, 10]
+set big_ones to filter(numbers, is_big)
+say "Big numbers: {big_ones}"
+
+// Functional style
+set doubled to map([1, 2, 3], fn(x) { return x * 2 })
+say "Doubled: {doubled}"
+
+yell "Forge is fun!"

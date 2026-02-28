@@ -1,0 +1,34 @@
+// stdlib.fg — Standard Library modules in Forge
+
+// === Math module ===
+say "=== Math ==="
+say "pi = {math.pi}"
+say "e = {math.e}"
+say "sqrt(144) = {math.sqrt(144)}"
+say "pow(2, 8) = {math.pow(2, 8)}"
+say "abs(-99) = {math.abs(-99)}"
+say "max(10, 20) = {math.max(10, 20)}"
+say "min(10, 20) = {math.min(10, 20)}"
+say "floor(9.7) = {math.floor(9.7)}"
+say "ceil(9.2) = {math.ceil(9.2)}"
+say "round(9.5) = {math.round(9.5)}"
+
+// === FS module ===
+say ""
+say "=== File System ==="
+set test_path to "/tmp/forge_test.txt"
+fs.write(test_path, "Hello from Forge!")
+set content to fs.read(test_path)
+say "Read file: {content}"
+set file_exists to fs.exists(test_path)
+say "File exists: {file_exists}"
+fs.remove(test_path)
+set after_remove to fs.exists(test_path)
+say "After remove: {after_remove}"
+
+// === Assertions ===
+say ""
+say "=== Assertions ==="
+assert(1 + 1 == 2)
+assert_eq(math.abs(-5), 5)
+say "All assertions passed!"

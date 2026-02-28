@@ -17,7 +17,7 @@ greet("Developer")
 
 // Arrays and iteration
 let numbers = [1, 2, 3, 4, 5]
-let total = 0
+let mut total = 0
 for n in numbers {
     total = total + n
 }
@@ -36,10 +36,10 @@ fn describe(n) {
     if n > 100 {
         println("{n} is big!")
     } else if n > 10 {
-        println("{n} is medium")
-    } else {
-        println("{n} is small")
-    }
+    println("{n} is medium")
+} else {
+println("{n} is small")
+}
 }
 
 describe(42)

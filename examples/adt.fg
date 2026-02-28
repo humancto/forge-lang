@@ -1,0 +1,45 @@
+// adt.fg — Algebraic Data Types in Forge
+
+type Color = Red | Green | Blue
+
+type Shape = Circle(Float) | Rect(Float, Float)
+
+// Unit variants
+set c to Red
+say "Color: {c}"
+
+// Constructor variants
+set circle to Circle(5.0)
+set rect to Rect(3.0, 4.0)
+say "Circle: {circle}"
+say "Rect: {rect}"
+
+// Pattern matching on ADTs
+define describe_shape(s) {
+    match s {
+        Circle(r) => { say "Circle with radius {r}, area = {3.14159 * r * r}" }
+        Rect(w, h) => { say "Rectangle {w}x{h}, area = {w * h}" }
+    }
+}
+
+describe_shape(circle)
+describe_shape(rect)
+
+// Option type (built-in)
+set x to Some(42)
+set y to None
+
+say "x is_some: {is_some(x)}"
+say "y is_none: {is_none(y)}"
+
+match x {
+    Some(val) => say "Got: {val}"
+    None => say "Nothing"
+}
+
+// Exhaustive matching — this would error if we removed a variant:
+match c {
+    Red => say "Red!"
+    Green => say "Green!"
+    Blue => say "Blue!"
+}

@@ -1,15 +1,9 @@
 // fetch_demo.fg — Forge HTTP client
 // Demonstrates the built-in fetch() function
-// Note: Phase 1b supports HTTP only (no HTTPS yet)
+// Run: forge run examples/fetch_demo.fg
 
-// Fetch from a local server (start api.fg first!)
-// let resp = fetch("http://localhost:8080/hello/Forge")
-// println("Status: {resp.status}")
-// println("Body: {resp.body}")
-
-// For now, demonstrate fetch with a known HTTP endpoint
-println("Forge fetch() demo")
-println("==================")
+say "Forge HTTP Client Demo"
+say "======================"
 
 // fetch() returns an object with: status, ok, url, body, json, headers
 let resp = fetch("http://httpbin.org/get")

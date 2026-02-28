@@ -51,8 +51,14 @@ impl Lexer {
                 // Numbers
                 '0'..='9' => self.lex_number()?,
 
-                // Strings
-                '"' => self.lex_string()?,
+                // Strings (triple-quoted or single-quoted)
+                '"' => {
+                    if self.peek() == Some('"') && self.peek_at(2) == Some('"') {
+                        self.lex_triple_string()?
+                    } else {
+                        self.lex_string()?
+                    }
+                }
 
                 // Identifiers and keywords
                 'a'..='z' | 'A'..='Z' | '_' => self.lex_ident(),
@@ -60,24 +66,42 @@ impl Lexer {
                 // Operators and delimiters
                 '+' => {
                     self.advance();
-                    Token::Plus
+                    if self.current_matches('=') {
+                        self.advance();
+                        Token::PlusEq
+                    } else {
+                        Token::Plus
+                    }
                 }
                 '-' => {
                     self.advance();
                     if self.current_matches('>') {
                         self.advance();
                         Token::Arrow
+                    } else if self.current_matches('=') {
+                        self.advance();
+                        Token::MinusEq
                     } else {
                         Token::Minus
                     }
                 }
                 '*' => {
                     self.advance();
-                    Token::Star
+                    if self.current_matches('=') {
+                        self.advance();
+                        Token::StarEq
+                    } else {
+                        Token::Star
+                    }
                 }
                 '/' => {
                     self.advance();
-                    Token::Slash
+                    if self.current_matches('=') {
+                        self.advance();
+                        Token::SlashEq
+                    } else {
+                        Token::Slash
+                    }
                 }
                 '%' => {
                     self.advance();
@@ -118,6 +142,9 @@ impl Lexer {
                     if self.current_matches('=') {
                         self.advance();
                         Token::GtEq
+                    } else if self.current_matches('>') {
+                        self.advance();
+                        Token::PipeRight
                     } else {
                         Token::Gt
                     }
@@ -140,7 +167,7 @@ impl Lexer {
                         self.advance();
                         Token::Pipe
                     } else {
-                        return Err(self.error("unexpected '|', did you mean '||' or '|>'?"));
+                        Token::Bar
                     }
                 }
                 '?' => {
@@ -151,7 +178,12 @@ impl Lexer {
                     self.advance();
                     if self.current_matches('.') {
                         self.advance();
-                        Token::DotDot
+                        if self.current_matches('.') {
+                            self.advance();
+                            Token::DotDotDot
+                        } else {
+                            Token::DotDot
+                        }
                     } else {
                         Token::Dot
                     }
@@ -227,7 +259,7 @@ impl Lexer {
             if ch.is_ascii_digit() {
                 num_str.push(ch);
                 self.advance();
-            } else if ch == '.' && !is_float && self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            } else if ch == '.' && !is_float && self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 is_float = true;
                 num_str.push(ch);
                 self.advance();
@@ -293,6 +325,10 @@ impl Lexer {
                             result.push('{');
                             self.advance();
                         }
+                        '}' => {
+                            result.push('}');
+                            self.advance();
+                        }
                         _ => {
                             return Err(self.error(&format!("unknown escape: \\{}", self.current())))
                         }
@@ -309,6 +345,31 @@ impl Lexer {
         }
 
         Err(self.error("unterminated string"))
+    }
+
+    fn lex_triple_string(&mut self) -> Result<Token, LexError> {
+        // Skip opening """
+        self.advance(); // "
+        self.advance(); // "
+        self.advance(); // "
+
+        // Skip leading newline if present
+        if self.pos < self.source.len() && self.source[self.pos] == '\n' {
+            self.advance();
+        }
+
+        let mut result = String::new();
+        while self.pos < self.source.len() {
+            if self.current() == '"' && self.peek() == Some('"') && self.peek_at(2) == Some('"') {
+                self.advance(); // "
+                self.advance(); // "
+                self.advance(); // "
+                return Ok(Token::RawStringLit(result));
+            }
+            result.push(self.current());
+            self.advance();
+        }
+        Err(self.error("unterminated triple-quoted string"))
     }
 
     fn lex_ident(&mut self) -> Token {
@@ -333,6 +394,10 @@ impl Lexer {
 
     fn peek(&self) -> Option<char> {
         self.source.get(self.pos + 1).copied()
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<char> {
+        self.source.get(self.pos + offset).copied()
     }
 
     fn current_matches(&self, ch: char) -> bool {
@@ -466,5 +531,76 @@ mod tests {
     fn test_decorator() {
         let tokens = lex("@get");
         assert_eq!(tokens, vec![Token::At, Token::Ident("get".into())]);
+    }
+
+    #[test]
+    fn test_triple_quoted_string() {
+        let tokens = lex(r#""""hello world""""#);
+        assert_eq!(tokens, vec![Token::RawStringLit("hello world".into())]);
+    }
+
+    #[test]
+    fn test_compound_operators() {
+        assert_eq!(lex("+="), vec![Token::PlusEq]);
+        assert_eq!(lex("-="), vec![Token::MinusEq]);
+        assert_eq!(lex("*="), vec![Token::StarEq]);
+        assert_eq!(lex("/="), vec![Token::SlashEq]);
+    }
+
+    #[test]
+    fn test_spread_operator() {
+        assert_eq!(lex("..."), vec![Token::DotDotDot]);
+    }
+
+    #[test]
+    fn test_pipe_right() {
+        assert_eq!(lex(">>"), vec![Token::PipeRight]);
+    }
+
+    #[test]
+    fn test_bar_operator() {
+        assert_eq!(lex("| "), vec![Token::Bar]);
+    }
+
+    #[test]
+    fn test_natural_keywords() {
+        assert_eq!(lex("set"), vec![Token::Set]);
+        assert_eq!(lex("to"), vec![Token::To]);
+        assert_eq!(lex("change"), vec![Token::Change]);
+        assert_eq!(lex("define"), vec![Token::Define]);
+        assert_eq!(lex("say"), vec![Token::Say]);
+        assert_eq!(lex("yell"), vec![Token::Yell]);
+        assert_eq!(lex("whisper"), vec![Token::Whisper]);
+        assert_eq!(lex("otherwise"), vec![Token::Otherwise]);
+        assert_eq!(lex("nah"), vec![Token::Nah]);
+    }
+
+    #[test]
+    fn test_innovation_keywords() {
+        assert_eq!(lex("when"), vec![Token::When]);
+        assert_eq!(lex("must"), vec![Token::Must]);
+        assert_eq!(lex("safe"), vec![Token::Safe]);
+        assert_eq!(lex("check"), vec![Token::Check]);
+        assert_eq!(lex("retry"), vec![Token::Retry]);
+        assert_eq!(lex("timeout"), vec![Token::Timeout]);
+        assert_eq!(lex("freeze"), vec![Token::Freeze]);
+        assert_eq!(lex("unless"), vec![Token::Unless]);
+    }
+
+    #[test]
+    fn test_forge_vocabulary() {
+        assert_eq!(lex("forge"), vec![Token::ForgeKw]);
+        assert_eq!(lex("hold"), vec![Token::Hold]);
+        assert_eq!(lex("emit"), vec![Token::Emit]);
+        assert_eq!(lex("unpack"), vec![Token::Unpack]);
+    }
+
+    #[test]
+    fn test_escape_sequences() {
+        assert_eq!(lex(r#""\n""#), vec![Token::StringLit("\n".into())]);
+        assert_eq!(lex(r#""\t""#), vec![Token::StringLit("\t".into())]);
+        assert_eq!(lex(r#""\\""#), vec![Token::StringLit("\\".into())]);
+        assert_eq!(lex(r#""\{""#), vec![Token::StringLit("{".into())]);
+        assert_eq!(lex(r#""\}""#), vec![Token::StringLit("}".into())]);
     }
 }

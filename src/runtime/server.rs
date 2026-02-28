@@ -1,5 +1,6 @@
 /// Forge HTTP Server — Axum + Tokio
 /// Production-grade: async, CORS, JSON, path/query params.
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,7 @@ pub fn extract_routes(program: &Program) -> Vec<Route> {
                     "post" => "POST",
                     "put" => "PUT",
                     "delete" => "DELETE",
+                    "ws" => "WS",
                     _ => continue,
                 };
                 let path = dec
@@ -73,7 +75,7 @@ pub fn extract_server_config(program: &Program) -> Option<ServerConfig> {
             if dec.name == "server" {
                 let mut config = ServerConfig {
                     port: 8080,
-                    host: "0.0.0.0".to_string(),
+                    host: "127.0.0.1".to_string(),
                 };
                 for arg in &dec.args {
                     match arg {
@@ -133,10 +135,10 @@ fn call_handler(
                 args.push(
                     body.as_ref()
                         .map(|b| json_to_forge(b.clone()))
-                        .unwrap_or(Value::Object(HashMap::new())),
+                        .unwrap_or(Value::Object(IndexMap::new())),
                 );
             } else if param.name == "query" || param.name == "qs" {
-                let obj: HashMap<String, Value> = query_params
+                let obj: IndexMap<String, Value> = query_params
                     .iter()
                     .map(|(k, v)| (k.clone(), Value::String(v.clone())))
                     .collect();
@@ -179,7 +181,10 @@ pub async fn start_server(
                     Query(query): Query<HashMap<String, String>>,
                 | async move {
                     let params = path.map(|Path(p)| p).unwrap_or_default();
-                    let mut interp = state.lock().unwrap();
+                    let mut interp = match state.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
                     let (status, json) = call_handler(&mut interp, &hn, &params, &query, None);
                     (status, JsonResponse(json))
                 }));
@@ -192,7 +197,10 @@ pub async fn start_server(
                                     Query(query): Query<HashMap<String, String>>,
                                     Json(body): Json<JsonValue>| async move {
                     let params = path.map(|Path(p)| p).unwrap_or_default();
-                    let mut interp = state.lock().unwrap();
+                    let mut interp = match state.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
                     let (status, json) =
                         call_handler(&mut interp, &hn, &params, &query, Some(body));
                     (status, JsonResponse(json))
@@ -211,10 +219,54 @@ pub async fn start_server(
                     Query(query): Query<HashMap<String, String>>,
                 | async move {
                     let params = path.map(|Path(p)| p).unwrap_or_default();
-                    let mut interp = state.lock().unwrap();
+                    let mut interp = match state.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
                     let (status, json) = call_handler(&mut interp, &hn, &params, &query, None);
                     (status, JsonResponse(json))
                 }));
+            }
+            "WS" => {
+                let hn = hn.clone();
+                app = app.route(
+                    &axum_path,
+                    get(move |
+                        State(state): State<AppState>,
+                        ws: axum::extract::WebSocketUpgrade,
+                    | {
+                        let state = state.clone();
+                        let hn = hn.clone();
+                        async move {
+                            ws.on_upgrade(move |mut socket| async move {
+                                use axum::extract::ws::Message;
+                                while let Some(Ok(msg)) = socket.recv().await {
+                                    if let Message::Text(text) = msg {
+                                        let response = {
+                                            let mut interp = match state.lock() {
+                                                Ok(g) => g,
+                                                Err(poisoned) => poisoned.into_inner(),
+                                            };
+                                            let handler = interp.env.get(&hn).cloned();
+                                            if let Some(h) = handler {
+                                                match interp.call_function(
+                                                    h,
+                                                    vec![Value::String(text.to_string())],
+                                                ) {
+                                                    Ok(v) => format!("{}", v),
+                                                    Err(e) => format!("error: {}", e.message),
+                                                }
+                                            } else {
+                                                "handler not found".to_string()
+                                            }
+                                        };
+                                        let _ = socket.send(Message::Text(response.into())).await;
+                                    }
+                                }
+                            })
+                        }
+                    }),
+                );
             }
             _ => {}
         }

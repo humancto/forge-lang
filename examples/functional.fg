@@ -52,8 +52,8 @@ fn fib(n) {
     return fib(n - 1) + fib(n - 2)
 }
 
-let i = 0
-while i < 15 {
+let mut i = 0
+while i < 10 {
     let f = fib(i)
     println("fib({i}) = {f}")
     i = i + 1

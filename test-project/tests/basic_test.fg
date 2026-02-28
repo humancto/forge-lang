@@ -1,0 +1,6 @@
+// Basic tests
+
+@test
+define should_work() {
+    assert(1 + 1 == 2)
+}

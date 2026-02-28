@@ -1,0 +1,29 @@
+// builtins_demo.fg — New Forge builtins
+
+set nums to [5, 3, 1, 4, 2]
+say "sorted: {sort(nums)}"
+say "reversed: {reverse(nums)}"
+
+set total to reduce(nums, 0, fn(acc, n) { return acc + n })
+say "sum via reduce: {total}"
+
+// String builtins
+set msg to "hello world"
+set delimiter to " "
+set parts to split(msg, delimiter)
+say "split: {parts}"
+
+set sep to "-"
+set joined to join(parts, sep)
+say "join: {joined}"
+
+set target to "world"
+set replacement to "forge"
+set replaced to replace(msg, target, replacement)
+say "replace: {replaced}"
+
+set prefix to "hello"
+say "starts_with hello: {starts_with(msg, prefix)}"
+
+set suffix to "world"
+say "ends_with world: {ends_with(msg, suffix)}"

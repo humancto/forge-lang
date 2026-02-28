@@ -2,6 +2,7 @@ use crate::interpreter::Value;
 use crate::runtime::server::json_to_forge;
 /// Forge HTTP Client — Powered by Reqwest
 /// Full HTTP/HTTPS client with JSON, headers, timeouts.
+use indexmap::IndexMap;
 use std::collections::HashMap;
 
 /// Perform an HTTP request — called by the fetch() builtin
@@ -47,7 +48,7 @@ pub async fn fetch(
     let ok = resp.status().is_success();
 
     // Collect response headers
-    let resp_headers: HashMap<String, Value> = resp
+    let resp_headers: IndexMap<String, Value> = resp
         .headers()
         .iter()
         .map(|(k, v)| {
@@ -64,7 +65,7 @@ pub async fn fetch(
         .map_err(|e| format!("body read error: {}", e))?;
 
     // Build response object
-    let mut response = HashMap::new();
+    let mut response = IndexMap::new();
     response.insert("status".to_string(), Value::Int(status as i64));
     response.insert("ok".to_string(), Value::Bool(ok));
     response.insert("url".to_string(), Value::String(url.to_string()));

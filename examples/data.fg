@@ -1,0 +1,76 @@
+// data.fg — Forge for data processing
+// Run: forge run examples/data.fg
+
+say term.bold("=== Data Processing with Forge ===")
+say ""
+
+// In-memory database
+db.open(":memory:")
+
+// Create and populate a table
+db.execute("CREATE TABLE sales (id INTEGER PRIMARY KEY, product TEXT, amount REAL, region TEXT)")
+db.execute("INSERT INTO sales (product, amount, region) VALUES ('Widget', 29.99, 'North')")
+db.execute("INSERT INTO sales (product, amount, region) VALUES ('Gadget', 49.99, 'South')")
+db.execute("INSERT INTO sales (product, amount, region) VALUES ('Widget', 19.99, 'East')")
+db.execute("INSERT INTO sales (product, amount, region) VALUES ('Gizmo', 99.99, 'North')")
+db.execute("INSERT INTO sales (product, amount, region) VALUES ('Gadget', 49.99, 'West')")
+db.execute("INSERT INTO sales (product, amount, region) VALUES ('Widget', 29.99, 'South')")
+db.execute("INSERT INTO sales (product, amount, region) VALUES ('Gizmo', 89.99, 'East')")
+db.execute("INSERT INTO sales (product, amount, region) VALUES ('Gadget', 59.99, 'North')")
+
+// Query and display
+say term.blue("All Sales:")
+let all_sales = db.query("SELECT * FROM sales")
+term.table(all_sales)
+say ""
+
+// Aggregation
+say term.blue("Sales by Product:")
+let by_product = db.query("SELECT product, COUNT(*) as count, SUM(amount) as total FROM sales GROUP BY product ORDER BY total DESC")
+term.table(by_product)
+say ""
+
+// Method chaining pipeline
+say term.blue("Data Pipeline (chained):")
+let amounts = all_sales.map(fn(row) { return float(row.amount) })
+let total = reduce(amounts, 0.0, fn(acc, x) { return acc + x })
+let count = len(amounts)
+let average = total / count
+
+say "  Total revenue: ${total}"
+say "  Transactions:  {count}"
+say "  Average sale:  ${average}"
+say ""
+
+// find() on results
+say term.blue("Find Specific Records:")
+let biggest = all_sales.find(fn(r) { return float(r.amount) > 90 })
+say "  Biggest sale: {biggest.product} at ${biggest.amount}"
+say ""
+
+// pick() to extract only what we need
+say term.blue("Slim Projection:")
+let slim = all_sales.map(fn(r) { return pick(r, ["product", "amount"]) })
+term.table(slim)
+say ""
+
+// Sparkline visualization
+say term.blue("Revenue Trend:")
+term.sparkline(amounts)
+say ""
+
+// Bar chart
+say term.blue("Product Revenue:")
+for each row in by_product {
+    term.bar(row.product, float(row.total), 200.0)
+}
+say ""
+
+// Export to JSON
+say term.blue("JSON Export:")
+say json.pretty(by_product)
+
+db.close()
+
+say ""
+term.success("Data processing complete!")

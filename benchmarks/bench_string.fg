@@ -1,0 +1,9 @@
+// Benchmark: String concatenation - 10,000 strings
+let mut s = ""
+let mut i = 0
+while i < 10000 {
+    s = s + "a"
+    i = i + 1
+}
+let length = len(s)
+println("String length = {length}")

@@ -1,0 +1,49 @@
+// stdlib_test.fg — Standard library tests
+
+@test
+define test_math() {
+    assert_eq(math.abs(-5), 5)
+    assert_eq(math.max(3, 7), 7)
+    assert_eq(math.min(3, 7), 3)
+    assert_eq(math.floor(3.7), 3)
+    assert_eq(math.ceil(3.2), 4)
+}
+
+@test
+define test_string_ops() {
+    let parts = split("a,b,c", ",")
+    assert(len(parts) == 3)
+    let joined = join(parts, "-")
+    assert(joined == "a-b-c")
+    assert(starts_with("hello", "hel"))
+    assert(ends_with("hello", "llo"))
+    assert(contains("hello world", "world"))
+}
+
+@test
+define test_array_ops() {
+    let arr = [5, 3, 1, 4, 2]
+    let sorted = sort(arr)
+    assert_eq(sorted[0], 1)
+    assert_eq(sorted[4], 5)
+    let rev = reverse(arr)
+    assert_eq(rev[0], 2)
+    assert_eq(len(arr), 5)
+}
+
+@test
+define test_json() {
+    let text = """{"name":"Alice","age":30}"""
+    let obj = json.parse(text)
+    let back = json.stringify(obj)
+    assert(contains(back, "Alice"))
+}
+
+@test
+define test_crypto() {
+    let hash = crypto.sha256("hello")
+    assert(len(hash) == 64)
+    let encoded = crypto.base64_encode("test")
+    let decoded = crypto.base64_decode(encoded)
+    assert(decoded == "test")
+}

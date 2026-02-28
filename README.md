@@ -1,69 +1,21 @@
-# 🔥 Forge
+<p align="center">
+  <h1 align="center">⚒️ Forge</h1>
+  <p align="center"><strong>Internet-native. Human-readable. Rust-powered.</strong></p>
+</p>
 
-**Go's simplicity. Rust's safety. The internet built in.**
+<p align="center">
+  <a href="#installation"><img alt="Install" src="https://img.shields.io/badge/cargo_install-forge--lang-blue?style=flat-square"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
+  <a href="https://www.rust-lang.org/"><img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-orange?style=flat-square"></a>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-189_passing-brightgreen?style=flat-square">
+</p>
 
-Forge is an internet-native programming language built in Rust. HTTP, JSON, and concurrency are language primitives — not library imports.
+---
 
-## Quick Start
+A REST API in Forge:
 
-```bash
-# Build
-cargo build --release
-
-# Run a program
-./target/release/forge run examples/hello.fg
-
-# Start the REPL
-./target/release/forge
 ```
-
-## Examples
-
-### Hello World
-```
-let name = "World"
-println("Hello, {name}!")
-```
-
-### Functions & Closures
-```
-fn make_adder(n) {
-    return fn(x) { return x + n }
-}
-
-let add5 = make_adder(5)
-println(add5(10))  // 15
-```
-
-### Objects (JSON-native)
-```
-let user = {
-    name: "Odin",
-    role: "Builder",
-    level: 99
-}
-println(user)
-```
-
-### Result + `?` Propagation
-```
-fn parse_num(s) {
-    if s == "" { return Err("empty input") }
-    return Ok(int(s))
-}
-
-fn add_one(s) {
-    let n = parse_num(s)?
-    return Ok(n + 1)
-}
-
-println(add_one("41"))  // Ok(42)
-println(add_one(""))    // Err(empty input)
-```
-
-### API Server
-```
-@server(port: 8080)
+@server(port: 3000)
 
 @get("/hello/:name")
 fn hello(name: String) -> Json {
@@ -71,59 +23,446 @@ fn hello(name: String) -> Json {
 }
 ```
 
-## Project Status
+Run it:
 
-**Phase 1 — Foundation** ✅ In Progress
+```bash
+forge run api.fg
+curl http://localhost:3000/hello/World
+# → {"greeting": "Hello, World!"}
+```
 
-| Component | Status | Lines |
-|-----------|--------|-------|
-| Lexer | ✅ Complete | 346 |
-| Parser | ✅ Complete | 808 |
-| AST | ✅ Complete | 259 |
-| Interpreter | ✅ Complete | 948 |
-| REPL | ✅ Complete | 164 |
-| Error Formatting | ✅ Complete | 58 |
-| CLI | ✅ Complete | 120 |
-| **Total** | | **2,850** |
+No framework. No dependencies. No setup.
 
-### What Works
-- Variables (`let`, `mut`)
-- Functions (with closures, recursion, higher-order)
-- String interpolation with expressions (`"sum = {a + b}"`, `"{user.name}"`)
-- Arithmetic, comparison, logical operators
-- Arrays and objects (JSON-native)
-- Control flow (`if/else`, `for..in`, `while`, `loop`)
-- Pattern matching (basic)
-- Result values (`Ok`, `Err`) with `?` unwrapping/propagation
-- Pipeline operator (`|>`)
-- Decorators (`@server`, `@get`, `@post`)
-- HTTP client (`fetch()`)
-- HTTP server routing (`@server`, `@get`, `@post`, `@put`, `@delete`)
-- REPL with multiline support
-- Source-mapped error reporting
+---
 
-### Coming Next
-- [ ] Full JSON parsing (`json.parse/stringify`)
-- [ ] Type annotations
-- [ ] Algebraic data types
+## What Is Forge?
+
+Forge is a programming language where HTTP, databases, crypto, and terminal UI are **built into the runtime** — not added through packages.
+
+```
+say "Hello, World!"
+
+let users = db.query("SELECT * FROM users")
+term.table(users)
+
+let hash = crypto.sha256("password")
+say hash
+
+let resp = fetch("https://api.example.com/data")
+say resp.json.name
+```
+
+Every line above runs without a single import or install. 15 standard library modules, 160+ built-in functions, zero external dependencies needed.
+
+It also reads like English — or like code. Both work:
+
+```
+// Natural syntax                        // Classic syntax
+set name to "Forge"                      let name = "Forge"
+say "Hello, {name}!"                     println("Hello, {name}!")
+define greet(who) { }                    fn greet(who) { }
+if ready { } otherwise { }              if ready { } else { }
+repeat 3 times { }                       for i in range(0, 3) { }
+```
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/forge-lang/forge.git
+cd forge
+cargo install --path .
+```
+
+Requires [Rust 1.85+](https://rustup.rs/). Then:
+
+```bash
+forge version          # verify
+forge learn            # 14 interactive tutorials
+forge                  # start REPL
+```
+
+---
+
+## Why Forge?
+
+Modern backend development:
+
+```
+pip install flask requests sqlalchemy bcrypt python-dotenv pydantic ...
+```
+
+Forge:
+
+```
+forge run app.fg
+```
+
+| Problem                     | Forge                                                   |
+| --------------------------- | ------------------------------------------------------- |
+| HTTP requires a framework   | `@server` + `@get` — 3 lines                            |
+| Database needs an ORM       | `db.query("SELECT * FROM users")` — built in            |
+| Crypto needs a library      | `crypto.sha256("data")` — built in                      |
+| JSON needs parsing          | `json.parse(text)` — built in                           |
+| CSV needs pandas            | `csv.read("data.csv")` — built in                       |
+| Shell scripts are fragile   | `sh("whoami")`, `shell("cmd \| grep x")` — built in     |
+| Terminal UIs need ncurses   | `term.table(data)`, `term.sparkline(vals)` — built in   |
+| Error handling is bolted on | `Result` types with `?` propagation — it's the language |
+| Learning a language is slow | `forge learn` — 14 lessons in your terminal             |
+
+---
+
+## Quick Tour
+
+### Variables
+
+```
+let name = "Forge"              // immutable
+let mut count = 0               // mutable
+count += 1
+
+set language to "Forge"         // natural syntax
+set mut score to 0
+change score to score + 10
+```
+
+### Functions
+
+```
+fn add(a, b) { return a + b }
+
+define greet(name) {
+    say "Hello, {name}!"
+}
+
+let double = fn(x) { return x * 2 }
+```
+
+### Output — The Fun Trio
+
+```
+say "Normal volume"              // standard output
+yell "LOUD AND PROUD!"          // UPPERCASE + !
+whisper "quiet and gentle"       // lowercase + ...
+```
+
+### Control Flow
+
+```
+if score > 90 { say "A" }
+otherwise if score > 80 { say "B" }
+otherwise { say "C" }
+
+when temp {
+    > 100 -> say "Boiling"
+    > 60  -> say "Warm"
+    else  -> say "Cold"
+}
+```
+
+### Loops
+
+```
+for item in [1, 2, 3] { say item }
+
+for each color in ["red", "green", "blue"] {
+    say color
+}
+
+repeat 5 times { say "hello" }
+
+while count < 10 { count += 1 }
+```
+
+### Collections
+
+```
+let nums = [1, 2, 3, 4, 5]
+let evens = nums.filter(fn(x) { return x % 2 == 0 })
+let doubled = evens.map(fn(x) { return x * 2 })
+say doubled   // [4, 8]
+
+let user = { name: "Alice", age: 30, role: "admin" }
+say user.name
+say pick(user, ["name", "role"])
+say has_key(user, "email")
+```
+
+### Error Handling
+
+```
+fn safe_divide(a, b) {
+    if b == 0 { return Err("division by zero") }
+    return Ok(a / b)
+}
+
+let result = safe_divide(10, 0)
+match result {
+    Ok(val) => say "Got: {val}"
+    Err(msg) => say "Error: {msg}"
+}
+
+// Propagate with ?
+fn compute(input) {
+    let n = parse_int(input)?
+    return Ok(n * 2)
+}
+```
+
+### Pattern Matching & ADTs
+
+```
+type Shape = Circle(Float) | Rect(Float, Float)
+
+let s = Circle(5.0)
+match s {
+    Circle(r) => say "Area = {3.14 * r * r}"
+    Rect(w, h) => say "Area = {w * h}"
+}
+```
+
+---
+
+## Standard Library
+
+15 modules. No imports needed.
+
+### HTTP Server
+
+```
+@server(port: 3000)
+
+@get("/users/:id")
+fn get_user(id: String) -> Json {
+    return db.query("SELECT * FROM users WHERE id = " + id)
+}
+
+@post("/users")
+fn create_user(body: Json) -> Json {
+    db.execute("INSERT INTO users (name) VALUES (\"" + body.name + "\")")
+    return { created: true }
+}
+```
+
+### HTTP Client
+
+```
+let resp = fetch("https://api.github.com/repos/rust-lang/rust")
+say resp.json.stargazers_count
+
+let data = http.post("https://httpbin.org/post", { name: "Forge" })
+say data.status
+```
+
+### Database (SQLite + PostgreSQL)
+
+```
+db.open(":memory:")
+db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+db.execute("INSERT INTO users (name) VALUES (\"Alice\")")
+let users = db.query("SELECT * FROM users")
+term.table(users)
+db.close()
+```
+
+### Shell Integration
+
+```
+say sh("whoami")                           // quick stdout
+let files = sh_lines("ls /etc | head -5")  // stdout as array
+if sh_ok("which docker") { say "Docker installed" }
+let path = which("git")                    // find command path
+let sorted = pipe_to(csv_data, "sort")     // pipe Forge data into commands
+say cwd()                                  // working directory
+```
+
+### Crypto
+
+```
+say crypto.sha256("forge")
+say crypto.base64_encode("secret")
+say crypto.md5("data")
+```
+
+### File System
+
+```
+fs.write("config.json", json.stringify(data))
+let content = fs.read("config.json")
+say fs.exists("config.json")
+say fs.list(".")
+```
+
+### Terminal UI
+
+```
+term.table(data)                   // formatted tables
+term.sparkline([1, 5, 3, 8, 2])   // inline charts
+term.bar("Progress", 75, 100)     // progress bars
+say term.red("Error!")             // colored output
+term.banner("FORGE")               // ASCII art
+term.success("All tests passed!") // status messages
+```
+
+### All Modules
+
+| Module   | What's In It                                                                   |
+| -------- | ------------------------------------------------------------------------------ |
+| `math`   | sqrt, pow, abs, sin, cos, tan, pi, e, random, floor, ceil, round               |
+| `fs`     | read, write, append, exists, list, mkdir, copy, rename, remove, size           |
+| `crypto` | sha256, md5, base64_encode/decode, hex_encode/decode                           |
+| `db`     | SQLite — open, query, execute, close                                           |
+| `pg`     | PostgreSQL — connect, query, execute, close                                    |
+| `json`   | parse, stringify, pretty                                                       |
+| `csv`    | parse, stringify, read, write                                                  |
+| `regex`  | test, find, find_all, replace, split                                           |
+| `env`    | get, set, has, keys                                                            |
+| `log`    | info, warn, error, debug                                                       |
+| `term`   | colors, table, sparkline, bar, banner, box, gradient, countdown, confirm, menu |
+| `http`   | get, post, put, delete, patch, head, download, crawl                           |
+| `io`     | prompt, print                                                                  |
+
+---
+
+## Object Helpers & Method Chaining
+
+```
+let user = { name: "Alice", age: 30, password: "secret" }
+
+// Safe access with defaults
+say get(user, "email", "N/A")                        // N/A
+say get(resp, "json.user.profile.name", "unknown")   // deep dot-path, never crashes
+
+// Transform objects
+let public = pick(user, ["name", "age"])          // extract fields
+let cleaned = omit(user, ["password"])             // remove fields
+let config = merge({ port: 3000 }, { port: 8080 }) // merge (later wins)
+
+// Search arrays
+let admin = users.find(fn(u) { return u.role == "admin" })
+
+// Chain operations
+let names = users
+    .filter(fn(u) { return u.active })
+    .map(fn(u) { return u.name })
+say names
+
+// Check keys
+say has_key(user, "email")
+say contains(user, "name")
+```
+
+---
+
+## CLI
+
+| Command               | What It Does          |
+| --------------------- | --------------------- |
+| `forge run <file>`    | Run a program         |
+| `forge`               | Start REPL            |
+| `forge -e '<code>'`   | Evaluate inline       |
+| `forge learn [n]`     | Interactive tutorials |
+| `forge new <name>`    | Scaffold a project    |
+| `forge test [dir]`    | Run tests             |
+| `forge fmt [files]`   | Format code           |
+| `forge build <file>`  | Compile to bytecode   |
+| `forge install <src>` | Install a package     |
+| `forge lsp`           | Language server       |
+| `forge chat`          | AI assistant          |
+| `forge version`       | Version info          |
+
+---
+
+## Examples
+
+```bash
+forge run examples/hello.fg        # basics
+forge run examples/natural.fg      # natural syntax
+forge run examples/api.fg          # REST API server
+forge run examples/data.fg         # data processing + visualization
+forge run examples/devops.fg       # system automation
+forge run examples/showcase.fg     # everything in one file
+forge run examples/functional.fg   # closures, recursion, higher-order
+forge run examples/adt.fg          # algebraic data types + matching
+forge run examples/result_try.fg   # error handling with ?
+```
+
+---
 
 ## Architecture
 
 ```
 Source (.fg) → Lexer → Tokens → Parser → AST → Interpreter → Result
+                                           ↓
+                                      Type Checker
+                                           ↓
+                                  Bytecode VM (--vm flag)
 ```
 
-Built on the "Ride on Giants" philosophy — Forge delegates heavy lifting to battle-tested Rust crates:
+~15,500 lines of Rust. Zero `unsafe` blocks. Built on:
 
-| Feature | Rust Crate | Status |
-|---------|-----------|--------|
-| HTTP Server | hyper + tower | Phase 1b |
-| HTTP Client | reqwest | Phase 1b |
-| Async Runtime | tokio | Phase 3 |
-| JSON | serde_json | ✅ Integrated |
-| TLS | rustls | Phase 4 |
-| Database | sqlx | Phase 4 |
+| Crate                                              | Purpose         |
+| -------------------------------------------------- | --------------- |
+| [axum](https://github.com/tokio-rs/axum)           | HTTP server     |
+| [tokio](https://tokio.rs)                          | Async runtime   |
+| [reqwest](https://github.com/seanmonstar/reqwest)  | HTTP client     |
+| [rusqlite](https://github.com/rusqlite/rusqlite)   | SQLite          |
+| [ariadne](https://github.com/zesterer/ariadne)     | Error reporting |
+| [rustyline](https://github.com/kkawakam/rustyline) | REPL            |
+| [clap](https://github.com/clap-rs/clap)            | CLI             |
+
+---
+
+## Project Status
+
+Forge is v0.2.0. The language, interpreter, and standard library are stable and tested. The bytecode VM is experimental (opt-in via `--vm`).
+
+| Metric                   | Value               |
+| ------------------------ | ------------------- |
+| Lines of Rust            | ~15,500             |
+| Standard library modules | 15                  |
+| Built-in functions       | 160+                |
+| Keywords                 | 80+                 |
+| Tests                    | 189 Rust + 25 Forge |
+| Interactive lessons      | 14                  |
+| Example programs         | 12                  |
+| Unsafe blocks            | 0                   |
+
+---
+
+## Known Limitations (v0.2.0)
+
+Forge is a young language. These are documented, not hidden:
+
+- **Recursive performance** is slower than Python for deep call stacks (100K+ calls). Loops and stdlib calls run at native Rust speed. The bytecode VM in the roadmap addresses this.
+- **`timeout` keyword** parses but does not enforce time limits yet. Documented as experimental.
+- **`safe` and `when`** work as statements only, not as expressions (`let x = when ...` is not yet supported).
+- **No parameterized SQL queries** — use string concatenation for now. Be cautious with user input.
+- **Object keys** must be valid identifiers (no hyphens like `"Content-Type"`).
+- **No `null` literal** — use `None` from the Option type system.
+
+See [ROADMAP.md](ROADMAP.md) for what's coming next.
+
+---
+
+## Contributing
+
+```bash
+git clone https://github.com/forge-lang/forge.git
+cd forge
+cargo build && cargo test
+forge run examples/showcase.fg
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture guide, how to add features, and PR guidelines.
+
+---
 
 ## License
 
-MIT
+[MIT](LICENSE)
+
+---
+
+<p align="center"><em>Stop installing. Start building.</em></p>

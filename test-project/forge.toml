@@ -1,0 +1,7 @@
+[project]
+name = "test-project"
+version = "0.1.0"
+description = ""
+
+[test]
+directory = "tests"

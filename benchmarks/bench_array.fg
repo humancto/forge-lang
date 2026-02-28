@@ -1,0 +1,20 @@
+// Benchmark: Array operations - create 100,000 items, map, filter, reduce
+let mut arr = []
+let mut i = 0
+while i < 100000 {
+    arr = push(arr, i)
+    i = i + 1
+}
+println("Array created, length = {len(arr)}")
+
+// Map: double each value
+let doubled = map(arr, fn(x) { return x * 2 })
+println("Map done, length = {len(doubled)}")
+
+// Filter: keep even values
+let evens = filter(doubled, fn(x) { return x % 2 == 0 })
+println("Filter done, length = {len(evens)}")
+
+// Reduce: sum
+let total = reduce(evens, 0, fn(acc, x) { return acc + x })
+println("Reduce sum = {total}")

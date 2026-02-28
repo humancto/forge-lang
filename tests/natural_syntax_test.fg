@@ -1,0 +1,54 @@
+// natural_syntax_test.fg — Natural language syntax tests
+
+@test
+define test_set_to() {
+    set x to 42
+    assert_eq(x, 42)
+}
+
+@test
+define test_set_mut_change() {
+    set mut counter to 0
+    change counter to 10
+    assert_eq(counter, 10)
+}
+
+@test
+define test_define_function() {
+    define add(a, b) { return a + b }
+    assert_eq(add(3, 4), 7)
+}
+
+@test
+define test_say_yell_whisper() {
+    say "normal"
+    yell "loud"
+    whisper "quiet"
+    assert(true)
+}
+
+@test
+define test_repeat_times() {
+    set mut count to 0
+    repeat 5 times {
+        change count to count + 1
+    }
+    assert_eq(count, 5)
+}
+
+@test
+define test_for_each() {
+    set mut total to 0
+    for each n in [10, 20, 30] {
+        change total to total + n
+    }
+    assert_eq(total, 60)
+}
+
+@test
+define test_otherwise_nah() {
+    set x to false
+    set mut result to 0
+    if x { change result to 1 } nah { change result to 2 }
+    assert_eq(result, 2)
+}

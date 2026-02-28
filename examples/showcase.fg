@@ -1,0 +1,167 @@
+// showcase.fg — Everything Forge can do
+// Run: forge run examples/showcase.fg
+
+say "=== Forge Language Showcase ==="
+say ""
+
+// --- Variables ---
+set name to "Forge"
+set mut version to 1
+change version to 2
+say "Language: {name} v{version}"
+
+// --- The Fun Trio ---
+say "Normal output"
+yell "Loud output!"
+whisper "Quiet output..."
+say ""
+
+// --- Functions ---
+define square(x) {
+    return x * x
+}
+fn cube(x) { return x * x * x }
+say "square(7) = {square(7)}"
+say "cube(3) = {cube(3)}"
+
+// --- Recursion ---
+fn factorial(n) {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+say "factorial(10) = {factorial(10)}"
+
+// --- Arrays ---
+set fruits to ["apple", "banana", "cherry"]
+say "Fruits: {fruits}"
+say "Count: {len(fruits)}"
+
+// --- Objects ---
+set user to { name: "Alice", age: 30, role: "engineer" }
+say "User: {user}"
+
+// --- Object Helpers ---
+let hk = has_key(user, "name")
+say "has_key: {hk}"
+let public_user = pick(user, ["name", "role"])
+say "pick: {public_user}"
+let defaults = { theme: "dark", lang: "en" }
+let prefs = merge(defaults, { lang: "fr" })
+say "merge: {prefs}"
+let fallback_email = get(user, "email", "no-email")
+say "get with default: {fallback_email}"
+
+// --- Control Flow ---
+set score to 85
+if score > 90 {
+    say "Grade: A"
+} otherwise if score > 80 {
+    say "Grade: B"
+} otherwise {
+    say "Grade: C"
+}
+
+// --- Loops ---
+set mut total to 0
+for each n in [10, 20, 30, 40] {
+    change total to total + n
+}
+say "Sum: {total}"
+
+set mut count to 0
+repeat 5 times {
+    change count to count + 1
+}
+say "Repeated 5 times, count = {count}"
+
+// --- Functional ---
+set numbers to [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+set evens to filter(numbers, fn(x) { return x % 2 == 0 })
+set doubled to map(evens, fn(x) { return x * 2 })
+set sum to reduce(doubled, 0, fn(acc, x) { return acc + x })
+say "Even numbers doubled and summed: {sum}"
+say "Sorted: {sort([5, 3, 1, 4, 2])}"
+say "Reversed: {reverse([1, 2, 3])}"
+
+// --- Method Chaining ---
+let big = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].filter(fn(x) { return x > 5 }).map(fn(x) { return x * 10 })
+say "Chained filter+map: {big}"
+
+let items = [
+    { name: "Apple", price: 1.5 },
+    { name: "Steak", price: 15.0 },
+    { name: "Bread", price: 3.0 }
+]
+let expensive = items.find(fn(i) { return i.price > 10 })
+say "Most expensive: {expensive.name}"
+
+// --- flat_map ---
+let nested = [[1, 2], [3, 4], [5]]
+let flat = flat_map(nested, fn(x) { return x })
+say "flat_map: {flat}"
+
+// --- Strings ---
+set msg to "hello world"
+set delimiter to " "
+set words to split(msg, delimiter)
+say "Words: {words}"
+set dash to "-"
+say "Joined: {join(words, dash)}"
+
+// --- lines ---
+let text = """line one
+line two
+line three"""
+let arr = lines(text)
+say "lines(): {arr}"
+
+// --- Result Types ---
+fn safe_divide(a, b) {
+    if b == 0 { return Err("division by zero") }
+    return Ok(a / b)
+}
+set result to safe_divide(42, 6)
+say "is_ok: {is_ok(result)}"
+say "value: {unwrap(result)}"
+
+// --- Math ---
+say "pi = {math.pi}"
+say "sqrt(144) = {math.sqrt(144)}"
+say "pow(2, 10) = {math.pow(2, 10)}"
+say "abs(-99) = {math.abs(-99)}"
+
+// --- Crypto ---
+set hash to crypto.sha256("forge")
+say "SHA256 of forge: {hash}"
+set encoded to crypto.base64_encode("secret")
+say "Base64: {encoded}"
+
+// --- Database ---
+db.open(":memory:")
+db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, price REAL)")
+db.execute("INSERT INTO items (name, price) VALUES (\"Widget\", 9.99)")
+db.execute("INSERT INTO items (name, price) VALUES (\"Gadget\", 24.99)")
+set items to db.query("SELECT * FROM items")
+say "Database items: {items}"
+db.close()
+
+// --- Shell Integration ---
+let me = sh("whoami")
+say "User: {me}"
+let git_ok = sh_ok("which git")
+say "git installed: {git_ok}"
+let here = cwd()
+say "Working dir: {here}"
+let etc_files = sh_lines("ls /etc | head -3")
+say "etc files: {etc_files}"
+
+// --- entries / from_entries ---
+let obj = { x: 10, y: 20 }
+say "entries: {entries(obj)}"
+
+// --- Assertions ---
+assert(1 + 1 == 2)
+assert_eq(len("forge"), 5)
+
+say ""
+yell "Forge showcase complete!"

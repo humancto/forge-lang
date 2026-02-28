@@ -1,0 +1,65 @@
+// innovation_test.fg — Forge innovation feature tests
+
+@test
+define test_must_unwraps() {
+    let x = must Ok(42)
+    assert_eq(x, 42)
+}
+
+@test
+define test_safe_blocks() {
+    safe { let x = 1 / 0 }
+    assert(true)
+}
+
+@test
+define test_retry() {
+    retry 1 times {
+        assert(true)
+    }
+}
+
+@test
+define test_destructure_object() {
+    let user = { name: "Alice", age: 30 }
+    unpack { name, age } from user
+    assert(name == "Alice")
+    assert_eq(age, 30)
+}
+
+@test
+define test_destructure_array() {
+    let items = [1, 2, 3, 4, 5]
+    unpack [first, ...rest] from items
+    assert_eq(first, 1)
+    assert_eq(len(rest), 4)
+}
+
+@test
+define test_for_in_object() {
+    let obj = { a: 1, b: 2, c: 3 }
+    let mut total = 0
+    for key, val in obj {
+        total += val
+    }
+    assert_eq(total, 6)
+}
+
+@test
+define test_compound_assign() {
+    let mut x = 10
+    x += 5
+    assert_eq(x, 15)
+    x -= 3
+    assert_eq(x, 12)
+    x *= 2
+    assert_eq(x, 24)
+}
+
+@test
+define test_typeof() {
+    assert_eq(typeof(42), "Int")
+    assert_eq(typeof("hi"), "String")
+    assert_eq(typeof(true), "Bool")
+    assert_eq(typeof([1,2]), "Array")
+}

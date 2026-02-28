@@ -1,0 +1,98 @@
+// devops.fg — Forge for DevOps and scripting
+// Run: forge run examples/devops.fg
+
+say term.bold("=== System Health Check ===")
+say ""
+
+// System info
+say term.blue("System Information:")
+let user = sh("whoami")
+let host = sh("hostname")
+let os_name = sh("uname -s")
+let arch = sh("uname -m")
+say "  User:     {user}"
+say "  Hostname: {host}"
+say "  OS:       {os_name}"
+say "  Arch:     {arch}"
+say ""
+
+// Disk usage
+say term.blue("Disk Usage:")
+let disk = shell("df -h / | tail -1")
+say "  {disk.stdout}"
+say ""
+
+// Dependency check with which()
+say term.blue("Required Tools:")
+let tools = ["git", "cargo", "curl"]
+for each tool in tools {
+    let path = which(tool)
+    if path {
+        let green_name = term.green(tool)
+        say "  {green_name}: {path}"
+    } nah {
+        let red_name = term.red(tool)
+        say "  {red_name}: NOT FOUND"
+    }
+}
+say ""
+
+// Process check with sh_ok()
+say term.blue("Service Status:")
+if sh_ok("pgrep -q Finder") {
+    say "  Finder: running"
+} nah {
+    say "  Finder: stopped"
+}
+say ""
+
+// Environment check
+say term.blue("Environment:")
+let home = env.get("HOME")
+let user_shell = env.get("SHELL")
+let path_sep = ":"
+let path_count = len(split(env.get("PATH"), path_sep))
+say "  HOME:  {home}"
+say "  SHELL: {user_shell}"
+say "  PATH entries: {path_count}"
+say ""
+
+// File operations
+say term.blue("Temp File Test:")
+let test_file = "/tmp/forge_health_check.txt"
+fs.write(test_file, "Forge health check")
+let content = fs.read(test_file)
+let size = fs.size(test_file)
+say "  Written: {test_file}"
+say "  Content: {content}"
+say "  Size:    {size} bytes"
+fs.remove(test_file)
+say "  Cleaned up"
+say ""
+
+// Config with merge() and pick()
+say term.blue("Config Handling:")
+let defaults = { app: "myservice", port: 3000, debug: false, workers: 4, log_level: "info" }
+let overrides = { port: 8080, debug: true, log_level: "debug" }
+let config = merge(defaults, overrides)
+say json.pretty(config)
+say ""
+
+// Log scanning with sh_lines + pipe_to
+say term.blue("Directory Scanner:")
+let here = cwd()
+let fg_files = sh_lines("find . -name '*.fg' -maxdepth 2 | head -5")
+let fg_count = len(fg_files)
+say "  Found {fg_count} Forge files:"
+for each f in fg_files {
+    say "    {f}"
+}
+say ""
+
+// Crypto
+say term.blue("Security:")
+let hash = crypto.sha256("deployment-secret-2026")
+say "  Deploy hash: {hash}"
+say ""
+
+term.success("Health check passed!")

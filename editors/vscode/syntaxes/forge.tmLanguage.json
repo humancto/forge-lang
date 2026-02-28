@@ -1,0 +1,98 @@
+{
+  "scopeName": "source.forge",
+  "name": "Forge",
+  "fileTypes": ["fg"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#triple-strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#natural-keywords" },
+    { "include": "#types" },
+    { "include": "#builtins" },
+    { "include": "#modules" },
+    { "include": "#decorators" },
+    { "include": "#operators" },
+    { "include": "#constants" },
+    { "include": "#function-def" },
+    { "include": "#function-call" }
+  ],
+  "repository": {
+    "comments": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.forge"
+    },
+    "strings": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.forge",
+      "patterns": [
+        {
+          "match": "\\\\[nrt\\\\\"{}]",
+          "name": "constant.character.escape.forge"
+        },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "name": "meta.interpolation.forge",
+          "patterns": [{ "include": "$self" }]
+        }
+      ]
+    },
+    "triple-strings": {
+      "begin": "\"\"\"",
+      "end": "\"\"\"",
+      "name": "string.quoted.triple.forge"
+    },
+    "numbers": {
+      "match": "\\b(\\d+\\.\\d+|\\d+(_\\d+)*)\\b",
+      "name": "constant.numeric.forge"
+    },
+    "keywords": {
+      "match": "\\b(let|mut|fn|return|if|else|match|for|in|while|loop|break|continue|struct|type|interface|impl|pub|import|spawn|async|await|yield|try|catch)\\b",
+      "name": "keyword.control.forge"
+    },
+    "natural-keywords": {
+      "match": "\\b(set|to|change|define|otherwise|nah|each|repeat|times|grab|from|wait|seconds|say|yell|whisper|forge|hold|emit|unpack)\\b",
+      "name": "keyword.other.forge"
+    },
+    "types": {
+      "match": "\\b(Int|Float|String|Bool|Json)\\b",
+      "name": "support.type.forge"
+    },
+    "builtins": {
+      "match": "\\b(println|print|len|type|str|int|float|push|pop|map|filter|reduce|sort|reverse|keys|values|contains|range|enumerate|split|join|replace|starts_with|ends_with|Ok|Err|Some|None|is_ok|is_err|is_some|is_none|unwrap|unwrap_or|assert|assert_eq|fetch|time|uuid|exit|run_command|satisfies)\\b",
+      "name": "support.function.forge"
+    },
+    "modules": {
+      "match": "\\b(math|fs|io|crypto|db|env|json|regex|log)\\b",
+      "name": "support.class.forge"
+    },
+    "decorators": {
+      "match": "@\\w+",
+      "name": "entity.name.function.decorator.forge"
+    },
+    "operators": {
+      "match": "(\\|>|=>|->|==|!=|<=|>=|&&|\\|\\||\\.\\.\\.|\\?)",
+      "name": "keyword.operator.forge"
+    },
+    "constants": {
+      "match": "\\b(true|false|null)\\b",
+      "name": "constant.language.forge"
+    },
+    "function-def": {
+      "match": "\\b(fn|define|forge)\\s+(\\w+)",
+      "captures": {
+        "1": { "name": "keyword.control.forge" },
+        "2": { "name": "entity.name.function.forge" }
+      }
+    },
+    "function-call": {
+      "match": "\\b(\\w+)\\s*\\(",
+      "captures": {
+        "1": { "name": "entity.name.function.forge" }
+      }
+    }
+  }
+}

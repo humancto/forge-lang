@@ -1,154 +1,294 @@
+mod chat;
 mod errors;
+mod formatter;
 mod interpreter;
 /// Forge — Internet-Native Programming Language
 /// Go's simplicity. Rust's safety. The internet built in.
+mod learn;
 mod lexer;
+mod lsp;
+mod manifest;
+mod package;
 mod parser;
 mod repl;
 mod runtime;
+mod scaffold;
+mod stdlib;
+mod testing;
+mod typechecker;
+mod vm;
 
-use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::process;
+
+use clap::{Parser, Subcommand};
 
 use interpreter::Interpreter;
 use lexer::Lexer;
-use parser::Parser;
+use parser::Parser as ForgeParser;
 
-const VERSION: &str = "0.1.0";
+const VERSION: &str = "0.2.0";
+
+#[derive(Parser)]
+#[command(
+    name = "forge",
+    version = VERSION,
+    about = "Forge — Internet-Native Programming Language",
+    long_about = "Go's simplicity. Rust's safety. The internet built in."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Evaluate a Forge expression inline
+    #[arg(short = 'e', long = "eval")]
+    eval_code: Option<String>,
+
+    /// Use the bytecode VM (experimental, faster but fewer features)
+    #[arg(long = "vm")]
+    use_vm: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run a Forge source file
+    Run {
+        /// Path to a .fg file
+        file: PathBuf,
+    },
+    /// Start the interactive REPL
+    Repl,
+    /// Show version information
+    Version,
+    /// Format Forge source files
+    Fmt {
+        /// Files to format (defaults to all .fg files in current directory)
+        files: Vec<PathBuf>,
+    },
+    /// Run tests in the tests/ directory
+    Test {
+        /// Test directory (defaults to "tests")
+        #[arg(default_value = "tests")]
+        dir: String,
+    },
+    /// Create a new Forge project
+    New {
+        /// Project name
+        name: String,
+    },
+    /// Compile Forge source to bytecode
+    Build {
+        /// Source file to compile
+        file: PathBuf,
+    },
+    /// Install a Forge package from git URL or local path
+    Install {
+        /// Git URL or local path
+        source: String,
+    },
+    /// Start the Language Server Protocol server
+    Lsp,
+    /// Interactive tutorials to learn Forge
+    Learn {
+        /// Lesson number (optional)
+        lesson: Option<usize>,
+    },
+    /// Start an AI chat session
+    Chat,
+}
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
+    let use_vm = cli.use_vm;
 
-    if args.len() < 2 {
-        // No arguments — launch REPL
-        repl::run_repl();
+    if let Some(code) = cli.eval_code {
+        let code = code.replace(';', "\n");
+        run_source(&code, "<eval>", use_vm).await;
         return;
     }
 
-    match args[1].as_str() {
-        "run" => {
-            if args.len() < 3 {
-                eprintln!("Usage: forge run <file.fg>");
-                process::exit(1);
-            }
-            run_file(&args[2]).await;
+    match cli.command {
+        Some(Command::Run { file }) => {
+            let path_str = file.display().to_string();
+            let source = match fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        errors::format_simple_error(&format!(
+                            "could not read '{}': {}",
+                            path_str, e
+                        ))
+                    );
+                    process::exit(1);
+                }
+            };
+            run_source(&source, &path_str, use_vm).await;
         }
-        "repl" => {
+        Some(Command::Repl) => {
             repl::run_repl();
         }
-        "version" | "--version" | "-v" => {
+        Some(Command::Version) => {
             println!("Forge v{}", VERSION);
             println!("Internet-native programming language");
+            println!("Bytecode VM with mark-sweep GC");
         }
-        "help" | "--help" | "-h" => {
-            print_usage();
+        Some(Command::Fmt { files }) => {
+            formatter::format_files(&files);
         }
-        // If the argument ends in .fg, treat it as a file
-        arg if arg.ends_with(".fg") => {
-            run_file(arg).await;
+        Some(Command::Test { dir }) => {
+            let test_dir = if dir == "tests" {
+                if let Some(m) = manifest::load_manifest() {
+                    m.test.directory
+                } else {
+                    dir
+                }
+            } else {
+                dir
+            };
+            testing::run_tests(&test_dir);
         }
-        _ => {
-            eprintln!("Unknown command: {}", args[1]);
-            print_usage();
-            process::exit(1);
+        Some(Command::New { name }) => {
+            scaffold::create_project(&name);
+        }
+        Some(Command::Build { file }) => {
+            let path_str = file.display().to_string();
+            let source = match fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        errors::format_simple_error(&format!(
+                            "could not read '{}': {}",
+                            path_str, e
+                        ))
+                    );
+                    process::exit(1);
+                }
+            };
+            compile_to_bytecode(&source, &path_str);
+        }
+        Some(Command::Install { source }) => {
+            package::install(&source);
+        }
+        Some(Command::Lsp) => {
+            lsp::run_lsp();
+        }
+        Some(Command::Learn { lesson }) => {
+            learn::run_learn(lesson);
+        }
+        Some(Command::Chat) => {
+            chat::run_chat();
+        }
+        None => {
+            repl::run_repl();
         }
     }
 }
 
-async fn run_file(path: &str) {
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_simple_error(&format!("could not read '{}': {}", path, e))
-            );
-            process::exit(1);
-        }
-    };
-
-    // Lex
-    let mut lexer = Lexer::new(&source);
+async fn run_source(source: &str, filename: &str, use_vm: bool) {
+    let mut lexer = Lexer::new(source);
     let tokens = match lexer.tokenize() {
         Ok(tokens) => tokens,
         Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_error(&source, e.line, e.col, &e.message)
-            );
+            eprintln!("{}", errors::format_error(source, e.line, e.col, &format!("[{}] {}", filename, e.message)));
             process::exit(1);
         }
     };
 
-    // Parse
-    let mut parser = Parser::new(tokens);
+    let mut parser = ForgeParser::new(tokens);
     let program = match parser.parse_program() {
         Ok(prog) => prog,
         Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_error(&source, e.line, e.col, &e.message)
-            );
+            eprintln!("{}", errors::format_error(source, e.line, e.col, &format!("[{}] {}", filename, e.message)));
             process::exit(1);
         }
     };
 
-    // Execute
-    let mut interpreter = Interpreter::new();
-    match interpreter.run(&program) {
-        Ok(_) => {}
+    let mut checker = typechecker::TypeChecker::new();
+    let warnings = checker.check(&program);
+    for w in &warnings {
+        eprintln!("{}", errors::format_warning(&w.message));
+    }
+
+    if use_vm {
+        match vm::run(&program) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{}", errors::format_simple_error(&e.message));
+                process::exit(1);
+            }
+        }
+    } else {
+        let mut interpreter = Interpreter::new();
+        match interpreter.run(&program) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{}", errors::format_simple_error(&e.message));
+                process::exit(1);
+            }
+        }
+
+        let server_config = runtime::server::extract_server_config(&program);
+        let routes = runtime::server::extract_routes(&program);
+
+        if let Some(config) = server_config {
+            if routes.is_empty() {
+                eprintln!(
+                    "{}",
+                    errors::format_simple_error(
+                        "@server defined but no route handlers found. Add @get/@post functions."
+                    )
+                );
+                process::exit(1);
+            }
+            if let Err(e) = runtime::server::start_server(interpreter, &config, &routes).await {
+                eprintln!("{}", errors::format_simple_error(&e.message));
+                process::exit(1);
+            }
+        }
+    }
+
+}
+
+fn compile_to_bytecode(source: &str, filename: &str) {
+    let mut lexer = Lexer::new(source);
+    let tokens = match lexer.tokenize() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}", errors::format_error(source, e.line, e.col, &e.message));
+            process::exit(1);
+        }
+    };
+
+    let mut parser = ForgeParser::new(tokens);
+    let program = match parser.parse_program() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", errors::format_error(source, e.line, e.col, &e.message));
+            process::exit(1);
+        }
+    };
+
+    match vm::compiler::compile(&program) {
+        Ok(chunk) => {
+            let out_path = filename.replace(".fg", ".fgc");
+            let info = format!(
+                "Compiled {} -> {}\n  {} instructions\n  {} constants\n  {} prototypes\n  {} max registers",
+                filename,
+                out_path,
+                chunk.code.len(),
+                chunk.constants.len(),
+                chunk.prototypes.len(),
+                chunk.max_registers,
+            );
+            println!("{}", info);
+        }
         Err(e) => {
             eprintln!("{}", errors::format_simple_error(&e.message));
             process::exit(1);
         }
     }
-
-    // Check if program defines a server
-    let server_config = runtime::server::extract_server_config(&program);
-    let routes = runtime::server::extract_routes(&program);
-
-    if let Some(config) = server_config {
-        if routes.is_empty() {
-            eprintln!(
-                "{}",
-                errors::format_simple_error(
-                    "@server defined but no route handlers found. Add @get/@post functions."
-                )
-            );
-            process::exit(1);
-        }
-        if let Err(e) = runtime::server::start_server(interpreter, &config, &routes).await {
-            eprintln!("{}", errors::format_simple_error(&e.message));
-            process::exit(1);
-        }
-    }
 }
-
-fn print_usage() {
-    println!(
-        r#"
-Forge v{} — Internet-Native Programming Language
-
-USAGE:
-    forge                    Start the REPL
-    forge run <file.fg>      Run a Forge program
-    forge repl               Start the REPL (explicit)
-    forge version            Show version info
-    forge help               Show this message
-
-EXAMPLES:
-    forge run hello.fg       Run a Forge source file
-    forge                    Enter interactive mode
-
-COMING SOON:
-    forge new <name>         Create a new Forge project
-    forge build              Compile to bytecode
-    forge test               Run tests
-    forge fmt                Format source code
-"#,
-        VERSION
-    );
-}
-// TEMP

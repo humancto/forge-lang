@@ -1,0 +1,42 @@
+// basic_test.fg — Forge test suite
+
+@test
+define should_add_numbers() {
+    assert(1 + 1 == 2)
+    assert(10 + 20 == 30)
+}
+
+@test
+define should_handle_strings() {
+    set name to "Forge"
+    assert(len(name) == 5)
+    assert(starts_with(name, "For"))
+    assert(ends_with(name, "ge"))
+}
+
+@test
+define should_handle_arrays() {
+    set nums to [1, 2, 3, 4, 5]
+    assert(len(nums) == 5)
+    set sorted to sort([5, 3, 1, 4, 2])
+    assert_eq(sorted[0], 1)
+    assert_eq(sorted[4], 5)
+}
+
+@test
+define should_handle_math() {
+    assert_eq(math.abs(-5), 5)
+    assert_eq(math.max(3, 7), 7)
+    assert_eq(math.min(3, 7), 3)
+    assert_eq(math.floor(3.7), 3)
+    assert_eq(math.ceil(3.2), 4)
+}
+
+@test
+define should_handle_results() {
+    set ok_val to Ok(42)
+    set err_val to Err("oops")
+    assert(is_ok(ok_val))
+    assert(is_err(err_val))
+    assert_eq(unwrap(ok_val), 42)
+}
