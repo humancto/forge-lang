@@ -11,6 +11,7 @@
   <a href="https://www.rust-lang.org/"><img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-orange?style=flat-square"></a>
   <img alt="Tests" src="https://img.shields.io/badge/tests-287_passing-brightgreen?style=flat-square">
   <a href="https://github.com/humancto/forge-lang/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/humancto/forge-lang?style=flat-square"></a>
+  <a href="https://crates.io/crates/forge-lang"><img alt="crates.io" src="https://img.shields.io/crates/v/forge-lang?style=flat-square"></a>
 </p>
 
 ---
@@ -94,20 +95,34 @@ repeat 3 times { }                       for i in range(0, 3) { }
 
 ## Installation
 
-### From source (recommended)
+**Latest: v0.2.0** — install via any method below.
+
+### Cargo (Rust)
+
+```bash
+cargo install forge-lang
+```
+
+Requires [Rust 1.85+](https://rustup.rs/). Published on [crates.io](https://crates.io/crates/forge-lang).
+
+### Homebrew (macOS & Linux)
+
+```bash
+brew install humancto/tap/forge
+```
+
+### Install script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/humancto/forge-lang/main/install.sh | bash
+```
+
+### From source
 
 ```bash
 git clone https://github.com/humancto/forge-lang.git
 cd forge-lang
 cargo install --path .
-```
-
-Requires [Rust 1.85+](https://rustup.rs/).
-
-### From install script
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/humancto/forge-lang/main/install.sh | bash
 ```
 
 ### Verify
