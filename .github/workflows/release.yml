@@ -3,38 +3,42 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-apple-darwin
-            os: macos-latest
-            artifact: forge-macos-x86_64
+            runner: macos-13
+            archive: tar.gz
           - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact: forge-macos-aarch64
+            runner: macos-14
+            archive: tar.gz
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: forge-linux-x86_64
+            runner: ubuntu-latest
+            archive: tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: forge-linux-aarch64
+            runner: ubuntu-latest
+            archive: tar.gz
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -43,21 +47,25 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
-      - name: Build
+      - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package binary
         shell: bash
         run: |
-          cd "target/${{ matrix.target }}/release"
-          tar czf "../../../${{ matrix.artifact }}.tar.gz" forge
-          cd ../../..
+          TAG="${GITHUB_REF#refs/tags/}"
+          ARCHIVE_NAME="forge-${TAG}-${{ matrix.target }}"
+          mkdir -p "${ARCHIVE_NAME}"
+          cp "target/${{ matrix.target }}/release/forge" "${ARCHIVE_NAME}/"
+          cp README.md LICENSE CHANGELOG.md "${ARCHIVE_NAME}/"
+          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          echo "ASSET=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.tar.gz
+          name: forge-${{ matrix.target }}
+          path: ${{ env.ASSET }}
 
   release:
     name: Create Release
@@ -66,15 +74,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*.tar.gz
-          generate_release_notes: true
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          find . -name '*.tar.gz' -exec mv {} . \;
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          cd artifacts
+          gh release create "$TAG" \
+            --title "Forge $TAG" \
+            --generate-notes \
+            *.tar.gz SHA256SUMS.txt

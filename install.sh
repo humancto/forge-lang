@@ -1,72 +1,117 @@
 #!/bin/sh
 set -e
 
-REPO="forge-lang/forge"
-INSTALL_DIR="${FORGE_INSTALL_DIR:-/usr/local/bin}"
+REPO="humancto/forge-lang"
+INSTALL_DIR="${FORGE_INSTALL_DIR:-$HOME/.forge/bin}"
 
 main() {
-    echo ""
-    echo "  ⚒️  Forge Installer"
-    echo "  ==================="
+    echo "Installing Forge..."
     echo ""
 
     OS=$(uname -s)
     ARCH=$(uname -m)
 
     case "$OS" in
-        Darwin)  OS_NAME="macos" ;;
-        Linux)   OS_NAME="linux" ;;
-        *)       echo "  Error: unsupported OS: $OS"; exit 1 ;;
+        Linux)  OS_TARGET="unknown-linux-gnu" ;;
+        Darwin) OS_TARGET="apple-darwin" ;;
+        *)
+            echo "Error: unsupported OS: $OS"
+            echo "Forge supports Linux and macOS. For other platforms, build from source:"
+            echo "  cargo install forge-lang"
+            exit 1
+            ;;
     esac
 
     case "$ARCH" in
-        x86_64|amd64)    ARCH_NAME="x86_64" ;;
-        aarch64|arm64)   ARCH_NAME="aarch64" ;;
-        *)               echo "  Error: unsupported architecture: $ARCH"; exit 1 ;;
+        x86_64|amd64)   ARCH_TARGET="x86_64" ;;
+        aarch64|arm64)  ARCH_TARGET="aarch64" ;;
+        *)
+            echo "Error: unsupported architecture: $ARCH"
+            exit 1
+            ;;
     esac
 
-    ARTIFACT="forge-${OS_NAME}-${ARCH_NAME}"
+    TARGET="${ARCH_TARGET}-${OS_TARGET}"
 
-    VERSION=$(curl -sL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
-
-    if [ -z "$VERSION" ]; then
-        echo "  Error: could not determine latest version"
-        echo "  Try installing from source: cargo install --git https://github.com/${REPO}.git"
-        exit 1
+    if [ -n "$1" ]; then
+        VERSION="$1"
+    else
+        VERSION=$(curl -sSf "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep '"tag_name"' \
+            | head -1 \
+            | sed 's/.*"tag_name": *"//;s/".*//')
+        if [ -z "$VERSION" ]; then
+            echo "Error: could not determine latest version."
+            echo "Install a specific version: curl -sSf ... | sh -s -- v0.2.0"
+            echo "Or install via cargo: cargo install forge-lang"
+            exit 1
+        fi
     fi
 
-    URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARTIFACT}.tar.gz"
+    ARCHIVE="forge-${VERSION}-${TARGET}.tar.gz"
+    URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
 
-    echo "  Detected: ${OS} ${ARCH}"
+    echo "  Platform: ${OS} ${ARCH}"
     echo "  Version:  ${VERSION}"
-    echo "  Binary:   ${ARTIFACT}"
+    echo "  Target:   ${TARGET}"
     echo ""
 
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "$TMPDIR"' EXIT
 
-    echo "  Downloading..."
-    curl -fsSL "$URL" -o "$TMPDIR/forge.tar.gz"
-
-    echo "  Extracting..."
-    tar xzf "$TMPDIR/forge.tar.gz" -C "$TMPDIR"
-
-    echo "  Installing to ${INSTALL_DIR}/forge..."
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "$TMPDIR/forge" "$INSTALL_DIR/forge"
-    else
-        sudo mv "$TMPDIR/forge" "$INSTALL_DIR/forge"
+    echo "Downloading ${URL}..."
+    if ! curl -sSfL "$URL" -o "${TMPDIR}/${ARCHIVE}"; then
+        echo ""
+        echo "Error: download failed."
+        echo "Check available releases: https://github.com/${REPO}/releases"
+        echo ""
+        echo "Alternative install methods:"
+        echo "  cargo install forge-lang"
+        echo "  brew install humancto/tap/forge"
+        exit 1
     fi
-    chmod +x "$INSTALL_DIR/forge"
+
+    echo "Extracting..."
+    tar xzf "${TMPDIR}/${ARCHIVE}" -C "${TMPDIR}"
+
+    mkdir -p "$INSTALL_DIR"
+    mv "${TMPDIR}/forge-${VERSION}-${TARGET}/forge" "${INSTALL_DIR}/forge"
+    chmod +x "${INSTALL_DIR}/forge"
 
     echo ""
-    echo "  ✅ Forge ${VERSION} installed successfully!"
+    echo "Forge ${VERSION} installed to ${INSTALL_DIR}/forge"
     echo ""
-    echo "  Get started:"
-    echo "    forge version"
-    echo "    forge learn"
-    echo "    forge"
+
+    case ":$PATH:" in
+        *":${INSTALL_DIR}:"*) ;;
+        *)
+            echo "Add Forge to your PATH by adding this to your shell profile:"
+            echo ""
+            SHELL_NAME=$(basename "$SHELL")
+            case "$SHELL_NAME" in
+                zsh)  PROFILE="~/.zshrc" ;;
+                bash) PROFILE="~/.bashrc" ;;
+                fish) PROFILE="~/.config/fish/config.fish" ;;
+                *)    PROFILE="~/.profile" ;;
+            esac
+            if [ "$SHELL_NAME" = "fish" ]; then
+                echo "  echo 'set -gx PATH ${INSTALL_DIR} \$PATH' >> ${PROFILE}"
+            else
+                echo "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ${PROFILE}"
+            fi
+            echo ""
+            echo "Then restart your shell or run: source ${PROFILE}"
+            echo ""
+            ;;
+    esac
+
+    echo "Verify installation:"
+    echo "  forge --version"
     echo ""
+    echo "Get started:"
+    echo "  forge              # start REPL"
+    echo "  forge run hello.fg # run a file"
+    echo "  forge learn        # interactive tutorial"
 }
 
-main
+main "$@"
