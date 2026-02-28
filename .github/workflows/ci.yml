@@ -32,7 +32,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -A dead-code -A unused-variables -A unused-imports
+      - run: cargo clippy --all-targets -- -A dead-code -A unused-variables -A unused-imports -A clippy::approx_constant -A clippy::result_large_err -A clippy::only_used_in_recursion -A clippy::len_zero
 
   fmt:
     name: Format

@@ -3,9 +3,15 @@ use indexmap::IndexMap;
 
 pub fn create_module() -> Value {
     let mut m = IndexMap::new();
-    m.insert("connect".to_string(), Value::BuiltIn("pg.connect".to_string()));
+    m.insert(
+        "connect".to_string(),
+        Value::BuiltIn("pg.connect".to_string()),
+    );
     m.insert("query".to_string(), Value::BuiltIn("pg.query".to_string()));
-    m.insert("execute".to_string(), Value::BuiltIn("pg.execute".to_string()));
+    m.insert(
+        "execute".to_string(),
+        Value::BuiltIn("pg.execute".to_string()),
+    );
     m.insert("close".to_string(), Value::BuiltIn("pg.close".to_string()));
     Value::Object(m)
 }

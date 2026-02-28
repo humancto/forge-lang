@@ -206,7 +206,15 @@ async fn run_source(source: &str, filename: &str, use_vm: bool) {
     let tokens = match lexer.tokenize() {
         Ok(tokens) => tokens,
         Err(e) => {
-            eprintln!("{}", errors::format_error(source, e.line, e.col, &format!("[{}] {}", filename, e.message)));
+            eprintln!(
+                "{}",
+                errors::format_error(
+                    source,
+                    e.line,
+                    e.col,
+                    &format!("[{}] {}", filename, e.message)
+                )
+            );
             process::exit(1);
         }
     };
@@ -215,7 +223,15 @@ async fn run_source(source: &str, filename: &str, use_vm: bool) {
     let program = match parser.parse_program() {
         Ok(prog) => prog,
         Err(e) => {
-            eprintln!("{}", errors::format_error(source, e.line, e.col, &format!("[{}] {}", filename, e.message)));
+            eprintln!(
+                "{}",
+                errors::format_error(
+                    source,
+                    e.line,
+                    e.col,
+                    &format!("[{}] {}", filename, e.message)
+                )
+            );
             process::exit(1);
         }
     };
@@ -263,7 +279,6 @@ async fn run_source(source: &str, filename: &str, use_vm: bool) {
             }
         }
     }
-
 }
 
 fn run_jit(source: &str, _filename: &str) {
@@ -271,7 +286,10 @@ fn run_jit(source: &str, _filename: &str) {
     let tokens = match lexer.tokenize() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("{}", errors::format_error(source, e.line, e.col, &e.message));
+            eprintln!(
+                "{}",
+                errors::format_error(source, e.line, e.col, &e.message)
+            );
             process::exit(1);
         }
     };
@@ -280,7 +298,10 @@ fn run_jit(source: &str, _filename: &str) {
     let program = match parser.parse_program() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}", errors::format_error(source, e.line, e.col, &e.message));
+            eprintln!(
+                "{}",
+                errors::format_error(source, e.line, e.col, &e.message)
+            );
             process::exit(1);
         }
     };
@@ -309,7 +330,11 @@ fn run_jit(source: &str, _filename: &str) {
         };
         match jit.compile_function(proto, &name) {
             Ok(ptr) => {
-                eprintln!("  JIT compiled: {} ({} instructions -> native)", name, proto.code.len());
+                eprintln!(
+                    "  JIT compiled: {} ({} instructions -> native)",
+                    name,
+                    proto.code.len()
+                );
             }
             Err(e) => {
                 eprintln!("  JIT skip: {} ({})", name, e);
@@ -345,7 +370,10 @@ fn compile_to_bytecode(source: &str, filename: &str) {
     let tokens = match lexer.tokenize() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("{}", errors::format_error(source, e.line, e.col, &e.message));
+            eprintln!(
+                "{}",
+                errors::format_error(source, e.line, e.col, &e.message)
+            );
             process::exit(1);
         }
     };
@@ -354,7 +382,10 @@ fn compile_to_bytecode(source: &str, filename: &str) {
     let program = match parser.parse_program() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}", errors::format_error(source, e.line, e.col, &e.message));
+            eprintln!(
+                "{}",
+                errors::format_error(source, e.line, e.col, &e.message)
+            );
             process::exit(1);
         }
     };

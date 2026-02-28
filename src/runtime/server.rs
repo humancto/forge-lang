@@ -231,41 +231,42 @@ pub async fn start_server(
                 let hn = hn.clone();
                 app = app.route(
                     &axum_path,
-                    get(move |
-                        State(state): State<AppState>,
-                        ws: axum::extract::WebSocketUpgrade,
-                    | {
-                        let state = state.clone();
-                        let hn = hn.clone();
-                        async move {
-                            ws.on_upgrade(move |mut socket| async move {
-                                use axum::extract::ws::Message;
-                                while let Some(Ok(msg)) = socket.recv().await {
-                                    if let Message::Text(text) = msg {
-                                        let response = {
-                                            let mut interp = match state.lock() {
-                                                Ok(g) => g,
-                                                Err(poisoned) => poisoned.into_inner(),
-                                            };
-                                            let handler = interp.env.get(&hn).cloned();
-                                            if let Some(h) = handler {
-                                                match interp.call_function(
-                                                    h,
-                                                    vec![Value::String(text.to_string())],
-                                                ) {
-                                                    Ok(v) => format!("{}", v),
-                                                    Err(e) => format!("error: {}", e.message),
+                    get(
+                        move |State(state): State<AppState>,
+                              ws: axum::extract::WebSocketUpgrade| {
+                            let state = state.clone();
+                            let hn = hn.clone();
+                            async move {
+                                ws.on_upgrade(move |mut socket| async move {
+                                    use axum::extract::ws::Message;
+                                    while let Some(Ok(msg)) = socket.recv().await {
+                                        if let Message::Text(text) = msg {
+                                            let response = {
+                                                let mut interp = match state.lock() {
+                                                    Ok(g) => g,
+                                                    Err(poisoned) => poisoned.into_inner(),
+                                                };
+                                                let handler = interp.env.get(&hn).cloned();
+                                                if let Some(h) = handler {
+                                                    match interp.call_function(
+                                                        h,
+                                                        vec![Value::String(text.to_string())],
+                                                    ) {
+                                                        Ok(v) => format!("{}", v),
+                                                        Err(e) => format!("error: {}", e.message),
+                                                    }
+                                                } else {
+                                                    "handler not found".to_string()
                                                 }
-                                            } else {
-                                                "handler not found".to_string()
-                                            }
-                                        };
-                                        let _ = socket.send(Message::Text(response.into())).await;
+                                            };
+                                            let _ =
+                                                socket.send(Message::Text(response.into())).await;
+                                        }
                                     }
-                                }
-                            })
-                        }
-                    }),
+                                })
+                            }
+                        },
+                    ),
                 );
             }
             _ => {}
