@@ -370,7 +370,7 @@ impl VM {
     pub fn execute(&mut self, chunk: &Chunk) -> Result<Value, VMError> {
         let func = ObjFunction {
             name: "<main>".to_string(),
-            chunk: chunk.clone(),
+            chunk: std::sync::Arc::new(chunk.clone()),
         };
         let closure = ObjClosure {
             function: func,
@@ -389,30 +389,26 @@ impl VM {
             }
 
             let frame_idx = self.frames.len() - 1;
-            let (chunk_code, chunk_constants, chunk_prototypes) = {
+            let chunk = {
                 let frame = &self.frames[frame_idx];
                 let closure_obj = self
                     .gc
                     .get(frame.closure)
                     .ok_or_else(|| VMError::new("invalid closure"))?;
                 if let ObjKind::Closure(c) = &closure_obj.kind {
-                    (
-                        c.function.chunk.code.clone(),
-                        c.function.chunk.constants.clone(),
-                        c.function.chunk.prototypes.clone(),
-                    )
+                    c.function.chunk.clone()
                 } else {
                     return Err(VMError::new("expected closure"));
                 }
             };
 
             let frame = &mut self.frames[frame_idx];
-            if frame.ip >= chunk_code.len() {
+            if frame.ip >= chunk.code.len() {
                 self.frames.pop();
                 continue;
             }
 
-            let inst = chunk_code[frame.ip];
+            let inst = chunk.code[frame.ip];
             frame.ip += 1;
             let base = frame.base;
 
@@ -422,55 +418,56 @@ impl VM {
             let c = decode_c(inst);
             let bx = decode_bx(inst);
             let sbx = decode_sbx(inst);
+            let opcode: OpCode = unsafe { std::mem::transmute(op) };
 
-            match op {
-                x if x == OpCode::LoadConst as u8 => {
-                    let val = self.constant_to_value(&chunk_constants[bx as usize]);
+            match opcode {
+                OpCode::LoadConst => {
+                    let val = self.constant_to_value(&chunk.constants[bx as usize]);
                     self.registers[base + a as usize] = val;
                 }
-                x if x == OpCode::LoadNull as u8 => {
+                OpCode::LoadNull => {
                     self.registers[base + a as usize] = Value::Null;
                 }
-                x if x == OpCode::LoadTrue as u8 => {
+                OpCode::LoadTrue => {
                     self.registers[base + a as usize] = Value::Bool(true);
                 }
-                x if x == OpCode::LoadFalse as u8 => {
+                OpCode::LoadFalse => {
                     self.registers[base + a as usize] = Value::Bool(false);
                 }
-                x if x == OpCode::Move as u8 => {
+                OpCode::Move => {
                     self.registers[base + a as usize] = self.registers[base + b as usize].clone();
                 }
-                x if x == OpCode::Add as u8 => {
+                OpCode::Add => {
                     let left = self.registers[base + b as usize].clone();
                     let right = self.registers[base + c as usize].clone();
                     self.registers[base + a as usize] =
                         self.arith_op(&left, &right, OpCode::Add)?;
                 }
-                x if x == OpCode::Sub as u8 => {
+                OpCode::Sub => {
                     let left = self.registers[base + b as usize].clone();
                     let right = self.registers[base + c as usize].clone();
                     self.registers[base + a as usize] =
                         self.arith_op(&left, &right, OpCode::Sub)?;
                 }
-                x if x == OpCode::Mul as u8 => {
+                OpCode::Mul => {
                     let left = self.registers[base + b as usize].clone();
                     let right = self.registers[base + c as usize].clone();
                     self.registers[base + a as usize] =
                         self.arith_op(&left, &right, OpCode::Mul)?;
                 }
-                x if x == OpCode::Div as u8 => {
+                OpCode::Div => {
                     let left = self.registers[base + b as usize].clone();
                     let right = self.registers[base + c as usize].clone();
                     self.registers[base + a as usize] =
                         self.arith_op(&left, &right, OpCode::Div)?;
                 }
-                x if x == OpCode::Mod as u8 => {
+                OpCode::Mod => {
                     let left = self.registers[base + b as usize].clone();
                     let right = self.registers[base + c as usize].clone();
                     self.registers[base + a as usize] =
                         self.arith_op(&left, &right, OpCode::Mod)?;
                 }
-                x if x == OpCode::Neg as u8 => {
+                OpCode::Neg => {
                     let src = &self.registers[base + b as usize];
                     self.registers[base + a as usize] = match src {
                         Value::Int(n) => Value::Int(-n),
@@ -478,54 +475,54 @@ impl VM {
                         _ => return Err(VMError::new("cannot negate non-number")),
                     };
                 }
-                x if x == OpCode::Eq as u8 => {
+                OpCode::Eq => {
                     let left = &self.registers[base + b as usize];
                     let right = &self.registers[base + c as usize];
                     self.registers[base + a as usize] = Value::Bool(left.equals(right, &self.gc));
                 }
-                x if x == OpCode::NotEq as u8 => {
+                OpCode::NotEq => {
                     let left = &self.registers[base + b as usize];
                     let right = &self.registers[base + c as usize];
                     self.registers[base + a as usize] = Value::Bool(!left.equals(right, &self.gc));
                 }
-                x if x == OpCode::Lt as u8 => {
+                OpCode::Lt => {
                     let left = &self.registers[base + b as usize];
                     let right = &self.registers[base + c as usize];
                     self.registers[base + a as usize] = self.compare_op(left, right, OpCode::Lt)?;
                 }
-                x if x == OpCode::Gt as u8 => {
+                OpCode::Gt => {
                     let left = &self.registers[base + b as usize];
                     let right = &self.registers[base + c as usize];
                     self.registers[base + a as usize] = self.compare_op(left, right, OpCode::Gt)?;
                 }
-                x if x == OpCode::LtEq as u8 => {
+                OpCode::LtEq => {
                     let left = &self.registers[base + b as usize];
                     let right = &self.registers[base + c as usize];
                     self.registers[base + a as usize] =
                         self.compare_op(left, right, OpCode::LtEq)?;
                 }
-                x if x == OpCode::GtEq as u8 => {
+                OpCode::GtEq => {
                     let left = &self.registers[base + b as usize];
                     let right = &self.registers[base + c as usize];
                     self.registers[base + a as usize] =
                         self.compare_op(left, right, OpCode::GtEq)?;
                 }
-                x if x == OpCode::And as u8 => {
+                OpCode::And => {
                     let left = self.registers[base + b as usize].is_truthy(&self.gc);
                     let right = self.registers[base + c as usize].is_truthy(&self.gc);
                     self.registers[base + a as usize] = Value::Bool(left && right);
                 }
-                x if x == OpCode::Or as u8 => {
+                OpCode::Or => {
                     let left = self.registers[base + b as usize].is_truthy(&self.gc);
                     let right = self.registers[base + c as usize].is_truthy(&self.gc);
                     self.registers[base + a as usize] = Value::Bool(left || right);
                 }
-                x if x == OpCode::Not as u8 => {
+                OpCode::Not => {
                     let val = self.registers[base + b as usize].is_truthy(&self.gc);
                     self.registers[base + a as usize] = Value::Bool(!val);
                 }
-                x if x == OpCode::GetGlobal as u8 => {
-                    let name_const = &chunk_constants[bx as usize];
+                OpCode::GetGlobal => {
+                    let name_const = &chunk.constants[bx as usize];
                     if let Constant::Str(name) = name_const {
                         let val = self.globals.get(name).cloned().ok_or_else(|| {
                             VMError::new(&format!("undefined variable: {}", name))
@@ -533,36 +530,36 @@ impl VM {
                         self.registers[base + a as usize] = val;
                     }
                 }
-                x if x == OpCode::SetGlobal as u8 => {
-                    let name_const = &chunk_constants[bx as usize];
+                OpCode::SetGlobal => {
+                    let name_const = &chunk.constants[bx as usize];
                     if let Constant::Str(name) = name_const {
                         let val = self.registers[base + a as usize].clone();
                         self.globals.insert(name.clone(), val);
                     }
                 }
-                x if x == OpCode::Jump as u8 => {
+                OpCode::Jump => {
                     let frame = &mut self.frames[frame_idx];
                     frame.ip = (frame.ip as i64 + sbx as i64) as usize;
                 }
-                x if x == OpCode::JumpIfFalse as u8 => {
+                OpCode::JumpIfFalse => {
                     let val = &self.registers[base + a as usize];
                     if !val.is_truthy(&self.gc) {
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
                     }
                 }
-                x if x == OpCode::JumpIfTrue as u8 => {
+                OpCode::JumpIfTrue => {
                     let val = &self.registers[base + a as usize];
                     if val.is_truthy(&self.gc) {
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
                     }
                 }
-                x if x == OpCode::Loop as u8 => {
+                OpCode::Loop => {
                     let frame = &mut self.frames[frame_idx];
                     frame.ip = (frame.ip as i64 + sbx as i64) as usize;
                 }
-                x if x == OpCode::Call as u8 => {
+                OpCode::Call => {
                     let func_val = self.registers[base + a as usize].clone();
                     let arg_count = b as usize;
                     let dst_reg = base + c as usize;
@@ -575,20 +572,20 @@ impl VM {
                     let result = self.call_value(func_val, args)?;
                     self.registers[dst_reg] = result;
                 }
-                x if x == OpCode::Return as u8 => {
+                OpCode::Return => {
                     let val = self.registers[base + a as usize].clone();
                     self.frames.pop();
                     return Ok(val);
                 }
-                x if x == OpCode::ReturnNull as u8 => {
+                OpCode::ReturnNull => {
                     self.frames.pop();
                     return Ok(Value::Null);
                 }
-                x if x == OpCode::Closure as u8 => {
-                    let proto = chunk_prototypes[bx as usize].clone();
+                OpCode::Closure => {
+                    let proto = chunk.prototypes[bx as usize].clone();
                     let func = ObjFunction {
                         name: proto.name.clone(),
-                        chunk: proto,
+                        chunk: std::sync::Arc::new(proto),
                     };
                     let closure = ObjClosure {
                         function: func,
@@ -597,7 +594,7 @@ impl VM {
                     let r = self.gc.alloc(ObjKind::Closure(closure));
                     self.registers[base + a as usize] = Value::Obj(r);
                 }
-                x if x == OpCode::NewArray as u8 => {
+                OpCode::NewArray => {
                     let start = base + b as usize;
                     let count = c as usize;
                     let mut items = Vec::with_capacity(count);
@@ -607,7 +604,7 @@ impl VM {
                     let r = self.gc.alloc(ObjKind::Array(items));
                     self.registers[base + a as usize] = Value::Obj(r);
                 }
-                x if x == OpCode::NewObject as u8 => {
+                OpCode::NewObject => {
                     let start = base + b as usize;
                     let pair_count = c as usize;
                     let mut map = IndexMap::new();
@@ -621,9 +618,9 @@ impl VM {
                     let r = self.gc.alloc(ObjKind::Object(map));
                     self.registers[base + a as usize] = Value::Obj(r);
                 }
-                x if x == OpCode::GetField as u8 => {
+                OpCode::GetField => {
                     let obj_val = &self.registers[base + b as usize];
-                    let field_const = &chunk_constants[c as usize];
+                    let field_const = &chunk.constants[c as usize];
                     if let (Value::Obj(r), Constant::Str(field)) = (obj_val, field_const) {
                         let r = *r;
                         let field = field.clone();
@@ -694,8 +691,8 @@ impl VM {
                         self.registers[base + a as usize] = result;
                     }
                 }
-                x if x == OpCode::SetField as u8 => {
-                    let field_const = &chunk_constants[b as usize];
+                OpCode::SetField => {
+                    let field_const = &chunk.constants[b as usize];
                     let val = self.registers[base + c as usize].clone();
                     if let Constant::Str(field) = field_const {
                         let obj_ref = if let Value::Obj(r) = &self.registers[base + a as usize] {
@@ -710,7 +707,7 @@ impl VM {
                         }
                     }
                 }
-                x if x == OpCode::GetIndex as u8 => {
+                OpCode::GetIndex => {
                     let obj = self.registers[base + b as usize].clone();
                     let idx = self.registers[base + c as usize].clone();
                     let result = match (&obj, &idx) {
@@ -746,7 +743,7 @@ impl VM {
                     };
                     self.registers[base + a as usize] = result;
                 }
-                x if x == OpCode::SetIndex as u8 => {
+                OpCode::SetIndex => {
                     let idx = self.registers[base + b as usize].clone();
                     let val = self.registers[base + c as usize].clone();
                     if let Value::Obj(r) = &self.registers[base + a as usize] {
@@ -770,7 +767,7 @@ impl VM {
                         }
                     }
                 }
-                x if x == OpCode::Len as u8 => {
+                OpCode::Len => {
                     let src = &self.registers[base + b as usize];
                     let len = match src {
                         Value::Obj(r) => {
@@ -789,13 +786,13 @@ impl VM {
                     };
                     self.registers[base + a as usize] = Value::Int(len);
                 }
-                x if x == OpCode::Concat as u8 => {
+                OpCode::Concat => {
                     let left = self.registers[base + b as usize].display(&self.gc);
                     let right = self.registers[base + c as usize].display(&self.gc);
                     let r = self.gc.alloc_string(format!("{}{}", left, right));
                     self.registers[base + a as usize] = Value::Obj(r);
                 }
-                x if x == OpCode::Interpolate as u8 => {
+                OpCode::Interpolate => {
                     let start = base + b as usize;
                     let count = c as usize;
                     let mut result = String::new();
@@ -805,7 +802,7 @@ impl VM {
                     let r = self.gc.alloc_string(result);
                     self.registers[base + a as usize] = Value::Obj(r);
                 }
-                x if x == OpCode::ExtractField as u8 => {
+                OpCode::ExtractField => {
                     let obj = &self.registers[base + b as usize];
                     let field_name = format!("_{}", c);
                     if let Value::Obj(r) = obj {
@@ -817,7 +814,7 @@ impl VM {
                         }
                     }
                 }
-                x if x == OpCode::Try as u8 => {
+                OpCode::Try => {
                     let src = &self.registers[base + b as usize];
                     if let Value::Obj(r) = src {
                         if let Some(obj) = self.gc.get(*r) {
@@ -837,7 +834,7 @@ impl VM {
                         return Err(VMError::new("? operator requires Result value"));
                     }
                 }
-                x if x == OpCode::Spawn as u8 => {
+                OpCode::Spawn => {
                     // For now, just call the closure synchronously (same as Phase 1)
                     let closure_val = self.registers[base + a as usize].clone();
                     self.call_value(closure_val, vec![])?;
@@ -849,8 +846,10 @@ impl VM {
 
             // GC check
             if self.gc.should_collect() {
-                let mut roots = Vec::new();
-                for r in &self.registers {
+                let max_reg = self.frames.last().map(|f| f.base + 256).unwrap_or(256);
+                let scan_limit = max_reg.min(self.registers.len());
+                let mut roots = Vec::with_capacity(scan_limit / 4);
+                for r in &self.registers[..scan_limit] {
                     if let Value::Obj(gr) = r {
                         roots.push(*gr);
                     }
@@ -877,33 +876,22 @@ impl VM {
                     .ok_or_else(|| VMError::new("null function"))?;
                 match &obj.kind {
                     ObjKind::Closure(closure) => {
-                        let chunk = closure.function.chunk.clone();
+                        let arity = closure.function.chunk.arity as usize;
                         let new_base = self.frames.last().map(|f| f.base + 256).unwrap_or(0);
                         if new_base + 256 > MAX_REGISTERS {
                             return Err(VMError::new("stack overflow"));
                         }
 
-                        // Bind args
                         for (i, arg) in args.iter().enumerate() {
-                            if i < chunk.arity as usize {
+                            if i < arity {
                                 self.registers[new_base + i] = arg.clone();
                             }
                         }
-                        for i in args.len()..chunk.arity as usize {
+                        for i in args.len()..arity {
                             self.registers[new_base + i] = Value::Null;
                         }
 
-                        let func_obj = ObjFunction {
-                            name: chunk.name.clone(),
-                            chunk,
-                        };
-                        let new_closure = ObjClosure {
-                            function: func_obj,
-                            upvalues: Vec::new(),
-                        };
-                        let closure_ref = self.gc.alloc(ObjKind::Closure(new_closure));
-
-                        self.frames.push(CallFrame::new(closure_ref, new_base));
+                        self.frames.push(CallFrame::new(*r, new_base));
                         self.run()
                     }
                     ObjKind::NativeFunction(nf) => {

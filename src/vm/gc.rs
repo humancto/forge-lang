@@ -1,6 +1,6 @@
 use super::value::{GcObject, GcRef, ObjKind, Value};
 
-const INITIAL_GC_THRESHOLD: usize = 256;
+const INITIAL_GC_THRESHOLD: usize = 8192;
 const GC_GROWTH_FACTOR: usize = 2;
 
 /// Mark-sweep garbage collector.

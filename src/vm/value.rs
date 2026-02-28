@@ -1,6 +1,7 @@
 use super::bytecode::Chunk;
 use indexmap::IndexMap;
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GcRef(pub usize);
@@ -237,7 +238,7 @@ pub enum ObjKind {
 #[derive(Clone)]
 pub struct ObjFunction {
     pub name: String,
-    pub chunk: Chunk,
+    pub chunk: Arc<Chunk>,
 }
 
 pub struct ObjClosure {
