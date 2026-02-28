@@ -12,6 +12,7 @@ pub struct VM {
     pub globals: HashMap<String, Value>,
     pub gc: Gc,
     pub output: Vec<String>,
+    pub jit_cache: HashMap<String, *const u8>,
 }
 
 #[derive(Debug)]
@@ -63,6 +64,7 @@ impl VM {
             globals: HashMap::new(),
             gc: Gc::new(),
             output: Vec::new(),
+            jit_cache: HashMap::new(),
         };
         vm.register_builtins();
         vm
@@ -876,7 +878,41 @@ impl VM {
                     .ok_or_else(|| VMError::new("null function"))?;
                 match &obj.kind {
                     ObjKind::Closure(closure) => {
-                        let arity = closure.function.chunk.arity as usize;
+                        let chunk = closure.function.chunk.clone();
+                        let func_name = closure.function.name.clone();
+
+                        // JIT dispatch: if this function is JIT-compiled, call native code
+                        if !func_name.is_empty() {
+                            if let Some(&native_ptr) = self.jit_cache.get(&func_name) {
+                                let enc_args: Vec<i64> = args
+                                    .iter()
+                                    .map(|v| super::jit::runtime::encode_value(v) as i64)
+                                    .collect();
+                                let result_encoded = unsafe {
+                                    match enc_args.len() {
+                                        0 => {
+                                            let f: extern "C" fn(i64) -> u64 =
+                                                std::mem::transmute(native_ptr);
+                                            f(0)
+                                        }
+                                        1 => {
+                                            let f: extern "C" fn(i64, i64) -> u64 =
+                                                std::mem::transmute(native_ptr);
+                                            f(0, enc_args[0])
+                                        }
+                                        _ => {
+                                            let f: extern "C" fn(i64, i64, i64) -> u64 =
+                                                std::mem::transmute(native_ptr);
+                                            f(0, enc_args[0], enc_args.get(1).copied().unwrap_or(0))
+                                        }
+                                    }
+                                };
+                                let result = super::jit::runtime::decode_value(result_encoded);
+                                return Ok(result);
+                            }
+                        }
+
+                        let arity = chunk.arity as usize;
                         let new_base = self.frames.last().map(|f| f.base + 256).unwrap_or(0);
                         if new_base + 256 > MAX_REGISTERS {
                             return Err(VMError::new("stack overflow"));

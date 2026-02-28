@@ -58,6 +58,10 @@ pub fn build_function<M: Module>(
             b.def_var(regs[i], nv);
         }
 
+        // Import self for recursive calls
+        let self_sig = b.import_signature(module.make_signature());
+        let self_func_ref = module.declare_func_in_func(func_id, b.func);
+
         let code_len = chunk.code.len();
         let mut blocks = Vec::with_capacity(code_len + 1);
         for _ in 0..=code_len {
@@ -216,6 +220,22 @@ pub fn build_function<M: Module>(
                     };
                     b.ins().brif(is_true, t, &[], next, &[]);
                 }
+                OpCode::Call => {
+                    // A=func_reg, B=arg_count, C=dst_reg
+                    // For recursive calls, call self directly
+                    let arg_count = bb;
+                    let dst = cc;
+                    let vm_ptr = b.ins().iconst(I64, 0);
+                    let mut call_args = vec![vm_ptr];
+                    for i in 0..arg_count {
+                        let arg = b.use_var(regs[a + 1 + i]);
+                        call_args.push(arg);
+                    }
+                    let call_inst = b.ins().call(self_func_ref, &call_args);
+                    let result = b.inst_results(call_inst)[0];
+                    b.def_var(regs[dst], result);
+                    b.ins().jump(next, &[]);
+                }
                 OpCode::Return => {
                     let val = b.use_var(regs[a]);
                     b.ins().return_(&[val]);
@@ -225,8 +245,7 @@ pub fn build_function<M: Module>(
                     b.ins().return_(&[nv]);
                 }
                 _ => {
-                    let nv = b.ins().iconst(I64, null_enc);
-                    b.ins().return_(&[nv]);
+                    b.ins().jump(next, &[]);
                 }
             }
         }

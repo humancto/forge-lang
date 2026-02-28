@@ -314,6 +314,19 @@ fn run_jit(source: &str, _filename: &str) {
     }
 
     let mut vm = vm::machine::VM::new();
+
+    // Populate JIT cache so VM dispatches to native code
+    for (i, proto) in chunk.prototypes.iter().enumerate() {
+        let name = if proto.name.is_empty() {
+            format!("fn_{}", i)
+        } else {
+            proto.name.clone()
+        };
+        if let Some(ptr) = jit.get_compiled(&name) {
+            vm.jit_cache.insert(name, ptr);
+        }
+    }
+
     match vm.execute(&chunk) {
         Ok(_) => {}
         Err(e) => {
