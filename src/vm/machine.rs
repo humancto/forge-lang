@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use super::bytecode::*;
 use super::frame::*;
 use super::gc::Gc;
+use super::jit::profiler::Profiler;
 use super::value::*;
 
 pub struct VM {
@@ -13,6 +14,7 @@ pub struct VM {
     pub gc: Gc,
     pub output: Vec<String>,
     pub jit_cache: HashMap<String, *const u8>,
+    pub profiler: Profiler,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,21 @@ impl VM {
             gc: Gc::new(),
             output: Vec::new(),
             jit_cache: HashMap::new(),
+            profiler: Profiler::new(false),
+        };
+        vm.register_builtins();
+        vm
+    }
+
+    pub fn with_profiling() -> Self {
+        let mut vm = Self {
+            registers: vec![Value::Null; MAX_REGISTERS],
+            frames: Vec::with_capacity(MAX_FRAMES),
+            globals: HashMap::new(),
+            gc: Gc::new(),
+            output: Vec::new(),
+            jit_cache: HashMap::new(),
+            profiler: Profiler::new(true),
         };
         vm.register_builtins();
         vm
@@ -576,10 +593,12 @@ impl VM {
                 }
                 OpCode::Return => {
                     let val = self.registers[base + a as usize].clone();
+                    self.profiler.exit_function();
                     self.frames.pop();
                     return Ok(val);
                 }
                 OpCode::ReturnNull => {
+                    self.profiler.exit_function();
                     self.frames.pop();
                     return Ok(Value::Null);
                 }
@@ -881,6 +900,10 @@ impl VM {
                         let chunk = closure.function.chunk.clone();
                         let func_name = closure.function.name.clone();
 
+                        if !func_name.is_empty() {
+                            self.profiler.enter_function(&func_name);
+                        }
+
                         // JIT dispatch: call native code with raw i64 values
                         if !func_name.is_empty() {
                             if let Some(&native_ptr) = self.jit_cache.get(&func_name) {
@@ -926,6 +949,7 @@ impl VM {
                                         }
                                     }
                                 };
+                                self.profiler.exit_function();
                                 return Ok(Value::Int(result));
                             }
                         }

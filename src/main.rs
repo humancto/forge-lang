@@ -52,6 +52,10 @@ struct Cli {
     /// Use JIT compilation for hot functions (requires --vm)
     #[arg(long = "jit")]
     use_jit: bool,
+
+    /// Profile function calls (uses VM, prints report after execution)
+    #[arg(long = "profile")]
+    profile: bool,
 }
 
 #[derive(Subcommand)]
@@ -105,8 +109,9 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let use_vm = cli.use_vm || cli.use_jit;
+    let use_vm = cli.use_vm || cli.use_jit || cli.profile;
     let use_jit = cli.use_jit;
+    let profile = cli.profile;
 
     if let Some(code) = cli.eval_code {
         let code = code.replace(';', "\n");
@@ -114,14 +119,14 @@ async fn main() {
             run_jit(&code, "<eval>");
             return;
         }
-        run_source(&code, "<eval>", use_vm).await;
+        run_source(&code, "<eval>", use_vm, profile).await;
         return;
     }
 
     match cli.command {
         Some(Command::Run { file }) => {
             if file.extension().map(|e| e == "fgc").unwrap_or(false) {
-                run_bytecode_file(&file);
+                run_bytecode_file(&file, profile);
                 return;
             }
             let path_str = file.display().to_string();
@@ -142,7 +147,7 @@ async fn main() {
                 run_jit(&source, &path_str);
                 return;
             }
-            run_source(&source, &path_str, use_vm).await;
+            run_source(&source, &path_str, use_vm, profile).await;
         }
         Some(Command::Repl) => {
             repl::run_repl();
@@ -205,7 +210,7 @@ async fn main() {
     }
 }
 
-async fn run_source(source: &str, filename: &str, use_vm: bool) {
+async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool) {
     let mut lexer = Lexer::new(source);
     let tokens = match lexer.tokenize() {
         Ok(tokens) => tokens,
@@ -247,11 +252,21 @@ async fn run_source(source: &str, filename: &str, use_vm: bool) {
     }
 
     if use_vm {
-        match vm::run(&program) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("{}", errors::format_simple_error(&e.message));
-                process::exit(1);
+        if profile {
+            match vm::run_with_profiling(&program) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("{}", errors::format_simple_error(&e.message));
+                    process::exit(1);
+                }
+            }
+        } else {
+            match vm::run(&program) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("{}", errors::format_simple_error(&e.message));
+                    process::exit(1);
+                }
             }
         }
     } else {
@@ -433,7 +448,7 @@ fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf) {
     }
 }
 
-fn run_bytecode_file(file_path: &PathBuf) {
+fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
     let bytes = match fs::read(file_path) {
         Ok(b) => b,
         Err(e) => {
@@ -464,12 +479,19 @@ fn run_bytecode_file(file_path: &PathBuf) {
         }
     };
 
-    let mut vm = vm::machine::VM::new();
+    let mut vm = if profile {
+        vm::machine::VM::with_profiling()
+    } else {
+        vm::machine::VM::new()
+    };
     match vm.execute(&chunk) {
         Ok(_) => {}
         Err(e) => {
             eprintln!("{}", errors::format_simple_error(&e.message));
             process::exit(1);
         }
+    }
+    if profile {
+        vm.profiler.print_report();
     }
 }
