@@ -6778,13 +6778,399 @@ say "Error count: {len(err_lines)}"
 
 ---
 
-_This concludes Part II: The Standard Library. With these fifteen modules and built-in shell integration at your disposal, you can read and write files, query databases, process data in CSV and JSON, validate text with regular expressions, hash and encode sensitive data, manage configuration through environment variables, present results with rich terminal formatting, and orchestrate Unix commands—all without leaving Forge._
+## Chapter 21: npc — Fake Data Generation
+
+Need test data? Prototyping a UI? Building a seed script? The `npc` module generates realistic fake data without external dependencies. Every call returns different random data.
+
+### Function Reference
+
+| Function              | Description               | Example Output              |
+| --------------------- | ------------------------- | --------------------------- |
+| `npc.name()`          | Full name (first + last)  | `"Jordan Patel"`            |
+| `npc.first_name()`    | First name only           | `"Luna"`                    |
+| `npc.last_name()`     | Last name only            | `"Nakamura"`                |
+| `npc.email()`         | Realistic email address   | `"kai.chen42@gmail.com"`    |
+| `npc.username()`      | Fun username              | `"cosmic_dragon247"`        |
+| `npc.phone()`         | US-format phone           | `"(415) 867-5309"`          |
+| `npc.number(min,max)` | Random integer in range   | `42`                        |
+| `npc.pick(arr)`       | Random item from array    | (varies)                    |
+| `npc.bool()`          | Random true/false         | `true`                      |
+| `npc.sentence(n?)`    | Random sentence (n words) | `"Code runs fast through."` |
+| `npc.word()`          | Single random word        | `"algorithm"`               |
+| `npc.id()`            | UUID-like identifier      | `"a3f8k2m1-x9b2-..."`       |
+| `npc.color()`         | Random hex color          | `"#3a7bc4"`                 |
+| `npc.ip()`            | Random IPv4 address       | `"192.168.42.7"`            |
+| `npc.url()`           | Random HTTPS URL          | `"https://techflow.io/api"` |
+| `npc.company()`       | Random company name       | `"PixelForge"`              |
+
+### Core Examples
+
+```forge
+// Seed a database with 10 fake users
+db.open(":memory:")
+db.execute("CREATE TABLE users (name TEXT, email TEXT, role TEXT)")
+
+let roles = ["admin", "user", "editor"]
+repeat 10 times {
+    db.execute("INSERT INTO users VALUES (?, ?, ?)", [
+        npc.name(),
+        npc.email(),
+        npc.pick(roles)
+    ])
+}
+
+let users = db.query("SELECT * FROM users")
+for each u in users {
+    say "{u.name} — {u.email} ({u.role})"
+}
+db.close()
+```
+
+```forge
+// Generate test API payloads
+let payload = {
+    id: npc.id(),
+    name: npc.name(),
+    email: npc.email(),
+    active: npc.bool(),
+    score: npc.number(1, 100),
+    color: npc.color()
+}
+say json.pretty(payload)
+```
+
+---
+
+## Chapter 22: String Transformations
+
+Forge includes powerful string transformation builtins that go beyond basic split/join. All support method syntax (`str.function()`).
+
+### Function Reference
+
+| Function                    | Description                     | Example                                      |
+| --------------------------- | ------------------------------- | -------------------------------------------- |
+| `substring(s, start, end?)` | Extract by char indices         | `substring("hello", 0, 3)` → `"hel"`         |
+| `index_of(s, substr)`       | First index of substr, or -1    | `index_of("abcabc", "bc")` → `1`             |
+| `last_index_of(s, substr)`  | Last index of substr, or -1     | `last_index_of("abcabc", "bc")` → `4`        |
+| `pad_start(s, len, char?)`  | Left-pad (default space)        | `pad_start("42", 5, "0")` → `"00042"`        |
+| `pad_end(s, len, char?)`    | Right-pad (default space)       | `pad_end("42", 5)` → `"42   "`               |
+| `capitalize(s)`             | Uppercase first, lowercase rest | `capitalize("hELLO")` → `"Hello"`            |
+| `title(s)`                  | Title Case Each Word            | `title("the quick fox")` → `"The Quick Fox"` |
+| `repeat_str(s, n)`          | Repeat string n times           | `repeat_str("-", 5)` → `"-----"`             |
+| `count(s, substr)`          | Count occurrences               | `count("banana", "an")` → `2`                |
+| `slugify(s)`                | URL-friendly string             | `slugify("Hello World!")` → `"hello-world"`  |
+| `snake_case(s)`             | Convert to snake_case           | `snake_case("myAPIKey")` → `"my_api_key"`    |
+| `camel_case(s)`             | Convert to camelCase            | `camel_case("hello_world")` → `"helloWorld"` |
+
+### Core Examples
+
+```forge
+// Format table columns with padding
+let items = [
+    { name: "Widget", price: 9.99 },
+    { name: "Gadget", price: 24.50 },
+    { name: "Doohickey", price: 149.99 }
+]
+for each item in items {
+    say "{pad_end(item.name, 15)}{pad_start(str(item.price), 8)}"
+}
+```
+
+```forge
+// Convert API keys between naming conventions
+let api_field = "userAccountStatus"
+say snake_case(api_field)    // user_account_status
+say slugify(api_field)       // useraccountstatus (URL-safe)
+
+let db_column = "created_at"
+say camel_case(db_column)    // createdAt
+```
+
+---
+
+## Chapter 23: Collection Power Tools
+
+Beyond `map`, `filter`, and `reduce`, Forge offers a comprehensive collection toolkit. All functions support method syntax.
+
+### Function Reference
+
+| Function                  | Description                               | Return Type       |
+| ------------------------- | ----------------------------------------- | ----------------- |
+| `sum(arr)`                | Sum of numeric array                      | Int or Float      |
+| `min_of(arr)`             | Minimum value                             | Int or Float      |
+| `max_of(arr)`             | Maximum value                             | Int or Float      |
+| `any(arr, fn)`            | True if any element satisfies predicate   | Bool              |
+| `all(arr, fn)`            | True if all elements satisfy predicate    | Bool              |
+| `unique(arr)`             | Deduplicate, preserve order               | Array             |
+| `zip(arr1, arr2)`         | Pair elements into `[[a,b], ...]`         | Array of pairs    |
+| `flatten(arr)`            | Flatten one level of nesting              | Array             |
+| `group_by(arr, fn)`       | Group into object keyed by fn result      | Object            |
+| `chunk(arr, size)`        | Split into sized chunks                   | Array of arrays   |
+| `slice(arr, start, end?)` | Extract sub-array (supports negative idx) | Array             |
+| `partition(arr, fn)`      | Split into `[matches, rest]`              | Array of 2 arrays |
+| `sort(arr, fn?)`          | Sort with optional comparator (-1/0/1)    | Array             |
+| `sample(arr, n?)`         | Random n items (default 1)                | Value or Array    |
+| `shuffle(arr)`            | Randomize array order (Fisher-Yates)      | Array             |
+| `diff(a, b)`              | Deep object comparison                    | Object or null    |
+
+### Core Examples
+
+```forge
+let scores = [85, 92, 67, 78, 95, 88, 72, 91]
+say "Total: {sum(scores)}"
+say "Average: {sum(scores) / len(scores)}"
+say "Best: {max_of(scores)}"
+say "Worst: {min_of(scores)}"
+say "All passing? {all(scores, fn(s) { return s >= 60 })}"
+
+// Split into grade groups
+let groups = group_by(scores, fn(s) {
+    if s >= 90 { return "A" }
+    if s >= 80 { return "B" }
+    if s >= 70 { return "C" }
+    return "D"
+})
+say "A students: {len(groups.A)}"
+```
+
+```forge
+// Partition for batch processing
+let users = [
+    { name: "Alice", active: true },
+    { name: "Bob", active: false },
+    { name: "Charlie", active: true }
+]
+let parts = partition(users, fn(u) { return u.active })
+say "Active: {len(parts[0])}"    // 2
+say "Inactive: {len(parts[1])}"  // 1
+```
+
+```forge
+// Diff for audit trails
+let before = { name: "Alice", role: "user", email: "alice@test.com" }
+let after = { name: "Alice", role: "admin", level: 5 }
+let changes = diff(before, after)
+// changes.role = { from: "user", to: "admin" }
+// changes.email = { removed: "alice@test.com" }
+// changes.level = { added: 5 }
+```
+
+---
+
+## Chapter 24: GenZ Debug Kit
+
+Forge's most distinctive feature: debugging and assertions with personality. These builtins do the same job as traditional tools but with memorable names and expressive error messages that make debugging less painful and more fun.
+
+### Function Reference
+
+| Function          | Traditional Equivalent | Behavior                                                  |
+| ----------------- | ---------------------- | --------------------------------------------------------- |
+| `sus(val)`        | `dbg!()` in Rust       | Print inspect info to stderr, return value (pass-through) |
+| `bruh(msg)`       | `panic!()`             | Crash with "BRUH: {msg}"                                  |
+| `bet(cond, msg?)` | `assert()`             | Pass: silent. Fail: "LOST THE BET: {msg}"                 |
+| `no_cap(a, b)`    | `assert_eq()`          | Pass: silent. Fail: "CAP DETECTED: a != b"                |
+| `ick(cond, msg?)` | `assert_false()`       | Pass if false. Fail: "ICK: {msg}" if true                 |
+
+### Core Examples
+
+```forge
+// sus() — sprinkle through code for quick debugging
+let data = http.get("https://api.example.com/users")
+let users = sus(data.body)  // prints inspect, keeps flowing
+let count = sus(len(users)) // prints count, keeps flowing
+```
+
+```forge
+// bet/no_cap/ick — assertions with attitude
+define validate_user(user) {
+    bet(has_key(user, "name"), "user needs a name, bestie")
+    bet(user.age >= 0, "negative age is not a vibe")
+    no_cap(typeof(user.email), "String")
+    ick(user.role == "superadmin", "no one should be superadmin")
+}
+```
+
+```forge
+// yolo — when you just don't care about errors
+let result = yolo(fn() {
+    return http.get("https://maybe-down.com/api").body
+})
+// result is None if it failed, actual data if it worked
+```
+
+---
+
+## Chapter 25: Execution Helpers
+
+Built-in performance profiling and resilient execution patterns — no external tools needed.
+
+### Function Reference
+
+| Function       | Description                                          | Return        |
+| -------------- | ---------------------------------------------------- | ------------- |
+| `cook(fn)`     | Time execution, print results with personality       | fn's return   |
+| `yolo(fn)`     | Execute, swallow ALL errors, return None on failure  | Value or None |
+| `ghost(fn)`    | Execute silently, return result                      | fn's return   |
+| `slay(fn, n?)` | Benchmark n times (default 100), return stats object | Object        |
+
+The `slay()` stats object contains:
+
+| Field    | Type  | Description              |
+| -------- | ----- | ------------------------ |
+| `avg_ms` | Float | Average execution time   |
+| `min_ms` | Float | Fastest run              |
+| `max_ms` | Float | Slowest run              |
+| `p99_ms` | Float | 99th percentile          |
+| `runs`   | Int   | Number of iterations     |
+| `result` | Any   | Return value of last run |
+
+### Core Examples
+
+```forge
+// Profile a data processing pipeline
+let processed = cook(fn() {
+    let data = fs.read("large_file.csv")
+    let rows = csv.parse(data)
+    return filter(rows, fn(r) { return int(r.score) > 80 })
+})
+// Prints: "COOKED: done in 42.3ms — no cap that was fast"
+```
+
+```forge
+// Compare two approaches
+say "--- Approach A ---"
+let stats_a = slay(fn() {
+    return sort([5, 3, 1, 4, 2])
+}, 1000)
+
+say "--- Approach B ---"
+let stats_b = slay(fn() {
+    return sort([5, 3, 1, 4, 2], fn(a, b) {
+        if a < b { return -1 }
+        if a > b { return 1 }
+        return 0
+    })
+}, 1000)
+```
+
+---
+
+## Chapter 26: Advanced Testing
+
+Forge's test framework supports decorators, hooks, assertions, and structured error handling.
+
+### Testing Features
+
+| Feature              | Description                                |
+| -------------------- | ------------------------------------------ |
+| `@test`              | Mark function as test                      |
+| `@skip`              | Skip test (shown as SKIP in output)        |
+| `@before`            | Run before each test in file               |
+| `@after`             | Run after each test (even on failure)      |
+| `assert(cond, msg?)` | Basic assertion                            |
+| `assert_eq(a, b)`    | Assert equal                               |
+| `assert_ne(a, b)`    | Assert not equal                           |
+| `assert_throws(fn)`  | Assert function throws an error            |
+| `--filter pattern`   | Run only tests whose name contains pattern |
+
+### Structured Error Objects
+
+When catching errors with `try/catch`, the error object has two fields:
+
+| Field         | Type   | Description            |
+| ------------- | ------ | ---------------------- |
+| `err.message` | String | The error message text |
+| `err.type`    | String | Error classification   |
+
+Error types: `ArithmeticError`, `TypeError`, `ReferenceError`, `IndexError`, `AssertionError`, `RuntimeError`
+
+### Core Examples
+
+```forge
+let mut setup_count = 0
+
+@before
+define setup() {
+    setup_count = setup_count + 1
+}
+
+@after
+define cleanup() {
+    // Runs after every test, even on failure
+}
+
+@test
+define test_math() {
+    assert_eq(1 + 1, 2)
+    assert_ne(1, 2)
+}
+
+@test
+define test_errors() {
+    assert_throws(fn() { let x = 1 / 0 })
+
+    try { let x = 1 / 0 } catch err {
+        assert_eq(err.type, "ArithmeticError")
+        assert(contains(err.message, "zero"))
+    }
+}
+
+@test
+@skip
+define test_not_ready() {
+    // This won't run, shown as SKIP
+}
+```
+
+Run with filter: `forge test --filter "math"` — runs only tests with "math" in the name.
+
+---
+
+## Chapter 27: math & fs Additions
+
+### New math Functions
+
+| Function                    | Description             | Example                           |
+| --------------------------- | ----------------------- | --------------------------------- |
+| `math.random_int(min, max)` | Random integer in range | `math.random_int(1, 6)` → `4`     |
+| `math.clamp(val, min, max)` | Clamp value to range    | `math.clamp(150, 0, 100)` → `100` |
+
+### New fs Functions
+
+| Function                  | Description            | Example                                           |
+| ------------------------- | ---------------------- | ------------------------------------------------- |
+| `fs.lines(path)`          | Read as array of lines | `fs.lines("data.txt")` → `["a", "b"]`             |
+| `fs.dirname(path)`        | Parent directory       | `fs.dirname("/home/user/f.txt")` → `"/home/user"` |
+| `fs.basename(path)`       | Filename component     | `fs.basename("/home/user/f.txt")` → `"f.txt"`     |
+| `fs.join_path(a, b, ...)` | Join path segments     | `fs.join_path("/home", "user")` → `"/home/user"`  |
+| `fs.is_dir(path)`         | Is directory?          | `fs.is_dir("/tmp")` → `true`                      |
+| `fs.is_file(path)`        | Is regular file?       | `fs.is_file("main.fg")` → `true`                  |
+| `fs.temp_dir()`           | System temp directory  | `fs.temp_dir()` → `"/tmp"`                        |
+
+### CLI Argument Parsing (io module)
+
+| Function            | Description           | Example                             |
+| ------------------- | --------------------- | ----------------------------------- |
+| `io.args_parse()`   | Parse all CLI args    | Returns `{ verbose: true, ... }`    |
+| `io.args_get(flag)` | Get single flag value | `io.args_get("--port")` → `"8080"`  |
+| `io.args_has(flag)` | Check if flag present | `io.args_has("--verbose")` → `true` |
+
+### Concurrency Additions
+
+| Function            | Description                  | Return            |
+| ------------------- | ---------------------------- | ----------------- |
+| `try_send(ch, val)` | Non-blocking channel send    | Bool              |
+| `try_receive(ch)`   | Non-blocking channel receive | Some(val) or None |
+
+---
+
+_This concludes Part II: The Standard Library. With sixteen modules, a GenZ debug kit, execution helpers, and 230+ functions at your disposal, Forge provides everything needed for file I/O, databases, data processing, HTTP, cryptography, terminal UI, fake data generation, performance profiling, shell scripting, and resilient error handling—all without leaving the language._
 
 # Part III: Building Real Things
 
 ---
 
-## Chapter 20: Building REST APIs
+## Chapter 28: Building REST APIs
 
 Every modern application needs an API. Whether you're building a mobile backend, a
 microservice, or a simple webhook receiver, the ability to stand up an HTTP server quickly
@@ -7318,7 +7704,7 @@ To bind to localhost only, pass the `host` argument:
 
 ---
 
-## Chapter 21: HTTP Client and Web Automation
+## Chapter 29: HTTP Client and Web Automation
 
 Building APIs is only half the story. Modern applications also _consume_ APIs—pulling
 data from GitHub, checking service health, downloading files, and scraping web content.
@@ -7681,7 +8067,7 @@ term.success("Scraping complete!")
 
 ---
 
-## Chapter 22: Data Processing Pipelines
+## Chapter 30: Data Processing Pipelines
 
 Data processing is the bread and butter of practical programming. You receive data in
 one format, transform it, analyze it, and present the results. Forge excels at this
@@ -8164,7 +8550,7 @@ term.success("Conversion pipeline complete!")
 
 ---
 
-## Chapter 23: DevOps and System Automation
+## Chapter 31: DevOps and System Automation
 
 System administrators and DevOps engineers spend their days automating repetitive tasks:
 checking system health, deploying applications, rotating backups, validating
@@ -8879,7 +9265,7 @@ term.success("Backup complete!")
 
 ---
 
-## Chapter 24: AI Integration
+## Chapter 32: AI Integration
 
 Forge has a built-in connection to large language models through the `ask` keyword. This
 isn't a library you install or an API you configure—it's a language-level primitive that
@@ -9174,7 +9560,7 @@ and how to publish Forge packages._
 
 ---
 
-## Chapter 25: Architecture and Internals
+## Chapter 33: Architecture and Internals
 
 Every sufficiently advanced programming language eventually reveals its inner machinery to the curious developer. Understanding how Forge works beneath its friendly syntax transforms you from a user of the language into a collaborator with it. This chapter pulls back the curtain on Forge's implementation: approximately 15,500 lines of Rust spread across 45 source files, with zero `unsafe` blocks in the entire codebase.
 
@@ -9736,7 +10122,7 @@ When an HTTP request arrives, the axum handler locks the interpreter, constructs
 
 ---
 
-## Chapter 26: The Bytecode VM
+## Chapter 34: The Bytecode VM
 
 While the tree-walk interpreter provides full-featured execution, some workloads benefit from the tighter execution loop of a bytecode virtual machine. Forge includes an experimental register-based VM activated with the `--vm` flag. This chapter examines its design, instruction set, and runtime subsystems.
 
@@ -10091,7 +10477,7 @@ The `--vm` flag is experimental. It supports core language features (variables, 
 
 ---
 
-## Chapter 27: Tooling Deep Dive
+## Chapter 35: Tooling Deep Dive
 
 A programming language is only as good as its tools. Forge ships with a comprehensive toolchain that handles formatting, testing, project scaffolding, compilation, package management, editor integration, interactive learning, and AI-assisted development—all from a single binary.
 

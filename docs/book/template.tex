@@ -1,0 +1,181 @@
+\documentclass[$if(fontsize)$$fontsize$$else$11pt$endif$,oneside]{book}
+
+% === Page geometry ===
+\usepackage[$if(geometry)$$geometry$$else$margin=1in$endif$]{geometry}
+
+% === LaTeX3 float point (needed by pandoc tables) ===
+\usepackage{xfp}
+\usepackage{calc}
+
+% === Fonts ===
+\usepackage{fontspec}
+\setmainfont{Georgia}
+\setmonofont[Scale=0.85]{Menlo}
+
+% === Colors ===
+\usepackage{xcolor}
+\definecolor{forgeblue}{HTML}{0a192f}
+\definecolor{forgeorange}{HTML}{ff6b35}
+\definecolor{forgeteal}{HTML}{64ffda}
+\definecolor{codebg}{HTML}{f5f5f5}
+\definecolor{linkblue}{HTML}{2563eb}
+\definecolor{chaptergray}{HTML}{374151}
+
+% === Code highlighting ===
+\usepackage{fancyvrb}
+\usepackage{listings}
+\usepackage{framed}
+
+% === Pandoc syntax highlighting support ===
+$if(highlighting-macros)$
+$highlighting-macros$
+$endif$
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{black!20},
+  breaklines=true,
+  breakatwhitespace=false,
+  tabsize=4,
+  showstringspaces=false,
+  xleftmargin=0.5em,
+  xrightmargin=0.5em,
+  framesep=0.5em,
+  framexleftmargin=0.5em,
+  aboveskip=1em,
+  belowskip=1em,
+}
+
+% === Links ===
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=forgeblue,
+  urlcolor=linkblue,
+  citecolor=forgeblue,
+  pdfauthor={Archith Rapaka},
+  pdftitle={Programming Forge},
+  pdfsubject={The Internet-Native Language That Reads Like English},
+}
+
+% === Graphics ===
+\usepackage{graphicx}
+\usepackage{grffile}
+
+% === Tables ===
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+
+% === Lists ===
+\usepackage{enumitem}
+\setlist{nosep, leftmargin=1.5em}
+
+% === Header/Footer ===
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{\leftmark}}
+\fancyhead[R]{\small\thepage}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% === Chapter styling ===
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\Huge\bfseries\color{forgeblue}}
+  {\chaptertitlename\ \thechapter}{20pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{-30pt}{30pt}
+
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{chaptergray}}
+  {\thesection}{1em}{}
+
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{chaptergray}}
+  {\thesubsection}{1em}{}
+
+% === Paragraph spacing ===
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6em}
+
+% === Tight list fix for pandoc ===
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
+% === Scale images ===
+\makeatletter
+\def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
+\def\maxheight{\ifdim\Gin@nat@height>\textheight\textheight\else\Gin@nat@height\fi}
+\makeatother
+\setkeys{Gin}{width=\maxwidth,height=\maxheight,keepaspectratio}
+
+% === CSL refs (pandoc) ===
+$if(csl-refs)$
+\newlength{\cslhangindent}
+\setlength{\cslhangindent}{1.5em}
+\newenvironment{CSLReferences}[2]{}{}
+\newcommand{\CSLLeftMargin}[1]{\parbox[t]{\cslhangindent}{#1}}
+\newcommand{\CSLRightInline}[1]{#1}
+$endif$
+
+\begin{document}
+
+% === Full-bleed cover page ===
+\newgeometry{margin=0pt}
+\thispagestyle{empty}
+\begin{center}
+\vspace*{0pt}
+\includegraphics[width=\paperwidth,height=\paperheight]{$cover-image$}
+\end{center}
+\restoregeometry
+
+% === Half-title page ===
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+{\Huge\bfseries Programming Forge}\\[1em]
+{\Large The Internet-Native Language That Reads Like English}
+\end{center}
+\vspace*{\fill}
+\newpage
+
+% === Title page ===
+\thispagestyle{empty}
+\vspace*{2cm}
+\begin{center}
+{\fontsize{36}{40}\selectfont\bfseries Programming Forge}\\[0.8cm]
+{\Large\itshape The Internet-Native Language That Reads Like English}\\[2cm]
+{\LARGE Archith Rapaka}\\[0.5cm]
+{\large First Edition — v0.3.0}\\[0.3cm]
+{\large March 2026}
+\end{center}
+\vspace*{\fill}
+\newpage
+
+% === Copyright page ===
+\thispagestyle{empty}
+\vspace*{\fill}
+{\small
+\textbf{Programming Forge: The Internet-Native Language That Reads Like English}\\[0.5em]
+Copyright \textcopyright\ 2026 Archith Rapaka. All rights reserved.\\[0.5em]
+Published under the MIT License.\\[0.5em]
+Forge is an open-source programming language.\\
+Visit \url{https://github.com/humancto/forge-lang} for source code and community.\\[1em]
+\textit{While every precaution has been taken in the preparation of this book, the author assumes no responsibility for errors or omissions, or for damages resulting from the use of the information contained herein.}\\[1em]
+First Edition, March 2026\\
+Version 0.3.0\\[0.5em]
+Typeset with \LaTeX\ and Pandoc.
+}
+\newpage
+
+% === Table of Contents ===
+\setcounter{tocdepth}{2}
+\tableofcontents
+\newpage
+
+% === Main body ===
+$body$
+
+\end{document}
