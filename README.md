@@ -9,7 +9,7 @@
   <a href="https://github.com/humancto/forge-lang/releases"><img alt="Release" src="https://img.shields.io/github/v/release/humancto/forge-lang?style=flat-square&color=blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
   <a href="https://www.rust-lang.org/"><img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-orange?style=flat-square"></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-441_passing-brightgreen?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-822_passing-brightgreen?style=flat-square">
   <a href="https://github.com/humancto/forge-lang/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/humancto/forge-lang?style=flat-square"></a>
   <a href="https://crates.io/crates/forge-lang"><img alt="crates.io" src="https://img.shields.io/crates/v/forge-lang?style=flat-square"></a>
 </p>
@@ -30,7 +30,7 @@
 - [Architecture](#architecture)
 - [Editor Support](#editor-support)
 - [Project Status](#project-status)
-- [Known Limitations](#known-limitations-v020)
+- [Known Limitations](#known-limitations-v030)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Community](#community)
@@ -159,7 +159,7 @@ forge run app.fg
 | Shell scripts are fragile   | `sh("whoami")`, `shell("cmd \| grep x")` — built in     |
 | Terminal UIs need ncurses   | `term.table(data)`, `term.sparkline(vals)` — built in   |
 | Error handling is bolted on | `Result` types with `?` propagation — it's the language |
-| Learning a language is slow | `forge learn` — 14 lessons in your terminal             |
+| Learning a language is slow | `forge learn` — 30 interactive lessons in your terminal |
 
 ---
 
@@ -320,7 +320,7 @@ The JIT compiles hot functions to native code via [Cranelift](https://cranelift.
 
 ## Standard Library
 
-15 modules. No imports needed.
+16 modules. No imports needed.
 
 ### HTTP Server
 
@@ -401,21 +401,24 @@ term.success("All tests passed!") // status messages
 
 ### All Modules
 
-| Module   | What's In It                                                                   |
-| -------- | ------------------------------------------------------------------------------ |
-| `math`   | sqrt, pow, abs, sin, cos, tan, pi, e, random, floor, ceil, round               |
-| `fs`     | read, write, append, exists, list, mkdir, copy, rename, remove, size           |
-| `crypto` | sha256, md5, base64_encode/decode, hex_encode/decode                           |
-| `db`     | SQLite — open, query, execute, close                                           |
-| `pg`     | PostgreSQL — connect, query, execute, close                                    |
-| `json`   | parse, stringify, pretty                                                       |
-| `csv`    | parse, stringify, read, write                                                  |
-| `regex`  | test, find, find_all, replace, split                                           |
-| `env`    | get, set, has, keys                                                            |
-| `log`    | info, warn, error, debug                                                       |
-| `term`   | colors, table, sparkline, bar, banner, box, gradient, countdown, confirm, menu |
-| `http`   | get, post, put, delete, patch, head, download, crawl                           |
-| `io`     | prompt, print                                                                  |
+| Module   | What's In It                                                                                                                         |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `math`   | sqrt, pow, abs, sin, cos, tan, pi, e, random, random_int, clamp, floor, ceil, round                                                  |
+| `fs`     | read, write, append, exists, list, mkdir, copy, rename, remove, size, lines, dirname, basename, join_path, is_dir, is_file, temp_dir |
+| `crypto` | sha256, md5, base64_encode/decode, hex_encode/decode                                                                                 |
+| `db`     | SQLite — open, query, execute, close                                                                                                 |
+| `pg`     | PostgreSQL — connect, query, execute, close                                                                                          |
+| `json`   | parse, stringify, pretty                                                                                                             |
+| `csv`    | parse, stringify, read, write                                                                                                        |
+| `regex`  | test, find, find_all, replace, split                                                                                                 |
+| `env`    | get, set, has, keys                                                                                                                  |
+| `log`    | info, warn, error, debug                                                                                                             |
+| `term`   | colors, table, sparkline, bar, banner, box, gradient, countdown, confirm, menu                                                       |
+| `http`   | get, post, put, delete, patch, head, download, crawl                                                                                 |
+| `io`     | prompt, print, args_parse, args_get, args_has                                                                                        |
+| `exec`   | run_command                                                                                                                          |
+| `time`   | now, format, parse, sleep, elapsed                                                                                                   |
+| `npc`    | name, email, username, phone, number, pick, bool, sentence, id, color, ip, url, company                                              |
 
 ---
 
@@ -560,8 +563,8 @@ Forge is v0.3.0. The language, interpreter, and standard library are stable and 
 Forge is a young language. These are documented, not hidden:
 
 - **No parameterized SQL queries** — use string concatenation for now. Be cautious with user input.
-- **Interpreter performance** is ~20x slower than Python for deep recursion. Use `--jit` for compute-heavy workloads (11x faster than Python) or `--vm` for general bytecode execution.
-- **VM/JIT feature gap** — the JIT and VM support fewer features than the interpreter. Use the default interpreter for full stdlib, HTTP, and database access.
+- **Three execution tiers with different trade-offs** — The interpreter supports all 230+ functions but is slower for compute-heavy recursion. Use `--jit` for hot-path performance (11x faster than Python) or `--vm` for bytecode execution. See [Performance](#performance) for benchmarks.
+- **VM/JIT feature gap** — The JIT and VM execute a subset of the language. Use the default interpreter for full stdlib, HTTP, database, and AI features.
 - **`regex` functions** take `(text, pattern)` argument order, not `(pattern, text)`.
 
 See [ROADMAP.md](ROADMAP.md) for what's coming next.
@@ -570,12 +573,12 @@ See [ROADMAP.md](ROADMAP.md) for what's coming next.
 
 ## Roadmap
 
-| Version | Focus                                            |
-| ------- | ------------------------------------------------ |
-| v0.3    | Parameterized SQL, package registry, async/await |
-| v0.4    | Debugger, WASM target, expanded JIT coverage     |
-| v0.5    | LSP completions, type inference, formatter v2    |
-| v1.0    | Stable API, backwards compatibility guarantee    |
+| Version | Focus                                                                      |
+| ------- | -------------------------------------------------------------------------- |
+| v0.3    | 73 new functions, GenZ debug kit, NPC module, structured errors, 822 tests |
+| v0.4    | Parameterized SQL, package registry, debugger                              |
+| v0.5    | WASM target, expanded JIT coverage, LSP completions                        |
+| v1.0    | Stable API, backwards compatibility guarantee                              |
 
 See [ROADMAP.md](ROADMAP.md) for the full plan. Have ideas? [Open an issue](https://github.com/humancto/forge-lang/issues).
 

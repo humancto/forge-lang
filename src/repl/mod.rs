@@ -273,7 +273,7 @@ fn print_help() {
         r#"
   REPL Commands:
     help        Show this message
-    learn       Interactive tutorials (14 lessons)
+    learn       Interactive tutorials (30 lessons)
     learn <n>   Jump to lesson n
     version     Show version
     clear       Clear the screen

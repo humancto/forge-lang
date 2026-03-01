@@ -18,10 +18,7 @@ pub async fn run_watch(file: &Path) {
     }
 
     println!();
-    println!(
-        "  \x1B[1;36m👁 Watching\x1B[0m {}",
-        path_str
-    );
+    println!("  \x1B[1;36m👁 Watching\x1B[0m {}", path_str);
     println!("  \x1B[90mPress Ctrl+C to stop\x1B[0m");
     println!();
 
@@ -34,9 +31,7 @@ pub async fn run_watch(file: &Path) {
         if current_mtime != last_modified {
             last_modified = current_mtime;
             println!("\x1B[2J\x1B[H");
-            println!(
-                "  \x1B[1;36m↻\x1B[0m File changed, re-running..."
-            );
+            println!("  \x1B[1;36m↻\x1B[0m File changed, re-running...");
             println!();
             run_file(file, &path_str);
         }
@@ -44,9 +39,7 @@ pub async fn run_watch(file: &Path) {
 }
 
 fn get_mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 fn run_file(file: &Path, path_str: &str) {
@@ -89,7 +82,10 @@ fn run_file(file: &Path, path_str: &str) {
     match interpreter.run(&program) {
         Ok(_) => {
             println!();
-            println!("  \x1B[32m✓\x1B[0m Completed at {}", chrono::Local::now().format("%H:%M:%S"));
+            println!(
+                "  \x1B[32m✓\x1B[0m Completed at {}",
+                chrono::Local::now().format("%H:%M:%S")
+            );
         }
         Err(e) => {
             eprintln!("{}", errors::format_simple_error(&e.message));

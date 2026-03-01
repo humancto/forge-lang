@@ -24,9 +24,9 @@ cover_description: "A glowing anvil in a digital forge, sparks flying as molten 
 
 **The Internet-Native Language That Reads Like English**
 
-*By Archith Rapaka*
+_By Archith Rapaka_
 
-*First Edition — February 2026*
+_First Edition — February 2026_
 
 ---
 
@@ -36,7 +36,7 @@ Published under the MIT License.
 
 Forge is an open-source programming language. Visit https://github.com/forge-lang/forge for source code and community.
 
-*While every precaution has been taken in the preparation of this book, the author assumes no responsibility for errors or omissions, or for damages resulting from the use of the information contained herein.*
+_While every precaution has been taken in the preparation of this book, the author assumes no responsibility for errors or omissions, or for damages resulting from the use of the information contained herein._
 
 \newpage
 
@@ -61,8 +61,8 @@ This book is organized in four parts:
 
 Whether you're a student writing your first program, a backend developer building APIs, or a language enthusiast curious about implementation — welcome to Forge.
 
-*Archith Rapaka*
-*February 2026*
+_Archith Rapaka_
+_February 2026_
 
 \newpage
 
@@ -3227,6 +3227,7 @@ This pattern — functions returning Results, `?` propagating errors, `match` ha
 2. **Graceful Defaults.** Write a program that tries to parse three strings as integers using a function that returns `Result`. Use `unwrap_or` to provide a default of `0` for any string that fails to parse. Compute and print the sum. Test with `["42", "not_a_number", "8"]` (expected sum: 50).
 
 3. **Error Reporter.** Write a function `validate_user(name, age_str)` that returns `Err` if the name is empty, `Err` if the age string cannot be parsed as an integer, and `Err` if the age is negative. On success, return `Ok({ name: name, age: age })`. Test with valid input, empty name, invalid age string, and negative age. Use `match` to print a specific message for each case.
+
 # PART II: THE STANDARD LIBRARY
 
 ---
@@ -6778,6 +6779,7 @@ say "Error count: {len(err_lines)}"
 ---
 
 _This concludes Part II: The Standard Library. With these fifteen modules and built-in shell integration at your disposal, you can read and write files, query databases, process data in CSV and JSON, validate text with regular expressions, hash and encode sensitive data, manage configuration through environment variables, present results with rich terminal formatting, and orchestrate Unix commands—all without leaving Forge._
+
 # Part III: Building Real Things
 
 ---
@@ -9167,6 +9169,7 @@ services, processed data pipelines, automated system operations, and integrated 
 with a language that compiles to a single binary and requires zero external dependencies.
 In Part IV, we'll look at Forge's tooling ecosystem: the formatter, test runner, LSP,
 and how to publish Forge packages._
+
 # PART IV: UNDER THE HOOD
 
 ---
@@ -10729,9 +10732,9 @@ Communicates via stdin/stdout using JSON-RPC. Provides diagnostics and completio
 Launch the interactive tutorial system.
 
 ```bash
-forge learn          # List all 14 lessons
+forge learn          # List all 30 lessons
 forge learn 1        # Start lesson 1 (Hello World)
-forge learn 14       # Start lesson 14 (Building APIs)
+forge learn 30       # Start lesson 30 (File Path Utilities)
 ```
 
 | Argument | Description                   |

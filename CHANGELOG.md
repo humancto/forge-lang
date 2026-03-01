@@ -128,7 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Innovation features**: `when` guards, `must` keyword, `safe` blocks (usable as expressions), `check` validation, `retry`/`timeout`/`schedule`/`watch` blocks
 - **AI integration**: `ask()` for LLM calls, `prompt` templates, `agent` blocks
 - **Developer tools**: `forge fmt`, `forge test`, `forge new`, `forge build`, `forge install`, `forge lsp`, `forge learn`, `forge chat`
-- **Interactive tutorial system** with 14 lessons
+- **Interactive tutorial system** with 14 lessons (expanded to 30 in v0.3.0)
 - **Type checker** with gradual type checking and warnings
 - **Algebraic data types** with pattern matching
 - **Result/Option types** with `?` operator propagation, both `Ok()`/`ok()` and `Err()`/`err()` supported

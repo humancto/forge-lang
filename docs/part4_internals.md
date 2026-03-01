@@ -1560,9 +1560,9 @@ Communicates via stdin/stdout using JSON-RPC. Provides diagnostics and completio
 Launch the interactive tutorial system.
 
 ```bash
-forge learn          # List all 14 lessons
+forge learn          # List all 30 lessons
 forge learn 1        # Start lesson 1 (Hello World)
-forge learn 14       # Start lesson 14 (Building APIs)
+forge learn 30       # Start lesson 30 (File Path Utilities)
 ```
 
 | Argument | Description                   |

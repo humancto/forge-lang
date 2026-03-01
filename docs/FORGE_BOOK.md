@@ -2180,7 +2180,7 @@ COMMANDS:
     build <file>      Compile to bytecode
     install <source>  Install a package
     lsp               Start Language Server Protocol server
-    learn [lesson]    Interactive tutorials (14 lessons)
+    learn [lesson]    Interactive tutorials (30 lessons)
     chat              AI-powered chat assistant
 
 OPTIONS:
