@@ -121,7 +121,6 @@ impl VM {
             "unwrap_or",
             "json",
             "fetch",
-            "time",
             "uuid",
             "exit",
             "run_command",
@@ -340,6 +339,72 @@ impl VM {
         let term_ref = self.gc.alloc(ObjKind::Object(term_map));
         self.globals
             .insert("term".to_string(), Value::Obj(term_ref));
+
+        // csv module
+        let mut csv_map = IndexMap::new();
+        for name in &["parse", "stringify", "read", "write"] {
+            let full = format!("csv.{}", name);
+            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+                name: full,
+                func: native_dispatch,
+            }));
+            csv_map.insert(name.to_string(), Value::Obj(nr));
+        }
+        let csv_ref = self.gc.alloc(ObjKind::Object(csv_map));
+        self.globals.insert("csv".to_string(), Value::Obj(csv_ref));
+
+        // time module
+        let mut time_map = IndexMap::new();
+        for name in &[
+            "now",
+            "unix",
+            "parse",
+            "format",
+            "diff",
+            "add",
+            "sub",
+            "zone",
+            "zones",
+            "elapsed",
+            "is_before",
+            "is_after",
+            "start_of",
+            "end_of",
+            "from_unix",
+            "today",
+            "date",
+            "sleep",
+            "measure",
+            "local",
+            "is_weekend",
+            "is_weekday",
+            "day_of_week",
+            "days_in_month",
+            "is_leap_year",
+        ] {
+            let full = format!("time.{}", name);
+            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+                name: full,
+                func: native_dispatch,
+            }));
+            time_map.insert(name.to_string(), Value::Obj(nr));
+        }
+        let time_ref = self.gc.alloc(ObjKind::Object(time_map));
+        self.globals
+            .insert("time".to_string(), Value::Obj(time_ref));
+
+        // pg module
+        let mut pg_map = IndexMap::new();
+        for name in &["connect", "query", "execute", "close"] {
+            let full = format!("pg.{}", name);
+            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+                name: full,
+                func: native_dispatch,
+            }));
+            pg_map.insert(name.to_string(), Value::Obj(nr));
+        }
+        let pg_ref = self.gc.alloc(ObjKind::Object(pg_map));
+        self.globals.insert("pg".to_string(), Value::Obj(pg_ref));
 
         // Option prelude
         let mut none_obj = IndexMap::new();
@@ -1453,14 +1518,6 @@ impl VM {
                 }
                 Ok(Value::Null)
             }
-            "time" => {
-                let now = chrono::Utc::now();
-                let mut m = IndexMap::new();
-                m.insert("now".to_string(), self.alloc_string(&now.to_rfc3339()));
-                m.insert("unix".to_string(), Value::Int(now.timestamp()));
-                let r = self.gc.alloc(ObjKind::Object(m));
-                Ok(Value::Obj(r))
-            }
             "uuid" => {
                 let id = uuid::Uuid::new_v4().to_string();
                 Ok(self.alloc_string(&id))
@@ -1757,6 +1814,24 @@ impl VM {
                     .collect();
                 let result =
                     crate::stdlib::term::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("csv.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result =
+                    crate::stdlib::csv::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("time.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result =
+                    crate::stdlib::time::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("pg.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result =
+                    crate::stdlib::pg::call(n, interp_args).map_err(|e| VMError::new(&e))?;
                 Ok(self.convert_interp_value(&result))
             }
             "shell" => {
