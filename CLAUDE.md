@@ -2,7 +2,7 @@
 
 ## What Is This?
 
-Forge is an internet-native programming language built in Rust. ~26,000 lines. Dual syntax (classic + natural language). Built-in HTTP, database, crypto, AI, CSV, terminal UI, shell integration, NPC fake data, GenZ debug kit, and 30 interactive tutorials.
+Forge is an internet-native programming language built in Rust. ~17,000 lines. Dual syntax (classic + natural language). Built-in HTTP, database, crypto, AI, CSV, terminal UI, shell integration, NPC fake data, GenZ debug kit, and 30 interactive tutorials.
 
 ## Architecture
 
@@ -157,11 +157,11 @@ These rules are non-negotiable. Follow them on every change.
 ```
 main.rs → lexer, parser, interpreter, vm, runtime, errors, typechecker, ...
 vm/mod.rs → compiler, machine, bytecode, frame, gc, green, jit, value
-vm/machine.rs → bytecode, frame, gc, value (2483 lines — largest VM file)
-vm/compiler.rs → bytecode, parser::ast (927 lines)
+vm/machine.rs → bytecode, frame, gc, value (2257 lines — largest VM file)
+vm/compiler.rs → bytecode, parser::ast (852 lines)
 vm/jit/ir_builder.rs → bytecode, cranelift (276 lines)
 vm/jit/jit_module.rs → ir_builder (47 lines)
-interpreter/mod.rs → parser::ast, runtime, stdlib (8153 lines — largest file)
+interpreter/mod.rs → parser::ast, runtime, stdlib (~7000 lines — largest file)
 runtime/server.rs → interpreter, parser::ast, axum (354 lines)
 runtime/client.rs → reqwest (100 lines)
 ```
