@@ -371,7 +371,14 @@ fn run_jit(source: &str, _filename: &str) {
             proto.name.clone()
         };
         if let Some(ptr) = jit.get_compiled(&name) {
-            vm.jit_cache.insert(name, ptr);
+            let type_info = vm::jit::type_analysis::analyze(proto);
+            vm.jit_cache.insert(
+                name,
+                vm::machine::JitEntry {
+                    ptr,
+                    uses_float: type_info.has_float,
+                },
+            );
         }
     }
 

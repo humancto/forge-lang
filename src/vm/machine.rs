@@ -7,13 +7,19 @@ use super::gc::Gc;
 use super::jit::profiler::Profiler;
 use super::value::*;
 
+#[derive(Clone, Copy)]
+pub struct JitEntry {
+    pub ptr: *const u8,
+    pub uses_float: bool,
+}
+
 pub struct VM {
     pub registers: Vec<Value>,
     pub frames: Vec<CallFrame>,
     pub globals: HashMap<String, Value>,
     pub gc: Gc,
     pub output: Vec<String>,
-    pub jit_cache: HashMap<String, *const u8>,
+    pub jit_cache: HashMap<String, JitEntry>,
     pub profiler: Profiler,
 }
 
@@ -1018,62 +1024,125 @@ impl VM {
                             && !self.jit_cache.contains_key(&func_name)
                             && self.profiler.is_hot(&func_name)
                         {
-                            if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
-                                if let Ok(ptr) = jit.compile_function(&chunk, &func_name) {
-                                    self.jit_cache.insert(func_name.clone(), ptr);
-                                    // Leak the JIT module to keep the compiled code alive
-                                    std::mem::forget(jit);
+                            let type_info = super::jit::type_analysis::analyze(&chunk);
+                            if !type_info.has_unsupported_ops {
+                                if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
+                                    if let Ok(ptr) = jit.compile_function(&chunk, &func_name) {
+                                        self.jit_cache.insert(
+                                            func_name.clone(),
+                                            JitEntry {
+                                                ptr,
+                                                uses_float: type_info.has_float,
+                                            },
+                                        );
+                                        std::mem::forget(jit);
+                                    }
                                 }
                             }
                         }
 
-                        // JIT dispatch: call native code with raw i64 values
+                        // JIT dispatch
                         if !func_name.is_empty() {
-                            if let Some(&native_ptr) = self.jit_cache.get(&func_name) {
-                                let raw_args: Vec<i64> = args
-                                    .iter()
-                                    .map(|v| match v {
-                                        Value::Int(n) => *n,
-                                        Value::Bool(b) => {
-                                            if *b {
-                                                1
-                                            } else {
-                                                0
+                            if let Some(&entry) = self.jit_cache.get(&func_name) {
+                                let result_val = if entry.uses_float {
+                                    let raw_args: Vec<f64> = args
+                                        .iter()
+                                        .map(|v| match v {
+                                            Value::Int(n) => *n as f64,
+                                            Value::Float(f) => *f,
+                                            Value::Bool(b) => {
+                                                if *b {
+                                                    1.0
+                                                } else {
+                                                    0.0
+                                                }
+                                            }
+                                            _ => 0.0,
+                                        })
+                                        .collect();
+                                    let result: f64 = unsafe {
+                                        match raw_args.len() {
+                                            0 => {
+                                                let f: extern "C" fn() -> f64 =
+                                                    std::mem::transmute(entry.ptr);
+                                                f()
+                                            }
+                                            1 => {
+                                                let f: extern "C" fn(f64) -> f64 =
+                                                    std::mem::transmute(entry.ptr);
+                                                f(raw_args[0])
+                                            }
+                                            2 => {
+                                                let f: extern "C" fn(f64, f64) -> f64 =
+                                                    std::mem::transmute(entry.ptr);
+                                                f(raw_args[0], raw_args[1])
+                                            }
+                                            _ => {
+                                                let f: extern "C" fn(f64, f64, f64) -> f64 =
+                                                    std::mem::transmute(entry.ptr);
+                                                f(
+                                                    raw_args[0],
+                                                    raw_args[1],
+                                                    raw_args.get(2).copied().unwrap_or(0.0),
+                                                )
                                             }
                                         }
-                                        _ => 0,
-                                    })
-                                    .collect();
-                                let result: i64 = unsafe {
-                                    match raw_args.len() {
-                                        0 => {
-                                            let f: extern "C" fn() -> i64 =
-                                                std::mem::transmute(native_ptr);
-                                            f()
-                                        }
-                                        1 => {
-                                            let f: extern "C" fn(i64) -> i64 =
-                                                std::mem::transmute(native_ptr);
-                                            f(raw_args[0])
-                                        }
-                                        2 => {
-                                            let f: extern "C" fn(i64, i64) -> i64 =
-                                                std::mem::transmute(native_ptr);
-                                            f(raw_args[0], raw_args[1])
-                                        }
-                                        _ => {
-                                            let f: extern "C" fn(i64, i64, i64) -> i64 =
-                                                std::mem::transmute(native_ptr);
-                                            f(
-                                                raw_args[0],
-                                                raw_args[1],
-                                                raw_args.get(2).copied().unwrap_or(0),
-                                            )
-                                        }
+                                    };
+                                    if result.fract() == 0.0
+                                        && result >= i64::MIN as f64
+                                        && result <= i64::MAX as f64
+                                    {
+                                        Value::Int(result as i64)
+                                    } else {
+                                        Value::Float(result)
                                     }
+                                } else {
+                                    let raw_args: Vec<i64> = args
+                                        .iter()
+                                        .map(|v| match v {
+                                            Value::Int(n) => *n,
+                                            Value::Bool(b) => {
+                                                if *b {
+                                                    1
+                                                } else {
+                                                    0
+                                                }
+                                            }
+                                            _ => 0,
+                                        })
+                                        .collect();
+                                    let result: i64 = unsafe {
+                                        match raw_args.len() {
+                                            0 => {
+                                                let f: extern "C" fn() -> i64 =
+                                                    std::mem::transmute(entry.ptr);
+                                                f()
+                                            }
+                                            1 => {
+                                                let f: extern "C" fn(i64) -> i64 =
+                                                    std::mem::transmute(entry.ptr);
+                                                f(raw_args[0])
+                                            }
+                                            2 => {
+                                                let f: extern "C" fn(i64, i64) -> i64 =
+                                                    std::mem::transmute(entry.ptr);
+                                                f(raw_args[0], raw_args[1])
+                                            }
+                                            _ => {
+                                                let f: extern "C" fn(i64, i64, i64) -> i64 =
+                                                    std::mem::transmute(entry.ptr);
+                                                f(
+                                                    raw_args[0],
+                                                    raw_args[1],
+                                                    raw_args.get(2).copied().unwrap_or(0),
+                                                )
+                                            }
+                                        }
+                                    };
+                                    Value::Int(result)
                                 };
                                 self.profiler.exit_function();
-                                return Ok(Value::Int(result));
+                                return Ok(result_val);
                             }
                         }
 
