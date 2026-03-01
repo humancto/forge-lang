@@ -1,0 +1,1450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forge — The Internet-Native Programming Language</title>
+<meta name="description" content="Built-in HTTP, databases, crypto, AI, and a JIT compiler. Write less. Build more. Reads like English.">
+<meta property="og:title" content="Forge — The Internet-Native Programming Language">
+<meta property="og:description" content="Built-in HTTP, databases, crypto, AI, and a JIT compiler. Write less. Build more.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://humancto.github.io/forge-lang/">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+/* === Reset & Base === */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --forge-blue: #0a192f;
+  --forge-deep: #020c1b;
+  --forge-mid: #112240;
+  --forge-light: #1d3461;
+  --forge-orange: #ff6b35;
+  --forge-orange-glow: #ff8c5a;
+  --forge-teal: #64ffda;
+  --forge-slate: #8892b0;
+  --forge-light-slate: #a8b2d1;
+  --forge-lightest-slate: #ccd6f6;
+  --forge-white: #e6f1ff;
+  --font-display: 'Outfit', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+  font-size: 16px;
+}
+
+body {
+  font-family: var(--font-display);
+  background: var(--forge-deep);
+  color: var(--forge-light-slate);
+  line-height: 1.6;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--forge-orange);
+  color: var(--forge-deep);
+}
+
+a { color: var(--forge-orange); text-decoration: none; transition: color 0.2s; }
+a:hover { color: var(--forge-orange-glow); }
+
+/* === Noise texture overlay === */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* === Navigation === */
+nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  padding: 1rem 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(2, 12, 27, 0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 107, 53, 0.08);
+  transition: all 0.3s;
+}
+
+nav.scrolled {
+  padding: 0.7rem 2rem;
+  border-bottom-color: rgba(255, 107, 53, 0.15);
+}
+
+.nav-logo {
+  font-family: var(--font-mono);
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--forge-white);
+  letter-spacing: -0.02em;
+}
+
+.nav-logo span { color: var(--forge-orange); }
+
+.nav-links {
+  display: flex;
+  gap: 2rem;
+  align-items: center;
+  list-style: none;
+}
+
+.nav-links a {
+  color: var(--forge-slate);
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: color 0.2s;
+}
+
+.nav-links a:hover { color: var(--forge-orange); }
+
+.nav-cta {
+  background: var(--forge-orange) !important;
+  color: var(--forge-deep) !important;
+  padding: 0.5rem 1.2rem;
+  border-radius: 6px;
+  font-weight: 600 !important;
+  font-size: 0.8rem !important;
+  transition: transform 0.2s, box-shadow 0.2s !important;
+}
+
+.nav-cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(255, 107, 53, 0.3);
+  color: var(--forge-deep) !important;
+}
+
+/* === Hero === */
+.hero {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  position: relative;
+  padding: 8rem 2rem 4rem;
+  overflow: hidden;
+}
+
+.hero-bg {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 80% 60% at 70% 40%, rgba(255, 107, 53, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 20% 80%, rgba(100, 255, 218, 0.03) 0%, transparent 50%);
+}
+
+/* Animated grid lines */
+.hero-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 107, 53, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 107, 53, 0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, black, transparent);
+}
+
+.hero-content {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  gap: 4rem;
+  align-items: center;
+  position: relative;
+  z-index: 1;
+}
+
+.hero-text { max-width: 640px; }
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 1rem;
+  border: 1px solid rgba(255, 107, 53, 0.25);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--forge-orange);
+  margin-bottom: 2rem;
+  background: rgba(255, 107, 53, 0.05);
+}
+
+.hero-badge .dot {
+  width: 6px;
+  height: 6px;
+  background: var(--forge-orange);
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+h1 {
+  font-size: clamp(2.8rem, 5.5vw, 4.5rem);
+  font-weight: 800;
+  color: var(--forge-white);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  margin-bottom: 1.5rem;
+}
+
+h1 .accent { color: var(--forge-orange); }
+h1 .teal { color: var(--forge-teal); }
+
+.hero-sub {
+  font-size: 1.15rem;
+  line-height: 1.7;
+  color: var(--forge-slate);
+  margin-bottom: 2.5rem;
+  max-width: 520px;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 2rem;
+  background: var(--forge-orange);
+  color: var(--forge-deep);
+  font-weight: 700;
+  font-size: 0.95rem;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.25s;
+  font-family: var(--font-display);
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px rgba(255, 107, 53, 0.35);
+  color: var(--forge-deep);
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 2rem;
+  background: transparent;
+  color: var(--forge-lightest-slate);
+  font-weight: 600;
+  font-size: 0.95rem;
+  border-radius: 8px;
+  border: 1px solid var(--forge-light);
+  cursor: pointer;
+  transition: all 0.25s;
+  font-family: var(--font-display);
+}
+
+.btn-secondary:hover {
+  border-color: var(--forge-orange);
+  color: var(--forge-orange);
+  transform: translateY(-2px);
+}
+
+/* Install command */
+.install-cmd {
+  margin-top: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: var(--forge-mid);
+  border: 1px solid rgba(255, 107, 53, 0.12);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--forge-light-slate);
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.install-cmd:hover {
+  border-color: rgba(255, 107, 53, 0.3);
+}
+
+.install-cmd .prompt { color: var(--forge-teal); user-select: none; }
+.install-cmd .cmd-text { color: var(--forge-lightest-slate); }
+.install-cmd .copy-icon {
+  color: var(--forge-slate);
+  font-size: 0.75rem;
+  transition: color 0.2s;
+}
+.install-cmd:hover .copy-icon { color: var(--forge-orange); }
+.install-cmd.copied .copy-icon { color: var(--forge-teal); }
+
+/* Hero book card */
+.hero-book {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+.book-card {
+  position: relative;
+  width: 300px;
+  transition: transform 0.4s cubic-bezier(0.2, 0, 0.2, 1);
+}
+
+.book-card:hover {
+  transform: translateY(-8px) rotateY(-3deg);
+}
+
+.book-card img {
+  width: 100%;
+  border-radius: 8px;
+  box-shadow:
+    0 25px 60px rgba(0, 0, 0, 0.5),
+    0 0 80px rgba(255, 107, 53, 0.08);
+}
+
+.book-card::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, rgba(255, 107, 53, 0.2), transparent 50%);
+  pointer-events: none;
+}
+
+.book-label {
+  text-align: center;
+  margin-top: 1.2rem;
+  font-size: 0.82rem;
+  color: var(--forge-slate);
+}
+
+.book-label a {
+  color: var(--forge-orange);
+  font-weight: 600;
+}
+
+/* === Section layout === */
+section {
+  padding: 6rem 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--forge-orange);
+  margin-bottom: 1rem;
+}
+
+.section-title {
+  font-size: clamp(2rem, 3.5vw, 2.8rem);
+  font-weight: 700;
+  color: var(--forge-white);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin-bottom: 1rem;
+}
+
+.section-desc {
+  font-size: 1.05rem;
+  color: var(--forge-slate);
+  max-width: 600px;
+  margin-bottom: 3rem;
+}
+
+/* === Full-width divider sections === */
+.full-section {
+  padding: 6rem 2rem;
+  position: relative;
+}
+
+.full-section .inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.bg-mid { background: var(--forge-blue); }
+.bg-deep { background: var(--forge-deep); }
+
+/* === Why Forge === */
+.why-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+}
+
+.why-card {
+  padding: 2rem;
+  background: var(--forge-mid);
+  border: 1px solid rgba(255, 107, 53, 0.06);
+  border-radius: 12px;
+  transition: all 0.3s;
+  position: relative;
+  overflow: hidden;
+}
+
+.why-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--forge-orange), transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.why-card:hover {
+  border-color: rgba(255, 107, 53, 0.15);
+  transform: translateY(-3px);
+}
+
+.why-card:hover::before { opacity: 1; }
+
+.why-icon {
+  font-size: 1.5rem;
+  margin-bottom: 1rem;
+  display: inline-block;
+  width: 48px;
+  height: 48px;
+  line-height: 48px;
+  text-align: center;
+  background: rgba(255, 107, 53, 0.08);
+  border-radius: 10px;
+}
+
+.why-card h3 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--forge-white);
+  margin-bottom: 0.6rem;
+}
+
+.why-card p {
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--forge-slate);
+}
+
+.why-card code {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  background: rgba(255, 107, 53, 0.1);
+  color: var(--forge-orange);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+}
+
+/* === Code Examples === */
+.code-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--forge-light);
+}
+
+.code-tab {
+  padding: 0.6rem 1.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--forge-slate);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+  margin-bottom: -1px;
+}
+
+.code-tab:hover { color: var(--forge-lightest-slate); }
+
+.code-tab.active {
+  color: var(--forge-orange);
+  border-bottom-color: var(--forge-orange);
+}
+
+.code-block {
+  background: var(--forge-blue);
+  border: 1px solid rgba(255, 107, 53, 0.08);
+  border-top: none;
+  border-radius: 0 0 12px 12px;
+  padding: 1.5rem 2rem;
+  overflow-x: auto;
+  position: relative;
+}
+
+.code-block pre {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.8;
+  color: var(--forge-light-slate);
+  white-space: pre;
+}
+
+.code-block .comment { color: #546e7a; font-style: italic; }
+.code-block .keyword { color: var(--forge-orange); }
+.code-block .string { color: var(--forge-teal); }
+.code-block .function { color: #82aaff; }
+.code-block .number { color: #f78c6c; }
+.code-block .decorator { color: #c792ea; }
+.code-block .type { color: #ffcb6b; }
+.code-block .operator { color: var(--forge-light-slate); }
+
+.code-panel { display: none; }
+.code-panel.active { display: block; }
+
+.code-showcase {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  margin-top: 3rem;
+}
+
+.code-example {
+  background: var(--forge-blue);
+  border: 1px solid rgba(255, 107, 53, 0.08);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.code-example-header {
+  padding: 0.8rem 1.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid rgba(255, 107, 53, 0.06);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--forge-slate);
+}
+
+.code-example-header .dots {
+  display: flex;
+  gap: 5px;
+}
+
+.code-example-header .dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.code-example-header .dots span:nth-child(1) { background: #ff5f56; }
+.code-example-header .dots span:nth-child(2) { background: #ffbd2e; }
+.code-example-header .dots span:nth-child(3) { background: #27c93f; }
+
+.code-example pre {
+  padding: 1.2rem 1.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.8;
+  color: var(--forge-light-slate);
+  overflow-x: auto;
+}
+
+/* === Dual Syntax === */
+.syntax-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 107, 53, 0.08);
+  margin-top: 2rem;
+}
+
+.syntax-side {
+  background: var(--forge-blue);
+}
+
+.syntax-side:first-child {
+  border-right: 1px solid rgba(255, 107, 53, 0.1);
+}
+
+.syntax-header {
+  padding: 0.8rem 1.5rem;
+  border-bottom: 1px solid rgba(255, 107, 53, 0.06);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.syntax-side:first-child .syntax-header { color: var(--forge-teal); }
+.syntax-side:last-child .syntax-header { color: var(--forge-orange); }
+
+.syntax-side pre {
+  padding: 1.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 2;
+  color: var(--forge-light-slate);
+}
+
+/* === Performance === */
+.perf-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1.5rem;
+  margin-top: 2rem;
+}
+
+.perf-card {
+  padding: 2rem;
+  background: var(--forge-mid);
+  border: 1px solid rgba(255, 107, 53, 0.06);
+  border-radius: 12px;
+  text-align: center;
+}
+
+.perf-card .engine {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--forge-slate);
+  margin-bottom: 0.5rem;
+}
+
+.perf-card .time {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: var(--forge-white);
+  letter-spacing: -0.02em;
+}
+
+.perf-card .time span { color: var(--forge-orange); font-size: 1rem; font-weight: 500; }
+
+.perf-card .compare {
+  font-size: 0.85rem;
+  color: var(--forge-teal);
+  font-weight: 600;
+  margin-top: 0.3rem;
+}
+
+.perf-card .label {
+  font-size: 0.8rem;
+  color: var(--forge-slate);
+  margin-top: 0.5rem;
+}
+
+.perf-bar-section { margin-top: 2.5rem; }
+
+.perf-bar-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 80px;
+  gap: 1rem;
+  align-items: center;
+  margin-bottom: 0.6rem;
+  font-size: 0.82rem;
+}
+
+.perf-bar-row .lang {
+  font-family: var(--font-mono);
+  color: var(--forge-lightest-slate);
+  text-align: right;
+}
+
+.perf-bar-track {
+  height: 24px;
+  background: var(--forge-mid);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.perf-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 1.5s cubic-bezier(0.2, 0, 0.2, 1);
+  width: 0;
+}
+
+.perf-bar-fill.rust { background: var(--forge-orange); }
+.perf-bar-fill.go { background: #00add8; }
+.perf-bar-fill.node { background: #68a063; }
+.perf-bar-fill.forge-jit { background: var(--forge-teal); }
+.perf-bar-fill.python { background: #ffd43b; }
+
+.perf-bar-row .time-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--forge-slate);
+}
+
+/* === Modules === */
+.modules-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+.module-chip {
+  padding: 1rem 1.2rem;
+  background: var(--forge-mid);
+  border: 1px solid rgba(255, 107, 53, 0.06);
+  border-radius: 10px;
+  transition: all 0.2s;
+}
+
+.module-chip:hover {
+  border-color: rgba(255, 107, 53, 0.2);
+  transform: translateY(-2px);
+}
+
+.module-chip .mod-name {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--forge-orange);
+  margin-bottom: 0.3rem;
+}
+
+.module-chip .mod-desc {
+  font-size: 0.78rem;
+  color: var(--forge-slate);
+  line-height: 1.5;
+}
+
+/* === CTA Section === */
+.cta-section {
+  padding: 8rem 2rem;
+  text-align: center;
+  position: relative;
+}
+
+.cta-section::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(255, 107, 53, 0.06) 0%, transparent 70%);
+}
+
+.cta-section .inner { position: relative; z-index: 1; }
+
+.cta-section h2 {
+  font-size: clamp(2.2rem, 4vw, 3.2rem);
+  font-weight: 800;
+  color: var(--forge-white);
+  margin-bottom: 1rem;
+  letter-spacing: -0.02em;
+}
+
+.cta-section p {
+  font-size: 1.1rem;
+  color: var(--forge-slate);
+  margin-bottom: 2.5rem;
+  max-width: 500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.cta-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.cta-install {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 2rem;
+  background: var(--forge-mid);
+  border: 1px solid var(--forge-light);
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--forge-lightest-slate);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.cta-install:hover {
+  border-color: var(--forge-orange);
+}
+
+.cta-install .prompt { color: var(--forge-teal); user-select: none; }
+
+/* === Footer === */
+footer {
+  padding: 3rem 2rem;
+  border-top: 1px solid rgba(255, 107, 53, 0.06);
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.footer-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.footer-left {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--forge-slate);
+}
+
+.footer-links {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.footer-links a {
+  font-size: 0.8rem;
+  color: var(--forge-slate);
+  transition: color 0.2s;
+}
+
+.footer-links a:hover { color: var(--forge-orange); }
+
+/* === Stats bar === */
+.stats-bar {
+  display: flex;
+  gap: 3rem;
+  margin-top: 4rem;
+  padding-top: 2rem;
+  border-top: 1px solid rgba(255, 107, 53, 0.08);
+}
+
+.stat-item .stat-number {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--forge-white);
+  font-family: var(--font-mono);
+}
+
+.stat-item .stat-number span { color: var(--forge-orange); }
+
+.stat-item .stat-label {
+  font-size: 0.78rem;
+  color: var(--forge-slate);
+  margin-top: 0.2rem;
+}
+
+/* === Animations === */
+.fade-up {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+
+.fade-up.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.stagger-1 { transition-delay: 0.1s; }
+.stagger-2 { transition-delay: 0.2s; }
+.stagger-3 { transition-delay: 0.3s; }
+.stagger-4 { transition-delay: 0.4s; }
+
+/* === Responsive === */
+@media (max-width: 900px) {
+  .hero-content {
+    grid-template-columns: 1fr;
+    text-align: center;
+  }
+  .hero-text { max-width: 100%; }
+  .hero-sub { margin-left: auto; margin-right: auto; }
+  .hero-actions { justify-content: center; }
+  .hero-book { order: -1; }
+  .book-card { width: 220px; }
+  .install-cmd { margin-left: auto; margin-right: auto; }
+  .why-grid { grid-template-columns: 1fr; }
+  .syntax-compare { grid-template-columns: 1fr; }
+  .syntax-side:first-child { border-right: none; border-bottom: 1px solid rgba(255, 107, 53, 0.1); }
+  .code-showcase { grid-template-columns: 1fr; }
+  .perf-grid { grid-template-columns: 1fr; }
+  .modules-grid { grid-template-columns: repeat(2, 1fr); }
+  .stats-bar { flex-wrap: wrap; gap: 2rem; justify-content: center; }
+  .footer-content { flex-direction: column; gap: 1rem; text-align: center; }
+  .nav-links { display: none; }
+}
+
+@media (max-width: 600px) {
+  section, .full-section { padding: 4rem 1.2rem; }
+  .modules-grid { grid-template-columns: 1fr; }
+}
+
+/* === Scrollbar === */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--forge-deep); }
+::-webkit-scrollbar-thumb { background: var(--forge-light); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--forge-slate); }
+
+/* === Floating particles === */
+.particles {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.particle {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  background: var(--forge-orange);
+  border-radius: 50%;
+  opacity: 0;
+  animation: float-particle linear infinite;
+}
+
+@keyframes float-particle {
+  0% { opacity: 0; transform: translateY(100vh) scale(0); }
+  10% { opacity: 0.6; }
+  90% { opacity: 0.6; }
+  100% { opacity: 0; transform: translateY(-10vh) scale(1); }
+}
+</style>
+</head>
+<body>
+
+<!-- Floating particles -->
+<div class="particles" id="particles"></div>
+
+<!-- Navigation -->
+<nav id="nav">
+  <div class="nav-logo"><span>⚒</span> forge</div>
+  <ul class="nav-links">
+    <li><a href="#features">Features</a></li>
+    <li><a href="#code">Code</a></li>
+    <li><a href="#performance">Performance</a></li>
+    <li><a href="#modules">Modules</a></li>
+    <li><a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf">Book</a></li>
+    <li><a href="https://github.com/humancto/forge-lang" class="nav-cta">GitHub</a></li>
+  </ul>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-grid"></div>
+  <div class="hero-content">
+    <div class="hero-text">
+      <div class="hero-badge fade-up">
+        <span class="dot"></span>
+        v0.3.2 — Now with JIT compiler
+      </div>
+      <h1 class="fade-up stagger-1">
+        Code that<br>reads like<br><span class="accent">English.</span>
+      </h1>
+      <p class="hero-sub fade-up stagger-2">
+        The internet-native programming language with built-in HTTP, databases, crypto, AI, and a JIT compiler. 16 modules. 230+ functions. Zero dependencies.
+      </p>
+      <div class="hero-actions fade-up stagger-3">
+        <a href="https://github.com/humancto/forge-lang" class="btn-primary">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          Star on GitHub
+        </a>
+        <a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf" class="btn-secondary">
+          📥 Download Book
+        </a>
+      </div>
+      <div class="install-cmd fade-up stagger-4" onclick="copyInstall(this)">
+        <span class="prompt">$</span>
+        <span class="cmd-text">brew install humancto/tap/forge</span>
+        <span class="copy-icon">⎘ copy</span>
+      </div>
+
+      <div class="stats-bar fade-up stagger-4">
+        <div class="stat-item">
+          <div class="stat-number">230<span>+</span></div>
+          <div class="stat-label">Built-in Functions</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-number">16</div>
+          <div class="stat-label">Stdlib Modules</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-number">30</div>
+          <div class="stat-label">Interactive Tutorials</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-number">822</div>
+          <div class="stat-label">Tests Passing</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero-book fade-up stagger-3">
+      <a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf" class="book-card">
+        <img src="cover.jpeg" alt="Programming Forge — The Internet-Native Language That Reads Like English">
+      </a>
+      <p class="book-label">
+        <a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf">Download the free book →</a>
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Why Forge -->
+<div class="full-section bg-mid" id="features">
+  <div class="inner">
+    <div class="section-label fade-up">Why Forge</div>
+    <div class="section-title fade-up stagger-1">Everything built in.<br>Nothing to install.</div>
+    <p class="section-desc fade-up stagger-2">
+      Modern development means installing dozens of packages before writing a single line of logic. Forge ships with the internet baked in.
+    </p>
+
+    <div class="why-grid">
+      <div class="why-card fade-up">
+        <div class="why-icon">🌐</div>
+        <h3>HTTP Server in 3 Lines</h3>
+        <p>Decorators like <code>@server</code> and <code>@get</code> give you a production-ready REST API with zero boilerplate. No framework needed.</p>
+      </div>
+      <div class="why-card fade-up stagger-1">
+        <div class="why-icon">🗄️</div>
+        <h3>Database — Just Query</h3>
+        <p>SQLite and PostgreSQL are built into the runtime. <code>db.query()</code> and <code>db.execute()</code> — no ORM, no driver installs.</p>
+      </div>
+      <div class="why-card fade-up stagger-2">
+        <div class="why-icon">🔐</div>
+        <h3>Crypto Without Libraries</h3>
+        <p>SHA256, MD5, base64, hex encoding — all built in. <code>crypto.sha256("data")</code> just works.</p>
+      </div>
+      <div class="why-card fade-up stagger-3">
+        <div class="why-icon">📖</div>
+        <h3>Reads Like English</h3>
+        <p>Dual syntax — write <code>set name to "Forge"</code> or <code>let name = "Forge"</code>. Both compile the same. Your choice.</p>
+      </div>
+      <div class="why-card fade-up">
+        <div class="why-icon">🤖</div>
+        <h3>AI Built In</h3>
+        <p>Ask LLMs directly with <code>ask "prompt"</code>. Built-in chat mode with <code>forge chat</code>. AI is a first-class citizen.</p>
+      </div>
+      <div class="why-card fade-up stagger-1">
+        <div class="why-icon">⚡</div>
+        <h3>JIT Compiler</h3>
+        <p>Three execution tiers — interpreter, bytecode VM, and Cranelift JIT. The JIT runs 11x faster than Python on compute-heavy workloads.</p>
+      </div>
+      <div class="why-card fade-up stagger-2">
+        <div class="why-icon">🎓</div>
+        <h3>Learn in Your Terminal</h3>
+        <p>30 interactive tutorials built into the CLI. Run <code>forge learn</code> and start writing Forge in minutes — no docs to read first.</p>
+      </div>
+      <div class="why-card fade-up stagger-3">
+        <div class="why-icon">🐚</div>
+        <h3>Shell Integration</h3>
+        <p>Run shell commands, pipe data, check exit codes — <code>sh()</code>, <code>pipe_to()</code>, <code>which()</code>. Replace fragile bash scripts with Forge.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Dual Syntax -->
+<section id="code">
+  <div class="section-label fade-up">Dual Syntax</div>
+  <div class="section-title fade-up stagger-1">Write it your way.</div>
+  <p class="section-desc fade-up stagger-2">
+    Classic syntax for developers who think in code. Natural syntax for everyone else. Mix them freely — both compile identically.
+  </p>
+
+  <div class="syntax-compare fade-up stagger-3">
+    <div class="syntax-side">
+      <div class="syntax-header">✦ Natural Syntax</div>
+      <pre><span class="keyword">set</span> name <span class="keyword">to</span> <span class="string">"World"</span>
+<span class="function">say</span> <span class="string">"Hello, {name}!"</span>
+
+<span class="keyword">define</span> <span class="function">greet</span>(who) {
+    <span class="function">say</span> <span class="string">"Welcome, {who}!"</span>
+}
+
+<span class="keyword">set mut</span> score <span class="keyword">to</span> <span class="number">0</span>
+<span class="keyword">repeat</span> <span class="number">5</span> <span class="keyword">times</span> {
+    <span class="keyword">change</span> score <span class="keyword">to</span> score + <span class="number">10</span>
+}
+
+<span class="keyword">if</span> score > <span class="number">40</span> {
+    <span class="function">yell</span> <span class="string">"You win!"</span>
+} <span class="keyword">otherwise</span> {
+    <span class="function">whisper</span> <span class="string">"try again..."</span>
+}</pre>
+    </div>
+    <div class="syntax-side">
+      <div class="syntax-header">⚙ Classic Syntax</div>
+      <pre><span class="keyword">let</span> name = <span class="string">"World"</span>
+<span class="function">println</span>(<span class="string">"Hello, {name}!"</span>)
+
+<span class="keyword">fn</span> <span class="function">greet</span>(who) {
+    <span class="function">println</span>(<span class="string">"Welcome, {who}!"</span>)
+}
+
+<span class="keyword">let mut</span> score = <span class="number">0</span>
+<span class="keyword">for</span> i <span class="keyword">in</span> <span class="function">range</span>(<span class="number">0</span>, <span class="number">5</span>) {
+    score += <span class="number">10</span>
+}
+
+<span class="keyword">if</span> score > <span class="number">40</span> {
+    <span class="function">println</span>(<span class="string">"You win!"</span>)
+} <span class="keyword">else</span> {
+    <span class="function">println</span>(<span class="string">"try again..."</span>)
+}</pre>
+    </div>
+  </div>
+</section>
+
+<!-- Code Examples -->
+<div class="full-section bg-mid">
+  <div class="inner">
+    <div class="section-label fade-up">Real Code</div>
+    <div class="section-title fade-up stagger-1">From API to database in minutes.</div>
+    <p class="section-desc fade-up stagger-2">No frameworks. No packages. No boilerplate. Just the code that matters.</p>
+
+    <div class="code-showcase">
+      <div class="code-example fade-up">
+        <div class="code-example-header">
+          <div class="dots"><span></span><span></span><span></span></div>
+          api.fg — REST API
+        </div>
+        <pre><span class="decorator">@server</span>(port: <span class="number">3000</span>)
+
+<span class="decorator">@get</span>(<span class="string">"/hello/:name"</span>)
+<span class="keyword">fn</span> <span class="function">hello</span>(name: <span class="type">String</span>) -> <span class="type">Json</span> {
+    <span class="keyword">return</span> {
+        greeting: <span class="string">"Hello, {name}!"</span>,
+        language: <span class="string">"Forge"</span>
+    }
+}
+
+<span class="decorator">@post</span>(<span class="string">"/users"</span>)
+<span class="keyword">fn</span> <span class="function">create_user</span>(body: <span class="type">Json</span>) -> <span class="type">Json</span> {
+    <span class="function">db.execute</span>(<span class="string">"INSERT INTO users ..."</span>)
+    <span class="keyword">return</span> { created: <span class="keyword">true</span> }
+}</pre>
+      </div>
+      <div class="code-example fade-up stagger-1">
+        <div class="code-example-header">
+          <div class="dots"><span></span><span></span><span></span></div>
+          data.fg — Data Processing
+        </div>
+        <pre><span class="keyword">let</span> users = <span class="function">db.query</span>(<span class="string">"SELECT * FROM users"</span>)
+
+<span class="keyword">let</span> active = users
+    .<span class="function">filter</span>(<span class="keyword">fn</span>(u) { u.active })
+    .<span class="function">map</span>(<span class="keyword">fn</span>(u) { u.name })
+
+<span class="function">term.table</span>(active)
+
+<span class="comment">// Export to CSV</span>
+<span class="function">csv.write</span>(<span class="string">"report.csv"</span>, users)
+
+<span class="comment">// Or hash some data</span>
+<span class="keyword">let</span> hash = <span class="function">crypto.sha256</span>(<span class="string">"sensitive"</span>)
+<span class="function">say</span> hash</pre>
+      </div>
+      <div class="code-example fade-up stagger-2">
+        <div class="code-example-header">
+          <div class="dots"><span></span><span></span><span></span></div>
+          devops.fg — Shell Automation
+        </div>
+        <pre><span class="function">say</span> <span class="function">sh</span>(<span class="string">"whoami"</span>)
+
+<span class="keyword">if</span> <span class="function">sh_ok</span>(<span class="string">"which docker"</span>) {
+    <span class="function">say</span> <span class="string">"Docker installed"</span>
+}
+
+<span class="keyword">let</span> files = <span class="function">sh_lines</span>(<span class="string">"ls /etc | head -5"</span>)
+<span class="keyword">for</span> f <span class="keyword">in</span> files {
+    <span class="function">say</span> <span class="string">"Found: {f}"</span>
+}
+
+<span class="comment">// Pipe Forge data into commands</span>
+<span class="keyword">let</span> sorted = <span class="function">pipe_to</span>(data, <span class="string">"sort"</span>)</pre>
+      </div>
+      <div class="code-example fade-up stagger-3">
+        <div class="code-example-header">
+          <div class="dots"><span></span><span></span><span></span></div>
+          app.fg — Innovation Keywords
+        </div>
+        <pre><span class="comment">// Error handling that reads</span>
+<span class="keyword">safe</span> { <span class="function">risky_function</span>() }
+<span class="keyword">must</span> <span class="function">parse_config</span>(<span class="string">"app.toml"</span>)
+
+<span class="comment">// Retry with a keyword</span>
+<span class="keyword">retry</span> <span class="number">3</span> <span class="keyword">times</span> {
+    <span class="function">fetch</span>(<span class="string">"https://api.example.com"</span>)
+}
+
+<span class="comment">// Pattern matching + ADTs</span>
+<span class="keyword">type</span> <span class="type">Shape</span> = <span class="type">Circle</span>(<span class="type">Float</span>) | <span class="type">Rect</span>(<span class="type">Float</span>, <span class="type">Float</span>)
+<span class="keyword">match</span> shape {
+    <span class="type">Circle</span>(r) => <span class="function">say</span> <span class="string">"r={r}"</span>
+    <span class="type">Rect</span>(w, h) => <span class="function">say</span> <span class="string">"{w}x{h}"</span>
+}</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Performance -->
+<section id="performance">
+  <div class="section-label fade-up">Performance</div>
+  <div class="section-title fade-up stagger-1">Three engines. Pick your tradeoff.</div>
+  <p class="section-desc fade-up stagger-2">
+    Full stdlib with the interpreter. Raw speed with the JIT. The Cranelift JIT puts Forge alongside Node.js for compute-heavy code.
+  </p>
+
+  <div class="perf-grid fade-up stagger-3">
+    <div class="perf-card">
+      <div class="engine">--jit</div>
+      <div class="time">10<span>ms</span></div>
+      <div class="compare">11x faster than Python</div>
+      <div class="label">Cranelift JIT • Hot functions</div>
+    </div>
+    <div class="perf-card">
+      <div class="engine">--vm</div>
+      <div class="time">252<span>ms</span></div>
+      <div class="compare">Bytecode VM</div>
+      <div class="label">Compiled bytecode</div>
+    </div>
+    <div class="perf-card">
+      <div class="engine">interpreter</div>
+      <div class="time">2.3<span>s</span></div>
+      <div class="compare">Full stdlib access</div>
+      <div class="label">All 230+ functions available</div>
+    </div>
+  </div>
+
+  <div class="perf-bar-section fade-up stagger-4">
+    <p style="font-size: 0.85rem; color: var(--forge-slate); margin-bottom: 1.5rem; font-family: var(--font-mono);">fib(30) benchmark — lower is better</p>
+    <div class="perf-bar-row">
+      <div class="lang">Rust</div>
+      <div class="perf-bar-track"><div class="perf-bar-fill rust" data-width="1.3"></div></div>
+      <div class="time-label">1.5ms</div>
+    </div>
+    <div class="perf-bar-row">
+      <div class="lang">Go</div>
+      <div class="perf-bar-track"><div class="perf-bar-fill go" data-width="3.7"></div></div>
+      <div class="time-label">4.2ms</div>
+    </div>
+    <div class="perf-bar-row">
+      <div class="lang">Node.js</div>
+      <div class="perf-bar-track"><div class="perf-bar-fill node" data-width="8.4"></div></div>
+      <div class="time-label">9.5ms</div>
+    </div>
+    <div class="perf-bar-row">
+      <div class="lang">Forge JIT</div>
+      <div class="perf-bar-track"><div class="perf-bar-fill forge-jit" data-width="8.8"></div></div>
+      <div class="time-label">10ms</div>
+    </div>
+    <div class="perf-bar-row">
+      <div class="lang">Python</div>
+      <div class="perf-bar-track"><div class="perf-bar-fill python" data-width="100"></div></div>
+      <div class="time-label">114ms</div>
+    </div>
+  </div>
+</section>
+
+<!-- Modules -->
+<div class="full-section bg-mid" id="modules">
+  <div class="inner">
+    <div class="section-label fade-up">Standard Library</div>
+    <div class="section-title fade-up stagger-1">16 modules. No imports needed.</div>
+    <p class="section-desc fade-up stagger-2">
+      Every module is available from the first line of code. No package manager, no dependency hell.
+    </p>
+
+    <div class="modules-grid fade-up stagger-3">
+      <div class="module-chip">
+        <div class="mod-name">math</div>
+        <div class="mod-desc">sqrt, pow, abs, sin, cos, pi, random, clamp</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">fs</div>
+        <div class="mod-desc">read, write, exists, list, mkdir, copy, rename</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">crypto</div>
+        <div class="mod-desc">sha256, md5, base64, hex encode/decode</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">db</div>
+        <div class="mod-desc">SQLite — open, query, execute, close</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">pg</div>
+        <div class="mod-desc">PostgreSQL — connect, query, execute</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">http</div>
+        <div class="mod-desc">get, post, put, delete, download, crawl</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">json</div>
+        <div class="mod-desc">parse, stringify, pretty print</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">csv</div>
+        <div class="mod-desc">parse, stringify, read, write</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">regex</div>
+        <div class="mod-desc">test, find, find_all, replace, split</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">term</div>
+        <div class="mod-desc">colors, table, sparkline, bar, banner</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">env</div>
+        <div class="mod-desc">get, set, has, keys — environment vars</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">log</div>
+        <div class="mod-desc">info, warn, error, debug — structured logging</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">io</div>
+        <div class="mod-desc">prompt, print, args parsing</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">exec</div>
+        <div class="mod-desc">run_command — external processes</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">time</div>
+        <div class="mod-desc">now, format, parse, elapsed</div>
+      </div>
+      <div class="module-chip">
+        <div class="mod-name">npc</div>
+        <div class="mod-desc">Fake data — names, emails, IPs, UUIDs</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CTA -->
+<div class="cta-section">
+  <div class="inner">
+    <h2 class="fade-up">Start forging.</h2>
+    <p class="fade-up stagger-1">One install. 30 tutorials. Everything built in.</p>
+    <div class="cta-actions fade-up stagger-2">
+      <div class="cta-install" onclick="copyInstall(this)">
+        <span class="prompt">$</span>
+        brew install humancto/tap/forge
+        <span class="copy-icon">⎘</span>
+      </div>
+    </div>
+    <div style="margin-top: 1.5rem;" class="fade-up stagger-3">
+      <a href="https://github.com/humancto/forge-lang" style="color: var(--forge-slate); font-size: 0.85rem;">
+        Or: <span style="color: var(--forge-orange)">cargo install forge-lang</span> · <span style="color: var(--forge-orange)">curl install script</span> · <span style="color: var(--forge-orange)">build from source</span>
+      </a>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<footer>
+  <div class="footer-content">
+    <div class="footer-left">
+      ⚒ Forge — MIT License — Built with Rust
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/humancto/forge-lang">GitHub</a>
+      <a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf">Book (PDF)</a>
+      <a href="https://crates.io/crates/forge-lang">crates.io</a>
+      <a href="https://github.com/humancto/forge-lang/issues">Issues</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// Nav scroll effect
+const nav = document.getElementById('nav');
+window.addEventListener('scroll', () => {
+  nav.classList.toggle('scrolled', window.scrollY > 50);
+});
+
+// Intersection Observer for fade-up animations
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+    }
+  });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+document.querySelectorAll('.fade-up').forEach(el => observer.observe(el));
+
+// Performance bars animation
+const perfObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.querySelectorAll('.perf-bar-fill').forEach(bar => {
+        const width = bar.dataset.width;
+        setTimeout(() => {
+          bar.style.width = width + '%';
+        }, 200);
+      });
+      perfObserver.unobserve(entry.target);
+    }
+  });
+}, { threshold: 0.3 });
+
+const perfSection = document.querySelector('.perf-bar-section');
+if (perfSection) perfObserver.observe(perfSection);
+
+// Copy install command
+function copyInstall(el) {
+  navigator.clipboard.writeText('brew install humancto/tap/forge');
+  const icon = el.querySelector('.copy-icon');
+  const original = icon.textContent;
+  icon.textContent = '✓ copied';
+  el.classList.add('copied');
+  setTimeout(() => {
+    icon.textContent = original;
+    el.classList.remove('copied');
+  }, 2000);
+}
+
+// Floating particles
+const particlesContainer = document.getElementById('particles');
+for (let i = 0; i < 20; i++) {
+  const particle = document.createElement('div');
+  particle.className = 'particle';
+  particle.style.left = Math.random() * 100 + '%';
+  particle.style.animationDuration = (8 + Math.random() * 12) + 's';
+  particle.style.animationDelay = Math.random() * 10 + 's';
+  particle.style.width = (1 + Math.random() * 2) + 'px';
+  particle.style.height = particle.style.width;
+  particlesContainer.appendChild(particle);
+}
+</script>
+
+</body>
+</html>

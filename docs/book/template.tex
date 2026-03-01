@@ -129,13 +129,10 @@ $endif$
 \begin{document}
 
 % === Full-bleed cover page ===
-\newgeometry{margin=0pt}
 \thispagestyle{empty}
-\begin{center}
-\vspace*{0pt}
-\includegraphics[width=\paperwidth,height=\paperheight]{$cover-image$}
-\end{center}
-\restoregeometry
+\vspace*{-1in}\hspace*{-1in}%
+\noindent\includegraphics[width=\paperwidth,height=\paperheight]{$cover-image$}
+\clearpage
 
 % === Half-title page ===
 \thispagestyle{empty}
