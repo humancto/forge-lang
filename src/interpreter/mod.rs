@@ -368,6 +368,9 @@ impl Interpreter {
             "yell",
             "whisper",
             "wait",
+            "channel",
+            "send",
+            "receive",
             "is_some",
             "is_none",
             "satisfies",
@@ -786,14 +789,19 @@ impl Interpreter {
             Stmt::Continue => Ok(Signal::Continue),
 
             Stmt::Spawn { body } => {
-                // Run spawn body on a background thread for real concurrency
                 let body = body.clone();
                 let mut spawn_interp = Interpreter::new();
-                // Copy current environment for the spawn
                 spawn_interp.env = self.env.clone();
-                std::thread::spawn(move || {
-                    let _ = spawn_interp.exec_block(&body);
-                });
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    tokio::task::spawn_blocking(move || match spawn_interp.exec_block(&body) {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("spawn error: {}", e.message),
+                    });
+                } else {
+                    std::thread::spawn(move || {
+                        let _ = spawn_interp.exec_block(&body);
+                    });
+                }
                 Ok(Signal::None)
             }
 
@@ -2278,6 +2286,83 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new("wait() requires a number of seconds")),
             },
+            "channel" => {
+                let capacity = match args.first() {
+                    Some(Value::Int(n)) => (*n).max(1) as usize,
+                    _ => 32,
+                };
+                let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(capacity);
+                let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+                let rx = std::sync::Arc::new(std::sync::Mutex::new(Some(rx)));
+
+                // Store in thread-safe statics via leaked Box
+                let tx_ptr = Box::into_raw(Box::new(tx)) as usize;
+                let rx_ptr = Box::into_raw(Box::new(rx)) as usize;
+
+                let mut ch = IndexMap::new();
+                ch.insert("__type__".to_string(), Value::String("Channel".to_string()));
+                ch.insert("__tx__".to_string(), Value::Int(tx_ptr as i64));
+                ch.insert("__rx__".to_string(), Value::Int(rx_ptr as i64));
+                ch.insert("capacity".to_string(), Value::Int(capacity as i64));
+                Ok(Value::Object(ch))
+            }
+            "send" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new(
+                        "send(channel, value) requires 2 arguments",
+                    ));
+                }
+                let ch = &args[0];
+                let val = args[1].clone();
+                if let Value::Object(map) = ch {
+                    if let Some(Value::Int(tx_ptr)) = map.get("__tx__") {
+                        let tx = unsafe {
+                            &*((*tx_ptr as usize)
+                                as *const std::sync::Arc<
+                                    std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Value>>>,
+                                >)
+                        };
+                        if let Ok(guard) = tx.lock() {
+                            if let Some(ref sender) = *guard {
+                                sender
+                                    .send(val)
+                                    .map_err(|_| RuntimeError::new("channel closed"))?;
+                                return Ok(Value::Null);
+                            }
+                        }
+                    }
+                }
+                Err(RuntimeError::new(
+                    "send() requires a channel as first argument",
+                ))
+            }
+            "receive" => {
+                let ch = match args.first() {
+                    Some(v) => v,
+                    None => return Err(RuntimeError::new("receive(channel) requires 1 argument")),
+                };
+                if let Value::Object(map) = ch {
+                    if let Some(Value::Int(rx_ptr)) = map.get("__rx__") {
+                        let rx = unsafe {
+                            &*((*rx_ptr as usize)
+                                as *const std::sync::Arc<
+                                    std::sync::Mutex<Option<std::sync::mpsc::Receiver<Value>>>,
+                                >)
+                        };
+                        if let Ok(guard) = rx.lock() {
+                            if let Some(ref receiver) = *guard {
+                                match receiver.recv() {
+                                    Ok(val) => return Ok(val),
+                                    Err(_) => return Ok(Value::Null),
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(RuntimeError::new(
+                    "receive() requires a channel as first argument",
+                ))
+            }
             "reduce" => {
                 if args.len() != 3 {
                     return Err(RuntimeError::new(
