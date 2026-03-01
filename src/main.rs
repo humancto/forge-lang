@@ -1,4 +1,5 @@
 mod chat;
+mod doc;
 mod errors;
 mod formatter;
 mod interpreter;
@@ -17,6 +18,7 @@ mod stdlib;
 mod testing;
 mod typechecker;
 mod vm;
+mod watch;
 
 use std::fs;
 use std::path::PathBuf;
@@ -104,6 +106,16 @@ enum Command {
     },
     /// Start an AI chat session
     Chat,
+    /// Watch a file and re-run on changes
+    Watch {
+        /// Path to a .fg file
+        file: PathBuf,
+    },
+    /// Generate documentation from source files
+    Doc {
+        /// Files or directories (defaults to current directory)
+        paths: Vec<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -203,6 +215,12 @@ async fn main() {
         }
         Some(Command::Chat) => {
             chat::run_chat();
+        }
+        Some(Command::Watch { file }) => {
+            watch::run_watch(&file).await;
+        }
+        Some(Command::Doc { paths }) => {
+            doc::generate_docs(&paths);
         }
         None => {
             repl::run_repl();

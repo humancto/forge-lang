@@ -65,7 +65,8 @@ fn handle_message(body: &str) -> Option<String> {
                         "textDocumentSync": 1,
                         "completionProvider": {
                             "triggerCharacters": ["."]
-                        }
+                        },
+                        "hoverProvider": true
                     }
                 }
             });
@@ -95,11 +96,35 @@ fn handle_message(body: &str) -> Option<String> {
             Some(notification.to_string())
         }
         "textDocument/completion" => {
-            let completions = get_completions();
+            let params = json.get("params")?;
+            let context = params
+                .pointer("/context/triggerCharacter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let completions = if context == "." {
+                get_module_completions(params)
+            } else {
+                get_completions()
+            };
             let result = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": completions
+            });
+            Some(result.to_string())
+        }
+        "textDocument/hover" => {
+            let params = json.get("params")?;
+            let doc = params.get("textDocument")?;
+            let uri = doc.get("uri")?.as_str()?;
+            let position = params.get("position")?;
+            let line = position.get("line")?.as_u64()? as usize;
+            let character = position.get("character")?.as_u64()? as usize;
+            let hover = get_hover(uri, line, character);
+            let result = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": hover
             });
             Some(result.to_string())
         }
@@ -242,7 +267,8 @@ fn get_completions() -> Vec<serde_json::Value> {
         "run_command",
     ];
     let modules = [
-        "math", "fs", "io", "crypto", "db", "env", "json", "regex", "log",
+        "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log", "http", "csv",
+        "term", "time",
     ];
 
     let mut items = Vec::new();
@@ -256,6 +282,195 @@ fn get_completions() -> Vec<serde_json::Value> {
         items.push(serde_json::json!({"label": m, "kind": 9})); // Module
     }
     items
+}
+
+fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> {
+    let _doc = params.get("textDocument");
+    let module_members: std::collections::HashMap<&str, Vec<&str>> = [
+        (
+            "math",
+            vec![
+                "sqrt", "pow", "abs", "max", "min", "floor", "ceil", "round", "random", "sin",
+                "cos", "tan", "log", "pi", "e",
+            ],
+        ),
+        (
+            "fs",
+            vec![
+                "read",
+                "write",
+                "append",
+                "exists",
+                "list",
+                "remove",
+                "mkdir",
+                "copy",
+                "rename",
+                "size",
+                "ext",
+                "read_json",
+                "write_json",
+            ],
+        ),
+        ("io", vec!["prompt", "print", "args"]),
+        (
+            "crypto",
+            vec![
+                "sha256",
+                "md5",
+                "base64_encode",
+                "base64_decode",
+                "hex_encode",
+                "hex_decode",
+            ],
+        ),
+        ("db", vec!["open", "query", "execute", "close"]),
+        ("pg", vec!["connect", "query", "execute", "close"]),
+        ("env", vec!["get", "set", "keys", "has"]),
+        ("json", vec!["parse", "stringify", "pretty"]),
+        (
+            "regex",
+            vec!["test", "find", "find_all", "replace", "split"],
+        ),
+        ("log", vec!["info", "warn", "error", "debug"]),
+        (
+            "http",
+            vec![
+                "get", "post", "put", "delete", "patch", "head", "download", "crawl",
+            ],
+        ),
+        ("csv", vec!["parse", "stringify", "read", "write"]),
+        (
+            "term",
+            vec![
+                "red", "green", "blue", "yellow", "cyan", "magenta", "bold", "dim", "table", "hr",
+                "clear", "confirm",
+            ],
+        ),
+        (
+            "time",
+            vec![
+                "now", "unix", "parse", "format", "diff", "add", "sub", "zone", "elapsed", "today",
+                "sleep", "measure", "local",
+            ],
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    let mut items = Vec::new();
+    for (module, members) in &module_members {
+        for member in members {
+            items.push(serde_json::json!({
+                "label": member,
+                "kind": 3,
+                "detail": format!("{}.{}", module, member),
+                "sortText": format!("0_{}", member),
+            }));
+        }
+    }
+    items
+}
+
+fn get_hover(_uri: &str, _line: usize, _character: usize) -> serde_json::Value {
+    let builtins: std::collections::HashMap<&str, &str> = [
+        (
+            "println",
+            "fn println(...args) — Print values followed by a newline",
+        ),
+        (
+            "print",
+            "fn print(...args) — Print values without a newline",
+        ),
+        ("say", "fn say(...args) — Print with natural language style"),
+        (
+            "len",
+            "fn len(value) -> Int — Get the length of a string, array, or object",
+        ),
+        (
+            "type",
+            "fn type(value) -> String — Get the type name of a value",
+        ),
+        ("str", "fn str(value) -> String — Convert a value to string"),
+        ("int", "fn int(value) -> Int — Convert a value to integer"),
+        (
+            "float",
+            "fn float(value) -> Float — Convert a value to float",
+        ),
+        (
+            "push",
+            "fn push(array, value) — Add an element to the end of an array",
+        ),
+        (
+            "pop",
+            "fn pop(array) -> Value — Remove and return the last element",
+        ),
+        ("map", "fn map(array, fn) -> Array — Transform each element"),
+        (
+            "filter",
+            "fn filter(array, fn) -> Array — Keep elements matching predicate",
+        ),
+        (
+            "reduce",
+            "fn reduce(array, fn, init) -> Value — Fold array to single value",
+        ),
+        (
+            "sort",
+            "fn sort(array) -> Array — Sort array in ascending order",
+        ),
+        (
+            "reverse",
+            "fn reverse(array) -> Array — Reverse array order",
+        ),
+        (
+            "keys",
+            "fn keys(object) -> Array — Get all keys of an object",
+        ),
+        (
+            "values",
+            "fn values(object) -> Array — Get all values of an object",
+        ),
+        (
+            "range",
+            "fn range(start, end) -> Array — Generate integer range [start, end)",
+        ),
+        (
+            "fetch",
+            "fn fetch(url) -> Object — HTTP GET request, returns {status, body, headers}",
+        ),
+        ("uuid", "fn uuid() -> String — Generate a random UUID v4"),
+        (
+            "assert",
+            "fn assert(condition) — Panic if condition is false",
+        ),
+        ("assert_eq", "fn assert_eq(a, b) — Panic if a != b"),
+        (
+            "Ok",
+            "fn Ok(value) -> Result — Wrap value in a success Result",
+        ),
+        (
+            "Err",
+            "fn Err(message) -> Result — Wrap message in an error Result",
+        ),
+        (
+            "unwrap",
+            "fn unwrap(result) -> Value — Extract value from Ok, panic on Err",
+        ),
+        (
+            "sh",
+            "fn sh(command) -> String — Run shell command, return stdout",
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    // Without document text context, return generic hover
+    serde_json::json!({
+        "contents": {
+            "kind": "markdown",
+            "value": "Forge Language Server"
+        }
+    })
 }
 
 use std::io::Read;
