@@ -144,3 +144,31 @@ pub extern "C" fn rt_int_mul(a: i64, b: i64) -> u64 {
         }
     }
 }
+
+/// Simple bridges for JIT code using raw i64/f64 calling convention.
+/// These don't use tagged encoding — they work with the current
+/// type-aware JIT that passes raw values.
+
+pub extern "C" fn rt_println_i64(val: i64) {
+    println!("{}", val);
+}
+
+pub extern "C" fn rt_println_f64(val: f64) {
+    if val.fract() == 0.0 && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
+        println!("{}", val as i64);
+    } else {
+        println!("{}", val);
+    }
+}
+
+pub extern "C" fn rt_print_i64(val: i64) {
+    print!("{}", val);
+}
+
+pub extern "C" fn rt_print_f64(val: f64) {
+    if val.fract() == 0.0 && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
+        print!("{}", val as i64);
+    } else {
+        print!("{}", val);
+    }
+}

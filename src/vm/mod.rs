@@ -299,3 +299,184 @@ mod parity_tests {
         assert_eq!(vm.output, vec!["21"]);
     }
 }
+
+#[cfg(test)]
+mod jit_tests {
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use crate::vm::compiler;
+    use crate::vm::jit::jit_module::JitCompiler;
+    use crate::vm::jit::type_analysis;
+    use crate::vm::machine::{JitEntry, VM};
+
+    fn run_jit_function(source: &str) -> Vec<String> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let chunk = compiler::compile(&program).unwrap();
+
+        let mut jit = JitCompiler::new().unwrap();
+        for (i, proto) in chunk.prototypes.iter().enumerate() {
+            let name = if proto.name.is_empty() {
+                format!("fn_{}", i)
+            } else {
+                proto.name.clone()
+            };
+            let _ = jit.compile_function(proto, &name);
+        }
+
+        let mut vm = VM::new();
+        for (i, proto) in chunk.prototypes.iter().enumerate() {
+            let name = if proto.name.is_empty() {
+                format!("fn_{}", i)
+            } else {
+                proto.name.clone()
+            };
+            if let Some(ptr) = jit.get_compiled(&name) {
+                let type_info = type_analysis::analyze(proto);
+                vm.jit_cache.insert(
+                    name,
+                    JitEntry {
+                        ptr,
+                        uses_float: type_info.has_float,
+                    },
+                );
+            }
+        }
+
+        vm.execute(&chunk).unwrap();
+        vm.output.clone()
+    }
+
+    #[test]
+    fn jit_fib_integer() {
+        let out = run_jit_function(
+            "fn fib(n) { if n <= 1 { return n } return fib(n - 1) + fib(n - 2) }\nprintln(fib(10))",
+        );
+        assert_eq!(out, vec!["55"]);
+    }
+
+    #[test]
+    fn jit_factorial() {
+        let out = run_jit_function(
+            "fn fact(n) { if n <= 1 { return 1 } return n * fact(n - 1) }\nprintln(fact(10))",
+        );
+        assert_eq!(out, vec!["3628800"]);
+    }
+
+    #[test]
+    fn jit_add_two_args() {
+        let out = run_jit_function("fn add(a, b) { return a + b }\nprintln(add(17, 25))");
+        assert_eq!(out, vec!["42"]);
+    }
+
+    #[test]
+    fn jit_subtract() {
+        let out = run_jit_function("fn sub(a, b) { return a - b }\nprintln(sub(100, 58))");
+        assert_eq!(out, vec!["42"]);
+    }
+
+    #[test]
+    fn jit_multiply() {
+        let out = run_jit_function("fn mul(a, b) { return a * b }\nprintln(mul(6, 7))");
+        assert_eq!(out, vec!["42"]);
+    }
+
+    #[test]
+    fn jit_division() {
+        let out = run_jit_function("fn div(a, b) { return a / b }\nprintln(div(84, 2))");
+        assert_eq!(out, vec!["42"]);
+    }
+
+    #[test]
+    fn jit_modulo() {
+        let out = run_jit_function("fn modop(a, b) { return a % b }\nprintln(modop(10, 3))");
+        assert_eq!(out, vec!["1"]);
+    }
+
+    #[test]
+    fn jit_negation() {
+        let out = run_jit_function("fn neg(x) { return -x }\nprintln(neg(42))");
+        assert_eq!(out, vec!["-42"]);
+    }
+
+    #[test]
+    fn jit_comparison() {
+        let out = run_jit_function(
+            "fn max(a, b) { if a > b { return a } return b }\nprintln(max(10, 20))\nprintln(max(30, 5))",
+        );
+        assert_eq!(out, vec!["20", "30"]);
+    }
+
+    #[test]
+    fn jit_zero_args() {
+        let out = run_jit_function("fn answer() { return 42 }\nprintln(answer())");
+        assert_eq!(out, vec!["42"]);
+    }
+
+    #[test]
+    fn jit_nested_calls() {
+        let out = run_jit_function(
+            "fn sq(n) { return n * n }\nfn sum_sq(a, b) { return sq(a) + sq(b) }\nprintln(sum_sq(3, 4))",
+        );
+        assert_eq!(out, vec!["25"]);
+    }
+
+    #[test]
+    fn jit_loop_accumulator() {
+        let out = run_jit_function(
+            "fn sum_to(n) { let mut s = 0\nlet mut i = 1\nwhile i <= n { s = s + i\ni = i + 1 }\nreturn s }\nprintln(sum_to(100))",
+        );
+        assert_eq!(out, vec!["5050"]);
+    }
+
+    #[test]
+    fn jit_boolean_function() {
+        let out = run_jit_function(
+            "fn is_even(n) { return n % 2 == 0 }\nprintln(is_even(4))\nprintln(is_even(7))",
+        );
+        // JIT returns int (1/0) for boolean results; VM println shows as 1/0
+        assert_eq!(out, vec!["1", "0"]);
+    }
+
+    #[test]
+    fn jit_float_arithmetic() {
+        let out = run_jit_function(
+            "fn circle_area(r) { return 3.14159 * r * r }\nprintln(circle_area(10.0))",
+        );
+        assert_eq!(out, vec!["314.159"]);
+    }
+
+    #[test]
+    fn jit_float_negation() {
+        let out = run_jit_function("fn neg_pi() { return -3.14159 }\nprintln(neg_pi())");
+        assert_eq!(out, vec!["-3.14159"]);
+    }
+
+    #[test]
+    fn jit_rejects_string_function() {
+        let mut lexer = Lexer::new("fn greet() { return \"hello\" }");
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let chunk = compiler::compile(&program).unwrap();
+
+        let mut jit = JitCompiler::new().unwrap();
+        let result = jit.compile_function(&chunk.prototypes[0], "greet");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn jit_rejects_array_function() {
+        let mut lexer = Lexer::new("fn make_arr() { return [1, 2, 3] }");
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let chunk = compiler::compile(&program).unwrap();
+
+        let mut jit = JitCompiler::new().unwrap();
+        let result = jit.compile_function(&chunk.prototypes[0], "make_arr");
+        assert!(result.is_err());
+    }
+}
