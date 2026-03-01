@@ -58,6 +58,10 @@ struct Cli {
     /// Profile function calls (uses VM, prints report after execution)
     #[arg(long = "profile")]
     profile: bool,
+
+    /// Enforce type annotations as errors (gradual strict mode)
+    #[arg(long = "strict")]
+    strict: bool,
 }
 
 #[derive(Subcommand)]
@@ -124,6 +128,7 @@ async fn main() {
     let use_vm = cli.use_vm || cli.use_jit || cli.profile;
     let use_jit = cli.use_jit;
     let profile = cli.profile;
+    let strict = cli.strict;
 
     if let Some(code) = cli.eval_code {
         let code = code.replace(';', "\n");
@@ -131,7 +136,7 @@ async fn main() {
             run_jit(&code, "<eval>");
             return;
         }
-        run_source(&code, "<eval>", use_vm, profile).await;
+        run_source(&code, "<eval>", use_vm, profile, strict).await;
         return;
     }
 
@@ -159,7 +164,7 @@ async fn main() {
                 run_jit(&source, &path_str);
                 return;
             }
-            run_source(&source, &path_str, use_vm, profile).await;
+            run_source(&source, &path_str, use_vm, profile, strict).await;
         }
         Some(Command::Repl) => {
             repl::run_repl();
@@ -228,7 +233,7 @@ async fn main() {
     }
 }
 
-async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool) {
+async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, strict: bool) {
     let mut lexer = Lexer::new(source);
     let tokens = match lexer.tokenize() {
         Ok(tokens) => tokens,
@@ -263,10 +268,19 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool) {
         }
     };
 
-    let mut checker = typechecker::TypeChecker::new();
+    let mut checker = typechecker::TypeChecker::with_strict(strict);
     let warnings = checker.check(&program);
+    let mut has_type_errors = false;
     for w in &warnings {
-        eprintln!("{}", errors::format_warning(&w.message));
+        if w.is_error {
+            eprintln!("{}", errors::format_simple_error(&w.message));
+            has_type_errors = true;
+        } else {
+            eprintln!("{}", errors::format_warning(&w.message));
+        }
+    }
+    if has_type_errors {
+        process::exit(1);
     }
 
     if use_vm {

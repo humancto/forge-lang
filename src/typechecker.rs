@@ -2,33 +2,55 @@
 /// Runs between parsing and interpretation.
 /// Enforces type annotations when present, ignores when absent.
 /// Does NOT reject programs without annotations (gradual typing).
+///
+/// With --strict: type mismatches are errors.
+/// Without --strict: type mismatches are warnings.
 use crate::parser::ast::*;
 use std::collections::HashMap;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct TypeWarning {
     pub message: String,
     pub line: usize,
     pub col: usize,
+    pub is_error: bool,
+}
+
+impl TypeWarning {
+    fn warn(msg: impl Into<String>) -> Self {
+        Self {
+            message: msg.into(),
+            line: 0,
+            col: 0,
+            is_error: false,
+        }
+    }
+
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            message: msg.into(),
+            line: 0,
+            col: 0,
+            is_error: true,
+        }
+    }
 }
 
 pub struct TypeChecker {
-    /// function name -> (param types, return type)
     functions: HashMap<String, FnSignature>,
-    /// type name -> list of variant names
     type_defs: HashMap<String, Vec<String>>,
-    /// interface name -> list of method signatures
     interfaces: HashMap<String, Vec<InterfaceMethod>>,
+    variables: HashMap<String, InferredType>,
+    current_fn_return: Option<InferredType>,
+    strict: bool,
     warnings: Vec<TypeWarning>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct FnSignature {
-    params: Vec<Option<String>>,
+    params: Vec<(String, Option<InferredType>)>,
     param_count: usize,
-    return_type: Option<String>,
+    return_type: Option<InferredType>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,7 +58,109 @@ struct FnSignature {
 struct InterfaceMethod {
     name: String,
     param_count: usize,
-    return_type: Option<String>,
+    return_type: Option<InferredType>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InferredType {
+    Int,
+    Float,
+    String,
+    Bool,
+    Null,
+    Array(Box<InferredType>),
+    Object,
+    Function(Vec<InferredType>, Box<InferredType>),
+    Option(Box<InferredType>),
+    Result(Box<InferredType>, Box<InferredType>),
+    Named(std::string::String),
+    Unknown,
+}
+
+impl std::fmt::Display for InferredType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InferredType::Int => write!(f, "Int"),
+            InferredType::Float => write!(f, "Float"),
+            InferredType::String => write!(f, "String"),
+            InferredType::Bool => write!(f, "Bool"),
+            InferredType::Null => write!(f, "Null"),
+            InferredType::Array(inner) => write!(f, "[{}]", inner),
+            InferredType::Object => write!(f, "Object"),
+            InferredType::Function(params, ret) => {
+                let ps: Vec<std::string::String> =
+                    params.iter().map(|p| format!("{}", p)).collect();
+                write!(f, "fn({}) -> {}", ps.join(", "), ret)
+            }
+            InferredType::Option(inner) => write!(f, "?{}", inner),
+            InferredType::Result(ok, err) => write!(f, "Result<{}, {}>", ok, err),
+            InferredType::Named(n) => write!(f, "{}", n),
+            InferredType::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+fn type_ann_to_inferred(ann: &TypeAnn) -> InferredType {
+    match ann {
+        TypeAnn::Simple(name) => match name.to_lowercase().as_str() {
+            "int" | "i64" | "integer" => InferredType::Int,
+            "float" | "f64" | "number" => InferredType::Float,
+            "string" | "str" => InferredType::String,
+            "bool" | "boolean" => InferredType::Bool,
+            "null" | "void" => InferredType::Null,
+            "object" | "json" => InferredType::Object,
+            _ => InferredType::Named(name.clone()),
+        },
+        TypeAnn::Array(inner) => InferredType::Array(Box::new(type_ann_to_inferred(inner))),
+        TypeAnn::Generic(name, args) => match name.as_str() {
+            "Option" if args.len() == 1 => {
+                InferredType::Option(Box::new(type_ann_to_inferred(&args[0])))
+            }
+            "Result" if args.len() == 2 => InferredType::Result(
+                Box::new(type_ann_to_inferred(&args[0])),
+                Box::new(type_ann_to_inferred(&args[1])),
+            ),
+            _ => InferredType::Named(name.clone()),
+        },
+        TypeAnn::Function(params, ret) => {
+            let param_types: Vec<InferredType> = params.iter().map(type_ann_to_inferred).collect();
+            InferredType::Function(param_types, Box::new(type_ann_to_inferred(ret)))
+        }
+        TypeAnn::Optional(inner) => InferredType::Option(Box::new(type_ann_to_inferred(inner))),
+    }
+}
+
+fn types_compatible(expected: &InferredType, actual: &InferredType) -> bool {
+    if *expected == InferredType::Unknown || *actual == InferredType::Unknown {
+        return true;
+    }
+    if expected == actual {
+        return true;
+    }
+    // Int and Float are compatible (numeric promotion)
+    if matches!(
+        (expected, actual),
+        (InferredType::Int, InferredType::Float) | (InferredType::Float, InferredType::Int)
+    ) {
+        return true;
+    }
+    // Named types match any concrete type (we don't track struct fields yet)
+    if matches!(expected, InferredType::Named(_)) || matches!(actual, InferredType::Named(_)) {
+        return true;
+    }
+    // Object matches any named type or Json
+    if matches!(
+        (expected, actual),
+        (InferredType::Object, InferredType::Named(_))
+            | (InferredType::Named(_), InferredType::Object)
+    ) {
+        return true;
+    }
+    // Option<T> accepts T or Null
+    if let InferredType::Option(inner) = expected {
+        return *actual == InferredType::Null || types_compatible(inner, actual);
+    }
+    false
 }
 
 impl TypeChecker {
@@ -45,21 +169,40 @@ impl TypeChecker {
             functions: HashMap::new(),
             type_defs: HashMap::new(),
             interfaces: HashMap::new(),
+            variables: HashMap::new(),
+            current_fn_return: None,
+            strict: false,
             warnings: Vec::new(),
         }
     }
 
+    pub fn with_strict(strict: bool) -> Self {
+        Self {
+            functions: HashMap::new(),
+            type_defs: HashMap::new(),
+            interfaces: HashMap::new(),
+            variables: HashMap::new(),
+            current_fn_return: None,
+            strict,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn emit(&mut self, msg: impl Into<String>) {
+        if self.strict {
+            self.warnings.push(TypeWarning::error(msg));
+        } else {
+            self.warnings.push(TypeWarning::warn(msg));
+        }
+    }
+
     pub fn check(&mut self, program: &Program) -> Vec<TypeWarning> {
-        // First pass: collect all function signatures, type defs, and interfaces
         for stmt in &program.statements {
             self.collect_definitions(stmt);
         }
-
-        // Second pass: check usage
         for stmt in &program.statements {
             self.check_stmt(stmt);
         }
-
         std::mem::take(&mut self.warnings)
     }
 
@@ -71,16 +214,21 @@ impl TypeChecker {
                 return_type,
                 ..
             } => {
-                let param_types: Vec<Option<String>> = params
+                let param_types: Vec<(String, Option<InferredType>)> = params
                     .iter()
-                    .map(|p| p.type_ann.as_ref().map(type_ann_to_string))
+                    .map(|p| {
+                        (
+                            p.name.clone(),
+                            p.type_ann.as_ref().map(type_ann_to_inferred),
+                        )
+                    })
                     .collect();
                 self.functions.insert(
                     name.clone(),
                     FnSignature {
                         param_count: params.len(),
                         params: param_types,
-                        return_type: return_type.as_ref().map(type_ann_to_string),
+                        return_type: return_type.as_ref().map(type_ann_to_inferred),
                     },
                 );
             }
@@ -94,7 +242,7 @@ impl TypeChecker {
                     .map(|m| InterfaceMethod {
                         name: m.name.clone(),
                         param_count: m.params.len(),
-                        return_type: m.return_type.as_ref().map(type_ann_to_string),
+                        return_type: m.return_type.as_ref().map(type_ann_to_inferred),
                     })
                     .collect();
                 self.interfaces.insert(name.clone(), method_sigs);
@@ -106,19 +254,80 @@ impl TypeChecker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let {
-                value, type_ann, ..
+                name,
+                value,
+                type_ann,
+                ..
             } => {
-                self.check_expr(value);
-                if let Some(_ann) = type_ann {
-                    // Future: validate that value type matches annotation
+                let inferred = self.infer_expr(value);
+                if let Some(ann) = type_ann {
+                    let expected = type_ann_to_inferred(ann);
+                    if inferred != InferredType::Unknown && !types_compatible(&expected, &inferred)
+                    {
+                        self.emit(format!(
+                            "type mismatch: '{}' declared as {} but assigned {}",
+                            name, expected, inferred
+                        ));
+                    }
+                    self.variables.insert(name.clone(), expected);
+                } else {
+                    self.variables.insert(name.clone(), inferred);
                 }
             }
-            Stmt::Assign { value, .. } => {
-                self.check_expr(value);
+            Stmt::Assign { target, value } => {
+                let val_type = self.infer_expr(value);
+                if let Expr::Ident(name) = target {
+                    if let Some(var_type) = self.variables.get(name).cloned() {
+                        if var_type != InferredType::Unknown
+                            && val_type != InferredType::Unknown
+                            && !types_compatible(&var_type, &val_type)
+                        {
+                            self.emit(format!(
+                                "type mismatch: '{}' is {} but assigned {}",
+                                name, var_type, val_type
+                            ));
+                        }
+                    }
+                }
             }
-            Stmt::FnDef { body, .. } => {
+            Stmt::FnDef {
+                name,
+                params,
+                body,
+                return_type,
+                ..
+            } => {
+                let prev_return = self.current_fn_return.take();
+                self.current_fn_return = return_type.as_ref().map(type_ann_to_inferred);
+
+                for param in params {
+                    if let Some(ref ann) = param.type_ann {
+                        self.variables
+                            .insert(param.name.clone(), type_ann_to_inferred(ann));
+                    }
+                }
+
                 for s in body {
                     self.check_stmt(s);
+                }
+
+                // Collect definitions for nested functions
+                for s in body {
+                    self.collect_definitions(s);
+                }
+
+                self.current_fn_return = prev_return;
+                let _ = name;
+            }
+            Stmt::Return(Some(expr)) => {
+                let returned = self.infer_expr(expr);
+                if let Some(ref expected) = self.current_fn_return {
+                    if returned != InferredType::Unknown && !types_compatible(expected, &returned) {
+                        self.emit(format!(
+                            "return type mismatch: expected {} but returning {}",
+                            expected, returned
+                        ));
+                    }
                 }
             }
             Stmt::If {
@@ -126,7 +335,10 @@ impl TypeChecker {
                 then_body,
                 else_body,
             } => {
-                self.check_expr(condition);
+                let cond_type = self.infer_expr(condition);
+                if cond_type != InferredType::Unknown && cond_type != InferredType::Bool {
+                    // Not an error in a dynamic language, just informational
+                }
                 for s in then_body {
                     self.check_stmt(s);
                 }
@@ -137,13 +349,13 @@ impl TypeChecker {
                 }
             }
             Stmt::For { iterable, body, .. } => {
-                self.check_expr(iterable);
+                self.infer_expr(iterable);
                 for s in body {
                     self.check_stmt(s);
                 }
             }
             Stmt::While { condition, body } => {
-                self.check_expr(condition);
+                self.infer_expr(condition);
                 for s in body {
                     self.check_stmt(s);
                 }
@@ -153,14 +365,12 @@ impl TypeChecker {
                     self.check_stmt(s);
                 }
             }
-            Stmt::Return(Some(expr)) => {
-                self.check_expr(expr);
-            }
+            Stmt::Return(None) => {}
             Stmt::Expression(expr) => {
-                self.check_expr(expr);
+                self.infer_expr(expr);
             }
             Stmt::Match { subject, arms } => {
-                self.check_expr(subject);
+                self.infer_expr(subject);
                 for arm in arms {
                     for s in &arm.body {
                         self.check_stmt(s);
@@ -171,71 +381,233 @@ impl TypeChecker {
         }
     }
 
-    fn check_expr(&mut self, expr: &Expr) {
+    fn infer_expr(&mut self, expr: &Expr) -> InferredType {
         match expr {
-            Expr::Call { function, args } => {
-                if let Expr::Ident(name) = function.as_ref() {
-                    if let Some(sig) = self.functions.get(name).cloned() {
-                        if args.len() != sig.param_count {
-                            self.warnings.push(TypeWarning {
-                                message: format!(
-                                    "function '{}' expects {} argument(s), got {}",
-                                    name,
-                                    sig.param_count,
-                                    args.len()
-                                ),
-                                line: 0,
-                                col: 0,
-                            });
+            Expr::Int(_) => InferredType::Int,
+            Expr::Float(_) => InferredType::Float,
+            Expr::StringLit(_) => InferredType::String,
+            Expr::Bool(_) => InferredType::Bool,
+
+            Expr::Ident(name) => {
+                if let Some(t) = self.variables.get(name) {
+                    return t.clone();
+                }
+                if self.functions.contains_key(name) {
+                    return InferredType::Function(vec![], Box::new(InferredType::Unknown));
+                }
+                InferredType::Unknown
+            }
+
+            Expr::StringInterp(_) => InferredType::String,
+
+            Expr::BinOp { left, op, right } => {
+                let lt = self.infer_expr(left);
+                let rt = self.infer_expr(right);
+                match op {
+                    BinOp::Eq
+                    | BinOp::NotEq
+                    | BinOp::Lt
+                    | BinOp::Gt
+                    | BinOp::LtEq
+                    | BinOp::GtEq
+                    | BinOp::And
+                    | BinOp::Or => InferredType::Bool,
+                    BinOp::Add => {
+                        if lt == InferredType::String || rt == InferredType::String {
+                            InferredType::String
+                        } else if lt == InferredType::Float || rt == InferredType::Float {
+                            InferredType::Float
+                        } else if lt == InferredType::Int && rt == InferredType::Int {
+                            InferredType::Int
+                        } else {
+                            InferredType::Unknown
+                        }
+                    }
+                    BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                        if lt == InferredType::Float || rt == InferredType::Float {
+                            InferredType::Float
+                        } else if lt == InferredType::Int && rt == InferredType::Int {
+                            InferredType::Int
+                        } else {
+                            InferredType::Unknown
                         }
                     }
                 }
+            }
+
+            Expr::UnaryOp { op, operand } => {
+                let t = self.infer_expr(operand);
+                match op {
+                    UnaryOp::Neg => t,
+                    UnaryOp::Not => InferredType::Bool,
+                }
+            }
+
+            Expr::Call { function, args } => {
+                if let Expr::Ident(name) = function.as_ref() {
+                    if let Some(sig) = self.functions.get(name).cloned() {
+                        // Arity check
+                        if args.len() != sig.param_count
+                            && !args.iter().any(|a| matches!(a, Expr::Spread(_)))
+                        {
+                            self.emit(format!(
+                                "function '{}' expects {} argument(s), got {}",
+                                name,
+                                sig.param_count,
+                                args.len()
+                            ));
+                        }
+
+                        // Argument type check
+                        for (i, arg) in args.iter().enumerate() {
+                            let arg_type = self.infer_expr(arg);
+                            if let Some((_, Some(expected))) = sig.params.get(i) {
+                                if arg_type != InferredType::Unknown
+                                    && !types_compatible(expected, &arg_type)
+                                {
+                                    self.emit(format!(
+                                        "argument {} of '{}': expected {} but got {}",
+                                        i + 1,
+                                        name,
+                                        expected,
+                                        arg_type
+                                    ));
+                                }
+                            }
+                        }
+
+                        return sig.return_type.unwrap_or(InferredType::Unknown);
+                    }
+
+                    match name.as_str() {
+                        "len" => return InferredType::Int,
+                        "str" | "type" | "typeof" | "uuid" | "cwd" | "sh" => {
+                            return InferredType::String
+                        }
+                        "int" => return InferredType::Int,
+                        "float" => return InferredType::Float,
+                        "Ok" | "ok" => {
+                            return InferredType::Result(
+                                Box::new(InferredType::Unknown),
+                                Box::new(InferredType::Unknown),
+                            )
+                        }
+                        "Err" | "err" => {
+                            return InferredType::Result(
+                                Box::new(InferredType::Unknown),
+                                Box::new(InferredType::Unknown),
+                            )
+                        }
+                        "is_ok" | "is_err" | "is_some" | "is_none" | "contains" | "starts_with"
+                        | "ends_with" | "sh_ok" | "satisfies" => return InferredType::Bool,
+                        "range" | "map" | "filter" | "sort" | "reverse" | "keys" | "values"
+                        | "split" | "sh_lines" | "entries" => {
+                            return InferredType::Array(Box::new(InferredType::Unknown))
+                        }
+                        "fetch" | "shell" | "sh_json" | "merge" => return InferredType::Object,
+                        _ => {}
+                    }
+                }
+
                 for arg in args {
-                    self.check_expr(arg);
+                    self.infer_expr(arg);
                 }
+                InferredType::Unknown
             }
-            Expr::BinOp { left, right, .. } => {
-                self.check_expr(left);
-                self.check_expr(right);
-            }
-            Expr::UnaryOp { operand, .. } => {
-                self.check_expr(operand);
-            }
-            Expr::FieldAccess { object, .. } => {
-                self.check_expr(object);
-            }
-            Expr::Index { object, index } => {
-                self.check_expr(object);
-                self.check_expr(index);
-            }
-            Expr::Pipeline { value, function } => {
-                self.check_expr(value);
-                self.check_expr(function);
-            }
-            Expr::Try(inner) => {
-                self.check_expr(inner);
-            }
+
             Expr::Array(items) => {
+                let mut elem_type = InferredType::Unknown;
                 for item in items {
-                    self.check_expr(item);
+                    let t = self.infer_expr(item);
+                    if elem_type == InferredType::Unknown {
+                        elem_type = t;
+                    }
                 }
+                InferredType::Array(Box::new(elem_type))
             }
+
             Expr::Object(fields) => {
-                for (_, expr) in fields {
-                    self.check_expr(expr);
+                for (_, val) in fields {
+                    self.infer_expr(val);
                 }
+                InferredType::Object
             }
-            Expr::Lambda { body, .. } => {
+
+            Expr::FieldAccess { object, .. } => {
+                self.infer_expr(object);
+                InferredType::Unknown
+            }
+
+            Expr::Index { object, index } => {
+                let obj_type = self.infer_expr(object);
+                self.infer_expr(index);
+                if let InferredType::Array(inner) = obj_type {
+                    return *inner;
+                }
+                InferredType::Unknown
+            }
+
+            Expr::Pipeline { value, function } => {
+                self.infer_expr(value);
+                self.infer_expr(function);
+                InferredType::Unknown
+            }
+
+            Expr::Lambda { params, body, .. } => {
+                for p in params {
+                    if let Some(ref ann) = p.type_ann {
+                        self.variables
+                            .insert(p.name.clone(), type_ann_to_inferred(ann));
+                    }
+                }
                 for s in body {
                     self.check_stmt(s);
                 }
+                InferredType::Function(vec![], Box::new(InferredType::Unknown))
             }
+
+            Expr::Try(inner) => {
+                self.infer_expr(inner);
+                InferredType::Unknown
+            }
+
+            Expr::StructInit { name, fields } => {
+                for (_, val) in fields {
+                    self.infer_expr(val);
+                }
+                InferredType::Named(name.clone())
+            }
+
+            Expr::MethodCall { object, args, .. } => {
+                self.infer_expr(object);
+                for arg in args {
+                    self.infer_expr(arg);
+                }
+                InferredType::Unknown
+            }
+
             Expr::Block(stmts) => {
                 for s in stmts {
                     self.check_stmt(s);
                 }
+                InferredType::Unknown
             }
-            _ => {}
+
+            Expr::Await(inner) | Expr::Must(inner) | Expr::Freeze(inner) | Expr::Ask(inner) => {
+                self.infer_expr(inner)
+            }
+
+            Expr::Spread(inner) => self.infer_expr(inner),
+
+            Expr::WhereFilter { source, .. } => {
+                self.infer_expr(source);
+                InferredType::Array(Box::new(InferredType::Unknown))
+            }
+
+            Expr::PipeChain { source, .. } => {
+                self.infer_expr(source);
+                InferredType::Unknown
+            }
         }
     }
 }
@@ -253,5 +625,186 @@ fn type_ann_to_string(ann: &TypeAnn) -> String {
             format!("({}) -> {}", param_strs.join(", "), type_ann_to_string(ret))
         }
         TypeAnn::Optional(inner) => format!("?{}", type_ann_to_string(inner)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn check_source(source: &str, strict: bool) -> Vec<TypeWarning> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut checker = TypeChecker::with_strict(strict);
+        checker.check(&program)
+    }
+
+    fn warnings_for(source: &str) -> Vec<TypeWarning> {
+        check_source(source, false)
+    }
+
+    fn errors_for(source: &str) -> Vec<TypeWarning> {
+        check_source(source, true)
+    }
+
+    #[test]
+    fn no_warnings_for_unannotated_code() {
+        let w = warnings_for("let x = 42\nlet y = x + 1\nprintln(y)");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn no_warnings_for_correct_annotations() {
+        let w = warnings_for("let x: Int = 42");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn warns_on_let_type_mismatch() {
+        let w = warnings_for("let x: Int = \"hello\"");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("type mismatch"));
+        assert!(w[0].message.contains("Int"));
+        assert!(w[0].message.contains("String"));
+        assert!(!w[0].is_error);
+    }
+
+    #[test]
+    fn strict_mode_produces_errors() {
+        let w = errors_for("let x: Int = \"hello\"");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].is_error);
+    }
+
+    #[test]
+    fn warns_on_return_type_mismatch() {
+        let w = warnings_for("fn add(a: Int, b: Int) -> Int { return \"oops\" }");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("return type mismatch"));
+    }
+
+    #[test]
+    fn no_warning_for_correct_return() {
+        let w = warnings_for("fn add(a: Int, b: Int) -> Int { return a + b }");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn warns_on_arity_mismatch() {
+        let w = warnings_for("fn add(a, b) { return a + b }\nadd(1, 2, 3)");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("expects 2"));
+    }
+
+    #[test]
+    fn warns_on_argument_type_mismatch() {
+        let w = warnings_for("fn double(x: Int) -> Int { return x * 2 }\ndouble(\"hello\")");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("argument 1"));
+        assert!(w[0].message.contains("expected Int"));
+        assert!(w[0].message.contains("got String"));
+    }
+
+    #[test]
+    fn no_warning_for_correct_args() {
+        let w = warnings_for("fn double(x: Int) -> Int { return x * 2 }\ndouble(5)");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn infers_string_concatenation() {
+        let w = warnings_for("let x: Int = \"a\" + \"b\"");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("String"));
+    }
+
+    #[test]
+    fn infers_float_promotion() {
+        let w = warnings_for("let x: Int = 1 + 2.5");
+        // 1 + 2.5 = Float, assigned to Int — but Int/Float are compatible
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn infers_comparison_as_bool() {
+        let w = warnings_for("let x: Int = 5 > 3");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Bool"));
+    }
+
+    #[test]
+    fn infers_array_type() {
+        let w = warnings_for("let x: Int = [1, 2, 3]");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("[Int]"));
+    }
+
+    #[test]
+    fn infers_object_type() {
+        let w = warnings_for("let x: Int = { name: \"Odin\" }");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Object"));
+    }
+
+    #[test]
+    fn assignment_type_check() {
+        let w = warnings_for("let mut x: Int = 5\nx = \"hello\"");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("type mismatch"));
+    }
+
+    #[test]
+    fn unannotated_code_no_errors_strict() {
+        let w = errors_for("let x = 42\nlet y = \"hello\"");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn builtin_return_types_known() {
+        let w = warnings_for("let x: String = len([1,2,3])");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Int"));
+    }
+
+    #[test]
+    fn string_interp_inferred_as_string() {
+        let w = warnings_for("let name = \"world\"\nlet x: Int = \"hello {name}\"");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("String"));
+    }
+
+    #[test]
+    fn negation_preserves_type() {
+        let w = warnings_for("let x: String = -5");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Int"));
+    }
+
+    #[test]
+    fn not_always_bool() {
+        let w = warnings_for("let x: Int = !true");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Bool"));
+    }
+
+    #[test]
+    fn lambda_body_checked() {
+        let w = warnings_for(
+            "fn takes_int(x: Int) -> Int { return x }\nlet f = fn() { takes_int(\"bad\") }",
+        );
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("argument 1"));
+    }
+
+    #[test]
+    fn multiple_errors() {
+        let w = warnings_for(
+            "let x: Int = \"hello\"\nlet y: String = 42\nfn f(a, b) { return a }\nf(1)",
+        );
+        assert_eq!(w.len(), 3);
     }
 }
