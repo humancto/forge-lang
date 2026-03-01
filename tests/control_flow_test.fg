@@ -151,7 +151,7 @@ define test_try_catch() {
     try {
         let x = 1 / 0
     } catch err {
-        caught = err
+        caught = err.message
     }
     assert(len(caught) > 0)
 }

@@ -1,0 +1,47 @@
+// error_handling_test.fg — Structured errors and assertions
+
+@test
+define test_error_has_message_field() {
+    let mut msg = ""
+    try {
+        let x = 1 / 0
+    } catch err {
+        msg = err.message
+    }
+    assert(contains(msg, "division by zero"))
+}
+
+@test
+define test_error_has_type_field() {
+    let mut t = ""
+    try {
+        let x = 1 / 0
+    } catch err {
+        t = err.type
+    }
+    assert_eq(t, "ArithmeticError")
+}
+
+@test
+define test_no_error_catch_not_reached() {
+    let mut reached = false
+    try {
+        let x = 42
+    } catch err {
+        reached = true
+    }
+    assert(!reached)
+}
+
+@test
+define test_io_args_has() {
+    // io.args_has checks for CLI flags — this flag won't exist in test mode
+    let has_fake = io.args_has("--fake-flag-xyz")
+    assert(!has_fake)
+}
+
+@test
+define test_io_args_get_missing() {
+    let val = io.args_get("--nonexistent-flag-xyz")
+    assert_eq(val, null)
+}

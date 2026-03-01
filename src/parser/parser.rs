@@ -1289,6 +1289,12 @@ impl Parser {
                 Ok(Expr::StringLit(s))
             }
 
+            // Allow 'any' keyword as identifier in expression context (builtin function)
+            Token::Any => {
+                self.advance();
+                Ok(Expr::Ident("any".to_string()))
+            }
+
             Token::Ident(ref name) => {
                 let name = name.clone();
                 self.advance();

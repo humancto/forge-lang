@@ -85,6 +85,9 @@ enum Command {
         /// Test directory (defaults to "tests")
         #[arg(default_value = "tests")]
         dir: String,
+        /// Filter tests by name pattern
+        #[arg(long)]
+        filter: Option<String>,
     },
     /// Create a new Forge project
     New {
@@ -177,7 +180,7 @@ async fn main() {
         Some(Command::Fmt { files }) => {
             formatter::format_files(&files);
         }
-        Some(Command::Test { dir }) => {
+        Some(Command::Test { dir, filter }) => {
             let test_dir = if dir == "tests" {
                 if let Some(m) = manifest::load_manifest() {
                     m.test.directory
@@ -187,7 +190,7 @@ async fn main() {
             } else {
                 dir
             };
-            testing::run_tests(&test_dir);
+            testing::run_tests(&test_dir, filter.as_deref());
         }
         Some(Command::New { name }) => {
             scaffold::create_project(&name);

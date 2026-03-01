@@ -34,6 +34,31 @@ pub fn create_module() -> Value {
         "write_json".to_string(),
         Value::BuiltIn("fs.write_json".to_string()),
     );
+    m.insert("lines".to_string(), Value::BuiltIn("fs.lines".to_string()));
+    m.insert(
+        "dirname".to_string(),
+        Value::BuiltIn("fs.dirname".to_string()),
+    );
+    m.insert(
+        "basename".to_string(),
+        Value::BuiltIn("fs.basename".to_string()),
+    );
+    m.insert(
+        "join_path".to_string(),
+        Value::BuiltIn("fs.join_path".to_string()),
+    );
+    m.insert(
+        "is_dir".to_string(),
+        Value::BuiltIn("fs.is_dir".to_string()),
+    );
+    m.insert(
+        "is_file".to_string(),
+        Value::BuiltIn("fs.is_file".to_string()),
+    );
+    m.insert(
+        "temp_dir".to_string(),
+        Value::BuiltIn("fs.temp_dir".to_string()),
+    );
     Value::Object(m)
 }
 
@@ -160,6 +185,59 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             }
             _ => Err("fs.write_json() requires (path, value)".to_string()),
         },
+        "fs.lines" => match args.first() {
+            Some(Value::String(path)) => {
+                let content =
+                    std::fs::read_to_string(path).map_err(|e| format!("fs.lines error: {}", e))?;
+                Ok(Value::Array(
+                    content
+                        .lines()
+                        .map(|l| Value::String(l.to_string()))
+                        .collect(),
+                ))
+            }
+            _ => Err("fs.lines() requires a file path string".to_string()),
+        },
+        "fs.dirname" => match args.first() {
+            Some(Value::String(path)) => {
+                let p = std::path::Path::new(path);
+                Ok(Value::String(
+                    p.parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                ))
+            }
+            _ => Err("fs.dirname() requires a path string".to_string()),
+        },
+        "fs.basename" => match args.first() {
+            Some(Value::String(path)) => {
+                let p = std::path::Path::new(path);
+                Ok(Value::String(
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                ))
+            }
+            _ => Err("fs.basename() requires a path string".to_string()),
+        },
+        "fs.join_path" => match (args.first(), args.get(1)) {
+            (Some(Value::String(a)), Some(Value::String(b))) => {
+                let p = std::path::Path::new(a).join(b);
+                Ok(Value::String(p.to_string_lossy().to_string()))
+            }
+            _ => Err("fs.join_path() requires two path strings".to_string()),
+        },
+        "fs.is_dir" => match args.first() {
+            Some(Value::String(path)) => Ok(Value::Bool(std::path::Path::new(path).is_dir())),
+            _ => Err("fs.is_dir() requires a path string".to_string()),
+        },
+        "fs.is_file" => match args.first() {
+            Some(Value::String(path)) => Ok(Value::Bool(std::path::Path::new(path).is_file())),
+            _ => Err("fs.is_file() requires a path string".to_string()),
+        },
+        "fs.temp_dir" => Ok(Value::String(
+            std::env::temp_dir().to_string_lossy().to_string(),
+        )),
         _ => Err(format!("unknown fs function: {}", name)),
     }
 }
@@ -251,6 +329,154 @@ pub fn call_vm(
                 .map(|_| FsResult::NullVal)
                 .map_err(|e| format!("{}", e))
         }
+        "fs.lines" => {
+            let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
+            let content =
+                std::fs::read_to_string(&path).map_err(|e| format!("fs.lines error: {}", e))?;
+            Ok(FsResult::ArrayVal(
+                content.lines().map(|l| l.to_string()).collect(),
+            ))
+        }
+        "fs.dirname" => {
+            let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
+            let p = std::path::Path::new(&path);
+            Ok(FsResult::StringVal(
+                p.parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ))
+        }
+        "fs.basename" => {
+            let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
+            let p = std::path::Path::new(&path);
+            Ok(FsResult::StringVal(
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ))
+        }
+        "fs.join_path" => {
+            let a = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
+            let b = get_str(args.get(1).ok_or("second path required")?).ok_or("string required")?;
+            let p = std::path::Path::new(&a).join(&b);
+            Ok(FsResult::StringVal(p.to_string_lossy().to_string()))
+        }
+        "fs.is_dir" => {
+            let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
+            Ok(FsResult::BoolVal(std::path::Path::new(&path).is_dir()))
+        }
+        "fs.is_file" => {
+            let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
+            Ok(FsResult::BoolVal(std::path::Path::new(&path).is_file()))
+        }
+        "fs.temp_dir" => Ok(FsResult::StringVal(
+            std::env::temp_dir().to_string_lossy().to_string(),
+        )),
         _ => Err(format!("unknown fs function: {}", name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fs_lines() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("forge_test_lines.txt");
+        std::fs::write(&path, "line1\nline2\nline3").unwrap();
+        let result = call(
+            "fs.lines",
+            vec![Value::String(path.to_string_lossy().to_string())],
+        )
+        .unwrap();
+        if let Value::Array(lines) = result {
+            assert_eq!(lines.len(), 3);
+            assert_eq!(lines[0], Value::String("line1".to_string()));
+        } else {
+            panic!("expected array");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_fs_dirname() {
+        assert_eq!(
+            call(
+                "fs.dirname",
+                vec![Value::String("/home/user/file.txt".to_string())]
+            )
+            .unwrap(),
+            Value::String("/home/user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fs_basename() {
+        assert_eq!(
+            call(
+                "fs.basename",
+                vec![Value::String("/home/user/file.txt".to_string())]
+            )
+            .unwrap(),
+            Value::String("file.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fs_join_path() {
+        assert_eq!(
+            call(
+                "fs.join_path",
+                vec![
+                    Value::String("/home".to_string()),
+                    Value::String("user".to_string())
+                ]
+            )
+            .unwrap(),
+            Value::String("/home/user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fs_is_dir() {
+        assert_eq!(
+            call("fs.is_dir", vec![Value::String("/tmp".to_string())]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call(
+                "fs.is_dir",
+                vec![Value::String("/nonexistent_path_xyz".to_string())]
+            )
+            .unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_fs_is_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("forge_test_is_file.txt");
+        std::fs::write(&path, "test").unwrap();
+        assert_eq!(
+            call(
+                "fs.is_file",
+                vec![Value::String(path.to_string_lossy().to_string())]
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_fs_temp_dir() {
+        let result = call("fs.temp_dir", vec![]).unwrap();
+        if let Value::String(s) = result {
+            assert!(!s.is_empty());
+        } else {
+            panic!("expected string");
+        }
     }
 }

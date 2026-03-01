@@ -104,3 +104,32 @@ define test_channel_multiple_messages() {
     let c = receive(ch)
     assert_eq(a + b + c, 6)
 }
+
+@test
+define test_try_send_success() {
+    let ch = channel()
+    spawn {
+        let val = receive(ch)
+    }
+    wait 0.05 seconds
+    let sent = try_send(ch, 99)
+    assert(sent)
+}
+
+@test
+define test_try_receive_empty() {
+    let ch = channel()
+    let result = try_receive(ch)
+    assert(is_none(result))
+}
+
+@test
+define test_try_receive_with_data() {
+    let ch = channel()
+    spawn {
+        send(ch, 42)
+    }
+    wait 0.1 seconds
+    let result = try_receive(ch)
+    assert(is_some(result))
+}

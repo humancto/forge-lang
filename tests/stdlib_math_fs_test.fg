@@ -1,0 +1,77 @@
+// stdlib_math_fs_test.fg — Math and FS stdlib tests
+
+@test
+define test_math_clamp_within_range() {
+    let result = math.clamp(5, 1, 10)
+    assert_eq(result, 5)
+}
+
+@test
+define test_math_clamp_below_min() {
+    let result = math.clamp(-5, 0, 10)
+    assert_eq(result, 0)
+}
+
+@test
+define test_math_clamp_above_max() {
+    let result = math.clamp(15, 0, 10)
+    assert_eq(result, 10)
+}
+
+@test
+define test_math_random_int_bounds() {
+    let r = math.random_int(1, 1)
+    assert_eq(r, 1)
+}
+
+@test
+define test_fs_dirname() {
+    let result = fs.dirname("/home/user/file.txt")
+    assert_eq(result, "/home/user")
+}
+
+@test
+define test_fs_basename() {
+    let result = fs.basename("/home/user/file.txt")
+    assert_eq(result, "file.txt")
+}
+
+@test
+define test_fs_join_path() {
+    let result = fs.join_path("/home", "user")
+    assert_eq(result, "/home/user")
+}
+
+@test
+define test_fs_is_dir() {
+    assert(fs.is_dir("/tmp"))
+    assert(!fs.is_dir("/nonexistent_xyz_path"))
+}
+
+@test
+define test_fs_temp_dir() {
+    let tmp = fs.temp_dir()
+    assert(len(tmp) > 0)
+}
+
+@test
+define test_fs_lines() {
+    let tmp = fs.temp_dir()
+    let path = fs.join_path(tmp, "forge_test_lines_fg.txt")
+    fs.write(path, "alpha\nbeta\ngamma")
+    let result = fs.lines(path)
+    assert_eq(len(result), 3)
+    assert_eq(result[0], "alpha")
+    assert_eq(result[2], "gamma")
+    fs.remove(path)
+}
+
+@test
+define test_fs_is_file() {
+    let tmp = fs.temp_dir()
+    let path = fs.join_path(tmp, "forge_test_is_file_fg.txt")
+    fs.write(path, "test")
+    assert(fs.is_file(path))
+    fs.remove(path)
+    assert(!fs.is_file(path))
+}

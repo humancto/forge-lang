@@ -1,0 +1,53 @@
+// testing_framework_test.fg — Test framework features
+
+@test
+define test_assert_ne() {
+    assert_ne(1, 2)
+    assert_ne("hello", "world")
+    assert_ne(true, false)
+}
+
+@test
+define test_assert_throws() {
+    assert_throws(fn() {
+        let x = 1 / 0
+    })
+}
+
+@test
+define test_assert_throws_with_error() {
+    assert_throws(fn() {
+        assert(false)
+    })
+}
+
+@test
+@skip
+define test_this_is_skipped() {
+    assert(false, "this should never run")
+}
+
+@test
+define test_structured_error() {
+    let mut err_msg = ""
+    let mut err_type = ""
+    try {
+        let x = 1 / 0
+    } catch err {
+        err_msg = err.message
+        err_type = err.type
+    }
+    assert(len(err_msg) > 0)
+    assert_eq(err_type, "ArithmeticError")
+}
+
+@test
+define test_error_type_classification() {
+    let mut caught_type = ""
+    try {
+        let x = undefined_var_xyz
+    } catch err {
+        caught_type = err.type
+    }
+    assert(len(caught_type) > 0)
+}

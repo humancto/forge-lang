@@ -434,6 +434,30 @@ impl Interpreter {
             "replace",
             "starts_with",
             "ends_with",
+            "substring",
+            "index_of",
+            "last_index_of",
+            "pad_start",
+            "pad_end",
+            "capitalize",
+            "title",
+            "repeat_str",
+            "count",
+            "sum",
+            "min_of",
+            "max_of",
+            "any",
+            "all",
+            "unique",
+            "zip",
+            "flatten",
+            "group_by",
+            "chunk",
+            "slice",
+            "assert_ne",
+            "assert_throws",
+            "try_send",
+            "try_receive",
         ] {
             self.env
                 .define(name.to_string(), Value::BuiltIn(name.to_string()));
@@ -857,7 +881,23 @@ impl Interpreter {
                 Ok(signal) => Ok(signal),
                 Err(e) => {
                     self.env.push_scope();
-                    self.env.define(catch_var.clone(), Value::String(e.message));
+                    let mut err_obj = IndexMap::new();
+                    err_obj.insert("message".to_string(), Value::String(e.message.clone()));
+                    let error_type = if e.message.contains("type") || e.message.contains("Type") {
+                        "TypeError"
+                    } else if e.message.contains("division by zero") {
+                        "ArithmeticError"
+                    } else if e.message.contains("assertion") {
+                        "AssertionError"
+                    } else if e.message.contains("index") || e.message.contains("out of bounds") {
+                        "IndexError"
+                    } else if e.message.contains("not found") || e.message.contains("undefined") {
+                        "ReferenceError"
+                    } else {
+                        "RuntimeError"
+                    };
+                    err_obj.insert("type".to_string(), Value::String(error_type.to_string()));
+                    self.env.define(catch_var.clone(), Value::Object(err_obj));
                     let result = self.exec_block(catch_body);
                     self.env.pop_scope();
                     result.unwrap_or(Signal::None);
@@ -1421,6 +1461,26 @@ impl Interpreter {
                         "upper",
                         "lower",
                         "trim",
+                        "substring",
+                        "index_of",
+                        "last_index_of",
+                        "pad_start",
+                        "pad_end",
+                        "capitalize",
+                        "title",
+                        "repeat_str",
+                        "count",
+                        "sum",
+                        "min_of",
+                        "max_of",
+                        "any",
+                        "all",
+                        "unique",
+                        "zip",
+                        "flatten",
+                        "group_by",
+                        "chunk",
+                        "slice",
                     ];
                     let func = match &obj {
                         Value::Object(map) if map.get(field).is_some() => {
@@ -2544,14 +2604,45 @@ impl Interpreter {
             "sort" => match args.first() {
                 Some(Value::Array(items)) => {
                     let mut sorted = items.clone();
-                    sorted.sort_by(|a, b| match (a, b) {
-                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                        (Value::Float(x), Value::Float(y)) => {
-                            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                    if let Some(comparator) = args.get(1) {
+                        // Custom comparator: sort(arr, fn(a, b) -> -1|0|1)
+                        let comparator = comparator.clone();
+                        let mut error: Option<RuntimeError> = None;
+                        sorted.sort_by(|a, b| {
+                            if error.is_some() {
+                                return std::cmp::Ordering::Equal;
+                            }
+                            match self.call_function(comparator.clone(), vec![a.clone(), b.clone()])
+                            {
+                                Ok(Value::Int(n)) => {
+                                    if n < 0 {
+                                        std::cmp::Ordering::Less
+                                    } else if n > 0 {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                }
+                                Ok(_) => std::cmp::Ordering::Equal,
+                                Err(e) => {
+                                    error = Some(e);
+                                    std::cmp::Ordering::Equal
+                                }
+                            }
+                        });
+                        if let Some(e) = error {
+                            return Err(e);
                         }
-                        (Value::String(x), Value::String(y)) => x.cmp(y),
-                        _ => std::cmp::Ordering::Equal,
-                    });
+                    } else {
+                        sorted.sort_by(|a, b| match (a, b) {
+                            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                            (Value::Float(x), Value::Float(y)) => {
+                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                            (Value::String(x), Value::String(y)) => x.cmp(y),
+                            _ => std::cmp::Ordering::Equal,
+                        });
+                    }
                     Ok(Value::Array(sorted))
                 }
                 _ => Err(RuntimeError::new("sort() requires an array")),
@@ -2700,6 +2791,474 @@ impl Interpreter {
                     return Err(RuntimeError::new(&format!("assertion failed: {}", detail)));
                 }
                 Ok(Value::Null)
+            }
+            "assert_ne" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new(
+                        "assert_ne() requires at least 2 arguments",
+                    ));
+                }
+                let left = format!("{}", args[0]);
+                let right = format!("{}", args[1]);
+                if left == right {
+                    let msg = args.get(2).map(|v| format!("{}", v)).unwrap_or_default();
+                    let detail = if msg.is_empty() {
+                        format!("expected values to differ, both are `{}`", left)
+                    } else {
+                        format!("{}: expected values to differ, both are `{}`", msg, left)
+                    };
+                    return Err(RuntimeError::new(&format!("assertion failed: {}", detail)));
+                }
+                Ok(Value::Null)
+            }
+            "assert_throws" => {
+                if args.is_empty() {
+                    return Err(RuntimeError::new("assert_throws() requires a function"));
+                }
+                let func = args[0].clone();
+                match self.call_function(func, vec![]) {
+                    Err(_) => Ok(Value::Bool(true)),
+                    Ok(_) => Err(RuntimeError::new(
+                        "assertion failed: expected function to throw an error, but it succeeded",
+                    )),
+                }
+            }
+            // ===== String Operations =====
+            "substring" => match args.first() {
+                Some(Value::String(s)) => {
+                    let start = match args.get(1) {
+                        Some(Value::Int(n)) => *n as usize,
+                        _ => {
+                            return Err(RuntimeError::new(
+                                "substring() requires (string, start, end?)",
+                            ))
+                        }
+                    };
+                    let chars: Vec<char> = s.chars().collect();
+                    let end = match args.get(2) {
+                        Some(Value::Int(n)) => (*n as usize).min(chars.len()),
+                        _ => chars.len(),
+                    };
+                    if start > chars.len() {
+                        return Ok(Value::String(String::new()));
+                    }
+                    Ok(Value::String(chars[start..end].iter().collect()))
+                }
+                _ => Err(RuntimeError::new(
+                    "substring() requires a string as first argument",
+                )),
+            },
+            "index_of" => match args.first() {
+                Some(Value::String(s)) => match args.get(1) {
+                    Some(Value::String(substr)) => Ok(Value::Int(
+                        s.find(substr.as_str()).map(|i| i as i64).unwrap_or(-1),
+                    )),
+                    _ => Err(RuntimeError::new("index_of() requires (string, substring)")),
+                },
+                Some(Value::Array(arr)) => {
+                    let needle = match args.get(1) {
+                        Some(v) => v,
+                        None => return Err(RuntimeError::new("index_of() requires 2 arguments")),
+                    };
+                    let idx = arr.iter().position(|v| v == needle);
+                    Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
+                }
+                _ => Err(RuntimeError::new(
+                    "index_of() requires a string or array as first argument",
+                )),
+            },
+            "last_index_of" => match (args.first(), args.get(1)) {
+                (Some(Value::String(s)), Some(Value::String(substr))) => Ok(Value::Int(
+                    s.rfind(substr.as_str()).map(|i| i as i64).unwrap_or(-1),
+                )),
+                _ => Err(RuntimeError::new(
+                    "last_index_of() requires (string, substring)",
+                )),
+            },
+            "pad_start" => match (args.first(), args.get(1)) {
+                (Some(Value::String(s)), Some(Value::Int(target_len))) => {
+                    let pad_char = match args.get(2) {
+                        Some(Value::String(c)) => c.chars().next().unwrap_or(' '),
+                        _ => ' ',
+                    };
+                    let target = *target_len as usize;
+                    let char_count = s.chars().count();
+                    if char_count >= target {
+                        Ok(Value::String(s.clone()))
+                    } else {
+                        let padding: String = std::iter::repeat(pad_char)
+                            .take(target - char_count)
+                            .collect();
+                        Ok(Value::String(format!("{}{}", padding, s)))
+                    }
+                }
+                _ => Err(RuntimeError::new("pad_start() requires (string, length)")),
+            },
+            "pad_end" => match (args.first(), args.get(1)) {
+                (Some(Value::String(s)), Some(Value::Int(target_len))) => {
+                    let pad_char = match args.get(2) {
+                        Some(Value::String(c)) => c.chars().next().unwrap_or(' '),
+                        _ => ' ',
+                    };
+                    let target = *target_len as usize;
+                    let char_count = s.chars().count();
+                    if char_count >= target {
+                        Ok(Value::String(s.clone()))
+                    } else {
+                        let padding: String = std::iter::repeat(pad_char)
+                            .take(target - char_count)
+                            .collect();
+                        Ok(Value::String(format!("{}{}", s, padding)))
+                    }
+                }
+                _ => Err(RuntimeError::new("pad_end() requires (string, length)")),
+            },
+            "capitalize" => match args.first() {
+                Some(Value::String(s)) => {
+                    let mut chars = s.chars();
+                    let result = match chars.next() {
+                        Some(c) => {
+                            let upper: String = c.to_uppercase().collect();
+                            let rest: String = chars.collect::<String>().to_lowercase();
+                            format!("{}{}", upper, rest)
+                        }
+                        None => String::new(),
+                    };
+                    Ok(Value::String(result))
+                }
+                _ => Err(RuntimeError::new("capitalize() requires a string")),
+            },
+            "title" => match args.first() {
+                Some(Value::String(s)) => {
+                    let result = s
+                        .split_whitespace()
+                        .map(|word| {
+                            let mut chars = word.chars();
+                            match chars.next() {
+                                Some(c) => {
+                                    let upper: String = c.to_uppercase().collect();
+                                    let rest: String = chars.collect::<String>().to_lowercase();
+                                    format!("{}{}", upper, rest)
+                                }
+                                None => String::new(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    Ok(Value::String(result))
+                }
+                _ => Err(RuntimeError::new("title() requires a string")),
+            },
+            "repeat_str" => match (args.first(), args.get(1)) {
+                (Some(Value::String(s)), Some(Value::Int(n))) => {
+                    if *n < 0 {
+                        return Err(RuntimeError::new("repeat_str() count must be non-negative"));
+                    }
+                    Ok(Value::String(s.repeat(*n as usize)))
+                }
+                _ => Err(RuntimeError::new("repeat_str() requires (string, count)")),
+            },
+            "count" => match (args.first(), args.get(1)) {
+                (Some(Value::String(s)), Some(Value::String(substr))) => {
+                    if substr.is_empty() {
+                        return Ok(Value::Int((s.len() + 1) as i64));
+                    }
+                    Ok(Value::Int(s.matches(substr.as_str()).count() as i64))
+                }
+                _ => Err(RuntimeError::new("count() requires (string, substring)")),
+            },
+            // ===== Numeric Aggregates =====
+            "sum" => match args.first() {
+                Some(Value::Array(arr)) => {
+                    let mut has_float = false;
+                    let mut int_sum: i64 = 0;
+                    let mut float_sum: f64 = 0.0;
+                    for item in arr {
+                        match item {
+                            Value::Int(n) => {
+                                int_sum += n;
+                                float_sum += *n as f64;
+                            }
+                            Value::Float(n) => {
+                                has_float = true;
+                                float_sum += n;
+                            }
+                            _ => return Err(RuntimeError::new("sum() requires array of numbers")),
+                        }
+                    }
+                    if has_float {
+                        Ok(Value::Float(float_sum))
+                    } else {
+                        Ok(Value::Int(int_sum))
+                    }
+                }
+                _ => Err(RuntimeError::new("sum() requires an array")),
+            },
+            "min_of" => match args.first() {
+                Some(Value::Array(arr)) => {
+                    if arr.is_empty() {
+                        return Err(RuntimeError::new("min_of() requires a non-empty array"));
+                    }
+                    let mut result = arr[0].clone();
+                    for item in &arr[1..] {
+                        result = match (&result, item) {
+                            (Value::Int(a), Value::Int(b)) => Value::Int(*a.min(b)),
+                            (Value::Float(a), Value::Float(b)) => Value::Float(a.min(*b)),
+                            (Value::Int(a), Value::Float(b)) => Value::Float((*a as f64).min(*b)),
+                            (Value::Float(a), Value::Int(b)) => Value::Float(a.min(*b as f64)),
+                            _ => {
+                                return Err(RuntimeError::new("min_of() requires array of numbers"))
+                            }
+                        };
+                    }
+                    Ok(result)
+                }
+                _ => Err(RuntimeError::new("min_of() requires an array")),
+            },
+            "max_of" => match args.first() {
+                Some(Value::Array(arr)) => {
+                    if arr.is_empty() {
+                        return Err(RuntimeError::new("max_of() requires a non-empty array"));
+                    }
+                    let mut result = arr[0].clone();
+                    for item in &arr[1..] {
+                        result = match (&result, item) {
+                            (Value::Int(a), Value::Int(b)) => Value::Int(*a.max(b)),
+                            (Value::Float(a), Value::Float(b)) => Value::Float(a.max(*b)),
+                            (Value::Int(a), Value::Float(b)) => Value::Float((*a as f64).max(*b)),
+                            (Value::Float(a), Value::Int(b)) => Value::Float(a.max(*b as f64)),
+                            _ => {
+                                return Err(RuntimeError::new("max_of() requires array of numbers"))
+                            }
+                        };
+                    }
+                    Ok(result)
+                }
+                _ => Err(RuntimeError::new("max_of() requires an array")),
+            },
+            // ===== Collection Operations =====
+            "any" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new("any() requires (array, predicate)"));
+                }
+                let arr = match &args[0] {
+                    Value::Array(a) => a.clone(),
+                    _ => return Err(RuntimeError::new("any() first argument must be an array")),
+                };
+                let func = args[1].clone();
+                for item in arr {
+                    let result = self.call_function(func.clone(), vec![item])?;
+                    if result.is_truthy() {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            "all" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new("all() requires (array, predicate)"));
+                }
+                let arr = match &args[0] {
+                    Value::Array(a) => a.clone(),
+                    _ => return Err(RuntimeError::new("all() first argument must be an array")),
+                };
+                let func = args[1].clone();
+                for item in arr {
+                    let result = self.call_function(func.clone(), vec![item])?;
+                    if !result.is_truthy() {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            "unique" => match args.first() {
+                Some(Value::Array(arr)) => {
+                    let mut seen = Vec::new();
+                    let mut result = Vec::new();
+                    for item in arr {
+                        let key = format!("{}", item);
+                        if !seen.contains(&key) {
+                            seen.push(key);
+                            result.push(item.clone());
+                        }
+                    }
+                    Ok(Value::Array(result))
+                }
+                _ => Err(RuntimeError::new("unique() requires an array")),
+            },
+            "zip" => match (args.first(), args.get(1)) {
+                (Some(Value::Array(a)), Some(Value::Array(b))) => {
+                    let pairs: Vec<Value> = a
+                        .iter()
+                        .zip(b.iter())
+                        .map(|(x, y)| Value::Array(vec![x.clone(), y.clone()]))
+                        .collect();
+                    Ok(Value::Array(pairs))
+                }
+                _ => Err(RuntimeError::new("zip() requires two arrays")),
+            },
+            "flatten" => match args.first() {
+                Some(Value::Array(arr)) => {
+                    let mut result = Vec::new();
+                    for item in arr {
+                        match item {
+                            Value::Array(inner) => result.extend(inner.clone()),
+                            other => result.push(other.clone()),
+                        }
+                    }
+                    Ok(Value::Array(result))
+                }
+                _ => Err(RuntimeError::new("flatten() requires an array")),
+            },
+            "group_by" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new("group_by() requires (array, function)"));
+                }
+                let arr = match &args[0] {
+                    Value::Array(a) => a.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "group_by() first argument must be an array",
+                        ))
+                    }
+                };
+                let func = args[1].clone();
+                let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
+                for item in arr {
+                    let key = self.call_function(func.clone(), vec![item.clone()])?;
+                    let key_str = format!("{}", key);
+                    groups.entry(key_str).or_default().push(item);
+                }
+                let result: IndexMap<String, Value> = groups
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::Array(v)))
+                    .collect();
+                Ok(Value::Object(result))
+            }
+            "chunk" => match (args.first(), args.get(1)) {
+                (Some(Value::Array(arr)), Some(Value::Int(size))) => {
+                    if *size <= 0 {
+                        return Err(RuntimeError::new("chunk() size must be positive"));
+                    }
+                    let chunks: Vec<Value> = arr
+                        .chunks(*size as usize)
+                        .map(|c| Value::Array(c.to_vec()))
+                        .collect();
+                    Ok(Value::Array(chunks))
+                }
+                _ => Err(RuntimeError::new("chunk() requires (array, size)")),
+            },
+            "slice" => match args.first() {
+                Some(Value::Array(arr)) => {
+                    let start = match args.get(1) {
+                        Some(Value::Int(n)) => {
+                            let s = *n;
+                            if s < 0 {
+                                (arr.len() as i64 + s).max(0) as usize
+                            } else {
+                                s as usize
+                            }
+                        }
+                        _ => 0,
+                    };
+                    let end = match args.get(2) {
+                        Some(Value::Int(n)) => {
+                            let e = *n;
+                            if e < 0 {
+                                (arr.len() as i64 + e).max(0) as usize
+                            } else {
+                                (e as usize).min(arr.len())
+                            }
+                        }
+                        _ => arr.len(),
+                    };
+                    if start >= end || start >= arr.len() {
+                        return Ok(Value::Array(vec![]));
+                    }
+                    Ok(Value::Array(arr[start..end].to_vec()))
+                }
+                Some(Value::String(s)) => {
+                    let chars: Vec<char> = s.chars().collect();
+                    let start = match args.get(1) {
+                        Some(Value::Int(n)) => {
+                            let st = *n;
+                            if st < 0 {
+                                (chars.len() as i64 + st).max(0) as usize
+                            } else {
+                                st as usize
+                            }
+                        }
+                        _ => 0,
+                    };
+                    let end = match args.get(2) {
+                        Some(Value::Int(n)) => {
+                            let e = *n;
+                            if e < 0 {
+                                (chars.len() as i64 + e).max(0) as usize
+                            } else {
+                                (e as usize).min(chars.len())
+                            }
+                        }
+                        _ => chars.len(),
+                    };
+                    if start >= end || start >= chars.len() {
+                        return Ok(Value::String(String::new()));
+                    }
+                    Ok(Value::String(chars[start..end].iter().collect()))
+                }
+                _ => Err(RuntimeError::new(
+                    "slice() requires an array or string as first argument",
+                )),
+            },
+            // ===== Channel Operations =====
+            "try_send" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new("try_send() requires (channel, value)"));
+                }
+                let ch = match &args[0] {
+                    Value::Channel(c) => c.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "try_send() first argument must be a channel",
+                        ))
+                    }
+                };
+                let val = args[1].clone();
+                let tx_guard = ch
+                    .tx
+                    .lock()
+                    .map_err(|e| RuntimeError::new(&format!("channel lock error: {}", e)))?;
+                match tx_guard.as_ref() {
+                    Some(tx) => match tx.try_send(val) {
+                        Ok(()) => Ok(Value::Bool(true)),
+                        Err(_) => Ok(Value::Bool(false)),
+                    },
+                    None => Ok(Value::Bool(false)),
+                }
+            }
+            "try_receive" => {
+                if args.is_empty() {
+                    return Err(RuntimeError::new("try_receive() requires a channel"));
+                }
+                let ch = match &args[0] {
+                    Value::Channel(c) => c.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "try_receive() argument must be a channel",
+                        ))
+                    }
+                };
+                let rx_guard = ch
+                    .rx
+                    .lock()
+                    .map_err(|e| RuntimeError::new(&format!("channel lock error: {}", e)))?;
+                match rx_guard.as_ref() {
+                    Some(rx) => match rx.try_recv() {
+                        Ok(val) => Ok(Value::Some(Box::new(val))),
+                        Err(_) => Ok(Value::None),
+                    },
+                    None => Ok(Value::None),
+                }
             }
             _ if name.starts_with("math.") => {
                 crate::stdlib::math::call(name, args).map_err(|e| RuntimeError::new(&e))

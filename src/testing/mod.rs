@@ -6,7 +6,7 @@ use crate::parser::Parser;
 use std::path::Path;
 use std::time::Instant;
 
-pub fn run_tests(test_dir: &str) {
+pub fn run_tests(test_dir: &str, filter: Option<&str>) {
     let dir = Path::new(test_dir);
     if !dir.exists() {
         eprintln!(
@@ -22,6 +22,7 @@ pub fn run_tests(test_dir: &str) {
     let mut total = 0;
     let mut passed = 0;
     let mut failed = 0;
+    let mut skipped = 0;
 
     println!();
 
@@ -84,7 +85,22 @@ pub fn run_tests(test_dir: &str) {
             }
         };
 
-        let test_fns = find_test_functions(&program);
+        let test_info = find_test_functions(&program);
+        let before_fn = find_hook_function(&program, "before");
+        let after_fn = find_hook_function(&program, "after");
+
+        // Apply filter if specified
+        let test_fns: Vec<&TestInfo> = test_info
+            .iter()
+            .filter(|t| {
+                if let Some(pat) = filter {
+                    t.name.contains(pat)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
         if test_fns.is_empty() {
             continue;
         }
@@ -100,22 +116,51 @@ pub fn run_tests(test_dir: &str) {
             continue;
         }
 
-        for test_fn_name in &test_fns {
+        for test in &test_fns {
             total += 1;
+
+            // Handle @skip
+            if test.skip {
+                skipped += 1;
+                println!("    \x1B[33mSKIP\x1B[0m  {}", test.name);
+                continue;
+            }
+
             let start = Instant::now();
 
-            let func = interpreter.env.get(test_fn_name).cloned();
+            // Run @before hook
+            if let Some(ref before_name) = before_fn {
+                if let Some(f) = interpreter.env.get(before_name).cloned() {
+                    if let Err(e) = interpreter.call_function(f, vec![]) {
+                        failed += 1;
+                        println!(
+                            "    \x1B[31mFAIL\x1B[0m  {} — @before hook failed: {}",
+                            test.name, e.message
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let func = interpreter.env.get(&test.name).cloned();
             let result = match func {
                 Some(f) => interpreter.call_function(f, vec![]),
                 None => {
                     failed += 1;
                     println!(
                         "    \x1B[31mFAIL\x1B[0m  {} — function not found",
-                        test_fn_name
+                        test.name
                     );
                     continue;
                 }
             };
+
+            // Run @after hook regardless of test result
+            if let Some(ref after_name) = after_fn {
+                if let Some(f) = interpreter.env.get(after_name).cloned() {
+                    let _ = interpreter.call_function(f, vec![]);
+                }
+            }
 
             let duration = start.elapsed().as_millis();
 
@@ -124,14 +169,14 @@ pub fn run_tests(test_dir: &str) {
                     passed += 1;
                     println!(
                         "    \x1B[32mok\x1B[0m    {} \x1B[90m({}ms)\x1B[0m",
-                        test_fn_name, duration
+                        test.name, duration
                     );
                 }
                 Err(e) => {
                     failed += 1;
                     println!(
                         "    \x1B[31mFAIL\x1B[0m  {} \x1B[90m({}ms)\x1B[0m",
-                        test_fn_name, duration
+                        test.name, duration
                     );
                     println!("          {}", e.message);
                 }
@@ -140,9 +185,14 @@ pub fn run_tests(test_dir: &str) {
         println!();
     }
 
+    let skip_msg = if skipped > 0 {
+        format!(", {} skipped", skipped)
+    } else {
+        String::new()
+    };
     println!(
-        "  \x1B[1m{} passed, {} failed, {} total\x1B[0m",
-        passed, failed, total
+        "  \x1B[1m{} passed, {} failed{}, {} total\x1B[0m",
+        passed, failed, skip_msg, total
     );
     println!();
 
@@ -151,20 +201,51 @@ pub fn run_tests(test_dir: &str) {
     }
 }
 
-fn find_test_functions(program: &Program) -> Vec<String> {
-    let mut names = Vec::new();
+struct TestInfo {
+    name: String,
+    skip: bool,
+}
+
+fn find_test_functions(program: &Program) -> Vec<TestInfo> {
+    let mut tests = Vec::new();
+    for stmt in &program.statements {
+        if let Stmt::FnDef {
+            name, decorators, ..
+        } = stmt
+        {
+            let mut is_test = false;
+            let mut is_skip = false;
+            for dec in decorators {
+                if dec.name == "test" {
+                    is_test = true;
+                }
+                if dec.name == "skip" {
+                    is_skip = true;
+                }
+            }
+            if is_test {
+                tests.push(TestInfo {
+                    name: name.clone(),
+                    skip: is_skip,
+                });
+            }
+        }
+    }
+    tests
+}
+
+fn find_hook_function(program: &Program, hook_name: &str) -> Option<String> {
     for stmt in &program.statements {
         if let Stmt::FnDef {
             name, decorators, ..
         } = stmt
         {
             for dec in decorators {
-                if dec.name == "test" {
-                    names.push(name.clone());
-                    break;
+                if dec.name == hook_name {
+                    return Some(name.clone());
                 }
             }
         }
     }
-    names
+    None
 }

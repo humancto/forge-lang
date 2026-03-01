@@ -28,6 +28,14 @@ pub fn create_module() -> Value {
     m.insert("cos".to_string(), Value::BuiltIn("math.cos".to_string()));
     m.insert("tan".to_string(), Value::BuiltIn("math.tan".to_string()));
     m.insert("log".to_string(), Value::BuiltIn("math.log".to_string()));
+    m.insert(
+        "random_int".to_string(),
+        Value::BuiltIn("math.random_int".to_string()),
+    );
+    m.insert(
+        "clamp".to_string(),
+        Value::BuiltIn("math.clamp".to_string()),
+    );
     Value::Object(m)
 }
 
@@ -122,6 +130,39 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Some(Value::Int(n)) => Ok(Value::Float((*n as f64).ln())),
             _ => Err("math.log() requires a number".to_string()),
         },
+        "math.random_int" => match (args.first(), args.get(1)) {
+            (Some(Value::Int(min)), Some(Value::Int(max))) => {
+                if min > max {
+                    return Err(format!(
+                        "math.random_int() requires min <= max, got {} > {}",
+                        min, max
+                    ));
+                }
+                use std::time::SystemTime;
+                let nanos = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() as i64;
+                let range = max - min + 1;
+                Ok(Value::Int(min + (nanos.abs() % range)))
+            }
+            _ => Err("math.random_int() requires two integers (min, max)".to_string()),
+        },
+        "math.clamp" => match (args.first(), args.get(1), args.get(2)) {
+            (Some(Value::Int(val)), Some(Value::Int(min)), Some(Value::Int(max))) => {
+                Ok(Value::Int((*val).max(*min).min(*max)))
+            }
+            (Some(Value::Float(val)), Some(Value::Float(min)), Some(Value::Float(max))) => {
+                Ok(Value::Float(val.max(*min).min(*max)))
+            }
+            (Some(Value::Int(val)), Some(Value::Float(min)), Some(Value::Float(max))) => {
+                Ok(Value::Float((*val as f64).max(*min).min(*max)))
+            }
+            (Some(Value::Float(val)), Some(Value::Int(min)), Some(Value::Int(max))) => {
+                Ok(Value::Float(val.max(*min as f64).min(*max as f64)))
+            }
+            _ => Err("math.clamp() requires (value, min, max) numbers".to_string()),
+        },
         _ => Err(format!("unknown math function: {}", name)),
     }
 }
@@ -213,6 +254,114 @@ pub fn call_vm(
             Some(V::Int(n)) => Ok(V::Float((*n as f64).ln())),
             _ => Err("math.log() requires a number".to_string()),
         },
+        "math.random_int" => match (args.first(), args.get(1)) {
+            (Some(V::Int(min)), Some(V::Int(max))) => {
+                if min > max {
+                    return Err(format!(
+                        "math.random_int() requires min <= max, got {} > {}",
+                        min, max
+                    ));
+                }
+                use std::time::SystemTime;
+                let nanos = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() as i64;
+                let range = max - min + 1;
+                Ok(V::Int(min + (nanos.abs() % range)))
+            }
+            _ => Err("math.random_int() requires two integers (min, max)".to_string()),
+        },
+        "math.clamp" => match (args.first(), args.get(1), args.get(2)) {
+            (Some(V::Int(val)), Some(V::Int(min)), Some(V::Int(max))) => {
+                Ok(V::Int((*val).max(*min).min(*max)))
+            }
+            (Some(V::Float(val)), Some(V::Float(min)), Some(V::Float(max))) => {
+                Ok(V::Float(val.max(*min).min(*max)))
+            }
+            (Some(V::Int(val)), Some(V::Float(min)), Some(V::Float(max))) => {
+                Ok(V::Float((*val as f64).max(*min).min(*max)))
+            }
+            (Some(V::Float(val)), Some(V::Int(min)), Some(V::Int(max))) => {
+                Ok(V::Float(val.max(*min as f64).min(*max as f64)))
+            }
+            _ => Err("math.clamp() requires (value, min, max) numbers".to_string()),
+        },
         _ => Err(format!("unknown math function: {}", name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_math_random_int_in_range() {
+        let result = call("math.random_int", vec![Value::Int(1), Value::Int(10)]).unwrap();
+        if let Value::Int(n) = result {
+            assert!(n >= 1 && n <= 10);
+        } else {
+            panic!("expected Int");
+        }
+    }
+
+    #[test]
+    fn test_math_random_int_same_bounds() {
+        let result = call("math.random_int", vec![Value::Int(5), Value::Int(5)]).unwrap();
+        assert_eq!(result, Value::Int(5));
+    }
+
+    #[test]
+    fn test_math_random_int_invalid_range() {
+        let result = call("math.random_int", vec![Value::Int(10), Value::Int(1)]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_math_clamp_int() {
+        assert_eq!(
+            call(
+                "math.clamp",
+                vec![Value::Int(5), Value::Int(1), Value::Int(10)]
+            )
+            .unwrap(),
+            Value::Int(5)
+        );
+        assert_eq!(
+            call(
+                "math.clamp",
+                vec![Value::Int(-5), Value::Int(0), Value::Int(10)]
+            )
+            .unwrap(),
+            Value::Int(0)
+        );
+        assert_eq!(
+            call(
+                "math.clamp",
+                vec![Value::Int(15), Value::Int(0), Value::Int(10)]
+            )
+            .unwrap(),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn test_math_clamp_float() {
+        assert_eq!(
+            call(
+                "math.clamp",
+                vec![Value::Float(5.5), Value::Float(1.0), Value::Float(10.0)]
+            )
+            .unwrap(),
+            Value::Float(5.5)
+        );
+        assert_eq!(
+            call(
+                "math.clamp",
+                vec![Value::Float(-1.0), Value::Float(0.0), Value::Float(1.0)]
+            )
+            .unwrap(),
+            Value::Float(0.0)
+        );
     }
 }

@@ -1,0 +1,100 @@
+// strings_extended_test.fg — New string operations
+
+@test
+define test_substring_basic() {
+    assert_eq(substring("hello world", 0, 5), "hello")
+    assert_eq(substring("hello world", 6), "world")
+    assert_eq(substring("hello", 0, 0), "")
+}
+
+@test
+define test_substring_unicode() {
+    assert_eq(substring("cafe", 0, 4), "cafe")
+    assert_eq(substring("abcdef", 2, 4), "cd")
+}
+
+@test
+define test_substring_out_of_bounds() {
+    assert_eq(substring("hi", 10), "")
+    assert_eq(substring("hello", 0, 100), "hello")
+}
+
+@test
+define test_index_of_string() {
+    assert_eq(index_of("hello world", "world"), 6)
+    assert_eq(index_of("hello world", "xyz"), -1)
+    assert_eq(index_of("abcabc", "bc"), 1)
+    assert_eq(index_of("hello", ""), 0)
+}
+
+@test
+define test_index_of_array() {
+    assert_eq(index_of([10, 20, 30], 20), 1)
+    assert_eq(index_of([10, 20, 30], 99), -1)
+    assert_eq(index_of(["a", "b", "c"], "b"), 1)
+}
+
+@test
+define test_last_index_of() {
+    assert_eq(last_index_of("abcabc", "bc"), 4)
+    assert_eq(last_index_of("hello", "l"), 3)
+    assert_eq(last_index_of("hello", "xyz"), -1)
+}
+
+@test
+define test_pad_start() {
+    assert_eq(pad_start("42", 5), "   42")
+    assert_eq(pad_start("42", 5, "0"), "00042")
+    assert_eq(pad_start("hello", 3), "hello")
+}
+
+@test
+define test_pad_end() {
+    assert_eq(pad_end("42", 5), "42   ")
+    assert_eq(pad_end("42", 5, "0"), "42000")
+    assert_eq(pad_end("hello", 3), "hello")
+}
+
+@test
+define test_capitalize() {
+    assert_eq(capitalize("hello"), "Hello")
+    assert_eq(capitalize("HELLO"), "Hello")
+    assert_eq(capitalize(""), "")
+    assert_eq(capitalize("a"), "A")
+}
+
+@test
+define test_title() {
+    assert_eq(title("hello world"), "Hello World")
+    assert_eq(title("the quick fox"), "The Quick Fox")
+    assert_eq(title(""), "")
+}
+
+@test
+define test_repeat_str() {
+    assert_eq(repeat_str("ab", 3), "ababab")
+    assert_eq(repeat_str("x", 0), "")
+    assert_eq(repeat_str("-", 5), "-----")
+}
+
+@test
+define test_count_occurrences() {
+    assert_eq(count("banana", "an"), 2)
+    assert_eq(count("hello", "l"), 2)
+    assert_eq(count("hello", "xyz"), 0)
+}
+
+@test
+define test_slice_string() {
+    assert_eq(slice("hello world", 0, 5), "hello")
+    assert_eq(slice("hello", 2), "llo")
+    assert_eq(slice("hello", -3), "llo")
+}
+
+@test
+define test_method_syntax_strings() {
+    let s = "hello world"
+    assert_eq(s.index_of("world"), 6)
+    assert_eq(s.substring(0, 5), "hello")
+    assert_eq("abc".repeat_str(2), "abcabc")
+}

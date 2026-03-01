@@ -84,7 +84,7 @@ say "I survived a division by zero!"
 try {
     let y = 1 / 0
 } catch err {
-    say "Caught: {err}"
+    say "Caught: {err.message}"
 }"#,
         "I survived...\nCaught: division by zero",
     ),
@@ -125,6 +125,118 @@ define should_add() {
     assert_eq(math.sqrt(16), 4.0)
 }"#,
         "(run with: forge test)",
+    ),
+    (
+        "File I/O",
+        "Read and write files with the fs module. Forge makes file operations simple.",
+        r#"fs.write("hello.txt", "Hello from Forge!")
+let content = fs.read("hello.txt")
+say "Read: {content}"
+say "Exists? {fs.exists("hello.txt")}"
+fs.remove("hello.txt")
+say "After delete: {fs.exists("hello.txt")}"
+"#,
+        "Read: Hello from Forge!\nExists? true\nAfter delete: false",
+    ),
+    (
+        "Data Processing",
+        "Use map, filter, and reduce to transform data — functional programming in Forge.",
+        r#"let people = [
+    { name: "Alice", age: 30 },
+    { name: "Bob", age: 17 },
+    { name: "Charlie", age: 25 }
+]
+let adults = filter(people, fn(p) { return p.age >= 18 })
+let names = map(adults, fn(p) { return p.name })
+say join(names, ", ")"#,
+        "Alice, Charlie",
+    ),
+    (
+        "Database",
+        "Forge has built-in SQLite. Open a database, create tables, and query with parameters.",
+        r#"db.open(":memory:")
+db.execute("CREATE TABLE users (name TEXT, age INT)")
+db.execute("INSERT INTO users VALUES (?, ?)", ["Alice", 30])
+db.execute("INSERT INTO users VALUES (?, ?)", ["Bob", 25])
+let rows = db.query("SELECT * FROM users")
+for each row in rows {
+    say "{row.name} is {row.age}"
+}
+db.close()"#,
+        "Alice is 30\nBob is 25",
+    ),
+    (
+        "Shell & System",
+        "Run shell commands and interact with the system — perfect for scripting.",
+        r#"let user = sh("whoami")
+say "User: {user}"
+say "Command works? {sh_ok("echo test")}"
+let dir = cwd()
+say "Directory: {dir}"
+let sh_path = which("sh")
+say "sh is at: {sh_path}""#,
+        "(your user, true, current dir, sh path)",
+    ),
+    (
+        "Channels & Spawn",
+        "Forge has built-in concurrency with spawn (background tasks) and channels (communication).",
+        r#"let ch = channel()
+spawn {
+    send(ch, "Hello from background!")
+}
+let msg = receive(ch)
+say msg
+
+let handle = spawn { return 21 * 2 }
+let result = await handle
+say "Computed: {result}""#,
+        "Hello from background!\nComputed: 42",
+    ),
+    (
+        "Pattern Matching & ADTs",
+        "Define custom types with ADTs and use match for type-safe branching.",
+        r#"type Shape = Circle(Float) | Square(Float)
+
+define area(s) {
+    match s {
+        Circle(r) => return 3.14 * r * r
+        Square(side) => return side * side
+    }
+}
+say area(Circle(5.0))
+say area(Square(4.0))"#,
+        "78.5\n16",
+    ),
+    (
+        "Result & Option",
+        "Use Result (Ok/Err) and Option (Some/None) for safe error handling.",
+        r#"let greeting = Ok("Hello!")
+let missing = Err("not found")
+say "Ok? {is_ok(greeting)}"
+say "Value: {unwrap(greeting)}"
+let fallback = unwrap_or(missing, "default")
+say "Fallback: {fallback}"
+
+let name = Some("Alice")
+let empty = None
+say "Has name? {is_some(name)}"
+let name_val = unwrap_or(empty, "nobody")
+say "Empty becomes: {name_val}""#,
+        "Ok? true\nValue: Hello!\nFallback: default\nHas name? true\nEmpty becomes: nobody",
+    ),
+    (
+        "String Processing",
+        "Split, join, replace, and search strings with built-in functions and regex.",
+        r#"let text = "Hello, World!"
+let parts = split(text, ", ")
+say "Parts: {parts}"
+say replace(text, "World", "Forge")
+say "Starts with Hello? {starts_with(text, "Hello")}"
+say "Length: {len(text)}"
+
+let found = regex.find("Order #42 shipped", "\\d+")
+say "Found number: {found}""#,
+        "Parts: [Hello, World!]\nHello, Forge!\nStarts with Hello? true\nLength: 13\nFound number: 42",
     ),
 ];
 
