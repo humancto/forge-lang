@@ -74,6 +74,11 @@ fn write_chunk_inner(w: &mut Vec<u8>, chunk: &Chunk) -> Result<(), SerializeErro
         write_chunk_inner(w, proto)?;
     }
 
+    write_u16(w, chunk.upvalue_sources.len() as u16)?;
+    for &src in &chunk.upvalue_sources {
+        w.push(src);
+    }
+
     Ok(())
 }
 
@@ -198,6 +203,14 @@ fn read_chunk_inner<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
         prototypes.push(read_chunk_inner(r)?);
     }
 
+    let uv_sources_count = read_u16(r)? as usize;
+    let mut upvalue_sources = Vec::with_capacity(uv_sources_count);
+    for _ in 0..uv_sources_count {
+        let mut b = [0u8; 1];
+        r.read_exact(&mut b)?;
+        upvalue_sources.push(b[0]);
+    }
+
     Ok(Chunk {
         code,
         constants,
@@ -207,6 +220,7 @@ fn read_chunk_inner<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
         max_registers,
         upvalue_count,
         arity,
+        upvalue_sources,
     })
 }
 

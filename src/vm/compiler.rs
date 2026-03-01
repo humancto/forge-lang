@@ -13,6 +13,12 @@ struct LoopContext {
     break_jumps: Vec<usize>,
 }
 
+#[derive(Clone)]
+struct UpvalueEntry {
+    name: String,
+    parent_register: u8,
+}
+
 pub struct Compiler {
     chunk: Chunk,
     locals: Vec<Local>,
@@ -20,6 +26,8 @@ pub struct Compiler {
     next_register: u8,
     max_register: u8,
     loops: Vec<LoopContext>,
+    upvalues: Vec<UpvalueEntry>,
+    parent_locals: Vec<(String, u8)>,
 }
 
 #[derive(Debug)]
@@ -44,7 +52,16 @@ impl Compiler {
             next_register: 0,
             max_register: 0,
             loops: Vec::new(),
+            upvalues: Vec::new(),
+            parent_locals: Vec::new(),
         }
+    }
+
+    fn snapshot_locals(&self) -> Vec<(String, u8)> {
+        self.locals
+            .iter()
+            .map(|l| (l.name.clone(), l.register))
+            .collect()
     }
 
     fn alloc_reg(&mut self) -> u8 {
@@ -127,6 +144,36 @@ impl Compiler {
         }
         None
     }
+
+    fn resolve_upvalue(&self, name: &str) -> Option<u8> {
+        for (i, uv) in self.upvalues.iter().enumerate() {
+            if uv.name == name {
+                return Some(i as u8);
+            }
+        }
+        None
+    }
+
+    fn add_upvalue(&mut self, name: &str, parent_register: u8) -> u8 {
+        if let Some(idx) = self.resolve_upvalue(name) {
+            return idx;
+        }
+        let idx = self.upvalues.len() as u8;
+        self.upvalues.push(UpvalueEntry {
+            name: name.to_string(),
+            parent_register,
+        });
+        idx
+    }
+
+    fn resolve_in_parent(&self, name: &str) -> Option<u8> {
+        for (pname, preg) in &self.parent_locals {
+            if pname == name {
+                return Some(*preg);
+            }
+        }
+        None
+    }
 }
 
 pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
@@ -204,7 +251,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::FnDef {
             name, params, body, ..
         } => {
+            let parent_locals = c.snapshot_locals();
+
             let mut fc = Compiler::new(name);
+            fc.parent_locals = parent_locals;
             fc.begin_scope();
             for param in params {
                 fc.add_local(&param.name, true);
@@ -215,12 +265,17 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             fc.chunk.max_registers = fc.max_register;
             fc.chunk.arity = params.len() as u8;
+            fc.chunk.upvalue_count = fc.upvalues.len() as u8;
 
+            let upvalue_sources: Vec<u8> = fc.upvalues.iter().map(|u| u.parent_register).collect();
             let proto_idx = c.chunk.prototypes.len() as u16;
-            c.chunk.prototypes.push(fc.chunk);
+            let mut proto_chunk = fc.chunk;
+            proto_chunk.upvalue_sources = upvalue_sources;
+            c.chunk.prototypes.push(proto_chunk);
 
             let fn_reg = c.add_local(name, false);
             c.emit(encode_abx(OpCode::Closure, fn_reg, proto_idx), 0);
+
             // Also register as global for recursion and cross-scope access
             let name_idx = c.const_str(name);
             c.emit(encode_abx(OpCode::SetGlobal, fn_reg, name_idx), 0);
@@ -643,6 +698,11 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 if reg != dst {
                     c.emit(encode_abc(OpCode::Move, dst, reg, 0), 0);
                 }
+            } else if let Some(uv_idx) = c.resolve_upvalue(name) {
+                c.emit(encode_abc(OpCode::GetUpvalue, dst, uv_idx, 0), 0);
+            } else if let Some(parent_reg) = c.resolve_in_parent(name) {
+                let uv_idx = c.add_upvalue(name, parent_reg);
+                c.emit(encode_abc(OpCode::GetUpvalue, dst, uv_idx, 0), 0);
             } else {
                 let idx = c.const_str(name);
                 c.emit(encode_abx(OpCode::GetGlobal, dst, idx), 0);
@@ -773,7 +833,10 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             c.free_to(saved);
         }
         Expr::Lambda { params, body } => {
+            let parent_locals = c.snapshot_locals();
+
             let mut lc = Compiler::new("<lambda>");
+            lc.parent_locals = parent_locals;
             lc.begin_scope();
             for p in params {
                 lc.add_local(&p.name, true);
@@ -784,8 +847,13 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             lc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             lc.chunk.max_registers = lc.max_register;
             lc.chunk.arity = params.len() as u8;
+            lc.chunk.upvalue_count = lc.upvalues.len() as u8;
+
+            let upvalue_sources: Vec<u8> = lc.upvalues.iter().map(|u| u.parent_register).collect();
+            let mut proto_chunk = lc.chunk;
+            proto_chunk.upvalue_sources = upvalue_sources;
             let pi = c.chunk.prototypes.len() as u16;
-            c.chunk.prototypes.push(lc.chunk);
+            c.chunk.prototypes.push(proto_chunk);
             c.emit(encode_abx(OpCode::Closure, dst, pi), 0);
         }
         Expr::StructInit { name, fields } => {

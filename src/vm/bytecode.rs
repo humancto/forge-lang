@@ -47,6 +47,8 @@ pub enum OpCode {
     Spawn,        // A=closure_reg
     ExtractField, // A=dst, B=obj_reg, C=field_index (0="_0", 1="_1", etc.)
     Interpolate,  // A=dst, B=start_reg, C=part_count
+    GetUpvalue,   // A=dst, B=upvalue_index
+    SetUpvalue,   // A=upvalue_index, B=src
     Pop,
 }
 
@@ -73,6 +75,7 @@ pub struct Chunk {
     pub max_registers: u8,
     pub upvalue_count: u8,
     pub arity: u8,
+    pub upvalue_sources: Vec<u8>,
 }
 
 impl Chunk {
@@ -86,6 +89,7 @@ impl Chunk {
             max_registers: 0,
             upvalue_count: 0,
             arity: 0,
+            upvalue_sources: Vec::new(),
         }
     }
 

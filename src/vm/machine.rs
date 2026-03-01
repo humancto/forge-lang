@@ -669,16 +669,60 @@ impl VM {
                 }
                 OpCode::Closure => {
                     let proto = chunk.prototypes[bx as usize].clone();
+
+                    let mut upvalue_refs = Vec::new();
+                    for &src_reg in &proto.upvalue_sources {
+                        let val = self.registers[base + src_reg as usize].clone();
+                        let uv_ref = self.gc.alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
+                        upvalue_refs.push(uv_ref);
+                    }
+
                     let func = ObjFunction {
                         name: proto.name.clone(),
                         chunk: std::sync::Arc::new(proto),
                     };
                     let closure = ObjClosure {
                         function: func,
-                        upvalues: Vec::new(),
+                        upvalues: upvalue_refs,
                     };
                     let r = self.gc.alloc(ObjKind::Closure(closure));
                     self.registers[base + a as usize] = Value::Obj(r);
+                }
+                OpCode::GetUpvalue => {
+                    let uv_idx = b as usize;
+                    if let Some(frame) = self.frames.last() {
+                        if let Some(obj) = self.gc.get(frame.closure) {
+                            if let ObjKind::Closure(closure) = &obj.kind {
+                                if uv_idx < closure.upvalues.len() {
+                                    let uv_ref = closure.upvalues[uv_idx];
+                                    if let Some(uv_obj) = self.gc.get(uv_ref) {
+                                        if let ObjKind::Upvalue(uv) = &uv_obj.kind {
+                                            self.registers[base + a as usize] = uv.value.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                OpCode::SetUpvalue => {
+                    let uv_idx = a as usize;
+                    let val = self.registers[base + b as usize].clone();
+                    if let Some(frame) = self.frames.last() {
+                        let closure_ref = frame.closure;
+                        if let Some(obj) = self.gc.get(closure_ref) {
+                            if let ObjKind::Closure(closure) = &obj.kind {
+                                if uv_idx < closure.upvalues.len() {
+                                    let uv_ref = closure.upvalues[uv_idx];
+                                    if let Some(uv_obj) = self.gc.get_mut(uv_ref) {
+                                        if let ObjKind::Upvalue(uv) = &mut uv_obj.kind {
+                                            uv.value = val;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 OpCode::NewArray => {
                     let start = base + b as usize;
