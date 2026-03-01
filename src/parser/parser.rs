@@ -1267,6 +1267,12 @@ impl Parser {
                 Ok(Expr::Ident("null".to_string()))
             }
 
+            Token::Spawn => {
+                self.advance();
+                let body = self.parse_block()?;
+                Ok(Expr::Spawn(body))
+            }
+
             Token::StringLit(ref s) => {
                 let s = s.clone();
                 self.advance();

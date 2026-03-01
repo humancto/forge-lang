@@ -161,10 +161,17 @@ fn types_compatible(expected: &InferredType, actual: &InferredType) -> bool {
     ) {
         return true;
     }
-    // Option<T> accepts T or Null
+    // Option<T> accepts T, Null, or Option<U> where U is compatible with T
     if let InferredType::Option(inner) = expected {
-        return *actual == InferredType::Null || types_compatible(inner, actual);
+        if *actual == InferredType::Null {
+            return true;
+        }
+        if let InferredType::Option(actual_inner) = actual {
+            return types_compatible(inner, actual_inner);
+        }
+        return types_compatible(inner, actual);
     }
+    // Actual is Option<T>, expected is not — incompatible (except Unknown handled above)
     false
 }
 
@@ -426,6 +433,9 @@ impl TypeChecker {
             Expr::Bool(_) => InferredType::Bool,
 
             Expr::Ident(name) => {
+                if name == "None" {
+                    return InferredType::Option(Box::new(InferredType::Unknown));
+                }
                 if let Some(t) = self.variables.get(name) {
                     return t.clone();
                 }
@@ -549,6 +559,13 @@ impl TypeChecker {
                                 Box::new(InferredType::Unknown),
                             )
                         }
+                        "Some" => {
+                            let inner = args
+                                .first()
+                                .map(|a| self.infer_expr(a))
+                                .unwrap_or(InferredType::Unknown);
+                            return InferredType::Option(Box::new(inner));
+                        }
                         "is_ok" | "is_err" | "is_some" | "is_none" | "contains" | "starts_with"
                         | "ends_with" | "sh_ok" | "satisfies" => return InferredType::Bool,
                         "range" | "map" | "filter" | "sort" | "reverse" | "keys" | "values"
@@ -646,6 +663,13 @@ impl TypeChecker {
 
             Expr::Await(inner) | Expr::Must(inner) | Expr::Freeze(inner) | Expr::Ask(inner) => {
                 self.infer_expr(inner)
+            }
+
+            Expr::Spawn(body) => {
+                for stmt in body {
+                    self.check_stmt(stmt);
+                }
+                InferredType::Unknown // TaskHandle type
             }
 
             Expr::Spread(inner) => self.infer_expr(inner),
@@ -879,5 +903,32 @@ mod tests {
             w.iter().filter(|w| w.message.contains("satisfy")).collect();
         assert!(!interface_warnings.is_empty());
         assert!(interface_warnings[0].message.contains("serialize"));
+    }
+
+    // ========== M3.3: Option<T> Type Checking ==========
+
+    #[test]
+    fn option_type_annotation_accepts_none() {
+        let w = warnings_for("let x: ?Int = None");
+        assert!(w.is_empty(), "None should be valid for ?Int");
+    }
+
+    #[test]
+    fn option_type_annotation_accepts_some() {
+        let w = warnings_for("let x: ?Int = Some(42)");
+        assert!(w.is_empty(), "Some(42) should be valid for ?Int");
+    }
+
+    #[test]
+    fn non_optional_rejects_none() {
+        let w = warnings_for("let x: Int = None");
+        assert!(!w.is_empty(), "None should not be valid for bare Int");
+    }
+
+    #[test]
+    fn some_inferred_as_option_type() {
+        let w = warnings_for("let x: Int = Some(42)");
+        assert!(!w.is_empty(), "Some(42) is Option, not Int");
+        assert!(w[0].message.contains("Option") || w[0].message.contains("?"));
     }
 }

@@ -30,8 +30,13 @@ pub enum Value {
     },
     ResultOk(Box<Value>),
     ResultErr(Box<Value>),
+    /// Option type: Some(value) or None
+    Some(Box<Value>),
+    None,
     /// Built-in function
     BuiltIn(String),
+    /// Task handle from spawn (awaitable)
+    TaskHandle(Arc<tokio::sync::Mutex<Option<Value>>>),
     Null,
 }
 
@@ -47,6 +52,8 @@ impl PartialEq for Value {
             (Value::Object(a), Value::Object(b)) => a == b,
             (Value::ResultOk(a), Value::ResultOk(b)) => a == b,
             (Value::ResultErr(a), Value::ResultErr(b)) => a == b,
+            (Value::Some(a), Value::Some(b)) => a == b,
+            (Value::None, Value::None) => true,
             (Value::BuiltIn(a), Value::BuiltIn(b)) => a == b,
             _ => false,
         }
@@ -65,7 +72,9 @@ impl Value {
             Value::Function { .. } => "Function",
             Value::Lambda { .. } => "Lambda",
             Value::ResultOk(_) | Value::ResultErr(_) => "Result",
+            Value::Some(_) | Value::None => "Option",
             Value::BuiltIn(_) => "BuiltIn",
+            Value::TaskHandle(_) => "TaskHandle",
             Value::Null => "Null",
         }
     }
@@ -81,6 +90,8 @@ impl Value {
             Value::Object(o) => !o.is_empty(),
             Value::ResultOk(_) => true,
             Value::ResultErr(_) => false,
+            Value::Some(_) => true,
+            Value::None => false,
             _ => true,
         }
     }
@@ -105,6 +116,8 @@ impl Value {
             Value::Null => "null".to_string(),
             Value::ResultOk(v) => format!("{{ \"Ok\": {} }}", v.to_json_string()),
             Value::ResultErr(v) => format!("{{ \"Err\": {} }}", v.to_json_string()),
+            Value::Some(v) => v.to_json_string(),
+            Value::None => "null".to_string(),
             _ => format!("\"<{}>\"", self.type_name()),
         }
     }
@@ -127,7 +140,10 @@ impl fmt::Display for Value {
             Value::Lambda { .. } => write!(f, "<lambda>"),
             Value::ResultOk(v) => write!(f, "Ok({})", v),
             Value::ResultErr(v) => write!(f, "Err({})", v),
+            Value::Some(v) => write!(f, "Some({})", v),
+            Value::None => write!(f, "None"),
             Value::BuiltIn(name) => write!(f, "<builtin {}>", name),
+            Value::TaskHandle(_) => write!(f, "<task>"),
         }
     }
 }
@@ -301,16 +317,9 @@ impl Interpreter {
             .define("time".to_string(), crate::stdlib::create_time_module());
 
         // Prelude: Option type = Some(value) | None
-        self.env.define(
-            "Some".to_string(),
-            Value::BuiltIn("adt:Option:Some:1".to_string()),
-        );
-        {
-            let mut none_obj = IndexMap::new();
-            none_obj.insert("__type__".to_string(), Value::String("Option".to_string()));
-            none_obj.insert("__variant__".to_string(), Value::String("None".to_string()));
-            self.env.define("None".to_string(), Value::Object(none_obj));
-        }
+        self.env
+            .define("Some".to_string(), Value::BuiltIn("Some".to_string()));
+        self.env.define("None".to_string(), Value::None);
         self.env.define("null".to_string(), Value::Null);
         {
             let mut type_meta = IndexMap::new();
@@ -789,19 +798,8 @@ impl Interpreter {
             Stmt::Continue => Ok(Signal::Continue),
 
             Stmt::Spawn { body } => {
-                let body = body.clone();
-                let mut spawn_interp = Interpreter::new();
-                spawn_interp.env = self.env.clone();
-                if tokio::runtime::Handle::try_current().is_ok() {
-                    tokio::task::spawn_blocking(move || match spawn_interp.exec_block(&body) {
-                        Ok(_) => {}
-                        Err(e) => eprintln!("spawn error: {}", e.message),
-                    });
-                } else {
-                    std::thread::spawn(move || {
-                        let _ = spawn_interp.exec_block(&body);
-                    });
-                }
+                // Fire-and-forget spawn (backward compat — result is discarded)
+                let _ = self.spawn_task(body)?;
                 Ok(Signal::None)
             }
 
@@ -1478,7 +1476,48 @@ impl Interpreter {
                 Ok(last)
             }
 
-            Expr::Await(inner) => self.eval_expr(inner),
+            Expr::Spawn(body) => {
+                self.spawn_task(body)
+            }
+
+            Expr::Await(inner) => {
+                let val = self.eval_expr(inner)?;
+                match val {
+                    Value::TaskHandle(slot) => {
+                        // Block until the spawned task completes
+                        if tokio::runtime::Handle::try_current().is_ok() {
+                            let result = tokio::task::block_in_place(|| {
+                                let handle = tokio::runtime::Handle::current();
+                                handle.block_on(async {
+                                    loop {
+                                        {
+                                            let guard = slot.lock().await;
+                                            if let std::option::Option::Some(v) = guard.as_ref() {
+                                                return v.clone();
+                                            }
+                                        }
+                                        tokio::time::sleep(std::time::Duration::from_millis(1))
+                                            .await;
+                                    }
+                                })
+                            });
+                            Ok(result)
+                        } else {
+                            // Spin-wait fallback for non-tokio context
+                            loop {
+                                if let Ok(guard) = slot.try_lock() {
+                                    if let std::option::Option::Some(v) = guard.as_ref() {
+                                        break Ok(v.clone());
+                                    }
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                        }
+                    }
+                    // Non-handle values pass through (backward compatible)
+                    other => Ok(other),
+                }
+            }
 
             Expr::Must(inner) => {
                 let val = self.eval_expr(inner)?;
@@ -1753,6 +1792,23 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("cannot perform arithmetic on null")),
             },
 
+            // Option equality
+            (Value::Some(a), Value::Some(b)) => match op {
+                BinOp::Eq => Ok(Value::Bool(a == b)),
+                BinOp::NotEq => Ok(Value::Bool(a != b)),
+                _ => Err(RuntimeError::new("invalid operator for Option")),
+            },
+            (Value::None, Value::None) => match op {
+                BinOp::Eq => Ok(Value::Bool(true)),
+                BinOp::NotEq => Ok(Value::Bool(false)),
+                _ => Err(RuntimeError::new("invalid operator for Option")),
+            },
+            (Value::Some(_), Value::None) | (Value::None, Value::Some(_)) => match op {
+                BinOp::Eq => Ok(Value::Bool(false)),
+                BinOp::NotEq => Ok(Value::Bool(true)),
+                _ => Err(RuntimeError::new("invalid operator for Option")),
+            },
+
             _ => Err(RuntimeError::new(&format!(
                 "cannot apply {:?} to {} and {}",
                 op,
@@ -1879,6 +1935,64 @@ impl Interpreter {
                 func.type_name()
             ))),
         }
+    }
+
+    /// Spawn a block as a concurrent task, returning a TaskHandle.
+    fn spawn_task(&mut self, body: &[Stmt]) -> Result<Value, RuntimeError> {
+        let body = body.to_vec();
+        let result_slot = Arc::new(tokio::sync::Mutex::new(std::option::Option::None));
+        let slot_clone = result_slot.clone();
+        let mut spawn_interp = Interpreter::new();
+        spawn_interp.env = self.env.clone();
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    spawn_interp.exec_block(&body)
+                })
+                .await;
+                match result {
+                    Ok(Ok(signal)) => {
+                        let val = match signal {
+                            Signal::Return(v) | Signal::ImplicitReturn(v) => v,
+                            _ => Value::Null,
+                        };
+                        *slot_clone.lock().await = std::option::Option::Some(val);
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("spawn error: {}", e.message);
+                        *slot_clone.lock().await = std::option::Option::Some(Value::Null);
+                    }
+                    Err(e) => {
+                        eprintln!("spawn panic: {}", e);
+                        *slot_clone.lock().await = std::option::Option::Some(Value::Null);
+                    }
+                }
+            });
+        } else {
+            // No tokio runtime — fall back to std::thread
+            std::thread::spawn(move || {
+                let result = spawn_interp.exec_block(&body);
+                match result {
+                    Ok(signal) => {
+                        let val = match signal {
+                            Signal::Return(v) | Signal::ImplicitReturn(v) => v,
+                            _ => Value::Null,
+                        };
+                        if let Ok(mut guard) = slot_clone.try_lock() {
+                            *guard = std::option::Option::Some(val);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("spawn error: {}", e.message);
+                        if let Ok(mut guard) = slot_clone.try_lock() {
+                            *guard = std::option::Option::Some(Value::Null);
+                        }
+                    }
+                }
+            });
+        }
+        Ok(Value::TaskHandle(result_slot))
     }
 
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -2190,6 +2304,10 @@ impl Interpreter {
                     .unwrap_or(Value::String("error".to_string()));
                 Ok(Value::ResultErr(Box::new(value)))
             }
+            "Some" => {
+                let value = args.first().cloned().unwrap_or(Value::Null);
+                Ok(Value::Some(Box::new(value)))
+            }
             "is_ok" => match args.first() {
                 Some(Value::ResultOk(_)) => Ok(Value::Bool(true)),
                 Some(Value::ResultErr(_)) => Ok(Value::Bool(false)),
@@ -2205,17 +2323,23 @@ impl Interpreter {
                 Some(Value::ResultErr(err)) => {
                     Err(RuntimeError::new(&format!("unwrap() on Err: {}", err)))
                 }
-                _ => Err(RuntimeError::new("unwrap() requires a Result value")),
+                Some(Value::Some(value)) => Ok((**value).clone()),
+                Some(Value::None) => Err(RuntimeError::new("unwrap() called on None")),
+                _ => Err(RuntimeError::new(
+                    "unwrap() requires a Result or Option value",
+                )),
             },
             "unwrap_or" => {
                 if args.len() != 2 {
-                    return Err(RuntimeError::new("unwrap_or() requires (result, default)"));
+                    return Err(RuntimeError::new("unwrap_or() requires (value, default)"));
                 }
                 match &args[0] {
                     Value::ResultOk(value) => Ok((**value).clone()),
                     Value::ResultErr(_) => Ok(args[1].clone()),
+                    Value::Some(value) => Ok((**value).clone()),
+                    Value::None => Ok(args[1].clone()),
                     _ => Err(RuntimeError::new(
-                        "unwrap_or() requires a Result value as first argument",
+                        "unwrap_or() requires a Result or Option value as first argument",
                     )),
                 }
             }
@@ -2451,36 +2575,50 @@ impl Interpreter {
                 )),
             },
             "is_some" => match args.first() {
+                Some(Value::Some(_)) => Ok(Value::Bool(true)),
+                Some(Value::None) => Ok(Value::Bool(false)),
+                // Backward compat: ADT-encoded Option objects
                 Some(Value::Object(obj)) => {
                     let is_opt = obj
                         .get("__type__")
                         .is_some_and(|v| matches!(v, Value::String(s) if s == "Option"));
                     if is_opt {
                         let variant = obj.get("__variant__").map(|v| format!("{}", v));
-                        Ok(Value::Bool(variant.as_deref() == Some("Some")))
+                        Ok(Value::Bool(
+                            variant.as_deref() == std::option::Option::Some("Some"),
+                        ))
                     } else {
                         Ok(Value::Bool(true))
                     }
                 }
                 Some(Value::Null) => Ok(Value::Bool(false)),
                 Some(_) => Ok(Value::Bool(true)),
-                None => Err(RuntimeError::new("is_some() requires an argument")),
+                std::option::Option::None => {
+                    Err(RuntimeError::new("is_some() requires an argument"))
+                }
             },
             "is_none" => match args.first() {
+                Some(Value::None) => Ok(Value::Bool(true)),
+                Some(Value::Some(_)) => Ok(Value::Bool(false)),
+                // Backward compat: ADT-encoded Option objects
                 Some(Value::Object(obj)) => {
                     let is_opt = obj
                         .get("__type__")
                         .is_some_and(|v| matches!(v, Value::String(s) if s == "Option"));
                     if is_opt {
                         let variant = obj.get("__variant__").map(|v| format!("{}", v));
-                        Ok(Value::Bool(variant.as_deref() == Some("None")))
+                        Ok(Value::Bool(
+                            variant.as_deref() == std::option::Option::Some("None"),
+                        ))
                     } else {
                         Ok(Value::Bool(false))
                     }
                 }
                 Some(Value::Null) => Ok(Value::Bool(true)),
                 Some(_) => Ok(Value::Bool(false)),
-                None => Err(RuntimeError::new("is_none() requires an argument")),
+                std::option::Option::None => {
+                    Err(RuntimeError::new("is_none() requires an argument"))
+                }
             },
             "satisfies" => {
                 if args.len() != 2 {
@@ -2801,18 +2939,32 @@ impl Interpreter {
         match pattern {
             Pattern::Wildcard => true,
             Pattern::Binding(name) => {
+                // Native None matches by name
+                if name == "None" {
+                    return matches!(value, Value::None);
+                }
                 // If the binding name matches a known ADT unit variant, treat as constructor match
-                if let Some(bound_val) = self.env.get(name) {
+                if let std::option::Option::Some(bound_val) = self.env.get(name) {
                     if let Value::Object(obj) = bound_val {
-                        if let Some(Value::String(bound_variant)) = obj.get("__variant__") {
+                        if let std::option::Option::Some(Value::String(bound_variant)) =
+                            obj.get("__variant__")
+                        {
                             if let Value::Object(val_obj) = value {
-                                if let Some(Value::String(val_variant)) = val_obj.get("__variant__")
+                                if let std::option::Option::Some(Value::String(val_variant)) =
+                                    val_obj.get("__variant__")
                                 {
                                     return bound_variant == val_variant;
                                 }
                             }
                             return false;
                         }
+                    }
+                    // Native None check via binding
+                    if matches!(bound_val, Value::None) && matches!(value, Value::None) {
+                        return true;
+                    }
+                    if matches!(bound_val, Value::None) && !matches!(value, Value::None) {
+                        return false;
                     }
                 }
                 true
@@ -2835,6 +2987,14 @@ impl Interpreter {
                         return fields.is_empty()
                             || (fields.len() == 1
                                 && self.match_pattern(&fields[0], inner.as_ref()));
+                    }
+                    ("Some", Value::Some(inner)) => {
+                        return fields.is_empty()
+                            || (fields.len() == 1
+                                && self.match_pattern(&fields[0], inner.as_ref()));
+                    }
+                    ("None", Value::None) => {
+                        return fields.is_empty();
                     }
                     _ => {}
                 }
@@ -2879,8 +3039,10 @@ impl Interpreter {
             }
             Pattern::Constructor { name, fields } => {
                 match (name.as_str(), value) {
-                    ("Ok", Value::ResultOk(inner)) | ("Err", Value::ResultErr(inner)) => {
-                        if let Some(field_pat) = fields.first() {
+                    ("Ok", Value::ResultOk(inner))
+                    | ("Err", Value::ResultErr(inner))
+                    | ("Some", Value::Some(inner)) => {
+                        if let std::option::Option::Some(field_pat) = fields.first() {
                             self.bind_pattern(field_pat, inner.as_ref());
                         }
                         return;
@@ -6375,5 +6537,381 @@ mod tests {
         "#,
         );
         assert_eq!(value, Value::Int(29));
+    }
+
+    // ========== M3.3: Native Option<T> Tests ==========
+
+    #[test]
+    fn option_some_is_native_value() {
+        let value = run_forge("Some(42)");
+        assert!(matches!(value, Value::Some(_)));
+        if let Value::Some(inner) = value {
+            assert_eq!(*inner, Value::Int(42));
+        }
+    }
+
+    #[test]
+    fn option_none_is_native_value() {
+        let value = run_forge("None");
+        assert!(matches!(value, Value::None));
+    }
+
+    #[test]
+    fn option_type_name_some() {
+        let value = run_forge(r#"typeof(Some(1))"#);
+        assert_eq!(value, Value::String("Option".into()));
+    }
+
+    #[test]
+    fn option_type_name_none() {
+        let value = run_forge(r#"typeof(None)"#);
+        assert_eq!(value, Value::String("Option".into()));
+    }
+
+    #[test]
+    fn option_some_is_truthy() {
+        let result = try_run_forge("assert(Some(0))");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn option_none_is_falsy() {
+        let result = try_run_forge("assert(!None)");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn unwrap_some_returns_inner() {
+        let value = run_forge("unwrap(Some(42))");
+        assert_eq!(value, Value::Int(42));
+    }
+
+    #[test]
+    fn unwrap_none_errors() {
+        let result = try_run_forge("unwrap(None)");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("None"));
+    }
+
+    #[test]
+    fn unwrap_or_some_returns_inner() {
+        let value = run_forge("unwrap_or(Some(42), 99)");
+        assert_eq!(value, Value::Int(42));
+    }
+
+    #[test]
+    fn unwrap_or_none_returns_default() {
+        let value = run_forge("unwrap_or(None, 99)");
+        assert_eq!(value, Value::Int(99));
+    }
+
+    #[test]
+    fn is_some_on_native_values() {
+        let result = try_run_forge(
+            r#"
+            assert(is_some(Some(1)))
+            assert(!is_some(None))
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn is_none_on_native_values() {
+        let result = try_run_forge(
+            r#"
+            assert(is_none(None))
+            assert(!is_none(Some(1)))
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn match_some_extracts_value() {
+        let result = try_run_forge(
+            r#"
+            let x = Some(42)
+            match x {
+                Some(v) => assert_eq(v, 42)
+                None => assert(false)
+            }
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn match_none_branch() {
+        let result = try_run_forge(
+            r#"
+            let x = None
+            let mut result = 0
+            match x {
+                Some(v) => { result = v }
+                None => { result = -1 }
+            }
+            assert_eq(result, -1)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn option_equality() {
+        let result = try_run_forge(
+            r#"
+            assert(Some(1) == Some(1))
+            assert(Some(1) != Some(2))
+            assert(None == None)
+            assert(Some(1) != None)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn option_display_some() {
+        let value = run_forge("str(Some(42))");
+        assert_eq!(value, Value::String("Some(42)".into()));
+    }
+
+    #[test]
+    fn option_display_none() {
+        let value = run_forge("str(None)");
+        assert_eq!(value, Value::String("None".into()));
+    }
+
+    #[test]
+    fn nested_option_unwrap() {
+        let result = try_run_forge(
+            r#"
+            let x = Some(Some(1))
+            assert(is_some(x))
+            let inner = unwrap(x)
+            assert(is_some(inner))
+            assert_eq(unwrap(inner), 1)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn option_in_array() {
+        let result = try_run_forge(
+            r#"
+            let items = [Some(1), None, Some(3)]
+            assert(is_some(items[0]))
+            assert(is_none(items[1]))
+            assert_eq(unwrap(items[2]), 3)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn option_as_function_return() {
+        let result = try_run_forge(
+            r#"
+            fn find_positive(x) {
+                if x > 0 { return Some(x) }
+                return None
+            }
+            assert_eq(unwrap(find_positive(5)), 5)
+            assert(is_none(find_positive(-1)))
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn unwrap_or_with_option_in_pipeline() {
+        let result = try_run_forge(
+            r#"
+            fn lookup(key) {
+                if key == "a" { return Some(1) }
+                return None
+            }
+            let val = unwrap_or(lookup("a"), 0)
+            assert_eq(val, 1)
+            let missing = unwrap_or(lookup("z"), 0)
+            assert_eq(missing, 0)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    // ===== M4.1: Spawn & Await Tests =====
+
+    #[test]
+    fn spawn_returns_task_handle() {
+        let value = run_forge(
+            r#"
+            let h = spawn { return 42 }
+            h
+        "#,
+        );
+        assert!(
+            matches!(value, Value::TaskHandle(_)),
+            "spawn should return a TaskHandle, got: {:?}",
+            value
+        );
+    }
+
+    #[test]
+    fn spawn_handle_type_name() {
+        let value = run_forge(
+            r#"
+            let h = spawn { return 1 }
+            typeof(h)
+        "#,
+        );
+        assert_eq!(value, Value::String("TaskHandle".into()));
+    }
+
+    #[test]
+    fn await_spawn_gets_value() {
+        let result = try_run_forge(
+            r#"
+            let h = spawn { return 42 }
+            let v = await h
+            assert_eq(v, 42)
+        "#,
+        );
+        assert!(result.is_ok(), "await spawn should return value: {:?}", result.err());
+    }
+
+    #[test]
+    fn await_spawn_string_result() {
+        let result = try_run_forge(
+            r#"
+            let h = spawn { return "hello from spawn" }
+            let v = await h
+            assert_eq(v, "hello from spawn")
+        "#,
+        );
+        assert!(result.is_ok(), "await spawn string: {:?}", result.err());
+    }
+
+    #[test]
+    fn await_non_handle_passes_through() {
+        let value = run_forge("await 42");
+        assert_eq!(value, Value::Int(42));
+    }
+
+    #[test]
+    fn await_string_passes_through() {
+        let value = run_forge(r#"await "hello""#);
+        assert_eq!(value, Value::String("hello".into()));
+    }
+
+    #[test]
+    fn multiple_spawns_await() {
+        let result = try_run_forge(
+            r#"
+            let a = spawn { return 10 }
+            let b = spawn { return 20 }
+            let va = await a
+            let vb = await b
+            assert_eq(va + vb, 30)
+        "#,
+        );
+        assert!(result.is_ok(), "multiple spawns: {:?}", result.err());
+    }
+
+    #[test]
+    fn spawn_error_does_not_crash_parent() {
+        let result = try_run_forge(
+            r#"
+            spawn { let x = 1 / 0 }
+            let y = 42
+            assert_eq(y, 42)
+        "#,
+        );
+        assert!(result.is_ok(), "spawn error isolation: {:?}", result.err());
+    }
+
+    #[test]
+    fn spawn_with_computation() {
+        let result = try_run_forge(
+            r#"
+            let h = spawn {
+                let mut sum = 0
+                for i in range(1, 11) {
+                    sum = sum + i
+                }
+                return sum
+            }
+            let v = await h
+            assert_eq(v, 55)
+        "#,
+        );
+        assert!(result.is_ok(), "spawn computation: {:?}", result.err());
+    }
+
+    #[test]
+    fn spawn_returns_object() {
+        let result = try_run_forge(
+            r#"
+            let h = spawn {
+                return { name: "test", value: 42 }
+            }
+            let obj = await h
+            assert_eq(obj.name, "test")
+            assert_eq(obj.value, 42)
+        "#,
+        );
+        assert!(result.is_ok(), "spawn returns object: {:?}", result.err());
+    }
+
+    #[test]
+    fn spawn_returns_array() {
+        let result = try_run_forge(
+            r#"
+            let h = spawn {
+                return [1, 2, 3]
+            }
+            let arr = await h
+            assert_eq(len(arr), 3)
+            assert_eq(arr[0], 1)
+        "#,
+        );
+        assert!(result.is_ok(), "spawn returns array: {:?}", result.err());
+    }
+
+    #[test]
+    fn spawn_fire_and_forget_still_works() {
+        let result = try_run_forge(
+            r#"
+            spawn { let x = 1 + 1 }
+            let y = 100
+            assert_eq(y, 100)
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn spawn_with_option_return() {
+        let result = try_run_forge(
+            r#"
+            let h = spawn { return Some(42) }
+            let v = await h
+            assert(is_some(v))
+            assert_eq(unwrap(v), 42)
+        "#,
+        );
+        assert!(result.is_ok(), "spawn with option: {:?}", result.err());
+    }
+
+    #[test]
+    fn task_handle_display() {
+        let value = run_forge(
+            r#"
+            let h = spawn { return 1 }
+            str(h)
+        "#,
+        );
+        assert_eq!(value, Value::String("<task>".into()));
     }
 }

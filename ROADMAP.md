@@ -18,7 +18,7 @@
 | HTTP server           | Complete            | axum + tokio, decorator routing, WebSocket                   |
 | HTTP client           | Complete            | reqwest, JSON, all methods                                   |
 | Type checker          | Stub                | Arity warnings only, no enforcement                          |
-| Tests                 | 287 Rust + 25 Forge | CI on Ubuntu + macOS                                         |
+| Tests                 | 441 Rust + 26 Forge | CI on Ubuntu + macOS                                         |
 | Distribution          | Complete            | crates.io, Homebrew, curl installer, GitHub Releases         |
 
 ### What Works Today
@@ -36,8 +36,6 @@ forge build app.fg        # Prints bytecode stats (no file output)
 - JIT only handles integer math (no strings, objects, arrays)
 - No AOT compilation
 - No standalone binary output
-- Green threads are synchronous stubs
-- Type annotations parsed but ignored
 - Profiler exists but is never wired in
 
 ---

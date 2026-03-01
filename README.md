@@ -9,7 +9,7 @@
   <a href="https://github.com/humancto/forge-lang/releases"><img alt="Release" src="https://img.shields.io/github/v/release/humancto/forge-lang?style=flat-square&color=blue"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
   <a href="https://www.rust-lang.org/"><img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-orange?style=flat-square"></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-287_passing-brightgreen?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-441_passing-brightgreen?style=flat-square">
   <a href="https://github.com/humancto/forge-lang/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/humancto/forge-lang?style=flat-square"></a>
   <a href="https://crates.io/crates/forge-lang"><img alt="crates.io" src="https://img.shields.io/crates/v/forge-lang?style=flat-square"></a>
 </p>
@@ -548,7 +548,7 @@ Forge is v0.2.0. The language, interpreter, and standard library are stable and 
 | Standard library modules | 15                  |
 | Built-in functions       | 160+                |
 | Keywords                 | 80+                 |
-| Tests                    | 287 Rust + 25 Forge |
+| Tests                    | 441 Rust + 26 Forge |
 | Interactive lessons      | 14                  |
 | Example programs         | 12                  |
 | Dependencies (CVEs)      | 280 crates (0 CVEs) |

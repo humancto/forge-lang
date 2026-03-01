@@ -887,6 +887,13 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Await(inner) | Expr::Must(inner) | Expr::Freeze(inner) | Expr::Ask(inner) => {
             compile_expr(c, inner, dst)?;
         }
+        Expr::Spawn(body) => {
+            // VM spawn: compile as synchronous call for now (VM concurrency is M4.3)
+            for stmt in body {
+                compile_stmt(c, stmt)?;
+            }
+            c.emit(encode_abc(OpCode::LoadNull, dst, 0, 0), 0);
+        }
         Expr::Spread(inner) => {
             compile_expr(c, inner, dst)?;
         }

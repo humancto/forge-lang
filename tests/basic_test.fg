@@ -40,3 +40,14 @@ define should_handle_results() {
     assert(is_err(err_val))
     assert_eq(unwrap(ok_val), 42)
 }
+
+@test
+define should_handle_option_type() {
+    set x to Some(42)
+    set y to None
+    assert(is_some(x))
+    assert(is_none(y))
+    assert_eq(unwrap(x), 42)
+    assert_eq(unwrap_or(y, 99), 99)
+    assert_eq(unwrap_or(x, 99), 42)
+}

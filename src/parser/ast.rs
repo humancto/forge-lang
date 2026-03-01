@@ -196,6 +196,7 @@ pub enum Expr {
         body: Vec<Stmt>,
     },
     Await(Box<Expr>),
+    Spawn(Vec<Stmt>),
     Spread(Box<Expr>),
     Must(Box<Expr>),
     Freeze(Box<Expr>),
