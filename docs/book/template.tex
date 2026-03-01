@@ -81,8 +81,14 @@ $endif$
 \fancyfoot{}
 \renewcommand{\headrulewidth}{0.4pt}
 
-% === Chapter styling ===
+% === Part styling ===
 \usepackage{titlesec}
+\titleformat{\part}[display]
+  {\centering\normalfont\fontsize{40}{44}\selectfont\bfseries\color{forgeblue}}
+  {\partname\ \thepart}{20pt}{\fontsize{28}{32}\selectfont}
+\titlespacing*{\part}{0pt}{50pt}{40pt}
+
+% === Chapter styling ===
 \titleformat{\chapter}[display]
   {\normalfont\Huge\bfseries\color{forgeblue}}
   {\chaptertitlename\ \thechapter}{20pt}{\Huge}
