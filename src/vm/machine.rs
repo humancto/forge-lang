@@ -904,6 +904,20 @@ impl VM {
                             self.profiler.enter_function(&func_name);
                         }
 
+                        // Auto-JIT: compile hot functions on the fly
+                        if !func_name.is_empty()
+                            && !self.jit_cache.contains_key(&func_name)
+                            && self.profiler.is_hot(&func_name)
+                        {
+                            if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
+                                if let Ok(ptr) = jit.compile_function(&chunk, &func_name) {
+                                    self.jit_cache.insert(func_name.clone(), ptr);
+                                    // Leak the JIT module to keep the compiled code alive
+                                    std::mem::forget(jit);
+                                }
+                            }
+                        }
+
                         // JIT dispatch: call native code with raw i64 values
                         if !func_name.is_empty() {
                             if let Some(&native_ptr) = self.jit_cache.get(&func_name) {
