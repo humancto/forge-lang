@@ -828,10 +828,14 @@ impl Interpreter {
                     )));
                 }
 
-                let file_path = if path.ends_with(".fg") {
-                    path.clone()
-                } else {
-                    format!("{}.fg", path)
+                let file_path = match crate::package::resolve_import(path) {
+                    Some(p) => p,
+                    None => {
+                        return Err(RuntimeError::new(&format!(
+                            "cannot import '{}': file not found (checked {0}.fg, forge_modules/{0}/main.fg)",
+                            path
+                        )));
+                    }
                 };
                 let source = std::fs::read_to_string(&file_path)
                     .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;

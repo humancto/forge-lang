@@ -39,9 +39,16 @@ fn create_project_files(name: &str, project_dir: &Path) -> std::io::Result<()> {
 name = "{}"
 version = "0.1.0"
 description = ""
+entry = "main.fg"
+
+[dependencies]
 
 [test]
 directory = "tests"
+
+[scripts]
+dev = "forge run main.fg"
+test = "forge test"
 "#,
         name
     );
@@ -65,7 +72,10 @@ define should_work() {
 "#;
     fs::write(project_dir.join("tests/basic_test.fg"), test_fg)?;
 
-    fs::write(project_dir.join(".gitignore"), "*.fgc\n")?;
+    fs::write(
+        project_dir.join(".gitignore"),
+        "*.fgc\nforge_modules/\n.forge/\n",
+    )?;
 
     Ok(())
 }
