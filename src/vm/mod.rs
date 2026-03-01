@@ -5,6 +5,7 @@ pub mod gc;
 pub mod green;
 pub mod jit;
 pub mod machine;
+pub mod serialize;
 pub mod value;
 
 use crate::parser::ast::Program;

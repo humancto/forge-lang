@@ -120,7 +120,7 @@ impl Chunk {
 }
 
 impl Constant {
-    fn identical(&self, other: &Constant) -> bool {
+    pub fn identical(&self, other: &Constant) -> bool {
         match (self, other) {
             (Constant::Int(a), Constant::Int(b)) => a == b,
             (Constant::Float(a), Constant::Float(b)) => a == b,
