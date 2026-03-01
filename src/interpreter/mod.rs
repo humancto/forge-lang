@@ -7,6 +7,14 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+/// Thread-safe channel inner type
+#[derive(Debug)]
+pub struct ChannelInner {
+    pub tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Value>>>,
+    pub rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<Value>>>,
+    pub capacity: usize,
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -35,8 +43,12 @@ pub enum Value {
     None,
     /// Built-in function
     BuiltIn(String),
-    /// Task handle from spawn (awaitable)
-    TaskHandle(Arc<tokio::sync::Mutex<Option<Value>>>),
+    /// Task handle from spawn (awaitable) — uses Condvar for notification
+    TaskHandle(Arc<(std::sync::Mutex<Option<Value>>, std::sync::Condvar)>),
+    /// Thread-safe channel for send/receive
+    Channel(Arc<ChannelInner>),
+    /// Frozen (immutable) wrapper — prevents field/index mutation
+    Frozen(Box<Value>),
     Null,
 }
 
@@ -55,6 +67,9 @@ impl PartialEq for Value {
             (Value::Some(a), Value::Some(b)) => a == b,
             (Value::None, Value::None) => true,
             (Value::BuiltIn(a), Value::BuiltIn(b)) => a == b,
+            (Value::Channel(a), Value::Channel(b)) => Arc::ptr_eq(a, b),
+            (Value::Frozen(a), b) => a.as_ref() == b,
+            (a, Value::Frozen(b)) => a == b.as_ref(),
             _ => false,
         }
     }
@@ -75,6 +90,8 @@ impl Value {
             Value::Some(_) | Value::None => "Option",
             Value::BuiltIn(_) => "BuiltIn",
             Value::TaskHandle(_) => "TaskHandle",
+            Value::Channel(_) => "Channel",
+            Value::Frozen(inner) => inner.type_name(),
             Value::Null => "Null",
         }
     }
@@ -92,8 +109,14 @@ impl Value {
             Value::ResultErr(_) => false,
             Value::Some(_) => true,
             Value::None => false,
+            Value::Frozen(inner) => inner.is_truthy(),
             _ => true,
         }
+    }
+
+    /// Check if this value is frozen (immutable)
+    pub fn is_frozen(&self) -> bool {
+        matches!(self, Value::Frozen(_))
     }
 
     pub fn to_json_string(&self) -> String {
@@ -118,6 +141,7 @@ impl Value {
             Value::ResultErr(v) => format!("{{ \"Err\": {} }}", v.to_json_string()),
             Value::Some(v) => v.to_json_string(),
             Value::None => "null".to_string(),
+            Value::Frozen(inner) => inner.to_json_string(),
             _ => format!("\"<{}>\"", self.type_name()),
         }
     }
@@ -144,6 +168,8 @@ impl fmt::Display for Value {
             Value::None => write!(f, "None"),
             Value::BuiltIn(name) => write!(f, "<builtin {}>", name),
             Value::TaskHandle(_) => write!(f, "<task>"),
+            Value::Channel(_) => write!(f, "<channel>"),
+            Value::Frozen(inner) => write!(f, "{}", inner),
         }
     }
 }
@@ -274,6 +300,7 @@ const MAX_CALL_DEPTH: usize = 512;
 pub struct Interpreter {
     pub env: Environment,
     call_depth: usize,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Interpreter {
@@ -281,6 +308,7 @@ impl Interpreter {
         let mut interp = Self {
             env: Environment::new(),
             call_depth: 0,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         interp.register_builtins();
         interp
@@ -458,6 +486,10 @@ impl Interpreter {
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Signal, RuntimeError> {
+        // Cooperative cancellation check (used by timeout blocks)
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(RuntimeError::new("cancelled"));
+        }
         match stmt {
             Stmt::Let {
                 name,
@@ -480,10 +512,17 @@ impl Interpreter {
                         } else {
                             return Err(RuntimeError::new("can only assign to variable fields"));
                         };
-                        let mut obj =
+                        let obj =
                             self.env.get(&name).cloned().ok_or_else(|| {
                                 RuntimeError::new(&format!("undefined: {}", name))
                             })?;
+                        if obj.is_frozen() {
+                            return Err(RuntimeError::new(&format!(
+                                "cannot modify frozen value '{}': field '{}'",
+                                name, field
+                            )));
+                        }
+                        let mut obj = obj;
                         if let Value::Object(ref mut map) = obj {
                             map.insert(field.clone(), val);
                         }
@@ -496,10 +535,17 @@ impl Interpreter {
                             return Err(RuntimeError::new("can only assign to variable indices"));
                         };
                         let idx = self.eval_expr(index)?;
-                        let mut arr =
+                        let existing =
                             self.env.get(&name).cloned().ok_or_else(|| {
                                 RuntimeError::new(&format!("undefined: {}", name))
                             })?;
+                        if existing.is_frozen() {
+                            return Err(RuntimeError::new(&format!(
+                                "cannot modify frozen value '{}': index assignment",
+                                name
+                            )));
+                        }
+                        let mut arr = existing;
                         if let (Value::Array(ref mut items), Value::Int(i)) = (&mut arr, &idx) {
                             let i = *i as usize;
                             if i < items.len() {
@@ -1019,8 +1065,10 @@ impl Interpreter {
                     _ => 5,
                 };
                 let body = body.clone();
+                let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let mut timeout_interp = Interpreter::new();
                 timeout_interp.env = self.env.clone();
+                timeout_interp.cancelled = cancel_flag.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 let handle = std::thread::spawn(move || {
                     let result = timeout_interp.exec_block(&body);
@@ -1032,7 +1080,10 @@ impl Interpreter {
                         result.map(|_| Signal::None)
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        drop(handle);
+                        // Signal cooperative cancellation
+                        cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Give the thread a moment to notice and exit
+                        let _ = handle.join();
                         Err(RuntimeError::new(&format!(
                             "timeout: operation exceeded {} second limit",
                             secs
@@ -1230,9 +1281,37 @@ impl Interpreter {
             }),
 
             Expr::BinOp { left, op, right } => {
+                // Short-circuit && and ||
+                if matches!(op, BinOp::And) {
+                    let l = self.eval_expr(left)?;
+                    return if !l.is_truthy() {
+                        Ok(Value::Bool(false))
+                    } else {
+                        let r = self.eval_expr(right)?;
+                        Ok(Value::Bool(r.is_truthy()))
+                    };
+                }
+                if matches!(op, BinOp::Or) {
+                    let l = self.eval_expr(left)?;
+                    return if l.is_truthy() {
+                        Ok(Value::Bool(true))
+                    } else {
+                        let r = self.eval_expr(right)?;
+                        Ok(Value::Bool(r.is_truthy()))
+                    };
+                }
                 let l = self.eval_expr(left)?;
                 let r = self.eval_expr(right)?;
-                self.eval_binop(&l, op, &r)
+                // Unwrap Frozen for binary operations
+                let l_inner = match &l {
+                    Value::Frozen(v) => v.as_ref(),
+                    other => other,
+                };
+                let r_inner = match &r {
+                    Value::Frozen(v) => v.as_ref(),
+                    other => other,
+                };
+                self.eval_binop(l_inner, op, r_inner)
             }
 
             Expr::UnaryOp { op, operand } => {
@@ -1249,7 +1328,12 @@ impl Interpreter {
 
             Expr::FieldAccess { object, field } => {
                 let obj = self.eval_expr(object)?;
-                match &obj {
+                // Unwrap Frozen for read access
+                let inner = match &obj {
+                    Value::Frozen(v) => v.as_ref(),
+                    other => other,
+                };
+                match inner {
                     Value::Object(map) => map.get(field).cloned().ok_or_else(|| {
                         RuntimeError::new(&format!("no field '{}' on object", field))
                     }),
@@ -1281,7 +1365,12 @@ impl Interpreter {
             Expr::Index { object, index } => {
                 let obj = self.eval_expr(object)?;
                 let idx = self.eval_expr(index)?;
-                match (&obj, &idx) {
+                // Unwrap Frozen for read access
+                let inner = match &obj {
+                    Value::Frozen(v) => v.as_ref(),
+                    other => other,
+                };
+                match (inner, &idx) {
                     (Value::Array(items), Value::Int(i)) => {
                         let i = *i as usize;
                         items
@@ -1476,43 +1565,22 @@ impl Interpreter {
                 Ok(last)
             }
 
-            Expr::Spawn(body) => {
-                self.spawn_task(body)
-            }
+            Expr::Spawn(body) => self.spawn_task(body),
 
             Expr::Await(inner) => {
                 let val = self.eval_expr(inner)?;
                 match val {
                     Value::TaskHandle(slot) => {
-                        // Block until the spawned task completes
-                        if tokio::runtime::Handle::try_current().is_ok() {
-                            let result = tokio::task::block_in_place(|| {
-                                let handle = tokio::runtime::Handle::current();
-                                handle.block_on(async {
-                                    loop {
-                                        {
-                                            let guard = slot.lock().await;
-                                            if let std::option::Option::Some(v) = guard.as_ref() {
-                                                return v.clone();
-                                            }
-                                        }
-                                        tokio::time::sleep(std::time::Duration::from_millis(1))
-                                            .await;
-                                    }
-                                })
-                            });
-                            Ok(result)
-                        } else {
-                            // Spin-wait fallback for non-tokio context
-                            loop {
-                                if let Ok(guard) = slot.try_lock() {
-                                    if let std::option::Option::Some(v) = guard.as_ref() {
-                                        break Ok(v.clone());
-                                    }
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(1));
-                            }
+                        let (lock, cvar) = &*slot;
+                        let mut guard = lock
+                            .lock()
+                            .map_err(|_| RuntimeError::new("await: task handle lock poisoned"))?;
+                        while guard.is_none() {
+                            guard = cvar
+                                .wait(guard)
+                                .map_err(|_| RuntimeError::new("await: condvar wait failed"))?;
                         }
+                        Ok(guard.take().unwrap_or(Value::Null))
                     }
                     // Non-handle values pass through (backward compatible)
                     other => Ok(other),
@@ -1533,7 +1601,7 @@ impl Interpreter {
 
             Expr::Freeze(inner) => {
                 let val = self.eval_expr(inner)?;
-                Ok(val)
+                Ok(Value::Frozen(Box::new(val)))
             }
 
             Expr::Ask(prompt_expr) => {
@@ -1940,58 +2008,29 @@ impl Interpreter {
     /// Spawn a block as a concurrent task, returning a TaskHandle.
     fn spawn_task(&mut self, body: &[Stmt]) -> Result<Value, RuntimeError> {
         let body = body.to_vec();
-        let result_slot = Arc::new(tokio::sync::Mutex::new(std::option::Option::None));
+        let result_slot: Arc<(std::sync::Mutex<Option<Value>>, std::sync::Condvar)> =
+            Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
         let slot_clone = result_slot.clone();
         let mut spawn_interp = Interpreter::new();
         spawn_interp.env = self.env.clone();
 
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    spawn_interp.exec_block(&body)
-                })
-                .await;
-                match result {
-                    Ok(Ok(signal)) => {
-                        let val = match signal {
-                            Signal::Return(v) | Signal::ImplicitReturn(v) => v,
-                            _ => Value::Null,
-                        };
-                        *slot_clone.lock().await = std::option::Option::Some(val);
-                    }
-                    Ok(Err(e)) => {
-                        eprintln!("spawn error: {}", e.message);
-                        *slot_clone.lock().await = std::option::Option::Some(Value::Null);
-                    }
-                    Err(e) => {
-                        eprintln!("spawn panic: {}", e);
-                        *slot_clone.lock().await = std::option::Option::Some(Value::Null);
-                    }
+        // Always use std::thread — simpler, avoids tokio dependency issues
+        std::thread::spawn(move || {
+            let result = spawn_interp.exec_block(&body);
+            let val = match result {
+                Ok(Signal::Return(v)) | Ok(Signal::ImplicitReturn(v)) => v,
+                Ok(_) => Value::Null,
+                Err(e) => {
+                    eprintln!("spawn error: {}", e.message);
+                    Value::Null
                 }
-            });
-        } else {
-            // No tokio runtime — fall back to std::thread
-            std::thread::spawn(move || {
-                let result = spawn_interp.exec_block(&body);
-                match result {
-                    Ok(signal) => {
-                        let val = match signal {
-                            Signal::Return(v) | Signal::ImplicitReturn(v) => v,
-                            _ => Value::Null,
-                        };
-                        if let Ok(mut guard) = slot_clone.try_lock() {
-                            *guard = std::option::Option::Some(val);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("spawn error: {}", e.message);
-                        if let Ok(mut guard) = slot_clone.try_lock() {
-                            *guard = std::option::Option::Some(Value::Null);
-                        }
-                    }
-                }
-            });
-        }
+            };
+            let (lock, cvar) = &*slot_clone;
+            if let Ok(mut guard) = lock.lock() {
+                *guard = Some(val);
+                cvar.notify_all();
+            }
+        });
         Ok(Value::TaskHandle(result_slot))
     }
 
@@ -2400,12 +2439,29 @@ impl Interpreter {
             }
             "wait" => match args.first() {
                 Some(Value::Int(secs)) => {
-                    let s = (*secs).max(0) as u64;
-                    std::thread::sleep(std::time::Duration::from_secs(s));
+                    let total_ms = ((*secs).max(0) as u64) * 1000;
+                    let mut elapsed = 0u64;
+                    while elapsed < total_ms {
+                        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err(RuntimeError::new("cancelled"));
+                        }
+                        let chunk = std::cmp::min(100, total_ms - elapsed);
+                        std::thread::sleep(std::time::Duration::from_millis(chunk));
+                        elapsed += chunk;
+                    }
                     Ok(Value::Null)
                 }
                 Some(Value::Float(secs)) => {
-                    std::thread::sleep(std::time::Duration::from_secs_f64(*secs));
+                    let total_ms = (secs.max(0.0) * 1000.0) as u64;
+                    let mut elapsed = 0u64;
+                    while elapsed < total_ms {
+                        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err(RuntimeError::new("cancelled"));
+                        }
+                        let chunk = std::cmp::min(100, total_ms - elapsed);
+                        std::thread::sleep(std::time::Duration::from_millis(chunk));
+                        elapsed += chunk;
+                    }
                     Ok(Value::Null)
                 }
                 _ => Err(RuntimeError::new("wait() requires a number of seconds")),
@@ -2416,19 +2472,11 @@ impl Interpreter {
                     _ => 32,
                 };
                 let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(capacity);
-                let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
-                let rx = std::sync::Arc::new(std::sync::Mutex::new(Some(rx)));
-
-                // Store in thread-safe statics via leaked Box
-                let tx_ptr = Box::into_raw(Box::new(tx)) as usize;
-                let rx_ptr = Box::into_raw(Box::new(rx)) as usize;
-
-                let mut ch = IndexMap::new();
-                ch.insert("__type__".to_string(), Value::String("Channel".to_string()));
-                ch.insert("__tx__".to_string(), Value::Int(tx_ptr as i64));
-                ch.insert("__rx__".to_string(), Value::Int(rx_ptr as i64));
-                ch.insert("capacity".to_string(), Value::Int(capacity as i64));
-                Ok(Value::Object(ch))
+                Ok(Value::Channel(Arc::new(ChannelInner {
+                    tx: std::sync::Mutex::new(Some(tx)),
+                    rx: std::sync::Mutex::new(Some(rx)),
+                    capacity,
+                })))
             }
             "send" => {
                 if args.len() < 2 {
@@ -2436,17 +2484,10 @@ impl Interpreter {
                         "send(channel, value) requires 2 arguments",
                     ));
                 }
-                let ch = &args[0];
                 let val = args[1].clone();
-                if let Value::Object(map) = ch {
-                    if let Some(Value::Int(tx_ptr)) = map.get("__tx__") {
-                        let tx = unsafe {
-                            &*((*tx_ptr as usize)
-                                as *const std::sync::Arc<
-                                    std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Value>>>,
-                                >)
-                        };
-                        if let Ok(guard) = tx.lock() {
+                match &args[0] {
+                    Value::Channel(ch) => {
+                        if let Ok(guard) = ch.tx.lock() {
                             if let Some(ref sender) = *guard {
                                 sender
                                     .send(val)
@@ -2454,26 +2495,21 @@ impl Interpreter {
                                 return Ok(Value::Null);
                             }
                         }
+                        Err(RuntimeError::new("channel closed"))
                     }
+                    _ => Err(RuntimeError::new(
+                        "send() requires a channel as first argument",
+                    )),
                 }
-                Err(RuntimeError::new(
-                    "send() requires a channel as first argument",
-                ))
             }
             "receive" => {
                 let ch = match args.first() {
                     Some(v) => v,
                     None => return Err(RuntimeError::new("receive(channel) requires 1 argument")),
                 };
-                if let Value::Object(map) = ch {
-                    if let Some(Value::Int(rx_ptr)) = map.get("__rx__") {
-                        let rx = unsafe {
-                            &*((*rx_ptr as usize)
-                                as *const std::sync::Arc<
-                                    std::sync::Mutex<Option<std::sync::mpsc::Receiver<Value>>>,
-                                >)
-                        };
-                        if let Ok(guard) = rx.lock() {
+                match ch {
+                    Value::Channel(inner) => {
+                        if let Ok(guard) = inner.rx.lock() {
                             if let Some(ref receiver) = *guard {
                                 match receiver.recv() {
                                     Ok(val) => return Ok(val),
@@ -2481,11 +2517,12 @@ impl Interpreter {
                                 }
                             }
                         }
+                        Ok(Value::Null)
                     }
+                    _ => Err(RuntimeError::new(
+                        "receive() requires a channel as first argument",
+                    )),
                 }
-                Err(RuntimeError::new(
-                    "receive() requires a channel as first argument",
-                ))
             }
             "reduce" => {
                 if args.len() != 3 {
@@ -4898,8 +4935,8 @@ mod tests {
             x"#,
         );
         match value {
-            Value::Int(n) => assert_eq!(n, 42),
-            _ => panic!("expected 42"),
+            Value::Frozen(inner) => assert_eq!(*inner, Value::Int(42)),
+            _ => panic!("expected Frozen(42), got {:?}", value),
         }
     }
 
@@ -6778,7 +6815,11 @@ mod tests {
             assert_eq(v, 42)
         "#,
         );
-        assert!(result.is_ok(), "await spawn should return value: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "await spawn should return value: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -6913,5 +6954,219 @@ mod tests {
         "#,
         );
         assert_eq!(value, Value::String("<task>".into()));
+    }
+
+    // === Phase 1: Channel tests ===
+
+    #[test]
+    fn channel_creates_channel_value() {
+        let value = run_forge("let ch = channel()\ntypeof(ch)");
+        assert_eq!(value, Value::String("Channel".into()));
+    }
+
+    #[test]
+    fn channel_display() {
+        let value = run_forge("let ch = channel()\nstr(ch)");
+        assert_eq!(value, Value::String("<channel>".into()));
+    }
+
+    #[test]
+    fn channel_is_truthy() {
+        let result = try_run_forge(
+            r#"
+            let ch = channel()
+            assert(ch)
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "channel should be truthy: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn channel_with_capacity() {
+        let value = run_forge("typeof(channel(10))");
+        assert_eq!(value, Value::String("Channel".into()));
+    }
+
+    #[test]
+    fn channel_send_receive() {
+        let result = try_run_forge(
+            r#"
+            let ch = channel()
+            spawn { send(ch, 42) }
+            let val = receive(ch)
+            assert_eq(val, 42)
+        "#,
+        );
+        assert!(result.is_ok(), "channel send/receive: {:?}", result.err());
+    }
+
+    #[test]
+    fn channel_send_receive_multiple() {
+        let result = try_run_forge(
+            r#"
+            let ch = channel()
+            spawn {
+                send(ch, 1)
+                send(ch, 2)
+                send(ch, 3)
+            }
+            let a = receive(ch)
+            let b = receive(ch)
+            let c = receive(ch)
+            assert_eq(a, 1)
+            assert_eq(b, 2)
+            assert_eq(c, 3)
+        "#,
+        );
+        assert!(result.is_ok(), "channel multi: {:?}", result.err());
+    }
+
+    // === Phase 2: Short-circuit tests ===
+
+    #[test]
+    fn and_short_circuits() {
+        // false && (1/0) must not crash — the right side should not be evaluated
+        let value = run_forge("false && (1/0)");
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn or_short_circuits() {
+        // true || (1/0) must not crash — the right side should not be evaluated
+        let value = run_forge("true || (1/0)");
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn and_evaluates_right_when_left_true() {
+        let value = run_forge("true && true");
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn or_evaluates_right_when_left_false() {
+        let value = run_forge("false || true");
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn and_returns_false_when_right_false() {
+        let value = run_forge("true && false");
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn or_returns_false_when_both_false() {
+        let value = run_forge("false || false");
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    // === Phase 4: Timeout cancellation tests ===
+
+    #[test]
+    fn timeout_returns_error_on_expiry() {
+        let result = try_run_forge(
+            r#"
+            timeout 1 seconds {
+                wait(10)
+            }
+        "#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("timeout"),
+            "expected timeout error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn timeout_completes_when_fast() {
+        let result = try_run_forge(
+            r#"
+            timeout 5 seconds {
+                let x = 1 + 1
+            }
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "fast timeout should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    // === Phase 7: Freeze tests ===
+
+    #[test]
+    fn freeze_prevents_field_mutation() {
+        let result = try_run_forge(
+            r#"
+            let mut obj = freeze { a: 1, b: 2 }
+            obj.a = 99
+        "#,
+        );
+        assert!(result.is_err(), "should error on frozen field mutation");
+        assert!(
+            result.unwrap_err().message.contains("frozen"),
+            "error should mention frozen"
+        );
+    }
+
+    #[test]
+    fn freeze_allows_field_read() {
+        let value = run_forge(
+            r#"
+            let obj = freeze { a: 1, b: 2 }
+            obj.a
+        "#,
+        );
+        assert_eq!(value, Value::Int(1));
+    }
+
+    #[test]
+    fn freeze_prevents_index_mutation() {
+        let result = try_run_forge(
+            r#"
+            let mut arr = freeze [1, 2, 3]
+            arr[0] = 99
+        "#,
+        );
+        assert!(result.is_err(), "should error on frozen index mutation");
+        assert!(
+            result.unwrap_err().message.contains("frozen"),
+            "error should mention frozen"
+        );
+    }
+
+    #[test]
+    fn freeze_allows_index_read() {
+        let value = run_forge(
+            r#"
+            let arr = freeze [1, 2, 3]
+            arr[1]
+        "#,
+        );
+        assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn freeze_preserves_equality() {
+        let value = run_forge("freeze 42 == 42");
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn freeze_preserves_display() {
+        let value = run_forge("str(freeze { x: 1 })");
+        assert!(
+            value.to_string().contains("x"),
+            "frozen display should show inner value"
+        );
     }
 }

@@ -1,0 +1,178 @@
+// stdlib_audit_test.fg — Extended stdlib coverage from architecture audit
+
+@test
+define test_sh_returns_output() {
+    let result = sh("echo hello")
+    assert(contains(result, "hello"))
+}
+
+@test
+define test_sh_lines_splits() {
+    let lines_arr = sh_lines("printf 'a\nb\nc'")
+    assert(len(lines_arr) >= 3)
+}
+
+@test
+define test_sh_ok_success() {
+    assert(sh_ok("true"))
+}
+
+@test
+define test_sh_ok_failure() {
+    assert(!sh_ok("false"))
+}
+
+@test
+define test_shell_returns_object() {
+    let result = shell("echo hi")
+    assert(contains(result.stdout, "hi"))
+}
+
+@test
+define test_cwd_returns_path() {
+    let dir = cwd()
+    assert(len(dir) > 0)
+}
+
+@test
+define test_which_finds_sh() {
+    let path = which("sh")
+    assert(len(path) > 0)
+}
+
+@test
+define test_has_key_positive() {
+    assert(has_key({ a: 1, b: 2 }, "a"))
+}
+
+@test
+define test_has_key_negative() {
+    assert(!has_key({ a: 1 }, "z"))
+}
+
+@test
+define test_entries_roundtrip() {
+    let obj = { a: 1, b: 2 }
+    let e = entries(obj)
+    assert_eq(len(e), 2)
+    let rebuilt = from_entries(e)
+    assert(has_key(rebuilt, "a"))
+    assert(has_key(rebuilt, "b"))
+}
+
+@test
+define test_flat_map() {
+    let result = flat_map([1, 2, 3], fn(x) { return [x, x * 10] })
+    assert_eq(len(result), 6)
+    assert_eq(result[0], 1)
+    assert_eq(result[1], 10)
+    assert_eq(result[2], 2)
+    assert_eq(result[3], 20)
+}
+
+@test
+define test_lines_builtin() {
+    let result = lines("a\nb\nc")
+    assert_eq(len(result), 3)
+    assert_eq(result[0], "a")
+    assert_eq(result[2], "c")
+}
+
+@test
+define test_find_predicate() {
+    let result = find([1, 2, 3, 4], fn(x) { return x > 2 })
+    assert_eq(result, 3)
+}
+
+@test
+define test_pick_omit() {
+    let obj = { a: 1, b: 2, c: 3 }
+    let picked = pick(obj, ["a", "c"])
+    assert(has_key(picked, "a"))
+    assert(!has_key(picked, "b"))
+    assert(has_key(picked, "c"))
+
+    let omitted = omit(obj, ["b"])
+    assert(has_key(omitted, "a"))
+    assert(!has_key(omitted, "b"))
+    assert(has_key(omitted, "c"))
+}
+
+@test
+define test_merge_objects() {
+    let a = { x: 1, y: 2 }
+    let b = { y: 3, z: 4 }
+    let merged = merge(a, b)
+    assert_eq(merged.x, 1)
+    assert_eq(merged.y, 3)
+    assert_eq(merged.z, 4)
+}
+
+@test
+define test_enumerate_array() {
+    let arr = ["a", "b", "c"]
+    let result = enumerate(arr)
+    assert_eq(len(result), 3)
+    assert_eq(result[0].index, 0)
+    assert_eq(result[0].value, "a")
+    assert_eq(result[2].index, 2)
+    assert_eq(result[2].value, "c")
+}
+
+@test
+define test_crypto_sha256() {
+    let hash = crypto.sha256("hello")
+    assert_eq(len(hash), 64)
+}
+
+@test
+define test_crypto_base64_roundtrip() {
+    let encoded = crypto.base64_encode("hello world")
+    let decoded = crypto.base64_decode(encoded)
+    assert_eq(decoded, "hello world")
+}
+
+@test
+define test_regex_test() {
+    assert(regex.test("hello123", "\\d+"))
+    assert(!regex.test("hello", "\\d+"))
+}
+
+@test
+define test_regex_find() {
+    let result = regex.find("hello 42 world", "\\d+")
+    assert_eq(result, "42")
+}
+
+@test
+define test_regex_replace() {
+    let result = regex.replace("foo bar baz", "bar", "qux")
+    assert_eq(result, "foo qux baz")
+}
+
+@test
+define test_env_get_set() {
+    env.set("FORGE_TEST_VAR", "hello")
+    let val = env.get("FORGE_TEST_VAR")
+    assert_eq(val, "hello")
+    assert(env.has("FORGE_TEST_VAR"))
+}
+
+@test
+define test_uuid_format() {
+    let id = uuid()
+    assert_eq(len(id), 36)
+    assert(contains(id, "-"))
+}
+
+@test
+define test_db_parameterized_query() {
+    db.open(":memory:")
+    db.execute("CREATE TABLE items (id INTEGER, name TEXT)")
+    db.execute("INSERT INTO items VALUES (?, ?)", [1, "widget"])
+    db.execute("INSERT INTO items VALUES (?, ?)", [2, "gadget"])
+    let results = db.query("SELECT * FROM items WHERE id = ?", [1])
+    assert_eq(len(results), 1)
+    assert_eq(results[0].name, "widget")
+    db.close()
+}

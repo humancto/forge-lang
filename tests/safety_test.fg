@@ -1,0 +1,139 @@
+// safety_test.fg — Safety, correctness, and edge case tests from audit
+
+@test
+define test_short_circuit_and() {
+    // false && (1/0) must NOT crash — right side should not be evaluated
+    let result = false && (1/0)
+    assert_eq(result, false)
+}
+
+@test
+define test_short_circuit_or() {
+    // true || (1/0) must NOT crash — right side should not be evaluated
+    let result = true || (1/0)
+    assert_eq(result, true)
+}
+
+@test
+define test_channel_roundtrip() {
+    let ch = channel()
+    assert_eq(typeof(ch), "Channel")
+    spawn { send(ch, 99) }
+    let val = receive(ch)
+    assert_eq(val, 99)
+}
+
+@test
+define test_channel_type() {
+    let ch = channel()
+    assert_eq(typeof(ch), "Channel")
+    assert_eq(str(ch), "<channel>")
+}
+
+@test
+define test_spawn_inside_spawn() {
+    let h = spawn {
+        let inner = spawn { return 42 }
+        return await inner
+    }
+    let val = await h
+    assert_eq(val, 42)
+}
+
+@test
+define test_safe_wraps_type_error() {
+    safe { let x = 1 + "x" }
+    assert(true)
+}
+
+@test
+define test_safe_wraps_division_by_zero() {
+    safe { let x = 1 / 0 }
+    assert(true)
+}
+
+@test
+define test_retry_with_real_failures() {
+    let mut attempt = 0
+    retry 5 times {
+        attempt += 1
+        if attempt < 3 {
+            let x = 1 / 0
+        }
+    }
+    assert_eq(attempt, 3)
+}
+
+@test
+define test_deep_recursion() {
+    fn factorial(n) {
+        if n <= 1 { return 1 }
+        return n * factorial(n - 1)
+    }
+    assert_eq(factorial(20), 2432902008176640000)
+}
+
+@test
+define test_large_array_operations() {
+    let arr = range(5000)
+    let doubled = map(arr, fn(x) { return x * 2 })
+    let evens = filter(doubled, fn(x) { return x % 4 == 0 })
+    assert(len(evens) > 0)
+    assert_eq(doubled[0], 0)
+    assert_eq(doubled[1], 2)
+}
+
+@test
+define test_nested_option_result() {
+    let val = Some(Ok(42))
+    assert(is_some(val))
+    let inner = unwrap(val)
+    assert(is_ok(inner))
+    assert_eq(unwrap(inner), 42)
+}
+
+@test
+define test_result_error_handling() {
+    let ok_val = Ok(100)
+    let err_val = Err("oops")
+    assert(is_ok(ok_val))
+    assert(is_err(err_val))
+    assert_eq(unwrap(ok_val), 100)
+    assert_eq(unwrap_or(err_val, 0), 0)
+}
+
+@test
+define test_option_none_handling() {
+    let n = None
+    assert(is_none(n))
+    assert(!is_some(n))
+    let s = Some(42)
+    assert(is_some(s))
+    assert_eq(unwrap(s), 42)
+}
+
+@test
+define test_chained_functional_ops() {
+    let arr = [1, 2, 3, 4, 5]
+    let filtered = filter(arr, fn(x) { return x > 2 })
+    let result = map(filtered, fn(x) { return x * 10 })
+    assert_eq(len(result), 3)
+    assert_eq(result[0], 30)
+    assert_eq(result[1], 40)
+    assert_eq(result[2], 50)
+}
+
+@test
+define test_freeze_object_prevents_mutation() {
+    let obj = freeze { a: 1, b: 2 }
+    // Reading should work
+    assert_eq(obj.a, 1)
+    assert_eq(obj.b, 2)
+}
+
+@test
+define test_freeze_array_read_works() {
+    let arr = freeze [10, 20, 30]
+    assert_eq(arr[0], 10)
+    assert_eq(arr[2], 30)
+}
