@@ -56,9 +56,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run a Forge source file
+    /// Run a Forge source file (.fg) or compiled bytecode (.fgc)
     Run {
-        /// Path to a .fg file
+        /// Path to a .fg or .fgc file
         file: PathBuf,
     },
     /// Start the interactive REPL
@@ -120,6 +120,10 @@ async fn main() {
 
     match cli.command {
         Some(Command::Run { file }) => {
+            if file.extension().map(|e| e == "fgc").unwrap_or(false) {
+                run_bytecode_file(&file);
+                return;
+            }
             let path_str = file.display().to_string();
             let source = match fs::read_to_string(&file) {
                 Ok(s) => s,
@@ -181,7 +185,7 @@ async fn main() {
                     process::exit(1);
                 }
             };
-            compile_to_bytecode(&source, &path_str);
+            compile_to_bytecode(&source, &path_str, &file);
         }
         Some(Command::Install { source }) => {
             package::install(&source);
@@ -365,7 +369,7 @@ fn run_jit(source: &str, _filename: &str) {
     }
 }
 
-fn compile_to_bytecode(source: &str, filename: &str) {
+fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf) {
     let mut lexer = Lexer::new(source);
     let tokens = match lexer.tokenize() {
         Ok(t) => t,
@@ -392,18 +396,77 @@ fn compile_to_bytecode(source: &str, filename: &str) {
 
     match vm::compiler::compile(&program) {
         Ok(chunk) => {
-            let out_path = filename.replace(".fg", ".fgc");
-            let info = format!(
-                "Compiled {} -> {}\n  {} instructions\n  {} constants\n  {} prototypes\n  {} max registers",
+            let out_path = file_path.with_extension("fgc");
+            let bytes = match vm::serialize::serialize_chunk(&chunk) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("{}", errors::format_simple_error(&e.message));
+                    process::exit(1);
+                }
+            };
+            if let Err(e) = fs::write(&out_path, &bytes) {
+                eprintln!(
+                    "{}",
+                    errors::format_simple_error(&format!(
+                        "could not write '{}': {}",
+                        out_path.display(),
+                        e
+                    ))
+                );
+                process::exit(1);
+            }
+            println!(
+                "Compiled {} -> {}\n  {} instructions\n  {} constants\n  {} prototypes\n  {} max registers\n  {} bytes",
                 filename,
-                out_path,
+                out_path.display(),
                 chunk.code.len(),
                 chunk.constants.len(),
                 chunk.prototypes.len(),
                 chunk.max_registers,
+                bytes.len(),
             );
-            println!("{}", info);
         }
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e.message));
+            process::exit(1);
+        }
+    }
+}
+
+fn run_bytecode_file(file_path: &PathBuf) {
+    let bytes = match fs::read(file_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                errors::format_simple_error(&format!(
+                    "could not read '{}': {}",
+                    file_path.display(),
+                    e
+                ))
+            );
+            process::exit(1);
+        }
+    };
+
+    let chunk = match vm::serialize::deserialize_chunk(&bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                errors::format_simple_error(&format!(
+                    "invalid bytecode file '{}': {}",
+                    file_path.display(),
+                    e.message
+                ))
+            );
+            process::exit(1);
+        }
+    };
+
+    let mut vm = vm::machine::VM::new();
+    match vm.execute(&chunk) {
+        Ok(_) => {}
         Err(e) => {
             eprintln!("{}", errors::format_simple_error(&e.message));
             process::exit(1);
