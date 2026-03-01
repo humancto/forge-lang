@@ -1,0 +1,242 @@
+// edge_cases_test.fg — Edge cases, boundary values, cross-feature interactions
+
+@test
+define test_empty_array_operations() {
+    let arr = []
+    assert_eq(len(arr), 0)
+    let mapped = map(arr, fn(x) { return x * 2 })
+    assert_eq(len(mapped), 0)
+    let filtered = filter(arr, fn(x) { return true })
+    assert_eq(len(filtered), 0)
+}
+
+@test
+define test_empty_object_operations() {
+    let obj = {}
+    assert_eq(len(keys(obj)), 0)
+    assert_eq(len(values(obj)), 0)
+    assert(!has_key(obj, "any"))
+}
+
+@test
+define test_zero_and_negative_numbers() {
+    assert_eq(0 + 0, 0)
+    assert_eq(-1 + 1, 0)
+    assert_eq(-5 * -3, 15)
+    assert_eq(-10 / 2, -5)
+    assert_eq(math.abs(-0), 0)
+}
+
+@test
+define test_float_arithmetic() {
+    assert_eq(0.1 + 0.2 > 0.29, true)
+    assert_eq(0.1 + 0.2 < 0.31, true)
+    assert_eq(1.0 / 3.0 * 3.0 > 0.99, true)
+}
+
+@test
+define test_empty_string_operations() {
+    assert_eq(len(""), 0)
+    assert_eq("" + "", "")
+    assert(starts_with("", ""))
+    assert(ends_with("", ""))
+    assert(contains("", ""))
+    let parts = split("", ",")
+    assert(len(parts) >= 1)
+}
+
+@test
+define test_boolean_edge_cases() {
+    assert(true && true)
+    assert(!(true && false))
+    assert(true || false)
+    assert(!(false || false))
+    assert(!false)
+    assert(!!true)
+}
+
+@test
+define test_nested_function_calls() {
+    fn add(a, b) { return a + b }
+    fn mul(a, b) { return a * b }
+    assert_eq(add(mul(2, 3), mul(4, 5)), 26)
+}
+
+@test
+define test_recursive_function() {
+    fn factorial(n) {
+        if n <= 1 { return 1 }
+        return n * factorial(n - 1)
+    }
+    assert_eq(factorial(0), 1)
+    assert_eq(factorial(1), 1)
+    assert_eq(factorial(5), 120)
+    assert_eq(factorial(10), 3628800)
+}
+
+@test
+define test_recursive_fibonacci() {
+    fn fib(n) {
+        if n <= 1 { return n }
+        return fib(n - 1) + fib(n - 2)
+    }
+    assert_eq(fib(0), 0)
+    assert_eq(fib(1), 1)
+    assert_eq(fib(10), 55)
+}
+
+@test
+define test_result_inside_option() {
+    let wrapped = Some(Ok(42))
+    assert(is_some(wrapped))
+    let inner = unwrap(wrapped)
+    assert(is_ok(inner))
+    assert_eq(unwrap(inner), 42)
+}
+
+@test
+define test_option_inside_result() {
+    let val = Ok(Some(99))
+    assert(is_ok(val))
+    let opt = unwrap(val)
+    assert(is_some(opt))
+    assert_eq(unwrap(opt), 99)
+}
+
+@test
+define test_safe_wraps_errors() {
+    safe { let x = 1 / 0 }
+    assert(true)
+
+    safe { fs.read("/tmp/this_file_absolutely_does_not_exist_forge.txt") }
+    assert(true)
+}
+
+@test
+define test_must_on_ok() {
+    let x = must Ok(42)
+    assert_eq(x, 42)
+}
+
+@test
+define test_retry_recovers() {
+    let mut count = 0
+    retry 3 times {
+        count += 1
+        if count < 3 {
+            let x = 1 / 0
+        }
+    }
+    assert_eq(count, 3)
+}
+
+@test
+define test_compound_assignment() {
+    let mut x = 10
+    x += 5
+    assert_eq(x, 15)
+    x -= 3
+    assert_eq(x, 12)
+    x *= 2
+    assert_eq(x, 24)
+}
+
+@test
+define test_adt_with_pattern_match() {
+    type Color = Red | Green | Blue
+    fn name(c) {
+        match c {
+            Red => return "red"
+            Green => return "green"
+            Blue => return "blue"
+        }
+    }
+    assert_eq(name(Red), "red")
+    assert_eq(name(Green), "green")
+    assert_eq(name(Blue), "blue")
+}
+
+@test
+define test_adt_with_fields() {
+    type Shape = Circle(Float) | Rect(Float, Float)
+    fn area(s) {
+        match s {
+            Circle(r) => return 3.14 * r * r
+            Rect(w, h) => return w * h
+        }
+    }
+    assert(area(Circle(1.0)) > 3.13)
+    assert(area(Circle(1.0)) < 3.15)
+    assert_eq(area(Rect(3.0, 4.0)), 12.0)
+}
+
+@test
+define test_large_array() {
+    let arr = range(1000)
+    assert_eq(len(arr), 1000)
+    assert_eq(arr[0], 0)
+    assert_eq(arr[999], 999)
+    let sum = reduce(arr, 0, fn(acc, x) { return acc + x })
+    assert_eq(sum, 499500)
+}
+
+@test
+define test_object_as_function_argument() {
+    fn greet(person) {
+        return "Hello, " + person.name + "!"
+    }
+    assert_eq(greet({ name: "Alice" }), "Hello, Alice!")
+    assert_eq(greet({ name: "Bob" }), "Hello, Bob!")
+}
+
+@test
+define test_array_of_objects() {
+    let users = [
+        { name: "Alice", age: 30 },
+        { name: "Bob", age: 25 },
+        { name: "Charlie", age: 35 }
+    ]
+    let names = map(users, fn(u) { return u.name })
+    assert_eq(len(names), 3)
+    assert_eq(names[0], "Alice")
+    let seniors = filter(users, fn(u) { return u.age > 28 })
+    assert_eq(len(seniors), 2)
+}
+
+@test
+define test_when_as_control_flow() {
+    let mut grade = "F"
+    let score = 85
+    when score {
+        >= 90 -> { grade = "A" }
+        >= 80 -> { grade = "B" }
+        >= 70 -> { grade = "C" }
+        else -> { grade = "D" }
+    }
+    assert_eq(grade, "B")
+}
+
+@test
+define test_shell_basic() {
+    let result = sh("echo hello")
+    assert(contains(result, "hello"))
+}
+
+@test
+define test_io_print_does_not_crash() {
+    io.print("test output\n")
+    assert(true)
+}
+
+@test
+define test_cross_module_db_csv() {
+    db.open(":memory:")
+    db.execute("CREATE TABLE products (name TEXT, price REAL)")
+    db.execute("INSERT INTO products VALUES ('Apple', 1.50)")
+    db.execute("INSERT INTO products VALUES ('Bread', 2.00)")
+    let rows = db.query("SELECT * FROM products")
+    let csv_str = csv.stringify(rows)
+    assert(contains(csv_str, "Apple"))
+    assert(contains(csv_str, "name"))
+    db.close()
+}

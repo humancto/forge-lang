@@ -1,0 +1,130 @@
+// functional_test.fg — Higher-order functions, closures, and functional patterns
+
+@test
+define test_map_array() {
+    let doubled = map([1, 2, 3], fn(x) { return x * 2 })
+    assert_eq(len(doubled), 3)
+    assert_eq(doubled[0], 2)
+    assert_eq(doubled[1], 4)
+    assert_eq(doubled[2], 6)
+}
+
+@test
+define test_filter_array() {
+    let evens = filter([1, 2, 3, 4, 5, 6], fn(x) { return x % 2 == 0 })
+    assert_eq(len(evens), 3)
+    assert_eq(evens[0], 2)
+    assert_eq(evens[1], 4)
+    assert_eq(evens[2], 6)
+}
+
+@test
+define test_reduce_sum() {
+    let total = reduce([1, 2, 3, 4, 5], 0, fn(acc, x) { return acc + x })
+    assert_eq(total, 15)
+}
+
+@test
+define test_reduce_string_concat() {
+    let result = reduce(["a", "b", "c"], "", fn(acc, x) { return acc + x })
+    assert_eq(result, "abc")
+}
+
+@test
+define test_sort_numbers() {
+    let sorted = sort([3, 1, 4, 1, 5, 9, 2])
+    assert_eq(sorted[0], 1)
+    assert_eq(sorted[1], 1)
+    assert_eq(sorted[6], 9)
+}
+
+@test
+define test_reverse_array() {
+    let rev = reverse([1, 2, 3])
+    assert_eq(rev[0], 3)
+    assert_eq(rev[1], 2)
+    assert_eq(rev[2], 1)
+}
+
+@test
+define test_find_element() {
+    let found = find([10, 20, 30, 40], fn(x) { return x > 25 })
+    assert_eq(found, 30)
+}
+
+@test
+define test_map_filter_chain() {
+    let result = filter(map([1, 2, 3, 4, 5], fn(x) { return x * 2 }), fn(x) { return x > 6 })
+    assert_eq(len(result), 2)
+    assert_eq(result[0], 8)
+    assert_eq(result[1], 10)
+}
+
+@test
+define test_closure_captures_variable() {
+    let multiplier = 10
+    let multiply = fn(x) { return x * multiplier }
+    assert_eq(multiply(5), 50)
+    assert_eq(multiply(3), 30)
+}
+
+@test
+define test_function_as_argument() {
+    fn apply(f, x) {
+        return f(x)
+    }
+    fn double(x) { return x * 2 }
+    fn negate(x) { return -x }
+    assert_eq(apply(double, 5), 10)
+    assert_eq(apply(negate, 3), -3)
+}
+
+@test
+define test_function_returns_function() {
+    fn make_adder(n) {
+        return fn(x) { return x + n }
+    }
+    let add5 = make_adder(5)
+    let add10 = make_adder(10)
+    assert_eq(add5(3), 8)
+    assert_eq(add10(3), 13)
+}
+
+@test
+define test_enumerate_array() {
+    let items = enumerate(["a", "b", "c"])
+    assert_eq(len(items), 3)
+    assert_eq(items[0].index, 0)
+    assert_eq(items[0].value, "a")
+    assert_eq(items[2].index, 2)
+    assert_eq(items[2].value, "c")
+}
+
+@test
+define test_range_basic() {
+    let r = range(5)
+    assert_eq(len(r), 5)
+    assert_eq(r[0], 0)
+    assert_eq(r[4], 4)
+}
+
+@test
+define test_range_start_end() {
+    let r = range(2, 6)
+    assert_eq(len(r), 4)
+    assert_eq(r[0], 2)
+    assert_eq(r[3], 5)
+}
+
+@test
+define test_implicit_return_in_closure() {
+    let doubled = map([1, 2, 3], fn(x) { x * 2 })
+    assert_eq(doubled[0], 2)
+    assert_eq(doubled[1], 4)
+}
+
+@test
+define test_pipeline_operator() {
+    let result = [1, 2, 3] |> fn(arr) { return len(arr) }
+    assert_eq(result, 3)
+}

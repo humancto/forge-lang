@@ -1,0 +1,279 @@
+// stdlib_extended_test.fg — Extended stdlib coverage: math, fs, regex, env, db, csv, time, json
+
+@test
+define test_math_trig() {
+    assert_eq(math.sin(0), 0.0)
+    assert_eq(math.cos(0), 1.0)
+    assert_eq(math.tan(0), 0.0)
+}
+
+@test
+define test_math_constants() {
+    assert(math.pi > 3.14)
+    assert(math.pi < 3.15)
+    assert(math.e > 2.71)
+    assert(math.e < 2.72)
+}
+
+@test
+define test_math_log() {
+    let ln_e = math.log(math.e)
+    assert(ln_e > 0.999)
+    assert(ln_e < 1.001)
+}
+
+@test
+define test_math_random() {
+    let r = math.random()
+    assert(r >= 0.0)
+    assert(r < 1.0)
+}
+
+@test
+define test_math_round() {
+    assert_eq(math.round(3.7), 4.0)
+    assert_eq(math.round(3.2), 3.0)
+    assert_eq(math.floor(3.9), 3.0)
+    assert_eq(math.ceil(3.1), 4.0)
+}
+
+@test
+define test_math_sqrt_pow() {
+    assert_eq(math.sqrt(16.0), 4.0)
+    assert_eq(math.pow(2, 10), 1024.0)
+    assert_eq(math.abs(-42), 42)
+}
+
+@test
+define test_fs_write_read_remove() {
+    let path = "/tmp/forge_test_rw.txt"
+    fs.write(path, "hello forge")
+    assert(fs.exists(path))
+    let content = fs.read(path)
+    assert_eq(content, "hello forge")
+    fs.remove(path)
+    assert(!fs.exists(path))
+}
+
+@test
+define test_fs_append() {
+    let path = "/tmp/forge_test_append.txt"
+    fs.write(path, "hello")
+    fs.append(path, " world")
+    let content = fs.read(path)
+    assert_eq(content, "hello world")
+    fs.remove(path)
+}
+
+@test
+define test_fs_mkdir_list() {
+    let dir = "/tmp/forge_test_dir"
+    safe { fs.remove(dir) }
+    fs.mkdir(dir)
+    fs.write(dir + "/a.txt", "a")
+    fs.write(dir + "/b.txt", "b")
+    let files = fs.list(dir)
+    assert(len(files) >= 2)
+    fs.remove(dir + "/a.txt")
+    fs.remove(dir + "/b.txt")
+    fs.remove(dir)
+}
+
+@test
+define test_fs_copy() {
+    let src = "/tmp/forge_test_copy_src.txt"
+    let dst = "/tmp/forge_test_copy_dst.txt"
+    fs.write(src, "copy me")
+    fs.copy(src, dst)
+    assert(fs.exists(dst))
+    assert_eq(fs.read(dst), "copy me")
+    fs.remove(src)
+    fs.remove(dst)
+}
+
+@test
+define test_fs_size_ext() {
+    let path = "/tmp/forge_test_size.json"
+    fs.write(path, "abcde")
+    let sz = fs.size(path)
+    assert_eq(sz, 5)
+    let ext = fs.ext(path)
+    assert_eq(ext, "json")
+    fs.remove(path)
+}
+
+@test
+define test_fs_read_write_json() {
+    let path = "/tmp/forge_test_json.json"
+    let data = { name: "test", values: [1, 2, 3] }
+    fs.write_json(path, data)
+    let loaded = fs.read_json(path)
+    assert_eq(loaded.name, "test")
+    assert_eq(len(loaded.values), 3)
+    fs.remove(path)
+}
+
+@test
+define test_regex_test() {
+    assert(regex.test("hello123", "\\d+"))
+    assert(!regex.test("hello", "\\d+"))
+}
+
+@test
+define test_regex_find() {
+    let m = regex.find("order-12345-abc", "\\d+")
+    assert_eq(m, "12345")
+}
+
+@test
+define test_regex_find_all() {
+    let matches = regex.find_all("a1b2c3", "\\d")
+    assert_eq(len(matches), 3)
+    assert_eq(matches[0], "1")
+    assert_eq(matches[2], "3")
+}
+
+@test
+define test_regex_replace() {
+    let result = regex.replace("hello world", "world", "forge")
+    assert_eq(result, "hello forge")
+}
+
+@test
+define test_regex_split() {
+    let parts = regex.split("one::two::three", "::")
+    assert_eq(len(parts), 3)
+    assert_eq(parts[0], "one")
+    assert_eq(parts[2], "three")
+}
+
+@test
+define test_env_set_get_has() {
+    env.set("FORGE_TEST_VAR", "testing123")
+    assert(env.has("FORGE_TEST_VAR"))
+    assert_eq(env.get("FORGE_TEST_VAR"), "testing123")
+    assert(!env.has("FORGE_NONEXISTENT_VAR_12345"))
+}
+
+@test
+define test_env_keys() {
+    env.set("FORGE_KEYS_TEST", "yes")
+    let all_keys = env.keys()
+    assert(len(all_keys) > 0)
+    assert(contains(all_keys, "FORGE_KEYS_TEST"))
+}
+
+@test
+define test_db_workflow() {
+    db.open(":memory:")
+    db.execute("CREATE TABLE items (id INTEGER, name TEXT, price REAL)")
+    db.execute("INSERT INTO items VALUES (1, 'Widget', 9.99)")
+    db.execute("INSERT INTO items VALUES (2, 'Gadget', 19.99)")
+    db.execute("INSERT INTO items VALUES (3, 'Doohickey', 4.99)")
+    let rows = db.query("SELECT * FROM items WHERE price > 10")
+    assert_eq(len(rows), 1)
+    assert_eq(rows[0].name, "Gadget")
+    let all = db.query("SELECT * FROM items ORDER BY id")
+    assert_eq(len(all), 3)
+    db.close()
+}
+
+@test
+define test_csv_parse_stringify() {
+    let csv_str = "name,age\nAlice,30\nBob,25"
+    let data = csv.parse(csv_str)
+    assert_eq(len(data), 2)
+    assert_eq(data[0].name, "Alice")
+    assert_eq(data[1].age, "25")
+    let output = csv.stringify(data)
+    assert(contains(output, "Alice"))
+    assert(contains(output, "name"))
+}
+
+@test
+define test_csv_read_write() {
+    let path = "/tmp/forge_test.csv"
+    let data = [
+        { name: "Alice", score: "95" },
+        { name: "Bob", score: "87" }
+    ]
+    csv.write(path, data)
+    let loaded = csv.read(path)
+    assert_eq(len(loaded), 2)
+    assert_eq(loaded[0].name, "Alice")
+    fs.remove(path)
+}
+
+@test
+define test_json_stringify_parse() {
+    let original = { name: "Forge", version: 2 }
+    let s = json.stringify(original)
+    let parsed = json.parse(s)
+    assert_eq(parsed.name, "Forge")
+    assert_eq(parsed.version, 2)
+}
+
+@test
+define test_json_pretty() {
+    let obj = { a: 1, b: 2 }
+    let pretty = json.pretty(obj)
+    assert(contains(pretty, "a"))
+    assert(contains(pretty, "1"))
+}
+
+@test
+define test_json_nested() {
+    let data = { users: [{ name: "Alice" }, { name: "Bob" }] }
+    let s = json.stringify(data)
+    let parsed = json.parse(s)
+    assert_eq(len(parsed.users), 2)
+    assert_eq(parsed.users[0].name, "Alice")
+}
+
+@test
+define test_time_now() {
+    let t = time.now()
+    assert(t.year >= 2026)
+}
+
+@test
+define test_time_unix() {
+    let ts = time.unix()
+    assert(ts > 1700000000)
+}
+
+@test
+define test_crypto_sha256() {
+    let hash = crypto.sha256("hello")
+    assert_eq(len(hash), 64)
+    assert_eq(hash, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+}
+
+@test
+define test_crypto_md5() {
+    let hash = crypto.md5("hello")
+    assert_eq(len(hash), 32)
+}
+
+@test
+define test_crypto_base64_roundtrip() {
+    let encoded = crypto.base64_encode("hello forge")
+    let decoded = crypto.base64_decode(encoded)
+    assert_eq(decoded, "hello forge")
+}
+
+@test
+define test_crypto_hex_roundtrip() {
+    let encoded = crypto.hex_encode("hello")
+    let decoded = crypto.hex_decode(encoded)
+    assert_eq(decoded, "hello")
+}
+
+@test
+define test_log_does_not_crash() {
+    log.info("test info message")
+    log.warn("test warning")
+    log.error("test error")
+    log.debug("test debug")
+    assert(true)
+}

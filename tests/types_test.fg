@@ -1,0 +1,160 @@
+// types_test.fg — Type system, Option, Result, and type conversion tests
+
+@test
+define test_option_construction() {
+    let s = Some(42)
+    let n = None
+    assert(is_some(s))
+    assert(is_none(n))
+    assert(!is_some(n))
+    assert(!is_none(s))
+}
+
+@test
+define test_option_unwrap() {
+    assert_eq(unwrap(Some(42)), 42)
+    assert_eq(unwrap(Some("hello")), "hello")
+    assert_eq(unwrap(Some(true)), true)
+    assert_eq(unwrap(Some([1,2,3]))[0], 1)
+}
+
+@test
+define test_option_unwrap_or() {
+    assert_eq(unwrap_or(Some(42), 99), 42)
+    assert_eq(unwrap_or(None, 99), 99)
+    assert_eq(unwrap_or(Some("a"), "b"), "a")
+    assert_eq(unwrap_or(None, "default"), "default")
+}
+
+@test
+define test_option_equality() {
+    assert(Some(1) == Some(1))
+    assert(Some(1) != Some(2))
+    assert(None == None)
+    assert(Some(1) != None)
+    assert(None != Some(1))
+    assert(Some("a") == Some("a"))
+    assert(Some("a") != Some("b"))
+}
+
+@test
+define test_option_truthiness() {
+    assert(Some(0))
+    assert(Some(false))
+    assert(Some(""))
+    assert(!None)
+}
+
+@test
+define test_option_nested() {
+    let x = Some(Some(42))
+    assert(is_some(x))
+    let inner = unwrap(x)
+    assert(is_some(inner))
+    assert_eq(unwrap(inner), 42)
+}
+
+@test
+define test_option_in_collections() {
+    let arr = [Some(1), None, Some(3)]
+    assert(is_some(arr[0]))
+    assert(is_none(arr[1]))
+    assert_eq(unwrap(arr[2]), 3)
+    assert_eq(len(arr), 3)
+}
+
+@test
+define test_option_pattern_match() {
+    let x = Some(42)
+    let mut result = 0
+    match x {
+        Some(v) => { result = v }
+        None => { result = -1 }
+    }
+    assert_eq(result, 42)
+
+    let y = None
+    let mut result2 = 0
+    match y {
+        Some(v) => { result2 = v }
+        None => { result2 = -1 }
+    }
+    assert_eq(result2, -1)
+}
+
+@test
+define test_option_as_return_value() {
+    fn find_item(items, target) {
+        for item in items {
+            if item == target { return Some(item) }
+        }
+        return None
+    }
+    assert_eq(unwrap(find_item([1,2,3], 2)), 2)
+    assert(is_none(find_item([1,2,3], 9)))
+}
+
+@test
+define test_option_display() {
+    assert_eq(str(Some(42)), "Some(42)")
+    assert_eq(str(None), "None")
+    assert_eq(typeof(Some(1)), "Option")
+    assert_eq(typeof(None), "Option")
+}
+
+@test
+define test_result_construction() {
+    let ok = Ok(42)
+    let err = Err("oops")
+    assert(is_ok(ok))
+    assert(is_err(err))
+    assert(!is_ok(err))
+    assert(!is_err(ok))
+}
+
+@test
+define test_result_unwrap() {
+    assert_eq(unwrap(Ok(42)), 42)
+    assert_eq(unwrap(Ok("hello")), "hello")
+    assert_eq(unwrap_or(Ok(42), 99), 42)
+    assert_eq(unwrap_or(Err("fail"), 99), 99)
+}
+
+@test
+define test_result_try_operator() {
+    fn safe_div(a, b) {
+        if b == 0 { return Err("division by zero") }
+        return Ok(a / b)
+    }
+    fn calc() {
+        let x = safe_div(10, 2)?
+        let y = safe_div(x, 0)?
+        return y
+    }
+    let r = calc()
+    assert(is_err(Err("division by zero")))
+}
+
+@test
+define test_type_conversions() {
+    assert_eq(int(3.14), 3)
+    assert_eq(int("42"), 42)
+    assert_eq(float(42), 42.0)
+    assert_eq(str(42), "42")
+    assert_eq(str(3.14), "3.14")
+    assert_eq(str(true), "true")
+    assert_eq(str(false), "false")
+}
+
+@test
+define test_typeof_all_types() {
+    assert_eq(typeof(42), "Int")
+    assert_eq(typeof(3.14), "Float")
+    assert_eq(typeof("hello"), "String")
+    assert_eq(typeof(true), "Bool")
+    assert_eq(typeof([1,2,3]), "Array")
+    assert_eq(typeof({a: 1}), "Object")
+    assert_eq(typeof(Some(1)), "Option")
+    assert_eq(typeof(None), "Option")
+    assert_eq(typeof(fn(x) { return x }), "Lambda")
+}

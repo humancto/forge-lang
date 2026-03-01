@@ -1,0 +1,117 @@
+// strings_test.fg — String operations, interpolation, and builtins
+
+@test
+define test_string_length() {
+    assert_eq(len(""), 0)
+    assert_eq(len("hello"), 5)
+    assert_eq(len("hello world"), 11)
+}
+
+@test
+define test_string_concatenation() {
+    assert_eq("hello" + " " + "world", "hello world")
+    assert_eq("" + "a", "a")
+    assert_eq("a" + "", "a")
+}
+
+@test
+define test_string_split() {
+    let parts = split("a,b,c", ",")
+    assert_eq(len(parts), 3)
+    assert_eq(parts[0], "a")
+    assert_eq(parts[1], "b")
+    assert_eq(parts[2], "c")
+}
+
+@test
+define test_string_join() {
+    let result = join(["a", "b", "c"], "-")
+    assert_eq(result, "a-b-c")
+}
+
+@test
+define test_string_join_empty() {
+    let result = join([], ",")
+    assert_eq(result, "")
+}
+
+@test
+define test_string_starts_with() {
+    assert(starts_with("hello world", "hello"))
+    assert(!starts_with("hello world", "world"))
+    assert(starts_with("", ""))
+}
+
+@test
+define test_string_ends_with() {
+    assert(ends_with("hello world", "world"))
+    assert(!ends_with("hello world", "hello"))
+    assert(ends_with("", ""))
+}
+
+@test
+define test_string_contains() {
+    assert(contains("hello world", "lo wo"))
+    assert(!contains("hello world", "xyz"))
+    assert(contains("hello", ""))
+}
+
+@test
+define test_string_replace() {
+    let result = replace("hello world", "world", "forge")
+    assert_eq(result, "hello forge")
+}
+
+@test
+define test_string_interpolation() {
+    let name = "Forge"
+    let version = 2
+    let result = "{name} v{version}"
+    assert_eq(result, "Forge v2")
+}
+
+@test
+define test_string_lines() {
+    let text = "line1\nline2\nline3"
+    let l = lines(text)
+    assert_eq(len(l), 3)
+    assert_eq(l[0], "line1")
+    assert_eq(l[2], "line3")
+}
+
+@test
+define test_string_to_int() {
+    assert_eq(int("42"), 42)
+    assert_eq(int("0"), 0)
+    assert_eq(int("-5"), -5)
+}
+
+@test
+define test_string_to_float() {
+    assert_eq(float("3.14"), 3.14)
+    assert_eq(float("0.0"), 0.0)
+}
+
+@test
+define test_number_to_string() {
+    assert_eq(str(42), "42")
+    assert_eq(str(3.14), "3.14")
+    assert_eq(str(true), "true")
+    assert_eq(str(false), "false")
+}
+
+@test
+define test_string_equality() {
+    assert("hello" == "hello")
+    assert("hello" != "world")
+    assert("" == "")
+}
+
+@test
+define test_string_repeat_pattern() {
+    let mut result = ""
+    repeat 3 times {
+        result = result + "ab"
+    }
+    assert_eq(result, "ababab")
+}

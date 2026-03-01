@@ -1,0 +1,150 @@
+// collections_test.fg — Arrays, objects, and collection operations
+
+@test
+define test_array_push_pop() {
+    let arr = [1, 2, 3]
+    let pushed = push(arr, 4)
+    assert_eq(len(pushed), 4)
+    assert_eq(pushed[3], 4)
+    let popped = pop(pushed)
+    assert_eq(len(popped), 3)
+}
+
+@test
+define test_array_indexing() {
+    let arr = [10, 20, 30, 40, 50]
+    assert_eq(arr[0], 10)
+    assert_eq(arr[4], 50)
+    assert_eq(arr[2], 30)
+}
+
+@test
+define test_array_contains() {
+    assert(contains([1, 2, 3], 2))
+    assert(!contains([1, 2, 3], 4))
+    assert(contains(["a", "b"], "a"))
+    assert(!contains([], 1))
+}
+
+@test
+define test_array_spread() {
+    let a = [1, 2, 3]
+    let b = [...a, 4, 5]
+    assert_eq(len(b), 5)
+    assert_eq(b[0], 1)
+    assert_eq(b[4], 5)
+}
+
+@test
+define test_array_nested() {
+    let matrix = [[1, 2], [3, 4], [5, 6]]
+    assert_eq(len(matrix), 3)
+    assert_eq(matrix[0][0], 1)
+    assert_eq(matrix[1][1], 4)
+    assert_eq(matrix[2][0], 5)
+}
+
+@test
+define test_array_empty() {
+    let arr = []
+    assert_eq(len(arr), 0)
+    let arr2 = push(arr, 1)
+    assert_eq(len(arr2), 1)
+    assert_eq(arr2[0], 1)
+}
+
+@test
+define test_object_creation() {
+    let obj = { name: "Forge", version: 2, active: true }
+    assert_eq(obj.name, "Forge")
+    assert_eq(obj.version, 2)
+    assert_eq(obj.active, true)
+}
+
+@test
+define test_object_keys_values() {
+    let obj = { a: 1, b: 2, c: 3 }
+    let k = keys(obj)
+    let v = values(obj)
+    assert_eq(len(k), 3)
+    assert_eq(len(v), 3)
+    assert(contains(k, "a"))
+    assert(contains(k, "b"))
+    assert(contains(k, "c"))
+}
+
+@test
+define test_object_has_key() {
+    let obj = { name: "test", count: 0 }
+    assert(has_key(obj, "name"))
+    assert(has_key(obj, "count"))
+    assert(!has_key(obj, "missing"))
+}
+
+@test
+define test_object_merge() {
+    let a = { x: 1, y: 2 }
+    let b = { y: 3, z: 4 }
+    let merged = merge(a, b)
+    assert_eq(merged.x, 1)
+    assert_eq(merged.y, 3)
+    assert_eq(merged.z, 4)
+}
+
+@test
+define test_object_entries() {
+    let obj = { a: 1, b: 2 }
+    let e = entries(obj)
+    assert_eq(len(e), 2)
+}
+
+@test
+define test_object_pick() {
+    let obj = { name: "Forge", version: 2, lang: "Rust" }
+    let picked = pick(obj, ["name", "version"])
+    assert_eq(picked.name, "Forge")
+    assert_eq(picked.version, 2)
+    assert(!has_key(picked, "lang"))
+}
+
+@test
+define test_object_omit() {
+    let obj = { name: "Forge", version: 2, lang: "Rust" }
+    let result = omit(obj, ["lang"])
+    assert(has_key(result, "name"))
+    assert(has_key(result, "version"))
+    assert(!has_key(result, "lang"))
+}
+
+@test
+define test_object_nested_access() {
+    let obj = { user: { name: "Alice", age: 30 } }
+    assert_eq(obj.user.name, "Alice")
+    assert_eq(obj.user.age, 30)
+}
+
+@test
+define test_object_dynamic_field() {
+    let mut obj = {}
+    obj.name = "test"
+    obj.value = 42
+    assert_eq(obj.name, "test")
+    assert_eq(obj.value, 42)
+}
+
+@test
+define test_destructure_object() {
+    let obj = { x: 10, y: 20, z: 30 }
+    unpack { x, y } from obj
+    assert_eq(x, 10)
+    assert_eq(y, 20)
+}
+
+@test
+define test_destructure_array() {
+    let arr = [1, 2, 3, 4, 5]
+    unpack [first, ...rest] from arr
+    assert_eq(first, 1)
+    assert_eq(len(rest), 4)
+    assert_eq(rest[0], 2)
+}
