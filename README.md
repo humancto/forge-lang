@@ -78,7 +78,7 @@ let resp = fetch("https://api.example.com/data")
 say resp.json.name
 ```
 
-Every line above runs without a single import or install. 15 standard library modules, 160+ built-in functions, zero external dependencies needed.
+Every line above runs without a single import or install. 16 standard library modules, 230+ built-in functions, zero external dependencies needed.
 
 It also reads like English — or like code. Both work:
 
@@ -129,7 +129,7 @@ cargo install --path .
 
 ```bash
 forge version          # check installation
-forge learn            # 14 interactive tutorials
+forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
 
@@ -547,7 +547,7 @@ Forge is v0.3.0. The language, interpreter, and standard library are stable and 
 
 | Metric                   | Value                |
 | ------------------------ | -------------------- |
-| Lines of Rust            | ~17,000              |
+| Lines of Rust            | ~26,000              |
 | Standard library modules | 16                   |
 | Built-in functions       | 230+                 |
 | Keywords                 | 80+                  |

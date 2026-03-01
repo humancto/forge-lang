@@ -5,21 +5,21 @@
 
 ---
 
-## Current State: v0.2 — Foundation
+## Current State: v0.3 — Feature Complete
 
 **Status: Shipped**
 
-| Component             | State               | Details                                                      |
-| --------------------- | ------------------- | ------------------------------------------------------------ |
-| Tree-walk interpreter | Complete            | Full feature support, 68+ builtins                           |
-| Bytecode VM           | Complete            | Register-based, 50 opcodes, mark-sweep GC                    |
-| JIT (Cranelift)       | Partial             | Integer-only functions, 20/50 opcodes                        |
-| Standard library      | 14 modules          | 131+ functions across math, fs, crypto, db, http, time, etc. |
-| HTTP server           | Complete            | axum + tokio, decorator routing, WebSocket                   |
-| HTTP client           | Complete            | reqwest, JSON, all methods                                   |
-| Type checker          | Stub                | Arity warnings only, no enforcement                          |
-| Tests                 | 441 Rust + 26 Forge | CI on Ubuntu + macOS                                         |
-| Distribution          | Complete            | crates.io, Homebrew, curl installer, GitHub Releases         |
+| Component             | State                | Details                                                     |
+| --------------------- | -------------------- | ----------------------------------------------------------- |
+| Tree-walk interpreter | Complete             | Full feature support, 230+ builtins                         |
+| Bytecode VM           | Complete             | Register-based, 50 opcodes, mark-sweep GC                   |
+| JIT (Cranelift)       | Partial              | Integer-only functions, 20/50 opcodes                       |
+| Standard library      | 16 modules           | 230+ functions across math, fs, crypto, db, http, npc, etc. |
+| HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket                  |
+| HTTP client           | Complete             | reqwest, JSON, all methods                                  |
+| Type checker          | Gradual              | Arity + type warnings, --strict mode                        |
+| Tests                 | 488 Rust + 334 Forge | CI on Ubuntu + macOS                                        |
+| Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases        |
 
 ### What Works Today
 
@@ -555,7 +555,7 @@ M1 (Bytecode Persistence + VM Parity)
 
 ## Performance Targets
 
-| Benchmark        | v0.2 (current) | M1 target    | M2 target    | M5 target       |
+| Benchmark        | v0.3 (current) | M1 target    | M2 target    | M5 target       |
 | ---------------- | -------------- | ------------ | ------------ | --------------- |
 | fib(35)          | ~4s (interp)   | ~0.5s (VM)   | ~0.05s (JIT) | ~0.02s (native) |
 | string concat 1M | ~2s            | ~1.5s        | ~0.3s        | ~0.1s           |

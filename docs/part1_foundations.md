@@ -139,7 +139,7 @@ The REPL also provides command history (press the up arrow to recall previous li
 
 ### Interactive Tutorials
 
-Forge includes 14 built-in interactive lessons that teach you the language step by step, right in your terminal. List them:
+Forge includes 30 built-in interactive lessons that teach you the language step by step, right in your terminal. List them:
 
 ```bash
 forge learn

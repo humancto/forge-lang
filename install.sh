@@ -42,7 +42,7 @@ main() {
             | sed 's/.*"tag_name": *"//;s/".*//')
         if [ -z "$VERSION" ]; then
             echo "Error: could not determine latest version."
-            echo "Install a specific version: curl -sSf ... | sh -s -- v0.2.0"
+            echo "Install a specific version: curl -sSf ... | sh -s -- v0.3.0"
             echo "Or install via cargo: cargo install forge-lang"
             exit 1
         fi

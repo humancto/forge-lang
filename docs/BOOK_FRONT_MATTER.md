@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.2.0"
+version: "0.3.0"
 year: "2026"
 publisher: "Self-Published"
 lang: "en"
@@ -24,9 +24,9 @@ cover_description: "A glowing anvil in a digital forge, sparks flying as molten 
 
 **The Internet-Native Language That Reads Like English**
 
-*By Archith Rapaka*
+_By Archith Rapaka_
 
-*First Edition — February 2026*
+_First Edition — February 2026_
 
 ---
 
@@ -36,7 +36,7 @@ Published under the MIT License.
 
 Forge is an open-source programming language. Visit https://github.com/forge-lang/forge for source code and community.
 
-*While every precaution has been taken in the preparation of this book, the author assumes no responsibility for errors or omissions, or for damages resulting from the use of the information contained herein.*
+_While every precaution has been taken in the preparation of this book, the author assumes no responsibility for errors or omissions, or for damages resulting from the use of the information contained herein._
 
 \newpage
 
@@ -55,14 +55,14 @@ Forge also reads like English. You can write `say "hello"` or `println("hello")`
 This book is organized in four parts:
 
 - **Part I: Foundations** covers installation, syntax, control flow, functions, collections, and error handling — everything you need to read and write Forge.
-- **Part II: The Standard Library** documents all 15 built-in modules, function by function, with recipes for common tasks.
+- **Part II: The Standard Library** documents all 16 built-in modules, function by function, with recipes for common tasks.
 - **Part III: Building Real Things** walks through complete projects — REST APIs, data pipelines, DevOps scripts, and AI integration.
 - **Part IV: Under the Hood** explains how Forge works internally — the lexer, parser, interpreter, bytecode VM, and toolchain.
 
 Whether you're a student writing your first program, a backend developer building APIs, or a language enthusiast curious about implementation — welcome to Forge.
 
-*Archith Rapaka*
-*February 2026*
+_Archith Rapaka_
+_February 2026_
 
 \newpage
 
@@ -88,4 +88,3 @@ Whether you're a student writing your first program, a backend developer buildin
 - Tips and important notes are formatted as blockquotes
 
 \newpage
-

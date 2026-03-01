@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.2.0"
+version: "0.3.0"
 year: "2026"
 publisher: "Self-Published"
 lang: "en"
@@ -230,7 +230,7 @@ The REPL also provides command history (press the up arrow to recall previous li
 
 ### Interactive Tutorials
 
-Forge includes 14 built-in interactive lessons that teach you the language step by step, right in your terminal. List them:
+Forge includes 30 built-in interactive lessons that teach you the language step by step, right in your terminal. List them:
 
 ```bash
 forge learn
@@ -10276,7 +10276,7 @@ The LSP server (`src/lsp/mod.rs`, 261 lines) provides IDE integration over stdin
 
 ### forge learn: Interactive Tutorials
 
-The tutorial system (`src/learn.rs`, 229 lines) provides 14 progressive lessons built into the binary:
+The tutorial system (`src/learn.rs`, 520 lines) provides 30 progressive lessons built into the binary:
 
 ```bash
 forge learn      # List all lessons
@@ -10650,7 +10650,7 @@ Display version information.
 
 ```bash
 forge version
-# Output: Forge v0.2.0
+# Output: Forge v0.3.0
 #         Internet-native programming language
 #         Bytecode VM with mark-sweep GC
 ```
@@ -10739,7 +10739,7 @@ forge learn 30       # Start lesson 30 (File Path Utilities)
 
 | Argument | Description                   |
 | -------- | ----------------------------- |
-| `LESSON` | Optional lesson number (1–14) |
+| `LESSON` | Optional lesson number (1–30) |
 
 #### `forge chat`
 
@@ -11245,28 +11245,28 @@ for rows.Next() {
 
 | Metric                       | Value   |
 | ---------------------------- | ------- |
-| Total Rust source lines      | ~15,500 |
-| Total source files           | 45      |
-| Rust tests                   | 189     |
-| Forge integration tests      | 25      |
+| Total Rust source lines      | ~26,000 |
+| Total source files           | 56      |
+| Rust tests                   | 488     |
+| Forge integration tests      | 334     |
 | Unsafe blocks                | 0       |
 | Keywords recognized          | 80+     |
-| Built-in functions           | 160+    |
-| Standard library modules     | 15      |
+| Built-in functions           | 230+    |
+| Standard library modules     | 16      |
 | CLI commands                 | 13      |
-| Interactive tutorial lessons | 14      |
-| Example programs             | 10+     |
+| Interactive tutorial lessons | 30      |
+| Example programs             | 12      |
 
 ### Largest Source Files
 
 | File                     | Lines | Component                |
 | ------------------------ | ----- | ------------------------ |
-| `src/interpreter/mod.rs` | 4,584 | Tree-walk interpreter    |
-| `src/parser/parser.rs`   | 1,808 | Recursive descent parser |
-| `src/vm/machine.rs`      | 1,807 | Bytecode VM engine       |
-| `src/vm/compiler.rs`     | 772   | AST to bytecode compiler |
+| `src/interpreter/mod.rs` | 8,153 | Tree-walk interpreter    |
+| `src/vm/machine.rs`      | 2,483 | Bytecode VM engine       |
+| `src/parser/parser.rs`   | 1,851 | Recursive descent parser |
+| `src/vm/compiler.rs`     | 927   | AST to bytecode compiler |
 | `src/lexer/lexer.rs`     | 606   | Lexer / tokenizer        |
-| `src/stdlib/term.rs`     | 478   | Terminal UI module       |
+| `src/learn.rs`           | 520   | Interactive tutorials    |
 | `src/runtime/server.rs`  | 352   | HTTP server (axum)       |
 | `src/parser/ast.rs`      | 335   | AST definitions          |
 | `src/repl/mod.rs`        | 299   | Interactive REPL         |
@@ -11312,6 +11312,7 @@ for rows.Next() {
 | ------- | --------------------------------------------------------------------------------------------------------------- |
 | 0.1.0   | Initial release: lexer, parser, interpreter, 8 stdlib modules                                                   |
 | 0.2.0   | Bytecode VM, mark-sweep GC, 15 stdlib modules, LSP, tutorials, AI chat, formatter, test runner, package manager |
+| 0.3.0   | 73 new functions, 16 modules, GenZ debug kit, NPC module, structured errors, 30 tutorials, 822 tests            |
 
 ### Acknowledgments
 

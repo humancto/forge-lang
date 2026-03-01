@@ -4,7 +4,8 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 0.2.x   | Yes       |
+| 0.3.x   | Yes       |
+| 0.2.x   | No        |
 | < 0.2   | No        |
 
 ## Reporting a Vulnerability
@@ -27,7 +28,7 @@ We will acknowledge your report within 48 hours and provide a timeline for a fix
 
 ## Known Security Considerations
 
-Forge v0.2.0 is a young language. The following are documented limitations, not vulnerabilities:
+Forge v0.3.0 is a young language. The following are documented limitations, not vulnerabilities:
 
 - **SQL queries** use raw strings — no parameterized query API yet. Do not pass untrusted user input directly into `db.query()` or `pg.query()`.
 - **File system** access is unrestricted — `fs.read/write` can access any path the process has permission for.

@@ -4,7 +4,7 @@
 
 ## Chapter 25: Architecture and Internals
 
-Every sufficiently advanced programming language eventually reveals its inner machinery to the curious developer. Understanding how Forge works beneath its friendly syntax transforms you from a user of the language into a collaborator with it. This chapter pulls back the curtain on Forge's implementation: approximately 15,500 lines of Rust spread across 45 source files, with zero `unsafe` blocks in the entire codebase.
+Every sufficiently advanced programming language eventually reveals its inner machinery to the curious developer. Understanding how Forge works beneath its friendly syntax transforms you from a user of the language into a collaborator with it. This chapter pulls back the curtain on Forge's implementation: approximately 26,000 lines of Rust spread across 56 source files, with zero `unsafe` blocks in the entire codebase.
 
 ### The Compilation Pipeline
 
@@ -1104,7 +1104,7 @@ The LSP server (`src/lsp/mod.rs`, 261 lines) provides IDE integration over stdin
 
 ### forge learn: Interactive Tutorials
 
-The tutorial system (`src/learn.rs`, 229 lines) provides 14 progressive lessons built into the binary:
+The tutorial system (`src/learn.rs`, 520 lines) provides 30 progressive lessons built into the binary:
 
 ```bash
 forge learn      # List all lessons
@@ -1478,7 +1478,7 @@ Display version information.
 
 ```bash
 forge version
-# Output: Forge v0.2.0
+# Output: Forge v0.3.0
 #         Internet-native programming language
 #         Bytecode VM with mark-sweep GC
 ```
@@ -1567,7 +1567,7 @@ forge learn 30       # Start lesson 30 (File Path Utilities)
 
 | Argument | Description                   |
 | -------- | ----------------------------- |
-| `LESSON` | Optional lesson number (1–14) |
+| `LESSON` | Optional lesson number (1–30) |
 
 #### `forge chat`
 
@@ -2073,32 +2073,32 @@ for rows.Next() {
 
 | Metric                       | Value   |
 | ---------------------------- | ------- |
-| Total Rust source lines      | ~15,500 |
-| Total source files           | 45      |
-| Rust tests                   | 189     |
-| Forge integration tests      | 25      |
+| Total Rust source lines      | ~26,000 |
+| Total source files           | 56      |
+| Rust tests                   | 488     |
+| Forge integration tests      | 334     |
 | Unsafe blocks                | 0       |
 | Keywords recognized          | 80+     |
-| Built-in functions           | 160+    |
-| Standard library modules     | 15      |
+| Built-in functions           | 230+    |
+| Standard library modules     | 16      |
 | CLI commands                 | 13      |
-| Interactive tutorial lessons | 14      |
-| Example programs             | 10+     |
+| Interactive tutorial lessons | 30      |
+| Example programs             | 12      |
 
 ### Largest Source Files
 
 | File                     | Lines | Component                |
 | ------------------------ | ----- | ------------------------ |
-| `src/interpreter/mod.rs` | 4,584 | Tree-walk interpreter    |
-| `src/parser/parser.rs`   | 1,808 | Recursive descent parser |
-| `src/vm/machine.rs`      | 1,807 | Bytecode VM engine       |
-| `src/vm/compiler.rs`     | 772   | AST to bytecode compiler |
+| `src/interpreter/mod.rs` | 8,153 | Tree-walk interpreter    |
+| `src/vm/machine.rs`      | 2,483 | Bytecode VM engine       |
+| `src/parser/parser.rs`   | 1,851 | Recursive descent parser |
+| `src/vm/compiler.rs`     | 927   | AST to bytecode compiler |
 | `src/lexer/lexer.rs`     | 606   | Lexer / tokenizer        |
+| `src/main.rs`            | 539   | CLI entry point          |
+| `src/learn.rs`           | 520   | Interactive tutorials    |
 | `src/stdlib/term.rs`     | 478   | Terminal UI module       |
-| `src/runtime/server.rs`  | 352   | HTTP server (axum)       |
-| `src/parser/ast.rs`      | 335   | AST definitions          |
-| `src/repl/mod.rs`        | 299   | Interactive REPL         |
-| `src/main.rs`            | 293   | CLI entry point          |
+| `src/stdlib/npc.rs`      | 460   | NPC fake data module     |
+| `src/runtime/server.rs`  | 353   | HTTP server (axum)       |
 
 ### Technology Stack
 
@@ -2140,6 +2140,7 @@ for rows.Next() {
 | ------- | --------------------------------------------------------------------------------------------------------------- |
 | 0.1.0   | Initial release: lexer, parser, interpreter, 8 stdlib modules                                                   |
 | 0.2.0   | Bytecode VM, mark-sweep GC, 15 stdlib modules, LSP, tutorials, AI chat, formatter, test runner, package manager |
+| 0.3.0   | 73 new functions, 16 modules, GenZ debug kit, NPC module, structured errors, 30 tutorials, 822 tests            |
 
 ### Acknowledgments
 

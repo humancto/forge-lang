@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.2.0"
+version: "0.3.0"
 year: "2026"
 publisher: "Self-Published"
 cover_description: "A glowing anvil in a digital forge, sparks flying as molten code streams pour from it, forming HTTP requests, database queries, and terminal UI elements — all set against a dark navy background with subtle circuit-board patterns. The anvil sits on a workbench made of keyboard keys. The sparks form recognizable code symbols: curly braces, arrows, pipes. Color palette: deep navy (#0a192f), forge orange (#ff6b35), electric blue (#64ffda), white spark highlights."
@@ -70,7 +70,7 @@ Verify your installation:
 
 ```
 $ forge version
-Forge v0.2.0
+Forge v0.3.0
 Internet-native programming language
 Bytecode VM with mark-sweep GC
 ```
@@ -100,7 +100,7 @@ Forge ships with an interactive read-eval-print loop. Start it by typing `forge`
 $ forge
 
   ╔═══════════════════════════════════════╗
-  ║  ⚒️  Forge REPL v0.2.0               ║
+  ║  ⚒️  Forge REPL v0.3.0               ║
   ║  Type 'help' for commands             ║
   ╚═══════════════════════════════════════╝
 
@@ -117,7 +117,7 @@ The REPL supports multiline input (open a `{` and press Enter), command history 
 
 ### Interactive Tutorials
 
-If you prefer guided learning, Forge has 14 built-in interactive lessons:
+If you prefer guided learning, Forge has 30 built-in interactive lessons:
 
 ```
 $ forge learn
@@ -1835,7 +1835,7 @@ The tree-walk interpreter (`src/interpreter/`) walks the AST and executes it dir
 
 - **Environment**: a scope stack (Vec of HashMaps) with push/pop for blocks
 - **Closures**: functions capture the environment at definition time
-- **Builtins**: 140+ native functions registered at startup
+- **Builtins**: 230+ native functions registered at startup
 - **Error handling**: Result types, `?` propagation, and descriptive error messages
 
 ### The Bytecode VM
@@ -2243,14 +2243,14 @@ A type annotation doesn't match the actual value. This is a warning, not an erro
 | Metric                   | Value          |
 | ------------------------ | -------------- |
 | Implementation language  | Rust           |
-| Lines of Rust source     | ~15,500        |
-| Source files             | 45             |
-| Standard library modules | 15             |
-| Built-in functions       | 140+           |
+| Lines of Rust source     | ~26,000        |
+| Source files             | 56             |
+| Standard library modules | 16             |
+| Built-in functions       | 230+           |
 | Language keywords        | 80+            |
-| Rust unit tests          | 189            |
-| Forge integration tests  | 25             |
-| Interactive lessons      | 14             |
+| Rust unit tests          | 488            |
+| Forge integration tests  | 334            |
+| Interactive lessons      | 30             |
 | Example programs         | 12             |
 | Unsafe code blocks       | 0              |
 | External dependencies    | 22 Rust crates |
@@ -2284,7 +2284,7 @@ A type annotation doesn't match the actual value. This is a warning, not an erro
 | HTTP server        | Express (install)          | Built-in (`@server`)            |
 | Type safety        | TypeScript (separate)      | Built-in type checker           |
 | `null` gotchas     | `null`, `undefined`, `NaN` | No null by default, Option type |
-| Package management | npm (1000s of deps)        | 15 built-in modules             |
+| Package management | npm (1000s of deps)        | 16 built-in modules             |
 | Error handling     | try/catch + callbacks      | Result types with `?`           |
 | Build step         | Webpack/Vite/etc.          | None needed                     |
 
@@ -2296,7 +2296,7 @@ A type annotation doesn't match the actual value. This is a warning, not an erro
 | HTTP server       | `net/http` (verbose)         | `@server` + `@get` (3 lines) |
 | Error handling    | `if err != nil` (repetitive) | `?` operator (one character) |
 | Generics          | Recently added               | Parsed (enforcement planned) |
-| Learning curve    | Moderate                     | Low (14 built-in lessons)    |
+| Learning curve    | Moderate                     | Low (30 built-in lessons)    |
 | Shell integration | `os/exec` (verbose)          | `sh("command")` (one line)   |
 
 ---
