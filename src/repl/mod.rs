@@ -8,7 +8,7 @@ use rustyline::{Config, Editor, Helper, Highlighter, Hinter, Validator};
 
 const BANNER: &str = r#"
   ╔═══════════════════════════════════════╗
-  ║   FORGE v0.2.0 — Internet-Native     ║
+  ║   FORGE v0.3.0 — Internet-Native     ║
   ║   Type 'help' for commands            ║
   ║   Type 'exit' or Ctrl+D to quit      ║
   ╚═══════════════════════════════════════╝
@@ -178,7 +178,7 @@ pub fn run_repl() {
                             continue;
                         }
                         "version" => {
-                            println!("Forge v0.2.0");
+                            println!("Forge v0.3.0");
                             continue;
                         }
                         "" => continue,

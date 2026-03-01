@@ -95,7 +95,7 @@ repeat 3 times { }                       for i in range(0, 3) { }
 
 ## Installation
 
-**Latest: v0.2.0** — install via any method below.
+**Latest: v0.3.0** — install via any method below.
 
 ### Cargo (Rust)
 
@@ -540,22 +540,22 @@ Configure your editor's LSP client to use `forge lsp` as the command.
 
 ## Project Status
 
-Forge is v0.2.0. The language, interpreter, and standard library are stable and tested. The bytecode VM and JIT compiler are available via `--vm` and `--jit` flags.
+Forge is v0.3.0. The language, interpreter, and standard library are stable and tested. The bytecode VM and JIT compiler are available via `--vm` and `--jit` flags.
 
-| Metric                   | Value               |
-| ------------------------ | ------------------- |
-| Lines of Rust            | ~16,000             |
-| Standard library modules | 15                  |
-| Built-in functions       | 160+                |
-| Keywords                 | 80+                 |
-| Tests                    | 441 Rust + 26 Forge |
-| Interactive lessons      | 14                  |
-| Example programs         | 12                  |
-| Dependencies (CVEs)      | 280 crates (0 CVEs) |
+| Metric                   | Value                |
+| ------------------------ | -------------------- |
+| Lines of Rust            | ~17,000              |
+| Standard library modules | 16                   |
+| Built-in functions       | 230+                 |
+| Keywords                 | 80+                  |
+| Tests                    | 488 Rust + 334 Forge |
+| Interactive lessons      | 30                   |
+| Example programs         | 12                   |
+| Dependencies (CVEs)      | 280 crates (0 CVEs)  |
 
 ---
 
-## Known Limitations (v0.2.0)
+## Known Limitations (v0.3.0)
 
 Forge is a young language. These are documented, not hidden:
 

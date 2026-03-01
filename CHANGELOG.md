@@ -7,20 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] - 2026-03-01
+
 ### Added
 
-- **Native Option<T> values** — `Some(x)` and `None` are now first-class `Value::Some`/`Value::None` variants instead of ADT object wrappers. Pattern matching (`match Some(42) { Some(v) => v, None => 0 }`), `unwrap()`, `unwrap_or()`, `is_some()`, `is_none()` all work natively. Nested options supported.
-- **Task handles from spawn** — `spawn { ... }` now returns a `TaskHandle` when used as an expression (`let h = spawn { return 42 }`). Fire-and-forget usage (`spawn { ... }` as a statement) remains backward compatible.
-- **Await on task handles** — `await h` blocks until the spawned task completes and returns its value. `await` on non-handle values passes through unchanged.
-- **35 new tests** — 21 for native Option<T>, 14 for spawn/await task handles, 4 for type checker Option inference. Total: 441 Rust + 26 Forge tests.
+#### Language Features
+
+- **Native Option<T> values** — `Some(x)` and `None` are first-class `Value::Some`/`Value::None` variants. Pattern matching, `unwrap()`, `unwrap_or()`, `is_some()`, `is_none()` all work natively.
+- **Task handles from spawn** — `let h = spawn { return 42 }` returns a handle; `await h` gets the value.
+- **Interface satisfaction checking** — Go-style structural typing with `satisfies` keyword.
+- **Tokio-powered concurrency** — `spawn`, `channel()`, `send()`, `receive()` with real async runtime.
+- **Gradual type inference** — `--strict` mode for type validation with warnings.
+
+#### GenZ Debug Kit (5 builtins)
+
+- `sus(val)` — Inspect with attitude, returns value (like Rust's `dbg!` but cooler)
+- `bruh(msg)` — Panic with GenZ energy
+- `bet(condition, msg?)` — Assert with swagger ("LOST THE BET" on failure)
+- `no_cap(a, b)` — Assert equal ("CAP DETECTED" on mismatch)
+- `ick(condition, msg?)` — Assert false ("ICK" when unexpectedly true)
+
+#### Execution Helpers (4 builtins)
+
+- `cook(fn)` — Time execution with personality ("speed demon fr" / "bruh that took a minute")
+- `yolo(fn)` — Fire-and-forget, swallows ALL errors, returns None on failure
+- `ghost(fn)` — Execute silently, capture result
+- `slay(fn, n?)` — Benchmark N times, returns `{avg_ms, min_ms, max_ms, p99_ms, runs, result}`
+
+#### NPC Module — Fake Data Generation (16 functions)
+
+- `npc.name()`, `npc.first_name()`, `npc.last_name()`, `npc.email()`, `npc.username()`, `npc.phone()`
+- `npc.number(min, max)`, `npc.pick(arr)`, `npc.bool()`, `npc.sentence(n?)`, `npc.word()`
+- `npc.id()`, `npc.color()`, `npc.ip()`, `npc.url()`, `npc.company()`
+
+#### String Operations (12 builtins)
+
+- `substring(s, start, end?)`, `index_of(s, substr)`, `last_index_of(s, substr)`
+- `pad_start(s, len, char?)`, `pad_end(s, len, char?)`, `capitalize(s)`, `title(s)`
+- `repeat_str(s, n)`, `count(s, substr)`
+- `slugify(s)` — URL-friendly strings
+- `snake_case(s)` — Handles camelCase, PascalCase, consecutive caps (myAPIKey → my_api_key)
+- `camel_case(s)` — From snake_case, kebab-case, or spaces
+
+#### Collection Operations (16 builtins)
+
+- `sum(arr)`, `min_of(arr)`, `max_of(arr)` — Numeric aggregates
+- `any(arr, fn)`, `all(arr, fn)` — Predicate checks
+- `unique(arr)`, `zip(arr1, arr2)`, `flatten(arr)`
+- `group_by(arr, fn)`, `chunk(arr, size)`, `slice(arr, start, end?)`
+- `partition(arr, fn)` — Split into `[matches, rest]`
+- `sort(arr, fn?)` — Now supports custom comparators returning -1/0/1
+- `sample(arr, n?)` — Random items from array
+- `shuffle(arr)` — Fisher-Yates shuffle
+- `diff(a, b)` — Deep object comparison with added/removed/changed tracking
+
+#### Testing Framework Improvements
+
+- `assert_ne(a, b)` — Assert not equal
+- `assert_throws(fn)` — Assert function throws error
+- `@skip` decorator — Skip tests (shown as SKIP in output)
+- `@before` / `@after` hooks — Setup/teardown per test
+- `--filter pattern` — Run only matching tests
+- **Structured error objects** — `catch err` now binds `{message, type}` instead of plain string
+  - Error types: ArithmeticError, TypeError, ReferenceError, IndexError, AssertionError, RuntimeError
+
+#### Stdlib Additions
+
+- `math.random_int(min, max)`, `math.clamp(val, min, max)`
+- `fs.lines(path)`, `fs.dirname(path)`, `fs.basename(path)`, `fs.join_path(a, b)`
+- `fs.is_dir(path)`, `fs.is_file(path)`, `fs.temp_dir()`
+- `io.args_parse()`, `io.args_get(flag)`, `io.args_has(flag)`
+- `try_send(ch, val)` — Non-blocking channel send (returns Bool)
+- `try_receive(ch)` — Non-blocking channel receive (returns Option)
+
+#### Developer Experience
+
+- `forge doc` — Auto-generate documentation from source
+- `forge watch` — File watcher for auto-reload
+- Package management with `forge.toml` dependency resolution
+- Bytecode serialization (`.fgc` binary format) with `forge build`
+- Function profiler with `--profile` flag
+- **30 interactive tutorials** (was 14)
+- **7 new language spec chapters** in the book
+
+#### Infrastructure
+
+- VM closure upvalue capture
+- VM dispatch for csv, time, pg modules
+- Auto-JIT compilation for hot integer functions
+- 17 JIT parity tests, 33 VM parity tests
+- Production gap fixes: is_truthy consistency, result-type propagation, catch-block isolation
 
 ### Changed
 
-- `Some()` builtin returns `Value::Some(Box<Value>)` instead of an ADT object with `__type__`/`__variant__` metadata
-- `None` in prelude is `Value::None` instead of an ADT object
-- `Expr::Spawn` added to AST — spawn is now usable as an expression, not just a statement
-- `Expr::Await` rewritten to poll `TaskHandle` result slots (tokio `block_in_place` or spin-wait fallback)
-- Type checker infers `Option<T>` for `Some(x)` calls and `None` identifiers
+- `Some()` builtin returns `Value::Some(Box<Value>)` instead of ADT object wrappers
+- `None` in prelude is `Value::None` instead of ADT object
+- `Expr::Spawn` added to AST — spawn usable as expression
+- `catch err` binds structured error object with `.message` and `.type` (breaking change from plain string)
+- `Token::Any` now works as identifier in expression context (fixes `any()` builtin keyword conflict)
+- Standard library expanded from 15 to 16 modules (added `npc`)
+- Total functions: 160+ → 230+
+- Total tests: 287 → **822** (488 Rust + 334 Forge)
 
 ---
 
