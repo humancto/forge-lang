@@ -1,0 +1,76 @@
+// execution_helpers_test.fg — cook, yolo, ghost, slay
+
+@test
+define test_cook_returns_value() {
+    let result = cook(fn() {
+        return 42
+    })
+    assert_eq(result, 42)
+}
+
+@test
+define test_cook_times_execution() {
+    let val = cook(fn() {
+        let mut sum = 0
+        for i in range(1, 1001) {
+            sum = sum + i
+        }
+        return sum
+    })
+    assert_eq(val, 500500)
+}
+
+@test
+define test_yolo_success() {
+    let result = yolo(fn() {
+        return "safe"
+    })
+    assert_eq(result, "safe")
+}
+
+@test
+define test_yolo_swallows_errors() {
+    let result = yolo(fn() {
+        let x = 1 / 0
+        return "never reaches here"
+    })
+    assert(is_none(result))
+}
+
+@test
+define test_yolo_swallows_any_error() {
+    let result = yolo(fn() {
+        bruh("total chaos")
+    })
+    assert(is_none(result))
+}
+
+@test
+define test_ghost_returns_value() {
+    let result = ghost(fn() {
+        return "invisible"
+    })
+    assert_eq(result, "invisible")
+}
+
+@test
+define test_slay_returns_stats() {
+    let stats = slay(fn() {
+        return 1 + 1
+    }, 10)
+    assert(has_key(stats, "avg_ms"))
+    assert(has_key(stats, "min_ms"))
+    assert(has_key(stats, "max_ms"))
+    assert(has_key(stats, "p99_ms"))
+    assert_eq(stats.runs, 10)
+    assert_eq(stats.result, 2)
+}
+
+@test
+define test_slay_timing_reasonable() {
+    let stats = slay(fn() {
+        return 42
+    }, 50)
+    assert(stats.avg_ms >= 0.0)
+    assert(stats.min_ms <= stats.max_ms)
+}

@@ -1,0 +1,83 @@
+// genz_kit_test.fg — GenZ Debug Kit: sus, bruh, bet, no_cap, ick
+
+@test
+define test_sus_passthrough() {
+    let x = sus(42)
+    assert_eq(x, 42)
+}
+
+@test
+define test_sus_string() {
+    let s = sus("hello")
+    assert_eq(s, "hello")
+}
+
+@test
+define test_sus_array() {
+    let arr = sus([1, 2, 3])
+    assert_eq(len(arr), 3)
+}
+
+@test
+define test_bet_passes() {
+    bet(true)
+    bet(1 > 0)
+    bet(1 == 1, "math is broken")
+}
+
+@test
+define test_bet_fails() {
+    let mut caught = ""
+    try {
+        bet(false, "this should fail")
+    } catch err {
+        caught = err.message
+    }
+    assert(contains(caught, "LOST THE BET"))
+}
+
+@test
+define test_no_cap_equal() {
+    no_cap(42, 42)
+    no_cap("hello", "hello")
+    no_cap(true, true)
+}
+
+@test
+define test_no_cap_unequal() {
+    let mut caught = ""
+    try {
+        no_cap(1, 2)
+    } catch err {
+        caught = err.message
+    }
+    assert(contains(caught, "CAP DETECTED"))
+}
+
+@test
+define test_ick_false_passes() {
+    ick(false)
+    ick(1 > 100)
+}
+
+@test
+define test_ick_true_fails() {
+    let mut caught = ""
+    try {
+        ick(true, "password is 123456")
+    } catch err {
+        caught = err.message
+    }
+    assert(contains(caught, "ICK"))
+}
+
+@test
+define test_bruh_panics() {
+    let mut caught = ""
+    try {
+        bruh("this shouldn't happen")
+    } catch err {
+        caught = err.message
+    }
+    assert(contains(caught, "BRUH"))
+}

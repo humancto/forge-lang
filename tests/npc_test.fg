@@ -1,0 +1,101 @@
+// npc_test.fg — NPC fake data generation module
+
+@test
+define test_npc_name_has_space() {
+    let name = npc.name()
+    assert(contains(name, " "))
+}
+
+@test
+define test_npc_email_format() {
+    let email = npc.email()
+    assert(contains(email, "@"))
+    assert(contains(email, "."))
+}
+
+@test
+define test_npc_username_format() {
+    let username = npc.username()
+    assert(contains(username, "_"))
+    assert(len(username) > 3)
+}
+
+@test
+define test_npc_number_range() {
+    let n = npc.number(1, 10)
+    assert(n >= 1)
+    assert(n <= 10)
+}
+
+@test
+define test_npc_pick_from_array() {
+    let colors = ["red", "blue", "green"]
+    let color = npc.pick(colors)
+    assert(contains(colors, color))
+}
+
+@test
+define test_npc_sentence_ends_with_period() {
+    let s = npc.sentence(5)
+    assert(ends_with(s, "."))
+}
+
+@test
+define test_npc_id_format() {
+    let id = npc.id()
+    assert(contains(id, "-"))
+    assert(len(id) > 20)
+}
+
+@test
+define test_npc_bool_is_boolean() {
+    let b = npc.bool()
+    assert(typeof(b) == "Bool")
+}
+
+@test
+define test_npc_phone_format() {
+    let phone = npc.phone()
+    assert(starts_with(phone, "("))
+    assert(contains(phone, ")"))
+}
+
+@test
+define test_npc_color_hex() {
+    let color = npc.color()
+    assert(starts_with(color, "#"))
+    assert_eq(len(color), 7)
+}
+
+@test
+define test_npc_ip_format() {
+    let ip = npc.ip()
+    let parts = split(ip, ".")
+    assert_eq(len(parts), 4)
+}
+
+@test
+define test_npc_url_https() {
+    let url = npc.url()
+    assert(starts_with(url, "https://"))
+}
+
+@test
+define test_npc_company_not_empty() {
+    let company = npc.company()
+    assert(len(company) > 0)
+}
+
+@test
+define test_npc_first_last_name() {
+    let first = npc.first_name()
+    let last = npc.last_name()
+    assert(len(first) > 0)
+    assert(len(last) > 0)
+}
+
+@test
+define test_npc_word() {
+    let w = npc.word()
+    assert(len(w) > 0)
+}

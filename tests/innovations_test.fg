@@ -1,0 +1,151 @@
+// innovations_test.fg — slugify, snake_case, camel_case, sample, shuffle, partition, diff
+
+@test
+define test_slugify_basic() {
+    assert_eq(slugify("Hello World"), "hello-world")
+    assert_eq(slugify("  Spaces  Everywhere  "), "spaces-everywhere")
+    assert_eq(slugify("camelCase & UPPER"), "camelcase-upper")
+}
+
+@test
+define test_slugify_special_chars() {
+    assert_eq(slugify("Hello, World! @2024"), "hello-world-2024")
+    assert_eq(slugify("foo---bar"), "foo-bar")
+}
+
+@test
+define test_snake_case_from_camel() {
+    assert_eq(snake_case("helloWorld"), "hello_world")
+    assert_eq(snake_case("HelloWorld"), "hello_world")
+    assert_eq(snake_case("myAPIKey"), "my_api_key")
+}
+
+@test
+define test_snake_case_from_spaces() {
+    assert_eq(snake_case("hello world"), "hello_world")
+    assert_eq(snake_case("Hello World"), "hello_world")
+}
+
+@test
+define test_camel_case_from_snake() {
+    assert_eq(camel_case("hello_world"), "helloWorld")
+    assert_eq(camel_case("my_cool_var"), "myCoolVar")
+}
+
+@test
+define test_camel_case_from_spaces() {
+    assert_eq(camel_case("hello world"), "helloWorld")
+    assert_eq(camel_case("the quick fox"), "theQuickFox")
+}
+
+@test
+define test_camel_case_from_kebab() {
+    assert_eq(camel_case("hello-world"), "helloWorld")
+}
+
+@test
+define test_sample_single() {
+    let arr = [10, 20, 30, 40, 50]
+    let item = sample(arr)
+    assert(contains(arr, item))
+}
+
+@test
+define test_sample_multiple() {
+    let arr = [1, 2, 3, 4, 5]
+    let items = sample(arr, 3)
+    assert_eq(len(items), 3)
+}
+
+@test
+define test_sample_empty() {
+    let result = sample([], 5)
+    assert_eq(result, [])
+}
+
+@test
+define test_shuffle_preserves_length() {
+    let arr = [1, 2, 3, 4, 5]
+    let shuffled = shuffle(arr)
+    assert_eq(len(shuffled), 5)
+}
+
+@test
+define test_shuffle_preserves_elements() {
+    let arr = [1, 2, 3]
+    let shuffled = shuffle(arr)
+    assert(contains(shuffled, 1))
+    assert(contains(shuffled, 2))
+    assert(contains(shuffled, 3))
+}
+
+@test
+define test_partition_basic() {
+    let result = partition([1, 2, 3, 4, 5], fn(x) { return x > 3 })
+    assert_eq(result[0], [4, 5])
+    assert_eq(result[1], [1, 2, 3])
+}
+
+@test
+define test_partition_all_match() {
+    let result = partition([2, 4, 6], fn(x) { return x % 2 == 0 })
+    assert_eq(result[0], [2, 4, 6])
+    assert_eq(result[1], [])
+}
+
+@test
+define test_partition_none_match() {
+    let result = partition([1, 3, 5], fn(x) { return x % 2 == 0 })
+    assert_eq(result[0], [])
+    assert_eq(result[1], [1, 3, 5])
+}
+
+@test
+define test_diff_equal_objects() {
+    let a = { name: "Alice", age: 30 }
+    let b = { name: "Alice", age: 30 }
+    let d = diff(a, b)
+    assert_eq(d, null)
+}
+
+@test
+define test_diff_changed_field() {
+    let a = { name: "Alice", age: 30 }
+    let b = { name: "Alice", age: 31 }
+    let d = diff(a, b)
+    assert_eq(d.age.from, 30)
+    assert_eq(d.age.to, 31)
+}
+
+@test
+define test_diff_added_field() {
+    let a = { name: "Alice" }
+    let b = { name: "Alice", role: "admin" }
+    let d = diff(a, b)
+    assert_eq(d.role.added, "admin")
+}
+
+@test
+define test_diff_removed_field() {
+    let a = { name: "Alice", age: 30 }
+    let b = { name: "Alice" }
+    let d = diff(a, b)
+    assert_eq(d.age.removed, 30)
+}
+
+@test
+define test_diff_primitives() {
+    let d = diff(42, 99)
+    assert_eq(d.from, 42)
+    assert_eq(d.to, 99)
+}
+
+@test
+define test_method_syntax_innovations() {
+    assert_eq("Hello World".slugify(), "hello-world")
+    assert_eq("helloWorld".snake_case(), "hello_world")
+    assert_eq("hello_world".camel_case(), "helloWorld")
+    let arr = [1, 2, 3, 4, 5, 6]
+    let parts = arr.partition(fn(x) { return x > 3 })
+    assert_eq(parts[0], [4, 5, 6])
+}

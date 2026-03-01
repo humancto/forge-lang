@@ -343,6 +343,8 @@ impl Interpreter {
             .define("csv".to_string(), crate::stdlib::create_csv_module());
         self.env
             .define("time".to_string(), crate::stdlib::create_time_module());
+        self.env
+            .define("npc".to_string(), crate::stdlib::create_npc_module());
 
         // Prelude: Option type = Some(value) | None
         self.env
@@ -458,6 +460,26 @@ impl Interpreter {
             "assert_throws",
             "try_send",
             "try_receive",
+            // GenZ Debug Kit
+            "sus",
+            "bruh",
+            "bet",
+            "no_cap",
+            "ick",
+            // Execution helpers
+            "cook",
+            "yolo",
+            "ghost",
+            "slay",
+            // String utils
+            "slugify",
+            "snake_case",
+            "camel_case",
+            // Array utils
+            "sample",
+            "shuffle",
+            "partition",
+            "diff",
         ] {
             self.env
                 .define(name.to_string(), Value::BuiltIn(name.to_string()));
@@ -1481,6 +1503,13 @@ impl Interpreter {
                         "group_by",
                         "chunk",
                         "slice",
+                        "slugify",
+                        "snake_case",
+                        "camel_case",
+                        "sample",
+                        "shuffle",
+                        "partition",
+                        "diff",
                     ];
                     let func = match &obj {
                         Value::Object(map) if map.get(field).is_some() => {
@@ -3302,6 +3331,9 @@ impl Interpreter {
             _ if name.starts_with("time.") => {
                 crate::stdlib::time::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
+            _ if name.starts_with("npc.") => {
+                crate::stdlib::npc::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
             "input" => {
                 use std::io::Read;
                 let mut buffer = String::new();
@@ -3494,6 +3526,396 @@ impl Interpreter {
                 result.insert("ok".to_string(), Value::Bool(output.status.success()));
                 Ok(Value::Object(result))
             }
+            // ========== GenZ Debug Kit ==========
+            "sus" => {
+                // sus(value) — inspect a value with attitude, returns it (pass-through like Rust's dbg!)
+                if args.is_empty() {
+                    return Err(RuntimeError::new(
+                        "sus() needs something to inspect, bestie",
+                    ));
+                }
+                let val = &args[0];
+                let type_str = val.type_name();
+                let display = match val {
+                    Value::String(s) => format!("\"{}\"", s),
+                    other => format!("{}", other),
+                };
+                eprintln!(
+                    "\x1b[33m🔍 SUS CHECK:\x1b[0m {} \x1b[2m({})\x1b[0m",
+                    display, type_str
+                );
+                Ok(args.into_iter().next().unwrap())
+            }
+            "bruh" => {
+                // bruh(msg) — panic with GenZ energy
+                let msg = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => format!("{}", other),
+                    None => "something ain't right".to_string(),
+                };
+                Err(RuntimeError::new(&format!("BRUH: {}", msg)))
+            }
+            "bet" => {
+                // bet(condition, msg?) — assert with swagger
+                let condition = match args.first() {
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => true,
+                    None => return Err(RuntimeError::new("bet() needs a condition, no cap")),
+                };
+                if condition {
+                    Ok(Value::Bool(true))
+                } else {
+                    let msg = match args.get(1) {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => "condition was false".to_string(),
+                    };
+                    Err(RuntimeError::new(&format!("LOST THE BET: {}", msg)))
+                }
+            }
+            "no_cap" => {
+                // no_cap(a, b) — assert_eq but GenZ
+                if args.len() < 2 {
+                    return Err(RuntimeError::new(
+                        "no_cap() needs two values to compare, fr fr",
+                    ));
+                }
+                let a = &args[0];
+                let b = &args[1];
+                if a == b {
+                    Ok(Value::Bool(true))
+                } else {
+                    Err(RuntimeError::new(&format!("CAP DETECTED: {} ≠ {}", a, b)))
+                }
+            }
+            "ick" => {
+                // ick(condition, msg?) — assert something is FALSE
+                let condition = match args.first() {
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => true,
+                    None => return Err(RuntimeError::new("ick() needs a condition to reject")),
+                };
+                if !condition {
+                    Ok(Value::Bool(true))
+                } else {
+                    let msg = match args.get(1) {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => "that's an ick".to_string(),
+                    };
+                    Err(RuntimeError::new(&format!("ICK: {}", msg)))
+                }
+            }
+
+            // ========== Execution Helpers ==========
+            "cook" => {
+                // cook(fn) — time execution with personality
+                let func = match args.first() {
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    _ => return Err(RuntimeError::new("cook() needs a function — let him cook!")),
+                };
+                let start = std::time::Instant::now();
+                let result = self.call_function(func, vec![])?;
+                let elapsed = start.elapsed();
+                let ms = elapsed.as_secs_f64() * 1000.0;
+                if ms < 1.0 {
+                    eprintln!(
+                        "\x1b[32m👨‍🍳 COOKED:\x1b[0m done in {:.2}µs — \x1b[2mspeed demon fr\x1b[0m",
+                        elapsed.as_secs_f64() * 1_000_000.0
+                    );
+                } else if ms < 100.0 {
+                    eprintln!("\x1b[32m👨‍🍳 COOKED:\x1b[0m done in {:.2}ms — \x1b[2mno cap that was fast\x1b[0m", ms);
+                } else if ms < 1000.0 {
+                    eprintln!("\x1b[33m👨‍🍳 COOKED:\x1b[0m done in {:.0}ms — \x1b[2mit's giving adequate\x1b[0m", ms);
+                } else {
+                    eprintln!("\x1b[31m👨‍🍳 COOKED:\x1b[0m done in {:.2}s — \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64());
+                }
+                Ok(result)
+            }
+            "yolo" => {
+                // yolo(fn) — swallow ALL errors, return None on failure
+                let func = match args.first() {
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    _ => return Err(RuntimeError::new("yolo() needs a function to send it on")),
+                };
+                match self.call_function(func, vec![]) {
+                    Ok(val) => Ok(val),
+                    Err(_) => Ok(Value::None),
+                }
+            }
+            "ghost" => {
+                // ghost(fn) — capture all println/say output, return as string
+                // Note: In a real implementation this would redirect stdout.
+                // For now, we execute and return the result silently.
+                let func = match args.first() {
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    _ => return Err(RuntimeError::new("ghost() needs a function to haunt")),
+                };
+                // Execute the function, capturing its return value
+                let result = self.call_function(func, vec![])?;
+                Ok(result)
+            }
+            "slay" => {
+                // slay(fn, n?) — benchmark function n times, return stats
+                let func = match args.first() {
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    _ => return Err(RuntimeError::new("slay() needs a function to benchmark")),
+                };
+                let n = match args.get(1) {
+                    Some(Value::Int(n)) => *n as usize,
+                    _ => 100,
+                };
+                let mut times: Vec<f64> = Vec::with_capacity(n);
+                let mut last_result = Value::Null;
+                for _ in 0..n {
+                    let start = std::time::Instant::now();
+                    last_result = self.call_function(func.clone(), vec![])?;
+                    times.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+                times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let avg = times.iter().sum::<f64>() / times.len() as f64;
+                let min = times.first().copied().unwrap_or(0.0);
+                let max = times.last().copied().unwrap_or(0.0);
+                let p99_idx = ((times.len() as f64) * 0.99) as usize;
+                let p99 = times
+                    .get(p99_idx.min(times.len() - 1))
+                    .copied()
+                    .unwrap_or(0.0);
+                let mut stats = IndexMap::new();
+                stats.insert("avg_ms".to_string(), Value::Float(avg));
+                stats.insert("min_ms".to_string(), Value::Float(min));
+                stats.insert("max_ms".to_string(), Value::Float(max));
+                stats.insert("p99_ms".to_string(), Value::Float(p99));
+                stats.insert("runs".to_string(), Value::Int(n as i64));
+                stats.insert("result".to_string(), last_result);
+                eprintln!(
+                    "\x1b[35m💅 SLAYED:\x1b[0m {}x runs — avg {:.3}ms, min {:.3}ms, max {:.3}ms, p99 {:.3}ms",
+                    n, avg, min, max, p99
+                );
+                Ok(Value::Object(stats))
+            }
+
+            // ========== String Utils ==========
+            "slugify" => {
+                // slugify(str) — URL-friendly string
+                let s = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return Err(RuntimeError::new("slugify() requires a string")),
+                };
+                let slug: String = s
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                    .collect::<String>()
+                    .split('-')
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<&str>>()
+                    .join("-");
+                Ok(Value::String(slug))
+            }
+            "snake_case" => {
+                // snake_case(str) — convert camelCase/PascalCase/spaces to snake_case
+                let s = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return Err(RuntimeError::new("snake_case() requires a string")),
+                };
+                let chars: Vec<char> = s.chars().collect();
+                let mut result = String::new();
+                for i in 0..chars.len() {
+                    let c = chars[i];
+                    if c.is_uppercase() {
+                        if i > 0 {
+                            let prev = chars[i - 1];
+                            if prev.is_lowercase() || prev.is_numeric() {
+                                result.push('_');
+                            } else if prev.is_uppercase()
+                                && i + 1 < chars.len()
+                                && chars[i + 1].is_lowercase()
+                            {
+                                // Handle transitions like "APIKey" → "api_key"
+                                result.push('_');
+                            }
+                        }
+                        result.push(c.to_lowercase().next().unwrap_or(c));
+                    } else if c == ' ' || c == '-' {
+                        result.push('_');
+                    } else {
+                        result.push(c);
+                    }
+                }
+                Ok(Value::String(result))
+            }
+            "camel_case" => {
+                // camel_case(str) — convert snake_case/spaces to camelCase
+                let s = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return Err(RuntimeError::new("camel_case() requires a string")),
+                };
+                let parts: Vec<&str> = s
+                    .split(|c: char| c == '_' || c == ' ' || c == '-')
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let mut result = String::new();
+                for (i, part) in parts.iter().enumerate() {
+                    if i == 0 {
+                        result.push_str(&part.to_lowercase());
+                    } else {
+                        let mut chars = part.chars();
+                        if let Some(first) = chars.next() {
+                            result.push(first.to_uppercase().next().unwrap_or(first));
+                            result.push_str(&chars.as_str().to_lowercase());
+                        }
+                    }
+                }
+                Ok(Value::String(result))
+            }
+
+            // ========== Array Utils ==========
+            "sample" => {
+                // sample(arr, n?) — random N items from array
+                match args.first() {
+                    Some(Value::Array(items)) => {
+                        let n = match args.get(1) {
+                            Some(Value::Int(n)) => *n as usize,
+                            _ => 1,
+                        };
+                        if items.is_empty() {
+                            return Ok(Value::Array(vec![]));
+                        }
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let seed = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as u64;
+                        let mut result = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let mut x = seed.wrapping_add(i as u64);
+                            x ^= x << 13;
+                            x ^= x >> 7;
+                            x ^= x << 17;
+                            let idx = (x % items.len() as u64) as usize;
+                            result.push(items[idx].clone());
+                        }
+                        if n == 1 {
+                            Ok(result.into_iter().next().unwrap_or(Value::Null))
+                        } else {
+                            Ok(Value::Array(result))
+                        }
+                    }
+                    _ => Err(RuntimeError::new("sample() requires an array")),
+                }
+            }
+            "shuffle" => {
+                // shuffle(arr) — Fisher-Yates shuffle
+                match args.into_iter().next() {
+                    Some(Value::Array(mut items)) => {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let mut seed = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as u64;
+                        for i in (1..items.len()).rev() {
+                            seed ^= seed << 13;
+                            seed ^= seed >> 7;
+                            seed ^= seed << 17;
+                            let j = (seed % (i as u64 + 1)) as usize;
+                            items.swap(i, j);
+                        }
+                        Ok(Value::Array(items))
+                    }
+                    _ => Err(RuntimeError::new("shuffle() requires an array")),
+                }
+            }
+            "partition" => {
+                // partition(arr, fn) — split into [matching, non-matching]
+                if args.len() < 2 {
+                    return Err(RuntimeError::new(
+                        "partition() requires an array and a function",
+                    ));
+                }
+                let items = match &args[0] {
+                    Value::Array(items) => items.clone(),
+                    _ => return Err(RuntimeError::new("partition() first arg must be an array")),
+                };
+                let func = args[1].clone();
+                let mut matches = Vec::new();
+                let mut rest = Vec::new();
+                for item in items {
+                    let result = self.call_function(func.clone(), vec![item.clone()])?;
+                    if result.is_truthy() {
+                        matches.push(item);
+                    } else {
+                        rest.push(item);
+                    }
+                }
+                Ok(Value::Array(vec![
+                    Value::Array(matches),
+                    Value::Array(rest),
+                ]))
+            }
+            "diff" => {
+                // diff(a, b) — deep object comparison
+                if args.len() < 2 {
+                    return Err(RuntimeError::new("diff() requires two values to compare"));
+                }
+                let a = &args[0];
+                let b = &args[1];
+                fn diff_values(a: &Value, b: &Value) -> Value {
+                    if a == b {
+                        return Value::Null;
+                    }
+                    match (a, b) {
+                        (Value::Object(map_a), Value::Object(map_b)) => {
+                            let mut changes = IndexMap::new();
+                            // Check keys in a
+                            for (key, val_a) in map_a {
+                                if key.starts_with("__") {
+                                    continue;
+                                }
+                                match map_b.get(key) {
+                                    Some(val_b) => {
+                                        let d = diff_values(val_a, val_b);
+                                        if d != Value::Null {
+                                            let mut change = IndexMap::new();
+                                            change.insert("from".to_string(), val_a.clone());
+                                            change.insert("to".to_string(), val_b.clone());
+                                            changes.insert(key.clone(), Value::Object(change));
+                                        }
+                                    }
+                                    None => {
+                                        let mut change = IndexMap::new();
+                                        change.insert("removed".to_string(), val_a.clone());
+                                        changes.insert(key.clone(), Value::Object(change));
+                                    }
+                                }
+                            }
+                            // Check keys only in b
+                            for (key, val_b) in map_b {
+                                if key.starts_with("__") {
+                                    continue;
+                                }
+                                if !map_a.contains_key(key) {
+                                    let mut change = IndexMap::new();
+                                    change.insert("added".to_string(), val_b.clone());
+                                    changes.insert(key.clone(), Value::Object(change));
+                                }
+                            }
+                            if changes.is_empty() {
+                                Value::Null
+                            } else {
+                                Value::Object(changes)
+                            }
+                        }
+                        _ => {
+                            let mut change = IndexMap::new();
+                            change.insert("from".to_string(), a.clone());
+                            change.insert("to".to_string(), b.clone());
+                            Value::Object(change)
+                        }
+                    }
+                }
+                let result = diff_values(a, b);
+                Ok(result)
+            }
+
             _ if name.starts_with("adt:") => {
                 let parts: Vec<&str> = name.splitn(4, ':').collect();
                 if parts.len() == 4 {

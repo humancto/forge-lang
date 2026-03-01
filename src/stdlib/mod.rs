@@ -9,6 +9,7 @@ pub mod io;
 pub mod json_module;
 pub mod log;
 pub mod math;
+pub mod npc;
 pub mod pg;
 pub mod regex_module;
 pub mod term;
@@ -57,4 +58,7 @@ pub fn create_csv_module() -> Value {
 }
 pub fn create_time_module() -> Value {
     time::create_module()
+}
+pub fn create_npc_module() -> Value {
+    npc::create_module()
 }
