@@ -1,0 +1,32 @@
+// hooks_test.fg — @before and @after hooks
+
+let mut setup_count = 0
+let mut teardown_count = 0
+
+@before
+define before_each() {
+    setup_count = setup_count + 1
+}
+
+@after
+define after_each() {
+    teardown_count = teardown_count + 1
+}
+
+@test
+define test_before_hook_runs() {
+    // After this test runs, setup_count should be >= 1
+    assert(setup_count >= 1)
+}
+
+@test
+define test_before_runs_for_each_test() {
+    // This is the 2nd test, so @before ran twice
+    assert(setup_count >= 2)
+}
+
+@test
+define test_after_runs_after_tests() {
+    // After 2 previous tests, @after should have run twice
+    assert(teardown_count >= 2)
+}

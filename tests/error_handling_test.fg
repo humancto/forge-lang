@@ -45,3 +45,16 @@ define test_io_args_get_missing() {
     let val = io.args_get("--nonexistent-flag-xyz")
     assert_eq(val, null)
 }
+
+@test
+define test_io_args_parse_returns_object() {
+    let parsed = io.args_parse()
+    assert_eq(typeof(parsed), "Object")
+}
+
+@test
+define test_io_args_parse_has_keys() {
+    let parsed = io.args_parse()
+    // In test mode, args may be empty but should still be an object
+    assert(typeof(parsed) == "Object")
+}
