@@ -30,7 +30,7 @@ use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser as ForgeParser;
 
-const VERSION: &str = "0.3.0";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
 #[command(
