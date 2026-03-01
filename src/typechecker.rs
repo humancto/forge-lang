@@ -40,6 +40,7 @@ pub struct TypeChecker {
     functions: HashMap<String, FnSignature>,
     type_defs: HashMap<String, Vec<String>>,
     interfaces: HashMap<String, Vec<InterfaceMethod>>,
+    structs: HashMap<String, Vec<String>>,
     variables: HashMap<String, InferredType>,
     current_fn_return: Option<InferredType>,
     strict: bool,
@@ -144,9 +145,13 @@ fn types_compatible(expected: &InferredType, actual: &InferredType) -> bool {
     ) {
         return true;
     }
-    // Named types match any concrete type (we don't track struct fields yet)
+    // Named types: same name matches; different names don't (interface check done separately)
+    if let (InferredType::Named(a), InferredType::Named(b)) = (expected, actual) {
+        return a == b;
+    }
+    // Named type matches Unknown
     if matches!(expected, InferredType::Named(_)) || matches!(actual, InferredType::Named(_)) {
-        return true;
+        return false;
     }
     // Object matches any named type or Json
     if matches!(
@@ -169,6 +174,7 @@ impl TypeChecker {
             functions: HashMap::new(),
             type_defs: HashMap::new(),
             interfaces: HashMap::new(),
+            structs: HashMap::new(),
             variables: HashMap::new(),
             current_fn_return: None,
             strict: false,
@@ -181,6 +187,7 @@ impl TypeChecker {
             functions: HashMap::new(),
             type_defs: HashMap::new(),
             interfaces: HashMap::new(),
+            structs: HashMap::new(),
             variables: HashMap::new(),
             current_fn_return: None,
             strict,
@@ -247,7 +254,37 @@ impl TypeChecker {
                     .collect();
                 self.interfaces.insert(name.clone(), method_sigs);
             }
+            Stmt::StructDef { name, fields } => {
+                let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                self.structs.insert(name.clone(), field_names);
+            }
             _ => {}
+        }
+    }
+
+    fn check_interface_satisfaction(&mut self, struct_name: &str, interface_name: &str) {
+        let struct_fields = match self.structs.get(struct_name) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        let methods = match self.interfaces.get(interface_name) {
+            Some(m) => m.clone(),
+            None => return,
+        };
+
+        for method in &methods {
+            let has_field = struct_fields.iter().any(|f| *f == method.name);
+            let has_fn = self
+                .functions
+                .get(&format!("{}_{}", struct_name, method.name))
+                .is_some()
+                || self.functions.get(&method.name).is_some();
+            if !has_field && !has_fn {
+                self.emit(format!(
+                    "struct '{}' does not satisfy interface '{}': missing '{}'",
+                    struct_name, interface_name, method.name
+                ));
+            }
         }
     }
 
@@ -465,6 +502,20 @@ impl TypeChecker {
                                 if arg_type != InferredType::Unknown
                                     && !types_compatible(expected, &arg_type)
                                 {
+                                    // Check interface satisfaction before emitting error
+                                    if let (
+                                        InferredType::Named(iface_name),
+                                        InferredType::Named(struct_name),
+                                    ) = (expected, &arg_type)
+                                    {
+                                        if self.interfaces.contains_key(iface_name) {
+                                            self.check_interface_satisfaction(
+                                                struct_name,
+                                                iface_name,
+                                            );
+                                            continue;
+                                        }
+                                    }
                                     self.emit(format!(
                                         "argument {} of '{}': expected {} but got {}",
                                         i + 1,
@@ -806,5 +857,27 @@ mod tests {
             "let x: Int = \"hello\"\nlet y: String = 42\nfn f(a, b) { return a }\nf(1)",
         );
         assert_eq!(w.len(), 3);
+    }
+
+    #[test]
+    fn interface_satisfaction_pass() {
+        let w = warnings_for(
+            "interface Printable { fn display() -> String }\nstruct User { name: String, display: String }\nfn show(p: Printable) { println(p) }\nlet u = User { name: \"Alice\", display: \"Alice\" }\nshow(u)",
+        );
+        // User has 'display' field, satisfies Printable — no warning
+        let interface_warnings: Vec<_> =
+            w.iter().filter(|w| w.message.contains("satisfy")).collect();
+        assert!(interface_warnings.is_empty());
+    }
+
+    #[test]
+    fn interface_satisfaction_fail() {
+        let w = warnings_for(
+            "interface Serializable { fn serialize() -> String }\nstruct Point { x: Int, y: Int }\nfn save(s: Serializable) { println(s) }\nlet p = Point { x: 1, y: 2 }\nsave(p)",
+        );
+        let interface_warnings: Vec<_> =
+            w.iter().filter(|w| w.message.contains("satisfy")).collect();
+        assert!(!interface_warnings.is_empty());
+        assert!(interface_warnings[0].message.contains("serialize"));
     }
 }
