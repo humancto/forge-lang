@@ -34,6 +34,7 @@
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Community](#community)
+- [Book](#book)
 - [License](#license)
 
 ---
@@ -604,6 +605,22 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards.
 - [Issues](https://github.com/humancto/forge-lang/issues) — Bug reports and feature requests
 - [Discussions](https://github.com/humancto/forge-lang/discussions) — Questions, ideas, show & tell
 - [RFCs](rfcs/) — Language design proposals
+
+---
+
+## Book
+
+<p align="center">
+  <a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf">
+    <img src="docs/cover.jpeg" alt="Programming Forge — The Internet-Native Language That Reads Like English" width="300">
+  </a>
+</p>
+
+<p align="center">
+  <strong>Programming Forge: The Internet-Native Language That Reads Like English</strong><br>
+  35 chapters covering foundations, standard library, real-world projects, and internals.<br><br>
+  <a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf">📥 Download PDF</a> · <a href="docs/PROGRAMMING_FORGE.md">📖 Read Online</a>
+</p>
 
 ---
 
