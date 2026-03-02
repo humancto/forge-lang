@@ -5,6 +5,8 @@
 -- 4. Strips "Chapter N:" prefixes so LaTeX auto-numbers chapters
 -- 5. Drops "APPENDICES" heading (rendered as a \part)
 -- 6. Removes HTML blocks/inlines that don't work in LaTeX
+-- 7. Strips duplicate colophon/copyright content before the first heading
+--    (the template.tex front matter already produces these pages)
 
 function Header(el)
   local text = pandoc.utils.stringify(el)
@@ -62,4 +64,38 @@ function RawInline(el)
   if el.format == "html" then
     return {}
   end
+end
+
+-- Document-level filter: strip duplicate front matter content.
+-- The markdown starts with a colophon/copyright block (title, author, copyright
+-- notice) before the first heading ("Preface"). The template.tex already produces
+-- proper front matter pages (cover, half-title, title, copyright), so this
+-- markdown colophon creates a duplicate page. Remove everything before the first
+-- remaining Header element (the "# Programming Forge" heading was already
+-- removed by the Header filter above, so the orphaned colophon paragraphs,
+-- horizontal rules, and \newpage raw blocks that follow it need to be stripped).
+function Pandoc(doc)
+  local new_blocks = {}
+  local found_first_heading = false
+
+  for _, block in ipairs(doc.blocks) do
+    if not found_first_heading then
+      -- Keep looking for the first Header (which will be "Preface" or similar)
+      if block.tag == "Header" then
+        found_first_heading = true
+        table.insert(new_blocks, block)
+      end
+      -- Skip everything before the first heading (colophon content)
+    else
+      table.insert(new_blocks, block)
+    end
+  end
+
+  -- Safety: if no heading found at all, return unchanged
+  if not found_first_heading then
+    return doc
+  end
+
+  doc.blocks = new_blocks
+  return doc
 end

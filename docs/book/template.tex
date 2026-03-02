@@ -129,9 +129,13 @@ $endif$
 \begin{document}
 
 % === Full-bleed cover page ===
+% Use zero margins so the cover image fills the entire physical page
+% without overflowing the text area (which would push it to page 2,
+% leaving page 1 blank).
+\newgeometry{margin=0pt}
 \thispagestyle{empty}
-\vspace*{-1in}\hspace*{-1in}%
 \noindent\includegraphics[width=\paperwidth,height=\paperheight]{$cover-image$}
+\restoregeometry
 \clearpage
 
 % === Half-title page ===
