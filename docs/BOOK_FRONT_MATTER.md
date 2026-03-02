@@ -68,9 +68,11 @@ _March 2026_
 
 ## About the Author
 
-**Archith Rapaka**, Los Angeles, is a software engineer and programming language designer. He believes programming languages should be as natural to read as they are powerful to write, and that the tools developers use most — HTTP, databases, cryptography — belong in the language itself, not in package registries. Forge is the embodiment of this philosophy.
+**Archith Rapaka**, Los Angeles, is an engineering executive and startup CTO with over 15 years of building consumer products from zero to one. He's scaled distributed systems serving millions of users, led platform transformations at the intersection of entertainment and technology, and most recently served as CPTO & Head of Engineering at Atom Tickets — powering integrations with major Hollywood studios and streaming partners in the theatrical ticketing space.
 
-Co-authored with **Claude from Anthropic**, **Cursor**, and **Codex 5.3 from OpenAI**.
+He's deeply interested in startups, scalable systems, LLMs, and developer experience. Forge started as a fun weekend project that refused to stay small — a language built by someone who spent years wishing the tools he needed every day were just _there_, something simple but fun and powerful.
+
+When he's not vibe-coding, instructing machines, or leading engineering teams, you'll find him watching cricket or on his PS5. He writes about technology, building products from zero to one, and process improvements at [humancto.com](https://humancto.com).
 
 \newpage
 

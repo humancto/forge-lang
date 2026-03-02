@@ -2162,7 +2162,11 @@ for rows.Next() {
 
 ### Acknowledgments
 
-Forge is written by **Archith Rapaka**, Los Angeles. Co-authored with **Claude from Anthropic**, **Cursor**, and **Codex 5.3 from OpenAI**. The language draws inspiration from:
+Forge is written by **Archith Rapaka**, Los Angeles.
+
+This book and language were co-authored with **Claude from Anthropic**, **Cursor**, and **Codex 5.3 from OpenAI** — each instrumental in different phases of design, implementation, and documentation.
+
+The language draws inspiration from:
 
 - **Python** for its readability and gentle learning curve
 - **Go** for its simplicity and built-in tooling philosophy
