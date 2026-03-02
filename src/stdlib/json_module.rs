@@ -15,6 +15,14 @@ pub fn create_module() -> Value {
         "pretty".to_string(),
         Value::BuiltIn("json.pretty".to_string()),
     );
+    m.insert(
+        "valid".to_string(),
+        Value::BuiltIn("json.valid".to_string()),
+    );
+    m.insert(
+        "merge".to_string(),
+        Value::BuiltIn("json.merge".to_string()),
+    );
     Value::Object(m)
 }
 
@@ -47,8 +55,36 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             }
             None => Err("json.pretty() requires a value".to_string()),
         },
+        "json.valid" => match args.first() {
+            Some(Value::String(s)) => Ok(Value::Bool(
+                serde_json::from_str::<serde_json::Value>(s).is_ok(),
+            )),
+            _ => Ok(Value::Bool(false)),
+        },
+        "json.merge" => match (args.first(), args.get(1)) {
+            (Some(Value::Object(a)), Some(Value::Object(b))) => Ok(Value::Object(deep_merge(a, b))),
+            _ => Err("json.merge() requires two objects".to_string()),
+        },
         _ => Err(format!("unknown json function: {}", name)),
     }
+}
+
+fn deep_merge(
+    a: &indexmap::IndexMap<String, Value>,
+    b: &indexmap::IndexMap<String, Value>,
+) -> indexmap::IndexMap<String, Value> {
+    let mut result = a.clone();
+    for (key, b_val) in b {
+        match (result.get(key), b_val) {
+            (Some(Value::Object(a_inner)), Value::Object(b_inner)) => {
+                result.insert(key.clone(), Value::Object(deep_merge(a_inner, b_inner)));
+            }
+            _ => {
+                result.insert(key.clone(), b_val.clone());
+            }
+        }
+    }
+    result
 }
 
 fn json_to_forge(v: serde_json::Value) -> Value {

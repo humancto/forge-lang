@@ -109,7 +109,8 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
 
     let mut headers_map = std::collections::HashMap::new();
     let mut body_str = None;
-    let mut _timeout_secs = 30u64;
+    let mut timeout_secs: Option<u64> = None;
+    let mut final_url = url.clone();
 
     if let Some(Value::Object(opt_map)) = opts {
         if let Some(Value::Object(hdrs)) = opt_map.get("headers") {
@@ -120,6 +121,71 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
         if let Some(Value::String(auth)) = opt_map.get("auth") {
             headers_map.insert("Authorization".to_string(), format!("Bearer {}", auth));
         }
+        // Basic auth: { basic_auth: { user: "x", pass: "y" } }
+        if let Some(Value::Object(basic)) = opt_map.get("basic_auth") {
+            let user = basic.get("user").map(|v| format!("{}", v)).unwrap_or_default();
+            let pass = basic.get("pass").map(|v| format!("{}", v)).unwrap_or_default();
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", user, pass));
+            headers_map.insert("Authorization".to_string(), format!("Basic {}", encoded));
+        }
+        // Query params: { params: { key: "val" } } — appended to URL
+        if let Some(Value::Object(params)) = opt_map.get("params") {
+            let separator = if final_url.contains('?') { "&" } else { "?" };
+            let query: Vec<String> = params
+                .iter()
+                .map(|(k, v)| {
+                    let val = match v {
+                        Value::String(s) => s.clone(),
+                        other => format!("{}", other),
+                    };
+                    format!(
+                        "{}={}",
+                        percent_encode(k),
+                        percent_encode(&val)
+                    )
+                })
+                .collect();
+            final_url = format!("{}{}{}", final_url, separator, query.join("&"));
+        }
+        // Form data: { form: { key: "val" } } — url-encoded form body
+        if let Some(Value::Object(form)) = opt_map.get("form") {
+            let pairs: Vec<String> = form
+                .iter()
+                .map(|(k, v)| {
+                    let val = match v {
+                        Value::String(s) => s.clone(),
+                        other => format!("{}", other),
+                    };
+                    format!(
+                        "{}={}",
+                        percent_encode(k),
+                        percent_encode(&val)
+                    )
+                })
+                .collect();
+            body_str = Some(pairs.join("&"));
+            if !headers_map.contains_key("Content-Type") {
+                headers_map.insert(
+                    "Content-Type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                );
+            }
+        }
+        // Cookies: { cookies: { key: "val" } } — sent as Cookie header
+        if let Some(Value::Object(cookies)) = opt_map.get("cookies") {
+            let cookie_str: Vec<String> = cookies
+                .iter()
+                .map(|(k, v)| {
+                    let val = match v {
+                        Value::String(s) => s.clone(),
+                        other => format!("{}", other),
+                    };
+                    format!("{}={}", k, val)
+                })
+                .collect();
+            headers_map.insert("Cookie".to_string(), cookie_str.join("; "));
+        }
         if let Some(body_val) = opt_map.get("body") {
             body_str = Some(body_val.to_json_string());
             if !headers_map.contains_key("Content-Type") {
@@ -127,7 +193,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
             }
         }
         if let Some(Value::Int(t)) = opt_map.get("timeout") {
-            _timeout_secs = *t as u64;
+            timeout_secs = Some(*t as u64);
         }
     }
 
@@ -139,7 +205,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
         Some(&headers_map)
     };
 
-    match crate::runtime::client::fetch_blocking(&url, method, body_str, headers_ref) {
+    match crate::runtime::client::fetch_blocking(&final_url, method, body_str, headers_ref, timeout_secs) {
         Ok(resp_val) => {
             let elapsed = start.elapsed().as_millis() as i64;
             if let Value::Object(mut resp) = resp_val {
@@ -299,6 +365,22 @@ fn extract_meta(html: &str, name: &str) -> Option<String> {
     let content_start = html[pos..].find("content=\"")? + pos + 9;
     let content_end = html[content_start..].find('"')?;
     Some(html[content_start..content_start + content_end].to_string())
+}
+
+fn percent_encode(s: &str) -> String {
+    // Simple percent-encoding for URL query parameters
+    let mut result = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(b as char);
+            }
+            _ => {
+                result.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    result
 }
 
 fn strip_html_tags(html: &str) -> String {

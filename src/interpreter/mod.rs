@@ -357,6 +357,12 @@ impl Interpreter {
             .define("time".to_string(), crate::stdlib::create_time_module());
         self.env
             .define("npc".to_string(), crate::stdlib::create_npc_module());
+        self.env
+            .define("url".to_string(), crate::stdlib::create_url_module());
+        self.env
+            .define("toml".to_string(), crate::stdlib::create_toml_module());
+        self.env
+            .define("ws".to_string(), crate::stdlib::create_ws_module());
 
         // Prelude: Option type = Some(value) | None
         self.env
@@ -492,6 +498,15 @@ impl Interpreter {
             "shuffle",
             "partition",
             "diff",
+            // New collection utils
+            "sort_by",
+            "first",
+            "last",
+            "compact",
+            "take_n",
+            "skip",
+            "frequencies",
+            "for_each",
         ] {
             self.env
                 .define(name.to_string(), Value::BuiltIn(name.to_string()));
@@ -1042,7 +1057,7 @@ impl Interpreter {
             Stmt::Import { path, names } => {
                 let builtin_modules = [
                     "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log",
-                    "term", "http", "csv", "exec", "time",
+                    "term", "http", "csv", "exec", "time", "url", "toml", "npc", "ws",
                 ];
                 if builtin_modules.contains(&path.as_str()) {
                     if self.env.get(path).is_some() {
@@ -1535,6 +1550,34 @@ impl Interpreter {
                         "upper" => Ok(Value::String(s.to_uppercase())),
                         "lower" => Ok(Value::String(s.to_lowercase())),
                         "trim" => Ok(Value::String(s.trim().to_string())),
+                        "trim_start" => Ok(Value::String(s.trim_start().to_string())),
+                        "trim_end" => Ok(Value::String(s.trim_end().to_string())),
+                        "is_empty" => Ok(Value::Bool(s.is_empty())),
+                        "is_numeric" => Ok(Value::Bool(
+                            s.chars()
+                                .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
+                        )),
+                        "is_alpha" => Ok(Value::Bool(
+                            !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+                        )),
+                        "is_alphanumeric" => Ok(Value::Bool(
+                            !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
+                        )),
+                        "chars" => Ok(Value::Array(
+                            s.chars().map(|c| Value::String(c.to_string())).collect(),
+                        )),
+                        "bytes" => Ok(Value::Array(
+                            s.bytes().map(|b| Value::Int(b as i64)).collect(),
+                        )),
+                        "words" => Ok(Value::Array(
+                            s.split_whitespace()
+                                .map(|w| Value::String(w.to_string()))
+                                .collect(),
+                        )),
+                        "lines" => Ok(Value::Array(
+                            s.lines().map(|l| Value::String(l.to_string())).collect(),
+                        )),
+                        "reverse" => Ok(Value::String(s.chars().rev().collect())),
                         _ => Err(RuntimeError::new(&format!(
                             "no method '{}' on String",
                             field
@@ -1641,6 +1684,27 @@ impl Interpreter {
                         "shuffle",
                         "partition",
                         "diff",
+                        // New string methods
+                        "trim_start",
+                        "trim_end",
+                        "is_empty",
+                        "is_numeric",
+                        "is_alpha",
+                        "is_alphanumeric",
+                        "char_at",
+                        "encode_uri",
+                        "decode_uri",
+                        "words",
+                        "bytes",
+                        // New collection methods
+                        "sort_by",
+                        "first",
+                        "last",
+                        "compact",
+                        "take_n",
+                        "skip",
+                        "frequencies",
+                        "for_each",
                     ];
                     let func = match &obj {
                         Value::Object(map) if map.get(field).is_some() => {
@@ -1721,18 +1785,119 @@ impl Interpreter {
                         Value::String(s)
                             if matches!(
                                 method_name,
-                                "upper" | "lower" | "trim" | "len" | "chars"
+                                "upper"
+                                    | "lower"
+                                    | "trim"
+                                    | "trim_start"
+                                    | "trim_end"
+                                    | "len"
+                                    | "chars"
+                                    | "bytes"
+                                    | "words"
+                                    | "is_empty"
+                                    | "is_numeric"
+                                    | "is_alpha"
+                                    | "is_alphanumeric"
+                                    | "reverse"
+                                    | "char_at"
+                                    | "encode_uri"
+                                    | "decode_uri"
                             ) =>
                         {
                             match method_name {
                                 "upper" => return Ok(Value::String(s.to_uppercase())),
                                 "lower" => return Ok(Value::String(s.to_lowercase())),
                                 "trim" => return Ok(Value::String(s.trim().to_string())),
+                                "trim_start" => {
+                                    return Ok(Value::String(s.trim_start().to_string()))
+                                }
+                                "trim_end" => return Ok(Value::String(s.trim_end().to_string())),
                                 "len" => return Ok(Value::Int(s.len() as i64)),
+                                "is_empty" => return Ok(Value::Bool(s.is_empty())),
+                                "is_numeric" => {
+                                    return Ok(Value::Bool(
+                                        s.chars()
+                                            .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
+                                    ))
+                                }
+                                "is_alpha" => {
+                                    return Ok(Value::Bool(
+                                        !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+                                    ))
+                                }
+                                "is_alphanumeric" => {
+                                    return Ok(Value::Bool(
+                                        !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
+                                    ))
+                                }
+                                "reverse" => return Ok(Value::String(s.chars().rev().collect())),
                                 "chars" => {
                                     return Ok(Value::Array(
                                         s.chars().map(|c| Value::String(c.to_string())).collect(),
                                     ))
+                                }
+                                "bytes" => {
+                                    return Ok(Value::Array(
+                                        s.bytes().map(|b| Value::Int(b as i64)).collect(),
+                                    ))
+                                }
+                                "words" => {
+                                    return Ok(Value::Array(
+                                        s.split_whitespace()
+                                            .map(|w| Value::String(w.to_string()))
+                                            .collect(),
+                                    ))
+                                }
+                                "char_at" => {
+                                    let idx = match args.first().map(|a| self.eval_expr(a)) {
+                                        Some(Ok(Value::Int(i))) => i as usize,
+                                        _ => {
+                                            return Err(RuntimeError::new(
+                                                "char_at() requires an integer index",
+                                            ))
+                                        }
+                                    };
+                                    return Ok(s
+                                        .chars()
+                                        .nth(idx)
+                                        .map(|c| Value::String(c.to_string()))
+                                        .unwrap_or(Value::Null));
+                                }
+                                "encode_uri" => {
+                                    let encoded: String = s
+                                        .chars()
+                                        .map(|c| match c {
+                                            'A'..='Z'
+                                            | 'a'..='z'
+                                            | '0'..='9'
+                                            | '-'
+                                            | '_'
+                                            | '.'
+                                            | '~' => c.to_string(),
+                                            _ => format!("%{:02X}", c as u32),
+                                        })
+                                        .collect();
+                                    return Ok(Value::String(encoded));
+                                }
+                                "decode_uri" => {
+                                    let mut result = String::new();
+                                    let mut chars = s.chars();
+                                    while let Some(c) = chars.next() {
+                                        if c == '%' {
+                                            let hex: String = chars.by_ref().take(2).collect();
+                                            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                                                result.push(byte as char);
+                                            } else {
+                                                result.push('%');
+                                                result.push_str(&hex);
+                                            }
+                                        } else if c == '+' {
+                                            result.push(' ');
+                                        } else {
+                                            result.push(c);
+                                        }
+                                    }
+                                    return Ok(Value::String(result));
                                 }
                                 _ => {}
                             }
@@ -1930,6 +2095,7 @@ impl Interpreter {
                         h.insert("Content-Type".to_string(), "application/json".to_string());
                         h
                     }),
+                    None,
                 ) {
                     Ok(Value::Object(resp)) => {
                         if let Some(Value::Object(json_body)) = resp.get("json") {
@@ -2701,7 +2867,7 @@ impl Interpreter {
                         _ => None,
                     };
 
-                    match crate::runtime::client::fetch_blocking(url, &method, body, None) {
+                    match crate::runtime::client::fetch_blocking(url, &method, body, None, None) {
                         Ok(value) => Ok(value),
                         Err(e) => Err(RuntimeError::new(&format!("fetch error: {}", e))),
                     }
@@ -2891,7 +3057,94 @@ impl Interpreter {
                     reversed.reverse();
                     Ok(Value::Array(reversed))
                 }
-                _ => Err(RuntimeError::new("reverse() requires an array")),
+                Some(Value::String(s)) => Ok(Value::String(s.chars().rev().collect())),
+                _ => Err(RuntimeError::new("reverse() requires an array or string")),
+            },
+            "sort_by" => match (args.first(), args.get(1)) {
+                (Some(Value::Array(items)), Some(key_fn)) => {
+                    let key_fn = key_fn.clone();
+                    let mut pairs: Vec<(Value, Value)> = Vec::new();
+                    for item in items {
+                        let key = self.call_function(key_fn.clone(), vec![item.clone()])?;
+                        pairs.push((key, item.clone()));
+                    }
+                    pairs.sort_by(|(ka, _), (kb, _)| match (ka, kb) {
+                        (Value::Int(a), Value::Int(b)) => a.cmp(b),
+                        (Value::Float(a), Value::Float(b)) => {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        }
+                        (Value::String(a), Value::String(b)) => a.cmp(b),
+                        _ => std::cmp::Ordering::Equal,
+                    });
+                    Ok(Value::Array(pairs.into_iter().map(|(_, v)| v).collect()))
+                }
+                _ => Err(RuntimeError::new(
+                    "sort_by() requires (array, key_function)",
+                )),
+            },
+            "first" => match args.first() {
+                Some(Value::Array(items)) => Ok(items.first().cloned().unwrap_or(Value::Null)),
+                _ => Err(RuntimeError::new("first() requires an array")),
+            },
+            "last" => match args.first() {
+                Some(Value::Array(items)) => Ok(items.last().cloned().unwrap_or(Value::Null)),
+                _ => Err(RuntimeError::new("last() requires an array")),
+            },
+            "compact" => match args.first() {
+                Some(Value::Array(items)) => {
+                    let filtered: Vec<Value> = items
+                        .iter()
+                        .filter(|v| !matches!(v, Value::Null | Value::None | Value::Bool(false)))
+                        .cloned()
+                        .collect();
+                    Ok(Value::Array(filtered))
+                }
+                _ => Err(RuntimeError::new("compact() requires an array")),
+            },
+            "take_n" => match (args.first(), args.get(1)) {
+                (Some(Value::Array(items)), Some(Value::Int(n))) => {
+                    let n = (*n as usize).min(items.len());
+                    Ok(Value::Array(items[..n].to_vec()))
+                }
+                _ => Err(RuntimeError::new("take() requires (array, count)")),
+            },
+            "skip" => match (args.first(), args.get(1)) {
+                (Some(Value::Array(items)), Some(Value::Int(n))) => {
+                    let n = (*n as usize).min(items.len());
+                    Ok(Value::Array(items[n..].to_vec()))
+                }
+                _ => Err(RuntimeError::new("skip() requires (array, count)")),
+            },
+            "frequencies" => match args.first() {
+                Some(Value::Array(items)) => {
+                    let mut counts = IndexMap::new();
+                    for item in items {
+                        let key = format!("{}", item);
+                        let count = counts
+                            .get(&key)
+                            .and_then(|v| {
+                                if let Value::Int(n) = v {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+                        counts.insert(key, Value::Int(count + 1));
+                    }
+                    Ok(Value::Object(counts))
+                }
+                _ => Err(RuntimeError::new("frequencies() requires an array")),
+            },
+            "for_each" => match (args.first(), args.get(1)) {
+                (Some(Value::Array(items)), Some(func)) => {
+                    let func = func.clone();
+                    for item in items {
+                        self.call_function(func.clone(), vec![item.clone()])?;
+                    }
+                    Ok(Value::Null)
+                }
+                _ => Err(RuntimeError::new("for_each() requires (array, function)")),
             },
             "split" => match (args.first(), args.get(1)) {
                 (Some(Value::String(s)), Some(Value::String(delim))) => Ok(Value::Array(
@@ -3561,6 +3814,15 @@ impl Interpreter {
             }
             _ if name.starts_with("npc.") => {
                 crate::stdlib::npc::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
+            _ if name.starts_with("url.") => {
+                crate::stdlib::url_module::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
+            _ if name.starts_with("toml.") => {
+                crate::stdlib::toml_module::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
+            _ if name.starts_with("ws.") => {
+                crate::stdlib::ws::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
             "input" => {
                 use std::io::Read;

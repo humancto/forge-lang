@@ -7,6 +7,8 @@ pub fn create_module() -> Value {
     m.insert("set".to_string(), Value::BuiltIn("env.set".to_string()));
     m.insert("keys".to_string(), Value::BuiltIn("env.keys".to_string()));
     m.insert("has".to_string(), Value::BuiltIn("env.has".to_string()));
+    m.insert("load".to_string(), Value::BuiltIn("env.load".to_string()));
+    m.insert("all".to_string(), Value::BuiltIn("env.all".to_string()));
     Value::Object(m)
 }
 
@@ -47,6 +49,30 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Some(Value::String(key)) => Ok(Value::Bool(std::env::var(key).is_ok())),
             _ => Err("env.has() requires a string key".to_string()),
         },
+        "env.load" => {
+            let path = match args.first() {
+                Some(Value::String(s)) => s.clone(),
+                _ => ".env".to_string(),
+            };
+            match dotenvy::from_filename(&path) {
+                Ok(_) => Ok(Value::Bool(true)),
+                Err(e) => {
+                    if path == ".env" {
+                        // Silent fail for default .env — file may not exist
+                        Ok(Value::Bool(false))
+                    } else {
+                        Err(format!("env.load() error: {}", e))
+                    }
+                }
+            }
+        }
+        "env.all" => {
+            let mut map = indexmap::IndexMap::new();
+            for (k, v) in std::env::vars() {
+                map.insert(k, Value::String(v));
+            }
+            Ok(Value::Object(map))
+        }
         _ => Err(format!("unknown env function: {}", name)),
     }
 }

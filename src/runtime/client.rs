@@ -11,9 +11,11 @@ pub async fn fetch(
     method: &str,
     body: Option<String>,
     headers: Option<&HashMap<String, String>>,
+    timeout_secs: Option<u64>,
 ) -> Result<Value, String> {
+    let timeout = timeout_secs.unwrap_or(30);
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(timeout))
         .build()
         .map_err(|e| format!("client error: {}", e))?;
 
@@ -36,7 +38,14 @@ pub async fn fetch(
 
     // Add body for methods that support it
     if let Some(body) = body {
-        req = req.header("Content-Type", "application/json").body(body);
+        // Only set Content-Type if not already provided by headers
+        let has_content_type = headers
+            .map(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type")))
+            .unwrap_or(false);
+        if !has_content_type {
+            req = req.header("Content-Type", "application/json");
+        }
+        req = req.body(body);
     }
 
     let resp = req
@@ -87,6 +96,7 @@ pub fn fetch_blocking(
     method: &str,
     body: Option<String>,
     headers: Option<&HashMap<String, String>>,
+    timeout_secs: Option<u64>,
 ) -> Result<Value, String> {
     // Use the existing tokio runtime handle
     let handle = tokio::runtime::Handle::try_current();
@@ -100,13 +110,13 @@ pub fn fetch_blocking(
             let headers = headers.cloned();
 
             tokio::task::block_in_place(|| {
-                handle.block_on(fetch(&url, &method, body, headers.as_ref()))
+                handle.block_on(fetch(&url, &method, body, headers.as_ref(), timeout_secs))
             })
         }
         Err(_) => {
             // No runtime — create one
             let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime error: {}", e))?;
-            rt.block_on(fetch(url, method, body, headers))
+            rt.block_on(fetch(url, method, body, headers, timeout_secs))
         }
     }
 }

@@ -14,6 +14,9 @@ pub mod pg;
 pub mod regex_module;
 pub mod term;
 pub mod time;
+pub mod toml_module;
+pub mod url_module;
+pub mod ws;
 
 use crate::interpreter::Value;
 
@@ -61,4 +64,13 @@ pub fn create_time_module() -> Value {
 }
 pub fn create_npc_module() -> Value {
     npc::create_module()
+}
+pub fn create_url_module() -> Value {
+    url_module::create_module()
+}
+pub fn create_toml_module() -> Value {
+    toml_module::create_module()
+}
+pub fn create_ws_module() -> Value {
+    ws::create_module()
 }
