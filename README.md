@@ -5,13 +5,13 @@
 ### The internet-native programming language that reads like English.
 
 Built-in HTTP, databases, crypto, AI, and a JIT compiler.<br>
-**16 modules. 230+ functions. Zero dependencies.**
+**18 modules. 238+ functions. Zero dependencies.**
 
 [![CI](https://github.com/humancto/forge-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/humancto/forge-lang/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64ffda?style=flat-square)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built_with-Rust-%23f74c00?style=flat-square)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-822_passing-64ffda?style=flat-square)](#project-status)
+[![Tests](https://img.shields.io/badge/tests-862_passing-64ffda?style=flat-square)](#project-status)
 [![Stars](https://img.shields.io/github/stars/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/stargazers)
 [![crates.io](https://img.shields.io/crates/v/forge-lang?color=%23ff6b35&style=flat-square)](https://crates.io/crates/forge-lang)
 
@@ -76,7 +76,7 @@ say crypto.sha256("password")
 | ---------------------------------------------------- | ------------------------------- | ------------------------------------- |
 | [⚡ Quick Example](#-see-it-in-action)               | [🎯 Why Forge?](#-why-forge)    | [📦 Installation](#-installation)     |
 | [🗣️ Dual Syntax](#️-dual-syntax)                      | [🚀 Quick Tour](#-quick-tour)   | [🏗️ Type System](#️-type-system)       |
-| [📚 Standard Library](#-standard-library-16-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
+| [📚 Standard Library](#-standard-library-18-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
 | [🔧 CLI](#-cli-commands)                             | [📂 Examples](#-examples)       | [🏛️ Architecture](#️-architecture)     |
 | [📕 Book](#-the-book)                                | [🗺️ Roadmap](#️-roadmap)         | [🤝 Contributing](#-contributing)     |
 
@@ -127,7 +127,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → forge 0.3.3
+forge version          # → forge 0.4.0
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -414,7 +414,7 @@ say emp.full()      // delegated to emp.addr.full() → "123 Main St, Portland"
 
 ---
 
-## 📚 Standard Library (16 Modules)
+## 📚 Standard Library (18 Modules)
 
 Every module is available from line 1. No imports. No installs.
 
@@ -433,7 +433,7 @@ let resp = fetch("https://api.github.com/repos/rust-lang/rust")
 say resp.json.stargazers_count
 ```
 
-### 🗄️ Database (SQLite + PostgreSQL)
+### 🗄️ Database (SQLite + PostgreSQL + MySQL)
 
 ```forge
 db.open(":memory:")
@@ -441,6 +441,20 @@ db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
 db.execute("INSERT INTO users (name) VALUES ('Alice')")
 let users = db.query("SELECT * FROM users")
 term.table(users)
+
+// MySQL — parameterized queries, connection pooling
+let conn = mysql.connect("mysql://root:pass@localhost/mydb")
+let users = mysql.query(conn, "SELECT * FROM users WHERE age > ?", [21])
+mysql.close(conn)
+```
+
+### 🔐 JWT Authentication
+
+```forge
+let token = jwt.sign({ user_id: 123, role: "admin" }, "secret", { expires: "1h" })
+let claims = jwt.verify(token, "secret")
+say claims.user_id       // 123
+say jwt.valid(token, "secret")  // true
 ```
 
 ### 🐚 Shell Integration
@@ -477,7 +491,7 @@ let exists = fs.exists("config.json")
 ```
 
 <details>
-<summary><strong>📋 All 16 modules at a glance (click to expand)</strong></summary>
+<summary><strong>📋 All 18 modules at a glance (click to expand)</strong></summary>
 
 | Module     | Functions                                                                                                                            |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -486,6 +500,8 @@ let exists = fs.exists("config.json")
 | **crypto** | sha256, md5, base64_encode/decode, hex_encode/decode                                                                                 |
 | **db**     | SQLite — open, query, execute, close                                                                                                 |
 | **pg**     | PostgreSQL — connect, query, execute, close                                                                                          |
+| **mysql**  | MySQL — connect, query, execute, close (parameterized queries, connection pooling)                                                   |
+| **jwt**    | sign, verify, decode, valid (HS256/384/512, RS256, ES256)                                                                            |
 | **json**   | parse, stringify, pretty                                                                                                             |
 | **csv**    | parse, stringify, read, write                                                                                                        |
 | **regex**  | test, find, find_all, replace, split                                                                                                 |
@@ -510,7 +526,7 @@ Three execution tiers — pick your tradeoff:
 | -------------- | -------: | :------------: | ------------------------------------- |
 | 🔥 `--jit`     | **10ms** | **11x faster** | Compute-heavy hot functions           |
 | ⚙️ `--vm`      |    252ms |   ~2x slower   | General bytecode execution            |
-| 📦 Interpreter |  2,300ms |  ~20x slower   | Full feature set + all 230+ functions |
+| 📦 Interpreter |  2,300ms |  ~20x slower   | Full feature set + all 238+ functions |
 
 <details>
 <summary><strong>📊 Full cross-language benchmark — fib(30)</strong></summary>
@@ -589,6 +605,8 @@ forge run examples/showcase.fg     # everything in one file
 forge run examples/functional.fg   # closures, recursion, higher-order
 forge run examples/adt.fg          # algebraic data types + matching
 forge run examples/result_try.fg   # error handling with ?
+forge run examples/jwt_demo.fg     # JWT authentication
+forge run examples/mysql_demo.fg   # MySQL database CRUD
 ```
 
 ---
@@ -646,18 +664,18 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 
 ## 📊 Project Status
 
-Forge is **v0.3.3**. The language, interpreter, and standard library are stable and tested.
+Forge is **v0.4.0**. The language, interpreter, and standard library are stable and tested.
 
 | Metric                   |                      Value |
 | ------------------------ | -------------------------: |
-| Lines of Rust            |                    ~26,000 |
-| Standard library modules |                         16 |
-| Built-in functions       |                       230+ |
+| Lines of Rust            |                    ~27,000 |
+| Standard library modules |                         18 |
+| Built-in functions       |                       238+ |
 | Keywords                 |                        80+ |
-| Tests passing            | 822 (488 Rust + 334 Forge) |
+| Tests passing            | 862 (528 Rust + 334 Forge) |
 | Interactive lessons      |                         30 |
-| Example programs         |                         12 |
-| Dependencies (CVEs)      |        280 crates (0 CVEs) |
+| Example programs         |                         15 |
+| Dependencies (CVEs)      |        344 crates (0 CVEs) |
 
 ### Known Limitations
 
@@ -665,7 +683,7 @@ Forge is **v0.3.3**. The language, interpreter, and standard library are stable 
 > Forge is a young language. These are documented, not hidden.
 
 - **No parameterized SQL queries** — use string concatenation for now. Be cautious with user input.
-- **Three execution tiers with different trade-offs** — The interpreter supports all 230+ functions. Use `--jit` for compute-heavy code (11x faster than Python) or `--vm` for bytecode execution.
+- **Three execution tiers with different trade-offs** — The interpreter supports all 238+ functions. Use `--jit` for compute-heavy code (11x faster than Python) or `--vm` for bytecode execution.
 - **VM/JIT feature gap** — The JIT and VM execute a subset of the language. Use the default interpreter for full stdlib, HTTP, database, and AI features.
 - **`regex` functions** take `(text, pattern)` argument order, not `(pattern, text)`.
 
@@ -676,7 +694,7 @@ Forge is **v0.3.3**. The language, interpreter, and standard library are stable 
 | Version     | Focus                                                                                             |
 | ----------- | ------------------------------------------------------------------------------------------------- |
 | **v0.3** ✅ | Type system (thing/power/give/craft/has), 73 new functions, GenZ debug kit, NPC module, 822 tests |
-| **v0.4**    | Parameterized SQL, package registry, debugger                                                     |
+| **v0.4** ✅ | JWT authentication, MySQL with parameterized queries, 18 modules, 862 tests                       |
 | **v0.5**    | WASM target, expanded JIT coverage, LSP completions                                               |
 | **v1.0**    | Stable API, backwards compatibility guarantee                                                     |
 

@@ -92,6 +92,7 @@ When he's not vibe-coding, instructing machines, or leading engineering teams, y
 - Tips and important notes are formatted as blockquotes
 
 \newpage
+
 # Part I: Foundations
 
 ---
@@ -3548,11 +3549,12 @@ say satisfies(dog.animal, Vocal)  // true
 2. **Builder Pattern.** Define a `thing Request` with fields `url: String`, `method: String = "GET"`, and `timeout: Int = 30`. Write a static method `Request.create(url)` that returns a Request with defaults. Then write instance methods `with_method(it, m)` and `with_timeout(it, t)` that return new Request instances with the given field changed. Chain them: `Request.create("https://api.example.com").with_method("POST").with_timeout(10)`.
 
 3. **Ability Validation.** Define a `power Serializable` with a `fn to_string() -> String` method. Define two things: `User` (with name and email) and `Product` (with title and price). Give `User` the Serializable ability. Verify that `satisfies(user, Serializable)` returns true. Try calling `satisfies(product, Serializable)` without implementing it — it should return false.
+
 # PART II: THE STANDARD LIBRARY
 
 ---
 
-Forge ships with fifteen built-in modules that cover the tasks programmers encounter daily—mathematics, file I/O, cryptography, databases, serialization, and terminal presentation. These modules require no imports; they are available the moment your program starts. You access them through dot notation (`module.function()`), and they follow consistent conventions: functions that can fail return meaningful error messages, types are coerced sensibly, and side effects are kept explicit.
+Forge ships with eighteen built-in modules that cover the tasks programmers encounter daily—mathematics, file I/O, cryptography, databases, JWT authentication, serialization, and terminal presentation. These modules require no imports; they are available the moment your program starts. You access them through dot notation (`module.function()`), and they follow consistent conventions: functions that can fail return meaningful error messages, types are coerced sensibly, and side effects are kept explicit.
 
 Part II is both a reference and a cookbook. Each chapter documents every function a module offers, then closes with recipes that combine those functions into real-world patterns. Read the chapters front to back when learning a module, or jump straight to the reference tables when you need a reminder.
 
@@ -7822,7 +7824,264 @@ ws.close(conn2.id)
 
 ---
 
-_This concludes Part II: The Standard Library. With nineteen modules, a GenZ debug kit, execution helpers, and 270+ functions at your disposal, Forge provides everything needed for file I/O, databases, data processing, HTTP, WebSockets, cryptography, URL handling, TOML configuration, terminal UI, fake data generation, performance profiling, shell scripting, and resilient error handling—all without leaving the language._
+## Chapter 32: jwt — JSON Web Token Authentication
+
+Every modern API needs authentication. JSON Web Tokens (JWTs) are the standard mechanism for stateless authentication—the server issues a signed token containing user claims, and subsequent requests carry that token as proof of identity. Forge's `jwt` module provides four functions that handle token creation, verification, and inspection. No external libraries, no middleware configuration—just sign, verify, and go.
+
+### Reference
+
+| Function                             | Returns  | Description                                            |
+| ------------------------------------ | -------- | ------------------------------------------------------ |
+| `jwt.sign(claims, secret, options?)` | `string` | Create a signed JWT from a claims object               |
+| `jwt.verify(token, secret)`          | `object` | Verify signature and expiration, return decoded claims |
+| `jwt.decode(token)`                  | `object` | Decode without verification (for debugging/inspection) |
+| `jwt.valid(token, secret)`           | `bool`   | Check if token is valid (never throws an error)        |
+
+### Creating Tokens
+
+The `jwt.sign` function takes a claims object (any Forge object), a secret string, and an optional options object:
+
+```forge
+// Basic token — HS256 by default
+let token = jwt.sign({ user_id: 123, role: "admin" }, "my-secret-key")
+say token  // eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2...
+```
+
+The options object controls expiration, standard claims, and algorithm:
+
+```forge
+let token = jwt.sign({ user_id: 123, name: "Alice" }, "secret", {
+    expires: "1h",        // Token expires in 1 hour
+    issuer: "forge-app",  // iss claim
+    audience: "users",    // aud claim
+    subject: "user-123",  // sub claim
+    algorithm: "HS256"    // Algorithm (default)
+})
+```
+
+**Options reference:**
+
+| Key          | Type   | Default | Description                                 |
+| ------------ | ------ | ------- | ------------------------------------------- |
+| `expires`    | string | none    | Duration: `"1h"`, `"30m"`, `"7d"`, `"365d"` |
+| `issuer`     | string | none    | Sets the `iss` claim                        |
+| `audience`   | string | none    | Sets the `aud` claim                        |
+| `subject`    | string | none    | Sets the `sub` claim                        |
+| `algorithm`  | string | `HS256` | `HS256`, `HS384`, `HS512`, `RS256`, `ES256` |
+| `not_before` | string | none    | Duration before token becomes valid         |
+
+Duration strings support: `s` (seconds), `m` (minutes), `h` (hours), `d` (days), `w` (weeks). An `iat` (issued-at) claim is added automatically.
+
+### Verifying Tokens
+
+`jwt.verify` validates the signature and checks expiration. On success, it returns the decoded claims as a Forge object. On failure, it returns an error:
+
+```forge
+let claims = jwt.verify(token, "my-secret-key")
+say claims.user_id  // 123
+say claims.role     // "admin"
+```
+
+Expired tokens are rejected immediately (zero leeway). Invalid signatures produce a clear error message.
+
+### Inspecting Tokens
+
+`jwt.decode` decodes the token **without** verifying the signature. Useful for debugging or logging middleware:
+
+```forge
+let decoded = jwt.decode(token)
+say decoded.header.alg      // "HS256"
+say decoded.header.typ      // "JWT"
+say decoded.payload.user_id // 123
+say decoded.payload.exp     // 1709337600
+```
+
+### Quick Validity Check
+
+`jwt.valid` returns a boolean—`true` if the token is valid, `false` otherwise. It never throws an error:
+
+```forge
+if jwt.valid(token, "secret") {
+    say "Token is valid"
+} else {
+    say "Token is invalid or expired"
+}
+```
+
+### Supported Algorithms
+
+| Algorithm | Type  | Key Format    |
+| --------- | ----- | ------------- |
+| HS256     | HMAC  | Secret string |
+| HS384     | HMAC  | Secret string |
+| HS512     | HMAC  | Secret string |
+| RS256     | RSA   | PEM string    |
+| RS384     | RSA   | PEM string    |
+| RS512     | RSA   | PEM string    |
+| ES256     | ECDSA | PEM string    |
+| ES384     | ECDSA | PEM string    |
+
+The `none` algorithm is explicitly rejected for security.
+
+### Recipe: API Authentication Middleware
+
+```forge
+let secret = env.get("JWT_SECRET")
+
+// Sign a token at login
+fn login(username, password) {
+    // ... validate credentials ...
+    let token = jwt.sign({
+        user_id: user.id,
+        name: user.name,
+        role: user.role
+    }, secret, { expires: "24h", issuer: "myapp" })
+    return { token: token }
+}
+
+// Verify on every request
+fn authenticate(req) {
+    let auth = req.headers["authorization"]
+    if !auth || !starts_with(auth, "Bearer ") {
+        return { error: "Missing token", status: 401 }
+    }
+    let token = substring(auth, 7, len(auth))
+    if !jwt.valid(token, secret) {
+        return { error: "Invalid token", status: 401 }
+    }
+    return jwt.verify(token, secret)
+}
+```
+
+---
+
+## Chapter 33: mysql — MySQL and MariaDB
+
+MySQL is one of the most widely deployed databases on the planet. Forge's `mysql` module gives you connection pooling, parameterized queries, and clean result mapping in four functions. It mirrors the patterns of the `db` (SQLite) and `pg` (PostgreSQL) modules, so switching between databases requires minimal code changes.
+
+### Reference
+
+| Function                              | Returns  | Description                                             |
+| ------------------------------------- | -------- | ------------------------------------------------------- |
+| `mysql.connect(url)`                  | `string` | Connect via URL, return connection ID                   |
+| `mysql.connect(host, user, pass, db)` | `string` | Connect with individual arguments                       |
+| `mysql.query(conn, sql, params?)`     | `array`  | Execute SELECT, return array of row objects             |
+| `mysql.execute(conn, sql, params?)`   | `int`    | Execute INSERT/UPDATE/DELETE, return affected row count |
+| `mysql.close(conn)`                   | `bool`   | Close connection pool                                   |
+
+### Connecting
+
+Two forms—URL string or individual arguments:
+
+```forge
+// URL form
+let conn = mysql.connect("mysql://root:password@localhost:3306/mydb")
+
+// Multi-argument form
+let conn = mysql.connect("localhost", "root", "password", "mydb")
+```
+
+The returned connection ID (e.g., `"mysql_1"`) is used in all subsequent operations. Multiple connections can be open simultaneously:
+
+```forge
+let prod = mysql.connect("mysql://root@prod-server/app")
+let analytics = mysql.connect("mysql://root@analytics-server/warehouse")
+```
+
+### Querying Data
+
+`mysql.query` returns an array of objects. Each object maps column names to values. Always use `?` placeholders for user-provided data to prevent SQL injection:
+
+```forge
+// Simple query
+let users = mysql.query(conn, "SELECT * FROM users")
+
+// Parameterized query (safe from SQL injection)
+let users = mysql.query(conn, "SELECT * FROM users WHERE age > ? AND city = ?", [21, "Portland"])
+for user in users {
+    say "{user.name} (age {user.age})"
+}
+```
+
+### Modifying Data
+
+`mysql.execute` handles INSERT, UPDATE, DELETE, and DDL statements. It returns the number of affected rows:
+
+```forge
+// Create a table
+mysql.execute(conn, "CREATE TABLE IF NOT EXISTS products (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    price DECIMAL(10,2),
+    in_stock BOOLEAN DEFAULT true
+)")
+
+// Insert
+mysql.execute(conn, "INSERT INTO products (name, price) VALUES (?, ?)", ["Widget", 9.99])
+
+// Update — returns affected row count
+let updated = mysql.execute(conn, "UPDATE products SET price = ? WHERE name = ?", [12.99, "Widget"])
+say "Updated {updated} row(s)"
+
+// Delete
+mysql.execute(conn, "DELETE FROM products WHERE id = ?", [5])
+```
+
+### Closing Connections
+
+```forge
+mysql.close(conn)  // Returns true if found and closed, false otherwise
+```
+
+### Type Mapping
+
+| MySQL Type                | Forge Type |
+| ------------------------- | ---------- |
+| INT, BIGINT               | `int`      |
+| TINYINT(1), BOOLEAN       | `int`      |
+| FLOAT, DOUBLE, DECIMAL    | `float`    |
+| VARCHAR, TEXT, CHAR       | `string`   |
+| DATETIME, TIMESTAMP, DATE | `string`   |
+| TIME                      | `string`   |
+| BLOB, BINARY              | `string`   |
+| NULL                      | `null`     |
+
+### Recipe: CRUD Application
+
+```forge
+let conn = mysql.connect(env.get("MYSQL_URL"))
+
+// Create
+mysql.execute(conn, "INSERT INTO users (name, email, age) VALUES (?, ?, ?)", ["Alice", "alice@example.com", 30])
+
+// Read
+let users = mysql.query(conn, "SELECT * FROM users WHERE age > ?", [25])
+for user in users {
+    say "{user.name} — {user.email}"
+}
+
+// Update
+let affected = mysql.execute(conn, "UPDATE users SET age = ? WHERE email = ?", [31, "alice@example.com"])
+say "Updated {affected} row(s)"
+
+// Delete
+mysql.execute(conn, "DELETE FROM users WHERE email = ?", ["alice@example.com"])
+
+// Clean up
+mysql.close(conn)
+```
+
+### Notes
+
+- All queries support `?` placeholders for parameterized queries. Always use parameters for user-provided data.
+- Connection pooling is automatic—each `mysql.connect` creates a pool that handles reconnection and reuse.
+- TLS is supported via `rustls` when connecting to remote servers.
+- The `mysql` module requires the interpreter (default) execution mode.
+
+---
+
+_This concludes Part II: The Standard Library. With twenty-one modules, a GenZ debug kit, execution helpers, and 280+ functions at your disposal, Forge provides everything needed for file I/O, databases, data processing, HTTP, WebSockets, JWT authentication, MySQL, cryptography, URL handling, TOML configuration, terminal UI, fake data generation, performance profiling, shell scripting, and resilient error handling—all without leaving the language._
+
 # Part III: Building Real Things
 
 ---
@@ -10267,6 +10526,7 @@ services, processed data pipelines, automated system operations, and integrated 
 with a language that compiles to a single binary and requires zero external dependencies.
 In Part IV, we'll look at Forge's tooling ecosystem: the formatter, test runner, LSP,
 and how to publish Forge packages._
+
 # PART IV: UNDER THE HOOD
 
 ---
@@ -12428,6 +12688,7 @@ for rows.Next() {
 | 0.3.1   | Interface satisfaction checking (Go-style structural typing)                                                    |
 | 0.3.2   | Tokio spawn, language-level channels, native Option/spawn task handles                                          |
 | 0.3.3   | 3 new modules (url, toml, ws), 40+ new stdlib functions, HTTP params/form/auth/cookies, HMAC-SHA256, WebSockets |
+| 0.4.0   | JWT authentication module, MySQL/MariaDB module, 21 stdlib modules, 280+ functions, 862 tests                   |
 
 ### Acknowledgments
 

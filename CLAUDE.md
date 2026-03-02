@@ -64,7 +64,7 @@ forge fmt                    # format code
 
 run, repl, version, fmt, test, new, build, install, lsp, learn, chat, help, -e
 
-## Standard Library (16 modules, 230+ functions)
+## Standard Library (18 modules, 238+ functions)
 
 | Module   | Key Functions                                                                                    |
 | -------- | ------------------------------------------------------------------------------------------------ |
@@ -74,6 +74,8 @@ run, repl, version, fmt, test, new, build, install, lsp, learn, chat, help, -e
 | `crypto` | sha256, md5, base64_encode/decode, hex_encode/decode                                             |
 | `db`     | open, query, execute, close (SQLite)                                                             |
 | `pg`     | connect, query, execute, close (PostgreSQL)                                                      |
+| `mysql`  | connect, query, execute, close (MySQL — parameterized queries, connection pooling)               |
+| `jwt`    | sign, verify, decode, valid (HS256/384/512, RS256, ES256)                                        |
 | `env`    | get, set, has, keys                                                                              |
 | `json`   | parse, stringify, pretty                                                                         |
 | `regex`  | test(text, pattern), find, find_all, replace, split                                              |
@@ -105,13 +107,13 @@ run, repl, version, fmt, test, new, build, install, lsp, learn, chat, help, -e
 
 ```bash
 cargo build          # 0 errors
-cargo test           # 488 Rust tests pass
-forge test           # 334 Forge tests pass (822 total)
+cargo test           # 528 Rust tests pass
+forge test           # 334 Forge tests pass (862 total)
 ```
 
-All 12 example files run successfully.
+All 15 example files run successfully.
 
-## Known Limitations (v0.3.3)
+## Known Limitations (v0.4.0)
 
 - SQL queries use raw strings (no parameterized query API yet) — be cautious with user input
 - Interpreter is ~20x slower than Python for deep recursion; use `--jit` (11x faster than Python) or `--vm` (2x slower than Python)

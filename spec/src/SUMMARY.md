@@ -68,6 +68,8 @@
 - [crypto](./stdlib/crypto.md)
 - [db (SQLite)](./stdlib/db.md)
 - [pg (PostgreSQL)](./stdlib/pg.md)
+- [mysql (MySQL)](./stdlib/mysql.md)
+- [jwt (JSON Web Tokens)](./stdlib/jwt.md)
 - [json](./stdlib/json.md)
 - [csv](./stdlib/csv.md)
 - [regex](./stdlib/regex.md)
