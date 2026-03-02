@@ -1,0 +1,35 @@
+name: Build Spec
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'spec/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'spec/**'
+
+jobs:
+  build-spec:
+    name: Build Language Specification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: 'latest'
+
+      - name: Build spec
+        run: mdbook build spec/
+
+      - name: Commit built spec to docs/spec/
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/spec/
+          git diff --cached --quiet || git commit -m "docs: auto-build language spec [skip ci]"
+          git push

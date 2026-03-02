@@ -1,0 +1,439 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Keywords - The Forge Language Specification</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Complete language specification for the Forge programming language">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/forge-9ecd375c.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-7ed87d68.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-cb066ca3.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">The Forge Language Specification</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/humancto/forge-lang" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/humancto/forge-lang/edit/main/spec/src/src/lexical-structure/keywords.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="keywords"><a class="header" href="#keywords">Keywords</a></h1>
+<p>Keywords are reserved identifiers with special syntactic meaning. A keyword cannot be used as a variable name, function name, or type name.</p>
+<p>Forge’s keyword set is organized into five categories: classic keywords (familiar from other languages), natural-language keywords (Forge’s English-like alternatives), innovation keywords (unique to Forge), error handling keywords, and type keywords.</p>
+<h2 id="classic-keywords"><a class="header" href="#classic-keywords">Classic Keywords</a></h2>
+<p>These keywords provide syntax familiar to developers coming from Rust, JavaScript, Go, or Python.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Keyword</th><th>Purpose</th></tr>
+</thead>
+<tbody>
+<tr><td><code>let</code></td><td>Variable declaration</td></tr>
+<tr><td><code>mut</code></td><td>Mutable variable modifier</td></tr>
+<tr><td><code>fn</code></td><td>Function declaration</td></tr>
+<tr><td><code>return</code></td><td>Return from function</td></tr>
+<tr><td><code>if</code></td><td>Conditional branch</td></tr>
+<tr><td><code>else</code></td><td>Alternative branch</td></tr>
+<tr><td><code>match</code></td><td>Pattern matching</td></tr>
+<tr><td><code>for</code></td><td>For loop</td></tr>
+<tr><td><code>in</code></td><td>Iterator binding (used with <code>for</code>)</td></tr>
+<tr><td><code>while</code></td><td>While loop</td></tr>
+<tr><td><code>loop</code></td><td>Infinite loop</td></tr>
+<tr><td><code>break</code></td><td>Exit a loop</td></tr>
+<tr><td><code>continue</code></td><td>Skip to next loop iteration</td></tr>
+<tr><td><code>struct</code></td><td>Struct type definition</td></tr>
+<tr><td><code>type</code></td><td>Algebraic data type definition</td></tr>
+<tr><td><code>interface</code></td><td>Interface definition</td></tr>
+<tr><td><code>impl</code></td><td>Method block / interface implementation</td></tr>
+<tr><td><code>pub</code></td><td>Public visibility modifier</td></tr>
+<tr><td><code>import</code></td><td>Module import</td></tr>
+<tr><td><code>spawn</code></td><td>Spawn a concurrent task</td></tr>
+<tr><td><code>true</code></td><td>Boolean literal true</td></tr>
+<tr><td><code>false</code></td><td>Boolean literal false</td></tr>
+<tr><td><code>null</code></td><td>Null literal</td></tr>
+<tr><td><code>async</code></td><td>Async function declaration</td></tr>
+<tr><td><code>await</code></td><td>Await an async expression</td></tr>
+<tr><td><code>yield</code></td><td>Yield a value from a generator</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="natural-language-keywords"><a class="header" href="#natural-language-keywords">Natural-Language Keywords</a></h2>
+<p>These keywords provide English-like alternatives to classic syntax. Each natural keyword maps to an equivalent classic construct.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Natural Keyword</th><th>Classic Equivalent</th><th>Usage</th></tr>
+</thead>
+<tbody>
+<tr><td><code>set</code></td><td><code>let</code></td><td><code>set x to 5</code></td></tr>
+<tr><td><code>to</code></td><td><code>=</code></td><td>Used with <code>set</code> and <code>change</code></td></tr>
+<tr><td><code>change</code></td><td>(reassignment)</td><td><code>change x to 10</code></td></tr>
+<tr><td><code>define</code></td><td><code>fn</code></td><td><code>define greet(name) { }</code></td></tr>
+<tr><td><code>otherwise</code></td><td><code>else</code></td><td><code>} otherwise { }</code></td></tr>
+<tr><td><code>nah</code></td><td><code>else</code></td><td><code>} nah { }</code> (informal)</td></tr>
+<tr><td><code>each</code></td><td>(loop modifier)</td><td><code>for each x in items { }</code></td></tr>
+<tr><td><code>repeat</code></td><td>(counted loop)</td><td><code>repeat 5 times { }</code></td></tr>
+<tr><td><code>times</code></td><td>(loop count)</td><td>Used with <code>repeat</code></td></tr>
+<tr><td><code>grab</code></td><td>(fetch)</td><td><code>grab resp from "url"</code></td></tr>
+<tr><td><code>from</code></td><td>(source)</td><td>Used with <code>grab</code> and <code>unpack</code></td></tr>
+<tr><td><code>wait</code></td><td>(sleep)</td><td><code>wait 2 seconds</code></td></tr>
+<tr><td><code>seconds</code></td><td>(time unit)</td><td>Used with <code>wait</code> and <code>timeout</code></td></tr>
+<tr><td><code>say</code></td><td><code>println</code></td><td><code>say "hello"</code></td></tr>
+<tr><td><code>yell</code></td><td>(uppercase print)</td><td><code>yell "hello"</code> prints <code>HELLO</code></td></tr>
+<tr><td><code>whisper</code></td><td>(lowercase print)</td><td><code>whisper "HELLO"</code> prints <code>hello</code></td></tr>
+<tr><td><code>thing</code></td><td><code>struct</code></td><td><code>thing Person { }</code></td></tr>
+<tr><td><code>power</code></td><td><code>interface</code></td><td><code>power Describable { }</code></td></tr>
+<tr><td><code>give</code></td><td><code>impl</code></td><td><code>give Person { }</code></td></tr>
+<tr><td><code>craft</code></td><td>(constructor)</td><td><code>craft Person { name: "A" }</code></td></tr>
+<tr><td><code>the</code></td><td>(connector)</td><td><code>give X the power Y { }</code></td></tr>
+<tr><td><code>forge</code></td><td><code>async</code></td><td><code>forge fetch_data() { }</code></td></tr>
+<tr><td><code>hold</code></td><td><code>await</code></td><td><code>hold expr</code></td></tr>
+<tr><td><code>emit</code></td><td><code>yield</code></td><td><code>emit value</code></td></tr>
+<tr><td><code>unpack</code></td><td>(destructure)</td><td><code>unpack {a, b} from obj</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="dual-syntax-mapping"><a class="header" href="#dual-syntax-mapping">Dual Syntax Mapping</a></h2>
+<p>The following table shows equivalent forms for the most common constructs:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Construct</th><th>Classic</th><th>Natural</th></tr>
+</thead>
+<tbody>
+<tr><td>Variable</td><td><code>let x = 5</code></td><td><code>set x to 5</code></td></tr>
+<tr><td>Mutable variable</td><td><code>let mut x = 0</code></td><td><code>set mut x to 0</code></td></tr>
+<tr><td>Reassignment</td><td><code>x = 10</code></td><td><code>change x to 10</code></td></tr>
+<tr><td>Function</td><td><code>fn add(a, b) { }</code></td><td><code>define add(a, b) { }</code></td></tr>
+<tr><td>Else branch</td><td><code>else { }</code></td><td><code>otherwise { }</code> / <code>nah { }</code></td></tr>
+<tr><td>Struct definition</td><td><code>struct Point { }</code></td><td><code>thing Point { }</code></td></tr>
+<tr><td>Interface</td><td><code>interface I { }</code></td><td><code>power I { }</code></td></tr>
+<tr><td>Impl block</td><td><code>impl T { }</code></td><td><code>give T { }</code></td></tr>
+<tr><td>Impl for interface</td><td><code>impl I for T { }</code></td><td><code>give T the power I { }</code></td></tr>
+<tr><td>Constructor</td><td><code>Point { x: 1 }</code></td><td><code>craft Point { x: 1 }</code></td></tr>
+<tr><td>Async function</td><td><code>async fn f() { }</code></td><td><code>forge f() { }</code></td></tr>
+<tr><td>Await</td><td><code>await expr</code></td><td><code>hold expr</code></td></tr>
+<tr><td>Yield</td><td><code>yield value</code></td><td><code>emit value</code></td></tr>
+<tr><td>Destructure</td><td><code>let {a, b} = obj</code></td><td><code>unpack {a, b} from obj</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="innovation-keywords"><a class="header" href="#innovation-keywords">Innovation Keywords</a></h2>
+<p>These keywords introduce constructs unique to Forge that have no direct equivalent in other mainstream languages.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Keyword</th><th>Purpose</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td><code>when</code></td><td>Guard expression (multi-way conditional)</td><td><code>when age { &lt; 13 -&gt; "kid" }</code></td></tr>
+<tr><td><code>unless</code></td><td>Postfix negative conditional</td><td><code>expr unless condition</code></td></tr>
+<tr><td><code>until</code></td><td>Postfix loop-until</td><td><code>expr until condition</code></td></tr>
+<tr><td><code>must</code></td><td>Crash on error with message</td><td><code>must parse_int(s)</code></td></tr>
+<tr><td><code>check</code></td><td>Declarative validation</td><td><code>check name is not empty</code></td></tr>
+<tr><td><code>safe</code></td><td>Null-safe execution block</td><td><code>safe { risky_code() }</code></td></tr>
+<tr><td><code>where</code></td><td>Collection filter</td><td><code>items where x &gt; 5</code></td></tr>
+<tr><td><code>timeout</code></td><td>Time-limited execution</td><td><code>timeout 5 seconds { }</code></td></tr>
+<tr><td><code>retry</code></td><td>Automatic retry with count</td><td><code>retry 3 times { }</code></td></tr>
+<tr><td><code>schedule</code></td><td>Cron-style scheduling</td><td><code>schedule every 5 minutes { }</code></td></tr>
+<tr><td><code>every</code></td><td>Used with <code>schedule</code></td><td><code>schedule every N { }</code></td></tr>
+<tr><td><code>any</code></td><td>Existential quantifier</td><td><code>any x in items</code></td></tr>
+<tr><td><code>ask</code></td><td>AI/LLM prompt</td><td><code>ask "summarize this"</code></td></tr>
+<tr><td><code>prompt</code></td><td>Prompt template definition</td><td><code>prompt summarize() { }</code></td></tr>
+<tr><td><code>transform</code></td><td>Data transformation block</td><td><code>transform data { }</code></td></tr>
+<tr><td><code>table</code></td><td>Table display</td><td><code>table [...]</code></td></tr>
+<tr><td><code>select</code></td><td>Query-style select</td><td><code>from X select Y</code></td></tr>
+<tr><td><code>order</code></td><td>Query-style ordering</td><td><code>order by field</code></td></tr>
+<tr><td><code>by</code></td><td>Used with <code>order</code> and <code>sort</code></td><td><code>order by name</code></td></tr>
+<tr><td><code>limit</code></td><td>Query-style limit</td><td><code>limit 10</code></td></tr>
+<tr><td><code>keep</code></td><td>Filter synonym</td><td><code>keep where condition</code></td></tr>
+<tr><td><code>take</code></td><td>Take N items</td><td><code>take 5</code></td></tr>
+<tr><td><code>freeze</code></td><td>Freeze/immobilize a value</td><td><code>freeze expr</code></td></tr>
+<tr><td><code>watch</code></td><td>File change detection</td><td><code>watch "file.txt" { }</code></td></tr>
+<tr><td><code>download</code></td><td>Download a file from URL</td><td><code>download "url" to "path"</code></td></tr>
+<tr><td><code>crawl</code></td><td>Web scraping</td><td><code>crawl "url"</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="error-handling-keywords"><a class="header" href="#error-handling-keywords">Error Handling Keywords</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Keyword</th><th>Purpose</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td><code>try</code></td><td>Try block</td><td><code>try { }</code></td></tr>
+<tr><td><code>catch</code></td><td>Catch block</td><td><code>catch err { }</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="type-keywords"><a class="header" href="#type-keywords">Type Keywords</a></h2>
+<p>These identifiers are reserved as built-in type names. They are recognized by the lexer as keyword tokens, not as general identifiers.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Keyword</th><th>Type</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Int</code></td><td>64-bit signed integer</td></tr>
+<tr><td><code>Float</code></td><td>64-bit IEEE 754 float</td></tr>
+<tr><td><code>String</code></td><td>UTF-8 string</td></tr>
+<tr><td><code>Bool</code></td><td>Boolean</td></tr>
+<tr><td><code>Json</code></td><td>JSON value type</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="operators-as-keywords"><a class="header" href="#operators-as-keywords">Operators as Keywords</a></h2>
+<p>The following operators are lexed as keyword tokens rather than punctuation:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Token</th><th>Keyword</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>|&gt;</code></td><td><code>Pipe</code></td><td>Pipe-forward operator</td></tr>
+<tr><td><code>&gt;&gt;</code></td><td><code>PipeRight</code></td><td>Alternate pipe operator</td></tr>
+<tr><td><code>...</code></td><td><code>DotDotDot</code></td><td>Spread operator</td></tr>
+<tr><td><code>+=</code></td><td><code>PlusEq</code></td><td>Add-assign</td></tr>
+<tr><td><code>-=</code></td><td><code>MinusEq</code></td><td>Subtract-assign</td></tr>
+<tr><td><code>*=</code></td><td><code>StarEq</code></td><td>Multiply-assign</td></tr>
+<tr><td><code>/=</code></td><td><code>SlashEq</code></td><td>Divide-assign</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="complete-alphabetical-index"><a class="header" href="#complete-alphabetical-index">Complete Alphabetical Index</a></h2>
+<p>For reference, the complete set of keyword strings recognized by the lexer (case-sensitive):</p>
+<pre><code>Int, Float, String, Bool, Json,
+any, ask, async, await, break, by, catch, change, continue, craft,
+crawl, define, download, each, else, emit, every, false, fn, for,
+forge, freeze, from, give, grab, hold, if, impl, import, in,
+interface, keep, let, limit, loop, match, mut, nah, null, order,
+otherwise, power, prompt, pub, repeat, retry, return, safe, say,
+schedule, seconds, select, set, spawn, struct, table, take, the,
+thing, timeout, times, to, transform, true, try, type, unless,
+unpack, until, wait, watch, when, where, while, whisper, yell, yield
+</code></pre>
+<p>All keywords are case-sensitive. <code>Let</code> and <code>LET</code> are identifiers, not keywords. The type keywords <code>Int</code>, <code>Float</code>, <code>String</code>, <code>Bool</code>, and <code>Json</code> are the only keywords that begin with an uppercase letter.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../lexical-structure/source-text.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../lexical-structure/identifiers.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../lexical-structure/source-text.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../lexical-structure/identifiers.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/forge-9e99b408.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

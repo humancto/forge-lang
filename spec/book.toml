@@ -1,0 +1,32 @@
+[book]
+title = "The Forge Language Specification"
+authors = ["Archith Rapaka"]
+description = "Complete language specification for the Forge programming language"
+src = "src"
+language = "en"
+
+[build]
+build-dir = "../docs/spec"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/humancto/forge-lang"
+edit-url-template = "https://github.com/humancto/forge-lang/edit/main/spec/src/{path}"
+site-url = "/forge-lang/spec/"
+additional-css = ["theme/forge.css"]
+additional-js = ["theme/forge.js"]
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 20
+
+[output.html.playground]
+editable = false
+
+[preprocessor.links]

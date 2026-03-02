@@ -15,7 +15,7 @@ Built-in HTTP, databases, crypto, AI, and a JIT compiler.<br>
 [![Stars](https://img.shields.io/github/stars/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/stargazers)
 [![crates.io](https://img.shields.io/crates/v/forge-lang?color=%23ff6b35&style=flat-square)](https://crates.io/crates/forge-lang)
 
-[📥 **Download Book**](https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf) · [🌐 **Website**](https://humancto.github.io/forge-lang/) · [💬 **Discussions**](https://github.com/humancto/forge-lang/discussions) · [🐛 **Issues**](https://github.com/humancto/forge-lang/issues)
+[📥 **Download Book**](https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf) · [📖 **Language Spec**](https://humancto.github.io/forge-lang/spec/) · [🌐 **Website**](https://humancto.github.io/forge-lang/) · [💬 **Discussions**](https://github.com/humancto/forge-lang/discussions) · [🐛 **Issues**](https://github.com/humancto/forge-lang/issues)
 
 </div>
 
