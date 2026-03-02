@@ -68,6 +68,11 @@ regex = "1"
 # === Database ===
 rusqlite = { version = "0.34", features = ["bundled"] }
 tokio-postgres = "0.7"
+mysql_async = { version = "0.34", default-features = false, features = ["rustls-tls"] }
+flate2 = "1"
+
+# === JWT ===
+jsonwebtoken = "9"
 
 # === JIT / Native Compilation (Cranelift) ===
 cranelift-codegen = "0.129"

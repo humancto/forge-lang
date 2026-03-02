@@ -363,6 +363,10 @@ impl Interpreter {
             .define("toml".to_string(), crate::stdlib::create_toml_module());
         self.env
             .define("ws".to_string(), crate::stdlib::create_ws_module());
+        self.env
+            .define("jwt".to_string(), crate::stdlib::create_jwt_module());
+        self.env
+            .define("mysql".to_string(), crate::stdlib::create_mysql_module());
 
         // Prelude: Option type = Some(value) | None
         self.env
@@ -1057,7 +1061,8 @@ impl Interpreter {
             Stmt::Import { path, names } => {
                 let builtin_modules = [
                     "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log",
-                    "term", "http", "csv", "exec", "time", "url", "toml", "npc", "ws",
+                    "term", "http", "csv", "exec", "time", "url", "toml", "npc", "ws", "jwt",
+                    "mysql",
                 ];
                 if builtin_modules.contains(&path.as_str()) {
                     if self.env.get(path).is_some() {
@@ -3823,6 +3828,12 @@ impl Interpreter {
             }
             _ if name.starts_with("ws.") => {
                 crate::stdlib::ws::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
+            _ if name.starts_with("jwt.") => {
+                crate::stdlib::jwt::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
+            _ if name.starts_with("mysql.") => {
+                crate::stdlib::mysql::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
             "input" => {
                 use std::io::Read;

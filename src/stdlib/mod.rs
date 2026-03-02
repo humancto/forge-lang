@@ -7,8 +7,10 @@ pub mod fs;
 pub mod http;
 pub mod io;
 pub mod json_module;
+pub mod jwt;
 pub mod log;
 pub mod math;
+pub mod mysql;
 pub mod npc;
 pub mod pg;
 pub mod regex_module;
@@ -73,4 +75,10 @@ pub fn create_toml_module() -> Value {
 }
 pub fn create_ws_module() -> Value {
     ws::create_module()
+}
+pub fn create_jwt_module() -> Value {
+    jwt::create_module()
+}
+pub fn create_mysql_module() -> Value {
+    mysql::create_module()
 }

@@ -1,0 +1,45 @@
+// MySQL Demo — Database CRUD Operations
+// Forge v0.4.0
+// Requires a running MySQL server. Set MYSQL_URL env var or edit connection below.
+
+say "=== MySQL CRUD Demo ==="
+say "Note: This demo requires a running MySQL server."
+say "Set MYSQL_URL environment variable or edit the connection string."
+say ""
+
+// Example connection (uncomment to use):
+//
+// -- Connect with URL string --
+// set conn to mysql.connect("mysql://root:password@localhost:3306/mydb")
+//
+// -- Or connect with separate args --
+// set conn to mysql.connect("localhost", "root", "password", "mydb")
+//
+// -- Create table --
+// mysql.execute(conn, "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100), age INT)")
+//
+// -- Insert with parameterized queries (safe from SQL injection) --
+// mysql.execute(conn, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", 30])
+// mysql.execute(conn, "INSERT INTO users (name, age) VALUES (?, ?)", ["Bob", 25])
+// mysql.execute(conn, "INSERT INTO users (name, age) VALUES (?, ?)", ["Charlie", 35])
+//
+// -- Query --
+// set users to mysql.query(conn, "SELECT * FROM users WHERE age > ?", [20])
+// say "Users over 20:"
+// for user in users {
+//     say "  " + user.name + " (age " + str(user.age) + ")"
+// }
+//
+// -- Update --
+// set affected to mysql.execute(conn, "UPDATE users SET age = ? WHERE name = ?", [31, "Alice"])
+// say "Updated " + str(affected) + " row(s)"
+//
+// -- Delete --
+// set affected to mysql.execute(conn, "DELETE FROM users WHERE name = ?", ["Charlie"])
+// say "Deleted " + str(affected) + " row(s)"
+//
+// -- Clean up --
+// mysql.execute(conn, "DROP TABLE users")
+// mysql.close(conn)
+
+say "=== Demo Complete ==="

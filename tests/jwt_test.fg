@@ -1,0 +1,82 @@
+// JWT Module Tests
+// Tests for jwt.sign, jwt.verify, jwt.decode, jwt.valid
+
+// Test 1: Basic sign returns a string with 3 dot-separated parts
+set token to jwt.sign({ user_id: 123 }, "secret")
+set parts to split(token, ".")
+assert_eq(len(parts), 3)
+
+// Test 2: Sign and verify round-trip
+set token to jwt.sign({ user_id: 42, role: "admin" }, "my-secret")
+set claims to jwt.verify(token, "my-secret")
+assert_eq(claims.user_id, 42)
+assert_eq(claims.role, "admin")
+
+// Test 3: Verify with wrong secret fails
+set token to jwt.sign({ data: "test" }, "correct-secret")
+set is_valid to jwt.valid(token, "wrong-secret")
+assert_eq(is_valid, false)
+
+// Test 4: jwt.valid returns true for valid token
+set token to jwt.sign({ id: 1 }, "secret")
+set is_valid to jwt.valid(token, "secret")
+assert_eq(is_valid, true)
+
+// Test 5: jwt.decode returns header and payload without verification
+set token to jwt.sign({ name: "Alice", age: 30 }, "secret")
+set decoded to jwt.decode(token)
+assert_eq(decoded.header.alg, "HS256")
+assert_eq(decoded.header.typ, "JWT")
+assert_eq(decoded.payload.name, "Alice")
+assert_eq(decoded.payload.age, 30)
+
+// Test 6: Sign with expires option
+set token to jwt.sign({ id: 1 }, "secret", { expires: "1h" })
+set claims to jwt.verify(token, "secret")
+assert_eq(claims.id, 1)
+assert(claims.exp > 0)
+
+// Test 7: Sign with issuer and subject
+set token to jwt.sign({ id: 1 }, "secret", { issuer: "myapp", subject: "user-1" })
+set claims to jwt.verify(token, "secret")
+assert_eq(claims.iss, "myapp")
+assert_eq(claims.sub, "user-1")
+
+// Test 8: Sign with HS384 algorithm
+set token to jwt.sign({ id: 1 }, "secret", { algorithm: "HS384" })
+set decoded to jwt.decode(token)
+assert_eq(decoded.header.alg, "HS384")
+
+// Test 9: Sign with HS512 algorithm
+set token to jwt.sign({ id: 1 }, "secret", { algorithm: "HS512" })
+set decoded to jwt.decode(token)
+assert_eq(decoded.header.alg, "HS512")
+
+// Test 10: Nested object claims
+set token to jwt.sign({
+    user: { id: 1, roles: ["admin", "editor"] }
+}, "secret")
+set claims to jwt.verify(token, "secret")
+assert_eq(claims.user.id, 1)
+assert_eq(len(claims.user.roles), 2)
+assert_eq(claims.user.roles[0], "admin")
+
+// Test 11: iat (issued at) is auto-added
+set token to jwt.sign({ id: 1 }, "secret")
+set claims to jwt.verify(token, "secret")
+assert(claims.iat > 0)
+
+// Test 12: Multiple claims types
+set token to jwt.sign({
+    name: "Bob",
+    age: 25,
+    active: true,
+    score: 9.5
+}, "secret")
+set claims to jwt.verify(token, "secret")
+assert_eq(claims.name, "Bob")
+assert_eq(claims.age, 25)
+assert_eq(claims.active, true)
+assert_eq(claims.score, 9.5)
+
+say "All JWT tests passed!"

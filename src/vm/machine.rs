@@ -412,6 +412,33 @@ impl VM {
         let pg_ref = self.gc.alloc(ObjKind::Object(pg_map));
         self.globals.insert("pg".to_string(), Value::Obj(pg_ref));
 
+        // jwt module
+        let mut jwt_map = IndexMap::new();
+        for name in &["sign", "verify", "decode", "valid"] {
+            let full = format!("jwt.{}", name);
+            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+                name: full,
+                func: native_dispatch,
+            }));
+            jwt_map.insert(name.to_string(), Value::Obj(nr));
+        }
+        let jwt_ref = self.gc.alloc(ObjKind::Object(jwt_map));
+        self.globals.insert("jwt".to_string(), Value::Obj(jwt_ref));
+
+        // mysql module
+        let mut mysql_map = IndexMap::new();
+        for name in &["connect", "query", "execute", "close"] {
+            let full = format!("mysql.{}", name);
+            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+                name: full,
+                func: native_dispatch,
+            }));
+            mysql_map.insert(name.to_string(), Value::Obj(nr));
+        }
+        let mysql_ref = self.gc.alloc(ObjKind::Object(mysql_map));
+        self.globals
+            .insert("mysql".to_string(), Value::Obj(mysql_ref));
+
         // Option prelude
         let mut none_obj = IndexMap::new();
         none_obj.insert("__type__".to_string(), self.alloc_string("Option"));
@@ -1945,6 +1972,18 @@ impl VM {
                 let interp_args = self.args_to_interp(&args);
                 let result =
                     crate::stdlib::pg::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("jwt.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result =
+                    crate::stdlib::jwt::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("mysql.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result =
+                    crate::stdlib::mysql::call(n, interp_args).map_err(|e| VMError::new(&e))?;
                 Ok(self.convert_interp_value(&result))
             }
             "shell" => {

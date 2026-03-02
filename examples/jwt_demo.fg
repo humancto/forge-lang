@@ -1,0 +1,52 @@
+// JWT Demo — Authentication with JSON Web Tokens
+// Forge v0.4.0
+
+say "=== JWT Authentication Demo ==="
+
+// 1. Sign a token (classic syntax)
+let secret = "my-super-secret-key-2024"
+let token = jwt.sign({
+    user_id: 123,
+    role: "admin",
+    name: "Alice"
+}, secret, {
+    expires: "1h",
+    issuer: "forge-app"
+})
+say "Token: " + token
+
+// 2. Verify the token (natural syntax)
+set claims to jwt.verify(token, secret)
+say "User: " + claims.name
+say "Role: " + claims.role
+say "Issuer: " + claims.iss
+
+// 3. Decode without verification (for debugging)
+set decoded to jwt.decode(token)
+say "Algorithm: " + decoded.header.alg
+say "Payload keys: " + str(keys(decoded.payload))
+
+// 4. Check validity (returns bool)
+say "Valid with correct secret: " + str(jwt.valid(token, secret))
+say "Valid with wrong secret: " + str(jwt.valid(token, "wrong"))
+
+// 5. Token with nested claims
+set api_token to jwt.sign({
+    user: {
+        id: 42,
+        roles: ["read", "write", "admin"]
+    },
+    permissions: {
+        can_delete: true,
+        max_requests: 1000
+    }
+}, secret, {
+    expires: "7d",
+    subject: "api-access"
+})
+
+set api_claims to jwt.verify(api_token, secret)
+say "API User ID: " + str(api_claims.user.id)
+say "Permissions: " + str(api_claims.permissions)
+
+say "=== Demo Complete ==="

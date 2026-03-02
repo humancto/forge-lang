@@ -1,0 +1,15 @@
+// MySQL Module Tests
+// Note: Most tests require a running MySQL server.
+// These tests verify module structure and error handling only.
+
+// Test 1: Module has correct functions
+assert_eq(type(mysql.connect), "BuiltIn")
+assert_eq(type(mysql.query), "BuiltIn")
+assert_eq(type(mysql.execute), "BuiltIn")
+assert_eq(type(mysql.close), "BuiltIn")
+
+// Test 2: Close with invalid ID returns false
+set result to mysql.close("nonexistent_connection")
+assert_eq(result, false)
+
+say "All MySQL tests passed!"
