@@ -73,6 +73,12 @@ pub enum Stmt {
         name: String,
         methods: Vec<MethodSig>,
     },
+    /// impl/give block: attach methods to a type
+    ImplBlock {
+        type_name: String,
+        ability: Option<String>,
+        methods: Vec<Stmt>,
+    },
     TryCatch {
         try_body: Vec<Stmt>,
         catch_var: String,
@@ -265,6 +271,8 @@ pub struct Param {
 pub struct FieldDef {
     pub name: String,
     pub type_ann: TypeAnn,
+    pub default: Option<Expr>,
+    pub embedded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

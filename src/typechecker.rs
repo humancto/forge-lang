@@ -265,6 +265,39 @@ impl TypeChecker {
                 let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
                 self.structs.insert(name.clone(), field_names);
             }
+            Stmt::ImplBlock {
+                type_name, methods, ..
+            } => {
+                for method in methods {
+                    if let Stmt::FnDef {
+                        name: method_name,
+                        params,
+                        return_type,
+                        ..
+                    } = method
+                    {
+                        let qualified = format!("{}::{}", type_name, method_name);
+                        let param_info: Vec<(String, Option<InferredType>)> = params
+                            .iter()
+                            .map(|p| {
+                                (
+                                    p.name.clone(),
+                                    p.type_ann.as_ref().map(type_ann_to_inferred),
+                                )
+                            })
+                            .collect();
+                        let ret = return_type.as_ref().map(type_ann_to_inferred);
+                        self.functions.insert(
+                            qualified,
+                            FnSignature {
+                                param_count: params.len(),
+                                params: param_info,
+                                return_type: ret,
+                            },
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }

@@ -39,8 +39,9 @@ impl Parser {
             Token::Change => self.parse_change(),
             Token::Fn | Token::Define => self.parse_fn_def(Vec::new()),
             Token::Type => self.parse_type_def(),
-            Token::Interface => self.parse_interface_def(),
-            Token::Struct => self.parse_struct_def(),
+            Token::Interface | Token::Power => self.parse_interface_def(),
+            Token::Struct | Token::Thing => self.parse_struct_def(),
+            Token::Impl | Token::Give => self.parse_impl_block(),
             Token::Return => self.parse_return(),
             Token::If => self.parse_if(),
             Token::Match => self.parse_match(),
@@ -190,7 +191,14 @@ impl Parser {
 
     /// Parses: interface Name { fn method(params) -> Type, ... }
     fn parse_interface_def(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(Token::Interface)?;
+        // Accept both: interface Greetable { } / power Greetable { }
+        if self.check(&Token::Interface) {
+            self.advance();
+        } else if self.check(&Token::Power) {
+            self.advance();
+        } else {
+            return Err(self.error("expected 'interface' or 'power'"));
+        }
         let name = self.expect_ident()?;
         self.expect(Token::LBrace)?;
         self.skip_newlines();
@@ -220,6 +228,60 @@ impl Parser {
         self.expect(Token::RBrace)?;
 
         Ok(Stmt::InterfaceDef { name, methods })
+    }
+
+    /// Parses impl/give blocks:
+    ///   Classic: impl Person { fn greet(it) { } }
+    ///   Classic: impl Greetable for Person { fn greet(it) { } }
+    ///   Natural: give Person { define greet(it) { } }
+    ///   Natural: give Person the power Greetable { define greet(it) { } }
+    fn parse_impl_block(&mut self) -> Result<Stmt, ParseError> {
+        let is_give = self.check(&Token::Give);
+        self.advance(); // consume 'impl' or 'give'
+
+        let first_name = self.expect_ident()?;
+        let mut type_name = first_name.clone();
+        let mut ability: Option<String> = None;
+
+        if is_give {
+            // Natural: give Person the power Greetable { }
+            if self.check(&Token::The) {
+                self.advance(); // consume 'the'
+                if self.check(&Token::Power) {
+                    self.advance(); // consume 'power'
+                    ability = Some(self.expect_ident()?);
+                } else {
+                    return Err(self.error("expected 'power' after 'the'"));
+                }
+            }
+        } else {
+            // Classic: impl Greetable for Person { }
+            // or:      impl Person { }
+            if self.check(&Token::For) {
+                // impl Greetable for Person { }
+                ability = Some(first_name);
+                self.advance(); // consume 'for'
+                type_name = self.expect_ident()?;
+            }
+        }
+
+        // Parse method body
+        self.expect(Token::LBrace)?;
+        self.skip_newlines();
+
+        let mut methods = Vec::new();
+        while !self.check(&Token::RBrace) {
+            let stmt = self.parse_fn_def(Vec::new())?;
+            methods.push(stmt);
+            self.skip_newlines();
+        }
+        self.expect(Token::RBrace)?;
+
+        Ok(Stmt::ImplBlock {
+            type_name,
+            ability,
+            methods,
+        })
     }
 
     /// Parses: say/yell/whisper expr
@@ -721,7 +783,14 @@ impl Parser {
     }
 
     fn parse_struct_def(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(Token::Struct)?;
+        // Accept both: struct Person { } / thing Person { }
+        if self.check(&Token::Struct) {
+            self.advance();
+        } else if self.check(&Token::Thing) {
+            self.advance();
+        } else {
+            return Err(self.error("expected 'struct' or 'thing'"));
+        }
         let name = self.expect_ident()?;
 
         self.expect(Token::LBrace)?;
@@ -729,12 +798,35 @@ impl Parser {
 
         let mut fields = Vec::new();
         while !self.check(&Token::RBrace) {
+            // Contextual "has" — embedding: has address: Address
+            let embedded = if let Token::Ident(ref id) = self.current_token() {
+                if id == "has" {
+                    self.advance();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
             let field_name = self.expect_ident()?;
             self.expect(Token::Colon)?;
             let type_ann = self.parse_type_ann()?;
+
+            // Optional default: field: Type = expr
+            let default = if self.check(&Token::Eq) {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+
             fields.push(FieldDef {
                 name: field_name,
                 type_ann,
+                default,
+                embedded,
             });
             self.skip_newlines();
             if self.check(&Token::Comma) {
@@ -1295,6 +1387,28 @@ impl Parser {
                 Ok(Expr::Ident("any".to_string()))
             }
 
+            // craft Person { name: "Alice", age: 30 }
+            Token::Craft => {
+                self.advance();
+                let name = self.expect_ident()?;
+                self.expect(Token::LBrace)?;
+                self.skip_newlines();
+                let mut fields = Vec::new();
+                while !self.check(&Token::RBrace) {
+                    let field_name = self.expect_ident()?;
+                    self.expect(Token::Colon)?;
+                    let value = self.parse_expr()?;
+                    fields.push((field_name, value));
+                    self.skip_newlines();
+                    if self.check(&Token::Comma) {
+                        self.advance();
+                    }
+                    self.skip_newlines();
+                }
+                self.expect(Token::RBrace)?;
+                Ok(Expr::StructInit { name, fields })
+            }
+
             Token::Ident(ref name) => {
                 let name = name.clone();
                 self.advance();
@@ -1724,6 +1838,11 @@ impl Parser {
             Token::Every => Some("every".to_string()),
             Token::Any => Some("any".to_string()),
             Token::By => Some("by".to_string()),
+            Token::Thing => Some("thing".to_string()),
+            Token::Power => Some("power".to_string()),
+            Token::Give => Some("give".to_string()),
+            Token::Craft => Some("craft".to_string()),
+            Token::The => Some("the".to_string()),
             _ => None,
         };
         match name {

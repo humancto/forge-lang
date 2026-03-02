@@ -301,6 +301,14 @@ pub struct Interpreter {
     pub env: Environment,
     call_depth: usize,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Instance methods: type_name -> { method_name -> Value::Function }
+    pub method_tables: HashMap<String, IndexMap<String, Value>>,
+    /// Static methods: type_name -> { method_name -> Value::Function }
+    pub static_methods: HashMap<String, IndexMap<String, Value>>,
+    /// Embedded fields: type_name -> [(field_name, embedded_type_name)]
+    pub embedded_fields: HashMap<String, Vec<(String, String)>>,
+    /// Struct defaults: type_name -> { field_name -> default_value }
+    pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
 }
 
 impl Interpreter {
@@ -309,6 +317,10 @@ impl Interpreter {
             env: Environment::new(),
             call_depth: 0,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            method_tables: HashMap::new(),
+            static_methods: HashMap::new(),
+            embedded_fields: HashMap::new(),
+            struct_defaults: HashMap::new(),
         };
         interp.register_builtins();
         interp
@@ -642,9 +654,31 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
-            Stmt::StructDef { name, fields: _ } => {
+            Stmt::StructDef { name, fields } => {
                 self.env
                     .define(name.clone(), Value::BuiltIn(format!("struct:{}", name)));
+
+                // Record embedded fields and defaults
+                let mut embeds = Vec::new();
+                let mut defaults = IndexMap::new();
+                for field in fields {
+                    if field.embedded {
+                        if let TypeAnn::Simple(ref type_name) = field.type_ann {
+                            embeds.push((field.name.clone(), type_name.clone()));
+                        }
+                    }
+                    if let Some(ref default_expr) = field.default {
+                        let default_val = self.eval_expr(default_expr)?;
+                        defaults.insert(field.name.clone(), default_val);
+                    }
+                }
+                if !embeds.is_empty() {
+                    self.embedded_fields.insert(name.clone(), embeds);
+                }
+                if !defaults.is_empty() {
+                    self.struct_defaults.insert(name.clone(), defaults);
+                }
+
                 Ok(Signal::None)
             }
 
@@ -710,6 +744,84 @@ impl Interpreter {
                 self.env.define(name.clone(), Value::Object(iface.clone()));
                 self.env
                     .define(format!("__interface_{}__", name), Value::Object(iface));
+                Ok(Signal::None)
+            }
+
+            Stmt::ImplBlock {
+                type_name,
+                ability,
+                methods,
+            } => {
+                // Phase 4 will fully implement method tables + dispatch
+                // For now, register each method function in the environment
+                for method_stmt in methods {
+                    if let Stmt::FnDef {
+                        name: method_name,
+                        params,
+                        return_type,
+                        body,
+                        is_async,
+                        ..
+                    } = method_stmt
+                    {
+                        let has_receiver = params.first().map_or(false, |p| p.name == "it");
+                        let qualified_name = if has_receiver {
+                            // Instance method: stored for dispatch
+                            format!("{}::{}", type_name, method_name)
+                        } else {
+                            // Static method: accessible as Type.method()
+                            format!("{}::{}", type_name, method_name)
+                        };
+
+                        let func_val = Value::Function {
+                            name: qualified_name.clone(),
+                            params: params.clone(),
+                            body: body.clone(),
+                            closure: self.env.clone(),
+                            decorators: Vec::new(),
+                        };
+
+                        // Register in method tables
+                        let type_methods = self
+                            .method_tables
+                            .entry(type_name.clone())
+                            .or_insert_with(IndexMap::new);
+                        type_methods.insert(method_name.clone(), func_val.clone());
+
+                        if !has_receiver {
+                            let type_statics = self
+                                .static_methods
+                                .entry(type_name.clone())
+                                .or_insert_with(IndexMap::new);
+                            type_statics.insert(method_name.clone(), func_val);
+                        }
+                    }
+                }
+
+                // If ability specified, validate all required methods are present
+                if let Some(ref ability_name) = ability {
+                    let iface_key = format!("__interface_{}__", ability_name);
+                    if let Some(Value::Object(iface)) = self.env.get(&iface_key).cloned() {
+                        if let Some(Value::Array(required_methods)) = iface.get("methods") {
+                            let type_methods = self.method_tables.get(type_name);
+                            for req in required_methods {
+                                if let Value::Object(m) = req {
+                                    if let Some(Value::String(mname)) = m.get("name") {
+                                        let has_it =
+                                            type_methods.map_or(false, |tm| tm.contains_key(mname));
+                                        if !has_it {
+                                            return Err(RuntimeError::new(&format!(
+                                                "'{}' does not implement '{}' required by power '{}'",
+                                                type_name, mname, ability_name
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Ok(Signal::None)
             }
 
@@ -1396,9 +1508,28 @@ impl Interpreter {
                     other => other,
                 };
                 match inner {
-                    Value::Object(map) => map.get(field).cloned().ok_or_else(|| {
-                        RuntimeError::new(&format!("no field '{}' on object", field))
-                    }),
+                    Value::Object(map) => {
+                        // Direct field access
+                        if let Some(val) = map.get(field) {
+                            return Ok(val.clone());
+                        }
+                        // Embedded field delegation: check embedded sub-objects
+                        if let Some(Value::String(type_name)) = map.get("__type__") {
+                            if let Some(embeds) = self.embedded_fields.get(type_name).cloned() {
+                                for (embed_field, _embed_type) in &embeds {
+                                    if let Some(Value::Object(sub)) = map.get(embed_field) {
+                                        if let Some(val) = sub.get(field) {
+                                            return Ok(val.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(RuntimeError::new(&format!(
+                            "no field '{}' on object",
+                            field
+                        )))
+                    }
                     Value::String(s) => match field.as_str() {
                         "len" => Ok(Value::Int(s.len() as i64)),
                         "upper" => Ok(Value::String(s.to_uppercase())),
@@ -1515,6 +1646,78 @@ impl Interpreter {
                         Value::Object(map) if map.get(field).is_some() => {
                             map.get(field).cloned().unwrap()
                         }
+                        // Static method call: Type.method(args)
+                        Value::BuiltIn(ref tag) if tag.starts_with("struct:") => {
+                            let type_name = tag[7..].to_string();
+                            let func_opt = self
+                                .static_methods
+                                .get(&type_name)
+                                .and_then(|s| s.get(method_name))
+                                .cloned();
+                            if let Some(func) = func_opt {
+                                let eval_args: Result<Vec<Value>, _> =
+                                    args.iter().map(|a| self.eval_expr(a)).collect();
+                                return self.call_function(func, eval_args?);
+                            }
+                            return Err(RuntimeError::new(&format!(
+                                "no static method '{}' on {}",
+                                method_name, type_name
+                            )));
+                        }
+                        // Instance method from give/impl block
+                        Value::Object(map) if map.get("__type__").is_some() => {
+                            let type_name = match map.get("__type__") {
+                                Some(Value::String(t)) => t.clone(),
+                                _ => String::new(),
+                            };
+                            // Clone func out before calling self methods
+                            let func_opt = self
+                                .method_tables
+                                .get(&type_name)
+                                .and_then(|m| m.get(method_name))
+                                .cloned();
+                            if let Some(func) = func_opt {
+                                let mut full_args = vec![obj.clone()];
+                                for arg in args {
+                                    full_args.push(self.eval_expr(arg)?);
+                                }
+                                return self.call_function(func, full_args);
+                            }
+                            // Check embedded fields for delegation
+                            let embeds = self.embedded_fields.get(&type_name).cloned();
+                            if let Some(embedded) = embeds {
+                                for (embed_field, embed_type) in &embedded {
+                                    let efunc = self
+                                        .method_tables
+                                        .get(embed_type)
+                                        .and_then(|m| m.get(method_name))
+                                        .cloned();
+                                    if let Some(func) = efunc {
+                                        let embed_obj =
+                                            map.get(embed_field).cloned().unwrap_or(Value::Null);
+                                        let mut full_args = vec![embed_obj];
+                                        for arg in args {
+                                            full_args.push(self.eval_expr(arg)?);
+                                        }
+                                        return self.call_function(func, full_args);
+                                    }
+                                }
+                            }
+                            // Fall through to known_methods / error
+                            if known_methods.contains(&method_name) {
+                                let mut full_args = vec![obj.clone()];
+                                for arg in args {
+                                    full_args.push(self.eval_expr(arg)?);
+                                }
+                                if let Some(func) = self.env.get(method_name).cloned() {
+                                    return self.call_function(func, full_args);
+                                }
+                            }
+                            return Err(RuntimeError::new(&format!(
+                                "no method '{}' on {}",
+                                field, type_name
+                            )));
+                        }
                         Value::String(s)
                             if matches!(
                                 method_name,
@@ -1599,6 +1802,12 @@ impl Interpreter {
 
             Expr::StructInit { name, fields } => {
                 let mut map = IndexMap::new();
+                // Apply defaults first, then override with provided fields
+                if let Some(defaults) = self.struct_defaults.get(name).cloned() {
+                    for (k, v) in defaults {
+                        map.insert(k, v);
+                    }
+                }
                 for (key, expr) in fields {
                     map.insert(key.clone(), self.eval_expr(expr)?);
                 }
@@ -2785,8 +2994,27 @@ impl Interpreter {
                 let iface = &args[1];
                 if let Value::Object(iface_obj) = iface {
                     if let Some(Value::Array(methods)) = iface_obj.get("methods") {
-                        let result = check_interface_satisfaction(value, methods, &self.env);
-                        return Ok(Value::Bool(result));
+                        // First check structural satisfaction (existing behavior)
+                        let structural = check_interface_satisfaction(value, methods, &self.env);
+                        if structural {
+                            return Ok(Value::Bool(true));
+                        }
+                        // Then check method_tables from give/impl blocks
+                        if let Value::Object(obj) = value {
+                            if let Some(Value::String(type_name)) = obj.get("__type__") {
+                                if let Some(type_methods) = self.method_tables.get(type_name) {
+                                    let all_satisfied = methods.iter().all(|spec| {
+                                        if let Value::Object(s) = spec {
+                                            if let Some(Value::String(mname)) = s.get("name") {
+                                                return type_methods.contains_key(mname);
+                                            }
+                                        }
+                                        false
+                                    });
+                                    return Ok(Value::Bool(all_satisfied));
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(Value::Bool(false))
@@ -8149,5 +8377,319 @@ mod tests {
             value.to_string().contains("x"),
             "frozen display should show inner value"
         );
+    }
+
+    // ========== Type System: thing/power/give ==========
+
+    #[test]
+    fn thing_defines_struct() {
+        let value = run_forge(
+            r#"
+            thing Person {
+                name: String,
+                age: Int
+            }
+            let p = Person { name: "Alice", age: 30 }
+            p.name
+            "#,
+        );
+        assert_eq!(value, Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn thing_with_defaults() {
+        let value = run_forge(
+            r#"
+            thing Config {
+                host: String = "localhost",
+                port: Int = 8080
+            }
+            let c = Config {}
+            c.port
+            "#,
+        );
+        assert_eq!(value, Value::Int(8080));
+    }
+
+    #[test]
+    fn thing_defaults_overridden() {
+        let value = run_forge(
+            r#"
+            thing Config {
+                host: String = "localhost",
+                port: Int = 8080
+            }
+            let c = Config { port: 3000 }
+            c.port
+            "#,
+        );
+        assert_eq!(value, Value::Int(3000));
+    }
+
+    #[test]
+    fn craft_expression() {
+        let value = run_forge(
+            r#"
+            thing Dog {
+                name: String,
+                breed: String
+            }
+            let d = craft Dog { name: "Rex", breed: "Lab" }
+            d.breed
+            "#,
+        );
+        assert_eq!(value, Value::String("Lab".to_string()));
+    }
+
+    #[test]
+    fn give_instance_method() {
+        let value = run_forge(
+            r#"
+            thing Person {
+                name: String,
+                age: Int
+            }
+            give Person {
+                fn greet(it) {
+                    return "Hi, I'm " + it.name
+                }
+            }
+            let p = Person { name: "Alice", age: 30 }
+            p.greet()
+            "#,
+        );
+        assert_eq!(value, Value::String("Hi, I'm Alice".to_string()));
+    }
+
+    #[test]
+    fn give_static_method() {
+        let value = run_forge(
+            r#"
+            thing Person {
+                name: String,
+                age: Int
+            }
+            give Person {
+                fn infant(name) {
+                    return Person { name: name, age: 0 }
+                }
+            }
+            let baby = Person.infant("Bob")
+            baby.name
+            "#,
+        );
+        assert_eq!(value, Value::String("Bob".to_string()));
+    }
+
+    #[test]
+    fn impl_classic_syntax() {
+        let value = run_forge(
+            r#"
+            struct Point {
+                x: Int,
+                y: Int
+            }
+            impl Point {
+                fn sum(it) {
+                    return it.x + it.y
+                }
+            }
+            let p = Point { x: 3, y: 4 }
+            p.sum()
+            "#,
+        );
+        assert_eq!(value, Value::Int(7));
+    }
+
+    #[test]
+    fn power_and_give_with_ability() {
+        let value = run_forge(
+            r#"
+            thing Cat {
+                name: String
+            }
+            power Greetable {
+                fn greet() -> String
+            }
+            give Cat the power Greetable {
+                fn greet(it) {
+                    return "Meow from " + it.name
+                }
+            }
+            let c = Cat { name: "Whiskers" }
+            let result = c.greet()
+            result
+            "#,
+        );
+        assert_eq!(value, Value::String("Meow from Whiskers".to_string()));
+    }
+
+    #[test]
+    fn power_missing_method_errors() {
+        let result = try_run_forge(
+            r#"
+            thing Dog {
+                name: String
+            }
+            power Trainable {
+                fn sit() -> String
+                fn stay() -> String
+            }
+            give Dog the power Trainable {
+                fn sit(it) {
+                    return it.name + " sits"
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().message;
+        assert!(
+            err.contains("stay"),
+            "error should mention missing method: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn satisfies_with_method_tables() {
+        let value = run_forge(
+            r#"
+            thing Robot {
+                id: Int
+            }
+            power Speakable {
+                fn speak() -> String
+            }
+            give Robot {
+                fn speak(it) {
+                    return "Beep " + str(it.id)
+                }
+            }
+            let r = Robot { id: 42 }
+            satisfies(r, Speakable)
+            "#,
+        );
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn multiple_give_blocks_additive() {
+        let value = run_forge(
+            r#"
+            thing Car {
+                brand: String,
+                speed: Int
+            }
+            give Car {
+                fn describe(it) {
+                    return it.brand
+                }
+            }
+            give Car {
+                fn fast(it) {
+                    return it.speed > 100
+                }
+            }
+            let c = Car { brand: "Tesla", speed: 200 }
+            c.describe() + " is fast: " + str(c.fast())
+            "#,
+        );
+        assert_eq!(value, Value::String("Tesla is fast: true".to_string()));
+    }
+
+    #[test]
+    fn natural_syntax_define_in_give() {
+        let value = run_forge(
+            r#"
+            thing Greeter {
+                name: String
+            }
+            give Greeter {
+                define hello(it) {
+                    return "Hello from " + it.name
+                }
+            }
+            set g to craft Greeter { name: "Forge" }
+            g.hello()
+            "#,
+        );
+        assert_eq!(value, Value::String("Hello from Forge".to_string()));
+    }
+
+    #[test]
+    fn impl_classic_for_syntax() {
+        let value = run_forge(
+            r#"
+            struct Animal {
+                species: String
+            }
+            interface Named {
+                fn name() -> String
+            }
+            impl Named for Animal {
+                fn name(it) {
+                    return it.species
+                }
+            }
+            let a = Animal { species: "Dog" }
+            let result = a.name()
+            result
+            "#,
+        );
+        assert_eq!(value, Value::String("Dog".to_string()));
+    }
+
+    #[test]
+    fn thing_with_has_embedding() {
+        let value = run_forge(
+            r#"
+            thing Address {
+                city: String,
+                zip: String
+            }
+            thing Employee {
+                name: String,
+                has addr: Address
+            }
+            give Address {
+                fn full(it) {
+                    return it.city + " " + it.zip
+                }
+            }
+            let e = Employee {
+                name: "Alice",
+                addr: Address { city: "Portland", zip: "97201" }
+            }
+            e.city
+            "#,
+        );
+        assert_eq!(value, Value::String("Portland".to_string()));
+    }
+
+    #[test]
+    fn embedded_method_delegation() {
+        let value = run_forge(
+            r#"
+            thing Engine {
+                hp: Int
+            }
+            thing Car {
+                name: String,
+                has engine: Engine
+            }
+            give Engine {
+                fn power(it) {
+                    return str(it.hp) + "hp"
+                }
+            }
+            let c = Car {
+                name: "Mustang",
+                engine: Engine { hp: 450 }
+            }
+            c.power()
+            "#,
+        );
+        assert_eq!(value, Value::String("450hp".to_string()));
     }
 }

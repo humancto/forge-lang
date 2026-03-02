@@ -1,0 +1,97 @@
+// Forge Type System Showcase
+// thing, power, give, craft, has — the Forge way
+
+// === Define a thing (data type) ===
+thing Person {
+    name: String,
+    age: Int,
+    role: String = "member"
+}
+
+// === Give it methods ===
+give Person {
+    define greet(it) {
+        return "Hi, I'm " + it.name + ", age " + str(it.age)
+    }
+
+    define birthday(it) {
+        return craft Person { name: it.name, age: it.age + 1, role: it.role }
+    }
+
+    // Static method (no "it" parameter)
+    define infant(name) {
+        return craft Person { name: name, age: 0 }
+    }
+}
+
+// === Construct with craft ===
+set alice to craft Person { name: "Alice", age: 30 }
+say alice.greet()
+say "Role (default): " + alice.role
+
+// === Static method call ===
+set baby to Person.infant("Bob")
+say baby.greet()
+
+// === Birthday ===
+set older to alice.birthday()
+say older.greet()
+
+// === Define a power (interface/contract) ===
+power Describable {
+    fn describe() -> String
+}
+
+// === Give a thing the power ===
+give Person the power Describable {
+    define describe(it) {
+        return it.name + " (" + it.role + ")"
+    }
+}
+
+say alice.describe()
+say "Satisfies Describable? " + str(satisfies(alice, Describable))
+
+// === Composition with "has" ===
+thing Address {
+    street: String,
+    city: String
+}
+
+thing Employee {
+    name: String,
+    has addr: Address
+}
+
+give Address {
+    define full(it) {
+        return it.street + ", " + it.city
+    }
+}
+
+set emp to craft Employee {
+    name: "Charlie",
+    addr: craft Address { street: "123 Main St", city: "Portland" }
+}
+
+// Field delegation through "has"
+say emp.city
+// Method delegation through "has"
+say emp.full()
+
+// === Classic syntax works too ===
+struct Point {
+    x: Int,
+    y: Int
+}
+
+impl Point {
+    fn magnitude(it) {
+        return it.x + it.y
+    }
+}
+
+let p = Point { x: 3, y: 4 }
+say "Point sum: " + str(p.magnitude())
+
+say "--- Type system complete! ---"

@@ -630,6 +630,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::WatchBlock { .. } => Ok(()),
         Stmt::PromptDef { .. } => Ok(()),
         Stmt::AgentDef { .. } => Ok(()),
+        Stmt::ImplBlock { .. } => Ok(()),
 
         Stmt::TryCatch {
             try_body,

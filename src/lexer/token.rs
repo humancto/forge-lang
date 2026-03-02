@@ -57,6 +57,15 @@ pub enum Token {
     Yell,      // yell "HELLO" (uppercase println)
     Whisper,   // whisper "hello" (lowercase println)
 
+    // Type system (natural)
+    Thing, // thing (struct alias) — "thing Person { }"
+    Power, // power (interface alias) — "power Trainable { }"
+    Give,  // give (impl alias) — "give Person { }" / "give Person the power X { }"
+    // Note: "has" is NOT a keyword — it's handled contextually in the parser
+    // inside thing/struct bodies, so env.has(), has_key(), etc. keep working.
+    Craft, // craft Name { } (constructor)
+    The,   // the (connector in "give X the power Y")
+
     // Error handling
     TryKw, // try { }
     Catch, // catch err { }
@@ -237,6 +246,11 @@ impl Token {
             "watch" => Some(Token::Watch),
             "download" => Some(Token::Download),
             "crawl" => Some(Token::Crawl),
+            "thing" => Some(Token::Thing),
+            "power" => Some(Token::Power),
+            "give" => Some(Token::Give),
+            "craft" => Some(Token::Craft),
+            "the" => Some(Token::The),
             "Int" => Some(Token::IntType),
             "Float" => Some(Token::FloatType),
             "String" => Some(Token::StringType),
