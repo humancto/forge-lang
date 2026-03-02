@@ -96,7 +96,7 @@ repeat 3 times { }                       for i in range(0, 3) { }
 
 ## Installation
 
-**Latest: v0.3.0** — install via any method below.
+**Latest: v0.3.3** — install via any method below.
 
 ### Cargo (Rust)
 
@@ -544,7 +544,7 @@ Configure your editor's LSP client to use `forge lsp` as the command.
 
 ## Project Status
 
-Forge is v0.3.0. The language, interpreter, and standard library are stable and tested. The bytecode VM and JIT compiler are available via `--vm` and `--jit` flags.
+Forge is v0.3.3. The language, interpreter, and standard library are stable and tested. The bytecode VM and JIT compiler are available via `--vm` and `--jit` flags.
 
 | Metric                   | Value                |
 | ------------------------ | -------------------- |
@@ -559,7 +559,7 @@ Forge is v0.3.0. The language, interpreter, and standard library are stable and 
 
 ---
 
-## Known Limitations (v0.3.0)
+## Known Limitations (v0.3.3)
 
 Forge is a young language. These are documented, not hidden:
 

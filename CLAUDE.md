@@ -111,7 +111,7 @@ forge test           # 334 Forge tests pass (822 total)
 
 All 12 example files run successfully.
 
-## Known Limitations (v0.3.0)
+## Known Limitations (v0.3.3)
 
 - SQL queries use raw strings (no parameterized query API yet) — be cautious with user input
 - Interpreter is ~20x slower than Python for deep recursion; use `--jit` (11x faster than Python) or `--vm` (2x slower than Python)

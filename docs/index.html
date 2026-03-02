@@ -930,6 +930,270 @@ footer {
   90% { opacity: 0.6; }
   100% { opacity: 0; transform: translateY(-10vh) scale(1); }
 }
+
+/* === Type System === */
+.type-showcase {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 107, 53, 0.08);
+  margin-top: 2rem;
+}
+
+.type-side {
+  background: var(--forge-blue);
+}
+
+.type-side:first-child {
+  border-right: 1px solid rgba(255, 107, 53, 0.1);
+}
+
+.type-header {
+  padding: 0.8rem 1.5rem;
+  border-bottom: 1px solid rgba(255, 107, 53, 0.06);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.type-side:first-child .type-header { color: var(--forge-teal); }
+.type-side:last-child .type-header { color: var(--forge-orange); }
+
+.type-side pre {
+  padding: 1.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.9;
+  color: var(--forge-light-slate);
+}
+
+.type-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 2rem;
+}
+
+.type-kw {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--forge-mid);
+  border: 1px solid rgba(255, 107, 53, 0.06);
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.type-kw:hover {
+  border-color: rgba(255, 107, 53, 0.2);
+  transform: translateY(-2px);
+}
+
+.type-kw .kw {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--forge-orange);
+}
+
+.type-kw .kw-desc {
+  font-size: 0.78rem;
+  color: var(--forge-slate);
+}
+
+/* === Concurrency === */
+.concurrency-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  margin-top: 2rem;
+}
+
+/* === GenZ Debug Kit === */
+.genz-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+.genz-card {
+  padding: 1.5rem;
+  background: var(--forge-mid);
+  border: 1px solid rgba(255, 107, 53, 0.06);
+  border-radius: 12px;
+  text-align: center;
+  transition: all 0.3s;
+  position: relative;
+  overflow: hidden;
+}
+
+.genz-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--forge-teal), transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.genz-card:hover {
+  border-color: rgba(100, 255, 218, 0.2);
+  transform: translateY(-3px);
+}
+
+.genz-card:hover::before { opacity: 1; }
+
+.genz-emoji {
+  font-size: 1.8rem;
+  margin-bottom: 0.6rem;
+}
+
+.genz-fn {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--forge-teal);
+  margin-bottom: 0.3rem;
+}
+
+.genz-aka {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--forge-slate);
+  margin-bottom: 0.4rem;
+}
+
+.genz-desc {
+  font-size: 0.78rem;
+  color: var(--forge-light-slate);
+  line-height: 1.5;
+}
+
+.genz-example {
+  margin-top: 2rem;
+}
+
+/* === Comparison Table === */
+.compare-table-wrap {
+  margin-top: 2rem;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 107, 53, 0.08);
+}
+
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.compare-table th {
+  padding: 1rem 1.2rem;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--forge-slate);
+  background: var(--forge-mid);
+  border-bottom: 1px solid rgba(255, 107, 53, 0.1);
+}
+
+.compare-table th.forge-col {
+  color: var(--forge-orange);
+}
+
+.compare-table td {
+  padding: 0.9rem 1.2rem;
+  background: var(--forge-blue);
+  border-bottom: 1px solid rgba(255, 107, 53, 0.04);
+  color: var(--forge-light-slate);
+  vertical-align: middle;
+}
+
+.compare-table tr:last-child td {
+  border-bottom: none;
+}
+
+.compare-table td:first-child {
+  font-weight: 600;
+  color: var(--forge-lightest-slate);
+  white-space: nowrap;
+}
+
+.compare-table td.forge-col {
+  color: var(--forge-teal);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+
+.compare-table td.other-col {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--forge-slate);
+}
+
+.compare-table .lines-badge {
+  display: inline-block;
+  padding: 0.15em 0.5em;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.lines-badge.forge-badge {
+  background: rgba(100, 255, 218, 0.1);
+  color: var(--forge-teal);
+}
+
+.lines-badge.other-badge {
+  background: rgba(136, 146, 176, 0.1);
+  color: var(--forge-slate);
+}
+
+.dep-tag {
+  display: inline-block;
+  padding: 0.15em 0.45em;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  margin-left: 0.3rem;
+}
+
+.dep-zero {
+  background: rgba(100, 255, 218, 0.1);
+  color: var(--forge-teal);
+}
+
+.dep-needed {
+  background: rgba(255, 107, 53, 0.1);
+  color: var(--forge-orange);
+}
+
+@media (max-width: 900px) {
+  .type-showcase { grid-template-columns: 1fr; }
+  .type-side:first-child { border-right: none; border-bottom: 1px solid rgba(255, 107, 53, 0.1); }
+  .concurrency-grid { grid-template-columns: 1fr; }
+  .genz-grid { grid-template-columns: repeat(2, 1fr); }
+  .compare-table { font-size: 0.78rem; }
+  .compare-table th, .compare-table td { padding: 0.7rem 0.8rem; }
+}
+
+@media (max-width: 600px) {
+  .genz-grid { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -945,6 +1209,7 @@ footer {
     <li><a href="#code">Code</a></li>
     <li><a href="#performance">Performance</a></li>
     <li><a href="#modules">Modules</a></li>
+    <li><a href="#types">Types</a></li>
     <li><a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf">Book</a></li>
     <li><a href="https://github.com/humancto/forge-lang" class="nav-cta">GitHub</a></li>
   </ul>
@@ -958,7 +1223,7 @@ footer {
     <div class="hero-text">
       <div class="hero-badge fade-up">
         <span class="dot"></span>
-        v0.3.2 — Now with JIT compiler
+        v0.3.3 — Type System + JIT compiler
       </div>
       <h1 class="fade-up stagger-1">
         Code that<br>reads like<br><span class="accent">English.</span>
@@ -1344,6 +1609,285 @@ footer {
         <div class="mod-name">npc</div>
         <div class="mod-desc">Fake data — names, emails, IPs, UUIDs</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Type System -->
+<section id="types">
+  <div class="section-label fade-up">Type System</div>
+  <div class="section-title fade-up stagger-1">Shape data. Teach it tricks.</div>
+  <p class="section-desc fade-up stagger-2">
+    Define data with <code>thing</code>, attach behavior with <code>give</code>, enforce contracts with <code>power</code>, compose with <code>has</code>. Or use classic <code>struct</code>/<code>impl</code>/<code>interface</code> — both compile identically.
+  </p>
+
+  <div class="type-showcase fade-up stagger-3">
+    <div class="type-side">
+      <div class="type-header">✦ Natural — thing / give / power</div>
+      <pre><span class="keyword">thing</span> <span class="type">Person</span> {
+    name: <span class="type">String</span>,
+    age: <span class="type">Int</span>,
+    role: <span class="type">String</span> = <span class="string">"member"</span>
+}
+
+<span class="keyword">give</span> <span class="type">Person</span> {
+    <span class="keyword">define</span> <span class="function">greet</span>(it) {
+        <span class="keyword">return</span> <span class="string">"Hi, I'm "</span> + it.name
+    }
+}
+
+<span class="keyword">power</span> <span class="type">Describable</span> {
+    <span class="keyword">fn</span> <span class="function">describe</span>() -> <span class="type">String</span>
+}
+
+<span class="keyword">give</span> <span class="type">Person</span> the <span class="keyword">power</span> <span class="type">Describable</span> {
+    <span class="keyword">define</span> <span class="function">describe</span>(it) {
+        <span class="keyword">return</span> it.name + <span class="string">" ("</span> + it.role + <span class="string">")"</span>
+    }
+}
+
+<span class="keyword">set</span> p <span class="keyword">to</span> <span class="keyword">craft</span> <span class="type">Person</span> { name: <span class="string">"Alice"</span>, age: <span class="number">30</span> }
+<span class="function">say</span> p.<span class="function">greet</span>()
+<span class="function">say</span> <span class="function">satisfies</span>(p, <span class="type">Describable</span>)  <span class="comment">// true</span></pre>
+    </div>
+    <div class="type-side">
+      <div class="type-header">⚙ Classic — struct / impl / interface</div>
+      <pre><span class="keyword">struct</span> <span class="type">Person</span> {
+    name: <span class="type">String</span>,
+    age: <span class="type">Int</span>,
+    role: <span class="type">String</span> = <span class="string">"member"</span>
+}
+
+<span class="keyword">impl</span> <span class="type">Person</span> {
+    <span class="keyword">fn</span> <span class="function">greet</span>(it) {
+        <span class="keyword">return</span> <span class="string">"Hi, I'm "</span> + it.name
+    }
+}
+
+<span class="keyword">interface</span> <span class="type">Describable</span> {
+    <span class="keyword">fn</span> <span class="function">describe</span>() -> <span class="type">String</span>
+}
+
+<span class="keyword">impl</span> <span class="type">Describable</span> for <span class="type">Person</span> {
+    <span class="keyword">fn</span> <span class="function">describe</span>(it) {
+        <span class="keyword">return</span> it.name + <span class="string">" ("</span> + it.role + <span class="string">")"</span>
+    }
+}
+
+<span class="keyword">let</span> p = <span class="type">Person</span> { name: <span class="string">"Alice"</span>, age: <span class="number">30</span> }
+<span class="function">println</span>(p.<span class="function">greet</span>())
+<span class="function">println</span>(<span class="function">satisfies</span>(p, <span class="type">Describable</span>))  <span class="comment">// true</span></pre>
+    </div>
+  </div>
+
+  <div class="type-keywords fade-up stagger-4">
+    <div class="type-kw"><span class="kw">thing</span><span class="kw-desc">define a data type</span></div>
+    <div class="type-kw"><span class="kw">craft</span><span class="kw-desc">construct an instance</span></div>
+    <div class="type-kw"><span class="kw">give</span><span class="kw-desc">attach methods</span></div>
+    <div class="type-kw"><span class="kw">power</span><span class="kw-desc">define a contract</span></div>
+    <div class="type-kw"><span class="kw">has</span><span class="kw-desc">embed + delegate</span></div>
+    <div class="type-kw"><span class="kw">it</span><span class="kw-desc">self-reference</span></div>
+  </div>
+</section>
+
+<!-- Concurrency -->
+<div class="full-section bg-mid" id="concurrency">
+  <div class="inner">
+    <div class="section-label fade-up">Concurrency</div>
+    <div class="section-title fade-up stagger-1">Channels, spawn, async — built in.</div>
+    <p class="section-desc fade-up stagger-2">
+      First-class concurrency primitives. No runtime to configure, no async coloring to fight. Spawn tasks, pass messages, await results.
+    </p>
+
+    <div class="concurrency-grid">
+      <div class="code-example fade-up">
+        <div class="code-example-header">
+          <div class="dots"><span></span><span></span><span></span></div>
+          channels.fg — Message Passing
+        </div>
+        <pre><span class="comment">// Create a channel</span>
+<span class="keyword">let</span> ch = <span class="function">channel</span>()
+
+<span class="comment">// Spawn a producer</span>
+<span class="function">spawn</span> {
+    <span class="keyword">for</span> i <span class="keyword">in</span> <span class="function">range</span>(<span class="number">0</span>, <span class="number">5</span>) {
+        <span class="function">send</span>(ch, <span class="string">"msg-{i}"</span>)
+    }
+}
+
+<span class="comment">// Receive messages</span>
+<span class="keyword">repeat</span> <span class="number">5</span> <span class="keyword">times</span> {
+    <span class="keyword">let</span> msg = <span class="function">receive</span>(ch)
+    <span class="function">say</span> msg
+}</pre>
+      </div>
+      <div class="code-example fade-up stagger-1">
+        <div class="code-example-header">
+          <div class="dots"><span></span><span></span><span></span></div>
+          async.fg — Async / Await
+        </div>
+        <pre><span class="comment">// Natural syntax</span>
+<span class="keyword">forge</span> <span class="function">fetch_data</span>() {
+    <span class="keyword">set</span> resp <span class="keyword">to</span> <span class="keyword">hold</span> <span class="function">http.get</span>(<span class="string">"https://api.example.com"</span>)
+    <span class="keyword">return</span> resp.body
+}
+
+<span class="comment">// Classic syntax</span>
+<span class="keyword">async fn</span> <span class="function">fetch_data</span>() {
+    <span class="keyword">let</span> resp = <span class="keyword">await</span> <span class="function">http.get</span>(<span class="string">"https://api.example.com"</span>)
+    <span class="keyword">return</span> resp.body
+}
+
+<span class="comment">// Fire-and-forget</span>
+<span class="function">yolo</span> { <span class="function">http.post</span>(<span class="string">"/analytics"</span>, data) }</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- GenZ Debug Kit -->
+<section id="genz">
+  <div class="section-label fade-up">Debug Kit</div>
+  <div class="section-title fade-up stagger-1">Debug like it's 2026.</div>
+  <p class="section-desc fade-up stagger-2">
+    Forge ships a GenZ-inspired debug toolkit alongside the classics. Same functions, more personality.
+  </p>
+
+  <div class="genz-grid fade-up stagger-3">
+    <div class="genz-card">
+      <div class="genz-emoji">🔍</div>
+      <div class="genz-fn">sus(x)</div>
+      <div class="genz-aka">= inspect / debug</div>
+      <div class="genz-desc">Inspect any value with type info and structure</div>
+    </div>
+    <div class="genz-card">
+      <div class="genz-emoji">💀</div>
+      <div class="genz-fn">bruh(msg)</div>
+      <div class="genz-aka">= panic / crash</div>
+      <div class="genz-desc">Crash with a message when something is deeply wrong</div>
+    </div>
+    <div class="genz-card">
+      <div class="genz-emoji">💯</div>
+      <div class="genz-fn">bet(expr)</div>
+      <div class="genz-aka">= assert</div>
+      <div class="genz-desc">Assert a condition is true — crash if it ain't</div>
+    </div>
+    <div class="genz-card">
+      <div class="genz-emoji">🧢</div>
+      <div class="genz-fn">no_cap(a, b)</div>
+      <div class="genz-aka">= assert_eq</div>
+      <div class="genz-desc">Assert two values are equal — no cap</div>
+    </div>
+    <div class="genz-card">
+      <div class="genz-emoji">🤮</div>
+      <div class="genz-fn">ick(expr)</div>
+      <div class="genz-aka">= assert_false</div>
+      <div class="genz-desc">Assert something is false — that's an ick</div>
+    </div>
+  </div>
+
+  <div class="genz-example">
+    <div class="code-example fade-up stagger-4">
+      <div class="code-example-header">
+        <div class="dots"><span></span><span></span><span></span></div>
+        debug.fg — Plus: cook, slay, ghost, yolo
+      </div>
+      <pre><span class="comment">// Profiling</span>
+<span class="function">cook</span> {
+    <span class="keyword">let</span> result = <span class="function">expensive_operation</span>()
+}  <span class="comment">// prints execution time</span>
+
+<span class="comment">// Benchmarking</span>
+<span class="function">slay</span> <span class="number">1000</span> {
+    <span class="function">fibonacci</span>(<span class="number">20</span>)
+}  <span class="comment">// runs 1000 iterations, prints stats</span>
+
+<span class="comment">// Silent execution — swallow all errors</span>
+<span class="function">ghost</span> { <span class="function">might_fail</span>() }
+
+<span class="comment">// Fire-and-forget async</span>
+<span class="function">yolo</span> { <span class="function">send_analytics</span>(data) }
+
+<span class="comment">// Classic debugging still works</span>
+<span class="function">sus</span>(my_object)        <span class="comment">// inspect with type info</span>
+<span class="function">bet</span>(score > <span class="number">0</span>)         <span class="comment">// assert it's positive</span>
+<span class="function">no_cap</span>(result, <span class="number">42</span>)    <span class="comment">// assert equality</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Comparison Table -->
+<div class="full-section bg-mid" id="compare">
+  <div class="inner">
+    <div class="section-label fade-up">Why Switch</div>
+    <div class="section-title fade-up stagger-1">Same task. Fewer lines. Zero deps.</div>
+    <p class="section-desc fade-up stagger-2">
+      Common tasks that require packages and boilerplate elsewhere are one-liners in Forge.
+    </p>
+
+    <div class="compare-table-wrap fade-up stagger-3">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Task</th>
+            <th class="forge-col">Forge</th>
+            <th>Python</th>
+            <th>Node.js</th>
+            <th>Go</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>REST API server</td>
+            <td class="forge-col"><span class="lines-badge forge-badge">3 lines</span> <span class="dep-tag dep-zero">0 deps</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">12 lines</span> <span class="dep-tag dep-needed">flask</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">15 lines</span> <span class="dep-tag dep-needed">express</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">25 lines</span> <span class="dep-tag dep-zero">stdlib</span></td>
+          </tr>
+          <tr>
+            <td>Query SQLite</td>
+            <td class="forge-col"><span class="lines-badge forge-badge">2 lines</span> <span class="dep-tag dep-zero">0 deps</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">5 lines</span> <span class="dep-tag dep-zero">stdlib</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">8 lines</span> <span class="dep-tag dep-needed">better-sqlite3</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">12 lines</span> <span class="dep-tag dep-needed">go-sqlite3</span></td>
+          </tr>
+          <tr>
+            <td>SHA-256 hash</td>
+            <td class="forge-col"><span class="lines-badge forge-badge">1 line</span> <span class="dep-tag dep-zero">0 deps</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">3 lines</span> <span class="dep-tag dep-zero">stdlib</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">3 lines</span> <span class="dep-tag dep-zero">crypto</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">5 lines</span> <span class="dep-tag dep-zero">stdlib</span></td>
+          </tr>
+          <tr>
+            <td>HTTP GET request</td>
+            <td class="forge-col"><span class="lines-badge forge-badge">1 line</span> <span class="dep-tag dep-zero">0 deps</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">3 lines</span> <span class="dep-tag dep-needed">requests</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">5 lines</span> <span class="dep-tag dep-needed">node-fetch</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">10 lines</span> <span class="dep-tag dep-zero">stdlib</span></td>
+          </tr>
+          <tr>
+            <td>Parse CSV file</td>
+            <td class="forge-col"><span class="lines-badge forge-badge">1 line</span> <span class="dep-tag dep-zero">0 deps</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">4 lines</span> <span class="dep-tag dep-zero">stdlib</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">6 lines</span> <span class="dep-tag dep-needed">csv-parser</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">8 lines</span> <span class="dep-tag dep-zero">encoding/csv</span></td>
+          </tr>
+          <tr>
+            <td>Terminal table output</td>
+            <td class="forge-col"><span class="lines-badge forge-badge">1 line</span> <span class="dep-tag dep-zero">0 deps</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">5 lines</span> <span class="dep-tag dep-needed">tabulate</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">4 lines</span> <span class="dep-tag dep-needed">cli-table</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">10 lines</span> <span class="dep-tag dep-needed">tablewriter</span></td>
+          </tr>
+          <tr>
+            <td>Retry with backoff</td>
+            <td class="forge-col"><span class="lines-badge forge-badge">1 line</span> <span class="dep-tag dep-zero">0 deps</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">12 lines</span> <span class="dep-tag dep-needed">tenacity</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">15 lines</span> <span class="dep-tag dep-needed">async-retry</span></td>
+            <td class="other-col"><span class="lines-badge other-badge">20 lines</span> <span class="dep-tag dep-needed">retry-go</span></td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </div>
