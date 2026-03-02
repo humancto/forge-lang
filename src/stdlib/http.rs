@@ -123,10 +123,17 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
         }
         // Basic auth: { basic_auth: { user: "x", pass: "y" } }
         if let Some(Value::Object(basic)) = opt_map.get("basic_auth") {
-            let user = basic.get("user").map(|v| format!("{}", v)).unwrap_or_default();
-            let pass = basic.get("pass").map(|v| format!("{}", v)).unwrap_or_default();
+            let user = basic
+                .get("user")
+                .map(|v| format!("{}", v))
+                .unwrap_or_default();
+            let pass = basic
+                .get("pass")
+                .map(|v| format!("{}", v))
+                .unwrap_or_default();
             use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", user, pass));
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", user, pass));
             headers_map.insert("Authorization".to_string(), format!("Basic {}", encoded));
         }
         // Query params: { params: { key: "val" } } — appended to URL
@@ -139,11 +146,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
                         Value::String(s) => s.clone(),
                         other => format!("{}", other),
                     };
-                    format!(
-                        "{}={}",
-                        percent_encode(k),
-                        percent_encode(&val)
-                    )
+                    format!("{}={}", percent_encode(k), percent_encode(&val))
                 })
                 .collect();
             final_url = format!("{}{}{}", final_url, separator, query.join("&"));
@@ -157,11 +160,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
                         Value::String(s) => s.clone(),
                         other => format!("{}", other),
                     };
-                    format!(
-                        "{}={}",
-                        percent_encode(k),
-                        percent_encode(&val)
-                    )
+                    format!("{}={}", percent_encode(k), percent_encode(&val))
                 })
                 .collect();
             body_str = Some(pairs.join("&"));
@@ -205,7 +204,13 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
         Some(&headers_map)
     };
 
-    match crate::runtime::client::fetch_blocking(&final_url, method, body_str, headers_ref, timeout_secs) {
+    match crate::runtime::client::fetch_blocking(
+        &final_url,
+        method,
+        body_str,
+        headers_ref,
+        timeout_secs,
+    ) {
         Ok(resp_val) => {
             let elapsed = start.elapsed().as_millis() as i64;
             if let Value::Object(mut resp) = resp_val {

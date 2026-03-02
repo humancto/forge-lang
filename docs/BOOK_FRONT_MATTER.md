@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.3.0"
+version: "0.3.3"
 year: "2026"
 publisher: "Self-Published"
 lang: "en"
@@ -26,15 +26,15 @@ cover_description: "A glowing anvil in a digital forge, sparks flying as molten 
 
 _By Archith Rapaka_
 
-_First Edition — February 2026_
+_First Edition — March 2026_
 
 ---
 
-Copyright (c) 2026 Archith Rapaka. All rights reserved.
+Copyright (c) 2026 Archith Rapaka, Los Angeles. All rights reserved.
 
 Published under the MIT License.
 
-Forge is an open-source programming language. Visit https://github.com/forge-lang/forge for source code and community.
+Forge is an open-source programming language. Visit https://humancto.github.io/forge-lang/ for documentation and https://github.com/humancto/forge-lang for source code and community.
 
 _While every precaution has been taken in the preparation of this book, the author assumes no responsibility for errors or omissions, or for damages resulting from the use of the information contained herein._
 
@@ -42,7 +42,7 @@ _While every precaution has been taken in the preparation of this book, the auth
 
 ## Preface
 
-I built Forge because I was tired of installing thirty packages to do what a programming language should do out of the box.
+It all started as an experiment on a weekend and evolved from there. I built Forge because I was tired of installing thirty packages to do what a programming language should do out of the box.
 
 Every modern application talks to HTTP endpoints, reads from databases, handles JSON, and hashes passwords. Yet in every mainstream language, these are third-party concerns. You pip-install a web framework. You npm-install a database driver. You go-get a crypto library. You wrestle with dependency conflicts, version mismatches, and supply chain vulnerabilities — all before writing a single line of your actual application.
 
@@ -55,20 +55,22 @@ Forge also reads like English. You can write `say "hello"` or `println("hello")`
 This book is organized in four parts:
 
 - **Part I: Foundations** covers installation, syntax, control flow, functions, collections, error handling, and the type system (structs, methods, abilities, composition) — everything you need to read and write Forge.
-- **Part II: The Standard Library** documents all 16 built-in modules, function by function, with recipes for common tasks.
+- **Part II: The Standard Library** documents all 19 built-in modules, function by function, with recipes for common tasks.
 - **Part III: Building Real Things** walks through complete projects — REST APIs, data pipelines, DevOps scripts, and AI integration.
 - **Part IV: Under the Hood** explains how Forge works internally — the lexer, parser, interpreter, bytecode VM, and toolchain.
 
 Whether you're a student writing your first program, a backend developer building APIs, or a language enthusiast curious about implementation — welcome to Forge.
 
-_Archith Rapaka_
-_February 2026_
+_Archith Rapaka, Los Angeles_
+_March 2026_
 
 \newpage
 
 ## About the Author
 
-**Archith Rapaka** is a software engineer and programming language designer. He believes programming languages should be as natural to read as they are powerful to write, and that the tools developers use most — HTTP, databases, cryptography — belong in the language itself, not in package registries. Forge is the embodiment of this philosophy.
+**Archith Rapaka**, Los Angeles, is a software engineer and programming language designer. He believes programming languages should be as natural to read as they are powerful to write, and that the tools developers use most — HTTP, databases, cryptography — belong in the language itself, not in package registries. Forge is the embodiment of this philosophy.
+
+Co-authored with **Claude from Anthropic**, **Cursor**, and **Codex 5.3 from OpenAI**.
 
 \newpage
 

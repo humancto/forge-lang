@@ -15,24 +15,17 @@ pub fn create_module() -> Value {
         "receive".to_string(),
         Value::BuiltIn("ws.receive".to_string()),
     );
-    m.insert(
-        "close".to_string(),
-        Value::BuiltIn("ws.close".to_string()),
-    );
+    m.insert("close".to_string(), Value::BuiltIn("ws.close".to_string()));
     Value::Object(m)
 }
 
 type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::Message,
 >;
 
 type WsStream = futures_util::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 struct WsConnection {
@@ -192,8 +185,7 @@ fn ws_receive(id: &str, timeout_ms: u64) -> Result<Value, String> {
                         Err(_) => {
                             let mut result = IndexMap::new();
                             result.insert("type".to_string(), Value::String("text".to_string()));
-                            result
-                                .insert("data".to_string(), Value::String(text_str.clone()));
+                            result.insert("data".to_string(), Value::String(text_str.clone()));
                             result.insert("raw".to_string(), Value::String(text_str));
                             Ok(Value::Object(result))
                         }
@@ -259,8 +251,7 @@ where
     match handle {
         Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
         Err(_) => {
-            let rt =
-                tokio::runtime::Runtime::new().map_err(|e| format!("runtime error: {}", e))?;
+            let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime error: {}", e))?;
             rt.block_on(future)
         }
     }

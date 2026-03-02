@@ -38,7 +38,7 @@ A Forge program begins its life as a `.fg` source file—a plain text document c
                                 │           Runtime               │        │
                                 │  ┌─────────┐  ┌─────────────┐  │        │
                                 │  │  Stdlib  │  │ HTTP Server  │  │        │
-                                │  │(15 mods) │  │   (axum)     │  │        │
+                                │  │(19 mods) │  │   (axum)     │  │        │
                                 │  └─────────┘  └─────────────┘  │        │
                                 └─────────────────────────────────┘        │
                                                                            │
@@ -1157,6 +1157,10 @@ The manifest is parsed using the `toml` and `serde` crates with default values f
 
 ---
 
+```{=latex}
+\appendix
+```
+
 ## Appendix A: Complete Keyword Reference
 
 Forge recognizes 80+ keywords divided into three categories: classic keywords familiar from mainstream languages, natural-language keywords that provide English-like alternatives, and innovation keywords unique to Forge.
@@ -1253,7 +1257,7 @@ Forge recognizes 80+ keywords divided into three categories: classic keywords fa
 
 ## Appendix B: Built-in Functions Quick Reference
 
-Forge provides 50+ built-in functions available without imports. Standard library modules add 90+ more functions organized into 15 namespaces.
+Forge provides 50+ built-in functions available without imports. Standard library modules add 120+ more functions organized into 19 namespaces.
 
 ### Output Functions
 
@@ -1377,15 +1381,15 @@ Access via `module.function()` syntax after the module is available in scope:
 
 **io** — `io.prompt(msg)`, `io.print(val)`, `io.args()`
 
-**crypto** — `crypto.sha256(data)`, `crypto.md5(data)`, `crypto.base64_encode(data)`, `crypto.base64_decode(data)`, `crypto.hex_encode(data)`, `crypto.hex_decode(data)`
+**crypto** — `crypto.sha256(data)`, `crypto.sha512(data)`, `crypto.md5(data)`, `crypto.hmac_sha256(key, msg)`, `crypto.random_bytes(n)`, `crypto.base64_encode(data)`, `crypto.base64_decode(data)`, `crypto.hex_encode(data)`, `crypto.hex_decode(data)`
 
 **db** — `db.open(path)`, `db.query(db, sql)`, `db.execute(db, sql)`, `db.close(db)`
 
 **pg** — `pg.connect(url)`, `pg.query(conn, sql)`, `pg.execute(conn, sql)`, `pg.close(conn)`
 
-**env** — `env.get(key)`, `env.set(key, val)`, `env.has(key)`, `env.keys()`
+**env** — `env.get(key)`, `env.set(key, val)`, `env.has(key)`, `env.keys()`, `env.all()`, `env.load(path?)`
 
-**json** — `json.parse(str)`, `json.stringify(val)`, `json.pretty(val)`
+**json** — `json.parse(str)`, `json.stringify(val)`, `json.pretty(val)`, `json.valid(str)`, `json.merge(a, b)`
 
 **regex** — `regex.test(pattern, str)`, `regex.find(pattern, str)`, `regex.find_all(pattern, str)`, `regex.replace(pattern, str, replacement)`, `regex.split(pattern, str)`
 
@@ -1396,6 +1400,12 @@ Access via `module.function()` syntax after the module is available in scope:
 **csv** — `csv.parse(str)`, `csv.stringify(data)`, `csv.read(path)`, `csv.write(path, data)`
 
 **term** — `term.red(str)`, `term.green(str)`, `term.blue(str)`, `term.yellow(str)`, `term.bold(str)`, `term.dim(str)`, `term.table(data)`, `term.hr()`, `term.sparkline(data)`, `term.bar(label, value, max)`, `term.banner(text)`, `term.countdown(seconds)`, `term.confirm(prompt)`
+
+**url** — `url.parse(str)`, `url.encode(str)`, `url.decode(str)`, `url.build(parts)`
+
+**toml** — `toml.parse(str)`, `toml.stringify(val)`, `toml.read(path)`
+
+**ws** — `ws.connect(url)`, `ws.send(id, msg)`, `ws.receive(id, timeout?)`, `ws.close(id)`
 
 **exec** — `exec.run_command(cmd)`
 
@@ -2075,12 +2085,12 @@ for rows.Next() {
 | ---------------------------- | ------- |
 | Total Rust source lines      | ~26,000 |
 | Total source files           | 56      |
-| Rust tests                   | 488     |
+| Rust tests                   | 503     |
 | Forge integration tests      | 334     |
 | Unsafe blocks                | 0       |
 | Keywords recognized          | 80+     |
-| Built-in functions           | 230+    |
-| Standard library modules     | 16      |
+| Built-in functions           | 270+    |
+| Standard library modules     | 19      |
 | CLI commands                 | 13      |
 | Interactive tutorial lessons | 30      |
 | Example programs             | 12      |
@@ -2102,25 +2112,30 @@ for rows.Next() {
 
 ### Technology Stack
 
-| Component       | Technology         | Purpose                           |
-| --------------- | ------------------ | --------------------------------- |
-| Language        | Rust               | Core implementation               |
-| CLI framework   | clap               | Argument parsing, subcommands     |
-| HTTP server     | axum               | Async HTTP server runtime         |
-| HTTP client     | reqwest + rustls   | HTTPS requests (pure Rust TLS)    |
-| Async runtime   | tokio              | Async I/O, task scheduling        |
-| SQLite          | rusqlite           | Embedded database support         |
-| PostgreSQL      | tokio-postgres     | PostgreSQL client                 |
-| Error reporting | ariadne            | Source-mapped error diagnostics   |
-| REPL            | rustyline          | Line editing, history, completion |
-| Ordered maps    | indexmap           | Insertion-order-preserving maps   |
-| JSON            | serde + serde_json | JSON parsing and serialization    |
-| TOML            | toml               | Manifest file parsing             |
-| CORS            | tower-http         | Cross-Origin Resource Sharing     |
-| Regex           | regex              | Regular expression engine         |
-| UUID            | uuid               | UUID v4 generation                |
-| Crypto          | sha2, md5, base64  | Cryptographic hash functions      |
-| CSV             | csv                | CSV parsing and writing           |
+| Component       | Technology         | Purpose                            |
+| --------------- | ------------------ | ---------------------------------- |
+| Language        | Rust               | Core implementation                |
+| CLI framework   | clap               | Argument parsing, subcommands      |
+| HTTP server     | axum               | Async HTTP server runtime          |
+| HTTP client     | reqwest + rustls   | HTTPS requests (pure Rust TLS)     |
+| Async runtime   | tokio              | Async I/O, task scheduling         |
+| SQLite          | rusqlite           | Embedded database support          |
+| PostgreSQL      | tokio-postgres     | PostgreSQL client                  |
+| Error reporting | ariadne            | Source-mapped error diagnostics    |
+| REPL            | rustyline          | Line editing, history, completion  |
+| Ordered maps    | indexmap           | Insertion-order-preserving maps    |
+| JSON            | serde + serde_json | JSON parsing and serialization     |
+| TOML            | toml               | Manifest file parsing              |
+| CORS            | tower-http         | Cross-Origin Resource Sharing      |
+| Regex           | regex              | Regular expression engine          |
+| UUID            | uuid               | UUID v4 generation                 |
+| Crypto          | sha2, md5, base64  | Cryptographic hash functions       |
+| HMAC            | hmac               | HMAC-SHA256 message authentication |
+| URL             | url                | URL parsing and encoding           |
+| WebSocket       | tokio-tungstenite  | WebSocket client connections       |
+| Async streams   | futures-util       | Stream splitting and utilities     |
+| Dotenv          | dotenvy            | `.env` file loading                |
+| CSV             | csv                | CSV parsing and writing            |
 
 ### Design Principles
 
@@ -2141,10 +2156,13 @@ for rows.Next() {
 | 0.1.0   | Initial release: lexer, parser, interpreter, 8 stdlib modules                                                   |
 | 0.2.0   | Bytecode VM, mark-sweep GC, 15 stdlib modules, LSP, tutorials, AI chat, formatter, test runner, package manager |
 | 0.3.0   | 73 new functions, 16 modules, GenZ debug kit, NPC module, structured errors, 30 tutorials, 822 tests            |
+| 0.3.1   | Interface satisfaction checking (Go-style structural typing)                                                    |
+| 0.3.2   | Tokio spawn, language-level channels, native Option/spawn task handles                                          |
+| 0.3.3   | 3 new modules (url, toml, ws), 40+ new stdlib functions, HTTP params/form/auth/cookies, HMAC-SHA256, WebSockets |
 
 ### Acknowledgments
 
-Forge is written by **Archith Rapaka**. The language draws inspiration from:
+Forge is written by **Archith Rapaka**, Los Angeles. Co-authored with **Claude from Anthropic**, **Cursor**, and **Codex 5.3 from OpenAI**. The language draws inspiration from:
 
 - **Python** for its readability and gentle learning curve
 - **Go** for its simplicity and built-in tooling philosophy
@@ -2154,7 +2172,7 @@ Forge is written by **Archith Rapaka**. The language draws inspiration from:
 - **Lua** for its register-based VM design
 - **Swift** for its optional handling and guard statements
 
-Special thanks to the Rust ecosystem for the excellent crates that power Forge's runtime: `tokio`, `axum`, `reqwest`, `rusqlite`, `ariadne`, `clap`, `rustyline`, `serde`, and `indexmap`.
+Special thanks to the Rust ecosystem for the excellent crates that power Forge's runtime: `tokio`, `axum`, `reqwest`, `rusqlite`, `tokio-tungstenite`, `futures-util`, `hmac`, `url`, `dotenvy`, `ariadne`, `clap`, `rustyline`, `serde`, and `indexmap`.
 
 ---
 

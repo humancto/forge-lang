@@ -614,20 +614,23 @@ for f in files_to_backup {
 
 ## Chapter 12: crypto — Hashing and Encoding
 
-The `crypto` module provides hashing algorithms and encoding utilities. It is intentionally small: two hash functions (SHA-256 and MD5) and two pairs of encode/decode functions (Base64 and hexadecimal). These six functions cover the most common needs—verifying data integrity, generating fingerprints, and preparing binary data for text-safe transport.
+The `crypto` module provides hashing algorithms, HMAC authentication, and encoding utilities. It includes three hash functions (SHA-256, SHA-512, and MD5), HMAC-SHA256 for message authentication, a random byte generator, and two pairs of encode/decode functions (Base64 and hexadecimal). These functions cover the most common needs—verifying data integrity, generating fingerprints, authenticating API requests, and preparing binary data for text-safe transport.
 
 All functions accept strings and return strings. Hashes produce lowercase hexadecimal digests. Encoding functions convert raw bytes to a text representation; decoding functions reverse the process.
 
 ### Function Reference
 
-| Function                  | Description                        | Example                                        | Return Type |
-| ------------------------- | ---------------------------------- | ---------------------------------------------- | ----------- |
-| `crypto.sha256(s)`        | SHA-256 hash, hex-encoded          | `crypto.sha256("hello")` → `"2cf24d..."`       | String      |
-| `crypto.md5(s)`           | MD5 hash, hex-encoded              | `crypto.md5("hello")` → `"5d4114..."`          | String      |
-| `crypto.base64_encode(s)` | Encode string to Base64            | `crypto.base64_encode("hello")` → `"aGVsbG8="` | String      |
-| `crypto.base64_decode(s)` | Decode Base64 string               | `crypto.base64_decode("aGVsbG8=")` → `"hello"` | String      |
-| `crypto.hex_encode(s)`    | Encode string bytes as hexadecimal | `crypto.hex_encode("AB")` → `"4142"`           | String      |
-| `crypto.hex_decode(s)`    | Decode hex string to bytes         | `crypto.hex_decode("4142")` → `"AB"`           | String      |
+| Function                       | Description                        | Example                                         | Return Type |
+| ------------------------------ | ---------------------------------- | ----------------------------------------------- | ----------- |
+| `crypto.sha256(s)`             | SHA-256 hash, hex-encoded          | `crypto.sha256("hello")` → `"2cf24d..."`        | String      |
+| `crypto.md5(s)`                | MD5 hash, hex-encoded              | `crypto.md5("hello")` → `"5d4114..."`           | String      |
+| `crypto.base64_encode(s)`      | Encode string to Base64            | `crypto.base64_encode("hello")` → `"aGVsbG8="`  | String      |
+| `crypto.base64_decode(s)`      | Decode Base64 string               | `crypto.base64_decode("aGVsbG8=")` → `"hello"`  | String      |
+| `crypto.hex_encode(s)`         | Encode string bytes as hexadecimal | `crypto.hex_encode("AB")` → `"4142"`            | String      |
+| `crypto.hex_decode(s)`         | Decode hex string to bytes         | `crypto.hex_decode("4142")` → `"AB"`            | String      |
+| `crypto.sha512(s)`             | SHA-512 hash, hex-encoded          | `crypto.sha512("hello")` → `"9b71d2..."`        | String      |
+| `crypto.hmac_sha256(key, msg)` | HMAC-SHA256 message auth code      | `crypto.hmac_sha256("key", "msg")` → hex string | String      |
+| `crypto.random_bytes(n)`       | Generate n random bytes (hex)      | `crypto.random_bytes(16)` → `"a3f1..."`         | String      |
 
 > **MD5 is not secure.** MD5 is provided for legacy compatibility and checksums. Never use it for password hashing or security-critical fingerprints. Use SHA-256 instead.
 
@@ -718,6 +721,38 @@ let data = "sensitive payload"
 let hash = crypto.sha256(data)
 let b64_hash = crypto.base64_encode(hash)
 say "SHA-256 (Base64): {b64_hash}"
+```
+
+**SHA-512 hashing:**
+
+```forge
+let hash = crypto.sha512("forge")
+say "SHA-512: {hash}"
+say "Length: {len(hash)} hex chars"  // 128 hex chars = 64 bytes
+```
+
+**HMAC-SHA256 for API authentication:**
+
+```forge
+let secret = "my_api_secret"
+let message = "POST /api/webhook 1709312400"
+let signature = crypto.hmac_sha256(secret, message)
+say "Signature: {signature}"
+
+// Verify by computing the same HMAC
+let expected = crypto.hmac_sha256(secret, message)
+say "Valid: {signature == expected}"
+```
+
+**Random bytes for tokens and nonces:**
+
+```forge
+let token = crypto.random_bytes(32)
+say "Token: {token}"
+say "Length: {len(token)} hex chars"  // 64 hex chars = 32 bytes
+
+let nonce = crypto.random_bytes(16)
+say "Nonce: {nonce}"
 ```
 
 ### Recipes
@@ -1350,7 +1385,7 @@ say "Database: {health.status}"
 
 ## Chapter 15: json — Serialization
 
-JSON is the lingua franca of modern APIs, configuration files, and data exchange. Forge embraces JSON at the language level—object literals in Forge _are_ JSON-compatible structures—and the `json` module provides three functions to move between Forge values and JSON text.
+JSON is the lingua franca of modern APIs, configuration files, and data exchange. Forge embraces JSON at the language level—object literals in Forge _are_ JSON-compatible structures—and the `json` module provides five functions to move between Forge values and JSON text, validate JSON strings, and deep-merge objects.
 
 Because Forge objects and JSON objects share the same structural model, serialization is natural. There is no schema to define, no mapping to configure. A Forge object becomes JSON text with `json.stringify()`, and JSON text becomes a Forge object with `json.parse()`.
 
@@ -1361,6 +1396,8 @@ Because Forge objects and JSON objects share the same structural model, serializ
 | `json.parse(s)`         | Parse a JSON string into a Forge value        | `json.parse("{\"a\":1}")` → `{a: 1}`     | Value       |
 | `json.stringify(value)` | Convert a Forge value to compact JSON string  | `json.stringify({a: 1})` → `"{\"a\":1}"` | String      |
 | `json.pretty(value)`    | Convert a Forge value to indented JSON string | `json.pretty({a: 1})` → formatted string | String      |
+| `json.valid(s)`         | Check if a string is valid JSON               | `json.valid("{\"a\":1}")` → `true`       | Bool        |
+| `json.merge(a, b)`      | Deep-merge two objects (b overwrites a)       | `json.merge({x:1}, {y:2})` → `{x:1,y:2}` | Object      |
 
 > **Number Handling.** `json.parse()` converts JSON numbers to `Int` when they have no fractional part, and `Float` otherwise. The number `42` becomes `Int(42)`, while `42.0` becomes `Float(42.0)`.
 
@@ -1502,6 +1539,27 @@ Value: null
 Flag: false
 Count: 0
 Serialized: {"value":null,"flag":false,"count":0}
+```
+
+**Validating JSON strings:**
+
+```forge
+say json.valid("{\"name\": \"Alice\"}")  // true
+say json.valid("not json at all")        // false
+say json.valid("[1, 2, 3]")              // true
+say json.valid("{broken")                // false
+```
+
+**Deep-merging objects:**
+
+```forge
+let defaults = { theme: "dark", font_size: 14, notifications: { email: true, sms: false } }
+let overrides = { font_size: 18, notifications: { sms: true } }
+
+let config = json.merge(defaults, overrides)
+say config.theme            // "dark" (kept from defaults)
+say config.font_size        // 18 (overridden)
+say config.notifications    // { email: true, sms: true } (deep-merged)
 ```
 
 ### Recipes
@@ -1865,19 +1923,21 @@ Contact [REDACTED-EMAIL], SSN [REDACTED-SSN], Card [REDACTED-CC]
 
 ## Chapter 17: env — Environment Variables
 
-Environment variables are the standard mechanism for passing configuration to applications. The `env` module provides four functions that read, write, check, and enumerate environment variables within the running Forge process. Values set with `env.set()` affect only the current process and its children—they do not persist after the program exits.
+Environment variables are the standard mechanism for passing configuration to applications. The `env` module provides functions to read, write, check, enumerate, and load environment variables within the running Forge process. Values set with `env.set()` affect only the current process and its children—they do not persist after the program exits.
 
 This module is small by design. Combined with the `fs` and `json` modules, it covers all common configuration patterns, from simple feature flags to environment-aware deployment scripts.
 
 ### Function Reference
 
-| Function                | Description                                 | Example                                | Return Type    |
-| ----------------------- | ------------------------------------------- | -------------------------------------- | -------------- |
-| `env.get(key)`          | Get an environment variable's value         | `env.get("HOME")` → `"/Users/alice"`   | String or Null |
-| `env.get(key, default)` | Get with a fallback default                 | `env.get("PORT", "3000")` → `"3000"`   | String         |
-| `env.set(key, value)`   | Set an environment variable (process-local) | `env.set("APP_MODE", "test")`          | Null           |
-| `env.has(key)`          | Check if a variable is defined              | `env.has("DATABASE_URL")` → `false`    | Bool           |
-| `env.keys()`            | List all environment variable names         | `env.keys()` → `["HOME", "PATH", ...]` | Array[String]  |
+| Function                | Description                                 | Example                                  | Return Type    |
+| ----------------------- | ------------------------------------------- | ---------------------------------------- | -------------- |
+| `env.get(key)`          | Get an environment variable's value         | `env.get("HOME")` → `"/Users/alice"`     | String or Null |
+| `env.get(key, default)` | Get with a fallback default                 | `env.get("PORT", "3000")` → `"3000"`     | String         |
+| `env.set(key, value)`   | Set an environment variable (process-local) | `env.set("APP_MODE", "test")`            | Null           |
+| `env.has(key)`          | Check if a variable is defined              | `env.has("DATABASE_URL")` → `false`      | Bool           |
+| `env.keys()`            | List all environment variable names         | `env.keys()` → `["HOME", "PATH", ...]`   | Array[String]  |
+| `env.all()`             | Get all variables as an object              | `env.all()` → `{HOME: "/...", ...}`      | Object         |
+| `env.load(path?)`       | Load `.env` file into process environment   | `env.load()` or `env.load(".env.local")` | Bool           |
 
 > **Default Values.** `env.get()` with two arguments never returns `null`—the second argument serves as a guaranteed fallback. Use the one-argument form when you need to detect missing variables explicitly.
 
@@ -1973,6 +2033,31 @@ Output:
 
 ```
 Server will listen on 0.0.0.0:8080 with 4 workers
+```
+
+**Loading a `.env` file:**
+
+```forge
+// Load .env from current directory
+env.load()
+
+// Or load a specific file
+env.load(".env.production")
+
+// Variables from the file are now available
+let db = env.get("DATABASE_URL")
+say "Database: {db}"
+```
+
+**Getting all environment variables:**
+
+```forge
+let all = env.all()
+say "Total variables: {len(keys(all))}"
+
+// Access like any object
+say "Home: {all.HOME}"
+say "Shell: {all.SHELL}"
 ```
 
 ### Recipes
@@ -3936,4 +4021,255 @@ Run with filter: `forge test --filter "math"` — runs only tests with "math" in
 
 ---
 
-_This concludes Part II: The Standard Library. With sixteen modules, a GenZ debug kit, execution helpers, and 230+ functions at your disposal, Forge provides everything needed for file I/O, databases, data processing, HTTP, cryptography, terminal UI, fake data generation, performance profiling, shell scripting, and resilient error handling—all without leaving the language._
+## Chapter 29: url — URL Parsing and Building
+
+URLs are the addresses of the internet, and parsing them correctly is trickier than it looks. The `url` module provides four functions to parse, encode, decode, and build URLs without wrestling with string concatenation or manual percent-encoding.
+
+### Function Reference
+
+| Function           | Description                         | Example                                          | Return Type |
+| ------------------ | ----------------------------------- | ------------------------------------------------ | ----------- |
+| `url.parse(s)`     | Parse URL into components           | `url.parse("https://example.com:8080/path?q=1")` | Object      |
+| `url.encode(s)`    | Percent-encode a string for URL use | `url.encode("hello world")` → `"hello%20world"`  | String      |
+| `url.decode(s)`    | Decode a percent-encoded string     | `url.decode("hello%20world")` → `"hello world"`  | String      |
+| `url.build(parts)` | Build a URL from component parts    | `url.build({host: "example.com", path: "/api"})` | String      |
+
+The object returned by `url.parse()` contains these fields:
+
+| Field      | Type         | Example Value      |
+| ---------- | ------------ | ------------------ |
+| `scheme`   | String       | `"https"`          |
+| `host`     | String       | `"example.com"`    |
+| `port`     | String or "" | `"8080"`           |
+| `path`     | String       | `"/path"`          |
+| `query`    | String or "" | `"q=1&lang=forge"` |
+| `fragment` | String or "" | `"section"`        |
+
+### Core Examples
+
+**Parsing URLs:**
+
+```forge
+let parsed = url.parse("https://api.example.com:8080/v2/users?role=admin&active=true#top")
+say "Scheme: {parsed.scheme}"    // https
+say "Host: {parsed.host}"        // api.example.com
+say "Port: {parsed.port}"        // 8080
+say "Path: {parsed.path}"        // /v2/users
+say "Query: {parsed.query}"      // role=admin&active=true
+say "Fragment: {parsed.fragment}" // top
+```
+
+**Encoding and decoding:**
+
+```forge
+let raw = "search term with spaces & special=chars"
+let encoded = url.encode(raw)
+say encoded  // "search%20term%20with%20spaces%20%26%20special%3Dchars"
+
+let decoded = url.decode(encoded)
+say decoded  // "search term with spaces & special=chars"
+```
+
+**Building URLs programmatically:**
+
+```forge
+let api_url = url.build({
+    scheme: "https",
+    host: "api.example.com",
+    path: "/v2/search",
+    query: "q=forge&limit=10"
+})
+say api_url  // "https://api.example.com/v2/search?q=forge&limit=10"
+```
+
+**Practical example — constructing API endpoints:**
+
+```forge
+fn build_api_url(base, endpoint, params) {
+    let query_parts = map(keys(params), fn(k) {
+        return "{url.encode(k)}={url.encode(str(params[k]))}"
+    })
+    let query = join(query_parts, "&")
+    return url.build({
+        scheme: "https",
+        host: base,
+        path: endpoint,
+        query: query
+    })
+}
+
+let search_url = build_api_url("api.github.com", "/search/repositories", {
+    q: "forge language",
+    sort: "stars",
+    per_page: 5
+})
+say search_url
+```
+
+---
+
+## Chapter 30: toml — Configuration Files
+
+TOML (Tom's Obvious Minimal Language) is the configuration format of choice for Rust projects, Python packaging, and many modern tools. The `toml` module provides three functions to parse TOML text, generate TOML from Forge objects, and read TOML files directly from disk.
+
+### Function Reference
+
+| Function                | Description                          | Example                                       | Return Type |
+| ----------------------- | ------------------------------------ | --------------------------------------------- | ----------- |
+| `toml.parse(s)`         | Parse TOML string into Forge object  | `toml.parse("key = \"val\"")` → `{key:"val"}` | Object      |
+| `toml.stringify(value)` | Convert Forge object to TOML string  | `toml.stringify({a: 1})` → `"a = 1\n"`        | String      |
+| `toml.read(path)`       | Read and parse a TOML file from disk | `toml.read("config.toml")` → Object           | Object      |
+
+### Core Examples
+
+**Parsing TOML strings:**
+
+```forge
+let config_text = "[server]\nhost = \"0.0.0.0\"\nport = 8080\n\n[database]\nurl = \"postgres://localhost/mydb\"\npool_size = 5"
+
+let config = toml.parse(config_text)
+say "Host: {config.server.host}"        // 0.0.0.0
+say "Port: {config.server.port}"        // 8080
+say "DB URL: {config.database.url}"     // postgres://localhost/mydb
+say "Pool size: {config.database.pool_size}"  // 5
+```
+
+**Generating TOML:**
+
+```forge
+let config = {
+    title: "My Application",
+    version: "1.0.0",
+    debug: false
+}
+
+let toml_text = toml.stringify(config)
+say toml_text
+// title = "My Application"
+// version = "1.0.0"
+// debug = false
+```
+
+**Reading a TOML file:**
+
+```forge
+// Write a sample config file
+fs.write("/tmp/app.toml", "[app]\nname = \"forge-demo\"\nport = 3000\n")
+
+// Read it back
+let config = toml.read("/tmp/app.toml")
+say "App: {config.app.name}"   // forge-demo
+say "Port: {config.app.port}"  // 3000
+
+fs.remove("/tmp/app.toml")
+```
+
+**Practical example — reading Cargo.toml:**
+
+```forge
+// Read a Rust project's Cargo.toml
+let cargo = toml.read("Cargo.toml")
+say "Package: {cargo.package.name}"
+say "Version: {cargo.package.version}"
+say "Edition: {cargo.package.edition}"
+```
+
+---
+
+## Chapter 31: ws — WebSocket Client
+
+WebSockets enable real-time, bidirectional communication between clients and servers. The `ws` module provides a complete WebSocket client — connect, send messages, receive messages, and close connections. It supports both plain text and JSON messages, with configurable receive timeouts.
+
+### Function Reference
+
+| Function                   | Description                                | Return Type |
+| -------------------------- | ------------------------------------------ | ----------- |
+| `ws.connect(url)`          | Open a WebSocket connection                | Object      |
+| `ws.send(id, message)`     | Send a text or JSON message                | Bool        |
+| `ws.receive(id, timeout?)` | Receive next message (default 30s timeout) | Object      |
+| `ws.close(id)`             | Close the connection                       | Bool        |
+
+The connection object returned by `ws.connect()`:
+
+| Field       | Type   | Description                    |
+| ----------- | ------ | ------------------------------ |
+| `id`        | String | Connection ID (e.g., `"ws_1"`) |
+| `url`       | String | The connected URL              |
+| `connected` | Bool   | `true` if connection succeeded |
+
+The message object returned by `ws.receive()`:
+
+| Field  | Type   | Values                                                    |
+| ------ | ------ | --------------------------------------------------------- |
+| `type` | String | `"text"`, `"binary"`, `"close"`, `"timeout"`, `"control"` |
+| `data` | Mixed  | Parsed JSON object, string, or hex bytes                  |
+| `raw`  | String | Original text (for text messages)                         |
+
+### Core Examples
+
+**Basic connect, send, and receive:**
+
+```forge
+let conn = ws.connect("wss://echo.websocket.org")
+say "Connected: {conn.id}"
+
+ws.send(conn.id, "Hello from Forge!")
+let msg = ws.receive(conn.id, 5000)  // 5 second timeout
+say "Received: {msg.data}"
+
+ws.close(conn.id)
+```
+
+**Sending and receiving JSON:**
+
+```forge
+let conn = ws.connect("wss://echo.websocket.org")
+
+// Send a JSON object — automatically serialized
+ws.send(conn.id, { action: "subscribe", channel: "updates" })
+
+let msg = ws.receive(conn.id, 5000)
+if msg.type == "text" {
+    say "Response: {msg.data}"    // Parsed JSON object
+    say "Raw: {msg.raw}"          // Original JSON string
+}
+
+ws.close(conn.id)
+```
+
+**Handling timeouts:**
+
+```forge
+let conn = ws.connect("wss://echo.websocket.org")
+
+// Short timeout — will likely timeout if no message is pending
+let msg = ws.receive(conn.id, 1000)
+if msg.type == "timeout" {
+    say "No message received within 1 second"
+}
+
+ws.close(conn.id)
+```
+
+**Multiple connections:**
+
+```forge
+let conn1 = ws.connect("wss://echo.websocket.org")
+let conn2 = ws.connect("wss://echo.websocket.org")
+
+ws.send(conn1.id, "from connection 1")
+ws.send(conn2.id, "from connection 2")
+
+let msg1 = ws.receive(conn1.id, 5000)
+let msg2 = ws.receive(conn2.id, 5000)
+
+say "Conn 1: {msg1.data}"
+say "Conn 2: {msg2.data}"
+
+ws.close(conn1.id)
+ws.close(conn2.id)
+```
+
+---
+
+_This concludes Part II: The Standard Library. With nineteen modules, a GenZ debug kit, execution helpers, and 270+ functions at your disposal, Forge provides everything needed for file I/O, databases, data processing, HTTP, WebSockets, cryptography, URL handling, TOML configuration, terminal UI, fake data generation, performance profiling, shell scripting, and resilient error handling—all without leaving the language._

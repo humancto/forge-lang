@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.3.0"
+version: "0.3.3"
 year: "2026"
 publisher: "Self-Published"
 lang: "en"
@@ -26,15 +26,15 @@ cover_description: "A glowing anvil in a digital forge, sparks flying as molten 
 
 _By Archith Rapaka_
 
-_First Edition — February 2026_
+_First Edition — March 2026_
 
 ---
 
-Copyright (c) 2026 Archith Rapaka. All rights reserved.
+Copyright (c) 2026 Archith Rapaka, Los Angeles. All rights reserved.
 
 Published under the MIT License.
 
-Forge is an open-source programming language. Visit https://github.com/forge-lang/forge for source code and community.
+Forge is an open-source programming language. Visit https://humancto.github.io/forge-lang/ for documentation and https://github.com/humancto/forge-lang for source code and community.
 
 _While every precaution has been taken in the preparation of this book, the author assumes no responsibility for errors or omissions, or for damages resulting from the use of the information contained herein._
 
@@ -42,7 +42,7 @@ _While every precaution has been taken in the preparation of this book, the auth
 
 ## Preface
 
-I built Forge because I was tired of installing thirty packages to do what a programming language should do out of the box.
+It all started as an experiment on a weekend and evolved from there. I built Forge because I was tired of installing thirty packages to do what a programming language should do out of the box.
 
 Every modern application talks to HTTP endpoints, reads from databases, handles JSON, and hashes passwords. Yet in every mainstream language, these are third-party concerns. You pip-install a web framework. You npm-install a database driver. You go-get a crypto library. You wrestle with dependency conflicts, version mismatches, and supply chain vulnerabilities — all before writing a single line of your actual application.
 
@@ -54,23 +54,23 @@ Forge also reads like English. You can write `say "hello"` or `println("hello")`
 
 This book is organized in four parts:
 
-- **Part I: Foundations** covers installation, syntax, control flow, functions, collections, and error handling — everything you need to read and write Forge.
-- **Part II: The Standard Library** documents all 15 built-in modules, function by function, with recipes for common tasks.
+- **Part I: Foundations** covers installation, syntax, control flow, functions, collections, error handling, and the type system (structs, methods, abilities, composition) — everything you need to read and write Forge.
+- **Part II: The Standard Library** documents all 19 built-in modules, function by function, with recipes for common tasks.
 - **Part III: Building Real Things** walks through complete projects — REST APIs, data pipelines, DevOps scripts, and AI integration.
 - **Part IV: Under the Hood** explains how Forge works internally — the lexer, parser, interpreter, bytecode VM, and toolchain.
 
 Whether you're a student writing your first program, a backend developer building APIs, or a language enthusiast curious about implementation — welcome to Forge.
 
-_Archith Rapaka_
-_February 2026_
+_Archith Rapaka, Los Angeles_
+_March 2026_
 
 \newpage
 
 ## About the Author
 
-**Archith Rapaka** is an engineering executive and startup CTO with over 15 years of building consumer products from zero to one. He's scaled distributed systems serving millions of users, led platform transformations at the intersection of entertainment and technology, and most recently served as CPTO & Head of Engineering at Atom Tickets — powering integrations with major Hollywood studios and streaming partners in the theatrical ticketing space.
+**Archith Rapaka**, Los Angeles, is a software engineer and programming language designer. He believes programming languages should be as natural to read as they are powerful to write, and that the tools developers use most — HTTP, databases, cryptography — belong in the language itself, not in package registries. Forge is the embodiment of this philosophy.
 
-He's deeply interested in startups, scalable systems, LLMs, and developer experience. Forge started as a fun weekend project that refused to stay small — a language built by someone who spent years wishing the tools he needed every day were just there, something simple but fun and powerful. When he's not vibe-coding, instructing machines, or leading engineering teams, you'll find him watching cricket or on his PS5.
+Co-authored with **Claude from Anthropic**, **Cursor**, and **Codex 5.3 from OpenAI**.
 
 \newpage
 
@@ -90,7 +90,6 @@ He's deeply interested in startups, scalable systems, LLMs, and developer experi
 - Tips and important notes are formatted as blockquotes
 
 \newpage
-
 # Part I: Foundations
 
 ---
@@ -3230,6 +3229,8 @@ This pattern — functions returning Results, `?` propagating errors, `match` ha
 
 3. **Error Reporter.** Write a function `validate_user(name, age_str)` that returns `Err` if the name is empty, `Err` if the age string cannot be parsed as an integer, and `Err` if the age is negative. On success, return `Ok({ name: name, age: age })`. Test with valid input, empty name, invalid age string, and negative age. Use `match` to print a specific message for each case.
 
+---
+
 ## Chapter 9: Structs, Methods, and Abilities
 
 Until now, every piece of data you have worked with has been a plain object — a bag of key-value pairs with no formal shape. That works fine for small scripts, but the moment you are building something larger, you need guarantees: this object _will_ have a `name` field, this method _belongs_ to this type, this type _satisfies_ this contract. That is what Forge's type system gives you.
@@ -3268,7 +3269,7 @@ let p = Point { x: 3, y: 4 }
 set p to craft Point { x: 3, y: 4 }
 ```
 
-Both produce an object with a `__type__` field set to `"Point"`, plus the fields you specified. You access fields with dot notation:
+Both produce an object with a `__type__` field set to `"Point"`, plus the fields you specified. You access fields with dot notation as you would expect:
 
 ```forge
 say p.x      // 3
@@ -3461,6 +3462,8 @@ The explicit path also works — `emp.addr.city` and `emp.addr.full()` produce t
 
 ### Dual Syntax Reference
 
+Every construct in this chapter has two spellings. Here is the complete mapping:
+
 | Concept          | Classic Syntax                     | Natural Syntax                            |
 | ---------------- | ---------------------------------- | ----------------------------------------- |
 | Define data type | `struct Person { }`                | `thing Person { }`                        |
@@ -3471,9 +3474,14 @@ The explicit path also works — `emp.addr.city` and `emp.addr.full()` produce t
 | Self-reference   | `it` (first parameter)             | `it` (first parameter)                    |
 | Embed a type     | `has addr: Address`                | `has addr: Address`                       |
 
+Both syntaxes can be mixed freely in the same file. Use whichever reads better in context.
+
 ### A Complete Example
 
+Here is a full program that exercises every feature from this chapter:
+
 ```forge
+// Define types
 thing Animal {
     species: String,
     sound: String = "..."
@@ -3484,48 +3492,60 @@ thing Pet {
     has animal: Animal
 }
 
+// Define an ability
 power Vocal {
     fn speak() -> String
 }
 
+// Attach methods to Animal
 give Animal {
     define describe(it) {
         return it.species + " that says " + it.sound
     }
 }
 
+// Give Animal the Vocal ability
 give Animal the power Vocal {
     define speak(it) {
         return it.sound + "! " + it.sound + "!"
     }
 }
 
+// Give Pet its own methods
 give Pet {
     define introduce(it) {
         return it.name + " the " + it.species
     }
 }
 
+// Create instances
 set dog to craft Pet {
     name: "Rex",
     animal: craft Animal { species: "Dog", sound: "Woof" }
 }
 
-say dog.species         // Dog (delegated)
-say dog.describe()      // Dog that says Woof (delegated)
-say dog.speak()         // Woof! Woof! (delegated)
+// Field delegation (has)
+say dog.species         // Dog (delegated to dog.animal.species)
+say dog.sound           // Woof (delegated)
+
+// Method delegation (has)
+say dog.describe()      // Dog that says Woof
+say dog.speak()         // Woof! Woof!
+
+// Pet's own method
 say dog.introduce()     // Rex the Dog
+
+// Ability check
 say satisfies(dog.animal, Vocal)  // true
 ```
 
 ### Try It Yourself
 
-1. **Shape Calculator.** Define a `thing Rectangle` with `width` and `height` fields. Write a `give` block with methods `area(it)` and `perimeter(it)`. Create a rectangle and print both values.
+1. **Shape Calculator.** Define a `thing Rectangle` with `width` and `height` fields. Write a `give` block with methods `area(it)` (returns width _ height) and `perimeter(it)` (returns 2 _ (width + height)). Create a rectangle and print both values.
 
-2. **Builder Pattern.** Define a `thing Request` with fields `url: String`, `method: String = "GET"`, and `timeout: Int = 30`. Write a static method `Request.create(url)` and instance methods `with_method(it, m)` and `with_timeout(it, t)` that return new instances. Chain them together.
+2. **Builder Pattern.** Define a `thing Request` with fields `url: String`, `method: String = "GET"`, and `timeout: Int = 30`. Write a static method `Request.create(url)` that returns a Request with defaults. Then write instance methods `with_method(it, m)` and `with_timeout(it, t)` that return new Request instances with the given field changed. Chain them: `Request.create("https://api.example.com").with_method("POST").with_timeout(10)`.
 
-3. **Ability Validation.** Define a `power Serializable` with `fn to_string() -> String`. Give it to one type but not another. Verify `satisfies()` returns the correct result for each.
-
+3. **Ability Validation.** Define a `power Serializable` with a `fn to_string() -> String` method. Define two things: `User` (with name and email) and `Product` (with title and price). Give `User` the Serializable ability. Verify that `satisfies(user, Serializable)` returns true. Try calling `satisfies(product, Serializable)` without implementing it — it should return false.
 # PART II: THE STANDARD LIBRARY
 
 ---
@@ -4142,20 +4162,23 @@ for f in files_to_backup {
 
 ## Chapter 12: crypto — Hashing and Encoding
 
-The `crypto` module provides hashing algorithms and encoding utilities. It is intentionally small: two hash functions (SHA-256 and MD5) and two pairs of encode/decode functions (Base64 and hexadecimal). These six functions cover the most common needs—verifying data integrity, generating fingerprints, and preparing binary data for text-safe transport.
+The `crypto` module provides hashing algorithms, HMAC authentication, and encoding utilities. It includes three hash functions (SHA-256, SHA-512, and MD5), HMAC-SHA256 for message authentication, a random byte generator, and two pairs of encode/decode functions (Base64 and hexadecimal). These functions cover the most common needs—verifying data integrity, generating fingerprints, authenticating API requests, and preparing binary data for text-safe transport.
 
 All functions accept strings and return strings. Hashes produce lowercase hexadecimal digests. Encoding functions convert raw bytes to a text representation; decoding functions reverse the process.
 
 ### Function Reference
 
-| Function                  | Description                        | Example                                        | Return Type |
-| ------------------------- | ---------------------------------- | ---------------------------------------------- | ----------- |
-| `crypto.sha256(s)`        | SHA-256 hash, hex-encoded          | `crypto.sha256("hello")` → `"2cf24d..."`       | String      |
-| `crypto.md5(s)`           | MD5 hash, hex-encoded              | `crypto.md5("hello")` → `"5d4114..."`          | String      |
-| `crypto.base64_encode(s)` | Encode string to Base64            | `crypto.base64_encode("hello")` → `"aGVsbG8="` | String      |
-| `crypto.base64_decode(s)` | Decode Base64 string               | `crypto.base64_decode("aGVsbG8=")` → `"hello"` | String      |
-| `crypto.hex_encode(s)`    | Encode string bytes as hexadecimal | `crypto.hex_encode("AB")` → `"4142"`           | String      |
-| `crypto.hex_decode(s)`    | Decode hex string to bytes         | `crypto.hex_decode("4142")` → `"AB"`           | String      |
+| Function                       | Description                        | Example                                         | Return Type |
+| ------------------------------ | ---------------------------------- | ----------------------------------------------- | ----------- |
+| `crypto.sha256(s)`             | SHA-256 hash, hex-encoded          | `crypto.sha256("hello")` → `"2cf24d..."`        | String      |
+| `crypto.md5(s)`                | MD5 hash, hex-encoded              | `crypto.md5("hello")` → `"5d4114..."`           | String      |
+| `crypto.base64_encode(s)`      | Encode string to Base64            | `crypto.base64_encode("hello")` → `"aGVsbG8="`  | String      |
+| `crypto.base64_decode(s)`      | Decode Base64 string               | `crypto.base64_decode("aGVsbG8=")` → `"hello"`  | String      |
+| `crypto.hex_encode(s)`         | Encode string bytes as hexadecimal | `crypto.hex_encode("AB")` → `"4142"`            | String      |
+| `crypto.hex_decode(s)`         | Decode hex string to bytes         | `crypto.hex_decode("4142")` → `"AB"`            | String      |
+| `crypto.sha512(s)`             | SHA-512 hash, hex-encoded          | `crypto.sha512("hello")` → `"9b71d2..."`        | String      |
+| `crypto.hmac_sha256(key, msg)` | HMAC-SHA256 message auth code      | `crypto.hmac_sha256("key", "msg")` → hex string | String      |
+| `crypto.random_bytes(n)`       | Generate n random bytes (hex)      | `crypto.random_bytes(16)` → `"a3f1..."`         | String      |
 
 > **MD5 is not secure.** MD5 is provided for legacy compatibility and checksums. Never use it for password hashing or security-critical fingerprints. Use SHA-256 instead.
 
@@ -4246,6 +4269,38 @@ let data = "sensitive payload"
 let hash = crypto.sha256(data)
 let b64_hash = crypto.base64_encode(hash)
 say "SHA-256 (Base64): {b64_hash}"
+```
+
+**SHA-512 hashing:**
+
+```forge
+let hash = crypto.sha512("forge")
+say "SHA-512: {hash}"
+say "Length: {len(hash)} hex chars"  // 128 hex chars = 64 bytes
+```
+
+**HMAC-SHA256 for API authentication:**
+
+```forge
+let secret = "my_api_secret"
+let message = "POST /api/webhook 1709312400"
+let signature = crypto.hmac_sha256(secret, message)
+say "Signature: {signature}"
+
+// Verify by computing the same HMAC
+let expected = crypto.hmac_sha256(secret, message)
+say "Valid: {signature == expected}"
+```
+
+**Random bytes for tokens and nonces:**
+
+```forge
+let token = crypto.random_bytes(32)
+say "Token: {token}"
+say "Length: {len(token)} hex chars"  // 64 hex chars = 32 bytes
+
+let nonce = crypto.random_bytes(16)
+say "Nonce: {nonce}"
 ```
 
 ### Recipes
@@ -4878,7 +4933,7 @@ say "Database: {health.status}"
 
 ## Chapter 15: json — Serialization
 
-JSON is the lingua franca of modern APIs, configuration files, and data exchange. Forge embraces JSON at the language level—object literals in Forge _are_ JSON-compatible structures—and the `json` module provides three functions to move between Forge values and JSON text.
+JSON is the lingua franca of modern APIs, configuration files, and data exchange. Forge embraces JSON at the language level—object literals in Forge _are_ JSON-compatible structures—and the `json` module provides five functions to move between Forge values and JSON text, validate JSON strings, and deep-merge objects.
 
 Because Forge objects and JSON objects share the same structural model, serialization is natural. There is no schema to define, no mapping to configure. A Forge object becomes JSON text with `json.stringify()`, and JSON text becomes a Forge object with `json.parse()`.
 
@@ -4889,6 +4944,8 @@ Because Forge objects and JSON objects share the same structural model, serializ
 | `json.parse(s)`         | Parse a JSON string into a Forge value        | `json.parse("{\"a\":1}")` → `{a: 1}`     | Value       |
 | `json.stringify(value)` | Convert a Forge value to compact JSON string  | `json.stringify({a: 1})` → `"{\"a\":1}"` | String      |
 | `json.pretty(value)`    | Convert a Forge value to indented JSON string | `json.pretty({a: 1})` → formatted string | String      |
+| `json.valid(s)`         | Check if a string is valid JSON               | `json.valid("{\"a\":1}")` → `true`       | Bool        |
+| `json.merge(a, b)`      | Deep-merge two objects (b overwrites a)       | `json.merge({x:1}, {y:2})` → `{x:1,y:2}` | Object      |
 
 > **Number Handling.** `json.parse()` converts JSON numbers to `Int` when they have no fractional part, and `Float` otherwise. The number `42` becomes `Int(42)`, while `42.0` becomes `Float(42.0)`.
 
@@ -5030,6 +5087,27 @@ Value: null
 Flag: false
 Count: 0
 Serialized: {"value":null,"flag":false,"count":0}
+```
+
+**Validating JSON strings:**
+
+```forge
+say json.valid("{\"name\": \"Alice\"}")  // true
+say json.valid("not json at all")        // false
+say json.valid("[1, 2, 3]")              // true
+say json.valid("{broken")                // false
+```
+
+**Deep-merging objects:**
+
+```forge
+let defaults = { theme: "dark", font_size: 14, notifications: { email: true, sms: false } }
+let overrides = { font_size: 18, notifications: { sms: true } }
+
+let config = json.merge(defaults, overrides)
+say config.theme            // "dark" (kept from defaults)
+say config.font_size        // 18 (overridden)
+say config.notifications    // { email: true, sms: true } (deep-merged)
 ```
 
 ### Recipes
@@ -5393,19 +5471,21 @@ Contact [REDACTED-EMAIL], SSN [REDACTED-SSN], Card [REDACTED-CC]
 
 ## Chapter 17: env — Environment Variables
 
-Environment variables are the standard mechanism for passing configuration to applications. The `env` module provides four functions that read, write, check, and enumerate environment variables within the running Forge process. Values set with `env.set()` affect only the current process and its children—they do not persist after the program exits.
+Environment variables are the standard mechanism for passing configuration to applications. The `env` module provides functions to read, write, check, enumerate, and load environment variables within the running Forge process. Values set with `env.set()` affect only the current process and its children—they do not persist after the program exits.
 
 This module is small by design. Combined with the `fs` and `json` modules, it covers all common configuration patterns, from simple feature flags to environment-aware deployment scripts.
 
 ### Function Reference
 
-| Function                | Description                                 | Example                                | Return Type    |
-| ----------------------- | ------------------------------------------- | -------------------------------------- | -------------- |
-| `env.get(key)`          | Get an environment variable's value         | `env.get("HOME")` → `"/Users/alice"`   | String or Null |
-| `env.get(key, default)` | Get with a fallback default                 | `env.get("PORT", "3000")` → `"3000"`   | String         |
-| `env.set(key, value)`   | Set an environment variable (process-local) | `env.set("APP_MODE", "test")`          | Null           |
-| `env.has(key)`          | Check if a variable is defined              | `env.has("DATABASE_URL")` → `false`    | Bool           |
-| `env.keys()`            | List all environment variable names         | `env.keys()` → `["HOME", "PATH", ...]` | Array[String]  |
+| Function                | Description                                 | Example                                  | Return Type    |
+| ----------------------- | ------------------------------------------- | ---------------------------------------- | -------------- |
+| `env.get(key)`          | Get an environment variable's value         | `env.get("HOME")` → `"/Users/alice"`     | String or Null |
+| `env.get(key, default)` | Get with a fallback default                 | `env.get("PORT", "3000")` → `"3000"`     | String         |
+| `env.set(key, value)`   | Set an environment variable (process-local) | `env.set("APP_MODE", "test")`            | Null           |
+| `env.has(key)`          | Check if a variable is defined              | `env.has("DATABASE_URL")` → `false`      | Bool           |
+| `env.keys()`            | List all environment variable names         | `env.keys()` → `["HOME", "PATH", ...]`   | Array[String]  |
+| `env.all()`             | Get all variables as an object              | `env.all()` → `{HOME: "/...", ...}`      | Object         |
+| `env.load(path?)`       | Load `.env` file into process environment   | `env.load()` or `env.load(".env.local")` | Bool           |
 
 > **Default Values.** `env.get()` with two arguments never returns `null`—the second argument serves as a guaranteed fallback. Use the one-argument form when you need to detect missing variables explicitly.
 
@@ -5501,6 +5581,31 @@ Output:
 
 ```
 Server will listen on 0.0.0.0:8080 with 4 workers
+```
+
+**Loading a `.env` file:**
+
+```forge
+// Load .env from current directory
+env.load()
+
+// Or load a specific file
+env.load(".env.production")
+
+// Variables from the file are now available
+let db = env.get("DATABASE_URL")
+say "Database: {db}"
+```
+
+**Getting all environment variables:**
+
+```forge
+let all = env.all()
+say "Total variables: {len(keys(all))}"
+
+// Access like any object
+say "Home: {all.HOME}"
+say "Shell: {all.SHELL}"
 ```
 
 ### Recipes
@@ -7076,6 +7181,8 @@ say "Error count: {len(err_lines)}"
 
 ---
 
+---
+
 ## Chapter 22: npc — Fake Data Generation
 
 Need test data? Prototyping a UI? Building a seed script? The `npc` module generates realistic fake data without external dependencies. Every call returns different random data.
@@ -7462,13 +7569,263 @@ Run with filter: `forge test --filter "math"` — runs only tests with "math" in
 
 ---
 
-_This concludes Part II: The Standard Library. With sixteen modules, a GenZ debug kit, execution helpers, and 230+ functions at your disposal, Forge provides everything needed for file I/O, databases, data processing, HTTP, cryptography, terminal UI, fake data generation, performance profiling, shell scripting, and resilient error handling—all without leaving the language._
+## Chapter 29: url — URL Parsing and Building
 
+URLs are the addresses of the internet, and parsing them correctly is trickier than it looks. The `url` module provides four functions to parse, encode, decode, and build URLs without wrestling with string concatenation or manual percent-encoding.
+
+### Function Reference
+
+| Function           | Description                         | Example                                          | Return Type |
+| ------------------ | ----------------------------------- | ------------------------------------------------ | ----------- |
+| `url.parse(s)`     | Parse URL into components           | `url.parse("https://example.com:8080/path?q=1")` | Object      |
+| `url.encode(s)`    | Percent-encode a string for URL use | `url.encode("hello world")` → `"hello%20world"`  | String      |
+| `url.decode(s)`    | Decode a percent-encoded string     | `url.decode("hello%20world")` → `"hello world"`  | String      |
+| `url.build(parts)` | Build a URL from component parts    | `url.build({host: "example.com", path: "/api"})` | String      |
+
+The object returned by `url.parse()` contains these fields:
+
+| Field      | Type         | Example Value      |
+| ---------- | ------------ | ------------------ |
+| `scheme`   | String       | `"https"`          |
+| `host`     | String       | `"example.com"`    |
+| `port`     | String or "" | `"8080"`           |
+| `path`     | String       | `"/path"`          |
+| `query`    | String or "" | `"q=1&lang=forge"` |
+| `fragment` | String or "" | `"section"`        |
+
+### Core Examples
+
+**Parsing URLs:**
+
+```forge
+let parsed = url.parse("https://api.example.com:8080/v2/users?role=admin&active=true#top")
+say "Scheme: {parsed.scheme}"    // https
+say "Host: {parsed.host}"        // api.example.com
+say "Port: {parsed.port}"        // 8080
+say "Path: {parsed.path}"        // /v2/users
+say "Query: {parsed.query}"      // role=admin&active=true
+say "Fragment: {parsed.fragment}" // top
+```
+
+**Encoding and decoding:**
+
+```forge
+let raw = "search term with spaces & special=chars"
+let encoded = url.encode(raw)
+say encoded  // "search%20term%20with%20spaces%20%26%20special%3Dchars"
+
+let decoded = url.decode(encoded)
+say decoded  // "search term with spaces & special=chars"
+```
+
+**Building URLs programmatically:**
+
+```forge
+let api_url = url.build({
+    scheme: "https",
+    host: "api.example.com",
+    path: "/v2/search",
+    query: "q=forge&limit=10"
+})
+say api_url  // "https://api.example.com/v2/search?q=forge&limit=10"
+```
+
+**Practical example — constructing API endpoints:**
+
+```forge
+fn build_api_url(base, endpoint, params) {
+    let query_parts = map(keys(params), fn(k) {
+        return "{url.encode(k)}={url.encode(str(params[k]))}"
+    })
+    let query = join(query_parts, "&")
+    return url.build({
+        scheme: "https",
+        host: base,
+        path: endpoint,
+        query: query
+    })
+}
+
+let search_url = build_api_url("api.github.com", "/search/repositories", {
+    q: "forge language",
+    sort: "stars",
+    per_page: 5
+})
+say search_url
+```
+
+---
+
+## Chapter 30: toml — Configuration Files
+
+TOML (Tom's Obvious Minimal Language) is the configuration format of choice for Rust projects, Python packaging, and many modern tools. The `toml` module provides three functions to parse TOML text, generate TOML from Forge objects, and read TOML files directly from disk.
+
+### Function Reference
+
+| Function                | Description                          | Example                                       | Return Type |
+| ----------------------- | ------------------------------------ | --------------------------------------------- | ----------- |
+| `toml.parse(s)`         | Parse TOML string into Forge object  | `toml.parse("key = \"val\"")` → `{key:"val"}` | Object      |
+| `toml.stringify(value)` | Convert Forge object to TOML string  | `toml.stringify({a: 1})` → `"a = 1\n"`        | String      |
+| `toml.read(path)`       | Read and parse a TOML file from disk | `toml.read("config.toml")` → Object           | Object      |
+
+### Core Examples
+
+**Parsing TOML strings:**
+
+```forge
+let config_text = "[server]\nhost = \"0.0.0.0\"\nport = 8080\n\n[database]\nurl = \"postgres://localhost/mydb\"\npool_size = 5"
+
+let config = toml.parse(config_text)
+say "Host: {config.server.host}"        // 0.0.0.0
+say "Port: {config.server.port}"        // 8080
+say "DB URL: {config.database.url}"     // postgres://localhost/mydb
+say "Pool size: {config.database.pool_size}"  // 5
+```
+
+**Generating TOML:**
+
+```forge
+let config = {
+    title: "My Application",
+    version: "1.0.0",
+    debug: false
+}
+
+let toml_text = toml.stringify(config)
+say toml_text
+// title = "My Application"
+// version = "1.0.0"
+// debug = false
+```
+
+**Reading a TOML file:**
+
+```forge
+// Write a sample config file
+fs.write("/tmp/app.toml", "[app]\nname = \"forge-demo\"\nport = 3000\n")
+
+// Read it back
+let config = toml.read("/tmp/app.toml")
+say "App: {config.app.name}"   // forge-demo
+say "Port: {config.app.port}"  // 3000
+
+fs.remove("/tmp/app.toml")
+```
+
+**Practical example — reading Cargo.toml:**
+
+```forge
+// Read a Rust project's Cargo.toml
+let cargo = toml.read("Cargo.toml")
+say "Package: {cargo.package.name}"
+say "Version: {cargo.package.version}"
+say "Edition: {cargo.package.edition}"
+```
+
+---
+
+## Chapter 31: ws — WebSocket Client
+
+WebSockets enable real-time, bidirectional communication between clients and servers. The `ws` module provides a complete WebSocket client — connect, send messages, receive messages, and close connections. It supports both plain text and JSON messages, with configurable receive timeouts.
+
+### Function Reference
+
+| Function                   | Description                                | Return Type |
+| -------------------------- | ------------------------------------------ | ----------- |
+| `ws.connect(url)`          | Open a WebSocket connection                | Object      |
+| `ws.send(id, message)`     | Send a text or JSON message                | Bool        |
+| `ws.receive(id, timeout?)` | Receive next message (default 30s timeout) | Object      |
+| `ws.close(id)`             | Close the connection                       | Bool        |
+
+The connection object returned by `ws.connect()`:
+
+| Field       | Type   | Description                    |
+| ----------- | ------ | ------------------------------ |
+| `id`        | String | Connection ID (e.g., `"ws_1"`) |
+| `url`       | String | The connected URL              |
+| `connected` | Bool   | `true` if connection succeeded |
+
+The message object returned by `ws.receive()`:
+
+| Field  | Type   | Values                                                    |
+| ------ | ------ | --------------------------------------------------------- |
+| `type` | String | `"text"`, `"binary"`, `"close"`, `"timeout"`, `"control"` |
+| `data` | Mixed  | Parsed JSON object, string, or hex bytes                  |
+| `raw`  | String | Original text (for text messages)                         |
+
+### Core Examples
+
+**Basic connect, send, and receive:**
+
+```forge
+let conn = ws.connect("wss://echo.websocket.org")
+say "Connected: {conn.id}"
+
+ws.send(conn.id, "Hello from Forge!")
+let msg = ws.receive(conn.id, 5000)  // 5 second timeout
+say "Received: {msg.data}"
+
+ws.close(conn.id)
+```
+
+**Sending and receiving JSON:**
+
+```forge
+let conn = ws.connect("wss://echo.websocket.org")
+
+// Send a JSON object — automatically serialized
+ws.send(conn.id, { action: "subscribe", channel: "updates" })
+
+let msg = ws.receive(conn.id, 5000)
+if msg.type == "text" {
+    say "Response: {msg.data}"    // Parsed JSON object
+    say "Raw: {msg.raw}"          // Original JSON string
+}
+
+ws.close(conn.id)
+```
+
+**Handling timeouts:**
+
+```forge
+let conn = ws.connect("wss://echo.websocket.org")
+
+// Short timeout — will likely timeout if no message is pending
+let msg = ws.receive(conn.id, 1000)
+if msg.type == "timeout" {
+    say "No message received within 1 second"
+}
+
+ws.close(conn.id)
+```
+
+**Multiple connections:**
+
+```forge
+let conn1 = ws.connect("wss://echo.websocket.org")
+let conn2 = ws.connect("wss://echo.websocket.org")
+
+ws.send(conn1.id, "from connection 1")
+ws.send(conn2.id, "from connection 2")
+
+let msg1 = ws.receive(conn1.id, 5000)
+let msg2 = ws.receive(conn2.id, 5000)
+
+say "Conn 1: {msg1.data}"
+say "Conn 2: {msg2.data}"
+
+ws.close(conn1.id)
+ws.close(conn2.id)
+```
+
+---
+
+_This concludes Part II: The Standard Library. With nineteen modules, a GenZ debug kit, execution helpers, and 270+ functions at your disposal, Forge provides everything needed for file I/O, databases, data processing, HTTP, WebSockets, cryptography, URL handling, TOML configuration, terminal UI, fake data generation, performance profiling, shell scripting, and resilient error handling—all without leaving the language._
 # Part III: Building Real Things
 
 ---
 
-## Chapter 29: Building REST APIs
+## Chapter 21: Building REST APIs
 
 Every modern application needs an API. Whether you're building a mobile backend, a
 microservice, or a simple webhook receiver, the ability to stand up an HTTP server quickly
@@ -8002,7 +8359,7 @@ To bind to localhost only, pass the `host` argument:
 
 ---
 
-## Chapter 30: HTTP Client and Web Automation
+## Chapter 22: HTTP Client and Web Automation
 
 Building APIs is only half the story. Modern applications also _consume_ APIs—pulling
 data from GitHub, checking service health, downloading files, and scraping web content.
@@ -8098,6 +8455,61 @@ parsing and extraction:
 ```forge
 let html = crawl "https://example.com"
 say html
+```
+
+### Advanced fetch() Options
+
+Beyond basic GET/POST, `fetch()` supports query parameters, form data, basic authentication, and cookies through the options object.
+
+**Query parameters** — automatically appended to the URL:
+
+```forge
+let resp = fetch("https://httpbin.org/get", {
+    params: { search: "forge lang", page: 1, limit: 20 }
+})
+// Request URL becomes: https://httpbin.org/get?search=forge+lang&page=1&limit=20
+say resp.json.args.search  // "forge lang"
+```
+
+**Form data** — sends as `application/x-www-form-urlencoded`:
+
+```forge
+let resp = fetch("https://httpbin.org/post", {
+    method: "POST",
+    form: { username: "alice", password: "secret123" }
+})
+say resp.json.form.username  // "alice"
+```
+
+**Basic authentication**:
+
+```forge
+let resp = fetch("https://httpbin.org/basic-auth/admin/pass123", {
+    basic_auth: { username: "admin", password: "pass123" }
+})
+say resp.json.authenticated  // true
+```
+
+**Cookies**:
+
+```forge
+let resp = fetch("https://httpbin.org/cookies", {
+    cookies: { session: "abc123", theme: "dark" }
+})
+say resp.json.cookies.session  // "abc123"
+```
+
+All options can be combined in a single request:
+
+```forge
+let resp = fetch("https://api.example.com/search", {
+    method: "POST",
+    params: { version: "v2" },
+    form: { query: "forge" },
+    basic_auth: { username: "api_user", password: "api_key" },
+    cookies: { session: "token123" },
+    timeout: 10
+})
 ```
 
 ### Project 1: API Consumer — GitHub Repository Dashboard
@@ -8365,7 +8777,7 @@ term.success("Scraping complete!")
 
 ---
 
-## Chapter 31: Data Processing Pipelines
+## Chapter 23: Data Processing Pipelines
 
 Data processing is the bread and butter of practical programming. You receive data in
 one format, transform it, analyze it, and present the results. Forge excels at this
@@ -8848,7 +9260,7 @@ term.success("Conversion pipeline complete!")
 
 ---
 
-## Chapter 32: DevOps and System Automation
+## Chapter 24: DevOps and System Automation
 
 System administrators and DevOps engineers spend their days automating repetitive tasks:
 checking system health, deploying applications, rotating backups, validating
@@ -9563,7 +9975,7 @@ term.success("Backup complete!")
 
 ---
 
-## Chapter 33: AI Integration
+## Chapter 25: AI Integration
 
 Forge has a built-in connection to large language models through the `ask` keyword. This
 isn't a library you install or an API you configure—it's a language-level primitive that
@@ -9853,14 +10265,13 @@ services, processed data pipelines, automated system operations, and integrated 
 with a language that compiles to a single binary and requires zero external dependencies.
 In Part IV, we'll look at Forge's tooling ecosystem: the formatter, test runner, LSP,
 and how to publish Forge packages._
-
 # PART IV: UNDER THE HOOD
 
 ---
 
-## Chapter 34: Architecture and Internals
+## Chapter 26: Architecture and Internals
 
-Every sufficiently advanced programming language eventually reveals its inner machinery to the curious developer. Understanding how Forge works beneath its friendly syntax transforms you from a user of the language into a collaborator with it. This chapter pulls back the curtain on Forge's implementation: approximately 15,500 lines of Rust spread across 45 source files, with zero `unsafe` blocks in the entire codebase.
+Every sufficiently advanced programming language eventually reveals its inner machinery to the curious developer. Understanding how Forge works beneath its friendly syntax transforms you from a user of the language into a collaborator with it. This chapter pulls back the curtain on Forge's implementation: approximately 26,000 lines of Rust spread across 56 source files, with zero `unsafe` blocks in the entire codebase.
 
 ### The Compilation Pipeline
 
@@ -9894,7 +10305,7 @@ A Forge program begins its life as a `.fg` source file—a plain text document c
                                 │           Runtime               │        │
                                 │  ┌─────────┐  ┌─────────────┐  │        │
                                 │  │  Stdlib  │  │ HTTP Server  │  │        │
-                                │  │(15 mods) │  │   (axum)     │  │        │
+                                │  │(19 mods) │  │   (axum)     │  │        │
                                 │  └─────────┘  └─────────────┘  │        │
                                 └─────────────────────────────────┘        │
                                                                            │
@@ -10420,7 +10831,7 @@ When an HTTP request arrives, the axum handler locks the interpreter, constructs
 
 ---
 
-## Chapter 35: The Bytecode VM
+## Chapter 27: The Bytecode VM
 
 While the tree-walk interpreter provides full-featured execution, some workloads benefit from the tighter execution loop of a bytecode virtual machine. Forge includes an experimental register-based VM activated with the `--vm` flag. This chapter examines its design, instruction set, and runtime subsystems.
 
@@ -10775,7 +11186,7 @@ The `--vm` flag is experimental. It supports core language features (variables, 
 
 ---
 
-## Chapter 36: Tooling Deep Dive
+## Chapter 28: Tooling Deep Dive
 
 A programming language is only as good as its tools. Forge ships with a comprehensive toolchain that handles formatting, testing, project scaffolding, compilation, package management, editor integration, interactive learning, and AI-assisted development—all from a single binary.
 
@@ -11013,6 +11424,10 @@ The manifest is parsed using the `toml` and `serde` crates with default values f
 
 ---
 
+```{=latex}
+\appendix
+```
+
 ## Appendix A: Complete Keyword Reference
 
 Forge recognizes 80+ keywords divided into three categories: classic keywords familiar from mainstream languages, natural-language keywords that provide English-like alternatives, and innovation keywords unique to Forge.
@@ -11036,8 +11451,8 @@ Forge recognizes 80+ keywords divided into three categories: classic keywords fa
 | `continue`  | Skip to next iteration     | `continue`                        | —                             |
 | `struct`    | Define structure           | `struct Point { x: Int, y: Int }` | Named product type            |
 | `type`      | Define algebraic data type | `type Color = Red \| Blue`        | Sum types with variants       |
-| `interface` | Define interface           | `interface Printable { print() }` | Synonym of `power`            |
-| `impl`      | Attach methods to type     | `impl Person { fn greet(it) {} }` | Synonym of `give`             |
+| `interface` | Define interface           | `interface Printable { print() }` | Method signatures             |
+| `impl`      | Implement interface        | `impl Printable for Point { }`    | Reserved for future use       |
 | `pub`       | Public visibility          | `pub fn api() { }`                | Reserved for future use       |
 | `import`    | Import module              | `import "utils.fg"`               | File or package import        |
 | `spawn`     | Launch concurrent task     | `spawn { heavy_work() }`          | Currently synchronous         |
@@ -11051,33 +11466,28 @@ Forge recognizes 80+ keywords divided into three categories: classic keywords fa
 
 ### Table A-2: Natural-Language Keywords
 
-| Keyword     | Purpose                     | Example                         | Classic Equivalent        |
-| ----------- | --------------------------- | ------------------------------- | ------------------------- |
-| `set`       | Declare variable            | `set name to "Alice"`           | `let name = "Alice"`      |
-| `to`        | Assignment marker           | `set x to 42`                   | `=` in `let`              |
-| `change`    | Reassign variable           | `change score to score + 1`     | `score = score + 1`       |
-| `define`    | Define function             | `define greet(n) { }`           | `fn greet(n) { }`         |
-| `otherwise` | Alternative branch          | `otherwise { }`                 | `else { }`                |
-| `nah`       | Alternative branch (casual) | `nah { }`                       | `else { }`                |
-| `each`      | Loop marker                 | `for each item in list { }`     | `for item in list`        |
-| `repeat`    | Counted loop                | `repeat 5 times { }`            | `for _ in range(5)`       |
-| `times`     | Repeat unit                 | `repeat 3 times { }`            | —                         |
-| `grab`      | HTTP fetch                  | `grab resp from "url"`          | `let resp = fetch("url")` |
-| `from`      | Source marker               | `grab data from url`            | —                         |
-| `wait`      | Sleep / pause               | `wait 2 seconds`                | `sleep(2000)`             |
-| `seconds`   | Time unit                   | `wait 5 seconds`                | —                         |
-| `say`       | Print output                | `say "hello"`                   | `println("hello")`        |
-| `yell`      | Print uppercase             | `yell "loud"`                   | — (unique)                |
-| `whisper`   | Print lowercase             | `whisper "quiet"`               | — (unique)                |
-| `forge`     | Async function              | `forge fetch_data() { }`        | `async fn fetch_data()`   |
-| `hold`      | Await result                | `hold fetch("url")`             | `await fetch("url")`      |
-| `emit`      | Yield value                 | `emit computed_value`           | `yield computed_value`    |
-| `unpack`    | Destructure                 | `unpack {a, b} from obj`        | `let {a, b} = obj`        |
-| `thing`     | Define data type            | `thing Person { name: String }` | `struct Person { }`       |
-| `power`     | Define ability/contract     | `power Greetable { }`           | `interface Greetable { }` |
-| `give`      | Attach methods to type      | `give Person { }`               | `impl Person { }`         |
-| `craft`     | Construct instance          | `craft Person { name: "A" }`    | `Person { name: "A" }`    |
-| `the`       | Connector in give...power   | `give X the power Y { }`        | `impl Y for X { }`        |
+| Keyword     | Purpose                     | Example                     | Classic Equivalent        |
+| ----------- | --------------------------- | --------------------------- | ------------------------- |
+| `set`       | Declare variable            | `set name to "Alice"`       | `let name = "Alice"`      |
+| `to`        | Assignment marker           | `set x to 42`               | `=` in `let`              |
+| `change`    | Reassign variable           | `change score to score + 1` | `score = score + 1`       |
+| `define`    | Define function             | `define greet(n) { }`       | `fn greet(n) { }`         |
+| `otherwise` | Alternative branch          | `otherwise { }`             | `else { }`                |
+| `nah`       | Alternative branch (casual) | `nah { }`                   | `else { }`                |
+| `each`      | Loop marker                 | `for each item in list { }` | `for item in list`        |
+| `repeat`    | Counted loop                | `repeat 5 times { }`        | `for _ in range(5)`       |
+| `times`     | Repeat unit                 | `repeat 3 times { }`        | —                         |
+| `grab`      | HTTP fetch                  | `grab resp from "url"`      | `let resp = fetch("url")` |
+| `from`      | Source marker               | `grab data from url`        | —                         |
+| `wait`      | Sleep / pause               | `wait 2 seconds`            | `sleep(2000)`             |
+| `seconds`   | Time unit                   | `wait 5 seconds`            | —                         |
+| `say`       | Print output                | `say "hello"`               | `println("hello")`        |
+| `yell`      | Print uppercase             | `yell "loud"`               | — (unique)                |
+| `whisper`   | Print lowercase             | `whisper "quiet"`           | — (unique)                |
+| `forge`     | Async function              | `forge fetch_data() { }`    | `async fn fetch_data()`   |
+| `hold`      | Await result                | `hold fetch("url")`         | `await fetch("url")`      |
+| `emit`      | Yield value                 | `emit computed_value`       | `yield computed_value`    |
+| `unpack`    | Destructure                 | `unpack {a, b} from obj`    | `let {a, b} = obj`        |
 
 ### Table A-3: Innovation Keywords
 
@@ -11114,7 +11524,7 @@ Forge recognizes 80+ keywords divided into three categories: classic keywords fa
 
 ## Appendix B: Built-in Functions Quick Reference
 
-Forge provides 50+ built-in functions available without imports. Standard library modules add 90+ more functions organized into 15 namespaces.
+Forge provides 50+ built-in functions available without imports. Standard library modules add 120+ more functions organized into 19 namespaces.
 
 ### Output Functions
 
@@ -11238,15 +11648,15 @@ Access via `module.function()` syntax after the module is available in scope:
 
 **io** — `io.prompt(msg)`, `io.print(val)`, `io.args()`
 
-**crypto** — `crypto.sha256(data)`, `crypto.md5(data)`, `crypto.base64_encode(data)`, `crypto.base64_decode(data)`, `crypto.hex_encode(data)`, `crypto.hex_decode(data)`
+**crypto** — `crypto.sha256(data)`, `crypto.sha512(data)`, `crypto.md5(data)`, `crypto.hmac_sha256(key, msg)`, `crypto.random_bytes(n)`, `crypto.base64_encode(data)`, `crypto.base64_decode(data)`, `crypto.hex_encode(data)`, `crypto.hex_decode(data)`
 
 **db** — `db.open(path)`, `db.query(db, sql)`, `db.execute(db, sql)`, `db.close(db)`
 
 **pg** — `pg.connect(url)`, `pg.query(conn, sql)`, `pg.execute(conn, sql)`, `pg.close(conn)`
 
-**env** — `env.get(key)`, `env.set(key, val)`, `env.has(key)`, `env.keys()`
+**env** — `env.get(key)`, `env.set(key, val)`, `env.has(key)`, `env.keys()`, `env.all()`, `env.load(path?)`
 
-**json** — `json.parse(str)`, `json.stringify(val)`, `json.pretty(val)`
+**json** — `json.parse(str)`, `json.stringify(val)`, `json.pretty(val)`, `json.valid(str)`, `json.merge(a, b)`
 
 **regex** — `regex.test(pattern, str)`, `regex.find(pattern, str)`, `regex.find_all(pattern, str)`, `regex.replace(pattern, str, replacement)`, `regex.split(pattern, str)`
 
@@ -11257,6 +11667,12 @@ Access via `module.function()` syntax after the module is available in scope:
 **csv** — `csv.parse(str)`, `csv.stringify(data)`, `csv.read(path)`, `csv.write(path, data)`
 
 **term** — `term.red(str)`, `term.green(str)`, `term.blue(str)`, `term.yellow(str)`, `term.bold(str)`, `term.dim(str)`, `term.table(data)`, `term.hr()`, `term.sparkline(data)`, `term.bar(label, value, max)`, `term.banner(text)`, `term.countdown(seconds)`, `term.confirm(prompt)`
+
+**url** — `url.parse(str)`, `url.encode(str)`, `url.decode(str)`, `url.build(parts)`
+
+**toml** — `toml.parse(str)`, `toml.stringify(val)`, `toml.read(path)`
+
+**ws** — `ws.connect(url)`, `ws.send(id, msg)`, `ws.receive(id, timeout?)`, `ws.close(id)`
 
 **exec** — `exec.run_command(cmd)`
 
@@ -11936,12 +12352,12 @@ for rows.Next() {
 | ---------------------------- | ------- |
 | Total Rust source lines      | ~26,000 |
 | Total source files           | 56      |
-| Rust tests                   | 488     |
+| Rust tests                   | 503     |
 | Forge integration tests      | 334     |
 | Unsafe blocks                | 0       |
 | Keywords recognized          | 80+     |
-| Built-in functions           | 230+    |
-| Standard library modules     | 16      |
+| Built-in functions           | 270+    |
+| Standard library modules     | 19      |
 | CLI commands                 | 13      |
 | Interactive tutorial lessons | 30      |
 | Example programs             | 12      |
@@ -11955,33 +12371,38 @@ for rows.Next() {
 | `src/parser/parser.rs`   | 1,851 | Recursive descent parser |
 | `src/vm/compiler.rs`     | 927   | AST to bytecode compiler |
 | `src/lexer/lexer.rs`     | 606   | Lexer / tokenizer        |
+| `src/main.rs`            | 539   | CLI entry point          |
 | `src/learn.rs`           | 520   | Interactive tutorials    |
-| `src/runtime/server.rs`  | 352   | HTTP server (axum)       |
-| `src/parser/ast.rs`      | 335   | AST definitions          |
-| `src/repl/mod.rs`        | 299   | Interactive REPL         |
-| `src/main.rs`            | 293   | CLI entry point          |
+| `src/stdlib/term.rs`     | 478   | Terminal UI module       |
+| `src/stdlib/npc.rs`      | 460   | NPC fake data module     |
+| `src/runtime/server.rs`  | 353   | HTTP server (axum)       |
 
 ### Technology Stack
 
-| Component       | Technology         | Purpose                           |
-| --------------- | ------------------ | --------------------------------- |
-| Language        | Rust               | Core implementation               |
-| CLI framework   | clap               | Argument parsing, subcommands     |
-| HTTP server     | axum               | Async HTTP server runtime         |
-| HTTP client     | reqwest + rustls   | HTTPS requests (pure Rust TLS)    |
-| Async runtime   | tokio              | Async I/O, task scheduling        |
-| SQLite          | rusqlite           | Embedded database support         |
-| PostgreSQL      | tokio-postgres     | PostgreSQL client                 |
-| Error reporting | ariadne            | Source-mapped error diagnostics   |
-| REPL            | rustyline          | Line editing, history, completion |
-| Ordered maps    | indexmap           | Insertion-order-preserving maps   |
-| JSON            | serde + serde_json | JSON parsing and serialization    |
-| TOML            | toml               | Manifest file parsing             |
-| CORS            | tower-http         | Cross-Origin Resource Sharing     |
-| Regex           | regex              | Regular expression engine         |
-| UUID            | uuid               | UUID v4 generation                |
-| Crypto          | sha2, md5, base64  | Cryptographic hash functions      |
-| CSV             | csv                | CSV parsing and writing           |
+| Component       | Technology         | Purpose                            |
+| --------------- | ------------------ | ---------------------------------- |
+| Language        | Rust               | Core implementation                |
+| CLI framework   | clap               | Argument parsing, subcommands      |
+| HTTP server     | axum               | Async HTTP server runtime          |
+| HTTP client     | reqwest + rustls   | HTTPS requests (pure Rust TLS)     |
+| Async runtime   | tokio              | Async I/O, task scheduling         |
+| SQLite          | rusqlite           | Embedded database support          |
+| PostgreSQL      | tokio-postgres     | PostgreSQL client                  |
+| Error reporting | ariadne            | Source-mapped error diagnostics    |
+| REPL            | rustyline          | Line editing, history, completion  |
+| Ordered maps    | indexmap           | Insertion-order-preserving maps    |
+| JSON            | serde + serde_json | JSON parsing and serialization     |
+| TOML            | toml               | Manifest file parsing              |
+| CORS            | tower-http         | Cross-Origin Resource Sharing      |
+| Regex           | regex              | Regular expression engine          |
+| UUID            | uuid               | UUID v4 generation                 |
+| Crypto          | sha2, md5, base64  | Cryptographic hash functions       |
+| HMAC            | hmac               | HMAC-SHA256 message authentication |
+| URL             | url                | URL parsing and encoding           |
+| WebSocket       | tokio-tungstenite  | WebSocket client connections       |
+| Async streams   | futures-util       | Stream splitting and utilities     |
+| Dotenv          | dotenvy            | `.env` file loading                |
+| CSV             | csv                | CSV parsing and writing            |
 
 ### Design Principles
 
@@ -12002,10 +12423,13 @@ for rows.Next() {
 | 0.1.0   | Initial release: lexer, parser, interpreter, 8 stdlib modules                                                   |
 | 0.2.0   | Bytecode VM, mark-sweep GC, 15 stdlib modules, LSP, tutorials, AI chat, formatter, test runner, package manager |
 | 0.3.0   | 73 new functions, 16 modules, GenZ debug kit, NPC module, structured errors, 30 tutorials, 822 tests            |
+| 0.3.1   | Interface satisfaction checking (Go-style structural typing)                                                    |
+| 0.3.2   | Tokio spawn, language-level channels, native Option/spawn task handles                                          |
+| 0.3.3   | 3 new modules (url, toml, ws), 40+ new stdlib functions, HTTP params/form/auth/cookies, HMAC-SHA256, WebSockets |
 
 ### Acknowledgments
 
-Forge is written by **Archith Rapaka**. The language draws inspiration from:
+Forge is written by **Archith Rapaka**, Los Angeles. Co-authored with **Claude from Anthropic**, **Cursor**, and **Codex 5.3 from OpenAI**. The language draws inspiration from:
 
 - **Python** for its readability and gentle learning curve
 - **Go** for its simplicity and built-in tooling philosophy
@@ -12015,7 +12439,7 @@ Forge is written by **Archith Rapaka**. The language draws inspiration from:
 - **Lua** for its register-based VM design
 - **Swift** for its optional handling and guard statements
 
-Special thanks to the Rust ecosystem for the excellent crates that power Forge's runtime: `tokio`, `axum`, `reqwest`, `rusqlite`, `ariadne`, `clap`, `rustyline`, `serde`, and `indexmap`.
+Special thanks to the Rust ecosystem for the excellent crates that power Forge's runtime: `tokio`, `axum`, `reqwest`, `rusqlite`, `tokio-tungstenite`, `futures-util`, `hmac`, `url`, `dotenvy`, `ariadne`, `clap`, `rustyline`, `serde`, and `indexmap`.
 
 ---
 

@@ -634,6 +634,61 @@ let html = crawl "https://example.com"
 say html
 ```
 
+### Advanced fetch() Options
+
+Beyond basic GET/POST, `fetch()` supports query parameters, form data, basic authentication, and cookies through the options object.
+
+**Query parameters** — automatically appended to the URL:
+
+```forge
+let resp = fetch("https://httpbin.org/get", {
+    params: { search: "forge lang", page: 1, limit: 20 }
+})
+// Request URL becomes: https://httpbin.org/get?search=forge+lang&page=1&limit=20
+say resp.json.args.search  // "forge lang"
+```
+
+**Form data** — sends as `application/x-www-form-urlencoded`:
+
+```forge
+let resp = fetch("https://httpbin.org/post", {
+    method: "POST",
+    form: { username: "alice", password: "secret123" }
+})
+say resp.json.form.username  // "alice"
+```
+
+**Basic authentication**:
+
+```forge
+let resp = fetch("https://httpbin.org/basic-auth/admin/pass123", {
+    basic_auth: { username: "admin", password: "pass123" }
+})
+say resp.json.authenticated  // true
+```
+
+**Cookies**:
+
+```forge
+let resp = fetch("https://httpbin.org/cookies", {
+    cookies: { session: "abc123", theme: "dark" }
+})
+say resp.json.cookies.session  // "abc123"
+```
+
+All options can be combined in a single request:
+
+```forge
+let resp = fetch("https://api.example.com/search", {
+    method: "POST",
+    params: { version: "v2" },
+    form: { query: "forge" },
+    basic_auth: { username: "api_user", password: "api_key" },
+    cookies: { session: "token123" },
+    timeout: 10
+})
+```
+
 ### Project 1: API Consumer — GitHub Repository Dashboard
 
 This program fetches a user's GitHub repositories and displays them as a formatted
