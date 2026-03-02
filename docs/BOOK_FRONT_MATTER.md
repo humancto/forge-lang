@@ -54,7 +54,7 @@ Forge also reads like English. You can write `say "hello"` or `println("hello")`
 
 This book is organized in four parts:
 
-- **Part I: Foundations** covers installation, syntax, control flow, functions, collections, and error handling — everything you need to read and write Forge.
+- **Part I: Foundations** covers installation, syntax, control flow, functions, collections, error handling, and the type system (structs, methods, abilities, composition) — everything you need to read and write Forge.
 - **Part II: The Standard Library** documents all 16 built-in modules, function by function, with recipes for common tasks.
 - **Part III: Building Real Things** walks through complete projects — REST APIs, data pipelines, DevOps scripts, and AI integration.
 - **Part IV: Under the Hood** explains how Forge works internally — the lexer, parser, interpreter, bytecode VM, and toolchain.

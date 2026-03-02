@@ -2,7 +2,7 @@
 
 ---
 
-## Chapter 25: Architecture and Internals
+## Chapter 26: Architecture and Internals
 
 Every sufficiently advanced programming language eventually reveals its inner machinery to the curious developer. Understanding how Forge works beneath its friendly syntax transforms you from a user of the language into a collaborator with it. This chapter pulls back the curtain on Forge's implementation: approximately 26,000 lines of Rust spread across 56 source files, with zero `unsafe` blocks in the entire codebase.
 
@@ -564,7 +564,7 @@ When an HTTP request arrives, the axum handler locks the interpreter, constructs
 
 ---
 
-## Chapter 26: The Bytecode VM
+## Chapter 27: The Bytecode VM
 
 While the tree-walk interpreter provides full-featured execution, some workloads benefit from the tighter execution loop of a bytecode virtual machine. Forge includes an experimental register-based VM activated with the `--vm` flag. This chapter examines its design, instruction set, and runtime subsystems.
 
@@ -919,7 +919,7 @@ The `--vm` flag is experimental. It supports core language features (variables, 
 
 ---
 
-## Chapter 27: Tooling Deep Dive
+## Chapter 28: Tooling Deep Dive
 
 A programming language is only as good as its tools. Forge ships with a comprehensive toolchain that handles formatting, testing, project scaffolding, compilation, package management, editor integration, interactive learning, and AI-assisted development—all from a single binary.
 

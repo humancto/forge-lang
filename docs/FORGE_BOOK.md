@@ -840,17 +840,88 @@ say value  // 25
 
 `must` is intentionally aggressive — it signals to both the runtime and the reader that failure is not expected here.
 
-### Interfaces
+### Structs and Things
 
-Forge supports Go-style implicit interfaces:
+Forge lets you define named data types with typed fields. The classic syntax uses `struct`, the natural syntax uses `thing`:
 
 ```
-interface Printable {
-    fn to_string() -> String
+// Classic                          // Natural
+struct Person {                     thing Person {
+    name: String,                       name: String,
+    age: Int,                           age: Int,
+    role: String = "member"             role: String = "member"
+}                                   }
+```
+
+Fields can have default values. Create instances with the type name directly or with `craft`:
+
+```
+let alice = Person { name: "Alice", age: 30 }
+set bob to craft Person { name: "Bob", age: 25, role: "admin" }
+say alice.role  // member (default)
+```
+
+### Methods with give/impl
+
+Attach methods to a type using `give` (natural) or `impl` (classic). Use `it` as the self-reference:
+
+```
+give Person {
+    define greet(it) {
+        return "Hi, I'm " + it.name + ", age " + str(it.age)
+    }
+
+    // Static method (no "it" parameter)
+    define infant(name) {
+        return craft Person { name: name, age: 0 }
+    }
 }
+
+say alice.greet()              // Hi, I'm Alice, age 30
+set baby to Person.infant("Eve")
+say baby.greet()               // Hi, I'm Eve, age 0
 ```
 
-A type satisfies an interface if it has all the required methods. No explicit `implements` declaration is needed.
+### Abilities (Interfaces)
+
+Define contracts with `power` (natural) or `interface` (classic). Implement them with `give ... the power ...` or `impl ... for ...`:
+
+```
+power Describable {
+    fn describe() -> String
+}
+
+give Person the power Describable {
+    define describe(it) {
+        return it.name + " (" + it.role + ")"
+    }
+}
+
+say alice.describe()                    // Alice (member)
+say satisfies(alice, Describable)       // true
+```
+
+Forge validates at definition time — if a required method is missing from the `give` block, you get an error immediately.
+
+### Composition with has
+
+Embed one type inside another using `has`. Fields and methods delegate automatically:
+
+```
+thing Address { street: String, city: String }
+thing Employee { name: String, has addr: Address }
+
+give Address {
+    define full(it) { return it.street + ", " + it.city }
+}
+
+set emp to craft Employee {
+    name: "Charlie",
+    addr: craft Address { street: "123 Main St", city: "Portland" }
+}
+say emp.city     // Portland (delegated to emp.addr.city)
+say emp.full()   // 123 Main St, Portland (delegated)
+```
 
 ### Type Checking
 
@@ -1990,52 +2061,58 @@ The manifest configures:
 
 ### Classic Keywords
 
-| Keyword           | Purpose              | Example                    |
-| ----------------- | -------------------- | -------------------------- |
-| `let`             | Variable declaration | `let x = 42`               |
-| `mut`             | Mutable modifier     | `let mut x = 0`            |
-| `fn`              | Function definition  | `fn add(a, b) { }`         |
-| `return`          | Return value         | `return x + 1`             |
-| `if`              | Conditional          | `if x > 0 { }`             |
-| `else`            | Else branch          | `} else { }`               |
-| `match`           | Pattern matching     | `match x { ... }`          |
-| `for`             | For loop             | `for i in items { }`       |
-| `in`              | Iterator keyword     | `for i in items`           |
-| `while`           | While loop           | `while x > 0 { }`          |
-| `loop`            | Infinite loop        | `loop { break }`           |
-| `break`           | Exit loop            | `break`                    |
-| `continue`        | Skip iteration       | `continue`                 |
-| `type`            | Type definition      | `type Color = Red \| Blue` |
-| `struct`          | Struct definition    | `struct Point { x: Int }`  |
-| `interface`       | Interface definition | `interface Printable { }`  |
-| `import`          | Import module        | `import "utils"`           |
-| `spawn`           | Background thread    | `spawn { work() }`         |
-| `true` / `false`  | Boolean literals     | `let x = true`             |
-| `try` / `catch`   | Error handling       | `try { } catch e { }`      |
-| `async` / `await` | Async functions      | `async fn load() { }`      |
+| Keyword           | Purpose              | Example                           |
+| ----------------- | -------------------- | --------------------------------- |
+| `let`             | Variable declaration | `let x = 42`                      |
+| `mut`             | Mutable modifier     | `let mut x = 0`                   |
+| `fn`              | Function definition  | `fn add(a, b) { }`                |
+| `return`          | Return value         | `return x + 1`                    |
+| `if`              | Conditional          | `if x > 0 { }`                    |
+| `else`            | Else branch          | `} else { }`                      |
+| `match`           | Pattern matching     | `match x { ... }`                 |
+| `for`             | For loop             | `for i in items { }`              |
+| `in`              | Iterator keyword     | `for i in items`                  |
+| `while`           | While loop           | `while x > 0 { }`                 |
+| `loop`            | Infinite loop        | `loop { break }`                  |
+| `break`           | Exit loop            | `break`                           |
+| `continue`        | Skip iteration       | `continue`                        |
+| `type`            | Type definition      | `type Color = Red \| Blue`        |
+| `struct`          | Struct definition    | `struct Point { x: Int }`         |
+| `interface`       | Interface definition | `interface Printable { }`         |
+| `impl`            | Attach methods       | `impl Person { fn greet(it) {} }` |
+| `import`          | Import module        | `import "utils"`                  |
+| `spawn`           | Background thread    | `spawn { work() }`                |
+| `true` / `false`  | Boolean literals     | `let x = true`                    |
+| `try` / `catch`   | Error handling       | `try { } catch e { }`             |
+| `async` / `await` | Async functions      | `async fn load() { }`             |
 
 ### Natural Keywords
 
-| Keyword     | Classic Equivalent   | Example                  |
-| ----------- | -------------------- | ------------------------ |
-| `set`       | `let`                | `set name to "Forge"`    |
-| `to`        | `=` (in set context) | `set x to 42`            |
-| `change`    | reassignment         | `change x to x + 1`      |
-| `define`    | `fn`                 | `define greet(name) { }` |
-| `otherwise` | `else`               | `} otherwise { }`        |
-| `nah`       | `else`               | `} nah { }`              |
-| `each`      | (in for)             | `for each item in list`  |
-| `repeat`    | counted loop         | `repeat 3 times { }`     |
-| `times`     | (with repeat)        | `repeat N times { }`     |
-| `say`       | `println`            | `say "hello"`            |
-| `yell`      | uppercase println    | `yell "loud"`            |
-| `whisper`   | lowercase println    | `whisper "quiet"`        |
-| `grab`      | fetch                | `grab data from "url"`   |
-| `wait`      | sleep                | `wait 2 seconds`         |
-| `forge`     | async function       | `forge fn load() { }`    |
-| `hold`      | await                | `hold fetch("url")`      |
-| `emit`      | yield                | `emit value`             |
-| `unpack`    | destructure          | `unpack {a, b} from obj` |
+| Keyword     | Classic Equivalent   | Example                         |
+| ----------- | -------------------- | ------------------------------- |
+| `set`       | `let`                | `set name to "Forge"`           |
+| `to`        | `=` (in set context) | `set x to 42`                   |
+| `change`    | reassignment         | `change x to x + 1`             |
+| `define`    | `fn`                 | `define greet(name) { }`        |
+| `otherwise` | `else`               | `} otherwise { }`               |
+| `nah`       | `else`               | `} nah { }`                     |
+| `each`      | (in for)             | `for each item in list`         |
+| `repeat`    | counted loop         | `repeat 3 times { }`            |
+| `times`     | (with repeat)        | `repeat N times { }`            |
+| `say`       | `println`            | `say "hello"`                   |
+| `yell`      | uppercase println    | `yell "loud"`                   |
+| `whisper`   | lowercase println    | `whisper "quiet"`               |
+| `grab`      | fetch                | `grab data from "url"`          |
+| `wait`      | sleep                | `wait 2 seconds`                |
+| `forge`     | async function       | `forge fn load() { }`           |
+| `hold`      | await                | `hold fetch("url")`             |
+| `emit`      | yield                | `emit value`                    |
+| `unpack`    | destructure          | `unpack {a, b} from obj`        |
+| `thing`     | `struct`             | `thing Person { name: String }` |
+| `power`     | `interface`          | `power Greetable { }`           |
+| `give`      | `impl`               | `give Person { }`               |
+| `craft`     | constructor          | `craft Person { name: "A" }`    |
+| `the`       | connector            | `give X the power Y { }`        |
 
 ### Innovation Keywords
 

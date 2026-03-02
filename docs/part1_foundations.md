@@ -3136,3 +3136,321 @@ This pattern — functions returning Results, `?` propagating errors, `match` ha
 2. **Graceful Defaults.** Write a program that tries to parse three strings as integers using a function that returns `Result`. Use `unwrap_or` to provide a default of `0` for any string that fails to parse. Compute and print the sum. Test with `["42", "not_a_number", "8"]` (expected sum: 50).
 
 3. **Error Reporter.** Write a function `validate_user(name, age_str)` that returns `Err` if the name is empty, `Err` if the age string cannot be parsed as an integer, and `Err` if the age is negative. On success, return `Ok({ name: name, age: age })`. Test with valid input, empty name, invalid age string, and negative age. Use `match` to print a specific message for each case.
+
+---
+
+## Chapter 9: Structs, Methods, and Abilities
+
+Until now, every piece of data you have worked with has been a plain object — a bag of key-value pairs with no formal shape. That works fine for small scripts, but the moment you are building something larger, you need guarantees: this object _will_ have a `name` field, this method _belongs_ to this type, this type _satisfies_ this contract. That is what Forge's type system gives you.
+
+Like everything in Forge, the type system has two spellings. The classic syntax uses `struct`, `interface`, and `impl` — familiar to anyone who has written Rust or Go. The natural syntax uses `thing`, `power`, and `give` — words that read like English and feel at home in Forge. Both compile to exactly the same thing.
+
+### Defining Data Types
+
+A struct (or thing) defines a named data type with typed fields:
+
+```forge
+// Classic syntax
+struct Point {
+    x: Int,
+    y: Int
+}
+
+// Natural syntax — same result
+thing Point {
+    x: Int,
+    y: Int
+}
+```
+
+Both create a type called `Point` with two integer fields. Use whichever reads better to you.
+
+#### Creating Instances
+
+There are two ways to create an instance. Classic syntax uses the type name directly. Natural syntax uses the `craft` keyword:
+
+```forge
+// Classic
+let p = Point { x: 3, y: 4 }
+
+// Natural
+set p to craft Point { x: 3, y: 4 }
+```
+
+Both produce an object with a `__type__` field set to `"Point"`, plus the fields you specified. You access fields with dot notation as you would expect:
+
+```forge
+say p.x      // 3
+say p.y      // 4
+```
+
+#### Default Values
+
+Fields can have default values. If you omit them during construction, the default kicks in:
+
+```forge
+thing Config {
+    host: String = "localhost",
+    port: Int = 8080,
+    debug: Bool = false
+}
+
+set cfg to craft Config {}
+say cfg.host   // localhost
+say cfg.port   // 8080
+
+// Override just what you need
+set prod to craft Config { host: "api.example.com", port: 443 }
+say prod.host   // api.example.com
+say prod.debug  // false (default)
+```
+
+Any field without a default is required — omitting it is an error.
+
+### Attaching Methods
+
+A data type on its own is just data. To give it behavior, you write a `give` block (or `impl` block in classic syntax):
+
+```forge
+thing Person {
+    name: String,
+    age: Int
+}
+
+// Natural syntax
+give Person {
+    define greet(it) {
+        return "Hi, I'm " + it.name + ", age " + str(it.age)
+    }
+}
+
+// Classic syntax — same result
+impl Person {
+    fn greet(it) {
+        return "Hi, I'm " + it.name + ", age " + str(it.age)
+    }
+}
+```
+
+The `it` parameter is Forge's self-reference. When you call `alice.greet()`, the object `alice` is automatically passed as `it`. You do not include `it` in the call — just in the definition.
+
+```forge
+set alice to craft Person { name: "Alice", age: 30 }
+say alice.greet()   // Hi, I'm Alice, age 30
+```
+
+#### Static Methods
+
+If a method's first parameter is _not_ `it`, it becomes a static method — called on the type itself, not on an instance:
+
+```forge
+give Person {
+    define infant(name) {
+        return craft Person { name: name, age: 0 }
+    }
+}
+
+set baby to Person.infant("Bob")
+say baby.greet()   // Hi, I'm Bob, age 0
+```
+
+Static methods are useful for constructors, factory functions, and utility methods that belong to the type but do not need an instance.
+
+#### Multiple give Blocks
+
+You can write multiple `give` blocks for the same type. Methods accumulate:
+
+```forge
+give Person {
+    define greet(it) {
+        return "Hi, I'm " + it.name
+    }
+}
+
+give Person {
+    define birthday(it) {
+        return craft Person { name: it.name, age: it.age + 1 }
+    }
+}
+
+set p to craft Person { name: "Alice", age: 30 }
+say p.greet()             // Hi, I'm Alice
+set older to p.birthday()
+say older.age             // 31
+```
+
+### Abilities (Interfaces)
+
+An ability (or interface) defines a contract — a set of methods that a type must provide:
+
+```forge
+// Natural syntax
+power Describable {
+    fn describe() -> String
+}
+
+// Classic syntax
+interface Describable {
+    fn describe() -> String
+}
+```
+
+On their own, abilities do nothing. They become useful when you attach them to a type.
+
+#### Implementing an Ability
+
+The `give ... the power ...` syntax (or `impl ... for ...` in classic) declares that a type satisfies an ability, and provides the required methods:
+
+```forge
+// Natural
+give Person the power Describable {
+    define describe(it) {
+        return it.name + " (" + str(it.age) + ")"
+    }
+}
+
+// Classic — same thing
+impl Describable for Person {
+    fn describe(it) {
+        return it.name + " (" + str(it.age) + ")"
+    }
+}
+```
+
+Forge validates the implementation at definition time. If the ability requires a `describe` method and you forgot to include it, you get an error immediately — not when you first try to call it.
+
+#### Checking Satisfaction
+
+The `satisfies()` function checks whether a value's type satisfies an ability:
+
+```forge
+set alice to craft Person { name: "Alice", age: 30 }
+say satisfies(alice, Describable)   // true
+say alice.describe()                // Alice (30)
+```
+
+### Composition with has
+
+Forge supports composition — embedding one type inside another — using the `has` keyword inside a struct or thing body:
+
+```forge
+thing Address {
+    street: String,
+    city: String
+}
+
+thing Employee {
+    name: String,
+    has addr: Address
+}
+
+give Address {
+    define full(it) {
+        return it.street + ", " + it.city
+    }
+}
+```
+
+The `has` keyword does two things:
+
+1. **Field delegation.** Accessing a field that does not exist on the outer type automatically delegates to the embedded type. `emp.city` becomes `emp.addr.city`.
+2. **Method delegation.** Calling a method that does not exist on the outer type delegates to the embedded type. `emp.full()` becomes `emp.addr.full()`.
+
+```forge
+set emp to craft Employee {
+    name: "Charlie",
+    addr: craft Address { street: "123 Main St", city: "Portland" }
+}
+
+say emp.city     // Portland (delegated to emp.addr.city)
+say emp.full()   // 123 Main St, Portland (delegated to emp.addr.full())
+```
+
+The explicit path also works — `emp.addr.city` and `emp.addr.full()` produce the same results. The delegation is a convenience, not a replacement.
+
+### Dual Syntax Reference
+
+Every construct in this chapter has two spellings. Here is the complete mapping:
+
+| Concept          | Classic Syntax                     | Natural Syntax                            |
+| ---------------- | ---------------------------------- | ----------------------------------------- |
+| Define data type | `struct Person { }`                | `thing Person { }`                        |
+| Define contract  | `interface Greetable { }`          | `power Greetable { }`                     |
+| Attach methods   | `impl Person { }`                  | `give Person { }`                         |
+| Satisfy contract | `impl Greetable for Person { }`    | `give Person the power Greetable { }`     |
+| Create instance  | `let p = Person { name: "Alice" }` | `set p to craft Person { name: "Alice" }` |
+| Self-reference   | `it` (first parameter)             | `it` (first parameter)                    |
+| Embed a type     | `has addr: Address`                | `has addr: Address`                       |
+
+Both syntaxes can be mixed freely in the same file. Use whichever reads better in context.
+
+### A Complete Example
+
+Here is a full program that exercises every feature from this chapter:
+
+```forge
+// Define types
+thing Animal {
+    species: String,
+    sound: String = "..."
+}
+
+thing Pet {
+    name: String,
+    has animal: Animal
+}
+
+// Define an ability
+power Vocal {
+    fn speak() -> String
+}
+
+// Attach methods to Animal
+give Animal {
+    define describe(it) {
+        return it.species + " that says " + it.sound
+    }
+}
+
+// Give Animal the Vocal ability
+give Animal the power Vocal {
+    define speak(it) {
+        return it.sound + "! " + it.sound + "!"
+    }
+}
+
+// Give Pet its own methods
+give Pet {
+    define introduce(it) {
+        return it.name + " the " + it.species
+    }
+}
+
+// Create instances
+set dog to craft Pet {
+    name: "Rex",
+    animal: craft Animal { species: "Dog", sound: "Woof" }
+}
+
+// Field delegation (has)
+say dog.species         // Dog (delegated to dog.animal.species)
+say dog.sound           // Woof (delegated)
+
+// Method delegation (has)
+say dog.describe()      // Dog that says Woof
+say dog.speak()         // Woof! Woof!
+
+// Pet's own method
+say dog.introduce()     // Rex the Dog
+
+// Ability check
+say satisfies(dog.animal, Vocal)  // true
+```
+
+### Try It Yourself
+
+1. **Shape Calculator.** Define a `thing Rectangle` with `width` and `height` fields. Write a `give` block with methods `area(it)` (returns width _ height) and `perimeter(it)` (returns 2 _ (width + height)). Create a rectangle and print both values.
+
+2. **Builder Pattern.** Define a `thing Request` with fields `url: String`, `method: String = "GET"`, and `timeout: Int = 30`. Write a static method `Request.create(url)` that returns a Request with defaults. Then write instance methods `with_method(it, m)` and `with_timeout(it, t)` that return new Request instances with the given field changed. Chain them: `Request.create("https://api.example.com").with_method("POST").with_timeout(10)`.
+
+3. **Ability Validation.** Define a `power Serializable` with a `fn to_string() -> String` method. Define two things: `User` (with name and email) and `Product` (with title and price). Give `User` the Serializable ability. Verify that `satisfies(user, Serializable)` returns true. Try calling `satisfies(product, Serializable)` without implementing it — it should return false.

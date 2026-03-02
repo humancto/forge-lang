@@ -2,7 +2,7 @@
 
 ---
 
-## Chapter 20: Building REST APIs
+## Chapter 21: Building REST APIs
 
 Every modern application needs an API. Whether you're building a mobile backend, a
 microservice, or a simple webhook receiver, the ability to stand up an HTTP server quickly
@@ -536,7 +536,7 @@ To bind to localhost only, pass the `host` argument:
 
 ---
 
-## Chapter 21: HTTP Client and Web Automation
+## Chapter 22: HTTP Client and Web Automation
 
 Building APIs is only half the story. Modern applications also _consume_ APIs—pulling
 data from GitHub, checking service health, downloading files, and scraping web content.
@@ -899,7 +899,7 @@ term.success("Scraping complete!")
 
 ---
 
-## Chapter 22: Data Processing Pipelines
+## Chapter 23: Data Processing Pipelines
 
 Data processing is the bread and butter of practical programming. You receive data in
 one format, transform it, analyze it, and present the results. Forge excels at this
@@ -1382,7 +1382,7 @@ term.success("Conversion pipeline complete!")
 
 ---
 
-## Chapter 23: DevOps and System Automation
+## Chapter 24: DevOps and System Automation
 
 System administrators and DevOps engineers spend their days automating repetitive tasks:
 checking system health, deploying applications, rotating backups, validating
@@ -2097,7 +2097,7 @@ term.success("Backup complete!")
 
 ---
 
-## Chapter 24: AI Integration
+## Chapter 25: AI Integration
 
 Forge has a built-in connection to large language models through the `ask` keyword. This
 isn't a library you install or an API you configure—it's a language-level primitive that

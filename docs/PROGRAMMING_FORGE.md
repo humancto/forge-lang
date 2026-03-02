@@ -3230,6 +3230,302 @@ This pattern — functions returning Results, `?` propagating errors, `match` ha
 
 3. **Error Reporter.** Write a function `validate_user(name, age_str)` that returns `Err` if the name is empty, `Err` if the age string cannot be parsed as an integer, and `Err` if the age is negative. On success, return `Ok({ name: name, age: age })`. Test with valid input, empty name, invalid age string, and negative age. Use `match` to print a specific message for each case.
 
+## Chapter 9: Structs, Methods, and Abilities
+
+Until now, every piece of data you have worked with has been a plain object — a bag of key-value pairs with no formal shape. That works fine for small scripts, but the moment you are building something larger, you need guarantees: this object _will_ have a `name` field, this method _belongs_ to this type, this type _satisfies_ this contract. That is what Forge's type system gives you.
+
+Like everything in Forge, the type system has two spellings. The classic syntax uses `struct`, `interface`, and `impl` — familiar to anyone who has written Rust or Go. The natural syntax uses `thing`, `power`, and `give` — words that read like English and feel at home in Forge. Both compile to exactly the same thing.
+
+### Defining Data Types
+
+A struct (or thing) defines a named data type with typed fields:
+
+```forge
+// Classic syntax
+struct Point {
+    x: Int,
+    y: Int
+}
+
+// Natural syntax — same result
+thing Point {
+    x: Int,
+    y: Int
+}
+```
+
+Both create a type called `Point` with two integer fields. Use whichever reads better to you.
+
+#### Creating Instances
+
+There are two ways to create an instance. Classic syntax uses the type name directly. Natural syntax uses the `craft` keyword:
+
+```forge
+// Classic
+let p = Point { x: 3, y: 4 }
+
+// Natural
+set p to craft Point { x: 3, y: 4 }
+```
+
+Both produce an object with a `__type__` field set to `"Point"`, plus the fields you specified. You access fields with dot notation:
+
+```forge
+say p.x      // 3
+say p.y      // 4
+```
+
+#### Default Values
+
+Fields can have default values. If you omit them during construction, the default kicks in:
+
+```forge
+thing Config {
+    host: String = "localhost",
+    port: Int = 8080,
+    debug: Bool = false
+}
+
+set cfg to craft Config {}
+say cfg.host   // localhost
+say cfg.port   // 8080
+
+// Override just what you need
+set prod to craft Config { host: "api.example.com", port: 443 }
+say prod.host   // api.example.com
+say prod.debug  // false (default)
+```
+
+Any field without a default is required — omitting it is an error.
+
+### Attaching Methods
+
+A data type on its own is just data. To give it behavior, you write a `give` block (or `impl` block in classic syntax):
+
+```forge
+thing Person {
+    name: String,
+    age: Int
+}
+
+// Natural syntax
+give Person {
+    define greet(it) {
+        return "Hi, I'm " + it.name + ", age " + str(it.age)
+    }
+}
+
+// Classic syntax — same result
+impl Person {
+    fn greet(it) {
+        return "Hi, I'm " + it.name + ", age " + str(it.age)
+    }
+}
+```
+
+The `it` parameter is Forge's self-reference. When you call `alice.greet()`, the object `alice` is automatically passed as `it`. You do not include `it` in the call — just in the definition.
+
+```forge
+set alice to craft Person { name: "Alice", age: 30 }
+say alice.greet()   // Hi, I'm Alice, age 30
+```
+
+#### Static Methods
+
+If a method's first parameter is _not_ `it`, it becomes a static method — called on the type itself, not on an instance:
+
+```forge
+give Person {
+    define infant(name) {
+        return craft Person { name: name, age: 0 }
+    }
+}
+
+set baby to Person.infant("Bob")
+say baby.greet()   // Hi, I'm Bob, age 0
+```
+
+Static methods are useful for constructors, factory functions, and utility methods that belong to the type but do not need an instance.
+
+#### Multiple give Blocks
+
+You can write multiple `give` blocks for the same type. Methods accumulate:
+
+```forge
+give Person {
+    define greet(it) {
+        return "Hi, I'm " + it.name
+    }
+}
+
+give Person {
+    define birthday(it) {
+        return craft Person { name: it.name, age: it.age + 1 }
+    }
+}
+
+set p to craft Person { name: "Alice", age: 30 }
+say p.greet()             // Hi, I'm Alice
+set older to p.birthday()
+say older.age             // 31
+```
+
+### Abilities (Interfaces)
+
+An ability (or interface) defines a contract — a set of methods that a type must provide:
+
+```forge
+// Natural syntax
+power Describable {
+    fn describe() -> String
+}
+
+// Classic syntax
+interface Describable {
+    fn describe() -> String
+}
+```
+
+On their own, abilities do nothing. They become useful when you attach them to a type.
+
+#### Implementing an Ability
+
+The `give ... the power ...` syntax (or `impl ... for ...` in classic) declares that a type satisfies an ability, and provides the required methods:
+
+```forge
+// Natural
+give Person the power Describable {
+    define describe(it) {
+        return it.name + " (" + str(it.age) + ")"
+    }
+}
+
+// Classic — same thing
+impl Describable for Person {
+    fn describe(it) {
+        return it.name + " (" + str(it.age) + ")"
+    }
+}
+```
+
+Forge validates the implementation at definition time. If the ability requires a `describe` method and you forgot to include it, you get an error immediately — not when you first try to call it.
+
+#### Checking Satisfaction
+
+The `satisfies()` function checks whether a value's type satisfies an ability:
+
+```forge
+set alice to craft Person { name: "Alice", age: 30 }
+say satisfies(alice, Describable)   // true
+say alice.describe()                // Alice (30)
+```
+
+### Composition with has
+
+Forge supports composition — embedding one type inside another — using the `has` keyword inside a struct or thing body:
+
+```forge
+thing Address {
+    street: String,
+    city: String
+}
+
+thing Employee {
+    name: String,
+    has addr: Address
+}
+
+give Address {
+    define full(it) {
+        return it.street + ", " + it.city
+    }
+}
+```
+
+The `has` keyword does two things:
+
+1. **Field delegation.** Accessing a field that does not exist on the outer type automatically delegates to the embedded type. `emp.city` becomes `emp.addr.city`.
+2. **Method delegation.** Calling a method that does not exist on the outer type delegates to the embedded type. `emp.full()` becomes `emp.addr.full()`.
+
+```forge
+set emp to craft Employee {
+    name: "Charlie",
+    addr: craft Address { street: "123 Main St", city: "Portland" }
+}
+
+say emp.city     // Portland (delegated to emp.addr.city)
+say emp.full()   // 123 Main St, Portland (delegated to emp.addr.full())
+```
+
+The explicit path also works — `emp.addr.city` and `emp.addr.full()` produce the same results. The delegation is a convenience, not a replacement.
+
+### Dual Syntax Reference
+
+| Concept          | Classic Syntax                     | Natural Syntax                            |
+| ---------------- | ---------------------------------- | ----------------------------------------- |
+| Define data type | `struct Person { }`                | `thing Person { }`                        |
+| Define contract  | `interface Greetable { }`          | `power Greetable { }`                     |
+| Attach methods   | `impl Person { }`                  | `give Person { }`                         |
+| Satisfy contract | `impl Greetable for Person { }`    | `give Person the power Greetable { }`     |
+| Create instance  | `let p = Person { name: "Alice" }` | `set p to craft Person { name: "Alice" }` |
+| Self-reference   | `it` (first parameter)             | `it` (first parameter)                    |
+| Embed a type     | `has addr: Address`                | `has addr: Address`                       |
+
+### A Complete Example
+
+```forge
+thing Animal {
+    species: String,
+    sound: String = "..."
+}
+
+thing Pet {
+    name: String,
+    has animal: Animal
+}
+
+power Vocal {
+    fn speak() -> String
+}
+
+give Animal {
+    define describe(it) {
+        return it.species + " that says " + it.sound
+    }
+}
+
+give Animal the power Vocal {
+    define speak(it) {
+        return it.sound + "! " + it.sound + "!"
+    }
+}
+
+give Pet {
+    define introduce(it) {
+        return it.name + " the " + it.species
+    }
+}
+
+set dog to craft Pet {
+    name: "Rex",
+    animal: craft Animal { species: "Dog", sound: "Woof" }
+}
+
+say dog.species         // Dog (delegated)
+say dog.describe()      // Dog that says Woof (delegated)
+say dog.speak()         // Woof! Woof! (delegated)
+say dog.introduce()     // Rex the Dog
+say satisfies(dog.animal, Vocal)  // true
+```
+
+### Try It Yourself
+
+1. **Shape Calculator.** Define a `thing Rectangle` with `width` and `height` fields. Write a `give` block with methods `area(it)` and `perimeter(it)`. Create a rectangle and print both values.
+
+2. **Builder Pattern.** Define a `thing Request` with fields `url: String`, `method: String = "GET"`, and `timeout: Int = 30`. Write a static method `Request.create(url)` and instance methods `with_method(it, m)` and `with_timeout(it, t)` that return new instances. Chain them together.
+
+3. **Ability Validation.** Define a `power Serializable` with `fn to_string() -> String`. Give it to one type but not another. Verify `satisfies()` returns the correct result for each.
+
 # PART II: THE STANDARD LIBRARY
 
 ---
@@ -3240,7 +3536,7 @@ Part II is both a reference and a cookbook. Each chapter documents every functio
 
 ---
 
-## Chapter 9: math — Numbers and Computation
+## Chapter 10: math — Numbers and Computation
 
 Mathematics is the bedrock of programming, and Forge's `math` module provides the essential toolkit: constants, arithmetic helpers, trigonometric functions, and random number generation. Every function in the module accepts both `Int` and `Float` arguments, coercing integers to floating-point where the result demands it. The module covers the same ground as a scientific calculator—enough to build simulations, games, data analysis pipelines, and engineering tools without reaching for an external library.
 
@@ -3525,7 +3821,7 @@ Std Dev: 12.396773926563296
 
 ---
 
-## Chapter 10: fs — File System
+## Chapter 11: fs — File System
 
 The `fs` module gives Forge programs the ability to read, write, copy, rename, and inspect files and directories. It wraps the operating system's file APIs in a set of straightforward functions that accept string paths and return predictable results. Whether you are writing a quick script that processes a log file or building a tool that manages configuration across a project, `fs` is the module you will reach for first.
 
@@ -3844,7 +4140,7 @@ for f in files_to_backup {
 
 ---
 
-## Chapter 11: crypto — Hashing and Encoding
+## Chapter 12: crypto — Hashing and Encoding
 
 The `crypto` module provides hashing algorithms and encoding utilities. It is intentionally small: two hash functions (SHA-256 and MD5) and two pairs of encode/decode functions (Base64 and hexadecimal). These six functions cover the most common needs—verifying data integrity, generating fingerprints, and preparing binary data for text-safe transport.
 
@@ -4082,7 +4378,7 @@ A == C: false
 
 ---
 
-## Chapter 12: db — SQLite
+## Chapter 13: db — SQLite
 
 Forge includes a built-in SQLite driver, making it trivial to store and query structured data without installing a database server. The `db` module connects to a file-based database or an in-memory database, executes SQL statements, and returns results as arrays of Forge objects—no ORM layer, no mapping configuration. This makes Forge an excellent choice for data scripts, CLI tools, prototyping, and local applications.
 
@@ -4378,7 +4674,7 @@ Test passed: no dangerously low stock
 
 ---
 
-## Chapter 13: pg — PostgreSQL
+## Chapter 14: pg — PostgreSQL
 
 While the `db` module handles local SQLite databases, the `pg` module connects Forge to PostgreSQL—the workhorse of production infrastructure. The API mirrors `db` closely (connect, query, execute, close), so moving from a prototype on SQLite to a production system on PostgreSQL requires minimal code changes.
 
@@ -4580,7 +4876,7 @@ say "Database: {health.status}"
 
 ---
 
-## Chapter 14: json — Serialization
+## Chapter 15: json — Serialization
 
 JSON is the lingua franca of modern APIs, configuration files, and data exchange. Forge embraces JSON at the language level—object literals in Forge _are_ JSON-compatible structures—and the `json` module provides three functions to move between Forge values and JSON text.
 
@@ -4840,7 +5136,7 @@ say "User prefs: {json.stringify(user_prefs)}"
 
 ---
 
-## Chapter 15: regex — Regular Expressions
+## Chapter 16: regex — Regular Expressions
 
 Regular expressions are the Swiss Army knife of text processing, and Forge's `regex` module makes them accessible through five focused functions. You can test whether a pattern matches, extract the first or all occurrences, replace matches, or split text by a pattern. Under the hood, Forge uses Rust's `regex` crate—one of the fastest regex engines available—so even complex patterns over large inputs run efficiently.
 
@@ -5095,7 +5391,7 @@ Contact [REDACTED-EMAIL], SSN [REDACTED-SSN], Card [REDACTED-CC]
 
 ---
 
-## Chapter 16: env — Environment Variables
+## Chapter 17: env — Environment Variables
 
 Environment variables are the standard mechanism for passing configuration to applications. The `env` module provides four functions that read, write, check, and enumerate environment variables within the running Forge process. Values set with `env.set()` affect only the current process and its children—they do not persist after the program exits.
 
@@ -5311,7 +5607,7 @@ let ok = validate_secrets(required)
 
 ---
 
-## Chapter 17: csv — Tabular Data
+## Chapter 18: csv — Tabular Data
 
 CSV (Comma-Separated Values) remains one of the most widely used data exchange formats, particularly for spreadsheets, data exports, and ETL pipelines. The `csv` module handles parsing and serialization of CSV data, automatically detecting column types and producing clean output. It treats the first row as headers and returns an array of objects where each key is a column name.
 
@@ -5559,7 +5855,7 @@ fs.remove("/tmp/sensor_summary.csv")
 
 ---
 
-## Chapter 18: log — Structured Logging
+## Chapter 19: log — Structured Logging
 
 Every non-trivial program needs logging, and the `log` module provides four severity-level functions that write timestamped, color-coded messages to standard error. The interface is intentionally simple—call the function matching your severity level and pass any number of arguments. The module handles formatting, timestamps, and color.
 
@@ -5782,7 +6078,7 @@ startup_checks()
 
 ---
 
-## Chapter 19: term — Terminal UI
+## Chapter 20: term — Terminal UI
 
 The `term` module transforms the terminal from a plain text canvas into a rich presentation layer. It offers color functions for styling text, display functions for structured output like tables and progress bars, interactive prompts for user input, and visual effects that bring CLI applications to life. If you are building a command-line tool, a dashboard, or any interactive script, `term` is the module that makes it polished.
 
@@ -6284,7 +6580,7 @@ build_project(steps)
 
 ---
 
-## Chapter 20: Shell Integration — First-Class Bash
+## Chapter 21: Shell Integration — First-Class Bash
 
 Forge treats the shell as a first-class citizen. Ten built-in functions give you full control over system commands, from quick one-liners to piping Forge data through Unix tool chains. There is no module prefix—these functions are available globally, so you can run `sh("date")` or `pipe_to(data, "sort -n")` anywhere in your program. Combined with Forge's data types and control flow, they turn scripts into powerful automation tools without dropping to a separate shell.
 
@@ -6780,7 +7076,7 @@ say "Error count: {len(err_lines)}"
 
 ---
 
-## Chapter 21: npc — Fake Data Generation
+## Chapter 22: npc — Fake Data Generation
 
 Need test data? Prototyping a UI? Building a seed script? The `npc` module generates realistic fake data without external dependencies. Every call returns different random data.
 
@@ -6843,7 +7139,7 @@ say json.pretty(payload)
 
 ---
 
-## Chapter 22: String Transformations
+## Chapter 23: String Transformations
 
 Forge includes powerful string transformation builtins that go beyond basic split/join. All support method syntax (`str.function()`).
 
@@ -6890,7 +7186,7 @@ say camel_case(db_column)    // createdAt
 
 ---
 
-## Chapter 23: Collection Power Tools
+## Chapter 24: Collection Power Tools
 
 Beyond `map`, `filter`, and `reduce`, Forge offers a comprehensive collection toolkit. All functions support method syntax.
 
@@ -6959,7 +7255,7 @@ let changes = diff(before, after)
 
 ---
 
-## Chapter 24: GenZ Debug Kit
+## Chapter 25: GenZ Debug Kit
 
 Forge's most distinctive feature: debugging and assertions with personality. These builtins do the same job as traditional tools but with memorable names and expressive error messages that make debugging less painful and more fun.
 
@@ -7002,7 +7298,7 @@ let result = yolo(fn() {
 
 ---
 
-## Chapter 25: Execution Helpers
+## Chapter 26: Execution Helpers
 
 Built-in performance profiling and resilient execution patterns — no external tools needed.
 
@@ -7057,7 +7353,7 @@ let stats_b = slay(fn() {
 
 ---
 
-## Chapter 26: Advanced Testing
+## Chapter 27: Advanced Testing
 
 Forge's test framework supports decorators, hooks, assertions, and structured error handling.
 
@@ -7128,7 +7424,7 @@ Run with filter: `forge test --filter "math"` — runs only tests with "math" in
 
 ---
 
-## Chapter 27: math & fs Additions
+## Chapter 28: math & fs Additions
 
 ### New math Functions
 
@@ -7172,7 +7468,7 @@ _This concludes Part II: The Standard Library. With sixteen modules, a GenZ debu
 
 ---
 
-## Chapter 28: Building REST APIs
+## Chapter 29: Building REST APIs
 
 Every modern application needs an API. Whether you're building a mobile backend, a
 microservice, or a simple webhook receiver, the ability to stand up an HTTP server quickly
@@ -7706,7 +8002,7 @@ To bind to localhost only, pass the `host` argument:
 
 ---
 
-## Chapter 29: HTTP Client and Web Automation
+## Chapter 30: HTTP Client and Web Automation
 
 Building APIs is only half the story. Modern applications also _consume_ APIs—pulling
 data from GitHub, checking service health, downloading files, and scraping web content.
@@ -8069,7 +8365,7 @@ term.success("Scraping complete!")
 
 ---
 
-## Chapter 30: Data Processing Pipelines
+## Chapter 31: Data Processing Pipelines
 
 Data processing is the bread and butter of practical programming. You receive data in
 one format, transform it, analyze it, and present the results. Forge excels at this
@@ -8552,7 +8848,7 @@ term.success("Conversion pipeline complete!")
 
 ---
 
-## Chapter 31: DevOps and System Automation
+## Chapter 32: DevOps and System Automation
 
 System administrators and DevOps engineers spend their days automating repetitive tasks:
 checking system health, deploying applications, rotating backups, validating
@@ -9267,7 +9563,7 @@ term.success("Backup complete!")
 
 ---
 
-## Chapter 32: AI Integration
+## Chapter 33: AI Integration
 
 Forge has a built-in connection to large language models through the `ask` keyword. This
 isn't a library you install or an API you configure—it's a language-level primitive that
@@ -9562,7 +9858,7 @@ and how to publish Forge packages._
 
 ---
 
-## Chapter 33: Architecture and Internals
+## Chapter 34: Architecture and Internals
 
 Every sufficiently advanced programming language eventually reveals its inner machinery to the curious developer. Understanding how Forge works beneath its friendly syntax transforms you from a user of the language into a collaborator with it. This chapter pulls back the curtain on Forge's implementation: approximately 15,500 lines of Rust spread across 45 source files, with zero `unsafe` blocks in the entire codebase.
 
@@ -10124,7 +10420,7 @@ When an HTTP request arrives, the axum handler locks the interpreter, constructs
 
 ---
 
-## Chapter 34: The Bytecode VM
+## Chapter 35: The Bytecode VM
 
 While the tree-walk interpreter provides full-featured execution, some workloads benefit from the tighter execution loop of a bytecode virtual machine. Forge includes an experimental register-based VM activated with the `--vm` flag. This chapter examines its design, instruction set, and runtime subsystems.
 
@@ -10479,7 +10775,7 @@ The `--vm` flag is experimental. It supports core language features (variables, 
 
 ---
 
-## Chapter 35: Tooling Deep Dive
+## Chapter 36: Tooling Deep Dive
 
 A programming language is only as good as its tools. Forge ships with a comprehensive toolchain that handles formatting, testing, project scaffolding, compilation, package management, editor integration, interactive learning, and AI-assisted development—all from a single binary.
 
@@ -10740,8 +11036,8 @@ Forge recognizes 80+ keywords divided into three categories: classic keywords fa
 | `continue`  | Skip to next iteration     | `continue`                        | —                             |
 | `struct`    | Define structure           | `struct Point { x: Int, y: Int }` | Named product type            |
 | `type`      | Define algebraic data type | `type Color = Red \| Blue`        | Sum types with variants       |
-| `interface` | Define interface           | `interface Printable { print() }` | Method signatures             |
-| `impl`      | Implement interface        | `impl Printable for Point { }`    | Reserved for future use       |
+| `interface` | Define interface           | `interface Printable { print() }` | Synonym of `power`            |
+| `impl`      | Attach methods to type     | `impl Person { fn greet(it) {} }` | Synonym of `give`             |
 | `pub`       | Public visibility          | `pub fn api() { }`                | Reserved for future use       |
 | `import`    | Import module              | `import "utils.fg"`               | File or package import        |
 | `spawn`     | Launch concurrent task     | `spawn { heavy_work() }`          | Currently synchronous         |
@@ -10755,28 +11051,33 @@ Forge recognizes 80+ keywords divided into three categories: classic keywords fa
 
 ### Table A-2: Natural-Language Keywords
 
-| Keyword     | Purpose                     | Example                     | Classic Equivalent        |
-| ----------- | --------------------------- | --------------------------- | ------------------------- |
-| `set`       | Declare variable            | `set name to "Alice"`       | `let name = "Alice"`      |
-| `to`        | Assignment marker           | `set x to 42`               | `=` in `let`              |
-| `change`    | Reassign variable           | `change score to score + 1` | `score = score + 1`       |
-| `define`    | Define function             | `define greet(n) { }`       | `fn greet(n) { }`         |
-| `otherwise` | Alternative branch          | `otherwise { }`             | `else { }`                |
-| `nah`       | Alternative branch (casual) | `nah { }`                   | `else { }`                |
-| `each`      | Loop marker                 | `for each item in list { }` | `for item in list`        |
-| `repeat`    | Counted loop                | `repeat 5 times { }`        | `for _ in range(5)`       |
-| `times`     | Repeat unit                 | `repeat 3 times { }`        | —                         |
-| `grab`      | HTTP fetch                  | `grab resp from "url"`      | `let resp = fetch("url")` |
-| `from`      | Source marker               | `grab data from url`        | —                         |
-| `wait`      | Sleep / pause               | `wait 2 seconds`            | `sleep(2000)`             |
-| `seconds`   | Time unit                   | `wait 5 seconds`            | —                         |
-| `say`       | Print output                | `say "hello"`               | `println("hello")`        |
-| `yell`      | Print uppercase             | `yell "loud"`               | — (unique)                |
-| `whisper`   | Print lowercase             | `whisper "quiet"`           | — (unique)                |
-| `forge`     | Async function              | `forge fetch_data() { }`    | `async fn fetch_data()`   |
-| `hold`      | Await result                | `hold fetch("url")`         | `await fetch("url")`      |
-| `emit`      | Yield value                 | `emit computed_value`       | `yield computed_value`    |
-| `unpack`    | Destructure                 | `unpack {a, b} from obj`    | `let {a, b} = obj`        |
+| Keyword     | Purpose                     | Example                         | Classic Equivalent        |
+| ----------- | --------------------------- | ------------------------------- | ------------------------- |
+| `set`       | Declare variable            | `set name to "Alice"`           | `let name = "Alice"`      |
+| `to`        | Assignment marker           | `set x to 42`                   | `=` in `let`              |
+| `change`    | Reassign variable           | `change score to score + 1`     | `score = score + 1`       |
+| `define`    | Define function             | `define greet(n) { }`           | `fn greet(n) { }`         |
+| `otherwise` | Alternative branch          | `otherwise { }`                 | `else { }`                |
+| `nah`       | Alternative branch (casual) | `nah { }`                       | `else { }`                |
+| `each`      | Loop marker                 | `for each item in list { }`     | `for item in list`        |
+| `repeat`    | Counted loop                | `repeat 5 times { }`            | `for _ in range(5)`       |
+| `times`     | Repeat unit                 | `repeat 3 times { }`            | —                         |
+| `grab`      | HTTP fetch                  | `grab resp from "url"`          | `let resp = fetch("url")` |
+| `from`      | Source marker               | `grab data from url`            | —                         |
+| `wait`      | Sleep / pause               | `wait 2 seconds`                | `sleep(2000)`             |
+| `seconds`   | Time unit                   | `wait 5 seconds`                | —                         |
+| `say`       | Print output                | `say "hello"`                   | `println("hello")`        |
+| `yell`      | Print uppercase             | `yell "loud"`                   | — (unique)                |
+| `whisper`   | Print lowercase             | `whisper "quiet"`               | — (unique)                |
+| `forge`     | Async function              | `forge fetch_data() { }`        | `async fn fetch_data()`   |
+| `hold`      | Await result                | `hold fetch("url")`             | `await fetch("url")`      |
+| `emit`      | Yield value                 | `emit computed_value`           | `yield computed_value`    |
+| `unpack`    | Destructure                 | `unpack {a, b} from obj`        | `let {a, b} = obj`        |
+| `thing`     | Define data type            | `thing Person { name: String }` | `struct Person { }`       |
+| `power`     | Define ability/contract     | `power Greetable { }`           | `interface Greetable { }` |
+| `give`      | Attach methods to type      | `give Person { }`               | `impl Person { }`         |
+| `craft`     | Construct instance          | `craft Person { name: "A" }`    | `Person { name: "A" }`    |
+| `the`       | Connector in give...power   | `give X the power Y { }`        | `impl Y for X { }`        |
 
 ### Table A-3: Innovation Keywords
 

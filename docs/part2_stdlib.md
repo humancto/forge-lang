@@ -8,7 +8,7 @@ Part II is both a reference and a cookbook. Each chapter documents every functio
 
 ---
 
-## Chapter 9: math — Numbers and Computation
+## Chapter 10: math — Numbers and Computation
 
 Mathematics is the bedrock of programming, and Forge's `math` module provides the essential toolkit: constants, arithmetic helpers, trigonometric functions, and random number generation. Every function in the module accepts both `Int` and `Float` arguments, coercing integers to floating-point where the result demands it. The module covers the same ground as a scientific calculator—enough to build simulations, games, data analysis pipelines, and engineering tools without reaching for an external library.
 
@@ -293,7 +293,7 @@ Std Dev: 12.396773926563296
 
 ---
 
-## Chapter 10: fs — File System
+## Chapter 11: fs — File System
 
 The `fs` module gives Forge programs the ability to read, write, copy, rename, and inspect files and directories. It wraps the operating system's file APIs in a set of straightforward functions that accept string paths and return predictable results. Whether you are writing a quick script that processes a log file or building a tool that manages configuration across a project, `fs` is the module you will reach for first.
 
@@ -612,7 +612,7 @@ for f in files_to_backup {
 
 ---
 
-## Chapter 11: crypto — Hashing and Encoding
+## Chapter 12: crypto — Hashing and Encoding
 
 The `crypto` module provides hashing algorithms and encoding utilities. It is intentionally small: two hash functions (SHA-256 and MD5) and two pairs of encode/decode functions (Base64 and hexadecimal). These six functions cover the most common needs—verifying data integrity, generating fingerprints, and preparing binary data for text-safe transport.
 
@@ -850,7 +850,7 @@ A == C: false
 
 ---
 
-## Chapter 12: db — SQLite
+## Chapter 13: db — SQLite
 
 Forge includes a built-in SQLite driver, making it trivial to store and query structured data without installing a database server. The `db` module connects to a file-based database or an in-memory database, executes SQL statements, and returns results as arrays of Forge objects—no ORM layer, no mapping configuration. This makes Forge an excellent choice for data scripts, CLI tools, prototyping, and local applications.
 
@@ -1146,7 +1146,7 @@ Test passed: no dangerously low stock
 
 ---
 
-## Chapter 13: pg — PostgreSQL
+## Chapter 14: pg — PostgreSQL
 
 While the `db` module handles local SQLite databases, the `pg` module connects Forge to PostgreSQL—the workhorse of production infrastructure. The API mirrors `db` closely (connect, query, execute, close), so moving from a prototype on SQLite to a production system on PostgreSQL requires minimal code changes.
 
@@ -1348,7 +1348,7 @@ say "Database: {health.status}"
 
 ---
 
-## Chapter 14: json — Serialization
+## Chapter 15: json — Serialization
 
 JSON is the lingua franca of modern APIs, configuration files, and data exchange. Forge embraces JSON at the language level—object literals in Forge _are_ JSON-compatible structures—and the `json` module provides three functions to move between Forge values and JSON text.
 
@@ -1608,7 +1608,7 @@ say "User prefs: {json.stringify(user_prefs)}"
 
 ---
 
-## Chapter 15: regex — Regular Expressions
+## Chapter 16: regex — Regular Expressions
 
 Regular expressions are the Swiss Army knife of text processing, and Forge's `regex` module makes them accessible through five focused functions. You can test whether a pattern matches, extract the first or all occurrences, replace matches, or split text by a pattern. Under the hood, Forge uses Rust's `regex` crate—one of the fastest regex engines available—so even complex patterns over large inputs run efficiently.
 
@@ -1863,7 +1863,7 @@ Contact [REDACTED-EMAIL], SSN [REDACTED-SSN], Card [REDACTED-CC]
 
 ---
 
-## Chapter 16: env — Environment Variables
+## Chapter 17: env — Environment Variables
 
 Environment variables are the standard mechanism for passing configuration to applications. The `env` module provides four functions that read, write, check, and enumerate environment variables within the running Forge process. Values set with `env.set()` affect only the current process and its children—they do not persist after the program exits.
 
@@ -2079,7 +2079,7 @@ let ok = validate_secrets(required)
 
 ---
 
-## Chapter 17: csv — Tabular Data
+## Chapter 18: csv — Tabular Data
 
 CSV (Comma-Separated Values) remains one of the most widely used data exchange formats, particularly for spreadsheets, data exports, and ETL pipelines. The `csv` module handles parsing and serialization of CSV data, automatically detecting column types and producing clean output. It treats the first row as headers and returns an array of objects where each key is a column name.
 
@@ -2327,7 +2327,7 @@ fs.remove("/tmp/sensor_summary.csv")
 
 ---
 
-## Chapter 18: log — Structured Logging
+## Chapter 19: log — Structured Logging
 
 Every non-trivial program needs logging, and the `log` module provides four severity-level functions that write timestamped, color-coded messages to standard error. The interface is intentionally simple—call the function matching your severity level and pass any number of arguments. The module handles formatting, timestamps, and color.
 
@@ -2550,7 +2550,7 @@ startup_checks()
 
 ---
 
-## Chapter 19: term — Terminal UI
+## Chapter 20: term — Terminal UI
 
 The `term` module transforms the terminal from a plain text canvas into a rich presentation layer. It offers color functions for styling text, display functions for structured output like tables and progress bars, interactive prompts for user input, and visual effects that bring CLI applications to life. If you are building a command-line tool, a dashboard, or any interactive script, `term` is the module that makes it polished.
 
@@ -3052,7 +3052,7 @@ build_project(steps)
 
 ---
 
-## Chapter 20: Shell Integration — First-Class Bash
+## Chapter 21: Shell Integration — First-Class Bash
 
 Forge treats the shell as a first-class citizen. Ten built-in functions give you full control over system commands, from quick one-liners to piping Forge data through Unix tool chains. There is no module prefix—these functions are available globally, so you can run `sh("date")` or `pipe_to(data, "sort -n")` anywhere in your program. Combined with Forge's data types and control flow, they turn scripts into powerful automation tools without dropping to a separate shell.
 
@@ -3550,7 +3550,7 @@ say "Error count: {len(err_lines)}"
 
 ---
 
-## Chapter 21: npc — Fake Data Generation
+## Chapter 22: npc — Fake Data Generation
 
 Need test data? Prototyping a UI? Building a seed script? The `npc` module generates realistic fake data without external dependencies. Every call returns different random data.
 
@@ -3613,7 +3613,7 @@ say json.pretty(payload)
 
 ---
 
-## Chapter 22: String Transformations
+## Chapter 23: String Transformations
 
 Forge includes powerful string transformation builtins that go beyond basic split/join. All support method syntax (`str.function()`).
 
@@ -3660,7 +3660,7 @@ say camel_case(db_column)    // createdAt
 
 ---
 
-## Chapter 23: Collection Power Tools
+## Chapter 24: Collection Power Tools
 
 Beyond `map`, `filter`, and `reduce`, Forge offers a comprehensive collection toolkit. All functions support method syntax.
 
@@ -3729,7 +3729,7 @@ let changes = diff(before, after)
 
 ---
 
-## Chapter 24: GenZ Debug Kit
+## Chapter 25: GenZ Debug Kit
 
 Forge's most distinctive feature: debugging and assertions with personality. These builtins do the same job as traditional tools but with memorable names and expressive error messages that make debugging less painful and more fun.
 
@@ -3772,7 +3772,7 @@ let result = yolo(fn() {
 
 ---
 
-## Chapter 25: Execution Helpers
+## Chapter 26: Execution Helpers
 
 Built-in performance profiling and resilient execution patterns — no external tools needed.
 
@@ -3827,7 +3827,7 @@ let stats_b = slay(fn() {
 
 ---
 
-## Chapter 26: Advanced Testing
+## Chapter 27: Advanced Testing
 
 Forge's test framework supports decorators, hooks, assertions, and structured error handling.
 
@@ -3898,7 +3898,7 @@ Run with filter: `forge test --filter "math"` — runs only tests with "math" in
 
 ---
 
-## Chapter 27: math & fs Additions
+## Chapter 28: math & fs Additions
 
 ### New math Functions
 
