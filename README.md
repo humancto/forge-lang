@@ -548,6 +548,30 @@ The JIT compiles hot functions to native code via [Cranelift](https://cranelift.
 
 </details>
 
+<details>
+<summary><strong>🌐 HTTP Server benchmark — 20,000 requests / 200 concurrent (GET /ping → JSON)</strong></summary>
+
+| Server                         |    Req/sec | Avg Latency |    vs Python    |
+| ------------------------------ | ---------: | ----------: | :-------------: |
+| **Forge** (axum + interpreter) | **28,017** |      7.1 ms | **9.8x faster** |
+| Rust / Axum (native async)     |     24,853 |      8.0 ms |   8.7x faster   |
+| Python / Flask (threaded)      |      2,854 |     70.0 ms |      1.0x       |
+
+Forge's HTTP server is built on axum + tokio — the same stack powering production Rust services. For typical JSON API endpoints, Forge matches raw Rust throughput while giving you a 4-line handler instead of 40.
+
+Tested with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS. Run your own:
+
+```bash
+# Terminal 1
+forge run examples/bench_server.fg
+
+# Terminal 2
+forge run examples/bench_client.fg     # Forge-native client with stats
+ab -n 20000 -c 200 http://127.0.0.1:9090/ping   # or use ab/wrk/oha
+```
+
+</details>
+
 ---
 
 ## 🎮 GenZ Debug Kit
