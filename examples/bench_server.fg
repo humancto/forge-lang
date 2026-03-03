@@ -1,0 +1,25 @@
+// bench_server.fg — Lightweight HTTP server for benchmarking
+// Run: forge run examples/bench_server.fg
+
+@server(port: 9090)
+
+@get("/ping")
+fn ping() -> Json {
+    return { ok: true }
+}
+
+@get("/heavy")
+fn heavy() -> Json {
+    let mut total = 0
+    repeat 1000 times {
+        total = total + 1
+    }
+    return { result: total }
+}
+
+@post("/echo")
+fn echo(body: Json) -> Json {
+    return body
+}
+
+say "Benchmark server ready on :9090"
