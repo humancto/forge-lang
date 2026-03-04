@@ -1,0 +1,274 @@
+// safety_correctness_test.fg
+// Regression tests for bugs found in the second probe pass.
+// All tests document CORRECT behavior post-fix.
+
+// ===========================================================
+// BUG-A FIX: try/catch now properly propagates catch-body errors
+// ===========================================================
+
+@test
+define test_try_catch_catches_runtime_error() {
+    let mut caught = false
+    try {
+        let _ = 1 / 0
+    } catch e {
+        caught = true
+        assert_eq(e.type, "ArithmeticError")
+        assert(contains(e.message, "division by zero"))
+    }
+    assert(caught)
+}
+
+@test
+define test_try_catch_catches_index_error() {
+    let mut caught = false
+    try {
+        let _ = [1, 2, 3][99]
+    } catch e {
+        caught = true
+        assert_eq(e.type, "IndexError")
+    }
+    assert(caught)
+}
+
+@test
+define test_try_catch_catches_reference_error() {
+    let mut caught = false
+    try {
+        let _ = undefined_variable_xyz
+    } catch e {
+        caught = true
+        assert_eq(e.type, "ReferenceError")
+    }
+    assert(caught)
+}
+
+@test
+define test_try_catch_body_signals_propagate() {
+    // Return signal from catch body should bubble up correctly
+    fn test_fn() {
+        try {
+            let _ = 1 / 0
+        } catch e {
+            return "caught"
+        }
+        return "not reached"
+    }
+    assert_eq(test_fn(), "caught")
+}
+
+@test
+define test_try_catch_no_error_skips_catch() {
+    let mut in_catch = false
+    try {
+        let _ = 1 + 1
+    } catch e {
+        in_catch = true
+    }
+    assert(!in_catch)
+}
+
+@test
+define test_try_catch_nested() {
+    let mut outer_caught = false
+    let mut inner_caught = false
+    try {
+        try {
+            let _ = 1 / 0
+        } catch e {
+            inner_caught = true
+            // re-throw by triggering another error
+            let _ = [1][99]
+        }
+    } catch e {
+        outer_caught = true
+        assert_eq(e.type, "IndexError")
+    }
+    assert(inner_caught)
+    assert(outer_caught)
+}
+
+// ===========================================================
+// BUG-B: Negative array indices (Python-style)
+// ===========================================================
+
+@test
+define test_negative_index_last_element() {
+    let arr = [10, 20, 30, 40, 50]
+    assert_eq(arr[-1], 50)  // last
+    assert_eq(arr[-2], 40)  // second to last
+    assert_eq(arr[-5], 10)  // first via negative
+}
+
+@test
+define test_negative_index_out_of_bounds_caught() {
+    let mut caught = false
+    try {
+        let _ = [1, 2, 3][-99]
+    } catch e {
+        caught = true
+        assert_eq(e.type, "IndexError")
+    }
+    assert(caught)
+}
+
+@test
+define test_negative_index_on_single_element() {
+    let arr = [42]
+    assert_eq(arr[-1], 42)
+    assert_eq(arr[0], 42)
+}
+
+// ===========================================================
+// BUG-F: float division behavior documented
+// ===========================================================
+
+@test
+define test_float_div_by_zero_gives_inf() {
+    // 1.0 / 0.0 gives Float Infinity in Forge (IEEE 754)
+    let inf = 1.0 / 0.0
+    assert_eq(typeof(inf), "Float")
+    // Use > comparison to detect infinity
+    assert(inf > 9999999999.0)
+}
+
+@test
+define test_int_div_by_zero_throws() {
+    let mut caught = false
+    try {
+        let _ = 1 / 0
+    } catch e {
+        caught = true
+        assert_eq(e.type, "ArithmeticError")
+    }
+    assert(caught)
+}
+
+@test
+define test_int_div_truncates() {
+    assert_eq(7 / 2, 3)    // integer division truncates
+    assert_eq(-7 / 2, -3)  // truncates toward zero
+    assert_eq(7.0 / 2, 3.5) // float division
+}
+
+// ===========================================================
+// BUG-C: float modulo works
+// ===========================================================
+
+@test
+define test_float_modulo() {
+    assert_eq(7.5 % 2.0, 1.5)
+    assert_eq(10.0 % 3.0, 1.0)
+    assert_eq(7 % 2.5, 2.0)   // int % float promotes
+}
+
+@test
+define test_modulo_by_zero_int_throws() {
+    let mut caught = false
+    try {
+        let _ = 5 % 0
+    } catch e {
+        caught = true
+    }
+    assert(caught)
+}
+
+// ===========================================================
+// Additional safety: type errors have correct e.type
+// ===========================================================
+
+@test
+define test_call_non_function_caught() {
+    let mut caught = false
+    let not_a_fn = 42
+    try {
+        let _ = not_a_fn()
+    } catch e {
+        caught = true
+        assert(len(e.message) > 0)
+    }
+    assert(caught)
+}
+
+@test
+define test_null_field_access_caught() {
+    let mut caught = false
+    try {
+        let _ = null.something
+    } catch e {
+        caught = true
+        assert(len(e.message) > 0)
+    }
+    assert(caught)
+}
+
+@test
+define test_unary_minus_string_caught() {
+    let mut caught = false
+    try {
+        let _ = -"hello"
+    } catch e {
+        caught = true
+    }
+    assert(caught)
+}
+
+// ===========================================================
+// Additional: int() now handles bool
+// ===========================================================
+
+@test
+define test_int_from_bool() {
+    assert_eq(int(true), 1)
+    assert_eq(int(false), 0)
+}
+
+// ===========================================================
+// Additional: unwrap_err() now available
+// ===========================================================
+
+@test
+define test_unwrap_err() {
+    let e = Err("something went wrong")
+    let msg = unwrap_err(e)
+    assert_eq(msg, "something went wrong")
+}
+
+@test
+define test_unwrap_err_on_ok_throws() {
+    let mut caught = false
+    try {
+        let _ = unwrap_err(Ok(42))
+    } catch e {
+        caught = true
+    }
+    assert(caught)
+}
+
+// ===========================================================
+// Stress: deeply nested try/catch chains
+// ===========================================================
+
+@test
+define test_try_catch_return_value() {
+    fn safe_div(a, b) {
+        try {
+            return Ok(a / b)
+        } catch e {
+            return Err(e.message)
+        }
+    }
+    let r1 = safe_div(10, 2)
+    let r2 = safe_div(10, 0)
+    assert(is_ok(r1))
+    assert(is_err(r2))
+    assert_eq(unwrap(r1), 5)
+}
+
+@test
+define test_safe_block_catches() {
+    // safe { } blocks should not crash the program
+    safe { let _ = 1 / 0 }
+    // execution continues here
+    assert(true)
+}

@@ -424,6 +424,7 @@ impl Interpreter {
             "is_err",
             "unwrap",
             "unwrap_or",
+            "unwrap_err",
             "fetch",
             "uuid",
             "say",
@@ -1027,7 +1028,7 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
-            Stmt::TryCatch {
+             Stmt::TryCatch {
                 try_body,
                 catch_var,
                 catch_body,
@@ -1047,15 +1048,21 @@ impl Interpreter {
                         "IndexError"
                     } else if e.message.contains("not found") || e.message.contains("undefined") {
                         "ReferenceError"
+                    } else if e.message.contains("immutable") || e.message.contains("cannot reassign") {
+                        "TypeError"
                     } else {
                         "RuntimeError"
                     };
                     err_obj.insert("type".to_string(), Value::String(error_type.to_string()));
                     self.env.define(catch_var.clone(), Value::Object(err_obj));
-                    let result = self.exec_block(catch_body);
+                    // FIX: was `result.unwrap_or(Signal::None);` — the semicolon
+                    // silently discarded errors from the catch body itself.
+                    let catch_result = self.exec_block(catch_body);
                     self.env.pop_scope();
-                    result.unwrap_or(Signal::None);
-                    Ok(Signal::None)
+                    match catch_result {
+                        Ok(sig) => Ok(sig),
+                        Err(e) => Err(e), // propagate errors from catch body
+                    }
                 }
             },
 
@@ -1614,11 +1621,17 @@ impl Interpreter {
                 };
                 match (inner, &idx) {
                     (Value::Array(items), Value::Int(i)) => {
-                        let i = *i as usize;
-                        items
-                            .get(i)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::new("index out of bounds"))
+                        // Support negative indices (Python-style: -1 = last)
+                        let len = items.len() as i64;
+                        let actual = if *i < 0 { len + i } else { *i };
+                        if actual < 0 || actual >= len {
+                            Err(RuntimeError::new(&format!(
+                                "index out of bounds: index {} on array of length {}",
+                                i, len
+                            )))
+                        } else {
+                            Ok(items[actual as usize].clone())
+                        }
                     }
                     (Value::Object(map), Value::String(key)) => map
                         .get(key)
