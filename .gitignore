@@ -38,3 +38,9 @@ CLAUDE.md
 
 # Packages
 .forge/packages/
+
+# Local documentation (not for repo)
+TESTING.md
+BUGS.md
+ANALYSIS_REPORT.md
+docs/ARCHITECTURE_AUDIT.md
