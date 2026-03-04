@@ -1,0 +1,64 @@
+// examples/db_parameterized.fg
+// Demonstrates safe, parameterized SQL queries in Forge.
+// All three database modules (db, pg, mysql) support this pattern.
+// Use parameterized queries ALWAYS when incorporating user input — never
+// build SQL strings with concatenation.
+
+// ── SQLite (db module) ───────────────────────────────────────────────────────
+
+let opened = db.open(":memory:")
+say "SQLite opened: " + str(opened)
+
+db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)")
+
+// Parameterized INSERT — user input is bound safely, not concatenated
+let user_name = "Alice'; DROP TABLE users; --"   // classic injection attempt
+let user_age  = 30
+
+db.execute("INSERT INTO users (name, age) VALUES (?, ?)", [user_name, user_age])
+db.execute("INSERT INTO users (name, age) VALUES (?, ?)", ["Bob", 25])
+
+let last_id = db.last_insert_rowid()
+say "Last inserted rowid: " + str(last_id)   // → 2
+
+// Parameterized SELECT — safely filter by user-supplied value
+let min_age = 28
+let rows = db.query("SELECT * FROM users WHERE age >= ?", [min_age])
+
+for row in rows {
+    say row.name + " is " + str(row.age)     // → Alice is 30
+}
+
+// Verify the injection attempt did NOT drop the table
+let all = db.query("SELECT COUNT(*) as total FROM users")
+say "Total users: " + str(all[0].total)      // → 2, table is safe
+
+db.close()
+
+// ── PostgreSQL (pg module) ───────────────────────────────────────────────────
+// PostgreSQL uses $1, $2, ... placeholders (standard PG syntax)
+
+// let connected = pg.connect("host=localhost user=postgres dbname=myapp")
+// pg.execute("CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, name TEXT, price FLOAT)")
+// pg.execute("INSERT INTO products (name, price) VALUES ($1, $2)", ["Widget", 9.99])
+// pg.execute("INSERT INTO products (name, price) VALUES ($1, $2)", ["Gadget", 24.99])
+//
+// let cheap = pg.query("SELECT * FROM products WHERE price < $1", [15.0])
+// for p in cheap {
+//     say p.name + " costs $" + str(p.price)   // → Widget costs $9.99
+// }
+// pg.close()
+
+// ── MySQL (mysql module) ─────────────────────────────────────────────────────
+// MySQL uses ? placeholders. Connection returns an ID for multi-connection support.
+
+// let conn = mysql.connect("mysql://user:pass@localhost/myapp")
+// mysql.execute(conn, "CREATE TABLE IF NOT EXISTS orders (id INT AUTO_INCREMENT PRIMARY KEY, item TEXT, qty INT)")
+// mysql.execute(conn, "INSERT INTO orders (item, qty) VALUES (?, ?)", ["Book", 3])
+// mysql.execute(conn, "INSERT INTO orders (item, qty) VALUES (?, ?)", ["Pen", 10])
+//
+// let big_orders = mysql.query(conn, "SELECT * FROM orders WHERE qty > ?", [5])
+// for o in big_orders {
+//     say o.item + " × " + str(o.qty)    // → Pen × 10
+// }
+// mysql.close(conn)

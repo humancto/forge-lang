@@ -12,6 +12,10 @@ pub fn create_module() -> Value {
         Value::BuiltIn("db.execute".to_string()),
     );
     m.insert("close".to_string(), Value::BuiltIn("db.close".to_string()));
+    m.insert(
+        "last_insert_rowid".to_string(),
+        Value::BuiltIn("db.last_insert_rowid".to_string()),
+    );
     Value::Object(m)
 }
 
@@ -156,6 +160,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Ok(Value::Null)
         }
 
+        "db.last_insert_rowid" => {
+            let conn = get_conn()?;
+            let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+            Ok(Value::Int(c.last_insert_rowid()))
+        }
+
         _ => Err(format!("unknown db function: {}", name)),
     }
 }
@@ -233,6 +243,46 @@ mod tests {
         } else {
             panic!("expected array");
         }
+        call("db.close".into(), vec![]).unwrap();
+    }
+
+    #[test]
+    fn db_last_insert_rowid() {
+        call("db.open".into(), vec![Value::String(":memory:".into())]).unwrap();
+        call(
+            "db.execute".into(),
+            vec![Value::String(
+                "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)".into(),
+            )],
+        )
+        .unwrap();
+
+        // Insert using parameterized query
+        call(
+            "db.execute".into(),
+            vec![
+                Value::String("INSERT INTO items (name) VALUES (?)".into()),
+                Value::Array(vec![Value::String("forge".into())]),
+            ],
+        )
+        .unwrap();
+
+        let rowid = call("db.last_insert_rowid".into(), vec![]).unwrap();
+        assert_eq!(rowid, Value::Int(1));
+
+        // Insert again — rowid should increment
+        call(
+            "db.execute".into(),
+            vec![
+                Value::String("INSERT INTO items (name) VALUES (?)".into()),
+                Value::Array(vec![Value::String("lang".into())]),
+            ],
+        )
+        .unwrap();
+
+        let rowid2 = call("db.last_insert_rowid".into(), vec![]).unwrap();
+        assert_eq!(rowid2, Value::Int(2));
+
         call("db.close".into(), vec![]).unwrap();
     }
 }
