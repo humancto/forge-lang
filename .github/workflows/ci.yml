@@ -66,15 +66,11 @@ jobs:
         run: cargo build --release
       - name: Run Forge test suite
         run: |
-          PASS=0; FAIL=0
-          for f in tests/*.fg; do
-            if ./target/release/forge test "$f" > /dev/null 2>&1; then
-              echo "  PASS: $f"
-              PASS=$((PASS + 1))
-            else
-              echo "  FAIL: $f"
-              FAIL=$((FAIL + 1))
-            fi
-          done
-          echo "Results: $PASS passed, $FAIL failed"
-          [ "$FAIL" -eq 0 ] || exit 1
+          echo "Running all .fg tests in tests/ directory..."
+          ./target/release/forge test tests/ 2>&1 | tee /tmp/forge-test-out.txt
+          # Check for any failures in the summary line
+          if grep -qE "[1-9][0-9]* failed" /tmp/forge-test-out.txt; then
+            echo "FAILURE: Some Forge tests failed"
+            exit 1
+          fi
+          echo "All Forge tests passed!"
