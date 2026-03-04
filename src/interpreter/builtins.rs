@@ -41,11 +41,12 @@ impl Interpreter {
             "int" => match args.first() {
                 Some(Value::Int(n)) => Ok(Value::Int(*n)),
                 Some(Value::Float(n)) => Ok(Value::Int(*n as i64)),
+                Some(Value::Bool(b)) => Ok(Value::Int(if *b { 1 } else { 0 })),
                 Some(Value::String(s)) => s
                     .parse::<i64>()
                     .map(Value::Int)
                     .map_err(|_| RuntimeError::new(&format!("cannot convert '{}' to Int", s))),
-                _ => Err(RuntimeError::new("int() requires number or string")),
+                _ => Err(RuntimeError::new("int() requires number, bool, or string")),
             },
             "float" => match args.first() {
                 Some(Value::Int(n)) => Ok(Value::Float(*n as f64)),
@@ -69,9 +70,8 @@ impl Interpreter {
             }
             "pop" => match args.first() {
                 Some(Value::Array(items)) => {
-                    let mut out = items.clone();
-                    out.pop();
-                    Ok(Value::Array(out))
+                    // Returns the last element (the popped item), not the remaining array
+                    Ok(items.last().cloned().unwrap_or(Value::Null))
                 }
                 _ => Err(RuntimeError::new("pop() requires array")),
             },
@@ -358,6 +358,11 @@ impl Interpreter {
                     )),
                 }
             }
+            "unwrap_err" => match args.first() {
+                Some(Value::ResultErr(msg)) => Ok(Value::String(format!("{}", msg))),
+                Some(Value::ResultOk(_)) => Err(RuntimeError::new("unwrap_err() called on Ok")),
+                _ => Err(RuntimeError::new("unwrap_err() requires a Result value")),
+            },
             "fetch" => match args.first() {
                 Some(Value::String(url)) => {
                     let method = match args.get(1) {

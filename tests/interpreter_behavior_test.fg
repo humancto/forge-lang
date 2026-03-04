@@ -16,22 +16,20 @@ define test_push_does_not_mutate_original() {
 }
 
 @test
-define test_pop_returns_array_without_last() {
-    // pop() returns the array with the last element removed
-    let arr = [10, 20, 30, 40]
-    let result = pop(arr)
-    assert_eq(len(result), 3)
-    assert_eq(result[0], 10)
-    assert_eq(result[2], 30)
-    // Original array is unchanged
+define test_pop_returns_last_element() {
+    // FIXED: pop() now returns the removed element (last item)
+    let arr    = [10, 20, 30, 40]
+    let popped = pop(arr)
+    assert_eq(popped, 40)  // last element returned
+    // Original array is unchanged (copy semantics)
     assert_eq(len(arr), 4)
 }
 
 @test
 define test_pop_on_single_element() {
-    let arr = [42]
-    let result = pop(arr)
-    assert_eq(len(result), 0)
+    let arr    = [42]
+    let popped = pop(arr)
+    assert_eq(popped, 42)
 }
 
 @test

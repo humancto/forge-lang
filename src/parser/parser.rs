@@ -1092,12 +1092,14 @@ impl Parser {
             || self.check(&Token::MinusEq)
             || self.check(&Token::StarEq)
             || self.check(&Token::SlashEq)
+            || self.check(&Token::PercentEq)
         {
             let op = match self.current_token() {
                 Token::PlusEq => BinOp::Add,
                 Token::MinusEq => BinOp::Sub,
                 Token::StarEq => BinOp::Mul,
                 Token::SlashEq => BinOp::Div,
+                Token::PercentEq => BinOp::Mod,
                 _ => unreachable!(),
             };
             self.advance();

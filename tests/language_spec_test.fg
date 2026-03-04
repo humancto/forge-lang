@@ -101,6 +101,17 @@ define test_modulo_operator() {
 }
 
 @test
+define test_percent_assign() {
+    // BUG-001 FIXED: %= compound assignment now works
+    let mut x = 17
+    x %= 5
+    assert_eq(x, 2)
+    let mut y = 100
+    y %= 7
+    assert_eq(y, 2)  // 100 % 7 = 2
+}
+
+@test
 define test_type_annotation_string_int() {
     let name: String = "Alice"
     let age: Int = 30
@@ -164,13 +175,19 @@ define test_arithmetic_precedence() {
 }
 
 @test
-define test_string_comparison_equality() {
-    // String equality and inequality work
+define test_string_comparison_all_operators() {
+    // BUG-002 FIXED: string <, >, <=, >= now work in interpreter
+    assert("apple" < "banana")
+    assert("zebra" > "aardvark")
     assert("hello" == "hello")
     assert("hello" != "world")
-    assert("a" != "b")
-    // Note: < and > on strings not supported in interpreter (VM only)
-    // Test ordering via sort instead
+    assert("a" < "b")
+    assert("b" > "a")
+    assert("abc" <= "abc")
+    assert("abc" >= "abc")
+    assert("abc" <= "abd")
+    assert("abd" >= "abc")
+    // Can use in sort_by for stable ordering
     let sorted = sort(["banana", "apple", "cherry"])
     assert_eq(sorted[0], "apple")
     assert_eq(sorted[2], "cherry")
@@ -963,14 +980,11 @@ define test_triple_quoted_strings() {
 
 @test
 define test_array_push_copy_semantics() {
-    // push() does NOT mutate in-place (copy semantics in interpreter)
-    // pop(arr) returns the array with last element removed (NOT the removed element)
-    let arr = [10, 20, 30]
-    let shorter = pop(arr)       // returns [10, 20]
-    assert_eq(len(shorter), 2)
-    assert_eq(shorter[0], 10)
-    assert_eq(shorter[1], 20)
-    // Original is unchanged
+    // FIXED: pop(arr) now returns the last element (not the remaining array)
+    let arr    = [10, 20, 30]
+    let popped = pop(arr)       // returns 30
+    assert_eq(popped, 30)
+    // Original array is unchanged (copy semantics)
     assert_eq(len(arr), 3)
     // For growing arrays functionally, use map/filter/reduce
     let extended = map([1, 2, 3, 4, 5], fn(x) { return x })

@@ -116,6 +116,7 @@ pub enum Token {
     MinusEq,   // -=
     StarEq,    // *=
     SlashEq,   // /=
+    PercentEq, // %=
 
     // Built-in type names
     IntType,    // Int

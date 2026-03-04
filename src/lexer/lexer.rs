@@ -105,7 +105,12 @@ impl Lexer {
                 }
                 '%' => {
                     self.advance();
-                    Token::Percent
+                    if self.current_matches('=') {
+                        self.advance();
+                        Token::PercentEq
+                    } else {
+                        Token::Percent
+                    }
                 }
                 '=' => {
                     self.advance();
@@ -545,6 +550,7 @@ mod tests {
         assert_eq!(lex("-="), vec![Token::MinusEq]);
         assert_eq!(lex("*="), vec![Token::StarEq]);
         assert_eq!(lex("/="), vec![Token::SlashEq]);
+        assert_eq!(lex("%="), vec![Token::PercentEq]);
     }
 
     #[test]

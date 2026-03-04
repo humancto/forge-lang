@@ -2296,9 +2296,13 @@ impl Interpreter {
             }
 
             (Value::String(a), Value::String(b)) => match op {
-                BinOp::Add => Ok(Value::String(format!("{}{}", a, b))),
-                BinOp::Eq => Ok(Value::Bool(a == b)),
+                BinOp::Add   => Ok(Value::String(format!("{}{}", a, b))),
+                BinOp::Eq    => Ok(Value::Bool(a == b)),
                 BinOp::NotEq => Ok(Value::Bool(a != b)),
+                BinOp::Lt    => Ok(Value::Bool(a < b)),
+                BinOp::Gt    => Ok(Value::Bool(a > b)),
+                BinOp::LtEq  => Ok(Value::Bool(a <= b)),
+                BinOp::GtEq  => Ok(Value::Bool(a >= b)),
                 _ => Err(RuntimeError::new("invalid operator for String")),
             },
 
@@ -2839,17 +2843,17 @@ mod tests {
 
     #[test]
     fn pop_and_enumerate_work() {
+        // pop() now returns the last element, not the remaining array
         let value = run_forge(
             r#"
-            let xs = pop([10, 20, 30])
-            let rows = enumerate(xs)
-            rows[1].value
+            let last = pop([10, 20, 30])
+            last
             "#,
         );
 
         match value {
-            Value::Int(n) => assert_eq!(n, 20),
-            _ => panic!("expected int result"),
+            Value::Int(n) => assert_eq!(n, 30),
+            other => panic!("expected Int(30), got {:?}", other),
         }
     }
 
@@ -3940,10 +3944,11 @@ mod tests {
     fn push_pop_builtins() {
         let result = try_run_forge(
             r#"
-            let arr = push([1, 2], 3)
+            let arr  = push([1, 2], 3)
             assert(len(arr) == 3)
-            let popped = pop(arr)
-            assert(len(popped) == 2)
+            // pop() returns the last element (Int 3), not the remaining array
+            let last = pop(arr)
+            assert(last == 3)
         "#,
         );
         assert!(result.is_ok());

@@ -2,12 +2,13 @@
 
 @test
 define test_array_push_pop() {
-    let arr = [1, 2, 3]
+    let arr    = [1, 2, 3]
     let pushed = push(arr, 4)
     assert_eq(len(pushed), 4)
     assert_eq(pushed[3], 4)
-    let popped = pop(pushed)
-    assert_eq(len(popped), 3)
+    // pop() returns the last element (FIXED: not the remaining array)
+    let last = pop(pushed)
+    assert_eq(last, 4)
 }
 
 @test
