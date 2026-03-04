@@ -664,11 +664,17 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("for_each() requires (array, function)")),
             },
             "split" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(delim))) => Ok(Value::Array(
-                    s.split(delim.as_str())
-                        .map(|part| Value::String(part.to_string()))
-                        .collect(),
-                )),
+                (Some(Value::String(s)), Some(Value::String(delim))) => {
+                    let parts: Vec<Value> = if delim.is_empty() {
+                        // Empty delimiter: split into individual characters
+                        s.chars().map(|c| Value::String(c.to_string())).collect()
+                    } else {
+                        s.split(delim.as_str())
+                            .map(|part| Value::String(part.to_string()))
+                            .collect()
+                    };
+                    Ok(Value::Array(parts))
+                }
                 _ => Err(RuntimeError::new(
                     "split() requires (string, delimiter_string)",
                 )),

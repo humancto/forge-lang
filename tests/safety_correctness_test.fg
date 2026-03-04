@@ -272,3 +272,55 @@ define test_safe_block_catches() {
     // execution continues here
     assert(true)
 }
+
+// ===========================================================
+// BUG-E FIX: split("abc", "") returns individual characters
+// ===========================================================
+
+@test
+define test_split_empty_delimiter_gives_chars() {
+    // split with empty string => one element per character
+    let chars = split("abc", "")
+    assert_eq(len(chars), 3)
+    assert_eq(chars[0], "a")
+    assert_eq(chars[1], "b")
+    assert_eq(chars[2], "c")
+}
+
+@test
+define test_split_empty_delimiter_unicode() {
+    let chars = split("hi", "")
+    assert_eq(len(chars), 2)
+    assert_eq(chars[0], "h")
+    assert_eq(chars[1], "i")
+}
+
+@test
+define test_split_empty_string_with_empty_delimiter() {
+    let chars = split("", "")
+    assert_eq(len(chars), 0)
+}
+
+@test
+define test_split_normal_delimiter() {
+    let parts = split("a,b,c", ",")
+    assert_eq(len(parts), 3)
+    assert_eq(parts[0], "a")
+    assert_eq(parts[2], "c")
+}
+
+@test
+define test_split_multichar_delimiter() {
+    let parts = split("one::two::three", "::")
+    assert_eq(len(parts), 3)
+    assert_eq(parts[0], "one")
+    assert_eq(parts[1], "two")
+    assert_eq(parts[2], "three")
+}
+
+@test
+define test_split_no_match_returns_whole() {
+    let parts = split("hello", ",")
+    assert_eq(len(parts), 1)
+    assert_eq(parts[0], "hello")
+}
