@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -32,7 +32,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -A dead-code -A unused-variables -A unused-imports -A clippy::approx_constant -A clippy::result_large_err -A clippy::only_used_in_recursion -A clippy::len_zero
+      # Keep only targeted suppressions for known in-progress JIT stubs.
+      # Broad suppressions (-A dead-code, -A unused-variables, etc.) removed.
+      - run: cargo clippy --all-targets -- -A clippy::approx_constant -A clippy::result_large_err -A clippy::only_used_in_recursion -A clippy::len_zero
 
   fmt:
     name: Format
@@ -43,3 +45,36 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  forge-tests:
+    name: Forge Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build forge binary
+        run: cargo build --release
+      - name: Run Forge test suite
+        run: |
+          PASS=0; FAIL=0
+          for f in tests/*.fg; do
+            if ./target/release/forge test "$f" > /dev/null 2>&1; then
+              echo "  PASS: $f"
+              PASS=$((PASS + 1))
+            else
+              echo "  FAIL: $f"
+              FAIL=$((FAIL + 1))
+            fi
+          done
+          echo "Results: $PASS passed, $FAIL failed"
+          [ "$FAIL" -eq 0 ] || exit 1

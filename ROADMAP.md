@@ -5,21 +5,21 @@
 
 ---
 
-## Current State: v0.3 — Feature Complete
+## Current State: v0.4 — Feature Complete
 
 **Status: Shipped**
 
-| Component             | State                | Details                                                     |
-| --------------------- | -------------------- | ----------------------------------------------------------- |
-| Tree-walk interpreter | Complete             | Full feature support, 230+ builtins                         |
-| Bytecode VM           | Complete             | Register-based, 50 opcodes, mark-sweep GC                   |
-| JIT (Cranelift)       | Partial              | Integer-only functions, 20/50 opcodes                       |
-| Standard library      | 16 modules           | 230+ functions across math, fs, crypto, db, http, npc, etc. |
-| HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket                  |
-| HTTP client           | Complete             | reqwest, JSON, all methods                                  |
-| Type checker          | Gradual              | Arity + type warnings, --strict mode                        |
-| Tests                 | 488 Rust + 334 Forge | CI on Ubuntu + macOS                                        |
-| Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases        |
+| Component             | State                | Details                                                      |
+| --------------------- | -------------------- | ------------------------------------------------------------ |
+| Tree-walk interpreter | Complete             | Full feature support, 238+ builtins                          |
+| Bytecode VM           | Complete             | Register-based, 50 opcodes, mark-sweep GC                    |
+| JIT (Cranelift)       | Partial              | Integer-only functions, 20/50 opcodes                        |
+| Standard library      | 18 modules           | 238+ functions across math, fs, crypto, db, http, jwt, mysql, etc. |
+| HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket                   |
+| HTTP client           | Complete             | reqwest, JSON, all methods, benchmarked at 28k req/sec       |
+| Type checker          | Gradual              | Arity + type warnings, --strict mode                         |
+| Tests                 | 528 Rust + 334 Forge | CI on Ubuntu + macOS                                         |
+| Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases         |
 
 ### What Works Today
 

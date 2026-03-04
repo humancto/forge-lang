@@ -31,6 +31,7 @@
 
 # Internal / dev-only files
 AUDIT_REPORT.md
+ANALYSIS_REPORT.md
 test-project/
 CLAUDE.md
 .claude/
