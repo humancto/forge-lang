@@ -1,4 +1,5 @@
 pub mod bytecode;
+mod builtins; // VM builtin dispatch — extracted from machine.rs
 pub mod compiler;
 pub mod frame;
 pub mod gc;
