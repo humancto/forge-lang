@@ -68,6 +68,9 @@ regex = "1"
 # === Database ===
 rusqlite = { version = "0.34", features = ["bundled"] }
 tokio-postgres = "0.7"
+tokio-postgres-rustls = "0.13"             # TLS for pg — consistent with rustls-everywhere policy
+rustls = "0.23"                            # shared with reqwest/tungstenite TLS config
+webpki-roots = "1"                         # root CA certs for pg TLS verification
 mysql_async = { version = "0.34", default-features = false, features = ["rustls-tls"] }
 flate2 = "1"
 
