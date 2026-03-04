@@ -13,7 +13,7 @@ use axum::{
     Router,
 };
 use serde_json::Value as JsonValue;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::interpreter::{Interpreter, RuntimeError, Value};
 use crate::parser::ast::*;
@@ -27,10 +27,19 @@ pub struct Route {
     pub handler_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CorsMode {
+    /// Deny all cross-origin requests (default — safe for production).
+    Restrictive,
+    /// Allow any origin, method, and header. Opt-in via `@server(cors: "permissive")`.
+    Permissive,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
+    pub cors: CorsMode,
 }
 
 pub fn extract_routes(program: &Program) -> Vec<Route> {
@@ -76,6 +85,7 @@ pub fn extract_server_config(program: &Program) -> Option<ServerConfig> {
                 let mut config = ServerConfig {
                     port: 8080,
                     host: "127.0.0.1".to_string(),
+                    cors: CorsMode::Restrictive,
                 };
                 for arg in &dec.args {
                     match arg {
@@ -84,6 +94,12 @@ pub fn extract_server_config(program: &Program) -> Option<ServerConfig> {
                         }
                         DecoratorArg::Named(key, Expr::StringLit(s)) if key == "host" => {
                             config.host = s.clone()
+                        }
+                        DecoratorArg::Named(key, Expr::StringLit(s)) if key == "cors" => {
+                            config.cors = match s.to_lowercase().as_str() {
+                                "permissive" | "any" | "*" => CorsMode::Permissive,
+                                _ => CorsMode::Restrictive,
+                            };
                         }
                         _ => {}
                     }
@@ -273,15 +289,28 @@ pub async fn start_server(
         }
     }
 
-    let app = app.layer(CorsLayer::permissive()).with_state(state);
+    // Apply CORS policy: restrictive by default, permissive only when explicitly requested.
+    let cors_layer = match config.cors {
+        CorsMode::Permissive => CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+        CorsMode::Restrictive => CorsLayer::new(), // same-origin only
+    };
+    let app = app.layer(cors_layer).with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| RuntimeError::new(&format!("invalid address: {}", e)))?;
 
+    let cors_label = match config.cors {
+        CorsMode::Permissive => "\x1B[33mpermissive (any origin)\x1B[0m",
+        CorsMode::Restrictive => "\x1B[32mrestrictive (same-origin)\x1B[0m",
+    };
     println!();
     println!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
     println!("  \x1B[1m   http://{}\x1B[0m", addr);
+    println!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
     println!();
     for route in routes {
         println!("  \x1B[36m{:>6}\x1B[0m  {}", route.method, route.pattern);
@@ -349,5 +378,185 @@ pub fn forge_to_json(v: &Value) -> JsonValue {
             JsonValue::Object(obj)
         }
         _ => JsonValue::String(format!("<{}>", v.type_name())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn parse_program(src: &str) -> Program {
+        let tokens = Lexer::new(src).tokenize().expect("lex failed");
+        Parser::new(tokens).parse_program().expect("parse failed")
+    }
+
+    // ── ServerConfig / CORS extraction ──────────────────────────────────────
+
+    #[test]
+    fn default_cors_is_restrictive() {
+        let prog = parse_program("@server(port: 3000)\n");
+        let config = extract_server_config(&prog).unwrap();
+        assert_eq!(config.cors, CorsMode::Restrictive);
+        assert_eq!(config.port, 3000);
+    }
+
+    #[test]
+    fn cors_permissive_keyword() {
+        let prog = parse_program("@server(port: 8080, cors: \"permissive\")\n");
+        let config = extract_server_config(&prog).unwrap();
+        assert_eq!(config.cors, CorsMode::Permissive);
+    }
+
+    #[test]
+    fn cors_any_keyword() {
+        let prog = parse_program("@server(port: 8080, cors: \"any\")\n");
+        let config = extract_server_config(&prog).unwrap();
+        assert_eq!(config.cors, CorsMode::Permissive);
+    }
+
+    #[test]
+    fn cors_wildcard_keyword() {
+        let prog = parse_program("@server(port: 8080, cors: \"*\")\n");
+        let config = extract_server_config(&prog).unwrap();
+        assert_eq!(config.cors, CorsMode::Permissive);
+    }
+
+    #[test]
+    fn cors_unknown_value_falls_back_to_restrictive() {
+        let prog = parse_program("@server(port: 8080, cors: \"strict\")\n");
+        let config = extract_server_config(&prog).unwrap();
+        assert_eq!(config.cors, CorsMode::Restrictive);
+    }
+
+    #[test]
+    fn no_server_decorator_returns_none() {
+        let prog = parse_program("let x = 1\n");
+        assert!(extract_server_config(&prog).is_none());
+    }
+
+    #[test]
+    fn server_default_port_and_host() {
+        let prog = parse_program("@server(port: 9000)\n");
+        let config = extract_server_config(&prog).unwrap();
+        assert_eq!(config.port, 9000);
+        assert_eq!(config.host, "127.0.0.1");
+    }
+
+    // ── to_axum_path ────────────────────────────────────────────────────────
+
+    #[test]
+    fn axum_path_simple() {
+        assert_eq!(to_axum_path("/hello"), "/hello");
+    }
+
+    #[test]
+    fn axum_path_param_conversion() {
+        assert_eq!(to_axum_path("/users/:id"), "/users/{id}");
+    }
+
+    #[test]
+    fn axum_path_multiple_params() {
+        assert_eq!(to_axum_path("/org/:org/repo/:repo"), "/org/{org}/repo/{repo}");
+    }
+
+    // ── json_to_forge ────────────────────────────────────────────────────────
+
+    #[test]
+    fn json_null_to_forge() {
+        assert_eq!(json_to_forge(JsonValue::Null), Value::Null);
+    }
+
+    #[test]
+    fn json_bool_to_forge() {
+        assert_eq!(json_to_forge(JsonValue::Bool(true)), Value::Bool(true));
+        assert_eq!(json_to_forge(JsonValue::Bool(false)), Value::Bool(false));
+    }
+
+    #[test]
+    fn json_int_to_forge() {
+        let v = serde_json::json!(42);
+        assert_eq!(json_to_forge(v), Value::Int(42));
+    }
+
+    #[test]
+    fn json_float_to_forge() {
+        let v = serde_json::json!(3.14);
+        assert_eq!(json_to_forge(v), Value::Float(3.14));
+    }
+
+    #[test]
+    fn json_string_to_forge() {
+        let v = JsonValue::String("hello".to_string());
+        assert_eq!(json_to_forge(v), Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn json_array_to_forge() {
+        let v = serde_json::json!([1, 2, 3]);
+        assert_eq!(
+            json_to_forge(v),
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
+    }
+
+    // ── forge_to_json ────────────────────────────────────────────────────────
+
+    #[test]
+    fn forge_null_to_json() {
+        assert_eq!(forge_to_json(&Value::Null), JsonValue::Null);
+    }
+
+    #[test]
+    fn forge_bool_to_json() {
+        assert_eq!(forge_to_json(&Value::Bool(true)), JsonValue::Bool(true));
+    }
+
+    #[test]
+    fn forge_int_to_json() {
+        assert_eq!(forge_to_json(&Value::Int(7)), serde_json::json!(7));
+    }
+
+    #[test]
+    fn forge_float_to_json() {
+        let result = forge_to_json(&Value::Float(2.5));
+        assert_eq!(result, serde_json::json!(2.5));
+    }
+
+    #[test]
+    fn forge_string_to_json() {
+        let result = forge_to_json(&Value::String("forge".to_string()));
+        assert_eq!(result, JsonValue::String("forge".to_string()));
+    }
+
+    #[test]
+    fn forge_result_ok_to_json() {
+        let result = forge_to_json(&Value::ResultOk(Box::new(Value::Int(1))));
+        assert_eq!(result, serde_json::json!({"Ok": 1}));
+    }
+
+    #[test]
+    fn forge_result_err_to_json() {
+        let result = forge_to_json(&Value::ResultErr(Box::new(Value::String("oops".to_string()))));
+        assert_eq!(result, serde_json::json!({"Err": "oops"}));
+    }
+
+    #[test]
+    fn json_roundtrip_object() {
+        use indexmap::IndexMap;
+        let mut m = IndexMap::new();
+        m.insert("x".to_string(), Value::Int(10));
+        m.insert("y".to_string(), Value::Bool(false));
+        let forge_val = Value::Object(m);
+        let json = forge_to_json(&forge_val);
+        let back = json_to_forge(json);
+        // Round-trip via JSON: objects should come back with same keys/values
+        if let Value::Object(map) = back {
+            assert_eq!(map.get("x"), Some(&Value::Int(10)));
+            assert_eq!(map.get("y"), Some(&Value::Bool(false)));
+        } else {
+            panic!("expected object");
+        }
     }
 }
