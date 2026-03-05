@@ -267,8 +267,8 @@ fn get_completions() -> Vec<serde_json::Value> {
         "run_command",
     ];
     let modules = [
-        "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log", "http", "csv",
-        "term", "time",
+        "math", "fs", "io", "crypto", "db", "pg", "mysql", "env", "json", "regex", "log", "http",
+        "csv", "term", "time", "jwt", "npc", "exec",
     ];
 
     let mut items = Vec::new();
@@ -290,42 +290,29 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         (
             "math",
             vec![
-                "sqrt", "pow", "abs", "max", "min", "floor", "ceil", "round", "random", "sin",
-                "cos", "tan", "log", "pi", "e",
+                "sqrt", "pow", "abs", "max", "min", "floor", "ceil", "round", "random",
+                "random_int", "sin", "cos", "tan", "log", "pi", "e", "clamp",
             ],
         ),
         (
             "fs",
             vec![
-                "read",
-                "write",
-                "append",
-                "exists",
-                "list",
-                "remove",
-                "mkdir",
-                "copy",
-                "rename",
-                "size",
-                "ext",
-                "read_json",
-                "write_json",
+                "read", "write", "append", "exists", "list", "remove", "mkdir", "copy",
+                "rename", "size", "ext", "read_json", "write_json", "lines", "dirname",
+                "basename", "join_path", "is_dir", "is_file", "temp_dir",
             ],
         ),
-        ("io", vec!["prompt", "print", "args"]),
+        ("io", vec!["prompt", "print", "args", "args_parse", "args_get", "args_has"]),
         (
             "crypto",
             vec![
-                "sha256",
-                "md5",
-                "base64_encode",
-                "base64_decode",
-                "hex_encode",
-                "hex_decode",
+                "sha256", "md5", "base64_encode", "base64_decode", "hex_encode", "hex_decode",
             ],
         ),
-        ("db", vec!["open", "query", "execute", "close"]),
+        ("db", vec!["open", "query", "execute", "close", "last_insert_rowid"]),
         ("pg", vec!["connect", "query", "execute", "close"]),
+        ("mysql", vec!["connect", "query", "execute", "close"]),
+        ("jwt", vec!["sign", "verify", "decode", "valid"]),
         ("env", vec!["get", "set", "keys", "has"]),
         ("json", vec!["parse", "stringify", "pretty"]),
         (
@@ -343,17 +330,28 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         (
             "term",
             vec![
-                "red", "green", "blue", "yellow", "cyan", "magenta", "bold", "dim", "table", "hr",
-                "clear", "confirm",
+                "red", "green", "blue", "yellow", "cyan", "magenta", "bold", "dim", "table",
+                "hr", "clear", "confirm", "sparkline", "bar", "banner", "box", "gradient",
+                "success", "error",
             ],
         ),
         (
             "time",
             vec![
-                "now", "unix", "parse", "format", "diff", "add", "sub", "zone", "elapsed", "today",
-                "sleep", "measure", "local",
+                "now", "unix", "parse", "format", "diff", "add", "sub", "zone", "zones",
+                "elapsed", "today", "date", "sleep", "measure", "local", "is_before",
+                "is_after", "start_of", "end_of", "from_unix", "is_weekend", "is_weekday",
+                "day_of_week", "days_in_month", "is_leap_year",
             ],
         ),
+        (
+            "npc",
+            vec![
+                "name", "first_name", "last_name", "email", "username", "phone", "number",
+                "pick", "bool", "sentence", "word", "id", "color", "ip", "url", "company",
+            ],
+        ),
+        ("exec", vec!["run_command"]),
     ]
     .into_iter()
     .collect();
@@ -372,105 +370,155 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
     items
 }
 
-fn get_hover(_uri: &str, _line: usize, _character: usize) -> serde_json::Value {
+fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
     let builtins: std::collections::HashMap<&str, &str> = [
-        (
-            "println",
-            "fn println(...args) — Print values followed by a newline",
-        ),
-        (
-            "print",
-            "fn print(...args) — Print values without a newline",
-        ),
+        ("println", "fn println(...args) — Print values followed by a newline"),
+        ("print", "fn print(...args) — Print values without a newline"),
         ("say", "fn say(...args) — Print with natural language style"),
-        (
-            "len",
-            "fn len(value) -> Int — Get the length of a string, array, or object",
-        ),
-        (
-            "type",
-            "fn type(value) -> String — Get the type name of a value",
-        ),
+        ("yell", "fn yell(...args) — Print in UPPERCASE"),
+        ("whisper", "fn whisper(...args) — Print in lowercase"),
+        ("len", "fn len(value) -> Int — Get the length of a string, array, or object"),
+        ("type", "fn type(value) -> String — Get the type name of a value"),
+        ("typeof", "fn typeof(value) -> String — Alias for type()"),
         ("str", "fn str(value) -> String — Convert a value to string"),
         ("int", "fn int(value) -> Int — Convert a value to integer"),
-        (
-            "float",
-            "fn float(value) -> Float — Convert a value to float",
-        ),
-        (
-            "push",
-            "fn push(array, value) — Add an element to the end of an array",
-        ),
-        (
-            "pop",
-            "fn pop(array) -> Value — Remove and return the last element",
-        ),
+        ("float", "fn float(value) -> Float — Convert a value to float"),
+        ("push", "fn push(array, value) — Add an element to the end of an array"),
+        ("pop", "fn pop(array) -> Value — Remove and return the last element"),
         ("map", "fn map(array, fn) -> Array — Transform each element"),
-        (
-            "filter",
-            "fn filter(array, fn) -> Array — Keep elements matching predicate",
-        ),
-        (
-            "reduce",
-            "fn reduce(array, fn, init) -> Value — Fold array to single value",
-        ),
-        (
-            "sort",
-            "fn sort(array) -> Array — Sort array in ascending order",
-        ),
-        (
-            "reverse",
-            "fn reverse(array) -> Array — Reverse array order",
-        ),
-        (
-            "keys",
-            "fn keys(object) -> Array — Get all keys of an object",
-        ),
-        (
-            "values",
-            "fn values(object) -> Array — Get all values of an object",
-        ),
-        (
-            "range",
-            "fn range(start, end) -> Array — Generate integer range [start, end)",
-        ),
-        (
-            "fetch",
-            "fn fetch(url) -> Object — HTTP GET request, returns {status, body, headers}",
-        ),
+        ("filter", "fn filter(array, fn) -> Array — Keep elements matching predicate"),
+        ("reduce", "fn reduce(array, fn, init) -> Value — Fold array to single value"),
+        ("sort", "fn sort(array) -> Array — Sort array in ascending order"),
+        ("reverse", "fn reverse(array) -> Array — Reverse array order"),
+        ("keys", "fn keys(object) -> Array — Get all keys of an object"),
+        ("values", "fn values(object) -> Array — Get all values of an object"),
+        ("contains", "fn contains(collection, value) -> Bool — Check if collection contains value"),
+        ("range", "fn range(start, end) -> Array — Generate integer range [start, end)"),
+        ("enumerate", "fn enumerate(array) -> Array — Pairs of [index, value]"),
+        ("split", "fn split(string, delimiter) -> Array — Split string into parts"),
+        ("join", "fn join(array, separator) -> String — Join array elements into string"),
+        ("replace", "fn replace(string, from, to) -> String — Replace occurrences in string"),
+        ("starts_with", "fn starts_with(string, prefix) -> Bool — Check string prefix"),
+        ("ends_with", "fn ends_with(string, suffix) -> Bool — Check string suffix"),
+        ("fetch", "fn fetch(url) -> Object — HTTP GET request, returns {status, body, headers}"),
         ("uuid", "fn uuid() -> String — Generate a random UUID v4"),
-        (
-            "assert",
-            "fn assert(condition) — Panic if condition is false",
-        ),
+        ("assert", "fn assert(condition) — Panic if condition is false"),
         ("assert_eq", "fn assert_eq(a, b) — Panic if a != b"),
-        (
-            "Ok",
-            "fn Ok(value) -> Result — Wrap value in a success Result",
-        ),
-        (
-            "Err",
-            "fn Err(message) -> Result — Wrap message in an error Result",
-        ),
-        (
-            "unwrap",
-            "fn unwrap(result) -> Value — Extract value from Ok, panic on Err",
-        ),
-        (
-            "sh",
-            "fn sh(command) -> String — Run shell command, return stdout",
-        ),
+        ("assert_ne", "fn assert_ne(a, b) — Panic if a == b"),
+        ("assert_throws", "fn assert_throws(fn) — Assert that function throws an error"),
+        ("Ok", "fn Ok(value) -> Result — Wrap value in a success Result"),
+        ("Err", "fn Err(message) -> Result — Wrap message in an error Result"),
+        ("is_ok", "fn is_ok(result) -> Bool — Check if Result is Ok"),
+        ("is_err", "fn is_err(result) -> Bool — Check if Result is Err"),
+        ("unwrap", "fn unwrap(result) -> Value — Extract value from Ok, panic on Err"),
+        ("unwrap_or", "fn unwrap_or(result, default) -> Value — Extract value or use default"),
+        ("Some", "fn Some(value) -> Option — Wrap value in Some"),
+        ("None", "None — The absence of a value"),
+        ("is_some", "fn is_some(option) -> Bool — Check if Option has a value"),
+        ("is_none", "fn is_none(option) -> Bool — Check if Option is None"),
+        ("sh", "fn sh(command) -> String — Run shell command, return stdout"),
+        ("exit", "fn exit(code) — Exit the program with a status code"),
+        ("input", "fn input(prompt) -> String — Read a line from stdin"),
+        ("time", "fn time() -> Int — Current unix timestamp in seconds"),
+        ("sum", "fn sum(array) -> Number — Sum all elements in an array"),
+        ("min_of", "fn min_of(array) -> Value — Find minimum value in array"),
+        ("max_of", "fn max_of(array) -> Value — Find maximum value in array"),
+        ("unique", "fn unique(array) -> Array — Remove duplicates"),
+        ("flatten", "fn flatten(array) -> Array — Flatten nested arrays"),
+        ("zip", "fn zip(a, b) -> Array — Combine two arrays into pairs"),
+        ("chunk", "fn chunk(array, size) -> Array — Split array into chunks"),
+        ("find", "fn find(array, fn) -> Value — Find first matching element"),
+        ("any", "fn any(array, fn) -> Bool — Check if any element matches"),
+        ("all", "fn all(array, fn) -> Bool — Check if all elements match"),
+        ("has_key", "fn has_key(object, key) -> Bool — Check if object has key"),
+        ("merge", "fn merge(obj1, obj2) -> Object — Merge two objects"),
+        ("pick", "fn pick(object, keys) -> Object — Select specific keys"),
+        ("omit", "fn omit(object, keys) -> Object — Exclude specific keys"),
+        ("entries", "fn entries(object) -> Array — Get [key, value] pairs"),
+        ("from_entries", "fn from_entries(array) -> Object — Create object from pairs"),
+        // Module docs
+        ("math", "module math — Math functions: sqrt, pow, abs, sin, cos, random_int, pi, e, ..."),
+        ("fs", "module fs — File system: read, write, append, exists, list, remove, mkdir, ..."),
+        ("io", "module io — Input/output: prompt, print, args, args_parse, args_get, args_has"),
+        ("crypto", "module crypto — Cryptography: sha256, md5, base64_encode/decode, hex_encode/decode"),
+        ("db", "module db — SQLite database: open, query, execute, close, last_insert_rowid"),
+        ("pg", "module pg — PostgreSQL: connect, query, execute, close"),
+        ("mysql", "module mysql — MySQL: connect, query, execute, close"),
+        ("jwt", "module jwt — JSON Web Tokens: sign, verify, decode, valid"),
+        ("env", "module env — Environment variables: get, set, has, keys"),
+        ("json", "module json — JSON: parse, stringify, pretty"),
+        ("regex", "module regex — Regular expressions: test, find, find_all, replace, split"),
+        ("log", "module log — Logging: info, warn, error, debug"),
+        ("http", "module http — HTTP client: get, post, put, delete, patch, head, download, crawl"),
+        ("csv", "module csv — CSV: parse, stringify, read, write"),
+        ("term", "module term — Terminal: red, green, blue, bold, table, hr, sparkline, bar, banner, box"),
+        ("npc", "module npc — Fake data: name, email, username, phone, number, pick, bool, sentence, ..."),
+        ("exec", "module exec — Shell execution: run_command"),
+        // GenZ debug kit
+        ("sus", "fn sus(value) — Inspect a value (GenZ debug: equivalent to dbg!)"),
+        ("bruh", "fn bruh(message) — Panic with a message (GenZ debug)"),
+        ("bet", "fn bet(condition) — Assert condition is true (GenZ debug)"),
+        ("no_cap", "fn no_cap(a, b) — Assert equality (GenZ debug)"),
+        ("ick", "fn ick(condition) — Assert condition is false (GenZ debug)"),
+        ("yolo", "fn yolo(fn) — Fire-and-forget execution"),
+        ("cook", "fn cook(fn) — Profile execution time"),
+        ("slay", "fn slay(fn, iterations) — Benchmark a function"),
+        ("ghost", "fn ghost(fn) — Silent execution (suppresses output)"),
     ]
     .into_iter()
     .collect();
 
-    // Without document text context, return generic hover
+    // Try to read document text and find the word under cursor
+    let doc_text = read_document(uri);
+    if let Some(text) = doc_text {
+        let lines: Vec<&str> = text.lines().collect();
+        if let Some(line_text) = lines.get(line) {
+            let word = extract_word_at(line_text, character);
+            if let Some(doc) = builtins.get(word.as_str()) {
+                return serde_json::json!({
+                    "contents": {
+                        "kind": "markdown",
+                        "value": format!("```forge\n{}\n```", doc)
+                    }
+                });
+            }
+        }
+    }
+
     serde_json::json!({
         "contents": {
             "kind": "markdown",
             "value": "Forge Language Server"
         }
     })
+}
+
+/// Extract the word at a given character position in a line.
+fn extract_word_at(line: &str, character: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if character >= chars.len() {
+        return String::new();
+    }
+
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+
+    let mut start = character;
+    while start > 0 && is_ident(chars[start - 1]) {
+        start -= 1;
+    }
+
+    let mut end = character;
+    while end < chars.len() && is_ident(chars[end]) {
+        end += 1;
+    }
+
+    chars[start..end].iter().collect()
+}
+
+/// Read a document from a file:// URI.
+fn read_document(uri: &str) -> Option<String> {
+    let path = uri.strip_prefix("file://")?;
+    std::fs::read_to_string(path).ok()
 }
 
 use std::io::Read;

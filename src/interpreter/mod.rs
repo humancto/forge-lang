@@ -35,7 +35,7 @@ pub enum Value {
     Lambda {
         params: Vec<Param>,
         body: Vec<Stmt>,
-        closure: Environment,
+        closure: Arc<std::sync::Mutex<Environment>>,
     },
     ResultOk(Box<Value>),
     ResultErr(Box<Value>),
@@ -1981,7 +1981,7 @@ impl Interpreter {
             Expr::Lambda { params, body } => Ok(Value::Lambda {
                 params: params.clone(),
                 body: body.clone(),
-                closure: self.env.clone(),
+                closure: Arc::new(std::sync::Mutex::new(self.env.clone())),
             }),
 
             Expr::StructInit { name, fields } => {
@@ -2457,7 +2457,13 @@ impl Interpreter {
                 closure,
             } => {
                 let saved_env = self.env.clone();
-                self.env = closure;
+                // Lock the shared closure to get the current captured state.
+                // Using Arc<Mutex<Environment>> means mutations inside the lambda
+                // persist across calls (fixes BUG-005: mutable closure capture).
+                let captured_env = closure.lock()
+                    .map_err(|_| RuntimeError::new("closure lock poisoned"))?
+                    .clone();
+                self.env = captured_env;
                 self.env.push_scope();
 
                 for (i, param) in params.iter().enumerate() {
@@ -2467,26 +2473,13 @@ impl Interpreter {
 
                 let result = self.exec_stmts(&body);
                 self.env.pop_scope();
-                // TODO(BUG-005): Mutable closure capture — shared state broken.
-                // When a lambda mutates a captured variable (e.g. a counter), the
-                // mutation is lost here because we throw away `self.env` and restore
-                // `saved_env`. Each call to the closure sees the original snapshot.
-                //
-                // Root cause: closures capture by VALUE (env.clone()), not by reference.
-                // Fix: wrap captured mutable bindings in Arc<Mutex<Value>> so that
-                // mutations inside the closure are visible to all call sites.
-                //
-                // Example that currently fails (always prints 1, 1, 1):
-                //   fn make_counter() {
-                //       let mut n = 0
-                //       return fn() { n = n + 1; return n }
-                //   }
-                //   let c = make_counter()
-                //   say c()  // should be 1
-                //   say c()  // should be 2, but prints 1
-                //   say c()  // should be 3, but prints 1
-                //
-                // Tracked: interpreter_behavior_test.fg::test_closure_captures_scope_by_value
+
+                // Write the modified closure back through the shared Arc<Mutex>,
+                // so the next call to this lambda sees the mutations.
+                if let Ok(mut guard) = closure.lock() {
+                    *guard = self.env.clone();
+                }
+
                 self.env = saved_env;
 
                 match result {
