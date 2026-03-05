@@ -10,6 +10,7 @@ homepage = "https://github.com/humancto/forge-lang"
 keywords = ["language", "programming-language", "interpreter", "vm", "scripting"]
 categories = ["compilers", "command-line-utilities"]
 readme = "README.md"
+exclude = ["docs/book/programming-forge.pdf", "docs/cover.jpeg", "docs/spec/**", "docs/PROGRAMMING_FORGE.md", "docs/part*.md", "benchmarks/**", "spec/**"]
 
 [[bin]]
 name = "forge"
