@@ -206,28 +206,33 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, String> {
     }
     // Try date only
     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let dt = d.and_hms_opt(0, 0, 0).unwrap();
-        return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        if let Some(dt) = d.and_hms_opt(0, 0, 0) {
+            return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
     }
     // Try US format: MM/DD/YYYY
     if let Ok(d) = NaiveDate::parse_from_str(s, "%m/%d/%Y") {
-        let dt = d.and_hms_opt(0, 0, 0).unwrap();
-        return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        if let Some(dt) = d.and_hms_opt(0, 0, 0) {
+            return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
     }
     // Try European format: DD.MM.YYYY
     if let Ok(d) = NaiveDate::parse_from_str(s, "%d.%m.%Y") {
-        let dt = d.and_hms_opt(0, 0, 0).unwrap();
-        return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        if let Some(dt) = d.and_hms_opt(0, 0, 0) {
+            return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
     }
     // Try month-first: "Jan 15, 2026"
     if let Ok(d) = NaiveDate::parse_from_str(s, "%b %d, %Y") {
-        let dt = d.and_hms_opt(0, 0, 0).unwrap();
-        return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        if let Some(dt) = d.and_hms_opt(0, 0, 0) {
+            return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
     }
     // Try "15 Jan 2026"
     if let Ok(d) = NaiveDate::parse_from_str(s, "%d %b %Y") {
-        let dt = d.and_hms_opt(0, 0, 0).unwrap();
-        return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        if let Some(dt) = d.and_hms_opt(0, 0, 0) {
+            return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
     }
     Err(format!(
         "cannot parse '{}' as a date/time. Supported formats: YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS, MM/DD/YYYY, DD.MM.YYYY, \"Jan 15, 2026\"",
@@ -264,7 +269,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             (Some(Value::Int(y)), Some(Value::Int(m)), Some(Value::Int(d))) => {
                 let date = NaiveDate::from_ymd_opt(*y as i32, *m as u32, *d as u32)
                     .ok_or_else(|| format!("invalid date: {}-{}-{}", y, m, d))?;
-                let dt = date.and_hms_opt(0, 0, 0).unwrap();
+                let dt = date.and_hms_opt(0, 0, 0)
+                    .ok_or_else(|| format!("invalid date: {}-{}-{}", y, m, d))?;
                 let utc = DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
                 Ok(datetime_to_value(utc, "UTC"))
             }
@@ -472,35 +478,36 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             };
             let unix = extract_unix(t).ok_or("first argument must be a time object")?;
             let dt = DateTime::from_timestamp(unix, 0).ok_or("invalid timestamp")?;
+            let err = || "internal error: invalid time components".to_string();
             let new_dt = match unit {
                 "day" => {
                     let d = dt.date_naive();
-                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).unwrap(), Utc)
+                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).ok_or_else(err)?, Utc)
                 }
                 "hour" => {
                     let d = dt.date_naive();
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), 0, 0).unwrap()),
+                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), 0, 0).ok_or_else(err)?),
                         Utc,
                     )
                 }
                 "month" => {
-                    let d = NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap();
-                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).unwrap(), Utc)
+                    let d = NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).ok_or_else(err)?;
+                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).ok_or_else(err)?, Utc)
                 }
                 "year" => {
-                    let d = NaiveDate::from_ymd_opt(dt.year(), 1, 1).unwrap();
-                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).unwrap(), Utc)
+                    let d = NaiveDate::from_ymd_opt(dt.year(), 1, 1).ok_or_else(err)?;
+                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).ok_or_else(err)?, Utc)
                 }
                 "week" => {
                     let weekday = dt.weekday().num_days_from_monday() as i64;
                     let d = dt.date_naive() - Duration::days(weekday);
-                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).unwrap(), Utc)
+                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).ok_or_else(err)?, Utc)
                 }
                 "minute" => {
                     let d = dt.date_naive();
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 0).unwrap()),
+                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 0).ok_or_else(err)?),
                         Utc,
                     )
                 }
@@ -524,18 +531,19 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             };
             let unix = extract_unix(t).ok_or("first argument must be a time object")?;
             let dt = DateTime::from_timestamp(unix, 0).ok_or("invalid timestamp")?;
+            let err = || "internal error: invalid time components".to_string();
             let new_dt = match unit {
                 "day" => {
                     let d = dt.date_naive();
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        d.and_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap()),
+                        d.and_time(NaiveTime::from_hms_opt(23, 59, 59).ok_or_else(err)?),
                         Utc,
                     )
                 }
                 "hour" => {
                     let d = dt.date_naive();
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), 59, 59).unwrap()),
+                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), 59, 59).ok_or_else(err)?),
                         Utc,
                     )
                 }
@@ -545,17 +553,17 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                     } else {
                         (dt.year(), dt.month() + 1)
                     };
-                    let first_of_next = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+                    let first_of_next = NaiveDate::from_ymd_opt(y, m, 1).ok_or_else(err)?;
                     let last_day = first_of_next - Duration::days(1);
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        last_day.and_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap()),
+                        last_day.and_time(NaiveTime::from_hms_opt(23, 59, 59).ok_or_else(err)?),
                         Utc,
                     )
                 }
                 "year" => {
-                    let d = NaiveDate::from_ymd_opt(dt.year(), 12, 31).unwrap();
+                    let d = NaiveDate::from_ymd_opt(dt.year(), 12, 31).ok_or_else(err)?;
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        d.and_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap()),
+                        d.and_time(NaiveTime::from_hms_opt(23, 59, 59).ok_or_else(err)?),
                         Utc,
                     )
                 }
@@ -563,14 +571,14 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                     let weekday = dt.weekday().num_days_from_monday() as i64;
                     let sunday = dt.date_naive() + Duration::days(6 - weekday);
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        sunday.and_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap()),
+                        sunday.and_time(NaiveTime::from_hms_opt(23, 59, 59).ok_or_else(err)?),
                         Utc,
                     )
                 }
                 "minute" => {
                     let d = dt.date_naive();
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 59).unwrap()),
+                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 59).ok_or_else(err)?),
                         Utc,
                     )
                 }

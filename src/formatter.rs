@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-pub fn format_files(files: &[PathBuf]) {
+pub fn format_files(files: &[PathBuf], check: bool) {
     let targets = if files.is_empty() {
         find_forge_files(".")
     } else {
@@ -13,17 +13,23 @@ pub fn format_files(files: &[PathBuf]) {
     }
 
     let mut formatted = 0;
+    let mut unformatted = 0;
     for path in &targets {
         match std::fs::read_to_string(path) {
             Ok(source) => {
                 let result = format_source(&source);
                 if result != source {
-                    if let Err(e) = std::fs::write(path, &result) {
-                        eprintln!("  error      {} — {}", path.display(), e);
-                        continue;
+                    if check {
+                        println!("  would format  {}", path.display());
+                        unformatted += 1;
+                    } else {
+                        if let Err(e) = std::fs::write(path, &result) {
+                            eprintln!("  error      {} — {}", path.display(), e);
+                            continue;
+                        }
+                        println!("  formatted  {}", path.display());
+                        formatted += 1;
                     }
-                    println!("  formatted  {}", path.display());
-                    formatted += 1;
                 } else {
                     println!("  unchanged  {}", path.display());
                 }
@@ -34,7 +40,16 @@ pub fn format_files(files: &[PathBuf]) {
         }
     }
     println!();
-    println!("  {} file(s) formatted", formatted);
+    if check {
+        if unformatted > 0 {
+            println!("  {} file(s) need formatting", unformatted);
+            std::process::exit(1);
+        } else {
+            println!("  All files formatted correctly");
+        }
+    } else {
+        println!("  {} file(s) formatted", formatted);
+    }
 }
 
 fn find_forge_files(dir: &str) -> Vec<PathBuf> {
@@ -60,6 +75,62 @@ fn collect_fg_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+/// Count leading close braces/brackets at the start of a line (before any other content).
+fn count_leading_closes(line: &str) -> i32 {
+    let mut count = 0i32;
+    for c in line.chars() {
+        match c {
+            '}' | ']' => count += 1,
+            ' ' | '\t' => continue,
+            _ => break,
+        }
+    }
+    count
+}
+
+/// Count braces in a line, ignoring those inside strings and comments.
+fn count_braces(line: &str) -> (i32, i32) {
+    let mut opens = 0i32;
+    let mut closes = 0i32;
+    let mut in_string = false;
+    let mut string_char = '"';
+    let mut chars = line.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        // Handle line comments — stop counting
+        if !in_string && c == '/' && chars.peek() == Some(&'/') {
+            break;
+        }
+
+        // Handle string start/end
+        if !in_string && (c == '"' || c == '\'') {
+            in_string = true;
+            string_char = c;
+            continue;
+        }
+        if in_string {
+            if c == '\\' {
+                // Skip escaped character
+                chars.next();
+                continue;
+            }
+            if c == string_char {
+                in_string = false;
+            }
+            continue;
+        }
+
+        // Count braces and brackets outside strings
+        if c == '{' || c == '[' {
+            opens += 1;
+        } else if c == '}' || c == ']' {
+            closes += 1;
+        }
+    }
+
+    (opens, closes)
+}
+
 fn format_source(source: &str) -> String {
     let mut output = String::new();
     let mut indent_level: i32 = 0;
@@ -68,6 +139,7 @@ fn format_source(source: &str) -> String {
     for line in source.lines() {
         let trimmed = line.trim();
 
+        // Collapse multiple blank lines into one
         if trimmed.is_empty() {
             if !prev_blank {
                 output.push('\n');
@@ -77,38 +149,23 @@ fn format_source(source: &str) -> String {
         }
         prev_blank = false;
 
-        // Decrease indent before lines that start with closing brace
-        if trimmed.starts_with('}') || trimmed.starts_with("] ") {
-            indent_level -= 1;
-            if indent_level < 0 {
-                indent_level = 0;
-            }
+        let (opens, closes) = count_braces(trimmed);
+        let leading_closes = count_leading_closes(trimmed);
+
+        // Decrease indent for leading close braces (before writing the line)
+        indent_level -= leading_closes;
+        if indent_level < 0 {
+            indent_level = 0;
         }
 
-        // Also decrease for lines that are just else/otherwise/nah
-        let is_else_line = trimmed.starts_with("} else")
-            || trimmed.starts_with("} otherwise")
-            || trimmed.starts_with("} nah");
-
-        if is_else_line {
-            // These are on the same indent as the if
-        } else {
-            let indent = "    ".repeat(indent_level as usize);
-            output.push_str(&indent);
-        }
-
-        if is_else_line {
-            let indent = "    ".repeat(indent_level as usize);
-            output.push_str(&indent);
-        }
-
+        let indent = "    ".repeat(indent_level as usize);
+        output.push_str(&indent);
         output.push_str(trimmed);
         output.push('\n');
 
-        // Increase indent after lines that end with opening brace
-        let opens = trimmed.chars().filter(|c| *c == '{').count();
-        let closes = trimmed.chars().filter(|c| *c == '}').count();
-        indent_level += opens as i32 - closes as i32;
+        // Adjust indent for remaining braces (opens minus non-leading closes)
+        let trailing_closes = closes - leading_closes;
+        indent_level += opens - trailing_closes;
         if indent_level < 0 {
             indent_level = 0;
         }
@@ -143,5 +200,76 @@ mod tests {
         let input = "let x = 42\nlet y = 10\n";
         let result = format_source(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn ignores_braces_in_strings() {
+        let input = "let s = \"hello { world }\"\nsay s\n";
+        let result = format_source(input);
+        // Braces inside strings should NOT affect indentation
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn ignores_braces_in_comments() {
+        let input = "let x = 1 // this { brace\nsay x\n";
+        let result = format_source(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn handles_else_blocks() {
+        let input = "if true {\nsay \"yes\"\n} else {\nsay \"no\"\n}\n";
+        let result = format_source(input);
+        assert!(result.contains("} else {"));
+        assert!(result.contains("    say \"yes\""));
+        assert!(result.contains("    say \"no\""));
+    }
+
+    #[test]
+    fn strips_trailing_whitespace() {
+        let input = "let x = 42   \nlet y = 10  \n";
+        let result = format_source(input);
+        assert_eq!(result, "let x = 42\nlet y = 10\n");
+    }
+
+    #[test]
+    fn collapses_multiple_blank_lines() {
+        let input = "let x = 1\n\n\n\nlet y = 2\n";
+        let result = format_source(input);
+        assert_eq!(result, "let x = 1\n\nlet y = 2\n");
+    }
+
+    #[test]
+    fn handles_nested_braces() {
+        let input = "fn outer() {\nif true {\nsay \"nested\"\n}\n}\n";
+        let result = format_source(input);
+        assert!(result.contains("    if true {"));
+        assert!(result.contains("        say \"nested\""));
+        assert!(result.contains("    }"));
+    }
+
+    #[test]
+    fn count_braces_ignores_strings() {
+        assert_eq!(count_braces("let x = \"{\""), (0, 0));
+        assert_eq!(count_braces("if true {"), (1, 0));
+        assert_eq!(count_braces("}"), (0, 1));
+        assert_eq!(count_braces("} else {"), (1, 1));
+        assert_eq!(count_braces("let s = \"} else {\""), (0, 0));
+    }
+
+    #[test]
+    fn count_braces_includes_brackets() {
+        assert_eq!(count_braces("let a = ["), (1, 0));
+        assert_eq!(count_braces("]"), (0, 1));
+        assert_eq!(count_braces("[{"), (2, 0));
+        assert_eq!(count_braces("}]"), (0, 2));
+    }
+
+    #[test]
+    fn handles_bracket_indentation() {
+        let input = "let a = [\n1,\n2,\n3\n]\n";
+        let result = format_source(input);
+        assert_eq!(result, "let a = [\n    1,\n    2,\n    3\n]\n");
     }
 }

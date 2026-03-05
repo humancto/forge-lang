@@ -79,6 +79,9 @@ enum Command {
     Fmt {
         /// Files to format (defaults to all .fg files in current directory)
         files: Vec<PathBuf>,
+        /// Check formatting without writing (exit code 1 if unformatted)
+        #[arg(long)]
+        check: bool,
     },
     /// Run tests in the tests/ directory
     Test {
@@ -177,8 +180,8 @@ async fn main() {
             println!("Internet-native programming language");
             println!("Bytecode VM with mark-sweep GC");
         }
-        Some(Command::Fmt { files }) => {
-            formatter::format_files(&files);
+        Some(Command::Fmt { files, check }) => {
+            formatter::format_files(&files, check);
         }
         Some(Command::Test { dir, filter }) => {
             let test_dir = if dir == "tests" {
