@@ -18,9 +18,6 @@ let user_age  = 30
 db.execute("INSERT INTO users (name, age) VALUES (?, ?)", [user_name, user_age])
 db.execute("INSERT INTO users (name, age) VALUES (?, ?)", ["Bob", 25])
 
-let last_id = db.last_insert_rowid()
-say "Last inserted rowid: " + str(last_id)   // → 2
-
 // Parameterized SELECT — safely filter by user-supplied value
 let min_age = 28
 let rows = db.query("SELECT * FROM users WHERE age >= ?", [min_age])

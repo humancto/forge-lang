@@ -107,15 +107,15 @@ run, repl, version, fmt, test, new, build, install, lsp, learn, chat, help, -e
 
 ```bash
 cargo build          # 0 errors
-cargo test           # 528 Rust tests pass
-forge test           # 334 Forge tests pass (862 total)
+cargo test           # 577 Rust tests pass
+forge test           # 427 Forge tests pass (1004 total)
 ```
 
-All 15 example files run successfully.
+All 18 example files run successfully.
 
-## Known Limitations (v0.4.0)
+## Known Limitations (v0.4.1)
 
-- SQL queries use raw strings (no parameterized query API yet) — be cautious with user input
+- All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
 - Interpreter is ~20x slower than Python for deep recursion; use `--jit` (11x faster than Python) or `--vm` (2x slower than Python)
 - VM/JIT support fewer features than the interpreter — use interpreter (default) for full stdlib, HTTP, DB access
 - `regex` functions take `(text, pattern)` order, not `(pattern, text)`
