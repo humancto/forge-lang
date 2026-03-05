@@ -120,10 +120,10 @@ fn count_braces(line: &str) -> (i32, i32) {
             continue;
         }
 
-        // Count braces outside strings
-        if c == '{' {
+        // Count braces and brackets outside strings
+        if c == '{' || c == '[' {
             opens += 1;
-        } else if c == '}' {
+        } else if c == '}' || c == ']' {
             closes += 1;
         }
     }
@@ -256,5 +256,20 @@ mod tests {
         assert_eq!(count_braces("}"), (0, 1));
         assert_eq!(count_braces("} else {"), (1, 1));
         assert_eq!(count_braces("let s = \"} else {\""), (0, 0));
+    }
+
+    #[test]
+    fn count_braces_includes_brackets() {
+        assert_eq!(count_braces("let a = ["), (1, 0));
+        assert_eq!(count_braces("]"), (0, 1));
+        assert_eq!(count_braces("[{"), (2, 0));
+        assert_eq!(count_braces("}]"), (0, 2));
+    }
+
+    #[test]
+    fn handles_bracket_indentation() {
+        let input = "let a = [\n1,\n2,\n3\n]\n";
+        let result = format_source(input);
+        assert_eq!(result, "let a = [\n    1,\n    2,\n    3\n]\n");
     }
 }

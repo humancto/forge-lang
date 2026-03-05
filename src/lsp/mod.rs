@@ -1,6 +1,23 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::sync::Mutex;
+
+/// In-memory document store: uri -> text content.
+/// Updated on didOpen/didChange, used by hover/diagnostics.
+static DOCUMENTS: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn store_document(uri: &str, text: &str) {
+    if let Ok(mut docs) = DOCUMENTS.lock() {
+        docs.insert(uri.to_string(), text.to_string());
+    }
+}
+
+fn get_document(uri: &str) -> Option<String> {
+    DOCUMENTS.lock().ok()?.get(uri).cloned()
+}
 
 /// Basic LSP server for Forge.
 /// Implements the Language Server Protocol over stdin/stdout.
@@ -83,6 +100,8 @@ fn handle_message(body: &str) -> Option<String> {
                 let changes = params.get("contentChanges")?.as_array()?;
                 changes.first()?.get("text")?.as_str()?
             };
+
+            store_document(uri, text);
 
             let diagnostics = get_diagnostics(text);
             let notification = serde_json::json!({
@@ -468,8 +487,9 @@ fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
     .into_iter()
     .collect();
 
-    // Try to read document text and find the word under cursor
-    let doc_text = read_document(uri);
+    // Use in-memory document store (populated by didOpen/didChange),
+    // falling back to disk for files not yet opened in the editor.
+    let doc_text = get_document(uri).or_else(|| read_document(uri));
     if let Some(text) = doc_text {
         let lines: Vec<&str> = text.lines().collect();
         if let Some(line_text) = lines.get(line) {
