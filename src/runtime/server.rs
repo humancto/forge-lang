@@ -44,10 +44,10 @@ pub struct ServerConfig {
 
 pub fn extract_routes(program: &Program) -> Vec<Route> {
     let mut routes = Vec::new();
-    for stmt in &program.statements {
+    for spanned in &program.statements {
         if let Stmt::FnDef {
             name, decorators, ..
-        } = stmt
+        } = &spanned.stmt
         {
             for dec in decorators {
                 let method = match dec.name.as_str() {
@@ -79,8 +79,8 @@ pub fn extract_routes(program: &Program) -> Vec<Route> {
 }
 
 pub fn extract_server_config(program: &Program) -> Option<ServerConfig> {
-    for stmt in &program.statements {
-        if let Stmt::DecoratorStmt(dec) = stmt {
+    for spanned in &program.statements {
+        if let Stmt::DecoratorStmt(dec) = &spanned.stmt {
             if dec.name == "server" {
                 let mut config = ServerConfig {
                     port: 8080,
@@ -132,7 +132,7 @@ fn call_handler(
     query_params: &HashMap<String, String>,
     body: Option<JsonValue>,
 ) -> (StatusCode, JsonValue) {
-    let handler = match interp.env.get(handler_name).cloned() {
+    let handler = match interp.env.get(handler_name) {
         Some(v) => v,
         None => {
             return (
@@ -262,7 +262,7 @@ pub async fn start_server(
                                                     Ok(g) => g,
                                                     Err(poisoned) => poisoned.into_inner(),
                                                 };
-                                                let handler = interp.env.get(&hn).cloned();
+                                                let handler = interp.env.get(&hn);
                                                 if let Some(h) = handler {
                                                     match interp.call_function(
                                                         h,

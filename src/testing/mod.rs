@@ -130,7 +130,7 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
 
             // Run @before hook
             if let Some(ref before_name) = before_fn {
-                if let Some(f) = interpreter.env.get(before_name).cloned() {
+                if let Some(f) = interpreter.env.get(before_name) {
                     if let Err(e) = interpreter.call_function(f, vec![]) {
                         failed += 1;
                         println!(
@@ -142,7 +142,7 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
                 }
             }
 
-            let func = interpreter.env.get(&test.name).cloned();
+            let func = interpreter.env.get(&test.name);
             let result = match func {
                 Some(f) => interpreter.call_function(f, vec![]),
                 None => {
@@ -157,7 +157,7 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
 
             // Run @after hook regardless of test result
             if let Some(ref after_name) = after_fn {
-                if let Some(f) = interpreter.env.get(after_name).cloned() {
+                if let Some(f) = interpreter.env.get(after_name) {
                     let _ = interpreter.call_function(f, vec![]);
                 }
             }
@@ -208,10 +208,10 @@ struct TestInfo {
 
 fn find_test_functions(program: &Program) -> Vec<TestInfo> {
     let mut tests = Vec::new();
-    for stmt in &program.statements {
+    for spanned in &program.statements {
         if let Stmt::FnDef {
             name, decorators, ..
-        } = stmt
+        } = &spanned.stmt
         {
             let mut is_test = false;
             let mut is_skip = false;
@@ -235,10 +235,10 @@ fn find_test_functions(program: &Program) -> Vec<TestInfo> {
 }
 
 fn find_hook_function(program: &Program, hook_name: &str) -> Option<String> {
-    for stmt in &program.statements {
+    for spanned in &program.statements {
         if let Stmt::FnDef {
             name, decorators, ..
-        } = stmt
+        } = &spanned.stmt
         {
             for dec in decorators {
                 if dec.name == hook_name {

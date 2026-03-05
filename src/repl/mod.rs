@@ -6,19 +6,27 @@ use crate::parser::Parser;
 use rustyline::completion::{Completer, Pair};
 use rustyline::{Config, Editor, Helper, Highlighter, Hinter, Validator};
 
-const BANNER: &str = r#"
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn banner() -> String {
+    format!(
+        r#"
   ╔═══════════════════════════════════════╗
-  ║   FORGE v0.3.0 — Internet-Native     ║
+  ║   FORGE v{:<6}— Internet-Native     ║
   ║   Type 'help' for commands            ║
   ║   Type 'exit' or Ctrl+D to quit      ║
   ╚═══════════════════════════════════════╝
-"#;
+"#,
+        VERSION
+    )
+}
 
 const BUILTINS: &[&str] = &[
     "print",
     "println",
     "len",
     "type",
+    "typeof",
     "str",
     "int",
     "float",
@@ -31,12 +39,57 @@ const BUILTINS: &[&str] = &[
     "enumerate",
     "map",
     "filter",
+    "reduce",
+    "sort",
+    "reverse",
+    "find",
+    "flat_map",
+    "any",
+    "all",
+    "sample",
+    "shuffle",
+    "sum",
+    "min_of",
+    "max_of",
+    "unique",
+    "zip",
+    "flatten",
+    "group_by",
+    "chunk",
+    "slice",
+    "partition",
+    "has_key",
+    "get",
+    "pick",
+    "omit",
+    "merge",
+    "entries",
+    "from_entries",
+    "diff",
+    "split",
+    "join",
+    "replace",
+    "starts_with",
+    "ends_with",
+    "substring",
+    "index_of",
+    "pad_start",
+    "pad_end",
+    "capitalize",
+    "title",
+    "slugify",
+    "snake_case",
+    "camel_case",
     "Ok",
     "Err",
     "is_ok",
     "is_err",
     "unwrap",
     "unwrap_or",
+    "Some",
+    "None",
+    "is_some",
+    "is_none",
     "json",
     "fetch",
     "time",
@@ -45,6 +98,31 @@ const BUILTINS: &[&str] = &[
     "yell",
     "whisper",
     "wait",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "assert_throws",
+    "channel",
+    "send",
+    "receive",
+    "sh",
+    "shell",
+    "sh_lines",
+    "sh_json",
+    "sh_ok",
+    "which",
+    "cwd",
+    "exit",
+    "input",
+    "sus",
+    "bruh",
+    "bet",
+    "no_cap",
+    "ick",
+    "cook",
+    "yolo",
+    "ghost",
+    "slay",
 ];
 
 const KEYWORDS: &[&str] = &[
@@ -120,7 +198,7 @@ impl Completer for ForgeCompleter {
 }
 
 pub fn run_repl() {
-    println!("{}", BANNER);
+    println!("{}", banner());
 
     let config = Config::builder().auto_add_history(true).build();
     let mut rl = match Editor::with_config(config) {
@@ -178,7 +256,7 @@ pub fn run_repl() {
                             continue;
                         }
                         "version" => {
-                            println!("Forge v0.3.0");
+                            println!("Forge v{}", VERSION);
                             continue;
                         }
                         "" => continue,
@@ -293,7 +371,7 @@ fn print_help() {
     say typeof(42)             Type checking
     say crypto.sha256("hi")    Crypto
 
-  Modules: math, fs, io, crypto, db, env, json, regex, log, http, csv, term
+  Modules: math, fs, io, crypto, db, pg, mysql, env, json, regex, log, http, csv, term, jwt, exec, npc
 "#
     );
 }

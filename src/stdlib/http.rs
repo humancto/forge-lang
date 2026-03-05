@@ -391,19 +391,116 @@ fn percent_encode(s: &str) -> String {
 fn strip_html_tags(html: &str) -> String {
     let mut result = String::new();
     let mut in_tag = false;
-    let in_script = false;
+    let mut in_script = false;
+    let mut tag_name = String::new();
+    let mut collecting_tag_name = false;
+
     for ch in html.chars() {
         if ch == '<' {
             in_tag = true;
+            tag_name.clear();
+            collecting_tag_name = true;
             continue;
         }
         if ch == '>' {
             in_tag = false;
+            collecting_tag_name = false;
+            let tag_lower = tag_name.to_lowercase();
+            if tag_lower == "script" || tag_lower == "style" {
+                in_script = true;
+            } else if tag_lower == "/script" || tag_lower == "/style" {
+                in_script = false;
+            }
             continue;
         }
-        if !in_tag && !in_script {
+        if in_tag {
+            if collecting_tag_name {
+                if ch.is_whitespace() || ch == '/' && tag_name.is_empty() {
+                    // Allow leading '/' for closing tags like </script>
+                    if ch == '/' && tag_name.is_empty() {
+                        tag_name.push(ch);
+                    } else {
+                        collecting_tag_name = false;
+                    }
+                } else {
+                    tag_name.push(ch);
+                }
+            }
+            continue;
+        }
+        if !in_script {
             result.push(ch);
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_html_basic() {
+        assert_eq!(strip_html_tags("<p>Hello</p>"), "Hello");
+    }
+
+    #[test]
+    fn strip_html_nested_tags() {
+        assert_eq!(
+            strip_html_tags("<div><span>Hello</span> <b>World</b></div>"),
+            "Hello World"
+        );
+    }
+
+    #[test]
+    fn strip_html_script_content_removed() {
+        let html = "<p>Before</p><script>var x = 1; alert('xss');</script><p>After</p>";
+        let result = strip_html_tags(html);
+        assert_eq!(result, "BeforeAfter");
+        assert!(!result.contains("alert"), "script content should be removed");
+    }
+
+    #[test]
+    fn strip_html_style_content_removed() {
+        let html = "<p>Hello</p><style>body { color: red; }</style><p>World</p>";
+        let result = strip_html_tags(html);
+        assert_eq!(result, "HelloWorld");
+        assert!(!result.contains("color"), "style content should be removed");
+    }
+
+    #[test]
+    fn strip_html_script_with_attributes() {
+        let html = r#"<p>Text</p><script type="text/javascript">evil();</script><p>More</p>"#;
+        let result = strip_html_tags(html);
+        assert_eq!(result, "TextMore");
+    }
+
+    #[test]
+    fn strip_html_case_insensitive_script() {
+        let html = "<p>A</p><SCRIPT>bad();</SCRIPT><p>B</p>";
+        let result = strip_html_tags(html);
+        assert_eq!(result, "AB");
+    }
+
+    #[test]
+    fn strip_html_multiple_scripts() {
+        let html = "<script>a();</script>Hello<script>b();</script>World<style>.x{}</style>!";
+        let result = strip_html_tags(html);
+        assert_eq!(result, "HelloWorld!");
+    }
+
+    #[test]
+    fn strip_html_no_tags() {
+        assert_eq!(strip_html_tags("Just plain text"), "Just plain text");
+    }
+
+    #[test]
+    fn strip_html_empty() {
+        assert_eq!(strip_html_tags(""), "");
+    }
+
+    #[test]
+    fn strip_html_self_closing_tags() {
+        assert_eq!(strip_html_tags("Hello<br/>World<img src='x'/>!"), "HelloWorld!");
+    }
 }

@@ -20,8 +20,13 @@ impl Parser {
         self.skip_newlines();
 
         while !self.is_at_end() {
+            let line = if self.pos < self.tokens.len() {
+                self.tokens[self.pos].line
+            } else {
+                0
+            };
             let stmt = self.parse_statement()?;
-            statements.push(stmt);
+            statements.push(SpannedStmt { stmt, line });
             self.skip_newlines();
         }
 
@@ -1918,9 +1923,9 @@ mod tests {
     #[test]
     fn parses_expression_interpolation() {
         let program = parse_program(r#"let msg = "sum = {a + b}""#);
-        let stmt = program.statements.first().expect("expected one statement");
+        let spanned = program.statements.first().expect("expected one statement");
 
-        match stmt {
+        match &spanned.stmt {
             Stmt::Let { value, .. } => match value {
                 Expr::StringInterp(parts) => {
                     assert_eq!(parts.len(), 2);
@@ -1942,9 +1947,9 @@ mod tests {
     #[test]
     fn parses_field_access_interpolation() {
         let program = parse_program(r#"let msg = "name = {user.name}""#);
-        let stmt = program.statements.first().expect("expected one statement");
+        let spanned = program.statements.first().expect("expected one statement");
 
-        match stmt {
+        match &spanned.stmt {
             Stmt::Let { value, .. } => match value {
                 Expr::StringInterp(parts) => {
                     assert_eq!(parts.len(), 2);
