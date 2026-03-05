@@ -1,0 +1,333 @@
+// v0.4.2 Quality Pass — Comprehensive Tests
+// Tests for: push/pop mutation, closures, CSV parsing, error handling
+
+// ===== Fix 4: push/pop in-place mutation =====
+
+@test
+fn test_push_mutates_mutable_array() {
+    let mut arr = [1, 2, 3]
+    push(arr, 4)
+    assert_eq(arr, [1, 2, 3, 4])
+}
+
+@test
+fn test_pop_mutates_mutable_array() {
+    let mut arr = [10, 20, 30]
+    let popped = pop(arr)
+    assert_eq(popped, 30)
+    assert_eq(arr, [10, 20])
+}
+
+@test
+fn test_method_push_mutates_mutable() {
+    let mut arr = ["a", "b"]
+    arr.push("c")
+    assert_eq(arr, ["a", "b", "c"])
+}
+
+@test
+fn test_method_pop_mutates_mutable() {
+    let mut arr = [100, 200, 300]
+    let x = arr.pop()
+    assert_eq(x, 300)
+    assert_eq(len(arr), 2)
+}
+
+@test
+fn test_push_immutable_returns_new() {
+    let arr = [1, 2]
+    let result = push(arr, 3)
+    assert_eq(len(arr), 2)
+    assert_eq(len(result), 3)
+}
+
+@test
+fn test_multiple_pushes() {
+    let mut arr = []
+    push(arr, "a")
+    push(arr, "b")
+    push(arr, "c")
+    assert_eq(len(arr), 3)
+    assert_eq(arr, ["a", "b", "c"])
+}
+
+@test
+fn test_pop_until_empty() {
+    let mut arr = [1, 2]
+    let a = pop(arr)
+    let b = pop(arr)
+    assert_eq(a, 2)
+    assert_eq(b, 1)
+    assert_eq(len(arr), 0)
+}
+
+@test
+fn test_push_returns_mutated_array() {
+    let mut arr = [1]
+    let result = push(arr, 2)
+    assert_eq(result, [1, 2])
+    assert_eq(arr, [1, 2])
+}
+
+@test
+fn test_push_literal_returns_new() {
+    let result = push([1, 2], 3)
+    assert_eq(result, [1, 2, 3])
+}
+
+// ===== Fix 5: Mutable closure capture =====
+
+@test
+fn test_make_counter() {
+    fn make_counter() {
+        let mut count = 0
+        return fn() {
+            count = count + 1
+            return count
+        }
+    }
+    let counter = make_counter()
+    assert_eq(counter(), 1)
+    assert_eq(counter(), 2)
+    assert_eq(counter(), 3)
+}
+
+@test
+fn test_two_independent_counters() {
+    fn make_counter() {
+        let mut count = 0
+        return fn() {
+            count = count + 1
+            return count
+        }
+    }
+    let c1 = make_counter()
+    let c2 = make_counter()
+    c1()
+    c1()
+    c2()
+    assert_eq(c1(), 3)
+    assert_eq(c2(), 2)
+}
+
+@test
+fn test_closure_accumulator() {
+    fn make_adder() {
+        let mut total = 0
+        return fn(n) {
+            total = total + n
+            return total
+        }
+    }
+    let adder = make_adder()
+    assert_eq(adder(10), 10)
+    assert_eq(adder(20), 30)
+    assert_eq(adder(5), 35)
+}
+
+@test
+fn test_closure_over_loop_variable() {
+    let mut total = 0
+    let add = fn(n) { total = total + n }
+    for i in range(1, 6) {
+        add(i)
+    }
+    assert_eq(total, 15)
+}
+
+@test
+fn test_closure_immutable_capture() {
+    fn make_multiplier(factor) {
+        return fn(x) {
+            return x * factor
+        }
+    }
+    let double = make_multiplier(2)
+    let triple = make_multiplier(3)
+    assert_eq(double(5), 10)
+    assert_eq(triple(5), 15)
+}
+
+@test
+fn test_closure_toggle() {
+    fn make_toggle() {
+        let mut state = false
+        return fn() {
+            state = !state
+            return state
+        }
+    }
+    let toggle = make_toggle()
+    assert_eq(toggle(), true)
+    assert_eq(toggle(), false)
+    assert_eq(toggle(), true)
+}
+
+@test
+fn test_nested_closure_mutation() {
+    fn outer() {
+        let mut x = 0
+        fn middle() {
+            x = x + 10
+            fn inner() {
+                x = x + 1
+            }
+            inner()
+        }
+        middle()
+        return x
+    }
+    assert_eq(outer(), 11)
+}
+
+@test
+fn test_closure_with_array_mutation() {
+    fn make_collector() {
+        let mut items = []
+        return {
+            add: fn(item) { push(items, item) },
+            get: fn() { return items }
+        }
+    }
+    let c = make_collector()
+    c.add("a")
+    c.add("b")
+    c.add("c")
+    assert_eq(c.get(), ["a", "b", "c"])
+}
+
+// ===== Fix 3: CSV parsing =====
+
+@test
+fn test_csv_basic() {
+    let data = csv.parse("name,age\nAlice,30\nBob,25")
+    assert_eq(len(data), 2)
+    assert_eq(data[0].name, "Alice")
+    assert_eq(data[0].age, 30)
+    assert_eq(data[1].name, "Bob")
+}
+
+@test
+fn test_csv_quoted_commas() {
+    let data = csv.parse("name,city\n\"Smith, John\",\"New York\"")
+    assert_eq(len(data), 1)
+    assert_eq(data[0].name, "Smith, John")
+    assert_eq(data[0].city, "New York")
+}
+
+@test
+fn test_csv_escaped_quotes() {
+    let data = csv.parse("msg\n\"He said \"\"hello\"\"\"")
+    assert_eq(len(data), 1)
+    assert_eq(data[0].msg, "He said \"hello\"")
+}
+
+@test
+fn test_csv_numeric_types() {
+    let data = csv.parse("a,b,c\n42,3.14,true")
+    assert_eq(data[0].a, 42)
+    assert_eq(data[0].b, 3.14)
+    assert_eq(data[0].c, true)
+}
+
+@test
+fn test_csv_stringify_roundtrip() {
+    let data = csv.parse("x,y\n1,2\n3,4")
+    let output = csv.stringify(data)
+    assert(contains(output, "x,y"))
+    assert(contains(output, "1,2"))
+    assert(contains(output, "3,4"))
+}
+
+// ===== Fix 6: Runtime error handling =====
+
+@test
+fn test_division_by_zero_caught() {
+    let mut caught = false
+    try {
+        let x = 1 / 0
+    } catch e {
+        caught = true
+        assert(contains(e.message, "division by zero"))
+    }
+    assert(caught)
+}
+
+@test
+fn test_modulo_by_zero_caught() {
+    let mut caught = false
+    try {
+        let x = 10 % 0
+    } catch e {
+        caught = true
+        assert(contains(e.message, "modulo by zero"))
+    }
+    assert(caught)
+}
+
+@test
+fn test_arithmetic_error_type() {
+    let mut result = "ok"
+    try {
+        let x = 1 / 0
+    } catch e {
+        result = e.type
+    }
+    assert_eq(result, "ArithmeticError")
+}
+
+// ===== Regressions: core features still work =====
+
+@test
+fn test_map_filter_reduce() {
+    let nums = [1, 2, 3, 4, 5]
+    let evens = filter(nums, fn(x) { x % 2 == 0 })
+    assert_eq(evens, [2, 4])
+    let doubled = map(nums, fn(x) { x * 2 })
+    assert_eq(doubled, [2, 4, 6, 8, 10])
+    let total = reduce(nums, 0, fn(acc, x) { acc + x })
+    assert_eq(total, 15)
+}
+
+@test
+fn test_string_operations() {
+    assert_eq(split("a,b,c", ","), ["a", "b", "c"])
+    assert_eq(join(["x", "y"], "-"), "x-y")
+    assert_eq(replace("hello world", "world", "forge"), "hello forge")
+    assert(starts_with("hello", "hel"))
+    assert(ends_with("hello", "llo"))
+}
+
+@test
+fn test_object_operations() {
+    let obj = { name: "Alice", age: 30 }
+    assert_eq(keys(obj), ["name", "age"])
+    assert(has_key(obj, "name"))
+    assert_eq(get(obj, "name"), "Alice")
+}
+
+@test
+fn test_sort_with_comparator() {
+    let nums = [3, 1, 4, 1, 5]
+    let sorted = sort(nums, fn(a, b) { a - b })
+    assert_eq(sorted, [1, 1, 3, 4, 5])
+}
+
+@test
+fn test_recursion() {
+    fn fib(n) {
+        if n <= 1 { return n }
+        return fib(n - 1) + fib(n - 2)
+    }
+    assert_eq(fib(10), 55)
+}
+
+@test
+fn test_result_types() {
+    let ok_val = Ok(42)
+    let err_val = Err("oops")
+    assert(is_ok(ok_val))
+    assert(is_err(err_val))
+    assert_eq(unwrap(ok_val), 42)
+    assert_eq(unwrap_or(err_val, 0), 0)
+}

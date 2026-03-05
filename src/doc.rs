@@ -171,8 +171,8 @@ struct ParamDoc {
 fn extract_docs(program: &Program, lines: &[&str]) -> Vec<DocEntry> {
     let mut entries = Vec::new();
 
-    for stmt in &program.statements {
-        match stmt {
+    for spanned in &program.statements {
+        match &spanned.stmt {
             Stmt::FnDef {
                 name,
                 params,
@@ -180,7 +180,7 @@ fn extract_docs(program: &Program, lines: &[&str]) -> Vec<DocEntry> {
                 return_type,
                 ..
             } => {
-                let comments = extract_preceding_comments(lines, stmt);
+                let comments = extract_preceding_comments(lines, &spanned.stmt);
                 let param_docs: Vec<ParamDoc> = params
                     .iter()
                     .map(|p| ParamDoc {
@@ -223,7 +223,7 @@ fn extract_docs(program: &Program, lines: &[&str]) -> Vec<DocEntry> {
                 });
             }
             Stmt::StructDef { name, fields, .. } => {
-                let comments = extract_preceding_comments(lines, stmt);
+                let comments = extract_preceding_comments(lines, &spanned.stmt);
                 let field_names: Vec<String> = fields
                     .iter()
                     .map(|f| format!("{}: {}", f.name, format_type_ann(&f.type_ann)))

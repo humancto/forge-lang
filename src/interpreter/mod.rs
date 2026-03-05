@@ -178,21 +178,23 @@ impl fmt::Display for Value {
 /// Variable environment (scope chain) — uses Arc for O(1) cloning
 #[derive(Debug, Clone)]
 pub struct Environment {
-    scopes: Vec<Arc<HashMap<String, Value>>>,
-    mutability: Vec<Arc<HashMap<String, bool>>>,
+    scopes: Vec<Arc<std::sync::Mutex<HashMap<String, Value>>>>,
+    mutability: Vec<Arc<std::sync::Mutex<HashMap<String, bool>>>>,
 }
 
 impl Environment {
     pub fn new() -> Self {
         Self {
-            scopes: vec![Arc::new(HashMap::new())],
-            mutability: vec![Arc::new(HashMap::new())],
+            scopes: vec![Arc::new(std::sync::Mutex::new(HashMap::new()))],
+            mutability: vec![Arc::new(std::sync::Mutex::new(HashMap::new()))],
         }
     }
 
     pub fn push_scope(&mut self) {
-        self.scopes.push(Arc::new(HashMap::new()));
-        self.mutability.push(Arc::new(HashMap::new()));
+        self.scopes
+            .push(Arc::new(std::sync::Mutex::new(HashMap::new())));
+        self.mutability
+            .push(Arc::new(std::sync::Mutex::new(HashMap::new())));
     }
 
     pub fn pop_scope(&mut self) {
@@ -205,18 +207,19 @@ impl Environment {
     }
 
     pub fn define_with_mutability(&mut self, name: String, value: Value, mutable: bool) {
-        if let Some(scope) = self.scopes.last_mut() {
-            Arc::make_mut(scope).insert(name.clone(), value);
+        if let Some(scope) = self.scopes.last() {
+            scope.lock().unwrap().insert(name.clone(), value);
         }
-        if let Some(muts) = self.mutability.last_mut() {
-            Arc::make_mut(muts).insert(name, mutable);
+        if let Some(muts) = self.mutability.last() {
+            muts.lock().unwrap().insert(name, mutable);
         }
     }
 
-    pub fn get(&self, name: &str) -> Option<&Value> {
+    pub fn get(&self, name: &str) -> Option<Value> {
         for scope in self.scopes.iter().rev() {
-            if let Some(val) = scope.get(name) {
-                return Some(val);
+            let guard = scope.lock().unwrap();
+            if let Some(val) = guard.get(name) {
+                return Some(val.clone());
             }
         }
         None
@@ -224,7 +227,8 @@ impl Environment {
 
     fn is_mutable(&self, name: &str) -> Option<bool> {
         for muts in self.mutability.iter().rev() {
-            if let Some(m) = muts.get(name) {
+            let guard = muts.lock().unwrap();
+            if let Some(m) = guard.get(name) {
                 return Some(*m);
             }
         }
@@ -238,19 +242,37 @@ impl Environment {
                 name
             )));
         }
-        for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                Arc::make_mut(scope).insert(name.to_string(), value);
+        for scope in self.scopes.iter().rev() {
+            let mut guard = scope.lock().unwrap();
+            if guard.contains_key(name) {
+                guard.insert(name.to_string(), value);
                 return Ok(());
             }
         }
         Err(RuntimeError::new(&format!("undefined variable: {}", name)))
     }
 
+    /// Deep clone for spawn — breaks sharing so thread gets independent copy
+    pub fn deep_clone(&self) -> Self {
+        Self {
+            scopes: self
+                .scopes
+                .iter()
+                .map(|s| Arc::new(std::sync::Mutex::new(s.lock().unwrap().clone())))
+                .collect(),
+            mutability: self
+                .mutability
+                .iter()
+                .map(|m| Arc::new(std::sync::Mutex::new(m.lock().unwrap().clone())))
+                .collect(),
+        }
+    }
+
     pub fn suggest_similar(&self, name: &str) -> Option<String> {
         let mut best: Option<(String, usize)> = None;
         for scope in &self.scopes {
-            for key in scope.keys() {
+            let guard = scope.lock().unwrap();
+            for key in guard.keys() {
                 let dist = levenshtein(name, key);
                 if dist <= 2 && dist < name.len() {
                     match &best {
@@ -310,6 +332,10 @@ pub struct Interpreter {
     pub embedded_fields: HashMap<String, Vec<(String, String)>>,
     /// Struct defaults: type_name -> { field_name -> default_value }
     pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
+    /// Current source line number (set during run())
+    pub current_line: usize,
+    /// Source code (for error display)
+    pub source: Option<String>,
 }
 
 impl Interpreter {
@@ -322,6 +348,8 @@ impl Interpreter {
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
+            current_line: 0,
+            source: None,
         };
         interp.register_builtins();
         interp
@@ -520,12 +548,21 @@ impl Interpreter {
     }
 
     pub fn run(&mut self, program: &Program) -> Result<Value, RuntimeError> {
-        for stmt in &program.statements {
-            match self.exec_stmt(stmt)? {
-                Signal::Return(v) => return Ok(v),
-                Signal::Break => return Err(RuntimeError::new("break outside of loop")),
-                Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
-                Signal::None | Signal::ImplicitReturn(_) => {}
+        for spanned in &program.statements {
+            self.current_line = spanned.line;
+            match self.exec_stmt(&spanned.stmt) {
+                Ok(signal) => match signal {
+                    Signal::Return(v) => return Ok(v),
+                    Signal::Break => return Err(RuntimeError::new("break outside of loop")),
+                    Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
+                    Signal::None | Signal::ImplicitReturn(_) => {}
+                },
+                Err(mut e) => {
+                    if e.line == 0 {
+                        e.line = spanned.line;
+                    }
+                    return Err(e);
+                }
             }
         }
         Ok(Value::Null)
@@ -534,14 +571,15 @@ impl Interpreter {
     /// Run in REPL mode — returns the value of the last expression for display
     pub fn run_repl(&mut self, program: &Program) -> Result<Value, RuntimeError> {
         let mut last = Value::Null;
-        for stmt in &program.statements {
-            match self.exec_stmt(stmt)? {
+        for spanned in &program.statements {
+            self.current_line = spanned.line;
+            match self.exec_stmt(&spanned.stmt)? {
                 Signal::Return(v) => return Ok(v),
                 Signal::Break => return Err(RuntimeError::new("break outside of loop")),
                 Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
                 Signal::None | Signal::ImplicitReturn(_) => {}
             }
-            if let Stmt::Expression(ref expr) = stmt {
+            if let Stmt::Expression(ref expr) = spanned.stmt {
                 match expr {
                     Expr::Call { function, .. } => {
                         if let Expr::Ident(name) = function.as_ref() {
@@ -591,10 +629,10 @@ impl Interpreter {
                         } else {
                             return Err(RuntimeError::new("can only assign to variable fields"));
                         };
-                        let obj =
-                            self.env.get(&name).cloned().ok_or_else(|| {
-                                RuntimeError::new(&format!("undefined: {}", name))
-                            })?;
+                        let obj = self
+                            .env
+                            .get(&name)
+                            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", name)))?;
                         if obj.is_frozen() {
                             return Err(RuntimeError::new(&format!(
                                 "cannot modify frozen value '{}': field '{}'",
@@ -614,10 +652,10 @@ impl Interpreter {
                             return Err(RuntimeError::new("can only assign to variable indices"));
                         };
                         let idx = self.eval_expr(index)?;
-                        let existing =
-                            self.env.get(&name).cloned().ok_or_else(|| {
-                                RuntimeError::new(&format!("undefined: {}", name))
-                            })?;
+                        let existing = self
+                            .env
+                            .get(&name)
+                            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", name)))?;
                         if existing.is_frozen() {
                             return Err(RuntimeError::new(&format!(
                                 "cannot modify frozen value '{}': index assignment",
@@ -822,7 +860,7 @@ impl Interpreter {
                 // If ability specified, validate all required methods are present
                 if let Some(ref ability_name) = ability {
                     let iface_key = format!("__interface_{}__", ability_name);
-                    if let Some(Value::Object(iface)) = self.env.get(&iface_key).cloned() {
+                    if let Some(Value::Object(iface)) = self.env.get(&iface_key) {
                         if let Some(Value::Array(required_methods)) = iface.get("methods") {
                             let type_methods = self.method_tables.get(type_name);
                             for req in required_methods {
@@ -876,7 +914,7 @@ impl Interpreter {
                 if let Value::Object(ref obj) = val {
                     if let Some(Value::String(type_name)) = obj.get("__type__") {
                         let type_key = format!("__type_{}__", type_name);
-                        if let Some(Value::Object(type_meta)) = self.env.get(&type_key).cloned() {
+                        if let Some(Value::Object(type_meta)) = self.env.get(&type_key) {
                             if let Some(Value::Array(variant_list)) = type_meta.get("variants") {
                                 let has_wildcard =
                                     arms.iter().any(|a| matches!(a.pattern, Pattern::Wildcard));
@@ -1028,7 +1066,7 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
-             Stmt::TryCatch {
+            Stmt::TryCatch {
                 try_body,
                 catch_var,
                 catch_body,
@@ -1048,7 +1086,9 @@ impl Interpreter {
                         "IndexError"
                     } else if e.message.contains("not found") || e.message.contains("undefined") {
                         "ReferenceError"
-                    } else if e.message.contains("immutable") || e.message.contains("cannot reassign") {
+                    } else if e.message.contains("immutable")
+                        || e.message.contains("cannot reassign")
+                    {
                         "TypeError"
                     } else {
                         "RuntimeError"
@@ -1107,17 +1147,17 @@ impl Interpreter {
 
                 if let Some(name_list) = names {
                     for name in name_list {
-                        if let Some(val) = import_interp.env.get(name).cloned() {
+                        if let Some(val) = import_interp.env.get(name) {
                             self.env.define(name.to_string(), val);
                         }
                     }
                 } else {
                     // Import all top-level definitions
                     // We check what the import interpreter defined beyond builtins
-                    for stmt in &program.statements {
-                        match stmt {
+                    for spanned in &program.statements {
+                        match &spanned.stmt {
                             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
-                                if let Some(val) = import_interp.env.get(name).cloned() {
+                                if let Some(val) = import_interp.env.get(name) {
                                     self.env.define(name.clone(), val);
                                 }
                             }
@@ -1471,7 +1511,7 @@ impl Interpreter {
                 Ok(Value::Object(map))
             }
 
-            Expr::Ident(name) => self.env.get(name).cloned().ok_or_else(|| {
+            Expr::Ident(name) => self.env.get(name).ok_or_else(|| {
                 let suggestion = self.env.suggest_similar(name);
                 let mut msg = format!("undefined variable: '{}'", name);
                 if let Some(similar) = suggestion {
@@ -1644,6 +1684,33 @@ impl Interpreter {
             Expr::Call { function, args } => {
                 // Method call: obj.method(args) -> method(obj, args)
                 if let Expr::FieldAccess { object, field } = function.as_ref() {
+                    // In-place mutation for arr.push(x) / arr.pop() on mutable variables
+                    if let Expr::Ident(var_name) = object.as_ref() {
+                        if self.env.is_mutable(var_name) == Some(true) {
+                            if field == "push" && args.len() == 1 {
+                                let arr = self.eval_expr(object)?;
+                                let val = self.eval_expr(&args[0])?;
+                                if let Value::Array(mut items) = arr {
+                                    items.push(val);
+                                    let new_arr = Value::Array(items);
+                                    self.env.set(var_name, new_arr.clone())?;
+                                    return Ok(new_arr);
+                                }
+                                return Err(RuntimeError::new(
+                                    "push() first argument must be array",
+                                ));
+                            }
+                            if field == "pop" && args.is_empty() {
+                                let arr = self.eval_expr(object)?;
+                                if let Value::Array(mut items) = arr {
+                                    let popped = items.pop().unwrap_or(Value::Null);
+                                    self.env.set(var_name, Value::Array(items))?;
+                                    return Ok(popped);
+                                }
+                                return Err(RuntimeError::new("pop() requires array"));
+                            }
+                        }
+                    }
                     let obj = self.eval_expr(object)?;
                     let method_name = field.as_str();
                     let known_methods = [
@@ -1792,7 +1859,7 @@ impl Interpreter {
                                 for arg in args {
                                     full_args.push(self.eval_expr(arg)?);
                                 }
-                                if let Some(func) = self.env.get(method_name).cloned() {
+                                if let Some(func) = self.env.get(method_name) {
                                     return self.call_function(func, full_args);
                                 }
                             }
@@ -1927,7 +1994,7 @@ impl Interpreter {
                             for arg in args {
                                 full_args.push(self.eval_expr(arg)?);
                             }
-                            if let Some(func) = self.env.get(method_name).cloned() {
+                            if let Some(func) = self.env.get(method_name) {
                                 return self.call_function(func, full_args);
                             }
                             return Err(RuntimeError::new(&format!(
@@ -1952,6 +2019,40 @@ impl Interpreter {
                     let eval_args: Result<Vec<Value>, _> =
                         args.iter().map(|a| self.eval_expr(a)).collect();
                     return self.call_function(func, eval_args?);
+                }
+
+                // Special-case push/pop for in-place mutation when first arg is a mutable variable
+                if let Expr::Ident(fn_name) = function.as_ref() {
+                    if fn_name == "push" && args.len() == 2 {
+                        if let Expr::Ident(var_name) = &args[0] {
+                            if self.env.is_mutable(var_name) == Some(true) {
+                                let arr = self.eval_expr(&args[0])?;
+                                let val = self.eval_expr(&args[1])?;
+                                if let Value::Array(mut items) = arr {
+                                    items.push(val);
+                                    let new_arr = Value::Array(items);
+                                    self.env.set(var_name, new_arr.clone())?;
+                                    return Ok(new_arr);
+                                }
+                                return Err(RuntimeError::new(
+                                    "push() first argument must be array",
+                                ));
+                            }
+                        }
+                    }
+                    if fn_name == "pop" && args.len() == 1 {
+                        if let Expr::Ident(var_name) = &args[0] {
+                            if self.env.is_mutable(var_name) == Some(true) {
+                                let arr = self.eval_expr(&args[0])?;
+                                if let Value::Array(mut items) = arr {
+                                    let popped = items.pop().unwrap_or(Value::Null);
+                                    self.env.set(var_name, Value::Array(items))?;
+                                    return Ok(popped);
+                                }
+                                return Err(RuntimeError::new("pop() requires array"));
+                            }
+                        }
+                    }
                 }
 
                 let func = self.eval_expr(function)?;
@@ -2235,6 +2336,31 @@ impl Interpreter {
                 method,
                 args,
             } => {
+                // In-place mutation for arr.push(x) / arr.pop() method syntax on mutable variables
+                if let Expr::Ident(var_name) = object.as_ref() {
+                    if self.env.is_mutable(var_name) == Some(true) {
+                        if method == "push" && args.len() == 1 {
+                            let arr = self.eval_expr(object)?;
+                            let val = self.eval_expr(&args[0])?;
+                            if let Value::Array(mut items) = arr {
+                                items.push(val);
+                                let new_arr = Value::Array(items);
+                                self.env.set(var_name, new_arr.clone())?;
+                                return Ok(new_arr);
+                            }
+                            return Err(RuntimeError::new("push() first argument must be array"));
+                        }
+                        if method == "pop" && args.is_empty() {
+                            let arr = self.eval_expr(object)?;
+                            if let Value::Array(mut items) = arr {
+                                let popped = items.pop().unwrap_or(Value::Null);
+                                self.env.set(var_name, Value::Array(items))?;
+                                return Ok(popped);
+                            }
+                            return Err(RuntimeError::new("pop() requires array"));
+                        }
+                    }
+                }
                 let obj = self.eval_expr(object)?;
                 let mut full_args = vec![obj];
                 for arg in args {
@@ -2243,7 +2369,6 @@ impl Interpreter {
                 let func = self
                     .env
                     .get(method)
-                    .cloned()
                     .ok_or_else(|| RuntimeError::new(&format!("unknown method: {}", method)))?;
                 self.call_function(func, full_args)
             }
@@ -2309,13 +2434,13 @@ impl Interpreter {
             }
 
             (Value::String(a), Value::String(b)) => match op {
-                BinOp::Add   => Ok(Value::String(format!("{}{}", a, b))),
-                BinOp::Eq    => Ok(Value::Bool(a == b)),
+                BinOp::Add => Ok(Value::String(format!("{}{}", a, b))),
+                BinOp::Eq => Ok(Value::Bool(a == b)),
                 BinOp::NotEq => Ok(Value::Bool(a != b)),
-                BinOp::Lt    => Ok(Value::Bool(a < b)),
-                BinOp::Gt    => Ok(Value::Bool(a > b)),
-                BinOp::LtEq  => Ok(Value::Bool(a <= b)),
-                BinOp::GtEq  => Ok(Value::Bool(a >= b)),
+                BinOp::Lt => Ok(Value::Bool(a < b)),
+                BinOp::Gt => Ok(Value::Bool(a > b)),
+                BinOp::LtEq => Ok(Value::Bool(a <= b)),
+                BinOp::GtEq => Ok(Value::Bool(a >= b)),
                 _ => Err(RuntimeError::new("invalid operator for String")),
             },
 
@@ -2467,26 +2592,6 @@ impl Interpreter {
 
                 let result = self.exec_stmts(&body);
                 self.env.pop_scope();
-                // TODO(BUG-005): Mutable closure capture — shared state broken.
-                // When a lambda mutates a captured variable (e.g. a counter), the
-                // mutation is lost here because we throw away `self.env` and restore
-                // `saved_env`. Each call to the closure sees the original snapshot.
-                //
-                // Root cause: closures capture by VALUE (env.clone()), not by reference.
-                // Fix: wrap captured mutable bindings in Arc<Mutex<Value>> so that
-                // mutations inside the closure are visible to all call sites.
-                //
-                // Example that currently fails (always prints 1, 1, 1):
-                //   fn make_counter() {
-                //       let mut n = 0
-                //       return fn() { n = n + 1; return n }
-                //   }
-                //   let c = make_counter()
-                //   say c()  // should be 1
-                //   say c()  // should be 2, but prints 1
-                //   say c()  // should be 3, but prints 1
-                //
-                // Tracked: interpreter_behavior_test.fg::test_closure_captures_scope_by_value
                 self.env = saved_env;
 
                 match result {
@@ -2519,7 +2624,7 @@ impl Interpreter {
             Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
         let slot_clone = result_slot.clone();
         let mut spawn_interp = Interpreter::new();
-        spawn_interp.env = self.env.clone();
+        spawn_interp.env = self.env.deep_clone();
 
         // Always use std::thread — simpler, avoids tokio dependency issues
         std::thread::spawn(move || {
@@ -2541,9 +2646,7 @@ impl Interpreter {
         Ok(Value::TaskHandle(result_slot))
     }
 
-
     // call_builtin() is in src/interpreter/builtins.rs (extracted for readability)
-
 
     // ========== Pattern Matching ==========
 
@@ -2556,8 +2659,8 @@ impl Interpreter {
                     return matches!(value, Value::None);
                 }
                 // If the binding name matches a known ADT unit variant, treat as constructor match
-                if let std::option::Option::Some(bound_val) = self.env.get(name) {
-                    if let Value::Object(obj) = bound_val {
+                if let std::option::Option::Some(ref bound_val) = self.env.get(name) {
+                    if let Value::Object(ref obj) = bound_val {
                         if let std::option::Option::Some(Value::String(bound_variant)) =
                             obj.get("__variant__")
                         {
@@ -2731,6 +2834,7 @@ fn json_to_value(v: serde_json::Value) -> Value {
 #[derive(Debug, Clone)]
 pub struct RuntimeError {
     pub message: String,
+    pub line: usize,
     propagated: Option<Value>,
 }
 
@@ -2738,6 +2842,7 @@ impl RuntimeError {
     pub fn new(msg: &str) -> Self {
         Self {
             message: msg.to_string(),
+            line: 0,
             propagated: None,
         }
     }
@@ -2749,6 +2854,7 @@ impl RuntimeError {
         };
         Self {
             message,
+            line: 0,
             propagated: Some(value),
         }
     }
@@ -7058,5 +7164,307 @@ mod tests {
             "#,
         );
         assert_eq!(value, Value::String("450hp".to_string()));
+    }
+
+    // ===== Fix 4: push/pop mutation tests =====
+
+    #[test]
+    fn push_mutates_mutable_array() {
+        let val = run_forge(
+            r#"
+            let mut arr = [1, 2, 3]
+            let _ = push(arr, 4)
+            arr
+            "#,
+        );
+        assert_eq!(
+            val,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(4),
+            ])
+        );
+    }
+
+    #[test]
+    fn pop_mutates_mutable_array() {
+        let val = run_forge(
+            r#"
+            let mut arr = [10, 20, 30]
+            let popped = pop(arr)
+            [popped, len(arr)]
+            "#,
+        );
+        assert_eq!(val, Value::Array(vec![Value::Int(30), Value::Int(2)]));
+    }
+
+    #[test]
+    fn push_returns_new_array_for_immutable() {
+        // Immutable arrays should NOT be mutated in-place
+        let val = run_forge(
+            r#"
+            let arr = [1, 2]
+            let result = push(arr, 3)
+            [len(arr), len(result)]
+            "#,
+        );
+        assert_eq!(val, Value::Array(vec![Value::Int(2), Value::Int(3)]));
+    }
+
+    #[test]
+    fn method_push_mutates_mutable_array() {
+        let val = run_forge(
+            r#"
+            let mut arr = ["a", "b"]
+            let _ = arr.push("c")
+            arr
+            "#,
+        );
+        assert_eq!(
+            val,
+            Value::Array(vec![
+                Value::String("a".into()),
+                Value::String("b".into()),
+                Value::String("c".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn method_pop_mutates_mutable_array() {
+        let val = run_forge(
+            r#"
+            let mut arr = [100, 200]
+            let x = arr.pop()
+            [x, len(arr)]
+            "#,
+        );
+        assert_eq!(val, Value::Array(vec![Value::Int(200), Value::Int(1)]));
+    }
+
+    #[test]
+    fn push_multiple_times() {
+        let val = run_forge(
+            r#"
+            let mut arr = []
+            let _ = push(arr, 1)
+            let _ = push(arr, 2)
+            let _ = push(arr, 3)
+            len(arr)
+            "#,
+        );
+        assert_eq!(val, Value::Int(3));
+    }
+
+    #[test]
+    fn pop_until_empty() {
+        let val = run_forge(
+            r#"
+            let mut arr = [1, 2]
+            let a = pop(arr)
+            let b = pop(arr)
+            [a, b, len(arr)]
+            "#,
+        );
+        assert_eq!(
+            val,
+            Value::Array(vec![Value::Int(2), Value::Int(1), Value::Int(0)])
+        );
+    }
+
+    #[test]
+    fn push_on_literal_returns_new() {
+        // push on a literal (not a variable) returns new array
+        let val = run_forge(
+            r#"
+            let result = push([1, 2], 3)
+            result
+            "#,
+        );
+        assert_eq!(
+            val,
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
+    }
+
+    // ===== Fix 5: Closure capture (mutable closures) =====
+
+    #[test]
+    fn make_counter_pattern() {
+        let val = run_forge(
+            r#"
+            fn make_counter() {
+                let mut count = 0
+                return fn() {
+                    count = count + 1
+                    return count
+                }
+            }
+            let counter = make_counter()
+            let a = counter()
+            let b = counter()
+            let c = counter()
+            [a, b, c]
+            "#,
+        );
+        assert_eq!(
+            val,
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
+    }
+
+    #[test]
+    fn closure_captures_mutable_state() {
+        let val = run_forge(
+            r#"
+            fn make_adder() {
+                let mut total = 0
+                return fn(n) {
+                    total = total + n
+                    return total
+                }
+            }
+            let adder = make_adder()
+            let _ = adder(10)
+            let _ = adder(20)
+            let result = adder(5)
+            result
+            "#,
+        );
+        assert_eq!(val, Value::Int(35));
+    }
+
+    #[test]
+    fn two_independent_closures() {
+        let val = run_forge(
+            r#"
+            fn make_counter() {
+                let mut count = 0
+                return fn() {
+                    count = count + 1
+                    return count
+                }
+            }
+            let c1 = make_counter()
+            let c2 = make_counter()
+            let _ = c1()
+            let _ = c1()
+            let _ = c2()
+            let result = [c1(), c2()]
+            result
+            "#,
+        );
+        assert_eq!(val, Value::Array(vec![Value::Int(3), Value::Int(2)]));
+    }
+
+    #[test]
+    fn closure_over_loop_variable() {
+        let val = run_forge(
+            r#"
+            let mut total = 0
+            let add = fn(n) { total = total + n }
+            for i in range(1, 6) {
+                add(i)
+            }
+            total
+            "#,
+        );
+        assert_eq!(val, Value::Int(15));
+    }
+
+    #[test]
+    fn nested_closures() {
+        let val = run_forge(
+            r#"
+            fn outer() {
+                let mut x = 0
+                fn middle() {
+                    x = x + 10
+                    fn inner() {
+                        x = x + 1
+                    }
+                    inner()
+                }
+                middle()
+                return x
+            }
+            outer()
+            "#,
+        );
+        assert_eq!(val, Value::Int(11));
+    }
+
+    #[test]
+    fn closure_returning_closure() {
+        let val = run_forge(
+            r#"
+            fn make_multiplier(factor) {
+                return fn(x) {
+                    return x * factor
+                }
+            }
+            let double = make_multiplier(2)
+            let triple = make_multiplier(3)
+            [double(5), triple(5)]
+            "#,
+        );
+        assert_eq!(val, Value::Array(vec![Value::Int(10), Value::Int(15)]));
+    }
+
+    // ===== Fix 6: Runtime error source locations =====
+
+    #[test]
+    fn runtime_error_has_line_info() {
+        let result = try_run_forge("let x = 10\nlet y = 0\nprintln(x / y)");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.line > 0,
+            "error should have line info, got line={}",
+            err.line
+        );
+        assert_eq!(err.line, 3, "error should be on line 3");
+    }
+
+    #[test]
+    fn runtime_error_undefined_var_has_line() {
+        let result = try_run_forge("let a = 1\nlet b = 2\nprintln(c)");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.line > 0, "undefined var error should have line info");
+    }
+
+    #[test]
+    fn runtime_error_on_first_line() {
+        let result = try_run_forge("println(1 / 0)");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.line, 1, "error on first line should be line 1");
+    }
+
+    #[test]
+    fn runtime_error_deep_in_function() {
+        let result = try_run_forge(
+            r#"
+fn bad() {
+    return 1 / 0
+}
+bad()
+"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("division by zero"));
+    }
+
+    #[test]
+    fn division_by_zero_error_message() {
+        let result = try_run_forge("10 / 0");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().message;
+        assert!(msg.contains("division by zero"), "got: {}", msg);
+        assert!(msg.contains("hint"), "should contain hint: {}", msg);
     }
 }

@@ -2,9 +2,15 @@
 /// Every valid Forge program is represented as a tree of these nodes.
 
 #[derive(Debug, Clone)]
+pub struct SpannedStmt {
+    pub stmt: Stmt,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Program {
-    pub statements: Vec<Stmt>,
+    pub statements: Vec<SpannedStmt>,
 }
 
 #[derive(Debug, Clone)]

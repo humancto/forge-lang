@@ -179,8 +179,8 @@ impl Compiler {
 pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
     let mut c = Compiler::new("<main>");
     c.begin_scope();
-    for stmt in &program.statements {
-        compile_stmt(&mut c, stmt)?;
+    for spanned in &program.statements {
+        compile_stmt(&mut c, &spanned.stmt)?;
     }
     c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
     c.chunk.max_registers = c.max_register;

@@ -211,11 +211,11 @@ impl TypeChecker {
     }
 
     pub fn check(&mut self, program: &Program) -> Vec<TypeWarning> {
-        for stmt in &program.statements {
-            self.collect_definitions(stmt);
+        for spanned in &program.statements {
+            self.collect_definitions(&spanned.stmt);
         }
-        for stmt in &program.statements {
-            self.check_stmt(stmt);
+        for spanned in &program.statements {
+            self.check_stmt(&spanned.stmt);
         }
         std::mem::take(&mut self.warnings)
     }

@@ -7,11 +7,14 @@ pub fn format_error(source: &str, line: usize, col: usize, message: &str) -> Str
 
     let offset = line_col_to_offset(source, line, col);
 
+    // Split message from hints so the label only shows the core error
+    let label_msg = message.lines().next().unwrap_or(message);
+
     Report::build(ReportKind::Error, "<source>", offset)
         .with_message(message)
         .with_label(
             Label::new(("<source>", offset..offset + 1))
-                .with_message(message)
+                .with_message(label_msg)
                 .with_color(Color::Red),
         )
         .finish()

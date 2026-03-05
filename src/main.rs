@@ -306,10 +306,26 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
         }
     } else {
         let mut interpreter = Interpreter::new();
+        interpreter.source = Some(source.to_string());
         match interpreter.run(&program) {
             Ok(_) => {}
             Err(e) => {
-                eprintln!("{}", errors::format_simple_error(&e.message));
+                if e.line > 0 {
+                    eprintln!(
+                        "{}",
+                        errors::format_error(
+                            source,
+                            e.line,
+                            1,
+                            &format!("[{}] {}", filename, e.message)
+                        )
+                    );
+                } else {
+                    eprintln!(
+                        "{}",
+                        errors::format_simple_error(&format!("[{}] {}", filename, e.message))
+                    );
+                }
                 process::exit(1);
             }
         }
