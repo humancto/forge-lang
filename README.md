@@ -11,7 +11,7 @@ Built-in HTTP, databases, crypto, AI, and a JIT compiler.<br>
 [![Release](https://img.shields.io/github/v/release/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64ffda?style=flat-square)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built_with-Rust-%23f74c00?style=flat-square)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-862_passing-64ffda?style=flat-square)](#project-status)
+[![Tests](https://img.shields.io/badge/tests-1,019_passing-64ffda?style=flat-square)](#project-status)
 [![Stars](https://img.shields.io/github/stars/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/stargazers)
 [![crates.io](https://img.shields.io/crates/v/forge-lang?color=%23ff6b35&style=flat-square)](https://crates.io/crates/forge-lang)
 
@@ -127,7 +127,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → forge 0.4.0
+forge version          # → forge 0.4.1
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -688,18 +688,18 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 
 ## 📊 Project Status
 
-Forge is **v0.4.0**. The language, interpreter, and standard library are stable and tested.
+Forge is **v0.4.1**. The language, interpreter, and standard library are stable and tested.
 
-| Metric                   |                      Value |
-| ------------------------ | -------------------------: |
-| Lines of Rust            |                    ~27,000 |
-| Standard library modules |                         18 |
-| Built-in functions       |                       238+ |
-| Keywords                 |                        80+ |
-| Tests passing            | 862 (528 Rust + 334 Forge) |
-| Interactive lessons      |                         30 |
-| Example programs         |                         15 |
-| Dependencies (CVEs)      |        344 crates (0 CVEs) |
+| Metric                   |                        Value |
+| ------------------------ | ---------------------------: |
+| Lines of Rust            |                      ~27,000 |
+| Standard library modules |                           18 |
+| Built-in functions       |                         238+ |
+| Keywords                 |                          80+ |
+| Tests passing            | 1,019 (577 Rust + 442 Forge) |
+| Interactive lessons      |                           30 |
+| Example programs         |                           18 |
+| Dependencies (CVEs)      |          344 crates (0 CVEs) |
 
 ### Known Limitations
 
@@ -718,7 +718,7 @@ Forge is **v0.4.0**. The language, interpreter, and standard library are stable 
 | Version     | Focus                                                                                             |
 | ----------- | ------------------------------------------------------------------------------------------------- |
 | **v0.3** ✅ | Type system (thing/power/give/craft/has), 73 new functions, GenZ debug kit, NPC module, 822 tests |
-| **v0.4** ✅ | JWT authentication, MySQL with parameterized queries, 18 modules, 862 tests                       |
+| **v0.4** ✅ | JWT auth, MySQL, parameterized SQL (all DBs), CORS, PG TLS, 18 modules, 1,019 tests               |
 | **v0.5**    | WASM target, expanded JIT coverage, LSP completions                                               |
 | **v1.0**    | Stable API, backwards compatibility guarantee                                                     |
 
