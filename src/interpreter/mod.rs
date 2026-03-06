@@ -1794,7 +1794,8 @@ impl Interpreter {
                     ];
                     let func = match &obj {
                         Value::Object(map) if map.get(field).is_some() => {
-                            map.get(field).cloned().unwrap()
+                            // Safety: guarded by `is_some()` above; use unwrap_or for defence-in-depth
+                            map.get(field).cloned().unwrap_or(Value::Null)
                         }
                         // Static method call: Type.method(args)
                         Value::BuiltIn(ref tag) if tag.starts_with("struct:") => {
