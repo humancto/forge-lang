@@ -349,7 +349,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             c.emit_loop(loop_start, 0);
             c.patch_jump(exit);
 
-            let ctx = c.loops.pop().unwrap();
+            let ctx = c.loops.pop().ok_or_else(|| CompileError::new("internal: loop stack underflow in while"))?;
             for bj in ctx.break_jumps {
                 c.patch_jump(bj);
             }
@@ -371,7 +371,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.emit_loop(loop_start, 0);
 
-            let ctx = c.loops.pop().unwrap();
+            let ctx = c.loops.pop().ok_or_else(|| CompileError::new("internal: loop stack underflow in loop"))?;
             for bj in ctx.break_jumps {
                 c.patch_jump(bj);
             }
@@ -423,7 +423,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             c.emit_loop(loop_start, 0);
             c.patch_jump(exit);
 
-            let ctx = c.loops.pop().unwrap();
+            let ctx = c.loops.pop().ok_or_else(|| CompileError::new("internal: loop stack underflow in for"))?;
             for bj in ctx.break_jumps {
                 c.patch_jump(bj);
             }
