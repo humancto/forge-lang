@@ -205,44 +205,55 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         _ => vec![],
                     };
 
+                // Extract the client BEFORE entering block_in_place to avoid nested block_on
+                // deadlock: outer block_on(async { inner block_on }) is undefined/deadlock.
+                // Instead we borrow the client for the TLS/non-TLS call then drop the ref.
+                let client_ptr: Option<*const tokio_postgres::Client> =
+                    PG_CLIENT.with(|cell| {
+                        cell.borrow().as_ref().map(|c| c as *const tokio_postgres::Client)
+                    });
+
+                let client_ref = client_ptr
+                    .ok_or_else(|| "no pg connection open".to_string())?;
+
+                // SAFETY: The client lives in thread-local storage for the duration of this
+                // call; block_in_place blocks the current thread so the TLS slot cannot be
+                // replaced while the raw pointer is live.
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
-                        PG_CLIENT.with(|cell| {
-                            let borrow = cell.borrow();
-                            let client = borrow.as_ref().ok_or("no pg connection open")?;
-                            let rt = tokio::runtime::Handle::current();
+                        let client = unsafe { &*client_ref };
+                        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                            param_vals
+                                .iter()
+                                .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+                                .collect();
 
-                            let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                                param_vals
-                                    .iter()
-                                    .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-                                    .collect();
+                        // Await directly — no nested block_on
+                        let rows = client
+                            .query(sql.as_str(), param_refs.as_slice())
+                            .await
+                            .map_err(|e| format!("pg.query error: {}", e))?;
 
-                            let rows = rt
-                                .block_on(client.query(sql.as_str(), param_refs.as_slice()))
-                                .map_err(|e| format!("pg.query error: {}", e))?;
-
-                            let mut results = Vec::new();
-                            for row in &rows {
-                                let mut map = IndexMap::new();
-                                for (i, col) in row.columns().iter().enumerate() {
-                                    let val = if let Ok(v) = row.try_get::<_, i64>(i) {
-                                        Value::Int(v)
-                                    } else if let Ok(v) = row.try_get::<_, f64>(i) {
-                                        Value::Float(v)
-                                    } else if let Ok(v) = row.try_get::<_, String>(i) {
-                                        Value::String(v)
-                                    } else if let Ok(v) = row.try_get::<_, bool>(i) {
-                                        Value::Bool(v)
-                                    } else {
-                                        Value::Null
-                                    };
-                                    map.insert(col.name().to_string(), val);
-                                }
-                                results.push(Value::Object(map));
+                        let mut results = Vec::new();
+                        for row in &rows {
+                            let mut map = IndexMap::new();
+                            for (i, col) in row.columns().iter().enumerate() {
+                                let val = if let Ok(v) = row.try_get::<_, i64>(i) {
+                                    Value::Int(v)
+                                } else if let Ok(v) = row.try_get::<_, f64>(i) {
+                                    Value::Float(v)
+                                } else if let Ok(v) = row.try_get::<_, String>(i) {
+                                    Value::String(v)
+                                } else if let Ok(v) = row.try_get::<_, bool>(i) {
+                                    Value::Bool(v)
+                                } else {
+                                    Value::Null
+                                };
+                                map.insert(col.name().to_string(), val);
                             }
-                            Ok(Value::Array(results))
-                        })
+                            results.push(Value::Object(map));
+                        }
+                        Ok(Value::Array(results))
                     })
                 })
             }
@@ -261,24 +272,29 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         _ => vec![],
                     };
 
+                // Same fix as pg.query: extract client ptr before block_in_place
+                let client_ptr: Option<*const tokio_postgres::Client> =
+                    PG_CLIENT.with(|cell| {
+                        cell.borrow().as_ref().map(|c| c as *const tokio_postgres::Client)
+                    });
+                let client_ref = client_ptr
+                    .ok_or_else(|| "no pg connection open".to_string())?;
+
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
-                        PG_CLIENT.with(|cell| {
-                            let borrow = cell.borrow();
-                            let client = borrow.as_ref().ok_or("no pg connection open")?;
-                            let rt = tokio::runtime::Handle::current();
+                        let client = unsafe { &*client_ref };
+                        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                            param_vals
+                                .iter()
+                                .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+                                .collect();
 
-                            let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                                param_vals
-                                    .iter()
-                                    .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-                                    .collect();
-
-                            let count = rt
-                                .block_on(client.execute(sql.as_str(), param_refs.as_slice()))
-                                .map_err(|e| format!("pg.execute error: {}", e))?;
-                            Ok(Value::Int(count as i64))
-                        })
+                        // Await directly — no nested block_on
+                        let count = client
+                            .execute(sql.as_str(), param_refs.as_slice())
+                            .await
+                            .map_err(|e| format!("pg.execute error: {}", e))?;
+                        Ok(Value::Int(count as i64))
                     })
                 })
             }
