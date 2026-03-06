@@ -1034,7 +1034,7 @@ impl Parser {
             if self.check(&Token::Fn) || self.check(&Token::Define) {
                 self.parse_fn_def(decorators)
             } else {
-                Ok(Stmt::DecoratorStmt(decorators.pop().unwrap()))
+                Ok(Stmt::DecoratorStmt(decorators.pop().ok_or_else(|| self.error("internal: empty decorator list"))?))
             }
         } else {
             // Standalone decorator
