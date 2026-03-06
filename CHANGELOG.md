@@ -14,9 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VM `split(str, "")` did not split into characters** — empty delimiter now produces a char array (parity with interpreter)
 - **VM `int(bool)` raised an error** — `true` → `1`, `false` → `0` now works in `--vm` mode
 - **VM `sort()` only handled Int/Float** — String comparison and custom comparator function now supported
+- **VM `ok()`/`err()` lowercase aliases silently fell through** — `"Ok" | "Some"` match arm appeared before `"ok"` alias, making lowercase calls return `unknown builtin`; arm order corrected
+- **VM `float()` did not accept strings** — `float("3.14")` now parses correctly (parity with interpreter)
+- **VM `entries({})` returned `Null` for empty object** — now returns `[]` (parity fix)
+- **VM `find` / `flat_map` spawned a full Interpreter instance per call** — replaced with native VM loop implementations; no more per-call interpreter startup cost
+- **VM missing builtins: `any`, `all`, `unique`, `sum`, `min_of`, `max_of`, `assert_ne`** — implemented natively in `vm/builtins.rs` AND registered in `vm/machine.rs` builtin registry (registration was the critical missing step — without it names resolved as `undefined variable`)
+- **`pg.query` / `pg.execute` nested `block_on` deadlock** — the previous pattern `block_in_place(|| handle.block_on(async { rt.block_on(client.query) }))` is undefined/deadlock in Tokio; fixed by extracting a raw pointer to the client before `block_in_place`, then awaiting the query directly in the outer async block
+- **`sus()` panic on no arguments** — `args.into_iter().next().unwrap()` → `unwrap_or(Value::Null)`
+- **Parser `decorators.pop().unwrap()`** — replaced with `ok_or_else(ParseError)` to avoid panic on unexpected empty decorator list
+- **8× `Mutex::lock().unwrap()` in interpreter `Environment`** — replaced with poison-recovery `lock().unwrap_or_else(|p| p.into_inner())` to prevent panic propagation if a spawned thread panics while holding the lock
 - **Bare `unwrap()` in interpreter method dispatch path** (`mod.rs:1797`) — replaced with `unwrap_or(Value::Null)` to prevent panic on edge-case object mutation
 - **Unsafe `unwrap()` in VM GetField handler** (`machine.rs:852`) — replaced with `expect("BUG: ...")` for better crash diagnostics
 - **Compiler `loops.pop().unwrap()`** in While/Loop/For compile paths — replaced with `ok_or_else(CompileError)` to avoid panic on malformed AST
+
+### Changed
+
+- JIT `runtime.rs`: added `#![allow(dead_code)]` with explanatory comment — all unused functions are M2 NaN-boxing bridge infrastructure, intentionally kept ready
 
 ---
 
