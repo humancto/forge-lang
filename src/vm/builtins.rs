@@ -89,7 +89,18 @@ impl VM {
             "float" => match args.first() {
                 Some(Value::Int(n)) => Ok(Value::Float(*n as f64)),
                 Some(Value::Float(n)) => Ok(Value::Float(*n)),
-                _ => Err(VMError::new("float() requires a number")),
+                // Parity with interpreter: parse string to float
+                Some(Value::Obj(r)) => {
+                    if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::String(s) = &obj.kind {
+                            return s.parse::<f64>().map(Value::Float).map_err(|_| {
+                                VMError::new(&format!("cannot convert '{}' to Float", s))
+                            });
+                        }
+                    }
+                    Err(VMError::new("float() requires a number or numeric string"))
+                }
+                _ => Err(VMError::new("float() requires a number or numeric string")),
             },
             "range" => match (args.first(), args.get(1)) {
                 (Some(Value::Int(start)), Some(Value::Int(end))) => {
@@ -132,6 +143,18 @@ impl VM {
                     }
                 }
                 Err(VMError::new("pop() requires an array"))
+            }
+            // Lowercase aliases must come BEFORE the capitalized forms
+            // so the match arms are not shadowed ("Ok" would match before "ok" | "Ok")
+            "ok" => {
+                let val = args.first().cloned().unwrap_or(Value::Null);
+                let r = self.gc.alloc(ObjKind::ResultOk(val));
+                Ok(Value::Obj(r))
+            }
+            "err" => {
+                let val = args.first().cloned().unwrap_or_else(|| self.alloc_string("error"));
+                let r = self.gc.alloc(ObjKind::ResultErr(val));
+                Ok(Value::Obj(r))
             }
             "Ok" | "Some" => {
                 let val = args.first().cloned().unwrap_or(Value::Null);
@@ -227,6 +250,135 @@ impl VM {
                     )));
                 }
                 Ok(Value::Null)
+            }
+            "assert_ne" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("assert_ne() requires 2 arguments"));
+                }
+                if args[0].equals(&args[1], &self.gc) {
+                    let left = args[0].display(&self.gc);
+                    return Err(VMError::new(&format!(
+                        "assertion failed: expected values to differ, both were `{}`",
+                        left
+                    )));
+                }
+                Ok(Value::Null)
+            }
+            "any" => {
+                if args.len() < 2 { return Err(VMError::new("any() requires (array, function)")); }
+                let items = if let Value::Obj(r) = &args[0] {
+                    if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
+                        else { return Err(VMError::new("any() first arg must be array")); }
+                    } else { return Err(VMError::new("null array")); }
+                } else { return Err(VMError::new("any() first arg must be array")); };
+                let func = args[1].clone();
+                for item in items {
+                    if self.call_value(func.clone(), vec![item])?.is_truthy(&self.gc) {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            "all" => {
+                if args.len() < 2 { return Err(VMError::new("all() requires (array, function)")); }
+                let items = if let Value::Obj(r) = &args[0] {
+                    if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
+                        else { return Err(VMError::new("all() first arg must be array")); }
+                    } else { return Err(VMError::new("null array")); }
+                } else { return Err(VMError::new("all() first arg must be array")); };
+                let func = args[1].clone();
+                for item in items {
+                    if !self.call_value(func.clone(), vec![item])?.is_truthy(&self.gc) {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            "unique" => {
+                if let Some(Value::Obj(r)) = args.first() {
+                    let items = if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
+                        else { return Err(VMError::new("unique() requires an array")); }
+                    } else { return Err(VMError::new("null array")); };
+                    let mut seen: Vec<String> = Vec::new();
+                    let mut out = Vec::new();
+                    for item in items {
+                        let key = item.display(&self.gc);
+                        if !seen.contains(&key) {
+                            seen.push(key);
+                            out.push(item);
+                        }
+                    }
+                    let r = self.gc.alloc(ObjKind::Array(out));
+                    return Ok(Value::Obj(r));
+                }
+                Err(VMError::new("unique() requires an array"))
+            }
+            "sum" => {
+                if let Some(Value::Obj(r)) = args.first() {
+                    let items = if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
+                        else { return Err(VMError::new("sum() requires an array")); }
+                    } else { return Err(VMError::new("null array")); };
+                    let mut total_int: i64 = 0;
+                    let mut total_float: f64 = 0.0;
+                    let mut is_float = false;
+                    for item in &items {
+                        match item {
+                            Value::Int(n) => { total_int += n; total_float += *n as f64; }
+                            Value::Float(n) => { total_float += n; is_float = true; }
+                            _ => return Err(VMError::new("sum() requires array of numbers")),
+                        }
+                    }
+                    return Ok(if is_float { Value::Float(total_float) } else { Value::Int(total_int) });
+                }
+                Err(VMError::new("sum() requires an array"))
+            }
+            "min_of" => {
+                if let Some(Value::Obj(r)) = args.first() {
+                    let items = if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
+                        else { return Err(VMError::new("min_of() requires an array")); }
+                    } else { return Err(VMError::new("null array")); };
+                    if items.is_empty() { return Ok(Value::Null); }
+                    let mut min = items[0].clone();
+                    for item in &items[1..] {
+                        let less = match (&min, item) {
+                            (Value::Int(a), Value::Int(b)) => b < a,
+                            (Value::Float(a), Value::Float(b)) => b < a,
+                            (Value::Int(a), Value::Float(b)) => b < &(*a as f64),
+                            (Value::Float(a), Value::Int(b)) => (*b as f64) < *a,
+                            _ => false,
+                        };
+                        if less { min = item.clone(); }
+                    }
+                    return Ok(min);
+                }
+                Err(VMError::new("min_of() requires an array"))
+            }
+            "max_of" => {
+                if let Some(Value::Obj(r)) = args.first() {
+                    let items = if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
+                        else { return Err(VMError::new("max_of() requires an array")); }
+                    } else { return Err(VMError::new("null array")); };
+                    if items.is_empty() { return Ok(Value::Null); }
+                    let mut max = items[0].clone();
+                    for item in &items[1..] {
+                        let greater = match (&max, item) {
+                            (Value::Int(a), Value::Int(b)) => b > a,
+                            (Value::Float(a), Value::Float(b)) => b > a,
+                            (Value::Int(a), Value::Float(b)) => b > &(*a as f64),
+                            (Value::Float(a), Value::Int(b)) => (*b as f64) > *a,
+                            _ => false,
+                        };
+                        if greater { max = item.clone(); }
+                    }
+                    return Ok(max);
+                }
+                Err(VMError::new("max_of() requires an array"))
             }
             "map" => {
                 if args.len() != 2 {
@@ -1159,18 +1311,17 @@ impl VM {
                     } else {
                         vec![]
                     };
-                    if !kv_pairs.is_empty() {
-                        let mut pairs = Vec::new();
-                        for (k, v) in kv_pairs {
-                            let key = self.alloc_string(&k);
-                            let pair_r = self.gc.alloc(ObjKind::Array(vec![key, v]));
-                            pairs.push(Value::Obj(pair_r));
-                        }
-                        let r = self.gc.alloc(ObjKind::Array(pairs));
-                        return Ok(Value::Obj(r));
+                    // Return [] for empty objects (parity with interpreter — not Null)
+                    let mut pairs = Vec::new();
+                    for (k, v) in kv_pairs {
+                        let key = self.alloc_string(&k);
+                        let pair_r = self.gc.alloc(ObjKind::Array(vec![key, v]));
+                        pairs.push(Value::Obj(pair_r));
                     }
+                    let r = self.gc.alloc(ObjKind::Array(pairs));
+                    return Ok(Value::Obj(r));
                 }
-                Ok(Value::Null)
+                Err(VMError::new("entries() requires an object"))
             }
             "from_entries" => {
                 if let Some(Value::Obj(r)) = args.first() {
@@ -1198,24 +1349,51 @@ impl VM {
                 }
                 Ok(Value::Null)
             }
-            "find" | "flat_map" => {
-                let interp_args = self.args_to_interp(&args);
-                let mut interp = crate::interpreter::Interpreter::new();
-                let result = interp
-                    .call_builtin(name, interp_args)
-                    .map_err(|e| VMError::new(&e.message))?;
-                Ok(self.convert_interp_value(&result))
+            "find" => {
+                // find(array, predicate) -> first matching element or Null
+                if args.len() < 2 { return Err(VMError::new("find() requires (array, function)")); }
+                let items = if let Value::Obj(r) = &args[0] {
+                    if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { a.clone() } else { return Err(VMError::new("find() first arg must be array")); }
+                    } else { return Err(VMError::new("null array")); }
+                } else { return Err(VMError::new("find() first arg must be array")); };
+                let func = args[1].clone();
+                for item in items {
+                    let result = self.call_value(func.clone(), vec![item.clone()])?;
+                    if result.is_truthy(&self.gc) { return Ok(item); }
+                }
+                Ok(Value::Null)
             }
-            "ok" | "Ok" => {
-                let value = args.first().cloned().unwrap_or(Value::Null);
-                let r = self.gc.alloc(ObjKind::ResultOk(value));
+            "flat_map" => {
+                // flat_map(array, function) -> flattened array
+                if args.len() < 2 { return Err(VMError::new("flat_map() requires (array, function)")); }
+                let items = if let Value::Obj(r) = &args[0] {
+                    if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { a.clone() } else { return Err(VMError::new("flat_map() first arg must be array")); }
+                    } else { return Err(VMError::new("null array")); }
+                } else { return Err(VMError::new("flat_map() first arg must be array")); };
+                let func = args[1].clone();
+                let mut out = Vec::new();
+                for item in items {
+                    let result = self.call_value(func.clone(), vec![item])?;
+                    match result {
+                        Value::Obj(r) => {
+                            if let Some(obj) = self.gc.get(r) {
+                                if let ObjKind::Array(sub) = &obj.kind {
+                                    out.extend(sub.clone());
+                                    continue;
+                                }
+                            }
+                            out.push(Value::Obj(r));
+                        }
+                        other => out.push(other),
+                    }
+                }
+                let r = self.gc.alloc(ObjKind::Array(out));
                 Ok(Value::Obj(r))
             }
-            "err" | "Err" => {
-                let value = args.first().cloned().unwrap_or(self.alloc_string("error"));
-                let r = self.gc.alloc(ObjKind::ResultErr(value));
-                Ok(Value::Obj(r))
-            }
+            // Note: lowercase ok/err aliases are handled ABOVE (before "Ok"/"Err") to avoid
+            // unreachable pattern warnings. The dead duplicates below have been removed.
             _ => Err(VMError::new(&format!("unknown builtin: {}", name))),
         }
     }
