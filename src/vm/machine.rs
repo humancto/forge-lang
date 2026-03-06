@@ -849,7 +849,8 @@ impl VM {
                         let result = if let Some(s) = needs_alloc {
                             self.alloc_string(&s)
                         } else {
-                            direct_result.unwrap()
+                            // Safety: needs_alloc and direct_result are mutually exclusive branches above
+                            direct_result.expect("BUG: direct_result must be Some when needs_alloc is None")
                         };
                         self.registers[base + a as usize] = result;
                     }
