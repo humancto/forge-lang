@@ -72,6 +72,8 @@ impl VM {
             "int" => match args.first() {
                 Some(Value::Int(n)) => Ok(Value::Int(*n)),
                 Some(Value::Float(n)) => Ok(Value::Int(*n as i64)),
+                // Parity with interpreter: bool → 0/1
+                Some(Value::Bool(b)) => Ok(Value::Int(if *b { 1 } else { 0 })),
                 Some(Value::Obj(r)) => {
                     if let Some(obj) = self.gc.get(*r) {
                         if let ObjKind::String(s) = &obj.kind {
@@ -80,9 +82,9 @@ impl VM {
                             });
                         }
                     }
-                    Err(VMError::new("int() requires number or string"))
+                    Err(VMError::new("int() requires number, bool, or string"))
                 }
-                _ => Err(VMError::new("int() requires number or string")),
+                _ => Err(VMError::new("int() requires number, bool, or string")),
             },
             "float" => match args.first() {
                 Some(Value::Int(n)) => Ok(Value::Float(*n as f64)),
@@ -305,19 +307,46 @@ impl VM {
             }
             "sort" => {
                 if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(items) = &obj.kind {
-                            let mut sorted = items.clone();
-                            sorted.sort_by(|a, b| match (a, b) {
-                                (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                                (Value::Float(x), Value::Float(y)) => {
-                                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                    let items_clone = if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::Array(a) = &obj.kind { Some(a.clone()) } else { None }
+                    } else { None };
+                    if let Some(items) = items_clone {
+                        // Optional custom comparator (second arg)
+                        if let Some(func) = args.get(1).cloned() {
+                            let mut sorted = items;
+                            let mut err: Option<VMError> = None;
+                            sorted.sort_by(|a, b| {
+                                if err.is_some() { return std::cmp::Ordering::Equal; }
+                                match self.call_value(func.clone(), vec![a.clone(), b.clone()]) {
+                                    Ok(Value::Int(n)) => {
+                                        if n < 0 { std::cmp::Ordering::Less }
+                                        else if n > 0 { std::cmp::Ordering::Greater }
+                                        else { std::cmp::Ordering::Equal }
+                                    }
+                                    Ok(_) => std::cmp::Ordering::Equal,
+                                    Err(e) => { err = Some(e); std::cmp::Ordering::Equal }
                                 }
-                                _ => std::cmp::Ordering::Equal,
                             });
+                            if let Some(e) = err { return Err(e); }
                             let nr = self.gc.alloc(ObjKind::Array(sorted));
                             return Ok(Value::Obj(nr));
                         }
+                        // Default sort: ints, floats, strings
+                        let mut sorted = items;
+                        sorted.sort_by(|a, b| match (a, b) {
+                            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                            (Value::Float(x), Value::Float(y)) => {
+                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                            (Value::Obj(rx), Value::Obj(ry)) => {
+                                let sx = self.get_string(&Value::Obj(*rx)).unwrap_or_default();
+                                let sy = self.get_string(&Value::Obj(*ry)).unwrap_or_default();
+                                sx.cmp(&sy)
+                            }
+                            _ => std::cmp::Ordering::Equal,
+                        });
+                        let nr = self.gc.alloc(ObjKind::Array(sorted));
+                        return Ok(Value::Obj(nr));
                     }
                 }
                 Err(VMError::new("sort() requires an array"))
@@ -358,20 +387,16 @@ impl VM {
             },
             "keys" => {
                 if let Some(Value::Obj(r)) = args.first() {
-                    let key_strings: Vec<String> = if let Some(obj) = self.gc.get(*r) {
+                    if let Some(obj) = self.gc.get(*r) {
                         if let ObjKind::Object(map) = &obj.kind {
-                            map.keys().cloned().collect()
-                        } else {
-                            Vec::new()
+                            // Collect keys as owned Strings first to release gc borrow
+                            let key_strings: Vec<String> = map.keys().cloned().collect();
+                            drop(obj); // release gc borrow before alloc_string calls
+                            let keys: Vec<Value> =
+                                key_strings.iter().map(|k| self.alloc_string(k)).collect();
+                            let nr = self.gc.alloc(ObjKind::Array(keys));
+                            return Ok(Value::Obj(nr));
                         }
-                    } else {
-                        Vec::new()
-                    };
-                    if !key_strings.is_empty() {
-                        let keys: Vec<Value> =
-                            key_strings.iter().map(|k| self.alloc_string(k)).collect();
-                        let nr = self.gc.alloc(ObjKind::Array(keys));
-                        return Ok(Value::Obj(nr));
                     }
                 }
                 Err(VMError::new("keys() requires an object"))
@@ -418,7 +443,12 @@ impl VM {
                 if let (Some(Value::Obj(r1)), Some(Value::Obj(r2))) = (args.first(), args.get(1)) {
                     let s = self.get_string(&Value::Obj(*r1)).unwrap_or_default();
                     let delim = self.get_string(&Value::Obj(*r2)).unwrap_or_default();
-                    let parts: Vec<Value> = s.split(&delim).map(|p| self.alloc_string(p)).collect();
+                    // Parity with interpreter: empty delimiter splits into individual chars
+                    let parts: Vec<Value> = if delim.is_empty() {
+                        s.chars().map(|c| self.alloc_string(&c.to_string())).collect()
+                    } else {
+                        s.split(&delim).map(|p| self.alloc_string(p)).collect()
+                    };
                     let nr = self.gc.alloc(ObjKind::Array(parts));
                     return Ok(Value::Obj(nr));
                 }
@@ -480,9 +510,63 @@ impl VM {
                     Err(VMError::new("json() requires an argument"))
                 }
             }
-            "is_some" | "is_none" | "satisfies" => {
-                // Simplified versions
-                Ok(Value::Bool(false))
+            "is_some" => {
+                match args.first() {
+                    // Native Option encoding via ADT object
+                    Some(Value::Obj(r)) => {
+                        if let Some(obj) = self.gc.get(*r) {
+                            if let ObjKind::Object(map) = &obj.kind {
+                                // Check __type__ == "Option" and __variant__ == "Some"
+                                let is_option = map.get("__type__")
+                                    .and_then(|v| self.get_string(v))
+                                    .map(|s| s == "Option")
+                                    .unwrap_or(false);
+                                if is_option {
+                                    let variant = map.get("__variant__")
+                                        .and_then(|v| self.get_string(v))
+                                        .unwrap_or_default();
+                                    return Ok(Value::Bool(variant == "Some"));
+                                }
+                                // Non-Option object is truthy → Some
+                                return Ok(Value::Bool(true));
+                            }
+                        }
+                        Ok(Value::Bool(true)) // non-null Obj is Some
+                    }
+                    Some(Value::Null) => Ok(Value::Bool(false)),
+                    Some(_) => Ok(Value::Bool(true)),
+                    None => Err(VMError::new("is_some() requires an argument")),
+                }
+            }
+            "is_none" => {
+                match args.first() {
+                    Some(Value::Obj(r)) => {
+                        if let Some(obj) = self.gc.get(*r) {
+                            if let ObjKind::Object(map) = &obj.kind {
+                                let is_option = map.get("__type__")
+                                    .and_then(|v| self.get_string(v))
+                                    .map(|s| s == "Option")
+                                    .unwrap_or(false);
+                                if is_option {
+                                    let variant = map.get("__variant__")
+                                        .and_then(|v| self.get_string(v))
+                                        .unwrap_or_default();
+                                    return Ok(Value::Bool(variant == "None"));
+                                }
+                                return Ok(Value::Bool(false)); // non-Option object is Some
+                            }
+                        }
+                        Ok(Value::Bool(false)) // non-null Obj is Some
+                    }
+                    Some(Value::Null) => Ok(Value::Bool(true)),
+                    Some(_) => Ok(Value::Bool(false)),
+                    None => Err(VMError::new("is_none() requires an argument")),
+                }
+            }
+            "satisfies" => {
+                // Basic structural satisfaction check for --vm mode
+                if args.len() < 2 { return Err(VMError::new("satisfies() requires (value, interface)")); }
+                Ok(Value::Bool(false)) // TODO(M3): full interface checking in VM
             }
             n if n.starts_with("math.") => {
                 crate::stdlib::math::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))
