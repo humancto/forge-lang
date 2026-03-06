@@ -207,17 +207,19 @@ impl Environment {
     }
 
     pub fn define_with_mutability(&mut self, name: String, value: Value, mutable: bool) {
+        // Use poison-recovery: if another thread panicked while holding the lock,
+        // we still get a usable guard rather than propagating the panic.
         if let Some(scope) = self.scopes.last() {
-            scope.lock().unwrap().insert(name.clone(), value);
+            scope.lock().unwrap_or_else(|p| p.into_inner()).insert(name.clone(), value);
         }
         if let Some(muts) = self.mutability.last() {
-            muts.lock().unwrap().insert(name, mutable);
+            muts.lock().unwrap_or_else(|p| p.into_inner()).insert(name, mutable);
         }
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {
         for scope in self.scopes.iter().rev() {
-            let guard = scope.lock().unwrap();
+            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(val) = guard.get(name) {
                 return Some(val.clone());
             }
@@ -227,7 +229,7 @@ impl Environment {
 
     fn is_mutable(&self, name: &str) -> Option<bool> {
         for muts in self.mutability.iter().rev() {
-            let guard = muts.lock().unwrap();
+            let guard = muts.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(m) = guard.get(name) {
                 return Some(*m);
             }
@@ -243,7 +245,7 @@ impl Environment {
             )));
         }
         for scope in self.scopes.iter().rev() {
-            let mut guard = scope.lock().unwrap();
+            let mut guard = scope.lock().unwrap_or_else(|p| p.into_inner());
             if guard.contains_key(name) {
                 guard.insert(name.to_string(), value);
                 return Ok(());
@@ -258,12 +260,12 @@ impl Environment {
             scopes: self
                 .scopes
                 .iter()
-                .map(|s| Arc::new(std::sync::Mutex::new(s.lock().unwrap().clone())))
+                .map(|s| Arc::new(std::sync::Mutex::new(s.lock().unwrap_or_else(|p| p.into_inner()).clone())))
                 .collect(),
             mutability: self
                 .mutability
                 .iter()
-                .map(|m| Arc::new(std::sync::Mutex::new(m.lock().unwrap().clone())))
+                .map(|m| Arc::new(std::sync::Mutex::new(m.lock().unwrap_or_else(|p| p.into_inner()).clone())))
                 .collect(),
         }
     }
@@ -271,7 +273,7 @@ impl Environment {
     pub fn suggest_similar(&self, name: &str) -> Option<String> {
         let mut best: Option<(String, usize)> = None;
         for scope in &self.scopes {
-            let guard = scope.lock().unwrap();
+            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
             for key in guard.keys() {
                 let dist = levenshtein(name, key);
                 if dist <= 2 && dist < name.len() {
@@ -1794,7 +1796,8 @@ impl Interpreter {
                     ];
                     let func = match &obj {
                         Value::Object(map) if map.get(field).is_some() => {
-                            map.get(field).cloned().unwrap()
+                            // Safety: guarded by `is_some()` above; use unwrap_or for defence-in-depth
+                            map.get(field).cloned().unwrap_or(Value::Null)
                         }
                         // Static method call: Type.method(args)
                         Value::BuiltIn(ref tag) if tag.starts_with("struct:") => {

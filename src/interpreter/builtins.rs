@@ -1563,7 +1563,7 @@ impl Interpreter {
                     "\x1b[33m🔍 SUS CHECK:\x1b[0m {} \x1b[2m({})\x1b[0m",
                     display, type_str
                 );
-                Ok(args.into_iter().next().unwrap())
+                Ok(args.into_iter().next().unwrap_or(Value::Null))
             }
             "bruh" => {
                 // bruh(msg) — panic with GenZ energy

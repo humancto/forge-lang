@@ -1,3 +1,6 @@
+// JIT runtime bridge functions. Many are unused until M2 NaN-boxing JIT is wired up.
+#![allow(dead_code)]
+
 /// Runtime bridge functions for JIT-compiled code.
 ///
 /// JIT-compiled machine code can't call Rust methods directly.
@@ -7,6 +10,10 @@
 /// Values are passed as tagged u64:
 ///   Bits 60-63: tag (0=Int, 1=Float, 2=Bool, 3=Null, 4=Obj)
 ///   Bits  0-59: payload
+///
+/// NOTE: Many functions here are intentionally "unused" — they are infrastructure
+/// for the M2 NaN-boxing JIT (Milestone 2) and will be wired up in that milestone.
+/// The allow(dead_code) below suppresses the warnings until then.
 use crate::vm::machine::VM;
 use crate::vm::value::*;
 
