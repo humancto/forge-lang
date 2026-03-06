@@ -107,8 +107,8 @@ run, repl, version, fmt, test, new, build, install, lsp, learn, chat, help, -e
 
 ```bash
 cargo build          # 0 errors
-cargo test           # 577 Rust tests pass
-forge test           # 427 Forge tests pass (1004 total)
+cargo test           # 626+ Rust tests pass
+forge test           # integration tests pass (run after cargo build)
 ```
 
 All 18 example files run successfully.
@@ -135,15 +135,35 @@ These rules are non-negotiable. Follow them on every change.
 
 4. **Small, atomic commits.** One concern per commit. Never mix features.
 5. **Tests before or alongside code.** Risky changes get tests first.
-6. **No `unwrap()` in production paths.** Use `?` or proper error handling.
+6. **No `unwrap()` in production paths.** Use `?` or proper error handling. If structurally impossible, use `expect("BUG: ...")` with an explanation.
 7. **If it compiles but feels wrong, stop.** Check the design.
 8. **Never remove a working execution path.** Interpreter, VM, and JIT must all keep working.
+9. **VM parity is your responsibility.** When adding or fixing a builtin in the interpreter, port the same fix to `src/vm/builtins.rs`. The VM is not automatically in sync.
 
 ### After Every Change
 
-9. **Run `cargo test`.** If tests fail, fix before committing.
-10. **Run the examples.** `forge run examples/hello.fg` and `forge run examples/functional.fg` must pass.
-11. **Check for regressions.** If you changed the VM, test with `--vm`. If you changed the JIT, test with `--jit`.
+10. **Run `cargo test`.** If tests fail, fix before committing.
+11. **Run the examples.** `forge run examples/hello.fg` and `forge run examples/functional.fg` must pass.
+12. **Check for regressions.** If you changed the VM, test with `--vm`. If you changed the JIT, test with `--jit`.
+13. **Update CHANGELOG.md.** Every PR that ships user-facing changes must have an entry under `[Unreleased]`. Format: `- Description of change ([#PR](link))`. On release, `[Unreleased]` is cut into a version block.
+14. **Bump the version together.** When cutting a release, update `Cargo.toml` version, add CHANGELOG heading (e.g. `## [0.5.0] - 2026-03-06`), and tag the commit.
+
+### CHANGELOG Format (Keep-a-Changelog)
+
+```markdown
+## [Unreleased]
+### Added
+- New feature X
+### Fixed
+- Bug Y in module Z
+### Changed
+- Behaviour of W
+
+## [0.4.2] - 2026-01-15
+...
+```
+
+Categories in order: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 
 ### Learnings (Append Here)
 
@@ -153,6 +173,11 @@ These rules are non-negotiable. Follow them on every change.
 - **GitHub Actions runners:** `macos-13` is deprecated. Use `macos-latest` for both ARM and x86_64 targets.
 - **Bytecode encoding:** Instructions are 32-bit. Format: `[op:8][a:8][b:8][c:8]` or `[op:8][a:8][bx:16]` or `[op:8][a:8][sbx:16]`. The `sbx` field is signed 16-bit stored as unsigned.
 - **Constant dedup:** `Chunk::add_constant()` deduplicates via `identical()`. Don't add the same constant twice — it wastes the constant pool.
+- **VM-interpreter parity is not automatic.** The two share no code. Every interpreter builtin fix must be manually ported to `src/vm/builtins.rs`. Known audit-tracked gaps: `sort()` string support, `split("")` char-splitting, `int(bool)`, `keys({})`, `is_some`/`is_none` — all fixed in March 2026.
+- **`sort()` with custom comparator:** `sort_by` closure borrows `self` immutably but calling `self.call_value()` needs `&mut self`. Work around by collecting items first (releasing the `gc` borrow), then sort with `call_value` on cloned items.
+- **GC borrow in closures:** Never call `self.alloc_string()` or `self.call_value()` inside a closure that still holds `self.gc.get()`. Always collect into a `Vec<String>` or `Vec<Value>` first to drop the GC borrow.
+- **VM `TryCatch`:** The compiler currently drops the catch block (logs as TODO, M1.2.2). Until it's implemented, `--vm` mode does not catch runtime errors.
+- **VM `Destructure`:** Similarly dropped by the compiler (M1.2.1). Any `let {a, b} = obj` in `--vm` mode is silently skipped.
 
 ## Module Dependency Map
 

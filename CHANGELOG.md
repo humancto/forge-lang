@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **VM `is_some()` / `is_none()` were stubs that always returned `false`** — restored real ADT-aware logic for `Option<T>` values in `--vm` mode
+- **VM `keys({})` returned an error on empty objects** — now correctly returns `[]` matching interpreter behaviour
+- **VM `split(str, "")` did not split into characters** — empty delimiter now produces a char array (parity with interpreter)
+- **VM `int(bool)` raised an error** — `true` → `1`, `false` → `0` now works in `--vm` mode
+- **VM `sort()` only handled Int/Float** — String comparison and custom comparator function now supported
+- **Bare `unwrap()` in interpreter method dispatch path** (`mod.rs:1797`) — replaced with `unwrap_or(Value::Null)` to prevent panic on edge-case object mutation
+- **Unsafe `unwrap()` in VM GetField handler** (`machine.rs:852`) — replaced with `expect("BUG: ...")` for better crash diagnostics
+- **Compiler `loops.pop().unwrap()`** in While/Loop/For compile paths — replaced with `ok_or_else(CompileError)` to avoid panic on malformed AST
+
+---
+
+## [0.4.2] - 2026-01-15
+
+### Fixed
+
+- **Closure mutable capture (BUG-005)** — mutable variables captured in closures now persist mutations across invocations instead of resetting to the initial value
+- **Unwrap safety sweep** — removed all bare `unwrap()` calls from production execution paths in `interpreter/builtins.rs` and `interpreter/call_builtin.rs`
+- **LSP incremental sync** — fixed `textDocument/didChange` handler dropping partial edits in large files
+- **REPL multi-line paste** — pasted blocks with embedded newlines no longer trigger premature evaluation
+
+### Changed
+
+- Extracted `call_builtin` and `call_native` into separate files (`interpreter/call_builtin.rs`, `vm/builtins.rs`) for readability — zero behaviour change
+- Version bump: `0.4.1` → `0.4.2`
+
+---
+
+## [0.4.1] - 2026-01-08
+
+### Added
+
+- **`mysql` module** — `mysql.connect`, `mysql.query`, `mysql.execute`, `mysql.close` with parameterised queries and connection pooling (mirrors `pg` API)
+- **`jwt` module** — `jwt.sign`, `jwt.verify`, `jwt.decode`, `jwt.valid` supporting HS256/384/512, RS256, ES256
+- **`time` module** — `time.now`, `time.unix`, `time.format`, `time.parse`, `time.diff`, `time.sleep`
+- **`csv` improvements** — `csv.read` / `csv.write` now handle quoted fields with embedded commas and newlines
+
+### Fixed
+
+- `http.post` with JSON body set incorrect `Content-Type` (was `text/plain`, now `application/json`)
+- `fs.read_json` panicked on malformed JSON instead of returning `Err`
+- `pg.connect` TLS mode `"tls-no-verify"` was not recognised (case sensitivity)
+
+### Changed
+
+- Version bump: `0.4.0` → `0.4.1`
+
+---
+
+## [0.4.0] - 2026-01-01
+
+### Added
+
+- **Bytecode VM** (`--vm` flag) — register-based virtual machine with own compiler, GC, and JIT integration
+- **JIT compilation** (`--jit` flag) — Cranelift-backed JIT for numeric hot loops; auto-promotes functions after 100 calls
+- **VM serialisation** — compiled bytecode can be serialised to `.fgc` files and loaded without re-parsing
+- **`pg` module (PostgreSQL)** — `pg.connect`, `pg.query`, `pg.execute`, `pg.close` with TLS support (`no-tls`, `tls`, `tls-no-verify`)
+- **`forge build`** command — produces serialised `.fgc` bytecode artefact
+- **`forge lsp`** command — Language Server Protocol skeleton (hover, diagnostics, completion stubs)
+- **Gradual type checker** — `--strict` emits type warnings without failing; type annotations in function signatures
+- **ADT / enum types** — `type Shape = Circle(f) | Rect(f, f)` with exhaustive `match`
+- **`struct` + `give` blocks** — struct definitions with default fields and impl-style method blocks
+- **`safe { }` block** — null-safe execution scope; errors inside produce `null` instead of crashing
+- **`timeout N seconds { }` block** — time-limited execution (interpreter mode)
+- **`retry N times { }` block** — automatic retry up to N attempts on error
+- **`spawn { }` + channels** — cooperative concurrency with Tokio; `channel()`, `send()`, `receive()`
+- **30 interactive tutorials** (`forge learn`)
+
+### Changed
+
+- Interpreter is now the *default* engine; VM/JIT are opt-in
+- `println` aliased to `say` (both work)
+- Version bump: `0.3.0` → `0.4.0`
+
 ---
 
 ## [0.3.0] - 2026-03-01
