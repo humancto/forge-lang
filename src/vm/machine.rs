@@ -162,6 +162,14 @@ impl VM {
             "err",
             "input",
             "Some",
+            // Added in audit fix — implementations in vm/builtins.rs
+            "assert_ne",
+            "any",
+            "all",
+            "unique",
+            "sum",
+            "min_of",
+            "max_of",
         ];
         for name in &builtins {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
