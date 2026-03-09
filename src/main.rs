@@ -21,6 +21,7 @@ mod vm;
 mod watch;
 
 use std::fs;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process;
 
@@ -29,8 +30,24 @@ use clap::{Parser, Subcommand};
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser as ForgeParser;
+use parser::ast::{Expr, Program, Stmt};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug)]
+enum FrontendError {
+    Lex {
+        line: usize,
+        col: usize,
+        message: String,
+    },
+    Parse {
+        line: usize,
+        col: usize,
+        message: String,
+    },
+    Type(Vec<typechecker::TypeWarning>),
+}
 
 #[derive(Parser)]
 #[command(
@@ -138,8 +155,8 @@ async fn main() {
 
     if let Some(code) = cli.eval_code {
         let code = code.replace(';', "\n");
-        if use_jit {
-            run_jit(&code, "<eval>");
+        if use_jit && !profile {
+            run_jit(&code, "<eval>", strict);
             return;
         }
         run_source(&code, "<eval>", use_vm, profile, strict).await;
@@ -166,8 +183,8 @@ async fn main() {
                     process::exit(1);
                 }
             };
-            if use_jit {
-                run_jit(&source, &path_str);
+            if use_jit && !profile {
+                run_jit(&source, &path_str, strict);
                 return;
             }
             run_source(&source, &path_str, use_vm, profile, strict).await;
@@ -213,7 +230,7 @@ async fn main() {
                     process::exit(1);
                 }
             };
-            compile_to_bytecode(&source, &path_str, &file);
+            compile_to_bytecode(&source, &path_str, &file, strict);
         }
         Some(Command::Install { source }) => {
             package::install(&source);
@@ -239,57 +256,341 @@ async fn main() {
     }
 }
 
-async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, strict: bool) {
+fn prepare_program(
+    source: &str,
+    strict: bool,
+) -> Result<(Program, Vec<typechecker::TypeWarning>), FrontendError> {
     let mut lexer = Lexer::new(source);
-    let tokens = match lexer.tokenize() {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_error(
-                    source,
-                    e.line,
-                    e.col,
-                    &format!("[{}] {}", filename, e.message)
-                )
-            );
-            process::exit(1);
-        }
-    };
+    let tokens = lexer.tokenize().map_err(|e| FrontendError::Lex {
+        line: e.line,
+        col: e.col,
+        message: e.message,
+    })?;
 
     let mut parser = ForgeParser::new(tokens);
-    let program = match parser.parse_program() {
-        Ok(prog) => prog,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_error(
-                    source,
-                    e.line,
-                    e.col,
-                    &format!("[{}] {}", filename, e.message)
-                )
-            );
-            process::exit(1);
-        }
-    };
+    let program = parser.parse_program().map_err(|e| FrontendError::Parse {
+        line: e.line,
+        col: e.col,
+        message: e.message,
+    })?;
 
     let mut checker = typechecker::TypeChecker::with_strict(strict);
     let warnings = checker.check(&program);
-    let mut has_type_errors = false;
-    for w in &warnings {
-        if w.is_error {
-            eprintln!("{}", errors::format_simple_error(&w.message));
-            has_type_errors = true;
-        } else {
-            eprintln!("{}", errors::format_warning(&w.message));
-        }
-    }
-    if has_type_errors {
-        process::exit(1);
+    if warnings.iter().any(|w| w.is_error) {
+        return Err(FrontendError::Type(warnings));
     }
 
+    Ok((program, warnings))
+}
+
+fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
+    match err {
+        FrontendError::Lex { line, col, message } | FrontendError::Parse { line, col, message } => {
+            eprintln!(
+                "{}",
+                errors::format_error(source, line, col, &format!("[{}] {}", filename, message))
+            );
+        }
+        FrontendError::Type(warnings) => {
+            for warning in warnings {
+                let rendered = format!("[{}] {}", filename, warning.message);
+                if warning.is_error {
+                    eprintln!("{}", errors::format_simple_error(&rendered));
+                } else {
+                    eprintln!("{}", errors::format_warning(&rendered));
+                }
+            }
+        }
+    }
+    process::exit(1);
+}
+
+fn emit_type_warnings(warnings: &[typechecker::TypeWarning]) {
+    for warning in warnings {
+        if !warning.is_error {
+            eprintln!("{}", errors::format_warning(&warning.message));
+        }
+    }
+}
+
+fn vm_builtin_import(path: &str) -> bool {
+    matches!(
+        path,
+        "math"
+            | "fs"
+            | "io"
+            | "crypto"
+            | "db"
+            | "pg"
+            | "env"
+            | "json"
+            | "regex"
+            | "log"
+            | "term"
+            | "http"
+            | "csv"
+            | "exec"
+            | "time"
+    )
+}
+
+fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>) {
+    match stmt {
+        Stmt::TypeDef { .. } => {
+            issues.insert("type definitions");
+        }
+        Stmt::InterfaceDef { .. } => {
+            issues.insert("interface/power definitions");
+        }
+        Stmt::ImplBlock { methods, .. } => {
+            issues.insert("impl/give blocks");
+            for method in methods {
+                collect_vm_incompatible_stmt(method, issues);
+            }
+        }
+        Stmt::Destructure { .. } => {
+            issues.insert("destructuring");
+        }
+        Stmt::TryCatch {
+            try_body,
+            catch_body,
+            ..
+        } => {
+            issues.insert("try/catch");
+            for stmt in try_body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+            for stmt in catch_body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Stmt::SafeBlock { body } => {
+            issues.insert("safe blocks");
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Stmt::TimeoutBlock { body, .. } => {
+            issues.insert("timeout blocks");
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Stmt::RetryBlock { body, .. } => {
+            issues.insert("retry blocks");
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Stmt::ScheduleBlock { body, .. } => {
+            issues.insert("schedule blocks");
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Stmt::WatchBlock { body, .. } => {
+            issues.insert("watch blocks");
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Stmt::PromptDef { .. } => {
+            issues.insert("prompt definitions");
+        }
+        Stmt::AgentDef { .. } => {
+            issues.insert("agent definitions");
+        }
+        Stmt::DecoratorStmt(_) => {
+            issues.insert("decorator-driven runtime features");
+        }
+        Stmt::Import { path, .. } => {
+            if !vm_builtin_import(path) {
+                issues.insert("file/package imports");
+            }
+        }
+        Stmt::FnDef {
+            body, decorators, ..
+        } => {
+            if !decorators.is_empty() {
+                issues.insert("decorator-driven runtime features");
+            }
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            for stmt in then_body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+            if let Some(else_body) = else_body {
+                for stmt in else_body {
+                    collect_vm_incompatible_stmt(stmt, issues);
+                }
+            }
+        }
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                for stmt in &arm.body {
+                    collect_vm_incompatible_stmt(stmt, issues);
+                }
+            }
+        }
+        Stmt::For { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::Spawn { body } => {
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Stmt::Let { value, .. }
+        | Stmt::Expression(value)
+        | Stmt::YieldStmt(value) => collect_vm_incompatible_expr(value, issues),
+        Stmt::Assign { target, value } => {
+            collect_vm_incompatible_expr(target, issues);
+            collect_vm_incompatible_expr(value, issues);
+        }
+        Stmt::Return(Some(expr))
+        | Stmt::CheckStmt { expr, .. } => collect_vm_incompatible_expr(expr, issues),
+        Stmt::When { subject, arms } => {
+            collect_vm_incompatible_expr(subject, issues);
+            for arm in arms {
+                if let Some(value) = &arm.value {
+                    collect_vm_incompatible_expr(value, issues);
+                }
+                collect_vm_incompatible_expr(&arm.result, issues);
+            }
+        }
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::StructDef { .. } => {}
+    }
+}
+
+fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>) {
+    match expr {
+        Expr::BinOp { left, right, .. } => {
+            collect_vm_incompatible_expr(left, issues);
+            collect_vm_incompatible_expr(right, issues);
+        }
+        Expr::UnaryOp { operand, .. }
+        | Expr::Try(operand) => collect_vm_incompatible_expr(operand, issues),
+        Expr::FieldAccess { object, .. } => collect_vm_incompatible_expr(object, issues),
+        Expr::Index { object, index } => {
+            collect_vm_incompatible_expr(object, issues);
+            collect_vm_incompatible_expr(index, issues);
+        }
+        Expr::Call { function, args } => {
+            collect_vm_incompatible_expr(function, issues);
+            for arg in args {
+                collect_vm_incompatible_expr(arg, issues);
+            }
+        }
+        Expr::Pipeline { value, function } => {
+            collect_vm_incompatible_expr(value, issues);
+            collect_vm_incompatible_expr(function, issues);
+        }
+        Expr::Lambda { body, .. } | Expr::Block(body) => {
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Expr::Object(fields) | Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_vm_incompatible_expr(value, issues);
+            }
+        }
+        Expr::Array(items) => {
+            for item in items {
+                collect_vm_incompatible_expr(item, issues);
+            }
+        }
+        Expr::StringInterp(parts) => {
+            for part in parts {
+                if let parser::ast::StringPart::Expr(expr) = part {
+                    collect_vm_incompatible_expr(expr, issues);
+                }
+            }
+        }
+        Expr::MethodCall { object, args, .. } => {
+            collect_vm_incompatible_expr(object, issues);
+            for arg in args {
+                collect_vm_incompatible_expr(arg, issues);
+            }
+        }
+        Expr::WhereFilter { source, value, .. } => {
+            issues.insert("where filters");
+            collect_vm_incompatible_expr(source, issues);
+            collect_vm_incompatible_expr(value, issues);
+        }
+        Expr::PipeChain { source, steps } => {
+            issues.insert("pipe chains");
+            collect_vm_incompatible_expr(source, issues);
+            for step in steps {
+                match step {
+                    parser::ast::PipeStep::Keep(expr)
+                    | parser::ast::PipeStep::Take(expr)
+                    | parser::ast::PipeStep::Apply(expr) => {
+                        collect_vm_incompatible_expr(expr, issues);
+                    }
+                    parser::ast::PipeStep::Sort(_) => {}
+                }
+            }
+        }
+        Expr::Await(expr)
+        | Expr::Freeze(expr)
+        | Expr::Spread(expr)
+        | Expr::Must(expr)
+        | Expr::Ask(expr) => collect_vm_incompatible_expr(expr, issues),
+        Expr::Spawn(body) => {
+            for stmt in body {
+                collect_vm_incompatible_stmt(stmt, issues);
+            }
+        }
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Bool(_)
+        | Expr::Ident(_) => {}
+    }
+}
+
+fn vm_incompatibilities(program: &Program) -> Vec<&'static str> {
+    let mut issues = BTreeSet::new();
+    for stmt in &program.statements {
+        collect_vm_incompatible_stmt(&stmt.stmt, &mut issues);
+    }
+    issues.into_iter().collect()
+}
+
+fn ensure_vm_compatible(program: &Program, mode: &str) -> Result<(), String> {
+    let issues = vm_incompatibilities(program);
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} mode does not support this program yet. Unsupported constructs: {}.\n  hint: run without {} for full language support",
+        mode,
+        issues.join(", "),
+        mode
+    ))
+}
+
+async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, strict: bool) {
+    let (program, warnings) = match prepare_program(source, strict) {
+        Ok(prepared) => prepared,
+        Err(err) => print_frontend_error(source, filename, err),
+    };
+    emit_type_warnings(&warnings);
+
     if use_vm {
+        if let Err(message) = ensure_vm_compatible(&program, "--vm") {
+            eprintln!("{}", errors::format_simple_error(&message));
+            process::exit(1);
+        }
         if profile {
             match vm::run_with_profiling(&program) {
                 Ok(_) => {}
@@ -354,30 +655,16 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     }
 }
 
-fn run_jit(source: &str, _filename: &str) {
-    let mut lexer = Lexer::new(source);
-    let tokens = match lexer.tokenize() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_error(source, e.line, e.col, &e.message)
-            );
-            process::exit(1);
-        }
+fn run_jit(source: &str, filename: &str, strict: bool) {
+    let (program, warnings) = match prepare_program(source, strict) {
+        Ok(prepared) => prepared,
+        Err(err) => print_frontend_error(source, filename, err),
     };
-
-    let mut parser = ForgeParser::new(tokens);
-    let program = match parser.parse_program() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_error(source, e.line, e.col, &e.message)
-            );
-            process::exit(1);
-        }
-    };
+    emit_type_warnings(&warnings);
+    if let Err(message) = ensure_vm_compatible(&program, "--jit") {
+        eprintln!("{}", errors::format_simple_error(&message));
+        process::exit(1);
+    }
 
     let chunk = match vm::compiler::compile(&program) {
         Ok(c) => c,
@@ -402,7 +689,7 @@ fn run_jit(source: &str, _filename: &str) {
             proto.name.clone()
         };
         match jit.compile_function(proto, &name) {
-            Ok(ptr) => {
+            Ok(_ptr) => {
                 eprintln!(
                     "  JIT compiled: {} ({} instructions -> native)",
                     name,
@@ -445,30 +732,16 @@ fn run_jit(source: &str, _filename: &str) {
     }
 }
 
-fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf) {
-    let mut lexer = Lexer::new(source);
-    let tokens = match lexer.tokenize() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_error(source, e.line, e.col, &e.message)
-            );
-            process::exit(1);
-        }
+fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf, strict: bool) {
+    let (program, warnings) = match prepare_program(source, strict) {
+        Ok(prepared) => prepared,
+        Err(err) => print_frontend_error(source, filename, err),
     };
-
-    let mut parser = ForgeParser::new(tokens);
-    let program = match parser.parse_program() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                errors::format_error(source, e.line, e.col, &e.message)
-            );
-            process::exit(1);
-        }
-    };
+    emit_type_warnings(&warnings);
+    if let Err(message) = ensure_vm_compatible(&program, "bytecode build") {
+        eprintln!("{}", errors::format_simple_error(&message));
+        process::exit(1);
+    }
 
     match vm::compiler::compile(&program) {
         Ok(chunk) => {
@@ -554,5 +827,66 @@ fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
     }
     if profile {
         vm.profiler.print_report();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_program_rejects_strict_type_errors() {
+        let source = r#"
+        fn needs_int(x: Int) { return x }
+        needs_int("oops")
+        "#;
+
+        match prepare_program(source, true) {
+            Err(FrontendError::Type(warnings)) => {
+                assert!(warnings.iter().any(|w| w.is_error));
+                assert!(warnings.iter().any(|w| w.message.contains("expected Int")));
+            }
+            other => panic!("expected type error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn prepare_program_keeps_non_strict_warnings_non_fatal() {
+        let source = r#"
+        fn needs_int(x: Int) { return x }
+        needs_int("oops")
+        "#;
+
+        let (_, warnings) = prepare_program(source, false).expect("program should prepare");
+        assert!(warnings.iter().any(|w| !w.is_error));
+        assert!(warnings.iter().any(|w| w.message.contains("expected Int")));
+    }
+
+    #[test]
+    fn vm_incompatibilities_detect_interface_and_impl_blocks() {
+        let source = r#"
+        thing Robot { id: Int }
+        power Speakable { fn speak() -> String }
+        give Robot {
+            fn speak(it) { return "beep" }
+        }
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let issues = vm_incompatibilities(&program);
+        assert!(issues.contains(&"interface/power definitions"));
+        assert!(issues.contains(&"impl/give blocks"));
+    }
+
+    #[test]
+    fn vm_incompatibilities_ignore_basic_programs() {
+        let source = r#"
+        fn add(a, b) { return a + b }
+        let sum = add(20, 22)
+        println(sum)
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
     }
 }

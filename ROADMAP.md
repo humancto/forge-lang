@@ -5,21 +5,21 @@
 
 ---
 
-## Current State: v0.4 — Feature Complete
+## Current State: v0.4.3 — Shipping, With Backend Gaps
 
 **Status: Shipped**
 
-| Component             | State                | Details                                                      |
-| --------------------- | -------------------- | ------------------------------------------------------------ |
-| Tree-walk interpreter | Complete             | Full feature support, 238+ builtins                          |
-| Bytecode VM           | Complete             | Register-based, 50 opcodes, mark-sweep GC                    |
-| JIT (Cranelift)       | Partial              | Integer-only functions, 20/50 opcodes                        |
-| Standard library      | 18 modules           | 238+ functions across math, fs, crypto, db, http, jwt, mysql, etc. |
-| HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket                   |
-| HTTP client           | Complete             | reqwest, JSON, all methods, benchmarked at 28k req/sec       |
-| Type checker          | Gradual              | Arity + type warnings, --strict mode                         |
-| Tests                 | 528 Rust + 334 Forge | CI on Ubuntu + macOS                                         |
-| Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases         |
+| Component             | State                | Details                                                                 |
+| --------------------- | -------------------- | ----------------------------------------------------------------------- |
+| Tree-walk interpreter | Complete             | Full language support, 238+ builtins                                    |
+| Bytecode VM           | Partial              | Fast backend for a supported subset; unsupported constructs are blocked  |
+| JIT (Cranelift)       | Partial              | Integer-heavy functions on the same supported subset as the VM           |
+| Standard library      | 18 modules           | 238+ functions across math, fs, crypto, db, http, jwt, mysql, etc.      |
+| HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket                              |
+| HTTP client           | Complete             | reqwest, JSON, all methods, benchmarked at 28k req/sec                  |
+| Type checker          | Gradual              | Arity + type warnings, `--strict` turns them into hard errors           |
+| Tests                 | 630 Rust + 631 Forge | Verified locally; one Forge test is intentionally skipped                |
+| Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases                    |
 
 ### What Works Today
 
@@ -27,16 +27,19 @@
 forge run app.fg          # Tree-walk interpreter (default)
 forge run --vm app.fg     # Bytecode VM
 forge run --jit app.fg    # JIT for integer functions, VM fallback
-forge build app.fg        # Prints bytecode stats (no file output)
+forge run --profile app.fg  # VM execution with profiling report
+forge build app.fg          # Writes app.fgc bytecode to disk
+forge run app.fgc           # Loads and executes compiled bytecode
 ```
 
 ### What Doesn't
 
-- `forge build` doesn't produce a file
+- VM/JIT support a real subset of the language; the interpreter remains the full-fidelity runtime
+- Several AST features still compile only on the interpreter side (for example: interfaces/give blocks, destructuring, try/catch)
 - JIT only handles integer math (no strings, objects, arrays)
 - No AOT compilation
 - No standalone binary output
-- Profiler exists but is never wired in
+- No backend parity suite yet that runs the same program across interpreter, VM, and JIT
 
 ---
 
@@ -97,10 +100,10 @@ var     var   Prototype table (u16 count + recursive Chunk encoding)
 
 ### Milestone 1 Deliverables
 
-- [ ] `forge build app.fg → app.fgc` (binary bytecode file)
-- [ ] `forge run app.fgc` (load + execute)
+- [x] `forge build app.fg → app.fgc` (binary bytecode file)
+- [x] `forge run app.fgc` (load + execute)
 - [ ] VM runs all programs the interpreter can
-- [ ] Profiler integrated, `--profile` flag works
+- [x] Profiler integrated, `--profile` flag works
 - [ ] Auto-JIT for hot integer functions
 
 ### Commit Breakdown (M1)

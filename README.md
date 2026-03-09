@@ -127,7 +127,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → forge 0.4.1
+forge version          # → forge 0.4.3
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -608,7 +608,7 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 | `forge new <name>`    | Scaffold a project       |
 | `forge test [dir]`    | Run tests                |
 | `forge fmt [files]`   | Format code              |
-| `forge build <file>`  | Compile to bytecode      |
+| `forge build <file>`  | Compile to `.fgc` bytecode |
 | `forge install <src>` | Install a package        |
 | `forge lsp`           | Language server          |
 | `forge chat`          | AI assistant             |
@@ -688,7 +688,7 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 
 ## 📊 Project Status
 
-Forge is **v0.4.1**. The language, interpreter, and standard library are stable and tested.
+Forge is **v0.4.3**. The language, interpreter, and standard library are stable; VM/JIT backends are fast but still subset runtimes.
 
 | Metric                   |                        Value |
 | ------------------------ | ---------------------------: |
@@ -696,7 +696,7 @@ Forge is **v0.4.1**. The language, interpreter, and standard library are stable 
 | Standard library modules |                           18 |
 | Built-in functions       |                         238+ |
 | Keywords                 |                          80+ |
-| Tests passing            | 1,019 (577 Rust + 442 Forge) |
+| Tests passing            | 1,261 (630 Rust + 631 Forge) |
 | Interactive lessons      |                           30 |
 | Example programs         |                           18 |
 | Dependencies (CVEs)      |          344 crates (0 CVEs) |
@@ -707,8 +707,8 @@ Forge is **v0.4.1**. The language, interpreter, and standard library are stable 
 > Forge is a young language. These are documented, not hidden.
 
 - **Parameterized SQL queries supported** — pass a params array as the second argument to `db.query`, `db.execute`, `pg.query`, `pg.execute`, and `mysql.query` / `mysql.execute` to safely bind user input and prevent SQL injection.
-- **Three execution tiers with different trade-offs** — The interpreter supports all 238+ functions. Use `--jit` for compute-heavy code (11x faster than Python) or `--vm` for bytecode execution.
-- **VM/JIT feature gap** — The JIT and VM execute a subset of the language. Use the default interpreter for full stdlib, HTTP, database, and AI features.
+- **Three execution tiers with different trade-offs** — The interpreter is the full language runtime. Use `--vm` for supported bytecode execution, `--jit` for integer-heavy hot paths, and `--profile` to inspect VM execution.
+- **VM/JIT feature gap** — VM and JIT now fail fast on unsupported language features instead of silently compiling partial behavior. Use the default interpreter for full stdlib, HTTP, database, AI, and advanced language features.
 - **`regex` functions** take `(text, pattern)` argument order, not `(pattern, text)`.
 
 ---
