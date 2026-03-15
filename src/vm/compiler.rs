@@ -20,7 +20,7 @@ struct TryContext {
 #[derive(Clone)]
 struct UpvalueEntry {
     name: String,
-    parent_register: u8,
+    source: UpvalueSource,
 }
 
 pub struct Compiler {
@@ -33,6 +33,7 @@ pub struct Compiler {
     try_contexts: Vec<TryContext>,
     upvalues: Vec<UpvalueEntry>,
     parent_locals: Vec<(String, u8)>,
+    parent_upvalues: Vec<(String, u8)>,
 }
 
 #[derive(Debug)]
@@ -60,6 +61,7 @@ impl Compiler {
             try_contexts: Vec::new(),
             upvalues: Vec::new(),
             parent_locals: Vec::new(),
+            parent_upvalues: Vec::new(),
         }
     }
 
@@ -67,6 +69,14 @@ impl Compiler {
         self.locals
             .iter()
             .map(|l| (l.name.clone(), l.register))
+            .collect()
+    }
+
+    fn snapshot_upvalues(&self) -> Vec<(String, u8)> {
+        self.upvalues
+            .iter()
+            .enumerate()
+            .map(|(index, upvalue)| (upvalue.name.clone(), index as u8))
             .collect()
     }
 
@@ -160,14 +170,14 @@ impl Compiler {
         None
     }
 
-    fn add_upvalue(&mut self, name: &str, parent_register: u8) -> u8 {
+    fn add_upvalue(&mut self, name: &str, source: UpvalueSource) -> u8 {
         if let Some(idx) = self.resolve_upvalue(name) {
             return idx;
         }
         let idx = self.upvalues.len() as u8;
         self.upvalues.push(UpvalueEntry {
             name: name.to_string(),
-            parent_register,
+            source,
         });
         idx
     }
@@ -176,6 +186,15 @@ impl Compiler {
         for (pname, preg) in &self.parent_locals {
             if pname == name {
                 return Some(*preg);
+            }
+        }
+        None
+    }
+
+    fn resolve_parent_upvalue(&self, name: &str) -> Option<u8> {
+        for (pname, upvalue_idx) in &self.parent_upvalues {
+            if pname == name {
+                return Some(*upvalue_idx);
             }
         }
         None
@@ -270,7 +289,31 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                                 name
                             )));
                         }
-                        compile_expr(c, value, reg)?;
+                        let saved = c.next_register;
+                        let tmp = c.alloc_reg();
+                        compile_expr(c, value, tmp)?;
+                        c.emit(encode_abc(OpCode::SetLocal, reg, tmp, 0), 0);
+                        c.free_to(saved);
+                    } else if let Some(uv_idx) = c.resolve_upvalue(name) {
+                        let saved = c.next_register;
+                        let tmp = c.alloc_reg();
+                        compile_expr(c, value, tmp)?;
+                        c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, tmp, 0), 0);
+                        c.free_to(saved);
+                    } else if let Some(parent_reg) = c.resolve_in_parent(name) {
+                        let uv_idx = c.add_upvalue(name, UpvalueSource::Local(parent_reg));
+                        let saved = c.next_register;
+                        let tmp = c.alloc_reg();
+                        compile_expr(c, value, tmp)?;
+                        c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, tmp, 0), 0);
+                        c.free_to(saved);
+                    } else if let Some(parent_upvalue) = c.resolve_parent_upvalue(name) {
+                        let uv_idx = c.add_upvalue(name, UpvalueSource::Upvalue(parent_upvalue));
+                        let saved = c.next_register;
+                        let tmp = c.alloc_reg();
+                        compile_expr(c, value, tmp)?;
+                        c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, tmp, 0), 0);
+                        c.free_to(saved);
                     } else {
                         let tmp = c.alloc_reg();
                         compile_expr(c, value, tmp)?;
@@ -312,9 +355,11 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             name, params, body, ..
         } => {
             let parent_locals = c.snapshot_locals();
+            let parent_upvalues = c.snapshot_upvalues();
 
             let mut fc = Compiler::new(name);
             fc.parent_locals = parent_locals;
+            fc.parent_upvalues = parent_upvalues;
             fc.begin_scope();
             for param in params {
                 fc.add_local(&param.name, true);
@@ -327,7 +372,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             fc.chunk.arity = params.len() as u8;
             fc.chunk.upvalue_count = fc.upvalues.len() as u8;
 
-            let upvalue_sources: Vec<u8> = fc.upvalues.iter().map(|u| u.parent_register).collect();
+            let upvalue_sources: Vec<UpvalueSource> =
+                fc.upvalues.iter().map(|u| u.source).collect();
             let proto_idx = c.chunk.prototypes.len() as u16;
             let mut proto_chunk = fc.chunk;
             proto_chunk.upvalue_sources = upvalue_sources;
@@ -832,13 +878,14 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::Ident(name) => {
             if let Some((reg, _)) = c.resolve_local(name) {
-                if reg != dst {
-                    c.emit(encode_abc(OpCode::Move, dst, reg, 0), 0);
-                }
+                c.emit(encode_abc(OpCode::GetLocal, dst, reg, 0), 0);
             } else if let Some(uv_idx) = c.resolve_upvalue(name) {
                 c.emit(encode_abc(OpCode::GetUpvalue, dst, uv_idx, 0), 0);
             } else if let Some(parent_reg) = c.resolve_in_parent(name) {
-                let uv_idx = c.add_upvalue(name, parent_reg);
+                let uv_idx = c.add_upvalue(name, UpvalueSource::Local(parent_reg));
+                c.emit(encode_abc(OpCode::GetUpvalue, dst, uv_idx, 0), 0);
+            } else if let Some(parent_upvalue) = c.resolve_parent_upvalue(name) {
+                let uv_idx = c.add_upvalue(name, UpvalueSource::Upvalue(parent_upvalue));
                 c.emit(encode_abc(OpCode::GetUpvalue, dst, uv_idx, 0), 0);
             } else {
                 let idx = c.const_str(name);
@@ -971,9 +1018,11 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::Lambda { params, body } => {
             let parent_locals = c.snapshot_locals();
+            let parent_upvalues = c.snapshot_upvalues();
 
             let mut lc = Compiler::new("<lambda>");
             lc.parent_locals = parent_locals;
+            lc.parent_upvalues = parent_upvalues;
             lc.begin_scope();
             for p in params {
                 lc.add_local(&p.name, true);
@@ -986,7 +1035,8 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             lc.chunk.arity = params.len() as u8;
             lc.chunk.upvalue_count = lc.upvalues.len() as u8;
 
-            let upvalue_sources: Vec<u8> = lc.upvalues.iter().map(|u| u.parent_register).collect();
+            let upvalue_sources: Vec<UpvalueSource> =
+                lc.upvalues.iter().map(|u| u.source).collect();
             let mut proto_chunk = lc.chunk;
             proto_chunk.upvalue_sources = upvalue_sources;
             let pi = c.chunk.prototypes.len() as u16;

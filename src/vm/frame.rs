@@ -1,4 +1,5 @@
 use super::value::GcRef;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub struct ExceptionHandler {
@@ -17,6 +18,8 @@ pub struct CallFrame {
     pub base: usize,
     /// Active exception handlers for this frame, innermost last.
     pub handlers: Vec<ExceptionHandler>,
+    /// Shared cells for locals captured by closures created in this frame.
+    pub open_upvalues: HashMap<u8, GcRef>,
 }
 
 impl CallFrame {
@@ -26,6 +29,7 @@ impl CallFrame {
             ip: 0,
             base,
             handlers: Vec::new(),
+            open_upvalues: HashMap::new(),
         }
     }
 

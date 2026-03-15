@@ -97,7 +97,10 @@ mod parity_tests {
             } else {
                 proto.name.clone()
             };
-            let _ = jit.compile_function(proto, &name);
+            let info = type_analysis::analyze(proto);
+            if !info.has_unsupported_ops {
+                let _ = jit.compile_function(proto, &name);
+            }
         }
 
         let mut vm = VM::new();
@@ -107,8 +110,9 @@ mod parity_tests {
             } else {
                 proto.name.clone()
             };
-            if let Some(ptr) = jit.get_compiled(&name) {
-                let info = type_analysis::analyze(proto);
+            let info = type_analysis::analyze(proto);
+            if !info.has_unsupported_ops {
+                if let Some(ptr) = jit.get_compiled(&name) {
                 vm.jit_cache.insert(
                     name,
                     JitEntry {
@@ -116,6 +120,7 @@ mod parity_tests {
                         uses_float: info.has_float,
                     },
                 );
+            }
             }
         }
 
@@ -453,6 +458,66 @@ mod parity_tests {
             outcome
             "#,
             "ArithmeticError",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_mutable_closure_counter() {
+        assert_cross_backend_value(
+            r#"
+            fn make_counter() {
+                let mut count = 0
+                return fn() {
+                    count = count + 1
+                    return count
+                }
+            }
+            let counter = make_counter()
+            let a = counter()
+            let b = counter()
+            let c = counter()
+            [a, b, c]
+            "#,
+            "[1, 2, 3]",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_nested_closure_mutation() {
+        assert_cross_backend_value(
+            r#"
+            fn outer() {
+                let mut x = 0
+                fn middle() {
+                    x = x + 10
+                    fn inner() {
+                        x = x + 1
+                    }
+                    inner()
+                }
+                middle()
+                return x
+            }
+            outer()
+            "#,
+            "11",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_sibling_closures_share_state() {
+        assert_cross_backend_value(
+            r#"
+            fn run_pair() {
+                let mut n = 0
+                let inc = fn() { n = n + 1 }
+                let read = fn() { return n }
+                inc()
+                return read()
+            }
+            run_pair()
+            "#,
+            "1",
         );
     }
 

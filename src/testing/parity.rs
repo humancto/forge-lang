@@ -178,7 +178,10 @@ fn run_on_jit_value(program: &Program) -> String {
         } else {
             proto.name.clone()
         };
-        let _ = jit.compile_function(proto, &name);
+        let info = type_analysis::analyze(proto);
+        if !info.has_unsupported_ops {
+            let _ = jit.compile_function(proto, &name);
+        }
     }
 
     let mut vm = VM::new();
@@ -188,8 +191,9 @@ fn run_on_jit_value(program: &Program) -> String {
         } else {
             proto.name.clone()
         };
-        if let Some(ptr) = jit.get_compiled(&name) {
-            let info = type_analysis::analyze(proto);
+        let info = type_analysis::analyze(proto);
+        if !info.has_unsupported_ops {
+            if let Some(ptr) = jit.get_compiled(&name) {
             vm.jit_cache.insert(
                 name,
                 JitEntry {
@@ -197,6 +201,7 @@ fn run_on_jit_value(program: &Program) -> String {
                     uses_float: info.has_float,
                 },
             );
+        }
         }
     }
 

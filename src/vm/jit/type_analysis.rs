@@ -163,7 +163,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                     constants[a] = None;
                 }
             }
-            OpCode::Move => {
+            OpCode::Move | OpCode::GetLocal | OpCode::SetLocal => {
                 if a < types.len() && bb < types.len() {
                     types[a] = types[bb];
                     constants[a] = constants[bb];
@@ -202,6 +202,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
             | OpCode::SetGlobal
             | OpCode::GetUpvalue
             | OpCode::SetUpvalue => {
+                has_unsupported = true;
                 if a < constants.len() {
                     constants[a] = None;
                 }

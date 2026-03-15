@@ -1,0 +1,14 @@
+// expect: [1, 2, 3]
+fn make_counter() {
+    let mut count = 0
+    return fn() {
+        count = count + 1
+        return count
+    }
+}
+
+let counter = make_counter()
+let a = counter()
+let b = counter()
+let c = counter()
+[a, b, c]

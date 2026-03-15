@@ -1,4 +1,4 @@
-use super::bytecode::{Chunk, Constant};
+use super::bytecode::{Chunk, Constant, UpvalueSource};
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 4] = b"FGC\0";
@@ -76,7 +76,16 @@ fn write_chunk_inner(w: &mut Vec<u8>, chunk: &Chunk) -> Result<(), SerializeErro
 
     write_u16(w, chunk.upvalue_sources.len() as u16)?;
     for &src in &chunk.upvalue_sources {
-        w.push(src);
+        match src {
+            UpvalueSource::Local(reg) => {
+                w.push(0x01);
+                w.push(reg);
+            }
+            UpvalueSource::Upvalue(idx) => {
+                w.push(0x02);
+                w.push(idx);
+            }
+        }
     }
 
     Ok(())
@@ -206,9 +215,19 @@ fn read_chunk_inner<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
     let uv_sources_count = read_u16(r)? as usize;
     let mut upvalue_sources = Vec::with_capacity(uv_sources_count);
     for _ in 0..uv_sources_count {
-        let mut b = [0u8; 1];
-        r.read_exact(&mut b)?;
-        upvalue_sources.push(b[0]);
+        let mut source = [0u8; 2];
+        r.read_exact(&mut source)?;
+        let upvalue_source = match source[0] {
+            0x01 => UpvalueSource::Local(source[1]),
+            0x02 => UpvalueSource::Upvalue(source[1]),
+            other => {
+                return Err(SerializeError::new(&format!(
+                    "unknown upvalue source tag: 0x{:02x}",
+                    other
+                )));
+            }
+        };
+        upvalue_sources.push(upvalue_source);
     }
 
     Ok(Chunk {

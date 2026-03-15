@@ -1,0 +1,15 @@
+// expect: 11
+fn outer() {
+    let mut x = 0
+    fn middle() {
+        x = x + 10
+        fn inner() {
+            x = x + 1
+        }
+        inner()
+    }
+    middle()
+    return x
+}
+
+outer()

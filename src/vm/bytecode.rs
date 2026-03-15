@@ -65,6 +65,12 @@ pub enum Constant {
     Str(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpvalueSource {
+    Local(u8),
+    Upvalue(u8),
+}
+
 /// A compiled bytecode chunk (one per function/closure/module).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -77,7 +83,7 @@ pub struct Chunk {
     pub max_registers: u8,
     pub upvalue_count: u8,
     pub arity: u8,
-    pub upvalue_sources: Vec<u8>,
+    pub upvalue_sources: Vec<UpvalueSource>,
 }
 
 impl Chunk {

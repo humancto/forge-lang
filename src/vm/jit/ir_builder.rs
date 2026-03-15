@@ -135,7 +135,7 @@ pub fn build_function<M: Module>(
                     b.def_var(regs[a], v);
                     b.ins().jump(next, &[]);
                 }
-                OpCode::Move => {
+                OpCode::Move | OpCode::GetLocal | OpCode::SetLocal => {
                     let v = b.use_var(regs[bb]);
                     b.def_var(regs[a], v);
                     b.ins().jump(next, &[]);

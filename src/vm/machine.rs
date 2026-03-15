@@ -689,6 +689,38 @@ impl VM {
                             self.globals.insert(name.clone(), val);
                         }
                     }
+                    OpCode::GetLocal => {
+                        let local_slot = b;
+                        let value = if let Some(uv_ref) =
+                            self.frames[frame_idx].open_upvalues.get(&local_slot).copied()
+                        {
+                            let value = self
+                                .gc
+                                .get(uv_ref)
+                                .and_then(|uv_obj| match &uv_obj.kind {
+                                    ObjKind::Upvalue(uv) => Some(uv.value.clone()),
+                                    _ => None,
+                                })
+                                .ok_or_else(|| VMError::new("invalid open upvalue"))?;
+                            self.registers[base + local_slot as usize] = value.clone();
+                            value
+                        } else {
+                            self.registers[base + local_slot as usize].clone()
+                        };
+                        self.registers[base + a as usize] = value;
+                    }
+                    OpCode::SetLocal => {
+                        let val = self.registers[base + b as usize].clone();
+                        self.registers[base + a as usize] = val.clone();
+                        let open_upvalue = self.frames[frame_idx].open_upvalues.get(&a).copied();
+                        if let Some(uv_ref) = open_upvalue {
+                            if let Some(uv_obj) = self.gc.get_mut(uv_ref) {
+                                if let ObjKind::Upvalue(uv) = &mut uv_obj.kind {
+                                    uv.value = val;
+                                }
+                            }
+                        }
+                    }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
@@ -737,11 +769,43 @@ impl VM {
                     }
                     OpCode::Closure => {
                         let proto = chunk.prototypes[bx as usize].clone();
+                        let parent_upvalues = {
+                            let frame = &self.frames[frame_idx];
+                            let closure_obj = self
+                                .gc
+                                .get(frame.closure)
+                                .ok_or_else(|| VMError::new("invalid closure"))?;
+                            if let ObjKind::Closure(closure) = &closure_obj.kind {
+                                closure.upvalues.clone()
+                            } else {
+                                return Err(VMError::new("expected closure"));
+                            }
+                        };
 
                         let mut upvalue_refs = Vec::new();
-                        for &src_reg in &proto.upvalue_sources {
-                            let val = self.registers[base + src_reg as usize].clone();
-                            let uv_ref = self.gc.alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
+                        for source in &proto.upvalue_sources {
+                            let uv_ref = match source {
+                                UpvalueSource::Local(src_reg) => {
+                                    if let Some(existing) =
+                                        self.frames[frame_idx].open_upvalues.get(src_reg).copied()
+                                    {
+                                        existing
+                                    } else {
+                                        let val = self.registers[base + *src_reg as usize].clone();
+                                        let uv_ref = self
+                                            .gc
+                                            .alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
+                                        self.frames[frame_idx]
+                                            .open_upvalues
+                                            .insert(*src_reg, uv_ref);
+                                        uv_ref
+                                    }
+                                }
+                                UpvalueSource::Upvalue(parent_idx) => parent_upvalues
+                                    .get(*parent_idx as usize)
+                                    .copied()
+                                    .ok_or_else(|| VMError::new("invalid upvalue source"))?,
+                            };
                             upvalue_refs.push(uv_ref);
                         }
 
