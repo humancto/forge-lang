@@ -1,0 +1,11 @@
+// expect: 12
+
+type Shape = Circle(Float) | Rect(Float, Float)
+
+let shape = Rect(3.0, 4.0)
+let mut area = 0.0
+match shape {
+    Circle(r) => { area = r }
+    Rect(w, h) => { area = w * h }
+}
+area

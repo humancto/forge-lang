@@ -209,6 +209,7 @@ impl VM {
             "__forge_register_method",
             "__forge_validate_impl",
             "__forge_call_method",
+            "__forge_binding_matches",
         ];
         for name in &builtins {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {

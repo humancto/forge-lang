@@ -136,6 +136,28 @@ impl VM {
                 let method_name = self.get_string_arg(&args, 1)?;
                 self.call_forge_method(receiver, &method_name, &args[2..])
             }
+            "__forge_binding_matches" => {
+                if args.len() != 2 {
+                    return Err(VMError::new(
+                        "__forge_binding_matches() requires (binding_name, value)",
+                    ));
+                }
+                let binding_name = self.get_string_arg(&args, 0)?;
+                let value = args[1].clone();
+
+                let Some(bound_value) = self.globals.get(&binding_name).cloned() else {
+                    return Ok(Value::Bool(true));
+                };
+
+                if let (Some(bound_variant), Some(value_variant)) = (
+                    self.value_variant_name(&bound_value),
+                    self.value_variant_name(&value),
+                ) {
+                    return Ok(Value::Bool(bound_variant == value_variant));
+                }
+
+                Ok(Value::Bool(true))
+            }
             "println" | "say" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ");
@@ -1748,6 +1770,14 @@ impl VM {
         self.get_object_fields(value).and_then(|fields| {
             fields
                 .get("__type__")
+                .and_then(|value| self.get_string(value))
+        })
+    }
+
+    fn value_variant_name(&self, value: &Value) -> Option<String> {
+        self.get_object_fields(value).and_then(|fields| {
+            fields
+                .get("__variant__")
                 .and_then(|value| self.get_string(value))
         })
     }

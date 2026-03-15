@@ -637,6 +637,41 @@ mod parity_tests {
     }
 
     #[test]
+    fn cross_backend_parity_adt_unit_variants() {
+        assert_cross_backend_value(
+            r#"
+            type Color = Red | Green | Blue
+            let color = Green
+            let mut label = ""
+            match color {
+                Red => { label = "red" }
+                Green => { label = "green" }
+                Blue => { label = "blue" }
+            }
+            label
+            "#,
+            "green",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_adt_constructor_fields() {
+        assert_cross_backend_value(
+            r#"
+            type Shape = Circle(Float) | Rect(Float, Float)
+            let shape = Rect(3.0, 4.0)
+            let mut area = 0.0
+            match shape {
+                Circle(r) => { area = r }
+                Rect(w, h) => { area = w * h }
+            }
+            area
+            "#,
+            "12",
+        );
+    }
+
+    #[test]
     fn vm_power_missing_method_errors() {
         let program = parse_program(
             r#"

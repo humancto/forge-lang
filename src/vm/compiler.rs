@@ -287,6 +287,16 @@ fn compile_hidden_stmt(c: &mut Compiler, name: &str, args: Vec<Expr>) -> Result<
     Ok(())
 }
 
+fn compile_set_global_expr(c: &mut Compiler, name: &str, expr: Expr) -> Result<(), CompileError> {
+    let saved = c.next_register;
+    let reg = c.alloc_reg();
+    compile_expr(c, &expr, reg)?;
+    let name_idx = c.const_str(name);
+    c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+    c.free_to(saved);
+    Ok(())
+}
+
 fn type_ann_name(type_ann: &TypeAnn) -> String {
     match type_ann {
         TypeAnn::Simple(name) => name.clone(),
@@ -358,6 +368,39 @@ fn interface_methods_expr(methods: &[MethodSig]) -> Expr {
             })
             .collect(),
     )
+}
+
+fn type_metadata_expr(name: &str, variants: &[Variant]) -> Expr {
+    Expr::Object(vec![
+        ("__kind__".to_string(), Expr::StringLit("type".to_string())),
+        ("name".to_string(), Expr::StringLit(name.to_string())),
+        (
+            "variants".to_string(),
+            Expr::Array(
+                variants
+                    .iter()
+                    .map(|variant| Expr::StringLit(variant.name.clone()))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn variant_object_expr(type_name: &str, variant_name: &str, field_params: &[String]) -> Expr {
+    let mut fields = vec![
+        (
+            "__type__".to_string(),
+            Expr::StringLit(type_name.to_string()),
+        ),
+        (
+            "__variant__".to_string(),
+            Expr::StringLit(variant_name.to_string()),
+        ),
+    ];
+    for (index, param_name) in field_params.iter().enumerate() {
+        fields.push((format!("_{}", index), Expr::Ident(param_name.clone())));
+    }
+    Expr::Object(fields)
 }
 
 fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
@@ -675,6 +718,23 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         break;
                     }
                     Pattern::Binding(name) => {
+                        let saved = c.next_register;
+                        let fn_reg = c.alloc_reg();
+                        let fn_idx = c.const_str("__forge_binding_matches");
+                        c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
+
+                        let name_reg = c.alloc_reg();
+                        let name_idx = c.const_str(name);
+                        c.emit(encode_abx(OpCode::LoadConst, name_reg, name_idx), 0);
+
+                        let value_reg = c.alloc_reg();
+                        c.emit(encode_abc(OpCode::Move, value_reg, subj, 0), 0);
+
+                        let check_reg = c.alloc_reg();
+                        c.emit(encode_abc(OpCode::Call, fn_reg, 2, check_reg), 0);
+                        let skip = c.emit_jump(OpCode::JumpIfFalse, check_reg, 0);
+                        c.free_to(saved);
+
                         c.begin_scope();
                         let vr = c.add_local(name, false);
                         c.emit(encode_abc(OpCode::Move, vr, subj, 0), 0);
@@ -682,7 +742,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                             compile_stmt(c, s)?;
                         }
                         c.end_scope();
-                        break;
+
+                        let ej = c.emit_jump(OpCode::Jump, 0, 0);
+                        end_jumps.push(ej);
+                        c.patch_jump(skip);
                     }
                     Pattern::Literal(lit) => {
                         let lr = c.alloc_reg();
@@ -747,7 +810,50 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             Ok(())
         }
 
-        Stmt::TypeDef { .. } | Stmt::DecoratorStmt(_) => Ok(()),
+        Stmt::TypeDef { name, variants } => {
+            for variant in variants {
+                if variant.fields.is_empty() {
+                    compile_set_global_expr(
+                        c,
+                        &variant.name,
+                        variant_object_expr(name, &variant.name, &[]),
+                    )?;
+                    continue;
+                }
+
+                let params: Vec<Param> = variant
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, type_ann)| Param {
+                        name: format!("field{}", index),
+                        type_ann: Some(type_ann.clone()),
+                        default: None,
+                    })
+                    .collect();
+                let param_names = params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect::<Vec<_>>();
+                let constructor = Expr::Lambda {
+                    params,
+                    body: vec![Stmt::Return(Some(variant_object_expr(
+                        name,
+                        &variant.name,
+                        &param_names,
+                    )))],
+                };
+                compile_set_global_expr(c, &variant.name, constructor)?;
+            }
+
+            compile_set_global_expr(
+                c,
+                &format!("__type_{}__", name),
+                type_metadata_expr(name, variants),
+            )
+        }
+
+        Stmt::DecoratorStmt(_) => Ok(()),
 
         Stmt::StructDef { name, fields } => compile_hidden_stmt(
             c,

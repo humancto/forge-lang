@@ -344,9 +344,7 @@ fn vm_builtin_import(path: &str) -> bool {
 
 fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>) {
     match stmt {
-        Stmt::TypeDef { .. } => {
-            issues.insert("type definitions");
-        }
+        Stmt::TypeDef { .. } => {}
         Stmt::InterfaceDef { .. } => {}
         Stmt::ImplBlock { methods, .. } => {
             for method in methods {
@@ -929,6 +927,19 @@ mod tests {
         let issues = vm_incompatibilities(&program);
         assert!(!issues.contains(&"interface/power definitions"));
         assert!(!issues.contains(&"impl/give blocks"));
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_type_definitions() {
+        let source = r#"
+        type Color = Red | Green | Blue
+        let color = Red
+        color
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let issues = vm_incompatibilities(&program);
+        assert!(!issues.contains(&"type definitions"));
     }
 
     #[test]
