@@ -9,6 +9,7 @@ mod learn;
 mod lexer;
 mod lsp;
 mod manifest;
+mod native;
 mod package;
 mod parser;
 mod repl;
@@ -30,7 +31,7 @@ use clap::{Parser, Subcommand};
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser as ForgeParser;
-use parser::ast::{Expr, Program, Stmt};
+use parser::ast::{DestructurePattern, Expr, Program, Stmt};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -116,6 +117,9 @@ enum Command {
     },
     /// Compile Forge source to bytecode
     Build {
+        /// Emit a native launcher executable that shells into the Forge runtime
+        #[arg(long)]
+        native: bool,
         /// Source file to compile
         file: PathBuf,
     },
@@ -215,7 +219,7 @@ async fn main() {
         Some(Command::New { name }) => {
             scaffold::create_project(&name);
         }
-        Some(Command::Build { file }) => {
+        Some(Command::Build { file, native }) => {
             let path_str = file.display().to_string();
             let source = match fs::read_to_string(&file) {
                 Ok(s) => s,
@@ -230,7 +234,11 @@ async fn main() {
                     process::exit(1);
                 }
             };
-            compile_to_bytecode(&source, &path_str, &file, strict);
+            if native {
+                compile_to_native_launcher(&source, &path_str, &file, strict);
+            } else {
+                compile_to_bytecode(&source, &path_str, &file, strict);
+            }
         }
         Some(Command::Install { source }) => {
             package::install(&source);
@@ -348,8 +356,17 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
                 collect_vm_incompatible_stmt(method, issues);
             }
         }
-        Stmt::Destructure { .. } => {
-            issues.insert("destructuring");
+        Stmt::Destructure { pattern, value } => {
+            if matches!(
+                pattern,
+                DestructurePattern::Array {
+                    rest: Some(_),
+                    ..
+                }
+            ) {
+                issues.insert("array destructuring with rest");
+            }
+            collect_vm_incompatible_expr(value, issues);
         }
         Stmt::TryCatch {
             try_body,
@@ -782,6 +799,28 @@ fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf, strict
     }
 }
 
+fn compile_to_native_launcher(source: &str, filename: &str, file_path: &PathBuf, strict: bool) {
+    let (_, warnings) = match prepare_program(source, strict) {
+        Ok(prepared) => prepared,
+        Err(err) => print_frontend_error(source, filename, err),
+    };
+    emit_type_warnings(&warnings);
+
+    match native::build_native_launcher(source, file_path) {
+        Ok(output_path) => {
+            println!(
+                "Built native launcher {} -> {}\n  runtime: Forge interpreter/VM required at execution time",
+                filename,
+                output_path.display()
+            );
+        }
+        Err(message) => {
+            eprintln!("{}", errors::format_simple_error(&message));
+            process::exit(1);
+        }
+    }
+}
+
 fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
     let bytes = match fs::read(file_path) {
         Ok(b) => b,
@@ -888,5 +927,30 @@ mod tests {
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_object_destructuring() {
+        let source = r#"
+        let user = { name: "Forge", age: 4 }
+        unpack { name, age } from user
+        name
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_flag_array_rest_destructuring() {
+        let source = r#"
+        let items = [1, 2, 3]
+        unpack [first, ...rest] from items
+        first
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let issues = vm_incompatibilities(&program);
+        assert!(issues.contains(&"array destructuring with rest"));
     }
 }

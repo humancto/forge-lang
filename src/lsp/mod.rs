@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::parser::ast::Stmt;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::sync::Mutex;
@@ -21,7 +22,7 @@ fn get_document(uri: &str) -> Option<String> {
 
 /// Basic LSP server for Forge.
 /// Implements the Language Server Protocol over stdin/stdout.
-/// Provides: diagnostics (parse errors), completions (keywords/builtins).
+/// Provides: diagnostics (parse errors), completions, hover, definition, document symbols.
 
 pub fn run_lsp() {
     let stdin = io::stdin();
@@ -83,7 +84,9 @@ fn handle_message(body: &str) -> Option<String> {
                         "completionProvider": {
                             "triggerCharacters": ["."]
                         },
-                        "hoverProvider": true
+                        "hoverProvider": true,
+                        "definitionProvider": true,
+                        "documentSymbolProvider": true
                     }
                 }
             });
@@ -144,6 +147,33 @@ fn handle_message(body: &str) -> Option<String> {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": hover
+            });
+            Some(result.to_string())
+        }
+        "textDocument/definition" => {
+            let params = json.get("params")?;
+            let doc = params.get("textDocument")?;
+            let uri = doc.get("uri")?.as_str()?;
+            let position = params.get("position")?;
+            let line = position.get("line")?.as_u64()? as usize;
+            let character = position.get("character")?.as_u64()? as usize;
+            let definition = get_definition(uri, line, character);
+            let result = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": definition
+            });
+            Some(result.to_string())
+        }
+        "textDocument/documentSymbol" => {
+            let params = json.get("params")?;
+            let doc = params.get("textDocument")?;
+            let uri = doc.get("uri")?.as_str()?;
+            let symbols = get_document_symbols(uri);
+            let result = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": symbols
             });
             Some(result.to_string())
         }
@@ -389,6 +419,96 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
     items
 }
 
+#[derive(Debug, Clone)]
+struct DocumentSymbolInfo {
+    name: String,
+    kind: u64,
+    line: usize,
+}
+
+fn collect_document_symbols(source: &str) -> Vec<DocumentSymbolInfo> {
+    let mut lexer = crate::lexer::Lexer::new(source);
+    let tokens = match lexer.tokenize() {
+        Ok(tokens) => tokens,
+        Err(_) => return Vec::new(),
+    };
+    let mut parser = crate::parser::Parser::new(tokens);
+    let program = match parser.parse_program() {
+        Ok(program) => program,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut symbols = Vec::new();
+    for spanned in program.statements {
+        let (name, kind) = match spanned.stmt {
+            Stmt::FnDef { name, .. } => (name, 12),
+            Stmt::Let { name, .. } => (name, 13),
+            Stmt::StructDef { name, .. } => (name, 23),
+            Stmt::TypeDef { name, .. } => (name, 10),
+            Stmt::InterfaceDef { name, .. } => (name, 11),
+            Stmt::PromptDef { name, .. } => (name, 12),
+            Stmt::AgentDef { name, .. } => (name, 5),
+            _ => continue,
+        };
+        symbols.push(DocumentSymbolInfo {
+            name,
+            kind,
+            line: spanned.line.saturating_sub(1),
+        });
+    }
+    symbols
+}
+
+fn symbol_range(source: &str, line: usize, name: &str) -> serde_json::Value {
+    let line_text = source.lines().nth(line).unwrap_or("");
+    let start = line_text.find(name).unwrap_or(0);
+    serde_json::json!({
+        "start": { "line": line, "character": start },
+        "end": { "line": line, "character": start + name.len() }
+    })
+}
+
+fn get_document_symbols(uri: &str) -> Vec<serde_json::Value> {
+    let Some(text) = get_document(uri).or_else(|| read_document(uri)) else {
+        return Vec::new();
+    };
+
+    collect_document_symbols(&text)
+        .into_iter()
+        .map(|symbol| {
+            let range = symbol_range(&text, symbol.line, &symbol.name);
+            serde_json::json!({
+                "name": symbol.name,
+                "kind": symbol.kind,
+                "range": range.clone(),
+                "selectionRange": range
+            })
+        })
+        .collect()
+}
+
+fn get_definition(uri: &str, line: usize, character: usize) -> serde_json::Value {
+    let Some(text) = get_document(uri).or_else(|| read_document(uri)) else {
+        return serde_json::Value::Null;
+    };
+    let line_text = text.lines().nth(line).unwrap_or("");
+    let word = extract_word_at(line_text, character);
+    if word.is_empty() {
+        return serde_json::Value::Null;
+    }
+
+    let Some(symbol) = collect_document_symbols(&text)
+        .into_iter()
+        .find(|symbol| symbol.name == word) else {
+        return serde_json::Value::Null;
+    };
+
+    serde_json::json!({
+        "uri": uri,
+        "range": symbol_range(&text, symbol.line, &symbol.name)
+    })
+}
+
 fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
     let builtins: std::collections::HashMap<&str, &str> = [
         ("println", "fn println(...args) — Print values followed by a newline"),
@@ -542,3 +662,63 @@ fn read_document(uri: &str) -> Option<String> {
 }
 
 use std::io::Read;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialize_advertises_navigation_capabilities() {
+        let response = handle_message(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            json.pointer("/result/capabilities/definitionProvider")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            json.pointer("/result/capabilities/documentSymbolProvider")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn collect_document_symbols_finds_top_level_items() {
+        let symbols = collect_document_symbols(
+            r#"
+            fn add(a, b) { return a + b }
+            let answer = add(20, 22)
+            thing User { name: String }
+            "#,
+        );
+
+        assert!(symbols.iter().any(|symbol| symbol.name == "add" && symbol.kind == 12));
+        assert!(symbols.iter().any(|symbol| symbol.name == "answer" && symbol.kind == 13));
+        assert!(symbols.iter().any(|symbol| symbol.name == "User" && symbol.kind == 23));
+    }
+
+    #[test]
+    fn definition_returns_matching_symbol_location() {
+        let uri = "file:///tmp/forge-lsp-definition.fg";
+        let text = "fn add(a, b) { return a + b }\nlet answer = add(20, 22)\nanswer\n";
+        store_document(uri, text);
+
+        let definition = get_definition(uri, 1, 14);
+        assert_eq!(
+            definition
+                .pointer("/range/start/line")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            definition
+                .pointer("/range/start/character")
+                .and_then(|value| value.as_u64()),
+            Some(3)
+        );
+    }
+}

@@ -187,6 +187,47 @@ pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
     Ok(c.chunk)
 }
 
+pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
+    let mut c = Compiler::new("<repl>");
+    c.begin_scope();
+
+    let result_reg = c.alloc_reg();
+    let mut has_result = false;
+
+    for spanned in &program.statements {
+        match &spanned.stmt {
+            Stmt::Expression(expr) if !is_output_expr(expr) => {
+                compile_expr(&mut c, expr, result_reg)?;
+                has_result = true;
+            }
+            _ => compile_stmt(&mut c, &spanned.stmt)?,
+        }
+    }
+
+    if has_result {
+        c.emit(encode_abc(OpCode::Return, result_reg, 0, 0), 0);
+    } else {
+        c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+    }
+    c.chunk.max_registers = c.max_register;
+    Ok(c.chunk)
+}
+
+fn is_output_expr(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Call { function, .. }
+            if matches!(
+                function.as_ref(),
+                Expr::Ident(name)
+                    if matches!(
+                        name.as_str(),
+                        "print" | "println" | "say" | "yell" | "whisper"
+                    )
+            )
+    )
+}
+
 fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
     match stmt {
         Stmt::Let {
@@ -541,7 +582,50 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         | Stmt::InterfaceDef { .. }
         | Stmt::DecoratorStmt(_) => Ok(()),
 
-        Stmt::Destructure { .. } => Ok(()),
+        Stmt::Destructure { pattern, value } => {
+            let value_reg = c.alloc_reg();
+            compile_expr(c, value, value_reg)?;
+
+            let target_regs: Vec<u8> = match pattern {
+                DestructurePattern::Object(names) => names
+                    .iter()
+                    .map(|name| c.add_local(name, false))
+                    .collect(),
+                DestructurePattern::Array { items, rest } => {
+                    if rest.is_some() {
+                        return Err(CompileError::new(
+                            "VM does not support array destructuring with rest yet",
+                        ));
+                    }
+                    items
+                        .iter()
+                        .map(|name| c.add_local(name, false))
+                        .collect()
+                }
+            };
+
+            match pattern {
+                DestructurePattern::Object(names) => {
+                    for (name, target_reg) in names.iter().zip(target_regs.iter().copied()) {
+                        let field_idx = c.const_str(name);
+                        c.emit(encode_abc(OpCode::GetField, target_reg, value_reg, field_idx as u8), 0);
+                    }
+                }
+                DestructurePattern::Array { items, .. } => {
+                    let temp_base = c.next_register;
+                    for (index, (_, target_reg)) in
+                        items.iter().zip(target_regs.iter().copied()).enumerate()
+                    {
+                        let idx_reg = c.alloc_reg();
+                        let const_idx = c.const_int(index as i64);
+                        c.emit(encode_abx(OpCode::LoadConst, idx_reg, const_idx), 0);
+                        c.emit(encode_abc(OpCode::GetIndex, target_reg, value_reg, idx_reg), 0);
+                        c.free_to(temp_base);
+                    }
+                }
+            }
+            Ok(())
+        }
         Stmt::YieldStmt(_) => Ok(()),
 
         Stmt::When { subject, arms } => {

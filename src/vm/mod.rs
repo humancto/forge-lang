@@ -32,25 +32,107 @@ pub fn run_with_profiling(program: &Program) -> Result<(), VMError> {
 /// Compile and execute in REPL mode (returns the last value).
 #[allow(dead_code)]
 pub fn run_repl(vm: &mut VM, program: &Program) -> Result<value::Value, VMError> {
-    let chunk = compiler::compile(program).map_err(|e| VMError::new(&e.message))?;
+    let chunk = compiler::compile_repl(program).map_err(|e| VMError::new(&e.message))?;
     vm.execute(&chunk)
 }
 
 #[cfg(test)]
 mod parity_tests {
+    use crate::interpreter::Interpreter;
     use super::*;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+    use crate::vm::jit::jit_module::JitCompiler;
+    use crate::vm::jit::type_analysis;
+    use crate::vm::machine::JitEntry;
 
-    fn run_on_vm(source: &str) -> Vec<String> {
+    fn parse_program(source: &str) -> crate::parser::ast::Program {
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize().expect("lexer error");
         let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().expect("parse error");
+        parser.parse_program().expect("parse error")
+    }
+
+    fn run_on_interpreter_value(source: &str) -> String {
+        let program = parse_program(source);
+        let mut interpreter = Interpreter::new();
+        let value = interpreter.run_repl(&program).expect("interpreter error");
+        value.to_string()
+    }
+
+    fn run_on_vm(source: &str) -> Vec<String> {
+        let program = parse_program(source);
         let chunk = compiler::compile(&program).expect("compile error");
         let mut vm = VM::new();
         vm.execute(&chunk).expect("vm error");
         vm.output.clone()
+    }
+
+    fn run_on_vm_value(source: &str) -> String {
+        let program = parse_program(source);
+        let chunk = compiler::compile_repl(&program).expect("compile error");
+        let mut vm = VM::new();
+        let value = vm.execute(&chunk).expect("vm error");
+        value.display(&vm.gc)
+    }
+
+    fn run_on_bytecode_value(source: &str) -> String {
+        let program = parse_program(source);
+        let chunk = compiler::compile_repl(&program).expect("compile error");
+        let bytes = serialize::serialize_chunk(&chunk).expect("serialize error");
+        let restored = serialize::deserialize_chunk(&bytes).expect("deserialize error");
+        let mut vm = VM::new();
+        let value = vm.execute(&restored).expect("vm error");
+        value.display(&vm.gc)
+    }
+
+    fn run_on_jit_value(source: &str) -> String {
+        let program = parse_program(source);
+        let chunk = compiler::compile_repl(&program).expect("compile error");
+
+        let mut jit = JitCompiler::new().expect("jit init");
+        for (i, proto) in chunk.prototypes.iter().enumerate() {
+            let name = if proto.name.is_empty() {
+                format!("fn_{}", i)
+            } else {
+                proto.name.clone()
+            };
+            let _ = jit.compile_function(proto, &name);
+        }
+
+        let mut vm = VM::new();
+        for (i, proto) in chunk.prototypes.iter().enumerate() {
+            let name = if proto.name.is_empty() {
+                format!("fn_{}", i)
+            } else {
+                proto.name.clone()
+            };
+            if let Some(ptr) = jit.get_compiled(&name) {
+                let info = type_analysis::analyze(proto);
+                vm.jit_cache.insert(
+                    name,
+                    JitEntry {
+                        ptr,
+                        uses_float: info.has_float,
+                    },
+                );
+            }
+        }
+
+        let value = vm.execute(&chunk).expect("jit-assisted vm error");
+        value.display(&vm.gc)
+    }
+
+    fn assert_cross_backend_value(source: &str, expected: &str) {
+        let interp = run_on_interpreter_value(source);
+        let vm = run_on_vm_value(source);
+        let bytecode = run_on_bytecode_value(source);
+        let jit = run_on_jit_value(source);
+
+        assert_eq!(interp, expected);
+        assert_eq!(vm, expected);
+        assert_eq!(bytecode, expected);
+        assert_eq!(jit, expected);
     }
 
     #[test]
@@ -298,6 +380,47 @@ mod parity_tests {
         let mut vm = VM::new();
         vm.execute(&restored).unwrap();
         assert_eq!(vm.output, vec!["21"]);
+    }
+
+    #[test]
+    fn cross_backend_parity_integer_function() {
+        assert_cross_backend_value(
+            "fn square(n) { return n * n }\nsquare(9)",
+            "81",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_object_destructure() {
+        assert_cross_backend_value(
+            r#"
+            let point = { x: 20, y: 22 }
+            unpack { x, y } from point
+            fn add(a, b) { return a + b }
+            add(x, y)
+            "#,
+            "42",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_array_destructure_without_rest() {
+        assert_cross_backend_value(
+            r#"
+            let values = [10, 32]
+            unpack [left, right] from values
+            left + right
+            "#,
+            "42",
+        );
+    }
+
+    #[test]
+    fn vm_repl_returns_last_non_output_expression() {
+        let program = parse_program("1\nprintln(2)\n3");
+        let mut vm = VM::new();
+        let value = super::run_repl(&mut vm, &program).expect("vm repl error");
+        assert_eq!(value.display(&vm.gc), "3");
     }
 }
 
