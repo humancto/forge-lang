@@ -17,6 +17,10 @@ pub struct VM {
     pub registers: Vec<Value>,
     pub frames: Vec<CallFrame>,
     pub globals: HashMap<String, Value>,
+    pub method_tables: HashMap<String, IndexMap<String, Value>>,
+    pub static_methods: HashMap<String, IndexMap<String, Value>>,
+    pub embedded_fields: HashMap<String, Vec<(String, String)>>,
+    pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
     pub gc: Gc,
     pub output: Vec<String>,
     pub jit_cache: HashMap<String, JitEntry>,
@@ -91,6 +95,10 @@ impl VM {
             registers: vec![Value::Null; MAX_REGISTERS],
             frames: Vec::with_capacity(MAX_FRAMES),
             globals: HashMap::new(),
+            method_tables: HashMap::new(),
+            static_methods: HashMap::new(),
+            embedded_fields: HashMap::new(),
+            struct_defaults: HashMap::new(),
             gc: Gc::new(),
             output: Vec::new(),
             jit_cache: HashMap::new(),
@@ -105,6 +113,10 @@ impl VM {
             registers: vec![Value::Null; MAX_REGISTERS],
             frames: Vec::with_capacity(MAX_FRAMES),
             globals: HashMap::new(),
+            method_tables: HashMap::new(),
+            static_methods: HashMap::new(),
+            embedded_fields: HashMap::new(),
+            struct_defaults: HashMap::new(),
             gc: Gc::new(),
             output: Vec::new(),
             jit_cache: HashMap::new(),
@@ -191,6 +203,12 @@ impl VM {
             "sum",
             "min_of",
             "max_of",
+            "__forge_register_struct",
+            "__forge_new_struct",
+            "__forge_register_interface",
+            "__forge_register_method",
+            "__forge_validate_impl",
+            "__forge_call_method",
         ];
         for name in &builtins {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
@@ -691,8 +709,10 @@ impl VM {
                     }
                     OpCode::GetLocal => {
                         let local_slot = b;
-                        let value = if let Some(uv_ref) =
-                            self.frames[frame_idx].open_upvalues.get(&local_slot).copied()
+                        let value = if let Some(uv_ref) = self.frames[frame_idx]
+                            .open_upvalues
+                            .get(&local_slot)
+                            .copied()
                         {
                             let value = self
                                 .gc
@@ -892,13 +912,53 @@ impl VM {
                             if let Some(obj) = self.gc.get(r) {
                                 match &obj.kind {
                                     ObjKind::Object(map) => {
-                                        direct_result =
-                                            Some(map.get(&field).cloned().ok_or_else(|| {
+                                        if let Some(value) = map.get(&field).cloned() {
+                                            direct_result = Some(value);
+                                        } else if let Some(type_name) = map
+                                            .get("__type__")
+                                            .and_then(|value| self.get_string(value))
+                                        {
+                                            let mut delegated = None;
+                                            if let Some(embeds) =
+                                                self.embedded_fields.get(&type_name).cloned()
+                                            {
+                                                for (embed_field, _) in embeds {
+                                                    let Some(Value::Obj(embed_ref)) =
+                                                        map.get(&embed_field)
+                                                    else {
+                                                        continue;
+                                                    };
+                                                    let Some(embed_obj) = self.gc.get(*embed_ref)
+                                                    else {
+                                                        continue;
+                                                    };
+                                                    let ObjKind::Object(embed_map) =
+                                                        &embed_obj.kind
+                                                    else {
+                                                        continue;
+                                                    };
+                                                    if let Some(value) = embed_map.get(&field) {
+                                                        delegated = Some(value.clone());
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            direct_result = Some(delegated.ok_or_else(|| {
                                                 VMError::new(&format!(
                                                     "no field '{}' on object",
                                                     field
                                                 ))
                                             })?);
+                                        } else {
+                                            direct_result = Some(
+                                                map.get(&field).cloned().ok_or_else(|| {
+                                                    VMError::new(&format!(
+                                                        "no field '{}' on object",
+                                                        field
+                                                    ))
+                                                })?,
+                                            );
+                                        }
                                         needs_alloc = None;
                                     }
                                     ObjKind::String(s) => match field.as_str() {

@@ -266,6 +266,100 @@ fn is_output_expr(expr: &Expr) -> bool {
     )
 }
 
+fn compile_hidden_call(
+    c: &mut Compiler,
+    name: &str,
+    args: Vec<Expr>,
+    dst: u8,
+) -> Result<(), CompileError> {
+    let call = Expr::Call {
+        function: Box::new(Expr::Ident(name.to_string())),
+        args,
+    };
+    compile_expr(c, &call, dst)
+}
+
+fn compile_hidden_stmt(c: &mut Compiler, name: &str, args: Vec<Expr>) -> Result<(), CompileError> {
+    let saved = c.next_register;
+    let reg = c.alloc_reg();
+    compile_hidden_call(c, name, args, reg)?;
+    c.free_to(saved);
+    Ok(())
+}
+
+fn type_ann_name(type_ann: &TypeAnn) -> String {
+    match type_ann {
+        TypeAnn::Simple(name) => name.clone(),
+        TypeAnn::Array(inner) => format!("[{}]", type_ann_name(inner)),
+        TypeAnn::Generic(name, args) => {
+            let inner = args
+                .iter()
+                .map(type_ann_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}<{}>", name, inner)
+        }
+        TypeAnn::Function(params, ret) => {
+            let params = params
+                .iter()
+                .map(type_ann_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("fn({}) -> {}", params, type_ann_name(ret))
+        }
+        TypeAnn::Optional(inner) => format!("{}?", type_ann_name(inner)),
+    }
+}
+
+fn struct_embeds_expr(fields: &[FieldDef]) -> Expr {
+    Expr::Array(
+        fields
+            .iter()
+            .filter(|field| field.embedded)
+            .map(|field| {
+                Expr::Object(vec![
+                    ("field".to_string(), Expr::StringLit(field.name.clone())),
+                    (
+                        "type".to_string(),
+                        Expr::StringLit(type_ann_name(&field.type_ann)),
+                    ),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn struct_defaults_expr(fields: &[FieldDef]) -> Expr {
+    Expr::Object(
+        fields
+            .iter()
+            .filter_map(|field| {
+                field
+                    .default
+                    .as_ref()
+                    .map(|default| (field.name.clone(), default.clone()))
+            })
+            .collect(),
+    )
+}
+
+fn interface_methods_expr(methods: &[MethodSig]) -> Expr {
+    Expr::Array(
+        methods
+            .iter()
+            .map(|method| {
+                Expr::Object(vec![
+                    ("name".to_string(), Expr::StringLit(method.name.clone())),
+                    (
+                        "param_count".to_string(),
+                        Expr::Int(method.params.len() as i64),
+                    ),
+                ])
+            })
+            .collect(),
+    )
+}
+
 fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
     match stmt {
         Stmt::Let {
@@ -653,10 +747,33 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             Ok(())
         }
 
-        Stmt::TypeDef { .. }
-        | Stmt::StructDef { .. }
-        | Stmt::InterfaceDef { .. }
-        | Stmt::DecoratorStmt(_) => Ok(()),
+        Stmt::TypeDef { .. } | Stmt::DecoratorStmt(_) => Ok(()),
+
+        Stmt::StructDef { name, fields } => compile_hidden_stmt(
+            c,
+            "__forge_register_struct",
+            vec![
+                Expr::StringLit(name.clone()),
+                struct_embeds_expr(fields),
+                struct_defaults_expr(fields),
+            ],
+        ),
+
+        Stmt::InterfaceDef { name, methods } => {
+            let iface = Expr::Object(vec![
+                (
+                    "__kind__".to_string(),
+                    Expr::StringLit("interface".to_string()),
+                ),
+                ("name".to_string(), Expr::StringLit(name.clone())),
+                ("methods".to_string(), interface_methods_expr(methods)),
+            ]);
+            compile_hidden_stmt(
+                c,
+                "__forge_register_interface",
+                vec![Expr::StringLit(name.clone()), iface],
+            )
+        }
 
         Stmt::Destructure { pattern, value } => {
             let value_reg = c.alloc_reg();
@@ -714,14 +831,20 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         c.emit(encode_abc(OpCode::GetLocal, rest_src_reg, rest_reg, 0), 0);
 
                         let item_reg = c.alloc_reg();
-                        c.emit(encode_abc(OpCode::GetIndex, item_reg, value_reg, idx_reg), 0);
+                        c.emit(
+                            encode_abc(OpCode::GetIndex, item_reg, value_reg, idx_reg),
+                            0,
+                        );
 
                         let updated_rest_reg = c.alloc_reg();
                         c.emit(
                             encode_abc(OpCode::Call, push_fn_reg, 2, updated_rest_reg),
                             0,
                         );
-                        c.emit(encode_abc(OpCode::SetLocal, rest_reg, updated_rest_reg, 0), 0);
+                        c.emit(
+                            encode_abc(OpCode::SetLocal, rest_reg, updated_rest_reg, 0),
+                            0,
+                        );
 
                         let one_reg = c.alloc_reg();
                         let one_idx = c.const_int(1);
@@ -825,7 +948,50 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::WatchBlock { .. } => Ok(()),
         Stmt::PromptDef { .. } => Ok(()),
         Stmt::AgentDef { .. } => Ok(()),
-        Stmt::ImplBlock { .. } => Ok(()),
+        Stmt::ImplBlock {
+            type_name,
+            ability,
+            methods,
+        } => {
+            for method_stmt in methods {
+                let Stmt::FnDef {
+                    name, params, body, ..
+                } = method_stmt
+                else {
+                    return Err(CompileError::new(
+                        "impl/give blocks may only contain methods",
+                    ));
+                };
+                let has_receiver = params.first().is_some_and(|param| param.name == "it");
+                let function = Expr::Lambda {
+                    params: params.clone(),
+                    body: body.clone(),
+                };
+                compile_hidden_stmt(
+                    c,
+                    "__forge_register_method",
+                    vec![
+                        Expr::StringLit(type_name.clone()),
+                        Expr::StringLit(name.clone()),
+                        Expr::Bool(has_receiver),
+                        function,
+                    ],
+                )?;
+            }
+
+            if let Some(ability_name) = ability {
+                compile_hidden_stmt(
+                    c,
+                    "__forge_validate_impl",
+                    vec![
+                        Expr::StringLit(type_name.clone()),
+                        Expr::StringLit(ability_name.clone()),
+                    ],
+                )?;
+            }
+
+            Ok(())
+        }
 
         Stmt::TryCatch {
             try_body,
@@ -961,6 +1127,13 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             c.free_to(saved);
         }
         Expr::Call { function, args } => {
+            if let Expr::FieldAccess { object, field } = function.as_ref() {
+                let mut lowered_args = Vec::with_capacity(args.len() + 2);
+                lowered_args.push((**object).clone());
+                lowered_args.push(Expr::StringLit(field.clone()));
+                lowered_args.extend(args.clone());
+                return compile_hidden_call(c, "__forge_call_method", lowered_args, dst);
+            }
             let saved = c.next_register;
             let fr = c.alloc_reg();
             compile_expr(c, function, fr)?;
@@ -1077,25 +1250,13 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             c.emit(encode_abx(OpCode::Closure, dst, pi), 0);
         }
         Expr::StructInit { name, fields } => {
-            let start = c.next_register;
-            let tkr = c.alloc_reg();
-            let tki = c.const_str("__type__");
-            c.emit(encode_abx(OpCode::LoadConst, tkr, tki), 0);
-            let tvr = c.alloc_reg();
-            let tvi = c.const_str(name);
-            c.emit(encode_abx(OpCode::LoadConst, tvr, tvi), 0);
-            for (key, val) in fields {
-                let kr = c.alloc_reg();
-                let ki = c.const_str(key);
-                c.emit(encode_abx(OpCode::LoadConst, kr, ki), 0);
-                let vr = c.alloc_reg();
-                compile_expr(c, val, vr)?;
-            }
-            c.emit(
-                encode_abc(OpCode::NewObject, dst, start, (fields.len() + 1) as u8),
-                0,
-            );
-            c.free_to(start);
+            let provided_fields = Expr::Object(fields.clone());
+            compile_hidden_call(
+                c,
+                "__forge_new_struct",
+                vec![Expr::StringLit(name.clone()), provided_fields],
+                dst,
+            )?;
         }
         Expr::Block(stmts) => {
             c.begin_scope();
@@ -1128,19 +1289,11 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             method,
             args,
         } => {
-            // Desugar to function call: method(obj, args...)
-            let saved = c.next_register;
-            let fr = c.alloc_reg();
-            let mi = c.const_str(method);
-            c.emit(encode_abx(OpCode::GetGlobal, fr, mi), 0);
-            let or = c.alloc_reg();
-            compile_expr(c, object, or)?;
-            for arg in args {
-                let ar = c.alloc_reg();
-                compile_expr(c, arg, ar)?;
-            }
-            c.emit(encode_abc(OpCode::Call, fr, (args.len() + 1) as u8, dst), 0);
-            c.free_to(saved);
+            let mut lowered_args = Vec::with_capacity(args.len() + 2);
+            lowered_args.push((**object).clone());
+            lowered_args.push(Expr::StringLit(method.clone()));
+            lowered_args.extend(args.clone());
+            compile_hidden_call(c, "__forge_call_method", lowered_args, dst)?;
         }
     }
     Ok(())

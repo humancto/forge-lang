@@ -1,0 +1,18 @@
+// expect: true
+
+thing Robot {
+    id: Int
+}
+
+power Speakable {
+    fn speak() -> String
+}
+
+give Robot {
+    fn speak(it) {
+        return "Beep " + str(it.id)
+    }
+}
+
+let r = Robot { id: 42 }
+satisfies(r, Speakable)

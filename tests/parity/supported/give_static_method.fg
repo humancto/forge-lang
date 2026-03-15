@@ -1,0 +1,15 @@
+// expect: Bob
+
+thing Person {
+    name: String,
+    age: Int
+}
+
+give Person {
+    fn infant(name) {
+        return Person { name: name, age: 0 }
+    }
+}
+
+let baby = Person.infant("Bob")
+baby.name

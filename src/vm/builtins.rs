@@ -4,16 +4,138 @@
 /// Do NOT change logic here; this is a pure structural extraction.
 use indexmap::IndexMap;
 
-use super::bytecode::*;
-use super::frame::*;
-use super::gc::Gc;
-use super::jit::profiler::Profiler;
-use super::machine::{VM, VMError};
+use super::machine::{VMError, VM};
 use super::value::*;
 
 impl VM {
     pub(super) fn call_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
         match name {
+            "__forge_register_struct" => {
+                if args.len() != 3 {
+                    return Err(VMError::new(
+                        "__forge_register_struct() requires (name, embeds, defaults)",
+                    ));
+                }
+                let type_name = self.get_string_arg(&args, 0)?;
+                let embeds = self.parse_embedded_fields(&args[1])?;
+                let defaults = self.parse_object_fields(&args[2])?;
+
+                if embeds.is_empty() {
+                    self.embedded_fields.remove(&type_name);
+                } else {
+                    self.embedded_fields.insert(type_name.clone(), embeds);
+                }
+
+                if defaults.is_empty() {
+                    self.struct_defaults.remove(&type_name);
+                } else {
+                    self.struct_defaults.insert(type_name.clone(), defaults);
+                }
+
+                let marker = self.make_struct_marker(&type_name);
+                self.globals.insert(type_name, marker.clone());
+                Ok(marker)
+            }
+            "__forge_new_struct" => {
+                if args.len() != 2 {
+                    return Err(VMError::new(
+                        "__forge_new_struct() requires (name, provided_fields)",
+                    ));
+                }
+                let type_name = self.get_string_arg(&args, 0)?;
+                let mut fields = self
+                    .struct_defaults
+                    .get(&type_name)
+                    .cloned()
+                    .unwrap_or_default();
+                for (key, value) in self.parse_object_fields(&args[1])? {
+                    fields.insert(key, value);
+                }
+                fields.insert("__type__".to_string(), self.alloc_string(&type_name));
+                let r = self.gc.alloc(ObjKind::Object(fields));
+                Ok(Value::Obj(r))
+            }
+            "__forge_register_interface" => {
+                if args.len() != 2 {
+                    return Err(VMError::new(
+                        "__forge_register_interface() requires (name, interface)",
+                    ));
+                }
+                let name = self.get_string_arg(&args, 0)?;
+                let iface = args[1].clone();
+                self.globals.insert(name.clone(), iface.clone());
+                self.globals
+                    .insert(format!("__interface_{}__", name), iface.clone());
+                Ok(iface)
+            }
+            "__forge_register_method" => {
+                if args.len() != 4 {
+                    return Err(VMError::new(
+                        "__forge_register_method() requires (type_name, method_name, has_receiver, function)",
+                    ));
+                }
+                let type_name = self.get_string_arg(&args, 0)?;
+                let method_name = self.get_string_arg(&args, 1)?;
+                let has_receiver = match args[2] {
+                    Value::Bool(flag) => flag,
+                    _ => {
+                        return Err(VMError::new(
+                            "__forge_register_method() third argument must be Bool",
+                        ))
+                    }
+                };
+                let func = args[3].clone();
+
+                self.method_tables
+                    .entry(type_name.clone())
+                    .or_default()
+                    .insert(method_name.clone(), func.clone());
+
+                if !has_receiver {
+                    self.static_methods
+                        .entry(type_name)
+                        .or_default()
+                        .insert(method_name, func);
+                }
+
+                Ok(Value::Null)
+            }
+            "__forge_validate_impl" => {
+                if args.len() != 2 {
+                    return Err(VMError::new(
+                        "__forge_validate_impl() requires (type_name, ability_name)",
+                    ));
+                }
+                let type_name = self.get_string_arg(&args, 0)?;
+                let ability_name = self.get_string_arg(&args, 1)?;
+                let iface_key = format!("__interface_{}__", ability_name);
+                let iface =
+                    self.globals.get(&iface_key).cloned().ok_or_else(|| {
+                        VMError::new(&format!("unknown power '{}'", ability_name))
+                    })?;
+                let type_methods = self.method_tables.get(&type_name);
+                for required in self.interface_method_names(&iface) {
+                    let implemented =
+                        type_methods.is_some_and(|methods| methods.contains_key(&required));
+                    if !implemented {
+                        return Err(VMError::new(&format!(
+                            "'{}' does not implement '{}' required by power '{}'",
+                            type_name, required, ability_name
+                        )));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "__forge_call_method" => {
+                if args.len() < 2 {
+                    return Err(VMError::new(
+                        "__forge_call_method() requires (receiver, method_name, ...args)",
+                    ));
+                }
+                let receiver = args[0].clone();
+                let method_name = self.get_string_arg(&args, 1)?;
+                self.call_forge_method(receiver, &method_name, &args[2..])
+            }
             "println" | "say" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ");
@@ -152,7 +274,10 @@ impl VM {
                 Ok(Value::Obj(r))
             }
             "err" => {
-                let val = args.first().cloned().unwrap_or_else(|| self.alloc_string("error"));
+                let val = args
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| self.alloc_string("error"));
                 let r = self.gc.alloc(ObjKind::ResultErr(val));
                 Ok(Value::Obj(r))
             }
@@ -265,32 +390,56 @@ impl VM {
                 Ok(Value::Null)
             }
             "any" => {
-                if args.len() < 2 { return Err(VMError::new("any() requires (array, function)")); }
+                if args.len() < 2 {
+                    return Err(VMError::new("any() requires (array, function)"));
+                }
                 let items = if let Value::Obj(r) = &args[0] {
                     if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
-                        else { return Err(VMError::new("any() first arg must be array")); }
-                    } else { return Err(VMError::new("null array")); }
-                } else { return Err(VMError::new("any() first arg must be array")); };
+                        if let ObjKind::Array(a) = &obj.kind {
+                            a.clone()
+                        } else {
+                            return Err(VMError::new("any() first arg must be array"));
+                        }
+                    } else {
+                        return Err(VMError::new("null array"));
+                    }
+                } else {
+                    return Err(VMError::new("any() first arg must be array"));
+                };
                 let func = args[1].clone();
                 for item in items {
-                    if self.call_value(func.clone(), vec![item])?.is_truthy(&self.gc) {
+                    if self
+                        .call_value(func.clone(), vec![item])?
+                        .is_truthy(&self.gc)
+                    {
                         return Ok(Value::Bool(true));
                     }
                 }
                 Ok(Value::Bool(false))
             }
             "all" => {
-                if args.len() < 2 { return Err(VMError::new("all() requires (array, function)")); }
+                if args.len() < 2 {
+                    return Err(VMError::new("all() requires (array, function)"));
+                }
                 let items = if let Value::Obj(r) = &args[0] {
                     if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
-                        else { return Err(VMError::new("all() first arg must be array")); }
-                    } else { return Err(VMError::new("null array")); }
-                } else { return Err(VMError::new("all() first arg must be array")); };
+                        if let ObjKind::Array(a) = &obj.kind {
+                            a.clone()
+                        } else {
+                            return Err(VMError::new("all() first arg must be array"));
+                        }
+                    } else {
+                        return Err(VMError::new("null array"));
+                    }
+                } else {
+                    return Err(VMError::new("all() first arg must be array"));
+                };
                 let func = args[1].clone();
                 for item in items {
-                    if !self.call_value(func.clone(), vec![item])?.is_truthy(&self.gc) {
+                    if !self
+                        .call_value(func.clone(), vec![item])?
+                        .is_truthy(&self.gc)
+                    {
                         return Ok(Value::Bool(false));
                     }
                 }
@@ -299,9 +448,14 @@ impl VM {
             "unique" => {
                 if let Some(Value::Obj(r)) = args.first() {
                     let items = if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
-                        else { return Err(VMError::new("unique() requires an array")); }
-                    } else { return Err(VMError::new("null array")); };
+                        if let ObjKind::Array(a) = &obj.kind {
+                            a.clone()
+                        } else {
+                            return Err(VMError::new("unique() requires an array"));
+                        }
+                    } else {
+                        return Err(VMError::new("null array"));
+                    };
                     let mut seen: Vec<String> = Vec::new();
                     let mut out = Vec::new();
                     for item in items {
@@ -319,30 +473,52 @@ impl VM {
             "sum" => {
                 if let Some(Value::Obj(r)) = args.first() {
                     let items = if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
-                        else { return Err(VMError::new("sum() requires an array")); }
-                    } else { return Err(VMError::new("null array")); };
+                        if let ObjKind::Array(a) = &obj.kind {
+                            a.clone()
+                        } else {
+                            return Err(VMError::new("sum() requires an array"));
+                        }
+                    } else {
+                        return Err(VMError::new("null array"));
+                    };
                     let mut total_int: i64 = 0;
                     let mut total_float: f64 = 0.0;
                     let mut is_float = false;
                     for item in &items {
                         match item {
-                            Value::Int(n) => { total_int += n; total_float += *n as f64; }
-                            Value::Float(n) => { total_float += n; is_float = true; }
+                            Value::Int(n) => {
+                                total_int += n;
+                                total_float += *n as f64;
+                            }
+                            Value::Float(n) => {
+                                total_float += n;
+                                is_float = true;
+                            }
                             _ => return Err(VMError::new("sum() requires array of numbers")),
                         }
                     }
-                    return Ok(if is_float { Value::Float(total_float) } else { Value::Int(total_int) });
+                    return Ok(if is_float {
+                        Value::Float(total_float)
+                    } else {
+                        Value::Int(total_int)
+                    });
                 }
                 Err(VMError::new("sum() requires an array"))
             }
             "min_of" => {
                 if let Some(Value::Obj(r)) = args.first() {
                     let items = if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
-                        else { return Err(VMError::new("min_of() requires an array")); }
-                    } else { return Err(VMError::new("null array")); };
-                    if items.is_empty() { return Ok(Value::Null); }
+                        if let ObjKind::Array(a) = &obj.kind {
+                            a.clone()
+                        } else {
+                            return Err(VMError::new("min_of() requires an array"));
+                        }
+                    } else {
+                        return Err(VMError::new("null array"));
+                    };
+                    if items.is_empty() {
+                        return Ok(Value::Null);
+                    }
                     let mut min = items[0].clone();
                     for item in &items[1..] {
                         let less = match (&min, item) {
@@ -352,7 +528,9 @@ impl VM {
                             (Value::Float(a), Value::Int(b)) => (*b as f64) < *a,
                             _ => false,
                         };
-                        if less { min = item.clone(); }
+                        if less {
+                            min = item.clone();
+                        }
                     }
                     return Ok(min);
                 }
@@ -361,10 +539,17 @@ impl VM {
             "max_of" => {
                 if let Some(Value::Obj(r)) = args.first() {
                     let items = if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { a.clone() }
-                        else { return Err(VMError::new("max_of() requires an array")); }
-                    } else { return Err(VMError::new("null array")); };
-                    if items.is_empty() { return Ok(Value::Null); }
+                        if let ObjKind::Array(a) = &obj.kind {
+                            a.clone()
+                        } else {
+                            return Err(VMError::new("max_of() requires an array"));
+                        }
+                    } else {
+                        return Err(VMError::new("null array"));
+                    };
+                    if items.is_empty() {
+                        return Ok(Value::Null);
+                    }
                     let mut max = items[0].clone();
                     for item in &items[1..] {
                         let greater = match (&max, item) {
@@ -374,7 +559,9 @@ impl VM {
                             (Value::Float(a), Value::Int(b)) => (*b as f64) > *a,
                             _ => false,
                         };
-                        if greater { max = item.clone(); }
+                        if greater {
+                            max = item.clone();
+                        }
                     }
                     return Ok(max);
                 }
@@ -460,26 +647,43 @@ impl VM {
             "sort" => {
                 if let Some(Value::Obj(r)) = args.first() {
                     let items_clone = if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { Some(a.clone()) } else { None }
-                    } else { None };
+                        if let ObjKind::Array(a) = &obj.kind {
+                            Some(a.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     if let Some(items) = items_clone {
                         // Optional custom comparator (second arg)
                         if let Some(func) = args.get(1).cloned() {
                             let mut sorted = items;
                             let mut err: Option<VMError> = None;
                             sorted.sort_by(|a, b| {
-                                if err.is_some() { return std::cmp::Ordering::Equal; }
+                                if err.is_some() {
+                                    return std::cmp::Ordering::Equal;
+                                }
                                 match self.call_value(func.clone(), vec![a.clone(), b.clone()]) {
                                     Ok(Value::Int(n)) => {
-                                        if n < 0 { std::cmp::Ordering::Less }
-                                        else if n > 0 { std::cmp::Ordering::Greater }
-                                        else { std::cmp::Ordering::Equal }
+                                        if n < 0 {
+                                            std::cmp::Ordering::Less
+                                        } else if n > 0 {
+                                            std::cmp::Ordering::Greater
+                                        } else {
+                                            std::cmp::Ordering::Equal
+                                        }
                                     }
                                     Ok(_) => std::cmp::Ordering::Equal,
-                                    Err(e) => { err = Some(e); std::cmp::Ordering::Equal }
+                                    Err(e) => {
+                                        err = Some(e);
+                                        std::cmp::Ordering::Equal
+                                    }
                                 }
                             });
-                            if let Some(e) = err { return Err(e); }
+                            if let Some(e) = err {
+                                return Err(e);
+                            }
                             let nr = self.gc.alloc(ObjKind::Array(sorted));
                             return Ok(Value::Obj(nr));
                         }
@@ -597,7 +801,9 @@ impl VM {
                     let delim = self.get_string(&Value::Obj(*r2)).unwrap_or_default();
                     // Parity with interpreter: empty delimiter splits into individual chars
                     let parts: Vec<Value> = if delim.is_empty() {
-                        s.chars().map(|c| self.alloc_string(&c.to_string())).collect()
+                        s.chars()
+                            .map(|c| self.alloc_string(&c.to_string()))
+                            .collect()
                     } else {
                         s.split(&delim).map(|p| self.alloc_string(p)).collect()
                     };
@@ -669,12 +875,14 @@ impl VM {
                         if let Some(obj) = self.gc.get(*r) {
                             if let ObjKind::Object(map) = &obj.kind {
                                 // Check __type__ == "Option" and __variant__ == "Some"
-                                let is_option = map.get("__type__")
+                                let is_option = map
+                                    .get("__type__")
                                     .and_then(|v| self.get_string(v))
                                     .map(|s| s == "Option")
                                     .unwrap_or(false);
                                 if is_option {
-                                    let variant = map.get("__variant__")
+                                    let variant = map
+                                        .get("__variant__")
                                         .and_then(|v| self.get_string(v))
                                         .unwrap_or_default();
                                     return Ok(Value::Bool(variant == "Some"));
@@ -695,12 +903,14 @@ impl VM {
                     Some(Value::Obj(r)) => {
                         if let Some(obj) = self.gc.get(*r) {
                             if let ObjKind::Object(map) = &obj.kind {
-                                let is_option = map.get("__type__")
+                                let is_option = map
+                                    .get("__type__")
                                     .and_then(|v| self.get_string(v))
                                     .map(|s| s == "Option")
                                     .unwrap_or(false);
                                 if is_option {
-                                    let variant = map.get("__variant__")
+                                    let variant = map
+                                        .get("__variant__")
                                         .and_then(|v| self.get_string(v))
                                         .unwrap_or_default();
                                     return Ok(Value::Bool(variant == "None"));
@@ -716,9 +926,35 @@ impl VM {
                 }
             }
             "satisfies" => {
-                // Basic structural satisfaction check for --vm mode
-                if args.len() < 2 { return Err(VMError::new("satisfies() requires (value, interface)")); }
-                Ok(Value::Bool(false)) // TODO(M3): full interface checking in VM
+                if args.len() != 2 {
+                    return Err(VMError::new("satisfies() requires (value, interface)"));
+                }
+                let method_names = self.interface_method_names(&args[1]);
+                if method_names.is_empty() {
+                    return Ok(Value::Bool(false));
+                }
+
+                let structural = if let Some(map) = self.get_object_fields(&args[0]) {
+                    method_names.iter().all(|method_name| {
+                        map.get(method_name)
+                            .is_some_and(|value| self.is_callable_value(value))
+                    })
+                } else {
+                    false
+                };
+                if structural {
+                    return Ok(Value::Bool(true));
+                }
+
+                if let Some(type_name) = self.value_type_name(&args[0]) {
+                    if let Some(type_methods) = self.method_tables.get(&type_name) {
+                        let all_satisfied = method_names
+                            .iter()
+                            .all(|method_name| type_methods.contains_key(method_name));
+                        return Ok(Value::Bool(all_satisfied));
+                    }
+                }
+                Ok(Value::Bool(false))
             }
             n if n.starts_with("math.") => {
                 crate::stdlib::math::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))
@@ -1351,27 +1587,49 @@ impl VM {
             }
             "find" => {
                 // find(array, predicate) -> first matching element or Null
-                if args.len() < 2 { return Err(VMError::new("find() requires (array, function)")); }
+                if args.len() < 2 {
+                    return Err(VMError::new("find() requires (array, function)"));
+                }
                 let items = if let Value::Obj(r) = &args[0] {
                     if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { a.clone() } else { return Err(VMError::new("find() first arg must be array")); }
-                    } else { return Err(VMError::new("null array")); }
-                } else { return Err(VMError::new("find() first arg must be array")); };
+                        if let ObjKind::Array(a) = &obj.kind {
+                            a.clone()
+                        } else {
+                            return Err(VMError::new("find() first arg must be array"));
+                        }
+                    } else {
+                        return Err(VMError::new("null array"));
+                    }
+                } else {
+                    return Err(VMError::new("find() first arg must be array"));
+                };
                 let func = args[1].clone();
                 for item in items {
                     let result = self.call_value(func.clone(), vec![item.clone()])?;
-                    if result.is_truthy(&self.gc) { return Ok(item); }
+                    if result.is_truthy(&self.gc) {
+                        return Ok(item);
+                    }
                 }
                 Ok(Value::Null)
             }
             "flat_map" => {
                 // flat_map(array, function) -> flattened array
-                if args.len() < 2 { return Err(VMError::new("flat_map() requires (array, function)")); }
+                if args.len() < 2 {
+                    return Err(VMError::new("flat_map() requires (array, function)"));
+                }
                 let items = if let Value::Obj(r) = &args[0] {
                     if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(a) = &obj.kind { a.clone() } else { return Err(VMError::new("flat_map() first arg must be array")); }
-                    } else { return Err(VMError::new("null array")); }
-                } else { return Err(VMError::new("flat_map() first arg must be array")); };
+                        if let ObjKind::Array(a) = &obj.kind {
+                            a.clone()
+                        } else {
+                            return Err(VMError::new("flat_map() first arg must be array"));
+                        }
+                    } else {
+                        return Err(VMError::new("null array"));
+                    }
+                } else {
+                    return Err(VMError::new("flat_map() first arg must be array"));
+                };
                 let func = args[1].clone();
                 let mut out = Vec::new();
                 for item in items {
@@ -1396,5 +1654,284 @@ impl VM {
             // unreachable pattern warnings. The dead duplicates below have been removed.
             _ => Err(VMError::new(&format!("unknown builtin: {}", name))),
         }
+    }
+
+    fn make_struct_marker(&mut self, type_name: &str) -> Value {
+        let mut marker = IndexMap::new();
+        marker.insert("__kind__".to_string(), self.alloc_string("struct"));
+        marker.insert("name".to_string(), self.alloc_string(type_name));
+        let r = self.gc.alloc(ObjKind::Object(marker));
+        Value::Obj(r)
+    }
+
+    fn parse_object_fields(&self, value: &Value) -> Result<IndexMap<String, Value>, VMError> {
+        match value {
+            Value::Obj(r) => match self.gc.get(*r) {
+                Some(obj) => match &obj.kind {
+                    ObjKind::Object(map) => Ok(map.clone()),
+                    _ => Err(VMError::new("expected object value")),
+                },
+                None => Err(VMError::new("dangling object reference")),
+            },
+            Value::Null => Ok(IndexMap::new()),
+            _ => Err(VMError::new("expected object value")),
+        }
+    }
+
+    fn get_object_fields(&self, value: &Value) -> Option<IndexMap<String, Value>> {
+        match value {
+            Value::Obj(r) => self.gc.get(*r).and_then(|obj| match &obj.kind {
+                ObjKind::Object(map) => Some(map.clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn parse_embedded_fields(&self, value: &Value) -> Result<Vec<(String, String)>, VMError> {
+        match value {
+            Value::Obj(r) => match self.gc.get(*r) {
+                Some(obj) => match &obj.kind {
+                    ObjKind::Array(items) => {
+                        let mut embeds = Vec::new();
+                        for item in items {
+                            let fields = self.parse_object_fields(item)?;
+                            let field_name = fields
+                                .get("field")
+                                .and_then(|value| self.get_string(value))
+                                .ok_or_else(|| {
+                                    VMError::new("embedded field metadata missing field")
+                                })?;
+                            let type_name = fields
+                                .get("type")
+                                .and_then(|value| self.get_string(value))
+                                .ok_or_else(|| {
+                                    VMError::new("embedded field metadata missing type")
+                                })?;
+                            embeds.push((field_name, type_name));
+                        }
+                        Ok(embeds)
+                    }
+                    _ => Err(VMError::new("expected embedded field metadata array")),
+                },
+                None => Err(VMError::new("dangling embedded field metadata")),
+            },
+            Value::Null => Ok(Vec::new()),
+            _ => Err(VMError::new("expected embedded field metadata array")),
+        }
+    }
+
+    fn interface_method_names(&self, iface: &Value) -> Vec<String> {
+        let Some(fields) = self.get_object_fields(iface) else {
+            return Vec::new();
+        };
+        let Some(Value::Obj(method_ref)) = fields.get("methods") else {
+            return Vec::new();
+        };
+        let Some(method_obj) = self.gc.get(*method_ref) else {
+            return Vec::new();
+        };
+        let ObjKind::Array(methods) = &method_obj.kind else {
+            return Vec::new();
+        };
+
+        methods
+            .iter()
+            .filter_map(|method_spec| {
+                self.get_object_fields(method_spec)
+                    .and_then(|spec| spec.get("name").and_then(|value| self.get_string(value)))
+            })
+            .collect()
+    }
+
+    fn value_type_name(&self, value: &Value) -> Option<String> {
+        self.get_object_fields(value).and_then(|fields| {
+            fields
+                .get("__type__")
+                .and_then(|value| self.get_string(value))
+        })
+    }
+
+    fn struct_marker_name(&self, value: &Value) -> Option<String> {
+        let fields = self.get_object_fields(value)?;
+        let kind = fields
+            .get("__kind__")
+            .and_then(|value| self.get_string(value))?;
+        if kind != "struct" {
+            return None;
+        }
+        fields.get("name").and_then(|value| self.get_string(value))
+    }
+
+    fn is_callable_value(&self, value: &Value) -> bool {
+        match value {
+            Value::Obj(r) => self.gc.get(*r).is_some_and(|obj| {
+                matches!(
+                    obj.kind,
+                    ObjKind::Function(_) | ObjKind::Closure(_) | ObjKind::NativeFunction(_)
+                )
+            }),
+            _ => false,
+        }
+    }
+
+    fn call_forge_method(
+        &mut self,
+        receiver: Value,
+        method_name: &str,
+        extra_args: &[Value],
+    ) -> Result<Value, VMError> {
+        if let Some(fields) = self.get_object_fields(&receiver) {
+            if let Some(func) = fields.get(method_name).cloned() {
+                return self.call_value(func, extra_args.to_vec());
+            }
+        }
+
+        if let Some(type_name) = self.struct_marker_name(&receiver) {
+            if let Some(func) = self
+                .static_methods
+                .get(&type_name)
+                .and_then(|methods| methods.get(method_name))
+                .cloned()
+            {
+                return self.call_value(func, extra_args.to_vec());
+            }
+            return Err(VMError::new(&format!(
+                "no static method '{}' on {}",
+                method_name, type_name
+            )));
+        }
+
+        if let Some(type_name) = self.value_type_name(&receiver) {
+            if let Some(func) = self
+                .method_tables
+                .get(&type_name)
+                .and_then(|methods| methods.get(method_name))
+                .cloned()
+            {
+                let mut full_args = Vec::with_capacity(extra_args.len() + 1);
+                full_args.push(receiver.clone());
+                full_args.extend(extra_args.iter().cloned());
+                return self.call_value(func, full_args);
+            }
+
+            if let Some(embed_defs) = self.embedded_fields.get(&type_name).cloned() {
+                if let Some(fields) = self.get_object_fields(&receiver) {
+                    for (embed_field, embed_type) in embed_defs {
+                        let Some(func) = self
+                            .method_tables
+                            .get(&embed_type)
+                            .and_then(|methods| methods.get(method_name))
+                            .cloned()
+                        else {
+                            continue;
+                        };
+                        let Some(embed_value) = fields.get(&embed_field).cloned() else {
+                            continue;
+                        };
+                        let mut full_args = Vec::with_capacity(extra_args.len() + 1);
+                        full_args.push(embed_value);
+                        full_args.extend(extra_args.iter().cloned());
+                        return self.call_value(func, full_args);
+                    }
+                }
+            }
+        }
+
+        if Self::is_builtin_method_name(method_name) {
+            if let Some(func) = self.globals.get(method_name).cloned() {
+                let mut full_args = Vec::with_capacity(extra_args.len() + 1);
+                full_args.push(receiver);
+                full_args.extend(extra_args.iter().cloned());
+                return self.call_value(func, full_args);
+            }
+        }
+
+        Err(VMError::new(&format!(
+            "no method '{}' on {}",
+            method_name,
+            receiver.type_name(&self.gc)
+        )))
+    }
+
+    fn is_builtin_method_name(name: &str) -> bool {
+        matches!(
+            name,
+            "map"
+                | "filter"
+                | "reduce"
+                | "sort"
+                | "reverse"
+                | "push"
+                | "pop"
+                | "len"
+                | "contains"
+                | "keys"
+                | "values"
+                | "enumerate"
+                | "split"
+                | "join"
+                | "replace"
+                | "find"
+                | "flat_map"
+                | "has_key"
+                | "get"
+                | "pick"
+                | "omit"
+                | "merge"
+                | "entries"
+                | "from_entries"
+                | "starts_with"
+                | "ends_with"
+                | "upper"
+                | "lower"
+                | "trim"
+                | "substring"
+                | "index_of"
+                | "last_index_of"
+                | "pad_start"
+                | "pad_end"
+                | "capitalize"
+                | "title"
+                | "repeat_str"
+                | "count"
+                | "sum"
+                | "min_of"
+                | "max_of"
+                | "any"
+                | "all"
+                | "unique"
+                | "zip"
+                | "flatten"
+                | "group_by"
+                | "chunk"
+                | "slice"
+                | "slugify"
+                | "snake_case"
+                | "camel_case"
+                | "sample"
+                | "shuffle"
+                | "partition"
+                | "diff"
+                | "trim_start"
+                | "trim_end"
+                | "is_empty"
+                | "is_numeric"
+                | "is_alpha"
+                | "is_alphanumeric"
+                | "char_at"
+                | "encode_uri"
+                | "decode_uri"
+                | "words"
+                | "bytes"
+                | "sort_by"
+                | "first"
+                | "last"
+                | "compact"
+                | "take_n"
+                | "skip"
+                | "frequencies"
+                | "for_each"
+        )
     }
 }

@@ -113,14 +113,14 @@ mod parity_tests {
             let info = type_analysis::analyze(proto);
             if !info.has_unsupported_ops {
                 if let Some(ptr) = jit.get_compiled(&name) {
-                vm.jit_cache.insert(
-                    name,
-                    JitEntry {
-                        ptr,
-                        uses_float: info.has_float,
-                    },
-                );
-            }
+                    vm.jit_cache.insert(
+                        name,
+                        JitEntry {
+                            ptr,
+                            uses_float: info.has_float,
+                        },
+                    );
+                }
             }
         }
 
@@ -530,6 +530,139 @@ mod parity_tests {
             run_pair()
             "#,
             "1",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_give_instance_method() {
+        assert_cross_backend_value(
+            r#"
+            thing Person {
+                name: String,
+                age: Int
+            }
+            give Person {
+                fn greet(it) {
+                    return "Hi, I'm " + it.name
+                }
+            }
+            let p = Person { name: "Alice", age: 30 }
+            p.greet()
+            "#,
+            "Hi, I'm Alice",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_give_static_method() {
+        assert_cross_backend_value(
+            r#"
+            thing Person {
+                name: String,
+                age: Int
+            }
+            give Person {
+                fn infant(name) {
+                    return Person { name: name, age: 0 }
+                }
+            }
+            let baby = Person.infant("Bob")
+            baby.name
+            "#,
+            "Bob",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_power_satisfies_with_give_methods() {
+        assert_cross_backend_value(
+            r#"
+            thing Robot {
+                id: Int
+            }
+            power Speakable {
+                fn speak() -> String
+            }
+            give Robot {
+                fn speak(it) {
+                    return "Beep " + str(it.id)
+                }
+            }
+            let r = Robot { id: 42 }
+            satisfies(r, Speakable)
+            "#,
+            "true",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_struct_defaults() {
+        assert_cross_backend_value(
+            r#"
+            thing Person {
+                name: String = "Anonymous",
+                age: Int = 0
+            }
+            let p = Person {}
+            p.name + ":" + str(p.age)
+            "#,
+            "Anonymous:0",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_embedded_field_and_method_delegation() {
+        assert_cross_backend_value(
+            r#"
+            thing Engine {
+                hp: Int
+            }
+            thing Car {
+                name: String,
+                has engine: Engine
+            }
+            give Engine {
+                fn power(it) {
+                    return str(it.hp) + "hp"
+                }
+            }
+            let c = Car {
+                name: "Mustang",
+                engine: Engine { hp: 450 }
+            }
+            str(c.hp) + ":" + c.power()
+            "#,
+            "450:450hp",
+        );
+    }
+
+    #[test]
+    fn vm_power_missing_method_errors() {
+        let program = parse_program(
+            r#"
+            thing Dog {
+                name: String
+            }
+            power Trainable {
+                fn sit() -> String
+                fn stay() -> String
+            }
+            give Dog the power Trainable {
+                fn sit(it) {
+                    return it.name + " sits"
+                }
+            }
+            "#,
+        );
+        let chunk = compiler::compile_repl(&program).expect("compile error");
+        let mut vm = VM::new();
+        let err = vm
+            .execute(&chunk)
+            .expect_err("vm should reject incomplete impl");
+        assert!(
+            err.message.contains("stay"),
+            "expected missing method in error, got: {}",
+            err.message
         );
     }
 

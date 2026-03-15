@@ -1,0 +1,3 @@
+// expect-error: file/package imports
+
+import "local_dependency"

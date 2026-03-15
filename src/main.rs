@@ -347,11 +347,8 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         Stmt::TypeDef { .. } => {
             issues.insert("type definitions");
         }
-        Stmt::InterfaceDef { .. } => {
-            issues.insert("interface/power definitions");
-        }
+        Stmt::InterfaceDef { .. } => {}
         Stmt::ImplBlock { methods, .. } => {
-            issues.insert("impl/give blocks");
             for method in methods {
                 collect_vm_incompatible_stmt(method, issues);
             }
@@ -919,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_incompatibilities_detect_interface_and_impl_blocks() {
+    fn vm_incompatibilities_allow_interface_and_impl_blocks() {
         let source = r#"
         thing Robot { id: Int }
         power Speakable { fn speak() -> String }
@@ -930,8 +927,8 @@ mod tests {
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
         let issues = vm_incompatibilities(&program);
-        assert!(issues.contains(&"interface/power definitions"));
-        assert!(issues.contains(&"impl/give blocks"));
+        assert!(!issues.contains(&"interface/power definitions"));
+        assert!(!issues.contains(&"impl/give blocks"));
     }
 
     #[test]
