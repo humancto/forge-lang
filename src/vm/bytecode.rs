@@ -50,6 +50,8 @@ pub enum OpCode {
     GetUpvalue,   // A=dst, B=upvalue_index
     SetUpvalue,   // A=upvalue_index, B=src
     Pop,
+    PushHandler, // A=error_reg, sBx=catch_target
+    PopHandler,
 }
 
 /// Compile-time constant — can hold strings, unlike the runtime Value.

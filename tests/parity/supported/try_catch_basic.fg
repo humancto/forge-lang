@@ -1,0 +1,8 @@
+// expect: ArithmeticError
+let mut status = "ok"
+try {
+    let crash = 1 / 0
+} catch err {
+    status = err.type
+}
+status

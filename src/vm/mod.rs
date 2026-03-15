@@ -1,5 +1,5 @@
-pub mod bytecode;
 mod builtins; // VM builtin dispatch — extracted from machine.rs
+pub mod bytecode;
 pub mod compiler;
 pub mod frame;
 pub mod gc;
@@ -38,8 +38,8 @@ pub fn run_repl(vm: &mut VM, program: &Program) -> Result<value::Value, VMError>
 
 #[cfg(test)]
 mod parity_tests {
-    use crate::interpreter::Interpreter;
     use super::*;
+    use crate::interpreter::Interpreter;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use crate::vm::jit::jit_module::JitCompiler;
@@ -384,10 +384,7 @@ mod parity_tests {
 
     #[test]
     fn cross_backend_parity_integer_function() {
-        assert_cross_backend_value(
-            "fn square(n) { return n * n }\nsquare(9)",
-            "81",
-        );
+        assert_cross_backend_value("fn square(n) { return n * n }\nsquare(9)", "81");
     }
 
     #[test]
@@ -412,6 +409,50 @@ mod parity_tests {
             left + right
             "#,
             "42",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_try_catch_nested_call() {
+        assert_cross_backend_value(
+            r#"
+            fn boom() {
+                return 1 / 0
+            }
+            let mut status = "ok"
+            try {
+                boom()
+            } catch err {
+                status = err.type
+            }
+            status
+            "#,
+            "ArithmeticError",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_try_catch_after_loop_continue() {
+        assert_cross_backend_value(
+            r#"
+            let mut outcome = ""
+            let mut seen = 0
+            while seen < 3 {
+                seen += 1
+                try {
+                    continue
+                } catch err {
+                    outcome = "bad"
+                }
+            }
+            try {
+                let crash = 1 / 0
+            } catch err {
+                outcome = err.type
+            }
+            outcome
+            "#,
+            "ArithmeticError",
         );
     }
 

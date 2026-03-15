@@ -23,10 +23,17 @@ pub struct VM {
     pub profiler: Profiler,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorControl {
+    Runtime,
+    UnwoundToHandler,
+}
+
 #[derive(Debug)]
 pub struct VMError {
     pub message: String,
     pub stack_trace: Vec<StackFrame>,
+    control: ErrorControl,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +47,7 @@ impl VMError {
         Self {
             message: msg.to_string(),
             stack_trace: Vec::new(),
+            control: ErrorControl::Runtime,
         }
     }
 
@@ -48,7 +56,20 @@ impl VMError {
         Self {
             message: msg.to_string(),
             stack_trace: trace,
+            control: ErrorControl::Runtime,
         }
+    }
+
+    pub fn unwound_to_handler() -> Self {
+        Self {
+            message: "internal control transfer to catch handler".to_string(),
+            stack_trace: Vec::new(),
+            control: ErrorControl::UnwoundToHandler,
+        }
+    }
+
+    pub fn is_unwound_to_handler(&self) -> bool {
+        self.control == ErrorControl::UnwoundToHandler
     }
 }
 
@@ -504,10 +525,10 @@ impl VM {
         let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
 
         self.frames.push(CallFrame::new(closure_ref, 0));
-        self.run()
+        self.run_until(0)
     }
 
-    fn run(&mut self) -> Result<Value, VMError> {
+    fn run_until(&mut self, boundary_frame_idx: usize) -> Result<Value, VMError> {
         loop {
             if self.frames.is_empty() {
                 return Ok(Value::Null);
@@ -545,475 +566,525 @@ impl VM {
             let sbx = decode_sbx(inst);
             let opcode: OpCode = unsafe { std::mem::transmute(op) };
 
-            match opcode {
-                OpCode::LoadConst => {
-                    let val = self.constant_to_value(&chunk.constants[bx as usize]);
-                    self.registers[base + a as usize] = val;
-                }
-                OpCode::LoadNull => {
-                    self.registers[base + a as usize] = Value::Null;
-                }
-                OpCode::LoadTrue => {
-                    self.registers[base + a as usize] = Value::Bool(true);
-                }
-                OpCode::LoadFalse => {
-                    self.registers[base + a as usize] = Value::Bool(false);
-                }
-                OpCode::Move => {
-                    self.registers[base + a as usize] = self.registers[base + b as usize].clone();
-                }
-                OpCode::Add => {
-                    let left = self.registers[base + b as usize].clone();
-                    let right = self.registers[base + c as usize].clone();
-                    self.registers[base + a as usize] =
-                        self.arith_op(&left, &right, OpCode::Add)?;
-                }
-                OpCode::Sub => {
-                    let left = self.registers[base + b as usize].clone();
-                    let right = self.registers[base + c as usize].clone();
-                    self.registers[base + a as usize] =
-                        self.arith_op(&left, &right, OpCode::Sub)?;
-                }
-                OpCode::Mul => {
-                    let left = self.registers[base + b as usize].clone();
-                    let right = self.registers[base + c as usize].clone();
-                    self.registers[base + a as usize] =
-                        self.arith_op(&left, &right, OpCode::Mul)?;
-                }
-                OpCode::Div => {
-                    let left = self.registers[base + b as usize].clone();
-                    let right = self.registers[base + c as usize].clone();
-                    self.registers[base + a as usize] =
-                        self.arith_op(&left, &right, OpCode::Div)?;
-                }
-                OpCode::Mod => {
-                    let left = self.registers[base + b as usize].clone();
-                    let right = self.registers[base + c as usize].clone();
-                    self.registers[base + a as usize] =
-                        self.arith_op(&left, &right, OpCode::Mod)?;
-                }
-                OpCode::Neg => {
-                    let src = &self.registers[base + b as usize];
-                    self.registers[base + a as usize] = match src {
-                        Value::Int(n) => Value::Int(-n),
-                        Value::Float(n) => Value::Float(-n),
-                        _ => return Err(VMError::new("cannot negate non-number")),
-                    };
-                }
-                OpCode::Eq => {
-                    let left = &self.registers[base + b as usize];
-                    let right = &self.registers[base + c as usize];
-                    self.registers[base + a as usize] = Value::Bool(left.equals(right, &self.gc));
-                }
-                OpCode::NotEq => {
-                    let left = &self.registers[base + b as usize];
-                    let right = &self.registers[base + c as usize];
-                    self.registers[base + a as usize] = Value::Bool(!left.equals(right, &self.gc));
-                }
-                OpCode::Lt => {
-                    let left = &self.registers[base + b as usize];
-                    let right = &self.registers[base + c as usize];
-                    self.registers[base + a as usize] = self.compare_op(left, right, OpCode::Lt)?;
-                }
-                OpCode::Gt => {
-                    let left = &self.registers[base + b as usize];
-                    let right = &self.registers[base + c as usize];
-                    self.registers[base + a as usize] = self.compare_op(left, right, OpCode::Gt)?;
-                }
-                OpCode::LtEq => {
-                    let left = &self.registers[base + b as usize];
-                    let right = &self.registers[base + c as usize];
-                    self.registers[base + a as usize] =
-                        self.compare_op(left, right, OpCode::LtEq)?;
-                }
-                OpCode::GtEq => {
-                    let left = &self.registers[base + b as usize];
-                    let right = &self.registers[base + c as usize];
-                    self.registers[base + a as usize] =
-                        self.compare_op(left, right, OpCode::GtEq)?;
-                }
-                OpCode::And => {
-                    let left = self.registers[base + b as usize].is_truthy(&self.gc);
-                    let right = self.registers[base + c as usize].is_truthy(&self.gc);
-                    self.registers[base + a as usize] = Value::Bool(left && right);
-                }
-                OpCode::Or => {
-                    let left = self.registers[base + b as usize].is_truthy(&self.gc);
-                    let right = self.registers[base + c as usize].is_truthy(&self.gc);
-                    self.registers[base + a as usize] = Value::Bool(left || right);
-                }
-                OpCode::Not => {
-                    let val = self.registers[base + b as usize].is_truthy(&self.gc);
-                    self.registers[base + a as usize] = Value::Bool(!val);
-                }
-                OpCode::GetGlobal => {
-                    let name_const = &chunk.constants[bx as usize];
-                    if let Constant::Str(name) = name_const {
-                        let val = self.globals.get(name).cloned().ok_or_else(|| {
-                            VMError::new(&format!("undefined variable: {}", name))
-                        })?;
+            let step_result = (|| -> Result<Option<Value>, VMError> {
+                match opcode {
+                    OpCode::LoadConst => {
+                        let val = self.constant_to_value(&chunk.constants[bx as usize]);
                         self.registers[base + a as usize] = val;
                     }
-                }
-                OpCode::SetGlobal => {
-                    let name_const = &chunk.constants[bx as usize];
-                    if let Constant::Str(name) = name_const {
+                    OpCode::LoadNull => {
+                        self.registers[base + a as usize] = Value::Null;
+                    }
+                    OpCode::LoadTrue => {
+                        self.registers[base + a as usize] = Value::Bool(true);
+                    }
+                    OpCode::LoadFalse => {
+                        self.registers[base + a as usize] = Value::Bool(false);
+                    }
+                    OpCode::Move => {
+                        self.registers[base + a as usize] =
+                            self.registers[base + b as usize].clone();
+                    }
+                    OpCode::Add => {
+                        let left = self.registers[base + b as usize].clone();
+                        let right = self.registers[base + c as usize].clone();
+                        self.registers[base + a as usize] =
+                            self.arith_op(&left, &right, OpCode::Add)?;
+                    }
+                    OpCode::Sub => {
+                        let left = self.registers[base + b as usize].clone();
+                        let right = self.registers[base + c as usize].clone();
+                        self.registers[base + a as usize] =
+                            self.arith_op(&left, &right, OpCode::Sub)?;
+                    }
+                    OpCode::Mul => {
+                        let left = self.registers[base + b as usize].clone();
+                        let right = self.registers[base + c as usize].clone();
+                        self.registers[base + a as usize] =
+                            self.arith_op(&left, &right, OpCode::Mul)?;
+                    }
+                    OpCode::Div => {
+                        let left = self.registers[base + b as usize].clone();
+                        let right = self.registers[base + c as usize].clone();
+                        self.registers[base + a as usize] =
+                            self.arith_op(&left, &right, OpCode::Div)?;
+                    }
+                    OpCode::Mod => {
+                        let left = self.registers[base + b as usize].clone();
+                        let right = self.registers[base + c as usize].clone();
+                        self.registers[base + a as usize] =
+                            self.arith_op(&left, &right, OpCode::Mod)?;
+                    }
+                    OpCode::Neg => {
+                        let src = &self.registers[base + b as usize];
+                        self.registers[base + a as usize] = match src {
+                            Value::Int(n) => Value::Int(-n),
+                            Value::Float(n) => Value::Float(-n),
+                            _ => return Err(VMError::new("cannot negate non-number")),
+                        };
+                    }
+                    OpCode::Eq => {
+                        let left = &self.registers[base + b as usize];
+                        let right = &self.registers[base + c as usize];
+                        self.registers[base + a as usize] =
+                            Value::Bool(left.equals(right, &self.gc));
+                    }
+                    OpCode::NotEq => {
+                        let left = &self.registers[base + b as usize];
+                        let right = &self.registers[base + c as usize];
+                        self.registers[base + a as usize] =
+                            Value::Bool(!left.equals(right, &self.gc));
+                    }
+                    OpCode::Lt => {
+                        let left = &self.registers[base + b as usize];
+                        let right = &self.registers[base + c as usize];
+                        self.registers[base + a as usize] =
+                            self.compare_op(left, right, OpCode::Lt)?;
+                    }
+                    OpCode::Gt => {
+                        let left = &self.registers[base + b as usize];
+                        let right = &self.registers[base + c as usize];
+                        self.registers[base + a as usize] =
+                            self.compare_op(left, right, OpCode::Gt)?;
+                    }
+                    OpCode::LtEq => {
+                        let left = &self.registers[base + b as usize];
+                        let right = &self.registers[base + c as usize];
+                        self.registers[base + a as usize] =
+                            self.compare_op(left, right, OpCode::LtEq)?;
+                    }
+                    OpCode::GtEq => {
+                        let left = &self.registers[base + b as usize];
+                        let right = &self.registers[base + c as usize];
+                        self.registers[base + a as usize] =
+                            self.compare_op(left, right, OpCode::GtEq)?;
+                    }
+                    OpCode::And => {
+                        let left = self.registers[base + b as usize].is_truthy(&self.gc);
+                        let right = self.registers[base + c as usize].is_truthy(&self.gc);
+                        self.registers[base + a as usize] = Value::Bool(left && right);
+                    }
+                    OpCode::Or => {
+                        let left = self.registers[base + b as usize].is_truthy(&self.gc);
+                        let right = self.registers[base + c as usize].is_truthy(&self.gc);
+                        self.registers[base + a as usize] = Value::Bool(left || right);
+                    }
+                    OpCode::Not => {
+                        let val = self.registers[base + b as usize].is_truthy(&self.gc);
+                        self.registers[base + a as usize] = Value::Bool(!val);
+                    }
+                    OpCode::GetGlobal => {
+                        let name_const = &chunk.constants[bx as usize];
+                        if let Constant::Str(name) = name_const {
+                            let val = self.globals.get(name).cloned().ok_or_else(|| {
+                                VMError::new(&format!("undefined variable: {}", name))
+                            })?;
+                            self.registers[base + a as usize] = val;
+                        }
+                    }
+                    OpCode::SetGlobal => {
+                        let name_const = &chunk.constants[bx as usize];
+                        if let Constant::Str(name) = name_const {
+                            let val = self.registers[base + a as usize].clone();
+                            self.globals.insert(name.clone(), val);
+                        }
+                    }
+                    OpCode::Jump => {
+                        let frame = &mut self.frames[frame_idx];
+                        frame.ip = (frame.ip as i64 + sbx as i64) as usize;
+                    }
+                    OpCode::JumpIfFalse => {
+                        let val = &self.registers[base + a as usize];
+                        if !val.is_truthy(&self.gc) {
+                            let frame = &mut self.frames[frame_idx];
+                            frame.ip = (frame.ip as i64 + sbx as i64) as usize;
+                        }
+                    }
+                    OpCode::JumpIfTrue => {
+                        let val = &self.registers[base + a as usize];
+                        if val.is_truthy(&self.gc) {
+                            let frame = &mut self.frames[frame_idx];
+                            frame.ip = (frame.ip as i64 + sbx as i64) as usize;
+                        }
+                    }
+                    OpCode::Loop => {
+                        let frame = &mut self.frames[frame_idx];
+                        frame.ip = (frame.ip as i64 + sbx as i64) as usize;
+                    }
+                    OpCode::Call => {
+                        let func_val = self.registers[base + a as usize].clone();
+                        let arg_count = b as usize;
+                        let dst_reg = base + c as usize;
+
+                        let mut args = Vec::with_capacity(arg_count);
+                        for i in 0..arg_count {
+                            args.push(self.registers[base + a as usize + 1 + i].clone());
+                        }
+
+                        let result = self.call_value(func_val, args)?;
+                        self.registers[dst_reg] = result;
+                    }
+                    OpCode::Return => {
                         let val = self.registers[base + a as usize].clone();
-                        self.globals.insert(name.clone(), val);
+                        self.profiler.exit_function();
+                        self.frames.pop();
+                        return Ok(Some(val));
                     }
-                }
-                OpCode::Jump => {
-                    let frame = &mut self.frames[frame_idx];
-                    frame.ip = (frame.ip as i64 + sbx as i64) as usize;
-                }
-                OpCode::JumpIfFalse => {
-                    let val = &self.registers[base + a as usize];
-                    if !val.is_truthy(&self.gc) {
-                        let frame = &mut self.frames[frame_idx];
-                        frame.ip = (frame.ip as i64 + sbx as i64) as usize;
+                    OpCode::ReturnNull => {
+                        self.profiler.exit_function();
+                        self.frames.pop();
+                        return Ok(Some(Value::Null));
                     }
-                }
-                OpCode::JumpIfTrue => {
-                    let val = &self.registers[base + a as usize];
-                    if val.is_truthy(&self.gc) {
-                        let frame = &mut self.frames[frame_idx];
-                        frame.ip = (frame.ip as i64 + sbx as i64) as usize;
-                    }
-                }
-                OpCode::Loop => {
-                    let frame = &mut self.frames[frame_idx];
-                    frame.ip = (frame.ip as i64 + sbx as i64) as usize;
-                }
-                OpCode::Call => {
-                    let func_val = self.registers[base + a as usize].clone();
-                    let arg_count = b as usize;
-                    let dst_reg = base + c as usize;
+                    OpCode::Closure => {
+                        let proto = chunk.prototypes[bx as usize].clone();
 
-                    let mut args = Vec::with_capacity(arg_count);
-                    for i in 0..arg_count {
-                        args.push(self.registers[base + a as usize + 1 + i].clone());
+                        let mut upvalue_refs = Vec::new();
+                        for &src_reg in &proto.upvalue_sources {
+                            let val = self.registers[base + src_reg as usize].clone();
+                            let uv_ref = self.gc.alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
+                            upvalue_refs.push(uv_ref);
+                        }
+
+                        let func = ObjFunction {
+                            name: proto.name.clone(),
+                            chunk: std::sync::Arc::new(proto),
+                        };
+                        let closure = ObjClosure {
+                            function: func,
+                            upvalues: upvalue_refs,
+                        };
+                        let r = self.gc.alloc(ObjKind::Closure(closure));
+                        self.registers[base + a as usize] = Value::Obj(r);
                     }
-
-                    let result = self.call_value(func_val, args)?;
-                    self.registers[dst_reg] = result;
-                }
-                OpCode::Return => {
-                    let val = self.registers[base + a as usize].clone();
-                    self.profiler.exit_function();
-                    self.frames.pop();
-                    return Ok(val);
-                }
-                OpCode::ReturnNull => {
-                    self.profiler.exit_function();
-                    self.frames.pop();
-                    return Ok(Value::Null);
-                }
-                OpCode::Closure => {
-                    let proto = chunk.prototypes[bx as usize].clone();
-
-                    let mut upvalue_refs = Vec::new();
-                    for &src_reg in &proto.upvalue_sources {
-                        let val = self.registers[base + src_reg as usize].clone();
-                        let uv_ref = self.gc.alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
-                        upvalue_refs.push(uv_ref);
-                    }
-
-                    let func = ObjFunction {
-                        name: proto.name.clone(),
-                        chunk: std::sync::Arc::new(proto),
-                    };
-                    let closure = ObjClosure {
-                        function: func,
-                        upvalues: upvalue_refs,
-                    };
-                    let r = self.gc.alloc(ObjKind::Closure(closure));
-                    self.registers[base + a as usize] = Value::Obj(r);
-                }
-                OpCode::GetUpvalue => {
-                    let uv_idx = b as usize;
-                    if let Some(frame) = self.frames.last() {
-                        if let Some(obj) = self.gc.get(frame.closure) {
-                            if let ObjKind::Closure(closure) = &obj.kind {
-                                if uv_idx < closure.upvalues.len() {
-                                    let uv_ref = closure.upvalues[uv_idx];
-                                    if let Some(uv_obj) = self.gc.get(uv_ref) {
-                                        if let ObjKind::Upvalue(uv) = &uv_obj.kind {
-                                            self.registers[base + a as usize] = uv.value.clone();
+                    OpCode::GetUpvalue => {
+                        let uv_idx = b as usize;
+                        if let Some(frame) = self.frames.last() {
+                            if let Some(obj) = self.gc.get(frame.closure) {
+                                if let ObjKind::Closure(closure) = &obj.kind {
+                                    if uv_idx < closure.upvalues.len() {
+                                        let uv_ref = closure.upvalues[uv_idx];
+                                        if let Some(uv_obj) = self.gc.get(uv_ref) {
+                                            if let ObjKind::Upvalue(uv) = &uv_obj.kind {
+                                                self.registers[base + a as usize] =
+                                                    uv.value.clone();
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                OpCode::SetUpvalue => {
-                    let uv_idx = a as usize;
-                    let val = self.registers[base + b as usize].clone();
-                    if let Some(frame) = self.frames.last() {
-                        let closure_ref = frame.closure;
-                        if let Some(obj) = self.gc.get(closure_ref) {
-                            if let ObjKind::Closure(closure) = &obj.kind {
-                                if uv_idx < closure.upvalues.len() {
-                                    let uv_ref = closure.upvalues[uv_idx];
-                                    if let Some(uv_obj) = self.gc.get_mut(uv_ref) {
-                                        if let ObjKind::Upvalue(uv) = &mut uv_obj.kind {
-                                            uv.value = val;
+                    OpCode::SetUpvalue => {
+                        let uv_idx = a as usize;
+                        let val = self.registers[base + b as usize].clone();
+                        if let Some(frame) = self.frames.last() {
+                            let closure_ref = frame.closure;
+                            if let Some(obj) = self.gc.get(closure_ref) {
+                                if let ObjKind::Closure(closure) = &obj.kind {
+                                    if uv_idx < closure.upvalues.len() {
+                                        let uv_ref = closure.upvalues[uv_idx];
+                                        if let Some(uv_obj) = self.gc.get_mut(uv_ref) {
+                                            if let ObjKind::Upvalue(uv) = &mut uv_obj.kind {
+                                                uv.value = val;
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                OpCode::NewArray => {
-                    let start = base + b as usize;
-                    let count = c as usize;
-                    let mut items = Vec::with_capacity(count);
-                    for i in 0..count {
-                        items.push(self.registers[start + i].clone());
-                    }
-                    let r = self.gc.alloc(ObjKind::Array(items));
-                    self.registers[base + a as usize] = Value::Obj(r);
-                }
-                OpCode::NewObject => {
-                    let start = base + b as usize;
-                    let pair_count = c as usize;
-                    let mut map = IndexMap::new();
-                    for i in 0..pair_count {
-                        let key_val = &self.registers[start + i * 2];
-                        let val = self.registers[start + i * 2 + 1].clone();
-                        if let Some(key) = self.get_string(key_val) {
-                            map.insert(key, val);
+                    OpCode::NewArray => {
+                        let start = base + b as usize;
+                        let count = c as usize;
+                        let mut items = Vec::with_capacity(count);
+                        for i in 0..count {
+                            items.push(self.registers[start + i].clone());
                         }
+                        let r = self.gc.alloc(ObjKind::Array(items));
+                        self.registers[base + a as usize] = Value::Obj(r);
                     }
-                    let r = self.gc.alloc(ObjKind::Object(map));
-                    self.registers[base + a as usize] = Value::Obj(r);
-                }
-                OpCode::GetField => {
-                    let obj_val = &self.registers[base + b as usize];
-                    let field_const = &chunk.constants[c as usize];
-                    if let (Value::Obj(r), Constant::Str(field)) = (obj_val, field_const) {
-                        let r = *r;
-                        let field = field.clone();
-                        // Two-phase: extract data, then allocate if needed
-                        let needs_alloc: Option<String>;
-                        let direct_result: Option<Value>;
-                        if let Some(obj) = self.gc.get(r) {
-                            match &obj.kind {
-                                ObjKind::Object(map) => {
-                                    direct_result =
-                                        Some(map.get(&field).cloned().ok_or_else(|| {
-                                            VMError::new(&format!("no field '{}' on object", field))
-                                        })?);
-                                    needs_alloc = None;
-                                }
-                                ObjKind::String(s) => match field.as_str() {
-                                    "len" => {
-                                        direct_result = Some(Value::Int(s.len() as i64));
-                                        needs_alloc = None;
-                                    }
-                                    "upper" => {
-                                        needs_alloc = Some(s.to_uppercase());
-                                        direct_result = None;
-                                    }
-                                    "lower" => {
-                                        needs_alloc = Some(s.to_lowercase());
-                                        direct_result = None;
-                                    }
-                                    "trim" => {
-                                        needs_alloc = Some(s.trim().to_string());
-                                        direct_result = None;
-                                    }
-                                    _ => {
-                                        return Err(VMError::new(&format!(
-                                            "no method '{}' on String",
-                                            field
-                                        )))
-                                    }
-                                },
-                                ObjKind::Array(items) => match field.as_str() {
-                                    "len" => {
-                                        direct_result = Some(Value::Int(items.len() as i64));
-                                        needs_alloc = None;
-                                    }
-                                    _ => {
-                                        return Err(VMError::new(&format!(
-                                            "no method '{}' on Array",
-                                            field
-                                        )))
-                                    }
-                                },
-                                _ => {
-                                    return Err(VMError::new(&format!(
-                                        "cannot access field '{}' on {}",
-                                        field,
-                                        obj.type_name()
-                                    )))
-                                }
-                            }
-                        } else {
-                            return Err(VMError::new("null reference"));
-                        }
-                        let result = if let Some(s) = needs_alloc {
-                            self.alloc_string(&s)
-                        } else {
-                            // Safety: needs_alloc and direct_result are mutually exclusive branches above
-                            direct_result.expect("BUG: direct_result must be Some when needs_alloc is None")
-                        };
-                        self.registers[base + a as usize] = result;
-                    }
-                }
-                OpCode::SetField => {
-                    let field_const = &chunk.constants[b as usize];
-                    let val = self.registers[base + c as usize].clone();
-                    if let Constant::Str(field) = field_const {
-                        let obj_ref = if let Value::Obj(r) = &self.registers[base + a as usize] {
-                            *r
-                        } else {
-                            return Err(VMError::new("cannot set field on non-object"));
-                        };
-                        if let Some(obj) = self.gc.get_mut(obj_ref) {
-                            if let ObjKind::Object(map) = &mut obj.kind {
-                                map.insert(field.clone(), val);
+                    OpCode::NewObject => {
+                        let start = base + b as usize;
+                        let pair_count = c as usize;
+                        let mut map = IndexMap::new();
+                        for i in 0..pair_count {
+                            let key_val = &self.registers[start + i * 2];
+                            let val = self.registers[start + i * 2 + 1].clone();
+                            if let Some(key) = self.get_string(key_val) {
+                                map.insert(key, val);
                             }
                         }
+                        let r = self.gc.alloc(ObjKind::Object(map));
+                        self.registers[base + a as usize] = Value::Obj(r);
                     }
-                }
-                OpCode::GetIndex => {
-                    let obj = self.registers[base + b as usize].clone();
-                    let idx = self.registers[base + c as usize].clone();
-                    let result = match (&obj, &idx) {
-                        (Value::Obj(r), Value::Int(i)) => {
-                            if let Some(o) = self.gc.get(*r) {
-                                if let ObjKind::Array(items) = &o.kind {
-                                    items
-                                        .get(*i as usize)
-                                        .cloned()
-                                        .ok_or_else(|| VMError::new("index out of bounds"))?
-                                } else {
-                                    return Err(VMError::new("cannot index non-array"));
+                    OpCode::GetField => {
+                        let obj_val = &self.registers[base + b as usize];
+                        let field_const = &chunk.constants[c as usize];
+                        if let (Value::Obj(r), Constant::Str(field)) = (obj_val, field_const) {
+                            let r = *r;
+                            let field = field.clone();
+                            let needs_alloc: Option<String>;
+                            let direct_result: Option<Value>;
+                            if let Some(obj) = self.gc.get(r) {
+                                match &obj.kind {
+                                    ObjKind::Object(map) => {
+                                        direct_result =
+                                            Some(map.get(&field).cloned().ok_or_else(|| {
+                                                VMError::new(&format!(
+                                                    "no field '{}' on object",
+                                                    field
+                                                ))
+                                            })?);
+                                        needs_alloc = None;
+                                    }
+                                    ObjKind::String(s) => match field.as_str() {
+                                        "len" => {
+                                            direct_result = Some(Value::Int(s.len() as i64));
+                                            needs_alloc = None;
+                                        }
+                                        "upper" => {
+                                            needs_alloc = Some(s.to_uppercase());
+                                            direct_result = None;
+                                        }
+                                        "lower" => {
+                                            needs_alloc = Some(s.to_lowercase());
+                                            direct_result = None;
+                                        }
+                                        "trim" => {
+                                            needs_alloc = Some(s.trim().to_string());
+                                            direct_result = None;
+                                        }
+                                        _ => {
+                                            return Err(VMError::new(&format!(
+                                                "no method '{}' on String",
+                                                field
+                                            )))
+                                        }
+                                    },
+                                    ObjKind::Array(items) => match field.as_str() {
+                                        "len" => {
+                                            direct_result = Some(Value::Int(items.len() as i64));
+                                            needs_alloc = None;
+                                        }
+                                        _ => {
+                                            return Err(VMError::new(&format!(
+                                                "no method '{}' on Array",
+                                                field
+                                            )))
+                                        }
+                                    },
+                                    _ => {
+                                        return Err(VMError::new(&format!(
+                                            "cannot access field '{}' on {}",
+                                            field,
+                                            obj.type_name()
+                                        )))
+                                    }
                                 }
                             } else {
-                                Value::Null
+                                return Err(VMError::new("null reference"));
+                            }
+                            let result = if let Some(s) = needs_alloc {
+                                self.alloc_string(&s)
+                            } else {
+                                direct_result.expect(
+                                    "BUG: direct_result must be Some when needs_alloc is None",
+                                )
+                            };
+                            self.registers[base + a as usize] = result;
+                        }
+                    }
+                    OpCode::SetField => {
+                        let field_const = &chunk.constants[b as usize];
+                        let val = self.registers[base + c as usize].clone();
+                        if let Constant::Str(field) = field_const {
+                            let obj_ref = if let Value::Obj(r) = &self.registers[base + a as usize]
+                            {
+                                *r
+                            } else {
+                                return Err(VMError::new("cannot set field on non-object"));
+                            };
+                            if let Some(obj) = self.gc.get_mut(obj_ref) {
+                                if let ObjKind::Object(map) = &mut obj.kind {
+                                    map.insert(field.clone(), val);
+                                }
                             }
                         }
-                        (Value::Obj(r), Value::Obj(_key_ref)) => {
-                            let key = self
-                                .get_string(&idx)
-                                .ok_or_else(|| VMError::new("index must be string for objects"))?;
-                            if let Some(o) = self.gc.get(*r) {
-                                if let ObjKind::Object(map) = &o.kind {
-                                    map.get(&key).cloned().unwrap_or(Value::Null)
+                    }
+                    OpCode::GetIndex => {
+                        let obj = self.registers[base + b as usize].clone();
+                        let idx = self.registers[base + c as usize].clone();
+                        let result = match (&obj, &idx) {
+                            (Value::Obj(r), Value::Int(i)) => {
+                                if let Some(o) = self.gc.get(*r) {
+                                    if let ObjKind::Array(items) = &o.kind {
+                                        items
+                                            .get(*i as usize)
+                                            .cloned()
+                                            .ok_or_else(|| VMError::new("index out of bounds"))?
+                                    } else {
+                                        return Err(VMError::new("cannot index non-array"));
+                                    }
                                 } else {
                                     Value::Null
                                 }
-                            } else {
-                                Value::Null
                             }
-                        }
-                        _ => return Err(VMError::new("invalid index operation")),
-                    };
-                    self.registers[base + a as usize] = result;
-                }
-                OpCode::SetIndex => {
-                    let idx = self.registers[base + b as usize].clone();
-                    let val = self.registers[base + c as usize].clone();
-                    if let Value::Obj(r) = &self.registers[base + a as usize] {
-                        let r = *r;
-                        let key_str = self.get_string(&idx);
-                        if let Some(obj) = self.gc.get_mut(r) {
-                            match (&mut obj.kind, &idx) {
-                                (ObjKind::Array(items), Value::Int(i)) => {
-                                    let i = *i as usize;
-                                    if i < items.len() {
-                                        items[i] = val;
+                            (Value::Obj(r), Value::Obj(_key_ref)) => {
+                                let key = self.get_string(&idx).ok_or_else(|| {
+                                    VMError::new("index must be string for objects")
+                                })?;
+                                if let Some(o) = self.gc.get(*r) {
+                                    if let ObjKind::Object(map) = &o.kind {
+                                        map.get(&key).cloned().unwrap_or(Value::Null)
+                                    } else {
+                                        Value::Null
                                     }
+                                } else {
+                                    Value::Null
                                 }
-                                (ObjKind::Object(map), _) => {
-                                    if let Some(key) = key_str {
-                                        map.insert(key, val);
+                            }
+                            _ => return Err(VMError::new("invalid index operation")),
+                        };
+                        self.registers[base + a as usize] = result;
+                    }
+                    OpCode::SetIndex => {
+                        let idx = self.registers[base + b as usize].clone();
+                        let val = self.registers[base + c as usize].clone();
+                        if let Value::Obj(r) = &self.registers[base + a as usize] {
+                            let r = *r;
+                            let key_str = self.get_string(&idx);
+                            if let Some(obj) = self.gc.get_mut(r) {
+                                match (&mut obj.kind, &idx) {
+                                    (ObjKind::Array(items), Value::Int(i)) => {
+                                        let i = *i as usize;
+                                        if i < items.len() {
+                                            items[i] = val;
+                                        }
                                     }
+                                    (ObjKind::Object(map), _) => {
+                                        if let Some(key) = key_str {
+                                            map.insert(key, val);
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                     }
-                }
-                OpCode::Len => {
-                    let src = &self.registers[base + b as usize];
-                    let len = match src {
-                        Value::Obj(r) => {
+                    OpCode::Len => {
+                        let src = &self.registers[base + b as usize];
+                        let len = match src {
+                            Value::Obj(r) => {
+                                if let Some(obj) = self.gc.get(*r) {
+                                    match &obj.kind {
+                                        ObjKind::String(s) => s.len() as i64,
+                                        ObjKind::Array(a) => a.len() as i64,
+                                        ObjKind::Object(o) => o.len() as i64,
+                                        _ => 0,
+                                    }
+                                } else {
+                                    0
+                                }
+                            }
+                            _ => 0,
+                        };
+                        self.registers[base + a as usize] = Value::Int(len);
+                    }
+                    OpCode::Concat => {
+                        let left = self.registers[base + b as usize].display(&self.gc);
+                        let right = self.registers[base + c as usize].display(&self.gc);
+                        let r = self.gc.alloc_string(format!("{}{}", left, right));
+                        self.registers[base + a as usize] = Value::Obj(r);
+                    }
+                    OpCode::Interpolate => {
+                        let start = base + b as usize;
+                        let count = c as usize;
+                        let mut result = String::new();
+                        for i in 0..count {
+                            result.push_str(&self.registers[start + i].display(&self.gc));
+                        }
+                        let r = self.gc.alloc_string(result);
+                        self.registers[base + a as usize] = Value::Obj(r);
+                    }
+                    OpCode::ExtractField => {
+                        let obj = &self.registers[base + b as usize];
+                        let field_name = format!("_{}", c);
+                        if let Value::Obj(r) = obj {
+                            if let Some(o) = self.gc.get(*r) {
+                                if let ObjKind::Object(map) = &o.kind {
+                                    self.registers[base + a as usize] =
+                                        map.get(&field_name).cloned().unwrap_or(Value::Null);
+                                }
+                            }
+                        }
+                    }
+                    OpCode::Try => {
+                        let src = &self.registers[base + b as usize];
+                        if let Value::Obj(r) = src {
                             if let Some(obj) = self.gc.get(*r) {
                                 match &obj.kind {
-                                    ObjKind::String(s) => s.len() as i64,
-                                    ObjKind::Array(a) => a.len() as i64,
-                                    ObjKind::Object(o) => o.len() as i64,
-                                    _ => 0,
+                                    ObjKind::ResultOk(v) => {
+                                        self.registers[base + a as usize] = v.clone();
+                                    }
+                                    ObjKind::ResultErr(_) => {
+                                        let val = self.registers[base + b as usize].clone();
+                                        self.frames.pop();
+                                        return Ok(Some(val));
+                                    }
+                                    _ => {
+                                        return Err(VMError::new(
+                                            "? operator requires Result value",
+                                        ))
+                                    }
                                 }
-                            } else {
-                                0
                             }
-                        }
-                        _ => 0,
-                    };
-                    self.registers[base + a as usize] = Value::Int(len);
-                }
-                OpCode::Concat => {
-                    let left = self.registers[base + b as usize].display(&self.gc);
-                    let right = self.registers[base + c as usize].display(&self.gc);
-                    let r = self.gc.alloc_string(format!("{}{}", left, right));
-                    self.registers[base + a as usize] = Value::Obj(r);
-                }
-                OpCode::Interpolate => {
-                    let start = base + b as usize;
-                    let count = c as usize;
-                    let mut result = String::new();
-                    for i in 0..count {
-                        result.push_str(&self.registers[start + i].display(&self.gc));
-                    }
-                    let r = self.gc.alloc_string(result);
-                    self.registers[base + a as usize] = Value::Obj(r);
-                }
-                OpCode::ExtractField => {
-                    let obj = &self.registers[base + b as usize];
-                    let field_name = format!("_{}", c);
-                    if let Value::Obj(r) = obj {
-                        if let Some(o) = self.gc.get(*r) {
-                            if let ObjKind::Object(map) = &o.kind {
-                                self.registers[base + a as usize] =
-                                    map.get(&field_name).cloned().unwrap_or(Value::Null);
-                            }
+                        } else {
+                            return Err(VMError::new("? operator requires Result value"));
                         }
                     }
-                }
-                OpCode::Try => {
-                    let src = &self.registers[base + b as usize];
-                    if let Value::Obj(r) = src {
-                        if let Some(obj) = self.gc.get(*r) {
-                            match &obj.kind {
-                                ObjKind::ResultOk(v) => {
-                                    self.registers[base + a as usize] = v.clone();
-                                }
-                                ObjKind::ResultErr(_) => {
-                                    let val = self.registers[base + b as usize].clone();
-                                    self.frames.pop();
-                                    return Ok(val);
-                                }
-                                _ => return Err(VMError::new("? operator requires Result value")),
-                            }
-                        }
-                    } else {
-                        return Err(VMError::new("? operator requires Result value"));
+                    OpCode::Spawn => {
+                        let closure_val = self.registers[base + a as usize].clone();
+                        self.call_value(closure_val, vec![])?;
+                    }
+                    OpCode::PushHandler => {
+                        let catch_ip = {
+                            let frame = &self.frames[frame_idx];
+                            (frame.ip as i64 + sbx as i64) as usize
+                        };
+                        let frame = &mut self.frames[frame_idx];
+                        frame.handlers.push(ExceptionHandler {
+                            catch_ip,
+                            error_register: a,
+                        });
+                    }
+                    OpCode::PopHandler => {
+                        self.frames[frame_idx].handlers.pop();
+                    }
+                    _ => {
+                        return Err(VMError::new(&format!("unknown opcode: {}", op)));
                     }
                 }
-                OpCode::Spawn => {
-                    // For now, just call the closure synchronously (same as Phase 1)
-                    let closure_val = self.registers[base + a as usize].clone();
-                    self.call_value(closure_val, vec![])?;
+                Ok(None)
+            })();
+
+            match step_result {
+                Ok(Some(value)) => return Ok(value),
+                Ok(None) => {}
+                Err(err) if err.is_unwound_to_handler() => {
+                    if self.frames.len() <= boundary_frame_idx {
+                        return Err(err);
+                    }
+                    continue;
                 }
-                _ => {
-                    return Err(VMError::new(&format!("unknown opcode: {}", op)));
-                }
+                Err(err) => match self.handle_runtime_error(err) {
+                    Ok(handler_frame_idx) => {
+                        if handler_frame_idx < boundary_frame_idx {
+                            return Err(VMError::unwound_to_handler());
+                        }
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                },
             }
 
             // GC check
@@ -1198,7 +1269,8 @@ impl VM {
                         }
 
                         self.frames.push(CallFrame::new(*r, new_base));
-                        self.run()
+                        let boundary = self.frames.len() - 1;
+                        self.run_until(boundary)
                     }
                     ObjKind::NativeFunction(nf) => {
                         let name = nf.name.clone();
@@ -1250,6 +1322,67 @@ impl VM {
     #[allow(dead_code)]
     fn error_with_trace(&self, msg: &str) -> VMError {
         VMError::with_trace(msg, self.collect_stack_trace())
+    }
+
+    fn classify_error_type(message: &str) -> &'static str {
+        if message.contains("type") || message.contains("Type") {
+            "TypeError"
+        } else if message.contains("division by zero") || message.contains("modulo by zero") {
+            "ArithmeticError"
+        } else if message.contains("assertion") {
+            "AssertionError"
+        } else if message.contains("index") || message.contains("out of bounds") {
+            "IndexError"
+        } else if message.contains("not found") || message.contains("undefined") {
+            "ReferenceError"
+        } else if message.contains("immutable") || message.contains("cannot reassign") {
+            "TypeError"
+        } else {
+            "RuntimeError"
+        }
+    }
+
+    fn runtime_error_value(&mut self, err: &VMError) -> Value {
+        let mut err_obj = IndexMap::new();
+        err_obj.insert("message".to_string(), self.alloc_string(&err.message));
+        err_obj.insert(
+            "type".to_string(),
+            self.alloc_string(Self::classify_error_type(&err.message)),
+        );
+        let err_ref = self.gc.alloc(ObjKind::Object(err_obj));
+        Value::Obj(err_ref)
+    }
+
+    fn handle_runtime_error(&mut self, err: VMError) -> Result<usize, VMError> {
+        if err.is_unwound_to_handler() {
+            return Err(err);
+        }
+
+        for frame_idx in (0..self.frames.len()).rev() {
+            let handler = {
+                let frame = &mut self.frames[frame_idx];
+                frame.handlers.pop()
+            };
+
+            if let Some(handler) = handler {
+                while self.frames.len() > frame_idx + 1 {
+                    self.profiler.exit_function();
+                    self.frames.pop();
+                }
+
+                let err_value = self.runtime_error_value(&err);
+                let base = self.frames[frame_idx].base;
+                self.registers[base + handler.error_register as usize] = err_value;
+                self.frames[frame_idx].ip = handler.catch_ip;
+                return Ok(frame_idx);
+            }
+        }
+
+        if err.stack_trace.is_empty() {
+            Err(self.error_with_trace(&err.message))
+        } else {
+            Err(err)
+        }
     }
 
     pub(super) fn convert_to_interp_val(&self, v: &Value) -> crate::interpreter::Value {

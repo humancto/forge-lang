@@ -20,11 +20,30 @@ pub struct TypeInfo {
     pub has_float: bool,
 }
 
+#[derive(Clone, Copy)]
+enum ConstValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl ConstValue {
+    fn is_zero(self) -> bool {
+        match self {
+            ConstValue::Int(n) => n == 0,
+            ConstValue::Float(n) => n == 0.0,
+            ConstValue::Bool(false) => true,
+            ConstValue::Bool(true) => false,
+        }
+    }
+}
+
 /// Pre-pass: analyze bytecode to determine register types.
 /// Returns None if the function uses unsupported operations.
 pub fn analyze(chunk: &Chunk) -> TypeInfo {
     let num_regs = chunk.max_registers.max(chunk.arity).max(1) as usize + 1;
     let mut types = vec![RegType::Unknown; num_regs];
+    let mut constants = vec![None; num_regs];
     let mut has_unsupported = false;
     let mut has_float = false;
 
@@ -47,25 +66,41 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                         Constant::Int(_) => {
                             if a < types.len() {
                                 types[a] = RegType::Int;
+                                constants[a] = match &chunk.constants[bx as usize] {
+                                    Constant::Int(n) => Some(ConstValue::Int(*n)),
+                                    _ => None,
+                                };
                             }
                         }
                         Constant::Float(_) => {
                             if a < types.len() {
                                 types[a] = RegType::Float;
                                 has_float = true;
+                                constants[a] = match &chunk.constants[bx as usize] {
+                                    Constant::Float(n) => Some(ConstValue::Float(*n)),
+                                    _ => None,
+                                };
                             }
                         }
                         Constant::Bool(_) => {
                             if a < types.len() {
                                 types[a] = RegType::Bool;
+                                constants[a] = match &chunk.constants[bx as usize] {
+                                    Constant::Bool(v) => Some(ConstValue::Bool(*v)),
+                                    _ => None,
+                                };
                             }
                         }
                         Constant::Str(_) => {
                             has_unsupported = true;
+                            if a < constants.len() {
+                                constants[a] = None;
+                            }
                         }
                         Constant::Null => {
                             if a < types.len() {
                                 types[a] = RegType::Int;
+                                constants[a] = Some(ConstValue::Int(0));
                             }
                         }
                     }
@@ -74,14 +109,16 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
             OpCode::LoadNull => {
                 if a < types.len() {
                     types[a] = RegType::Int;
+                    constants[a] = Some(ConstValue::Int(0));
                 }
             }
             OpCode::LoadTrue | OpCode::LoadFalse => {
                 if a < types.len() {
                     types[a] = RegType::Bool;
+                    constants[a] = Some(ConstValue::Bool(matches!(opcode, OpCode::LoadTrue)));
                 }
             }
-            OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Mod => {
+            OpCode::Add | OpCode::Sub | OpCode::Mul => {
                 if a < types.len() && bb < types.len() && cc < types.len() {
                     if types[bb] == RegType::Float || types[cc] == RegType::Float {
                         types[a] = RegType::Float;
@@ -89,11 +126,27 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                     } else {
                         types[a] = RegType::Int;
                     }
+                    constants[a] = None;
+                }
+            }
+            OpCode::Div | OpCode::Mod => {
+                if a < types.len() && bb < types.len() && cc < types.len() {
+                    if constants[cc].is_some_and(ConstValue::is_zero) {
+                        has_unsupported = true;
+                    }
+                    if types[bb] == RegType::Float || types[cc] == RegType::Float {
+                        types[a] = RegType::Float;
+                        has_float = true;
+                    } else {
+                        types[a] = RegType::Int;
+                    }
+                    constants[a] = None;
                 }
             }
             OpCode::Neg => {
                 if a < types.len() && bb < types.len() {
                     types[a] = types[bb];
+                    constants[a] = None;
                 }
             }
             OpCode::Eq
@@ -107,11 +160,13 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
             | OpCode::Or => {
                 if a < types.len() {
                     types[a] = RegType::Bool;
+                    constants[a] = None;
                 }
             }
             OpCode::Move => {
                 if a < types.len() && bb < types.len() {
                     types[a] = types[bb];
+                    constants[a] = constants[bb];
                 }
             }
             OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpIfTrue | OpCode::Loop => {}
@@ -119,6 +174,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                 let dst = cc;
                 if dst < types.len() {
                     types[dst] = RegType::Int;
+                    constants[dst] = None;
                 }
             }
             OpCode::Return | OpCode::ReturnNull => {}
@@ -136,13 +192,20 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
             | OpCode::ExtractField
             | OpCode::Try => {
                 has_unsupported = true;
+                if a < constants.len() {
+                    constants[a] = None;
+                }
             }
 
             OpCode::Closure
             | OpCode::GetGlobal
             | OpCode::SetGlobal
             | OpCode::GetUpvalue
-            | OpCode::SetUpvalue => {}
+            | OpCode::SetUpvalue => {
+                if a < constants.len() {
+                    constants[a] = None;
+                }
+            }
 
             _ => {}
         }
@@ -243,5 +306,21 @@ mod tests {
 
         let info = analyze(&chunk);
         assert_eq!(info.reg_types[2], RegType::Bool);
+    }
+
+    #[test]
+    fn analyze_division_by_zero_constant_is_unsupported() {
+        let mut chunk = Chunk::new("boom");
+        chunk.arity = 0;
+        chunk.max_registers = 3;
+        let one_idx = chunk.add_constant(Constant::Int(1));
+        let zero_idx = chunk.add_constant(Constant::Int(0));
+        chunk.emit(encode_abx(OpCode::LoadConst, 0, one_idx), 1);
+        chunk.emit(encode_abx(OpCode::LoadConst, 1, zero_idx), 2);
+        chunk.emit(encode_abc(OpCode::Div, 2, 0, 1), 3);
+        chunk.emit(encode_abc(OpCode::Return, 2, 0, 0), 4);
+
+        let info = analyze(&chunk);
+        assert!(info.has_unsupported_ops);
     }
 }

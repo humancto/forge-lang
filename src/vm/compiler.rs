@@ -13,6 +13,10 @@ struct LoopContext {
     break_jumps: Vec<usize>,
 }
 
+struct TryContext {
+    loop_depth: usize,
+}
+
 #[derive(Clone)]
 struct UpvalueEntry {
     name: String,
@@ -26,6 +30,7 @@ pub struct Compiler {
     next_register: u8,
     max_register: u8,
     loops: Vec<LoopContext>,
+    try_contexts: Vec<TryContext>,
     upvalues: Vec<UpvalueEntry>,
     parent_locals: Vec<(String, u8)>,
 }
@@ -52,6 +57,7 @@ impl Compiler {
             next_register: 0,
             max_register: 0,
             loops: Vec::new(),
+            try_contexts: Vec::new(),
             upvalues: Vec::new(),
             parent_locals: Vec::new(),
         }
@@ -173,6 +179,19 @@ impl Compiler {
             }
         }
         None
+    }
+
+    fn emit_handler_pops_for_loop_exit(&mut self) {
+        let current_loop_depth = self.loops.len();
+        let pop_count = self
+            .try_contexts
+            .iter()
+            .rev()
+            .take_while(|ctx| ctx.loop_depth >= current_loop_depth)
+            .count();
+        for _ in 0..pop_count {
+            self.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
+        }
     }
 }
 
@@ -390,7 +409,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             c.emit_loop(loop_start, 0);
             c.patch_jump(exit);
 
-            let ctx = c.loops.pop().ok_or_else(|| CompileError::new("internal: loop stack underflow in while"))?;
+            let ctx = c
+                .loops
+                .pop()
+                .ok_or_else(|| CompileError::new("internal: loop stack underflow in while"))?;
             for bj in ctx.break_jumps {
                 c.patch_jump(bj);
             }
@@ -412,7 +434,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.emit_loop(loop_start, 0);
 
-            let ctx = c.loops.pop().ok_or_else(|| CompileError::new("internal: loop stack underflow in loop"))?;
+            let ctx = c
+                .loops
+                .pop()
+                .ok_or_else(|| CompileError::new("internal: loop stack underflow in loop"))?;
             for bj in ctx.break_jumps {
                 c.patch_jump(bj);
             }
@@ -464,7 +489,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             c.emit_loop(loop_start, 0);
             c.patch_jump(exit);
 
-            let ctx = c.loops.pop().ok_or_else(|| CompileError::new("internal: loop stack underflow in for"))?;
+            let ctx = c
+                .loops
+                .pop()
+                .ok_or_else(|| CompileError::new("internal: loop stack underflow in for"))?;
             for bj in ctx.break_jumps {
                 c.patch_jump(bj);
             }
@@ -473,6 +501,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::Break => {
+            c.emit_handler_pops_for_loop_exit();
             let j = c.emit_jump(OpCode::Jump, 0, 0);
             if let Some(ctx) = c.loops.last_mut() {
                 ctx.break_jumps.push(j);
@@ -481,6 +510,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::Continue => {
+            c.emit_handler_pops_for_loop_exit();
             if let Some(ctx) = c.loops.last() {
                 let start = ctx.start;
                 c.emit_loop(start, 0);
@@ -587,20 +617,16 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             compile_expr(c, value, value_reg)?;
 
             let target_regs: Vec<u8> = match pattern {
-                DestructurePattern::Object(names) => names
-                    .iter()
-                    .map(|name| c.add_local(name, false))
-                    .collect(),
+                DestructurePattern::Object(names) => {
+                    names.iter().map(|name| c.add_local(name, false)).collect()
+                }
                 DestructurePattern::Array { items, rest } => {
                     if rest.is_some() {
                         return Err(CompileError::new(
                             "VM does not support array destructuring with rest yet",
                         ));
                     }
-                    items
-                        .iter()
-                        .map(|name| c.add_local(name, false))
-                        .collect()
+                    items.iter().map(|name| c.add_local(name, false)).collect()
                 }
             };
 
@@ -608,7 +634,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 DestructurePattern::Object(names) => {
                     for (name, target_reg) in names.iter().zip(target_regs.iter().copied()) {
                         let field_idx = c.const_str(name);
-                        c.emit(encode_abc(OpCode::GetField, target_reg, value_reg, field_idx as u8), 0);
+                        c.emit(
+                            encode_abc(OpCode::GetField, target_reg, value_reg, field_idx as u8),
+                            0,
+                        );
                     }
                 }
                 DestructurePattern::Array { items, .. } => {
@@ -619,7 +648,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         let idx_reg = c.alloc_reg();
                         let const_idx = c.const_int(index as i64);
                         c.emit(encode_abx(OpCode::LoadConst, idx_reg, const_idx), 0);
-                        c.emit(encode_abc(OpCode::GetIndex, target_reg, value_reg, idx_reg), 0);
+                        c.emit(
+                            encode_abc(OpCode::GetIndex, target_reg, value_reg, idx_reg),
+                            0,
+                        );
                         c.free_to(temp_base);
                     }
                 }
@@ -721,13 +753,33 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             catch_var,
             catch_body,
         } => {
+            let catch_reg = c.alloc_reg();
+            let handler_jump = c.emit_jump(OpCode::PushHandler, catch_reg, 0);
+            c.try_contexts.push(TryContext {
+                loop_depth: c.loops.len(),
+            });
             c.begin_scope();
             for s in try_body {
                 compile_stmt(c, s)?;
             }
             c.end_scope();
-            let _ = catch_var;
-            let _ = catch_body;
+            c.try_contexts.pop();
+            c.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
+            let end_jump = c.emit_jump(OpCode::Jump, 0, 0);
+
+            c.patch_jump(handler_jump);
+            c.begin_scope();
+            c.locals.push(Local {
+                name: catch_var.clone(),
+                depth: c.scope_depth,
+                register: catch_reg,
+                mutable: false,
+            });
+            for s in catch_body {
+                compile_stmt(c, s)?;
+            }
+            c.end_scope();
+            c.patch_jump(end_jump);
             Ok(())
         }
 

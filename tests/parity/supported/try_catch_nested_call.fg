@@ -1,0 +1,12 @@
+// expect: ArithmeticError
+fn boom() {
+    return 1 / 0
+}
+
+let mut status = "ok"
+try {
+    boom()
+} catch err {
+    status = err.type
+}
+status

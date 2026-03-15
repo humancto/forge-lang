@@ -1,5 +1,11 @@
 use super::value::GcRef;
 
+#[derive(Clone, Copy)]
+pub struct ExceptionHandler {
+    pub catch_ip: usize,
+    pub error_register: u8,
+}
+
 /// A call frame representing one function invocation in the VM.
 /// Each frame has a window into the VM's flat register array.
 pub struct CallFrame {
@@ -9,6 +15,8 @@ pub struct CallFrame {
     pub ip: usize,
     /// Base index into the VM's register array for this frame's window
     pub base: usize,
+    /// Active exception handlers for this frame, innermost last.
+    pub handlers: Vec<ExceptionHandler>,
 }
 
 impl CallFrame {
@@ -17,6 +25,7 @@ impl CallFrame {
             closure,
             ip: 0,
             base,
+            handlers: Vec::new(),
         }
     }
 

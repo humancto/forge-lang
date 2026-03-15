@@ -1,0 +1,19 @@
+// expect: ArithmeticError
+let mut outcome = ""
+let mut seen = 0
+while seen < 3 {
+    seen += 1
+    try {
+        continue
+    } catch err {
+        outcome = "bad"
+    }
+}
+
+try {
+    let crash = 1 / 0
+} catch err {
+    outcome = err.type
+}
+
+outcome

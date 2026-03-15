@@ -36,7 +36,7 @@ forge build --native app.fg # Builds a native launcher (runtime still required)
 ### What Doesn't
 
 - VM/JIT support a real subset of the language; the interpreter remains the full-fidelity runtime
-- Several AST features still compile only on the interpreter side (for example: interfaces/give blocks, full try/catch, scheduler/watch/agent features)
+- Several AST features still compile only on the interpreter side (for example: interfaces/give blocks, safe/retry/timeout blocks, scheduler/watch/agent features)
 - JIT only natively compiles integer-heavy functions; broader programs rely on VM fallback
 - No AOT compilation
 - `forge build --native` is currently a launcher, not a standalone binary
@@ -59,7 +59,7 @@ The next phase is about maturity, not breadth.
 ### 30-Day Outcomes
 
 - Land a backend parity corpus in CI
-- Close the highest-value VM gaps (`try/catch`, closure correctness, remaining destructuring gaps)
+- Close the highest-value VM gaps (closure correctness, remaining safety-block gaps, remaining destructuring gaps)
 - Improve local dependency and module behavior (`forge install`, lockfiles, cycle detection, caching)
 - Strengthen LSP navigation and strict-mode diagnostics
 

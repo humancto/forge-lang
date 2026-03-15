@@ -21,8 +21,8 @@ mod typechecker;
 mod vm;
 mod watch;
 
-use std::fs;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::PathBuf;
 use std::process;
 
@@ -30,8 +30,8 @@ use clap::{Parser, Subcommand};
 
 use interpreter::Interpreter;
 use lexer::Lexer;
-use parser::Parser as ForgeParser;
 use parser::ast::{DestructurePattern, Expr, Program, Stmt};
+use parser::Parser as ForgeParser;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -357,13 +357,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
             }
         }
         Stmt::Destructure { pattern, value } => {
-            if matches!(
-                pattern,
-                DestructurePattern::Array {
-                    rest: Some(_),
-                    ..
-                }
-            ) {
+            if matches!(pattern, DestructurePattern::Array { rest: Some(_), .. }) {
                 issues.insert("array destructuring with rest");
             }
             collect_vm_incompatible_expr(value, issues);
@@ -373,7 +367,6 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
             catch_body,
             ..
         } => {
-            issues.insert("try/catch");
             for stmt in try_body {
                 collect_vm_incompatible_stmt(stmt, issues);
             }
@@ -464,15 +457,16 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
                 collect_vm_incompatible_stmt(stmt, issues);
             }
         }
-        Stmt::Let { value, .. }
-        | Stmt::Expression(value)
-        | Stmt::YieldStmt(value) => collect_vm_incompatible_expr(value, issues),
+        Stmt::Let { value, .. } | Stmt::Expression(value) | Stmt::YieldStmt(value) => {
+            collect_vm_incompatible_expr(value, issues)
+        }
         Stmt::Assign { target, value } => {
             collect_vm_incompatible_expr(target, issues);
             collect_vm_incompatible_expr(value, issues);
         }
-        Stmt::Return(Some(expr))
-        | Stmt::CheckStmt { expr, .. } => collect_vm_incompatible_expr(expr, issues),
+        Stmt::Return(Some(expr)) | Stmt::CheckStmt { expr, .. } => {
+            collect_vm_incompatible_expr(expr, issues)
+        }
         Stmt::When { subject, arms } => {
             collect_vm_incompatible_expr(subject, issues);
             for arm in arms {
@@ -492,8 +486,9 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
             collect_vm_incompatible_expr(left, issues);
             collect_vm_incompatible_expr(right, issues);
         }
-        Expr::UnaryOp { operand, .. }
-        | Expr::Try(operand) => collect_vm_incompatible_expr(operand, issues),
+        Expr::UnaryOp { operand, .. } | Expr::Try(operand) => {
+            collect_vm_incompatible_expr(operand, issues)
+        }
         Expr::FieldAccess { object, .. } => collect_vm_incompatible_expr(object, issues),
         Expr::Index { object, index } => {
             collect_vm_incompatible_expr(object, issues);
@@ -566,11 +561,7 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
                 collect_vm_incompatible_stmt(stmt, issues);
             }
         }
-        Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::StringLit(_)
-        | Expr::Bool(_)
-        | Expr::Ident(_) => {}
+        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => {}
     }
 }
 
@@ -964,6 +955,22 @@ mod tests {
         let user = { name: "Forge", age: 4 }
         unpack { name, age } from user
         name
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_try_catch() {
+        let source = r#"
+        let status = "ok"
+        try {
+            let crash = 1 / 0
+        } catch err {
+            status = err.type
+        }
+        status
         "#;
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
