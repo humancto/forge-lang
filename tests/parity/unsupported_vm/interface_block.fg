@@ -1,0 +1,5 @@
+// expect-error: interface/power definitions
+
+interface Greeter {
+    fn greet(name) -> String
+}

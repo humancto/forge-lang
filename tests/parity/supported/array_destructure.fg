@@ -1,0 +1,6 @@
+// expect: 42
+
+let values = [10, 32]
+unpack [left, right] from values
+
+left + right

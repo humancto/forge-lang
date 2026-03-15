@@ -1,0 +1,5 @@
+// expect: 81
+
+fn square(n) { return n * n }
+
+square(9)

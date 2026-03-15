@@ -1,0 +1,8 @@
+// expect: 42
+
+let point = { x: 20, y: 22 }
+unpack { x, y } from point
+
+fn add(a, b) { return a + b }
+
+add(x, y)

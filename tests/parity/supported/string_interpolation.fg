@@ -1,0 +1,6 @@
+// expect: Hello, Forge 42!
+
+let name = "Forge"
+let value = 42
+
+"Hello, {name} {value}!"

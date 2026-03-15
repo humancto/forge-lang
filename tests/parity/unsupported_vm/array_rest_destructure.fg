@@ -1,0 +1,6 @@
+// expect-error: array destructuring with rest
+
+let values = [1, 2, 3]
+unpack [first, ...rest] from values
+
+first

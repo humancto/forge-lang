@@ -18,7 +18,7 @@
 | HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket                              |
 | HTTP client           | Complete             | reqwest, JSON, all methods, benchmarked at 28k req/sec                  |
 | Type checker          | Gradual              | Arity + type warnings, `--strict` turns them into hard errors           |
-| Tests                 | 630 Rust + 631 Forge | Verified locally; one Forge test is intentionally skipped                |
+| Tests                 | 644 Rust + 631 Forge | Verified locally; one Forge test is intentionally skipped                |
 | Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases                    |
 
 ### What Works Today
@@ -30,16 +30,47 @@ forge run --jit app.fg    # JIT for integer functions, VM fallback
 forge run --profile app.fg  # VM execution with profiling report
 forge build app.fg          # Writes app.fgc bytecode to disk
 forge run app.fgc           # Loads and executes compiled bytecode
+forge build --native app.fg # Builds a native launcher (runtime still required)
 ```
 
 ### What Doesn't
 
 - VM/JIT support a real subset of the language; the interpreter remains the full-fidelity runtime
-- Several AST features still compile only on the interpreter side (for example: interfaces/give blocks, destructuring, try/catch)
-- JIT only handles integer math (no strings, objects, arrays)
+- Several AST features still compile only on the interpreter side (for example: interfaces/give blocks, full try/catch, scheduler/watch/agent features)
+- JIT only natively compiles integer-heavy functions; broader programs rely on VM fallback
 - No AOT compilation
-- No standalone binary output
-- No backend parity suite yet that runs the same program across interpreter, VM, and JIT
+- `forge build --native` is currently a launcher, not a standalone binary
+- Backend parity coverage has started, but it is not yet a full-language corpus
+
+---
+
+## Execution Focus: Next 90 Days
+
+The next phase is about maturity, not breadth.
+
+### Top Priorities
+
+1. Unified semantics layer between parser, interpreter, VM, JIT, and future AOT
+2. Full VM parity for the most-used language features
+3. Real package and module correctness
+4. Stronger type system foundations
+5. Standalone native compilation path
+
+### 30-Day Outcomes
+
+- Land a backend parity corpus in CI
+- Close the highest-value VM gaps (`try/catch`, closure correctness, remaining destructuring gaps)
+- Improve local dependency and module behavior (`forge install`, lockfiles, cycle detection, caching)
+- Strengthen LSP navigation and strict-mode diagnostics
+
+### 90-Day Outcomes
+
+- Reduce backend divergence materially
+- Make Forge a reliable multi-file, dependency-bearing project language
+- Improve typed tooling and diagnostics
+- Establish the runtime/codegen scaffolding for real standalone native builds
+
+This is the public execution focus. Tactical sequencing, issue breakdown, and internal dependency ordering can evolve as implementation reveals constraints.
 
 ---
 

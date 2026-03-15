@@ -874,6 +874,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parity_corpus_supported_cases() {
+        let cases = crate::testing::parity::load_supported_cases();
+        assert!(!cases.is_empty(), "expected supported parity fixtures");
+        for case in &cases {
+            crate::testing::parity::assert_supported_case(case);
+        }
+    }
+
+    #[test]
+    fn parity_corpus_vm_rejection_cases() {
+        let cases = crate::testing::parity::load_vm_rejection_cases();
+        assert!(!cases.is_empty(), "expected VM rejection parity fixtures");
+
+        for case in &cases {
+            let (program, _) = prepare_program(&case.source, false)
+                .unwrap_or_else(|err| panic!("{} should parse: {:?}", case.path.display(), err));
+            let error = ensure_vm_compatible(&program, "parity corpus")
+                .expect_err(&format!("{} should be rejected by VM", case.path.display()));
+            assert!(
+                error.contains(&case.expected_error),
+                "{} rejection mismatch: expected substring '{}', got '{}'",
+                case.path.display(),
+                case.expected_error,
+                error
+            );
+        }
+    }
+
+    #[test]
     fn prepare_program_rejects_strict_type_errors() {
         let source = r#"
         fn needs_int(x: Int) { return x }

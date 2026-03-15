@@ -5,13 +5,13 @@
 ### The internet-native programming language that reads like English.
 
 Built-in HTTP, databases, crypto, AI, and a JIT compiler.<br>
-**18 modules. 238+ functions. Zero dependencies.**
+**18 modules. 238+ functions. No extra packages required.**
 
 [![CI](https://github.com/humancto/forge-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/humancto/forge-lang/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64ffda?style=flat-square)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built_with-Rust-%23f74c00?style=flat-square)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-1,019_passing-64ffda?style=flat-square)](#project-status)
+[![Tests](https://img.shields.io/badge/tests-1,275_passing-64ffda?style=flat-square)](#project-status)
 [![Stars](https://img.shields.io/github/stars/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/stargazers)
 [![crates.io](https://img.shields.io/crates/v/forge-lang?color=%23ff6b35&style=flat-square)](https://crates.io/crates/forge-lang)
 
@@ -609,6 +609,7 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 | `forge test [dir]`    | Run tests                |
 | `forge fmt [files]`   | Format code              |
 | `forge build <file>`  | Compile to `.fgc` bytecode |
+| `forge build --native <file>` | Build a native launcher executable |
 | `forge install <src>` | Install a package        |
 | `forge lsp`           | Language server          |
 | `forge chat`          | AI assistant             |
@@ -696,7 +697,7 @@ Forge is **v0.4.3**. The language, interpreter, and standard library are stable;
 | Standard library modules |                           18 |
 | Built-in functions       |                         238+ |
 | Keywords                 |                          80+ |
-| Tests passing            | 1,261 (630 Rust + 631 Forge) |
+| Tests passing            | 1,275 (644 Rust + 631 Forge) |
 | Interactive lessons      |                           30 |
 | Example programs         |                           18 |
 | Dependencies (CVEs)      |          344 crates (0 CVEs) |
@@ -709,6 +710,7 @@ Forge is **v0.4.3**. The language, interpreter, and standard library are stable;
 - **Parameterized SQL queries supported** — pass a params array as the second argument to `db.query`, `db.execute`, `pg.query`, `pg.execute`, and `mysql.query` / `mysql.execute` to safely bind user input and prevent SQL injection.
 - **Three execution tiers with different trade-offs** — The interpreter is the full language runtime. Use `--vm` for supported bytecode execution, `--jit` for integer-heavy hot paths, and `--profile` to inspect VM execution.
 - **VM/JIT feature gap** — VM and JIT now fail fast on unsupported language features instead of silently compiling partial behavior. Use the default interpreter for full stdlib, HTTP, database, AI, and advanced language features.
+- **`forge build --native` is a launcher today** — it produces a native executable wrapper that shells back into the Forge runtime. Standalone AOT binaries are still on the roadmap.
 - **`regex` functions** take `(text, pattern)` argument order, not `(pattern, text)`.
 
 ---
@@ -719,10 +721,14 @@ Forge is **v0.4.3**. The language, interpreter, and standard library are stable;
 | ----------- | ------------------------------------------------------------------------------------------------- |
 | **v0.3** ✅ | Type system (thing/power/give/craft/has), 73 new functions, GenZ debug kit, NPC module, 822 tests |
 | **v0.4** ✅ | JWT auth, MySQL, parameterized SQL (all DBs), CORS, PG TLS, 18 modules, 1,019 tests               |
-| **v0.5**    | WASM target, expanded JIT coverage, LSP completions                                               |
-| **v1.0**    | Stable API, backwards compatibility guarantee                                                     |
+| **v0.5**    | Backend parity, package foundations, richer LSP                                                    |
+| **v0.6**    | Stronger typing, permissions, profiling and benching                                               |
+| **v0.7**    | Standalone native compilation groundwork                                                           |
+| **v1.0**    | Stable API, compatibility guarantees, production hardening                                         |
 
-See [ROADMAP.md](ROADMAP.md) for the full plan. Have ideas? [Open an issue](https://github.com/humancto/forge-lang/issues).
+Near-term execution focus: semantic parity across backends, package/module correctness, stronger typing, better editor tooling, and a path from launcher-based native builds to real standalone binaries.
+
+See [ROADMAP.md](ROADMAP.md) for the public roadmap. Have ideas? [Open an issue](https://github.com/humancto/forge-lang/issues).
 
 ---
 

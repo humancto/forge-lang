@@ -1,0 +1,7 @@
+// expect-error: try/catch
+
+try {
+    42
+} catch err {
+    err
+}

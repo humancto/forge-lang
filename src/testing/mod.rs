@@ -6,6 +6,9 @@ use crate::parser::Parser;
 use std::path::Path;
 use std::time::Instant;
 
+#[cfg(test)]
+pub mod parity;
+
 pub fn run_tests(test_dir: &str, filter: Option<&str>) {
     let dir = Path::new(test_dir);
     if !dir.exists() {
