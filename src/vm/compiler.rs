@@ -662,22 +662,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             let value_reg = c.alloc_reg();
             compile_expr(c, value, value_reg)?;
 
-            let target_regs: Vec<u8> = match pattern {
-                DestructurePattern::Object(names) => {
-                    names.iter().map(|name| c.add_local(name, false)).collect()
-                }
-                DestructurePattern::Array { items, rest } => {
-                    if rest.is_some() {
-                        return Err(CompileError::new(
-                            "VM does not support array destructuring with rest yet",
-                        ));
-                    }
-                    items.iter().map(|name| c.add_local(name, false)).collect()
-                }
-            };
-
             match pattern {
                 DestructurePattern::Object(names) => {
+                    let target_regs: Vec<u8> =
+                        names.iter().map(|name| c.add_local(name, false)).collect();
                     for (name, target_reg) in names.iter().zip(target_regs.iter().copied()) {
                         let field_idx = c.const_str(name);
                         c.emit(
@@ -686,11 +674,13 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         );
                     }
                 }
-                DestructurePattern::Array { items, .. } => {
+                DestructurePattern::Array { items, rest } => {
+                    let item_regs: Vec<u8> =
+                        items.iter().map(|name| c.add_local(name, false)).collect();
+                    let rest_reg = rest.as_ref().map(|name| c.add_local(name, false));
+
                     let temp_base = c.next_register;
-                    for (index, (_, target_reg)) in
-                        items.iter().zip(target_regs.iter().copied()).enumerate()
-                    {
+                    for (index, target_reg) in item_regs.iter().copied().enumerate() {
                         let idx_reg = c.alloc_reg();
                         let const_idx = c.const_int(index as i64);
                         c.emit(encode_abx(OpCode::LoadConst, idx_reg, const_idx), 0);
@@ -698,6 +688,49 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                             encode_abc(OpCode::GetIndex, target_reg, value_reg, idx_reg),
                             0,
                         );
+                        c.free_to(temp_base);
+                    }
+
+                    if let Some(rest_reg) = rest_reg {
+                        c.emit(encode_abc(OpCode::NewArray, rest_reg, temp_base, 0), 0);
+
+                        let idx_reg = c.alloc_reg();
+                        let start_idx = c.const_int(items.len() as i64);
+                        c.emit(encode_abx(OpCode::LoadConst, idx_reg, start_idx), 0);
+
+                        let loop_start = c.chunk.code_len();
+                        let len_reg = c.alloc_reg();
+                        c.emit(encode_abc(OpCode::Len, len_reg, value_reg, 0), 0);
+                        let cond_reg = c.alloc_reg();
+                        c.emit(encode_abc(OpCode::Lt, cond_reg, idx_reg, len_reg), 0);
+                        let exit = c.emit_jump(OpCode::JumpIfFalse, cond_reg, 0);
+                        c.free_to(len_reg);
+
+                        let push_fn_reg = c.alloc_reg();
+                        let push_idx = c.const_str("push");
+                        c.emit(encode_abx(OpCode::GetGlobal, push_fn_reg, push_idx), 0);
+
+                        let rest_src_reg = c.alloc_reg();
+                        c.emit(encode_abc(OpCode::GetLocal, rest_src_reg, rest_reg, 0), 0);
+
+                        let item_reg = c.alloc_reg();
+                        c.emit(encode_abc(OpCode::GetIndex, item_reg, value_reg, idx_reg), 0);
+
+                        let updated_rest_reg = c.alloc_reg();
+                        c.emit(
+                            encode_abc(OpCode::Call, push_fn_reg, 2, updated_rest_reg),
+                            0,
+                        );
+                        c.emit(encode_abc(OpCode::SetLocal, rest_reg, updated_rest_reg, 0), 0);
+
+                        let one_reg = c.alloc_reg();
+                        let one_idx = c.const_int(1);
+                        c.emit(encode_abx(OpCode::LoadConst, one_reg, one_idx), 0);
+                        c.emit(encode_abc(OpCode::Add, idx_reg, idx_reg, one_reg), 0);
+                        c.free_to(len_reg);
+
+                        c.emit_loop(loop_start, 0);
+                        c.patch_jump(exit);
                         c.free_to(temp_base);
                     }
                 }

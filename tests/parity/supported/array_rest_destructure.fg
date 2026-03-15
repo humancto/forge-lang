@@ -1,6 +1,6 @@
-// expect-error: array destructuring with rest
+// expect: [1, 2, 3]
 
 let values = [1, 2, 3]
 unpack [first, ...rest] from values
 
-first
+[first, rest[0], rest[1]]

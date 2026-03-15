@@ -418,6 +418,18 @@ mod parity_tests {
     }
 
     #[test]
+    fn cross_backend_parity_array_destructure_with_rest() {
+        assert_cross_backend_value(
+            r#"
+            let values = [1, 2, 3]
+            unpack [first, ...rest] from values
+            [first, rest[0], rest[1]]
+            "#,
+            "[1, 2, 3]",
+        );
+    }
+
+    #[test]
     fn cross_backend_parity_try_catch_nested_call() {
         assert_cross_backend_value(
             r#"

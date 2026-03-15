@@ -30,7 +30,7 @@ use clap::{Parser, Subcommand};
 
 use interpreter::Interpreter;
 use lexer::Lexer;
-use parser::ast::{DestructurePattern, Expr, Program, Stmt};
+use parser::ast::{Expr, Program, Stmt};
 use parser::Parser as ForgeParser;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -356,10 +356,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
                 collect_vm_incompatible_stmt(method, issues);
             }
         }
-        Stmt::Destructure { pattern, value } => {
-            if matches!(pattern, DestructurePattern::Array { rest: Some(_), .. }) {
-                issues.insert("array destructuring with rest");
-            }
+        Stmt::Destructure { pattern: _, value } => {
             collect_vm_incompatible_expr(value, issues);
         }
         Stmt::TryCatch {
@@ -978,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_incompatibilities_flag_array_rest_destructuring() {
+    fn vm_incompatibilities_allow_array_rest_destructuring() {
         let source = r#"
         let items = [1, 2, 3]
         unpack [first, ...rest] from items
@@ -986,7 +983,6 @@ mod tests {
         "#;
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
-        let issues = vm_incompatibilities(&program);
-        assert!(issues.contains(&"array destructuring with rest"));
+        assert!(vm_incompatibilities(&program).is_empty());
     }
 }
