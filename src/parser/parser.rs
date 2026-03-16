@@ -43,7 +43,7 @@ impl Parser {
             Token::Set => self.parse_set(),
             Token::Change => self.parse_change(),
             Token::Fn | Token::Define => self.parse_fn_def(Vec::new()),
-            Token::Type => self.parse_type_def(),
+            Token::Type if self.is_type_definition_start() => self.parse_type_def(),
             Token::Interface | Token::Power => self.parse_interface_def(),
             Token::Struct | Token::Thing => self.parse_struct_def(),
             Token::Impl | Token::Give => self.parse_impl_block(),
@@ -1969,6 +1969,19 @@ impl Parser {
             .unwrap_or(Token::Eof)
     }
 
+    fn peek_token(&self, offset: usize) -> Token {
+        self.tokens
+            .get(self.pos + offset)
+            .map(|s| s.token.clone())
+            .unwrap_or(Token::Eof)
+    }
+
+    fn is_type_definition_start(&self) -> bool {
+        matches!(self.current_token(), Token::Type)
+            && matches!(self.peek_token(1), Token::Ident(_))
+            && matches!(self.peek_token(2), Token::Eq)
+    }
+
     fn check(&self, expected: &Token) -> bool {
         std::mem::discriminant(&self.current_token()) == std::mem::discriminant(expected)
     }
@@ -2248,6 +2261,32 @@ mod tests {
                 assert_eq!(*max_steps, 5);
             }
             other => panic!("expected agent definition, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_type_builtin_call_at_statement_start() {
+        let program = parse_program("type(42)");
+
+        match &program.statements[0].stmt {
+            Stmt::Expression(Expr::Call { function, args }) => {
+                assert!(matches!(function.as_ref(), Expr::Ident(name) if name == "type"));
+                assert!(matches!(args.as_slice(), [Expr::Int(42)]));
+            }
+            other => panic!("expected type() call expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn still_parses_type_definitions() {
+        let program = parse_program("type Color = Red | Blue");
+
+        match &program.statements[0].stmt {
+            Stmt::TypeDef { name, variants } => {
+                assert_eq!(name, "Color");
+                assert_eq!(variants.len(), 2);
+            }
+            other => panic!("expected type definition, got {:?}", other),
         }
     }
 }

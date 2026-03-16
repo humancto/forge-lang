@@ -683,6 +683,11 @@ mod parity_tests {
     }
 
     #[test]
+    fn cross_backend_parity_type_builtin_statement_start() {
+        assert_cross_backend_value("type(42)", "Int");
+    }
+
+    #[test]
     fn cross_backend_parity_file_import() {
         assert_cross_backend_value(
             r#"

@@ -3621,6 +3621,15 @@ mod tests {
     }
 
     #[test]
+    fn type_builtin_works_at_statement_start() {
+        let value = run_forge(r#"type(42)"#);
+        match value {
+            Value::String(name) => assert_eq!(name, "Int"),
+            other => panic!("expected Int, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn did_you_mean_suggestion() {
         let result = try_run_forge(
             r#"
