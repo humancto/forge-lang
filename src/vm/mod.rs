@@ -671,6 +671,18 @@ mod parity_tests {
     }
 
     #[test]
+    fn cross_backend_parity_test_decorator_metadata() {
+        assert_cross_backend_value(
+            r#"
+            @test
+            fn answer() { return 42 }
+            answer()
+            "#,
+            "42",
+        );
+    }
+
+    #[test]
     fn cross_backend_parity_file_import() {
         assert_cross_backend_value(
             r#"

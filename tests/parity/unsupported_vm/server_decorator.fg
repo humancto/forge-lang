@@ -1,0 +1,4 @@
+// expect-error: decorator-driven runtime features
+@server(port: 8080)
+@get("/hello")
+fn hello() { return "hi" }

@@ -1,0 +1,5 @@
+// expect: 42
+@test
+fn answer() { return 42 }
+
+answer()

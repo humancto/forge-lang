@@ -382,7 +382,10 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         Stmt::FnDef {
             body, decorators, ..
         } => {
-            if !decorators.is_empty() {
+            if decorators
+                .iter()
+                .any(|decorator| !is_vm_metadata_decorator(&decorator.name))
+            {
                 issues.insert("decorator-driven runtime features");
             }
             for stmt in body {
@@ -439,6 +442,10 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         }
         Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::StructDef { .. } => {}
     }
+}
+
+fn is_vm_metadata_decorator(name: &str) -> bool {
+    matches!(name, "test" | "skip" | "before" | "after")
 }
 
 fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>) {
@@ -1078,5 +1085,29 @@ mod tests {
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_test_decorators() {
+        let source = r#"
+        @test
+        fn smoke() { return 42 }
+        smoke()
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_reject_server_route_decorators() {
+        let source = r#"
+        @server(port: 8080)
+        @get("/hello")
+        fn hello() { return "hi" }
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).contains(&"decorator-driven runtime features"));
     }
 }
