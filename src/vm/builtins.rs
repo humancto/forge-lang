@@ -207,6 +207,26 @@ impl VM {
                     count, last_error
                 )))
             }
+            "__forge_raise_error" => {
+                if args.len() != 1 {
+                    return Err(VMError::new(
+                        "__forge_raise_error() requires (error)",
+                    ));
+                }
+                let message = match &args[0] {
+                    Value::Obj(r) => self
+                        .gc
+                        .get(*r)
+                        .and_then(|obj| match &obj.kind {
+                            ObjKind::Object(map) => map.get("message").cloned(),
+                            _ => None,
+                        })
+                        .map(|value| value.display(&self.gc))
+                        .unwrap_or_else(|| args[0].display(&self.gc)),
+                    value => value.display(&self.gc),
+                };
+                Err(VMError::new(&message))
+            }
             "__forge_import_module" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(VMError::new(
@@ -1003,10 +1023,21 @@ impl VM {
                 Err(VMError::new("ends_with() requires (string, suffix)"))
             }
             "wait" => {
-                if let Some(Value::Int(secs)) = args.first() {
-                    std::thread::sleep(std::time::Duration::from_secs(*secs as u64));
+                match args.first() {
+                    Some(Value::Int(secs)) => {
+                        self.sleep_with_timeout_checks(std::time::Duration::from_secs(
+                            (*secs).max(0) as u64,
+                        ))?;
+                        Ok(Value::Null)
+                    }
+                    Some(Value::Float(secs)) => {
+                        self.sleep_with_timeout_checks(std::time::Duration::from_secs_f64(
+                            secs.max(0.0),
+                        ))?;
+                        Ok(Value::Null)
+                    }
+                    _ => Err(VMError::new("wait() requires a number of seconds")),
                 }
-                Ok(Value::Null)
             }
             "uuid" => {
                 let id = uuid::Uuid::new_v4().to_string();

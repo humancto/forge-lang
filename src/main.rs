@@ -351,7 +351,6 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
             }
         }
         Stmt::TimeoutBlock { body, .. } => {
-            issues.insert("timeout blocks");
             for stmt in body {
                 collect_vm_incompatible_stmt(stmt, issues);
             }
@@ -1001,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_incompatibilities_still_reject_timeout_blocks() {
+    fn vm_incompatibilities_allow_timeout_blocks() {
         let source = r#"
         timeout 1 seconds {
             println("slow")
@@ -1009,8 +1008,7 @@ mod tests {
         "#;
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
-        let issues = vm_incompatibilities(&program);
-        assert!(issues.contains(&"timeout blocks"));
+        assert!(vm_incompatibilities(&program).is_empty());
     }
 
     #[test]

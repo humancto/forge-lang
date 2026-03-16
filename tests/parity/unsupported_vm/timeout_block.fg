@@ -1,5 +1,0 @@
-// expect-error: timeout blocks
-
-timeout 1 seconds {
-    println("slow")
-}

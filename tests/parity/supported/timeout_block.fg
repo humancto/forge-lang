@@ -1,0 +1,7 @@
+// expect: done
+
+let mut status = "pending"
+timeout 1 seconds {
+    status = "done"
+}
+status

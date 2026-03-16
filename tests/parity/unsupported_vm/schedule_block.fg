@@ -1,0 +1,5 @@
+// expect-error: schedule blocks
+
+schedule every 1 seconds {
+    println("tick")
+}

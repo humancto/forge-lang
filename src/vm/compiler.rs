@@ -13,7 +13,14 @@ struct LoopContext {
     break_jumps: Vec<usize>,
 }
 
-struct TryContext {
+#[derive(Clone, Copy)]
+enum CleanupKind {
+    Handler,
+    Timeout,
+}
+
+struct CleanupContext {
+    kind: CleanupKind,
     loop_depth: usize,
 }
 
@@ -30,7 +37,7 @@ pub struct Compiler {
     next_register: u8,
     max_register: u8,
     loops: Vec<LoopContext>,
-    try_contexts: Vec<TryContext>,
+    cleanup_contexts: Vec<CleanupContext>,
     upvalues: Vec<UpvalueEntry>,
     parent_locals: Vec<(String, u8)>,
     parent_upvalues: Vec<(String, u8)>,
@@ -59,7 +66,7 @@ impl Compiler {
             next_register: 0,
             max_register: 0,
             loops: Vec::new(),
-            try_contexts: Vec::new(),
+            cleanup_contexts: Vec::new(),
             upvalues: Vec::new(),
             parent_locals: Vec::new(),
             parent_upvalues: Vec::new(),
@@ -204,14 +211,18 @@ impl Compiler {
 
     fn emit_handler_pops_for_loop_exit(&mut self) {
         let current_loop_depth = self.loops.len();
-        let pop_count = self
-            .try_contexts
+        let cleanup_kinds: Vec<CleanupKind> = self
+            .cleanup_contexts
             .iter()
             .rev()
             .take_while(|ctx| ctx.loop_depth >= current_loop_depth)
-            .count();
-        for _ in 0..pop_count {
-            self.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
+            .map(|ctx| ctx.kind)
+            .collect();
+        for kind in cleanup_kinds {
+            match kind {
+                CleanupKind::Handler => self.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0),
+                CleanupKind::Timeout => self.emit(encode_abc(OpCode::PopTimeout, 0, 0, 0), 0),
+            }
         }
     }
 }
@@ -1094,7 +1105,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             let saved = c.next_register;
             let err_reg = c.alloc_reg();
             let handler_jump = c.emit_jump(OpCode::PushHandler, err_reg, 0);
-            c.try_contexts.push(TryContext {
+            c.cleanup_contexts.push(CleanupContext {
+                kind: CleanupKind::Handler,
                 loop_depth: c.loops.len(),
             });
             c.begin_scope();
@@ -1102,7 +1114,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 compile_stmt(c, s)?;
             }
             c.end_scope();
-            c.try_contexts.pop();
+            c.cleanup_contexts.pop();
             c.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
             let end_jump = c.emit_jump(OpCode::Jump, 0, 0);
             c.patch_jump(handler_jump);
@@ -1112,14 +1124,41 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::TimeoutBlock { duration, body } => {
-            let _dur_reg = c.alloc_reg();
-            compile_expr(c, duration, _dur_reg)?;
-            c.free_to(_dur_reg);
+            let saved = c.next_register;
+            let error_reg = c.alloc_reg();
+            compile_expr(c, duration, error_reg)?;
+
+            let handler_jump = c.emit_jump(OpCode::PushHandler, error_reg, 0);
+            c.cleanup_contexts.push(CleanupContext {
+                kind: CleanupKind::Handler,
+                loop_depth: c.loops.len(),
+            });
+
+            let timeout_jump = c.emit_jump(OpCode::PushTimeout, error_reg, 0);
+            c.cleanup_contexts.push(CleanupContext {
+                kind: CleanupKind::Timeout,
+                loop_depth: c.loops.len(),
+            });
+
             c.begin_scope();
             for s in body {
                 compile_stmt(c, s)?;
             }
             c.end_scope();
+
+            c.cleanup_contexts.pop();
+            c.emit(encode_abc(OpCode::PopTimeout, 0, 0, 0), 0);
+            c.cleanup_contexts.pop();
+            c.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
+            let end_jump = c.emit_jump(OpCode::Jump, 0, 0);
+
+            c.patch_jump(timeout_jump);
+            c.patch_jump(handler_jump);
+            c.emit(encode_abc(OpCode::PopTimeout, 0, 0, 0), 0);
+            compile_hidden_call_from_regs(c, "__forge_raise_error", &[error_reg], error_reg)?;
+
+            c.patch_jump(end_jump);
+            c.free_to(saved);
             Ok(())
         }
 
@@ -1150,7 +1189,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             let loop_start = c.chunk.code_len();
             let handler_jump = c.emit_jump(OpCode::PushHandler, error_reg, 0);
-            c.try_contexts.push(TryContext {
+            c.cleanup_contexts.push(CleanupContext {
+                kind: CleanupKind::Handler,
                 loop_depth: c.loops.len(),
             });
             c.begin_scope();
@@ -1158,7 +1198,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 compile_stmt(c, s)?;
             }
             c.end_scope();
-            c.try_contexts.pop();
+            c.cleanup_contexts.pop();
             c.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
             let success_jump = c.emit_jump(OpCode::Jump, 0, 0);
 
@@ -1251,7 +1291,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         } => {
             let catch_reg = c.alloc_reg();
             let handler_jump = c.emit_jump(OpCode::PushHandler, catch_reg, 0);
-            c.try_contexts.push(TryContext {
+            c.cleanup_contexts.push(CleanupContext {
+                kind: CleanupKind::Handler,
                 loop_depth: c.loops.len(),
             });
             c.begin_scope();
@@ -1259,7 +1300,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 compile_stmt(c, s)?;
             }
             c.end_scope();
-            c.try_contexts.pop();
+            c.cleanup_contexts.pop();
             c.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
             let end_jump = c.emit_jump(OpCode::Jump, 0, 0);
 

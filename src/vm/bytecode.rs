@@ -52,6 +52,8 @@ pub enum OpCode {
     Pop,
     PushHandler, // A=error_reg, sBx=catch_target
     PopHandler,
+    PushTimeout, // A=duration/error reg, sBx=catch_target
+    PopTimeout,
 }
 
 /// Compile-time constant — can hold strings, unlike the runtime Value.

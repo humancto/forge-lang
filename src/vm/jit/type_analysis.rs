@@ -190,7 +190,11 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
             | OpCode::Interpolate
             | OpCode::Spawn
             | OpCode::ExtractField
-            | OpCode::Try => {
+            | OpCode::Try
+            | OpCode::PushHandler
+            | OpCode::PopHandler
+            | OpCode::PushTimeout
+            | OpCode::PopTimeout => {
                 has_unsupported = true;
                 if a < constants.len() {
                     constants[a] = None;

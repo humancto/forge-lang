@@ -587,6 +587,32 @@ mod parity_tests {
     }
 
     #[test]
+    fn cross_backend_parity_timeout_block_fast_path() {
+        assert_cross_backend_value(
+            r#"
+            let mut status = "pending"
+            timeout 1 seconds {
+                status = "done"
+            }
+            status
+            "#,
+            "done",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_timeout_block_expires() {
+        assert_cross_backend_error_contains(
+            r#"
+            timeout 1 seconds {
+                wait(2)
+            }
+            "#,
+            "timeout: operation exceeded 1 second limit",
+        );
+    }
+
+    #[test]
     fn cross_backend_parity_file_import() {
         assert_cross_backend_value(
             r#"

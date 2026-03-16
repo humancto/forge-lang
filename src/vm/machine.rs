@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use super::bytecode::*;
 use super::frame::*;
@@ -25,6 +26,7 @@ pub struct VM {
     pub output: Vec<String>,
     pub jit_cache: HashMap<String, JitEntry>,
     pub profiler: Profiler,
+    skip_timeout_check_once: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +105,7 @@ impl VM {
             output: Vec::new(),
             jit_cache: HashMap::new(),
             profiler: Profiler::new(false),
+            skip_timeout_check_once: false,
         };
         vm.register_builtins();
         vm
@@ -121,6 +124,7 @@ impl VM {
             output: Vec::new(),
             jit_cache: HashMap::new(),
             profiler: Profiler::new(true),
+            skip_timeout_check_once: false,
         };
         vm.register_builtins();
         vm
@@ -213,6 +217,7 @@ impl VM {
             "__forge_retry_count",
             "__forge_retry_wait",
             "__forge_retry_failed",
+            "__forge_raise_error",
             "__forge_import_module",
         ];
         for name in &builtins {
@@ -570,6 +575,70 @@ impl VM {
         self.run_until(boundary)
     }
 
+    fn earliest_expired_timeout(&self) -> Option<(usize, TimeoutGuard)> {
+        let now = Instant::now();
+        self.frames
+            .iter()
+            .enumerate()
+            .flat_map(|(frame_idx, frame)| {
+                frame
+                    .timeouts
+                    .iter()
+                    .copied()
+                    .map(move |guard| (frame_idx, guard))
+            })
+            .filter(|(_, guard)| now >= guard.deadline)
+            .min_by_key(|(_, guard)| guard.deadline)
+    }
+
+    pub(super) fn sleep_with_timeout_checks(&self, duration: Duration) -> Result<(), VMError> {
+        let total_ms = duration.as_millis() as u64;
+        let mut elapsed = 0u64;
+        while elapsed < total_ms {
+            if let Some((_, guard)) = self.earliest_expired_timeout() {
+                return Err(VMError::new(&format!(
+                    "timeout: operation exceeded {} second limit",
+                    guard.seconds
+                )));
+            }
+            let chunk = std::cmp::min(50, total_ms - elapsed);
+            std::thread::sleep(Duration::from_millis(chunk));
+            elapsed += chunk;
+        }
+        if let Some((_, guard)) = self.earliest_expired_timeout() {
+            return Err(VMError::new(&format!(
+                "timeout: operation exceeded {} second limit",
+                guard.seconds
+            )));
+        }
+        Ok(())
+    }
+
+    fn handle_timeout_expiry(&mut self) -> Result<usize, VMError> {
+        let (frame_idx, guard) = self
+            .earliest_expired_timeout()
+            .ok_or_else(|| VMError::new("internal: no expired timeout"))?;
+
+        while self.frames.len() > frame_idx + 1 {
+            self.profiler.exit_function();
+            self.frames.pop();
+        }
+
+        let err = VMError::new(&format!(
+            "timeout: operation exceeded {} second limit",
+            guard.seconds
+        ));
+        let err_value = self.runtime_error_value(&err);
+        let base = self.frames[frame_idx].base;
+        self.registers[base + guard.error_register as usize] = err_value;
+
+        let frame = &mut self.frames[frame_idx];
+        frame.handlers.truncate(guard.handler_base);
+        frame.ip = guard.catch_ip;
+        self.skip_timeout_check_once = true;
+        Ok(frame_idx)
+    }
+
     fn run_until(&mut self, boundary_frame_idx: usize) -> Result<Value, VMError> {
         loop {
             if self.frames.is_empty() {
@@ -590,12 +659,26 @@ impl VM {
                 }
             };
 
-            let frame = &mut self.frames[frame_idx];
-            if frame.ip >= chunk.code.len() {
+            if self.frames[frame_idx].ip >= chunk.code.len() {
                 self.frames.pop();
                 continue;
             }
 
+            if self.skip_timeout_check_once {
+                self.skip_timeout_check_once = false;
+            } else if self.earliest_expired_timeout().is_some() {
+                match self.handle_timeout_expiry() {
+                    Ok(handler_frame_idx) => {
+                        if handler_frame_idx < boundary_frame_idx {
+                            return Err(VMError::unwound_to_handler());
+                        }
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+
+            let frame = &mut self.frames[frame_idx];
             let inst = chunk.code[frame.ip];
             frame.ip += 1;
             let base = frame.base;
@@ -1207,6 +1290,28 @@ impl VM {
                     }
                     OpCode::PopHandler => {
                         self.frames[frame_idx].handlers.pop();
+                    }
+                    OpCode::PushTimeout => {
+                        let seconds = match &self.registers[base + a as usize] {
+                            Value::Int(n) => (*n).max(0) as u64,
+                            Value::Float(n) => n.max(0.0) as u64,
+                            _ => 5,
+                        };
+                        let catch_ip = {
+                            let frame = &self.frames[frame_idx];
+                            (frame.ip as i64 + sbx as i64) as usize
+                        };
+                        let handler_base = self.frames[frame_idx].handlers.len().saturating_sub(1);
+                        self.frames[frame_idx].timeouts.push(TimeoutGuard {
+                            deadline: Instant::now() + Duration::from_secs(seconds),
+                            seconds,
+                            catch_ip,
+                            error_register: a,
+                            handler_base,
+                        });
+                    }
+                    OpCode::PopTimeout => {
+                        self.frames[frame_idx].timeouts.pop();
                     }
                     _ => {
                         return Err(VMError::new(&format!("unknown opcode: {}", op)));
