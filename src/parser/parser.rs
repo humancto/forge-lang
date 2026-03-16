@@ -1125,7 +1125,29 @@ impl Parser {
     // ========== Expression Parsing (Pratt) ==========
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_pipeline()
+        self.parse_query_chain()
+    }
+
+    fn parse_query_chain(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_pipeline()?;
+
+        if self.check(&Token::Where) {
+            expr = self.parse_where_filter_suffix(expr)?;
+        }
+
+        if self.check(&Token::PipeRight) {
+            let mut steps = Vec::new();
+            while self.check(&Token::PipeRight) {
+                self.advance();
+                steps.push(self.parse_pipe_step()?);
+            }
+            expr = Expr::PipeChain {
+                source: Box::new(expr),
+                steps,
+            };
+        }
+
+        Ok(expr)
     }
 
     /// Pipeline: expr |> expr |> expr
@@ -1142,6 +1164,95 @@ impl Parser {
         }
 
         Ok(expr)
+    }
+
+    fn parse_where_filter_suffix(&mut self, source: Expr) -> Result<Expr, ParseError> {
+        self.expect(Token::Where)?;
+        let field = self.expect_ident()?;
+        let op = self.parse_query_compare_op()?;
+        let value = self.parse_pipeline()?;
+        Ok(Expr::WhereFilter {
+            source: Box::new(source),
+            field,
+            op,
+            value: Box::new(value),
+        })
+    }
+
+    fn parse_pipe_step(&mut self) -> Result<PipeStep, ParseError> {
+        match self.current_token() {
+            Token::Keep => {
+                self.advance();
+                self.expect(Token::Where)?;
+                Ok(PipeStep::Keep(Box::new(self.parse_pipe_keep_predicate()?)))
+            }
+            Token::Ident(ref name) if name == "sort" => {
+                self.advance();
+                let field = if self.check(&Token::By) {
+                    self.advance();
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                Ok(PipeStep::Sort(field))
+            }
+            Token::Take => {
+                self.advance();
+                Ok(PipeStep::Take(Box::new(self.parse_pipeline()?)))
+            }
+            _ => Ok(PipeStep::Apply(Box::new(self.parse_pipeline()?))),
+        }
+    }
+
+    fn parse_pipe_keep_predicate(&mut self) -> Result<Expr, ParseError> {
+        let field = self.expect_ident()?;
+        let predicate = if self.is_query_compare_op() {
+            let op = self.parse_query_compare_op()?;
+            let rhs = self.parse_pipeline()?;
+            Expr::BinOp {
+                left: Box::new(Expr::FieldAccess {
+                    object: Box::new(Expr::Ident("it".to_string())),
+                    field,
+                }),
+                op,
+                right: Box::new(rhs),
+            }
+        } else {
+            Expr::FieldAccess {
+                object: Box::new(Expr::Ident("it".to_string())),
+                field,
+            }
+        };
+
+        Ok(Expr::Lambda {
+            params: vec![Param {
+                name: "it".to_string(),
+                type_ann: None,
+                default: None,
+            }],
+            body: vec![Stmt::Return(Some(predicate))],
+        })
+    }
+
+    fn is_query_compare_op(&self) -> bool {
+        matches!(
+            self.current_token(),
+            Token::EqEq | Token::NotEq | Token::Lt | Token::Gt | Token::LtEq | Token::GtEq
+        )
+    }
+
+    fn parse_query_compare_op(&mut self) -> Result<BinOp, ParseError> {
+        let op = match self.current_token() {
+            Token::EqEq => BinOp::Eq,
+            Token::NotEq => BinOp::NotEq,
+            Token::Lt => BinOp::Lt,
+            Token::Gt => BinOp::Gt,
+            Token::LtEq => BinOp::LtEq,
+            Token::GtEq => BinOp::GtEq,
+            _ => return Err(self.error("expected comparison operator after query field")),
+        };
+        self.advance();
+        Ok(op)
     }
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
@@ -1973,5 +2084,39 @@ mod tests {
         let mut parser = Parser::new(tokens);
         let err = parser.parse_program().expect_err("parsing should fail");
         assert!(err.message.contains("invalid interpolation expression"));
+    }
+
+    #[test]
+    fn parses_where_filter_expression() {
+        let program = parse_program("let adults = users where age >= 18");
+        let spanned = program.statements.first().expect("expected one statement");
+
+        match &spanned.stmt {
+            Stmt::Let { value, .. } => match value {
+                Expr::WhereFilter { field, op, value, .. } => {
+                    assert_eq!(field, "age");
+                    assert_eq!(*op, BinOp::GtEq);
+                    assert!(matches!(value.as_ref(), Expr::Int(18)));
+                }
+                other => panic!("expected where filter, got {:?}", other),
+            },
+            other => panic!("expected let statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_query_pipe_chain_expression() {
+        let program = parse_program("users >> keep where active >> sort by name >> take 2");
+        let spanned = program.statements.first().expect("expected one statement");
+
+        match &spanned.stmt {
+            Stmt::Expression(Expr::PipeChain { steps, .. }) => {
+                assert_eq!(steps.len(), 3);
+                assert!(matches!(steps[0], PipeStep::Keep(_)));
+                assert!(matches!(steps[1], PipeStep::Sort(Some(ref field)) if field == "name"));
+                assert!(matches!(steps[2], PipeStep::Take(_)));
+            }
+            other => panic!("expected pipe chain expression, got {:?}", other),
+        }
     }
 }

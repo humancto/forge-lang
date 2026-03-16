@@ -613,6 +613,33 @@ mod parity_tests {
     }
 
     #[test]
+    fn cross_backend_parity_where_filter_syntax() {
+        assert_cross_backend_value(
+            r#"
+            let users = [{ age: 17 }, { age: 30 }, { age: 42 }]
+            len(users where age >= 18)
+            "#,
+            "2",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_pipe_chain_syntax() {
+        assert_cross_backend_value(
+            r#"
+            let users = [
+                { name: "Zed", active: false },
+                { name: "Bob", active: true },
+                { name: "Alice", active: true }
+            ]
+            let result = users >> keep where active >> sort by name >> take 1
+            result[0].name
+            "#,
+            "Alice",
+        );
+    }
+
+    #[test]
     fn cross_backend_parity_file_import() {
         assert_cross_backend_value(
             r#"

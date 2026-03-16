@@ -2282,11 +2282,38 @@ impl Interpreter {
                 let mut current = self.eval_expr(source)?;
                 for step in steps {
                     current = match step {
-                        PipeStep::Sort(_) => {
+                        PipeStep::Sort(field_opt) => {
                             if let Value::Array(mut items) = current {
                                 items.sort_by(|a, b| match (a, b) {
-                                    (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                                    _ => std::cmp::Ordering::Equal,
+                                    _ => {
+                                        let left = match field_opt {
+                                            Some(field) => match a {
+                                                Value::Object(map) => {
+                                                    map.get(field).cloned().unwrap_or(Value::Null)
+                                                }
+                                                _ => Value::Null,
+                                            },
+                                            None => a.clone(),
+                                        };
+                                        let right = match field_opt {
+                                            Some(field) => match b {
+                                                Value::Object(map) => {
+                                                    map.get(field).cloned().unwrap_or(Value::Null)
+                                                }
+                                                _ => Value::Null,
+                                            },
+                                            None => b.clone(),
+                                        };
+
+                                        match (&left, &right) {
+                                            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                                            (Value::Float(x), Value::Float(y)) => {
+                                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                                            }
+                                            (Value::String(x), Value::String(y)) => x.cmp(y),
+                                            _ => format!("{}", left).cmp(&format!("{}", right)),
+                                        }
+                                    }
                                 });
                                 Value::Array(items)
                             } else {
@@ -4783,6 +4810,39 @@ mod tests {
         match value {
             Value::Int(n) => assert_eq!(n, 2),
             _ => panic!("expected 2"),
+        }
+    }
+
+    #[test]
+    fn query_where_filter_syntax() {
+        let value = run_forge(
+            r#"
+            let items = [{ v: 1 }, { v: 5 }, { v: 10 }]
+            len(items where v > 3)
+        "#,
+        );
+        match value {
+            Value::Int(n) => assert_eq!(n, 2),
+            _ => panic!("expected 2"),
+        }
+    }
+
+    #[test]
+    fn query_pipe_chain_syntax() {
+        let value = run_forge(
+            r#"
+            let users = [
+                { name: "Zed", active: false },
+                { name: "Bob", active: true },
+                { name: "Alice", active: true }
+            ]
+            let result = users >> keep where active >> sort by name >> take 1
+            result[0].name
+        "#,
+        );
+        match value {
+            Value::String(name) => assert_eq!(name, "Alice"),
+            _ => panic!("expected Alice"),
         }
     }
 

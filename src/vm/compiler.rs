@@ -331,6 +331,36 @@ fn compile_hidden_call_from_regs(
     Ok(())
 }
 
+fn compile_call_from_expr_and_regs(
+    c: &mut Compiler,
+    function: &Expr,
+    arg_regs: &[u8],
+    dst: u8,
+) -> Result<(), CompileError> {
+    let saved = c.next_register;
+    let fn_reg = c.alloc_reg();
+    compile_expr(c, function, fn_reg)?;
+    for &arg_reg in arg_regs {
+        let slot = c.alloc_reg();
+        c.emit(encode_abc(OpCode::Move, slot, arg_reg, 0), 0);
+    }
+    c.emit(encode_abc(OpCode::Call, fn_reg, arg_regs.len() as u8, dst), 0);
+    c.free_to(saved);
+    Ok(())
+}
+
+fn query_op_name(op: &BinOp) -> &'static str {
+    match op {
+        BinOp::Eq => "==",
+        BinOp::NotEq => "!=",
+        BinOp::Lt => "<",
+        BinOp::Gt => ">",
+        BinOp::LtEq => "<=",
+        BinOp::GtEq => ">=",
+        _ => "==",
+    }
+}
+
 fn compile_set_global_expr(c: &mut Compiler, name: &str, expr: Expr) -> Result<(), CompileError> {
     let saved = c.next_register;
     let reg = c.alloc_reg();
@@ -1605,11 +1635,68 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Spread(inner) => {
             compile_expr(c, inner, dst)?;
         }
-        Expr::WhereFilter { source, .. } => {
-            compile_expr(c, source, dst)?;
+        Expr::WhereFilter {
+            source,
+            field,
+            op,
+            value,
+        } => {
+            compile_hidden_call(
+                c,
+                "__forge_where_filter",
+                vec![
+                    (**source).clone(),
+                    Expr::StringLit(field.clone()),
+                    Expr::StringLit(query_op_name(op).to_string()),
+                    (**value).clone(),
+                ],
+                dst,
+            )?;
         }
-        Expr::PipeChain { source, .. } => {
+        Expr::PipeChain { source, steps } => {
             compile_expr(c, source, dst)?;
+
+            for step in steps {
+                match step {
+                    PipeStep::Keep(predicate) => {
+                        let saved = c.next_register;
+                        let pred_reg = c.alloc_reg();
+                        compile_expr(c, predicate, pred_reg)?;
+                        compile_hidden_call_from_regs(c, "filter", &[dst, pred_reg], dst)?;
+                        c.free_to(saved);
+                    }
+                    PipeStep::Sort(Some(field)) => {
+                        let saved = c.next_register;
+                        let field_reg = c.alloc_reg();
+                        compile_expr(c, &Expr::StringLit(field.clone()), field_reg)?;
+                        compile_hidden_call_from_regs(
+                            c,
+                            "__forge_pipe_sort",
+                            &[dst, field_reg],
+                            dst,
+                        )?;
+                        c.free_to(saved);
+                    }
+                    PipeStep::Sort(None) => {
+                        compile_hidden_call_from_regs(c, "sort", &[dst], dst)?;
+                    }
+                    PipeStep::Take(count) => {
+                        let saved = c.next_register;
+                        let count_reg = c.alloc_reg();
+                        compile_expr(c, count, count_reg)?;
+                        compile_hidden_call_from_regs(
+                            c,
+                            "__forge_pipe_take",
+                            &[dst, count_reg],
+                            dst,
+                        )?;
+                        c.free_to(saved);
+                    }
+                    PipeStep::Apply(function) => {
+                        compile_call_from_expr_and_regs(c, function, &[dst], dst)?;
+                    }
+                }
+            }
         }
         Expr::MethodCall {
             object,

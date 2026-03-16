@@ -217,6 +217,9 @@ impl VM {
             "__forge_retry_count",
             "__forge_retry_wait",
             "__forge_retry_failed",
+            "__forge_where_filter",
+            "__forge_pipe_sort",
+            "__forge_pipe_take",
             "__forge_raise_error",
             "__forge_import_module",
         ];

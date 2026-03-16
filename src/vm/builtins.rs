@@ -207,6 +207,64 @@ impl VM {
                     count, last_error
                 )))
             }
+            "__forge_where_filter" => {
+                if args.len() != 4 {
+                    return Err(VMError::new(
+                        "__forge_where_filter() requires (array, field, op, value)",
+                    ));
+                }
+                let items = self.array_items(&args[0], "__forge_where_filter() first arg must be array")?;
+                let field = self.get_string_arg(&args, 1)?;
+                let op = self.get_string_arg(&args, 2)?;
+                let cmp_value = args[3].clone();
+                let filtered = items
+                    .into_iter()
+                    .filter(|item| {
+                        self.get_object_fields(item)
+                            .and_then(|fields| fields.get(&field).cloned())
+                            .is_some_and(|field_value| self.query_compare(&field_value, &op, &cmp_value))
+                    })
+                    .collect::<Vec<_>>();
+                let r = self.gc.alloc(ObjKind::Array(filtered));
+                Ok(Value::Obj(r))
+            }
+            "__forge_pipe_sort" => {
+                if args.len() != 2 {
+                    return Err(VMError::new(
+                        "__forge_pipe_sort() requires (array, field)",
+                    ));
+                }
+                let mut items = self.array_items(&args[0], "__forge_pipe_sort() first arg must be array")?;
+                let field = self.get_string_arg(&args, 1)?;
+                items.sort_by(|a, b| {
+                    let left = self
+                        .get_object_fields(a)
+                        .and_then(|fields| fields.get(&field).cloned())
+                        .unwrap_or(Value::Null);
+                    let right = self
+                        .get_object_fields(b)
+                        .and_then(|fields| fields.get(&field).cloned())
+                        .unwrap_or(Value::Null);
+                    self.query_value_cmp(&left, &right)
+                });
+                let r = self.gc.alloc(ObjKind::Array(items));
+                Ok(Value::Obj(r))
+            }
+            "__forge_pipe_take" => {
+                if args.len() != 2 {
+                    return Err(VMError::new(
+                        "__forge_pipe_take() requires (array, count)",
+                    ));
+                }
+                let items = self.array_items(&args[0], "__forge_pipe_take() first arg must be array")?;
+                let count = match args[1] {
+                    Value::Int(n) => n.max(0) as usize,
+                    Value::Float(n) => n.max(0.0) as usize,
+                    _ => 10,
+                };
+                let r = self.gc.alloc(ObjKind::Array(items.into_iter().take(count).collect()));
+                Ok(Value::Obj(r))
+            }
             "__forge_raise_error" => {
                 if args.len() != 1 {
                     return Err(VMError::new(
@@ -1868,6 +1926,53 @@ impl VM {
                 _ => None,
             }),
             _ => None,
+        }
+    }
+
+    fn array_items(&self, value: &Value, message: &str) -> Result<Vec<Value>, VMError> {
+        match value {
+            Value::Obj(r) => match self.gc.get(*r) {
+                Some(obj) => match &obj.kind {
+                    ObjKind::Array(items) => Ok(items.clone()),
+                    _ => Err(VMError::new(message)),
+                },
+                None => Err(VMError::new("dangling array reference")),
+            },
+            _ => Err(VMError::new(message)),
+        }
+    }
+
+    fn query_compare(&self, left: &Value, op: &str, right: &Value) -> bool {
+        match op {
+            "==" => self.query_value_cmp(left, right) == std::cmp::Ordering::Equal,
+            "!=" => self.query_value_cmp(left, right) != std::cmp::Ordering::Equal,
+            ">" => self.query_value_cmp(left, right) == std::cmp::Ordering::Greater,
+            ">=" => {
+                let ord = self.query_value_cmp(left, right);
+                matches!(ord, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+            }
+            "<" => self.query_value_cmp(left, right) == std::cmp::Ordering::Less,
+            "<=" => {
+                let ord = self.query_value_cmp(left, right);
+                matches!(ord, std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            }
+            _ => false,
+        }
+    }
+
+    fn query_value_cmp(&self, left: &Value, right: &Value) -> std::cmp::Ordering {
+        match (left, right) {
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Int(a), Value::Float(b)) => {
+                (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Float(a), Value::Int(b)) => {
+                a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            _ => left.display(&self.gc).cmp(&right.display(&self.gc)),
         }
     }
 

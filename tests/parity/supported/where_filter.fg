@@ -1,0 +1,4 @@
+// expect: 2
+
+let users = [{ age: 17 }, { age: 30 }, { age: 42 }]
+len(users where age >= 18)

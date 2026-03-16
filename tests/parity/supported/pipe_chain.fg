@@ -1,0 +1,9 @@
+// expect: Alice
+
+let users = [
+    { name: "Zed", active: false },
+    { name: "Bob", active: true },
+    { name: "Alice", active: true }
+]
+let result = users >> keep where active >> sort by name >> take 1
+result[0].name

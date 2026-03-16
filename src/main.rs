@@ -498,12 +498,10 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
             }
         }
         Expr::WhereFilter { source, value, .. } => {
-            issues.insert("where filters");
             collect_vm_incompatible_expr(source, issues);
             collect_vm_incompatible_expr(value, issues);
         }
         Expr::PipeChain { source, steps } => {
-            issues.insert("pipe chains");
             collect_vm_incompatible_expr(source, issues);
             for step in steps {
                 match step {
@@ -1031,5 +1029,27 @@ mod tests {
         assert!(vm_incompatibilities(&program).is_empty());
 
         std::fs::remove_file(&import_path).ok();
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_where_filters() {
+        let source = r#"
+        let users = [{ age: 17 }, { age: 30 }]
+        users where age >= 18
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_pipe_chains() {
+        let source = r#"
+        let users = [{ name: "Bob", active: true }]
+        users >> keep where active >> sort by name >> take 1
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
     }
 }
