@@ -287,6 +287,25 @@ fn compile_hidden_stmt(c: &mut Compiler, name: &str, args: Vec<Expr>) -> Result<
     Ok(())
 }
 
+fn compile_hidden_call_from_regs(
+    c: &mut Compiler,
+    name: &str,
+    arg_regs: &[u8],
+    dst: u8,
+) -> Result<(), CompileError> {
+    let saved = c.next_register;
+    let fn_reg = c.alloc_reg();
+    let fn_idx = c.const_str(name);
+    c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
+    for &arg_reg in arg_regs {
+        let slot = c.alloc_reg();
+        c.emit(encode_abc(OpCode::Move, slot, arg_reg, 0), 0);
+    }
+    c.emit(encode_abc(OpCode::Call, fn_reg, arg_regs.len() as u8, dst), 0);
+    c.free_to(saved);
+    Ok(())
+}
+
 fn compile_set_global_expr(c: &mut Compiler, name: &str, expr: Expr) -> Result<(), CompileError> {
     let saved = c.next_register;
     let reg = c.alloc_reg();
@@ -1018,11 +1037,23 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::SafeBlock { body } => {
+            let saved = c.next_register;
+            let err_reg = c.alloc_reg();
+            let handler_jump = c.emit_jump(OpCode::PushHandler, err_reg, 0);
+            c.try_contexts.push(TryContext {
+                loop_depth: c.loops.len(),
+            });
             c.begin_scope();
             for s in body {
                 compile_stmt(c, s)?;
             }
             c.end_scope();
+            c.try_contexts.pop();
+            c.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
+            let end_jump = c.emit_jump(OpCode::Jump, 0, 0);
+            c.patch_jump(handler_jump);
+            c.patch_jump(end_jump);
+            c.free_to(saved);
             Ok(())
         }
 
@@ -1039,14 +1070,74 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::RetryBlock { count, body } => {
-            let _count_reg = c.alloc_reg();
-            compile_expr(c, count, _count_reg)?;
-            c.free_to(_count_reg);
+            let saved = c.next_register;
+            let raw_count_reg = c.alloc_reg();
+            compile_expr(c, count, raw_count_reg)?;
+
+            let count_reg = c.alloc_reg();
+            compile_hidden_call_from_regs(c, "__forge_retry_count", &[raw_count_reg], count_reg)?;
+
+            let attempt_reg = c.alloc_reg();
+            let zero_idx = c.const_int(0);
+            c.emit(encode_abx(OpCode::LoadConst, attempt_reg, zero_idx), 0);
+
+            let error_reg = c.alloc_reg();
+            c.emit(encode_abc(OpCode::LoadNull, error_reg, 0, 0), 0);
+
+            let zero_cmp_reg = c.alloc_reg();
+            c.emit(encode_abx(OpCode::LoadConst, zero_cmp_reg, zero_idx), 0);
+            let can_run_reg = c.alloc_reg();
+            c.emit(
+                encode_abc(OpCode::Lt, can_run_reg, zero_cmp_reg, count_reg),
+                0,
+            );
+            let fail_without_attempts = c.emit_jump(OpCode::JumpIfFalse, can_run_reg, 0);
+            c.free_to(error_reg + 1);
+
+            let loop_start = c.chunk.code_len();
+            let handler_jump = c.emit_jump(OpCode::PushHandler, error_reg, 0);
+            c.try_contexts.push(TryContext {
+                loop_depth: c.loops.len(),
+            });
             c.begin_scope();
             for s in body {
                 compile_stmt(c, s)?;
             }
             c.end_scope();
+            c.try_contexts.pop();
+            c.emit(encode_abc(OpCode::PopHandler, 0, 0, 0), 0);
+            let success_jump = c.emit_jump(OpCode::Jump, 0, 0);
+
+            c.patch_jump(handler_jump);
+
+            let one_reg = c.alloc_reg();
+            let one_idx = c.const_int(1);
+            c.emit(encode_abx(OpCode::LoadConst, one_reg, one_idx), 0);
+            c.emit(encode_abc(OpCode::Add, attempt_reg, attempt_reg, one_reg), 0);
+            c.free_to(error_reg + 1);
+
+            let retry_cond_reg = c.alloc_reg();
+            c.emit(
+                encode_abc(OpCode::Lt, retry_cond_reg, attempt_reg, count_reg),
+                0,
+            );
+            let fail_jump = c.emit_jump(OpCode::JumpIfFalse, retry_cond_reg, 0);
+            c.free_to(error_reg + 1);
+
+            compile_hidden_call_from_regs(c, "__forge_retry_wait", &[attempt_reg], error_reg)?;
+            c.emit_loop(loop_start, 0);
+
+            c.patch_jump(fail_without_attempts);
+            c.patch_jump(fail_jump);
+            compile_hidden_call_from_regs(
+                c,
+                "__forge_retry_failed",
+                &[count_reg, error_reg],
+                error_reg,
+            )?;
+
+            c.patch_jump(success_jump);
+            c.free_to(saved);
             Ok(())
         }
 

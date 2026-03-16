@@ -158,6 +158,55 @@ impl VM {
 
                 Ok(Value::Bool(true))
             }
+            "__forge_retry_count" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("__forge_retry_count() requires (count)"));
+                }
+                match args[0] {
+                    Value::Int(n) => Ok(Value::Int(n.max(0))),
+                    _ => Ok(Value::Int(3)),
+                }
+            }
+            "__forge_retry_wait" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("__forge_retry_wait() requires (attempt)"));
+                }
+                let attempt = match args[0] {
+                    Value::Int(n) => n.max(0) as u64,
+                    _ => 0,
+                };
+                if attempt > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+                }
+                Ok(Value::Null)
+            }
+            "__forge_retry_failed" => {
+                if args.len() != 2 {
+                    return Err(VMError::new(
+                        "__forge_retry_failed() requires (count, last_error)",
+                    ));
+                }
+                let count = match args[0] {
+                    Value::Int(n) => n.max(0),
+                    _ => 0,
+                };
+                let last_error = match &args[1] {
+                    Value::Obj(r) => self
+                        .gc
+                        .get(*r)
+                        .and_then(|obj| match &obj.kind {
+                            ObjKind::Object(map) => map.get("message").cloned(),
+                            _ => None,
+                        })
+                        .map(|value| value.display(&self.gc))
+                        .unwrap_or_default(),
+                    value => value.display(&self.gc),
+                };
+                Err(VMError::new(&format!(
+                    "retry failed after {} attempts: {}",
+                    count, last_error
+                )))
+            }
             "println" | "say" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ");

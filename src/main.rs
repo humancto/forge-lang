@@ -367,7 +367,6 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
             }
         }
         Stmt::SafeBlock { body } => {
-            issues.insert("safe blocks");
             for stmt in body {
                 collect_vm_incompatible_stmt(stmt, issues);
             }
@@ -378,8 +377,8 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
                 collect_vm_incompatible_stmt(stmt, issues);
             }
         }
-        Stmt::RetryBlock { body, .. } => {
-            issues.insert("retry blocks");
+        Stmt::RetryBlock { count, body } => {
+            collect_vm_incompatible_expr(count, issues);
             for stmt in body {
                 collect_vm_incompatible_stmt(stmt, issues);
             }
@@ -992,5 +991,50 @@ mod tests {
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_safe_blocks() {
+        let source = r#"
+        let mut status = "ok"
+        safe {
+            let crash = 1 / 0
+            status = "bad"
+        }
+        status
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_retry_blocks() {
+        let source = r#"
+        let mut attempts = 0
+        retry 3 times {
+            attempts += 1
+            if attempts < 3 {
+                let crash = 1 / 0
+            }
+        }
+        attempts
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_still_reject_timeout_blocks() {
+        let source = r#"
+        timeout 1 seconds {
+            println("slow")
+        }
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let issues = vm_incompatibilities(&program);
+        assert!(issues.contains(&"timeout blocks"));
     }
 }

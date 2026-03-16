@@ -1,0 +1,7 @@
+// expect: ok
+let mut status = "ok"
+safe {
+    let crash = 1 / 0
+    status = "bad"
+}
+status

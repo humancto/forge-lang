@@ -140,6 +140,75 @@ mod parity_tests {
         assert_eq!(jit, expected);
     }
 
+    fn assert_cross_backend_error_contains(source: &str, expected: &str) {
+        let program = parse_program(source);
+
+        let mut interpreter = Interpreter::new();
+        let interp_err = interpreter
+            .run_repl(&program)
+            .expect_err("interpreter should error")
+            .to_string();
+
+        let chunk = compiler::compile_repl(&program).expect("compile error");
+
+        let mut vm = VM::new();
+        let vm_err = vm.execute(&chunk).expect_err("vm should error").to_string();
+
+        let bytes = serialize::serialize_chunk(&chunk).expect("serialize error");
+        let restored = serialize::deserialize_chunk(&bytes).expect("deserialize error");
+        let mut bytecode_vm = VM::new();
+        let bytecode_err = bytecode_vm
+            .execute(&restored)
+            .expect_err("bytecode should error")
+            .to_string();
+
+        let mut jit = JitCompiler::new().expect("jit init error");
+        for (index, proto) in chunk.prototypes.iter().enumerate() {
+            let name = if proto.name.is_empty() {
+                format!("fn_{}", index)
+            } else {
+                proto.name.clone()
+            };
+            let info = type_analysis::analyze(proto);
+            if !info.has_unsupported_ops {
+                let _ = jit.compile_function(proto, &name);
+            }
+        }
+        let mut jit_vm = VM::new();
+        for (index, proto) in chunk.prototypes.iter().enumerate() {
+            let name = if proto.name.is_empty() {
+                format!("fn_{}", index)
+            } else {
+                proto.name.clone()
+            };
+            let info = type_analysis::analyze(proto);
+            if !info.has_unsupported_ops {
+                if let Some(ptr) = jit.get_compiled(&name) {
+                    jit_vm.jit_cache.insert(
+                        name,
+                        JitEntry {
+                            ptr,
+                            uses_float: info.has_float,
+                        },
+                    );
+                }
+            }
+        }
+        let jit_err = jit_vm
+            .execute(&chunk)
+            .expect_err("jit-assisted vm should error")
+            .to_string();
+
+        assert!(interp_err.contains(expected), "interpreter error: {}", interp_err);
+        assert!(vm_err.contains(expected), "vm error: {}", vm_err);
+        assert!(
+            bytecode_err.contains(expected),
+            "bytecode error: {}",
+            bytecode_err
+        );
+        assert!(jit_err.contains(expected), "jit error: {}", jit_err);
+    }
+
     #[test]
     fn parity_arithmetic() {
         let out = run_on_vm("println(2 + 3)\nprintln(10 - 4)\nprintln(6 * 7)\nprintln(15 / 3)");
@@ -470,6 +539,50 @@ mod parity_tests {
             outcome
             "#,
             "ArithmeticError",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_safe_block_swallows_error() {
+        assert_cross_backend_value(
+            r#"
+            let mut status = "ok"
+            safe {
+                let crash = 1 / 0
+                status = "bad"
+            }
+            status
+            "#,
+            "ok",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_retry_block_recovers() {
+        assert_cross_backend_value(
+            r#"
+            let mut attempts = 0
+            retry 3 times {
+                attempts += 1
+                if attempts < 3 {
+                    let crash = 1 / 0
+                }
+            }
+            attempts
+            "#,
+            "3",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_retry_block_failure_message() {
+        assert_cross_backend_error_contains(
+            r#"
+            retry 2 times {
+                let crash = 1 / 0
+            }
+            "#,
+            "retry failed after 2 attempts",
         );
     }
 
