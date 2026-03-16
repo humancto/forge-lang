@@ -4775,27 +4775,40 @@ mod tests {
     }
 
     #[test]
-    fn prompt_def_parses() {
-        let result = try_run_forge(
+    fn prompt_def_registers_builtin_placeholder() {
+        let value = run_forge(
             r#"
             prompt classify(text) {
                 system: "You are a classifier"
                 user: "Classify: {text}"
             }
+            let kind = type(classify)
+            kind
         "#,
         );
-        assert!(result.is_ok());
+        match value {
+            Value::String(name) => assert_eq!(name, "BuiltIn"),
+            other => panic!("expected BuiltIn type, got {:?}", other),
+        }
     }
 
     #[test]
-    fn agent_def_parses() {
-        // Agent needs AI API, just verify parse
-        let result = try_run_forge(
+    fn agent_def_registers_builtin_placeholder() {
+        let value = run_forge(
             r#"
-            let x = 1
+            agent researcher(topic) {
+                tools: ["search", "read"]
+                goal: "Research {topic}"
+                max_steps: 5
+            }
+            let kind = type(researcher)
+            kind
         "#,
         );
-        assert!(result.is_ok());
+        match value {
+            Value::String(name) => assert_eq!(name, "BuiltIn"),
+            other => panic!("expected BuiltIn type, got {:?}", other),
+        }
     }
 
     #[test]

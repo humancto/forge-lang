@@ -640,6 +640,37 @@ mod parity_tests {
     }
 
     #[test]
+    fn cross_backend_parity_prompt_definition() {
+        assert_cross_backend_value(
+            r#"
+            prompt summarize(text) {
+                system: "You are concise"
+                user: "Summarize: {text}"
+            }
+            let kind = type(summarize)
+            kind
+            "#,
+            "BuiltIn",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_agent_definition() {
+        assert_cross_backend_value(
+            r#"
+            agent researcher(topic) {
+                tools: ["search", "read"]
+                goal: "Research {topic}"
+                max_steps: 5
+            }
+            let kind = type(researcher)
+            kind
+            "#,
+            "BuiltIn",
+        );
+    }
+
+    #[test]
     fn cross_backend_parity_file_import() {
         assert_cross_backend_value(
             r#"

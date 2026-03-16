@@ -1267,8 +1267,16 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::ScheduleBlock { .. } => Ok(()),
         Stmt::WatchBlock { .. } => Ok(()),
-        Stmt::PromptDef { .. } => Ok(()),
-        Stmt::AgentDef { .. } => Ok(()),
+        Stmt::PromptDef { name, .. } => compile_hidden_stmt(
+            c,
+            "__forge_register_prompt",
+            vec![Expr::StringLit(name.clone())],
+        ),
+        Stmt::AgentDef { name, .. } => compile_hidden_stmt(
+            c,
+            "__forge_register_agent",
+            vec![Expr::StringLit(name.clone())],
+        ),
         Stmt::ImplBlock {
             type_name,
             ability,

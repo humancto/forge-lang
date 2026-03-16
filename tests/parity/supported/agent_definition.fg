@@ -1,0 +1,9 @@
+// expect: BuiltIn
+agent researcher(topic) {
+    tools: ["search", "read"]
+    goal: "Research {topic}"
+    max_steps: 5
+}
+
+let kind = type(researcher)
+kind

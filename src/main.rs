@@ -373,12 +373,8 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
                 collect_vm_incompatible_stmt(stmt, issues);
             }
         }
-        Stmt::PromptDef { .. } => {
-            issues.insert("prompt definitions");
-        }
-        Stmt::AgentDef { .. } => {
-            issues.insert("agent definitions");
-        }
+        Stmt::PromptDef { .. } => {}
+        Stmt::AgentDef { .. } => {}
         Stmt::DecoratorStmt(_) => {
             issues.insert("decorator-driven runtime features");
         }
@@ -1047,6 +1043,37 @@ mod tests {
         let source = r#"
         let users = [{ name: "Bob", active: true }]
         users >> keep where active >> sort by name >> take 1
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_prompt_definitions() {
+        let source = r#"
+        prompt summarize(text) {
+            system: "You are concise"
+            user: "Summarize: {text}"
+        }
+        let kind = type(summarize)
+        kind
+        "#;
+
+        let (program, _) = prepare_program(source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_agent_definitions() {
+        let source = r#"
+        agent researcher(topic) {
+            tools: ["search", "read"]
+            goal: "Research {topic}"
+            max_steps: 5
+        }
+        let kind = type(researcher)
+        kind
         "#;
 
         let (program, _) = prepare_program(source, false).expect("program should parse");

@@ -99,6 +99,7 @@ pub enum Token {
     Any,       // any x in items
     Ask,       // ask "prompt"
     Prompt,    // prompt name() { }
+    Agent,     // agent name() { }
     Transform, // transform data { }
     Table,     // table [...]
     Select,    // from X select Y
@@ -235,6 +236,7 @@ impl Token {
             "any" => Some(Token::Any),
             "ask" => Some(Token::Ask),
             "prompt" => Some(Token::Prompt),
+            "agent" => Some(Token::Agent),
             "transform" => Some(Token::Transform),
             "table" => Some(Token::Table),
             "select" => Some(Token::Select),

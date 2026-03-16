@@ -220,6 +220,8 @@ impl VM {
             "__forge_where_filter",
             "__forge_pipe_sort",
             "__forge_pipe_take",
+            "__forge_register_prompt",
+            "__forge_register_agent",
             "__forge_raise_error",
             "__forge_import_module",
         ];
@@ -518,6 +520,14 @@ impl VM {
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
         let r = self.gc.alloc_string(s.to_string());
         Value::Obj(r)
+    }
+
+    pub(super) fn alloc_builtin(&mut self, name: &str) -> Value {
+        let native = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+            name: name.to_string(),
+            func: native_dispatch,
+        }));
+        Value::Obj(native)
     }
 
     fn constant_to_value(&mut self, constant: &Constant) -> Value {

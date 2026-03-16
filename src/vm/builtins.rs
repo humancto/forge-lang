@@ -68,6 +68,24 @@ impl VM {
                     .insert(format!("__interface_{}__", name), iface.clone());
                 Ok(iface)
             }
+            "__forge_register_prompt" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("__forge_register_prompt() requires (name)"));
+                }
+                let name = self.get_string_arg(&args, 0)?;
+                let placeholder = self.alloc_builtin(&format!("prompt:{}", name));
+                self.globals.insert(name, placeholder.clone());
+                Ok(placeholder)
+            }
+            "__forge_register_agent" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("__forge_register_agent() requires (name)"));
+                }
+                let name = self.get_string_arg(&args, 0)?;
+                let placeholder = self.alloc_builtin(&format!("agent:{}", name));
+                self.globals.insert(name, placeholder.clone());
+                Ok(placeholder)
+            }
             "__forge_register_method" => {
                 if args.len() != 4 {
                     return Err(VMError::new(

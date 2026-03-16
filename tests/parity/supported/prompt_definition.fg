@@ -1,0 +1,7 @@
+// expect: BuiltIn
+prompt summarize(text) {
+    system: "You are concise"
+    user: "Summarize: {text}"
+}
+let kind = type(summarize)
+kind

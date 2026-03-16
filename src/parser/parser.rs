@@ -80,6 +80,7 @@ impl Parser {
             Token::Schedule => self.parse_schedule(),
             Token::Watch => self.parse_watch(),
             Token::Prompt => self.parse_prompt_def(),
+            Token::Agent => self.parse_agent_def(),
             Token::Download => self.parse_download(),
             Token::Crawl => self.parse_crawl(),
             _ => self.parse_expr_or_assign(),
@@ -723,6 +724,75 @@ impl Parser {
             system,
             user_template,
             returns,
+        })
+    }
+
+    fn parse_agent_def(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(Token::Agent)?;
+        let name = self.expect_ident()?;
+        self.expect(Token::LParen)?;
+        let params = self.parse_params()?;
+        self.expect(Token::RParen)?;
+        self.expect(Token::LBrace)?;
+        self.skip_newlines();
+
+        let mut tools = Vec::new();
+        let mut goal = String::new();
+        let mut max_steps = 5usize;
+
+        while !self.check(&Token::RBrace) {
+            let Token::Ident(key) = self.current_token().clone() else {
+                return Err(self.error("expected agent field name"));
+            };
+            self.advance();
+            self.expect(Token::Colon)?;
+
+            match key.as_str() {
+                "tools" => {
+                    self.expect(Token::LBracket)?;
+                    self.skip_newlines();
+                    while !self.check(&Token::RBracket) {
+                        match self.current_token().clone() {
+                            Token::StringLit(tool) | Token::RawStringLit(tool) => {
+                                tools.push(tool);
+                                self.advance();
+                            }
+                            _ => return Err(self.error("agent tools must be string literals")),
+                        }
+                        if self.check(&Token::Comma) {
+                            self.advance();
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(Token::RBracket)?;
+                }
+                "goal" => match self.current_token().clone() {
+                    Token::StringLit(text) | Token::RawStringLit(text) => {
+                        goal = text;
+                        self.advance();
+                    }
+                    _ => return Err(self.error("agent goal must be a string literal")),
+                },
+                "max_steps" => match self.current_token().clone() {
+                    Token::Int(steps) if steps >= 0 => {
+                        max_steps = steps as usize;
+                        self.advance();
+                    }
+                    _ => return Err(self.error("agent max_steps must be a non-negative integer")),
+                },
+                _ => return Err(self.error("unknown field in agent definition")),
+            }
+
+            self.skip_newlines();
+        }
+
+        self.expect(Token::RBrace)?;
+        Ok(Stmt::AgentDef {
+            name,
+            params,
+            tools,
+            goal,
+            max_steps,
         })
     }
 
@@ -1945,6 +2015,7 @@ impl Parser {
             Token::Download => Some("download".to_string()),
             Token::Ask => Some("ask".to_string()),
             Token::Prompt => Some("prompt".to_string()),
+            Token::Agent => Some("agent".to_string()),
             Token::Schedule => Some("schedule".to_string()),
             Token::Retry => Some("retry".to_string()),
             Token::Timeout => Some("timeout".to_string()),
@@ -2117,6 +2188,66 @@ mod tests {
                 assert!(matches!(steps[2], PipeStep::Take(_)));
             }
             other => panic!("expected pipe chain expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_prompt_definition_statement() {
+        let program = parse_program(
+            r#"
+            prompt summarize(text) {
+                system: "You are concise"
+                user: "Summarize: {text}"
+                returns: "summary"
+            }
+            "#,
+        );
+
+        match &program.statements[0].stmt {
+            Stmt::PromptDef {
+                name,
+                params,
+                system,
+                user_template,
+                returns,
+            } => {
+                assert_eq!(name, "summarize");
+                assert_eq!(params.len(), 1);
+                assert_eq!(system, "You are concise");
+                assert_eq!(user_template, "Summarize: {text}");
+                assert_eq!(returns.as_deref(), Some("summary"));
+            }
+            other => panic!("expected prompt definition, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_agent_definition_statement() {
+        let program = parse_program(
+            r#"
+            agent researcher(topic) {
+                tools: ["search", "read"]
+                goal: "Research {topic}"
+                max_steps: 5
+            }
+            "#,
+        );
+
+        match &program.statements[0].stmt {
+            Stmt::AgentDef {
+                name,
+                params,
+                tools,
+                goal,
+                max_steps,
+            } => {
+                assert_eq!(name, "researcher");
+                assert_eq!(params.len(), 1);
+                assert_eq!(tools, &vec!["search".to_string(), "read".to_string()]);
+                assert_eq!(goal, "Research {topic}");
+                assert_eq!(*max_steps, 5);
+            }
+            other => panic!("expected agent definition, got {:?}", other),
         }
     }
 }
