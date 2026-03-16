@@ -1,0 +1,2 @@
+let answer = 42
+fn helper() { return answer }

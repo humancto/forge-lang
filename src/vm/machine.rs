@@ -213,6 +213,7 @@ impl VM {
             "__forge_retry_count",
             "__forge_retry_wait",
             "__forge_retry_failed",
+            "__forge_import_module",
         ];
         for name in &builtins {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
@@ -548,6 +549,25 @@ impl VM {
 
         self.frames.push(CallFrame::new(closure_ref, 0));
         self.run_until(0)
+    }
+
+    pub(super) fn execute_module(&mut self, chunk: &Chunk) -> Result<Value, VMError> {
+        let func = ObjFunction {
+            name: "<module>".to_string(),
+            chunk: std::sync::Arc::new(chunk.clone()),
+        };
+        let closure = ObjClosure {
+            function: func,
+            upvalues: Vec::new(),
+        };
+        let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
+        let new_base = self.frames.last().map(|f| f.base + 256).unwrap_or(0);
+        if new_base + 256 > MAX_REGISTERS {
+            return Err(VMError::new("stack overflow"));
+        }
+        self.frames.push(CallFrame::new(closure_ref, new_base));
+        let boundary = self.frames.len() - 1;
+        self.run_until(boundary)
     }
 
     fn run_until(&mut self, boundary_frame_idx: usize) -> Result<Value, VMError> {

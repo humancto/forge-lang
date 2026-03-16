@@ -34,6 +34,7 @@ pub struct Compiler {
     upvalues: Vec<UpvalueEntry>,
     parent_locals: Vec<(String, u8)>,
     parent_upvalues: Vec<(String, u8)>,
+    module_mode: bool,
 }
 
 #[derive(Debug)]
@@ -62,6 +63,7 @@ impl Compiler {
             upvalues: Vec::new(),
             parent_locals: Vec::new(),
             parent_upvalues: Vec::new(),
+            module_mode: false,
         }
     }
 
@@ -225,6 +227,18 @@ pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
     Ok(c.chunk)
 }
 
+pub fn compile_module(program: &Program) -> Result<Chunk, CompileError> {
+    let mut c = Compiler::new("<module>");
+    c.module_mode = true;
+    c.begin_scope();
+    for spanned in &program.statements {
+        compile_stmt(&mut c, &spanned.stmt)?;
+    }
+    c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+    c.chunk.max_registers = c.max_register;
+    Ok(c.chunk)
+}
+
 pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
     let mut c = Compiler::new("<repl>");
     c.begin_scope();
@@ -340,6 +354,42 @@ fn type_ann_name(type_ann: &TypeAnn) -> String {
     }
 }
 
+fn resolve_import_path(path: &str) -> Result<std::path::PathBuf, CompileError> {
+    crate::package::resolve_import(path).ok_or_else(|| {
+        CompileError::new(&format!(
+            "cannot import '{}': file not found (checked {0}.fg, forge_modules/{0}/main.fg)",
+            path
+        ))
+    })
+}
+
+fn parse_import_program(path: &str) -> Result<(String, Program), CompileError> {
+    let resolved = resolve_import_path(path)?;
+    let source = std::fs::read_to_string(&resolved).map_err(|e| {
+        CompileError::new(&format!("cannot import '{}': {}", path, e))
+    })?;
+    let mut lexer = crate::lexer::Lexer::new(&source);
+    let tokens = lexer
+        .tokenize()
+        .map_err(|e| CompileError::new(&format!("import '{}' lex error: {}", path, e.message)))?;
+    let mut parser = crate::parser::Parser::new(tokens);
+    let program = parser.parse_program().map_err(|e| {
+        CompileError::new(&format!("import '{}' parse error: {}", path, e.message))
+    })?;
+    Ok((resolved.display().to_string(), program))
+}
+
+fn import_export_names(program: &Program) -> Vec<String> {
+    program
+        .statements
+        .iter()
+        .filter_map(|spanned| match &spanned.stmt {
+            Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn struct_embeds_expr(fields: &[FieldDef]) -> Expr {
     Expr::Array(
         fields
@@ -432,6 +482,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         } => {
             let reg = c.add_local(name, *mutable);
             compile_expr(c, value, reg)?;
+            if c.module_mode && c.scope_depth == 1 {
+                let name_idx = c.const_str(name);
+                c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+            }
             Ok(())
         }
 
@@ -1228,12 +1282,47 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Import { path, names } => {
             let builtin_modules = [
                 "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log", "term",
-                "http", "csv", "exec", "time",
+                "http", "csv", "exec", "time", "url", "toml", "npc", "ws", "jwt", "mysql",
             ];
             if builtin_modules.contains(&path.as_str()) {
                 return Ok(());
             }
-            let _ = names;
+
+            let (resolved_path, export_names) = match names {
+                Some(name_list) => (
+                    resolve_import_path(path)?.display().to_string(),
+                    name_list.clone(),
+                ),
+                None => {
+                    let (resolved_path, program) = parse_import_program(path)?;
+                    (resolved_path, import_export_names(&program))
+                }
+            };
+
+            if export_names.is_empty() {
+                return Ok(());
+            }
+
+            let import_args = match names {
+                Some(name_list) => vec![
+                    Expr::StringLit(resolved_path),
+                    Expr::Array(
+                        name_list
+                            .iter()
+                            .map(|name| Expr::StringLit(name.clone()))
+                            .collect(),
+                    ),
+                ],
+                None => vec![Expr::StringLit(resolved_path)],
+            };
+
+            let module_reg = c.alloc_reg();
+            compile_hidden_call(c, "__forge_import_module", import_args, module_reg)?;
+            for name in export_names {
+                let local_reg = c.add_local(&name, false);
+                let field_idx = c.const_str(&name);
+                c.emit(encode_abc(OpCode::GetField, local_reg, module_reg, field_idx as u8), 0);
+            }
             Ok(())
         }
 

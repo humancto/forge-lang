@@ -587,6 +587,28 @@ mod parity_tests {
     }
 
     #[test]
+    fn cross_backend_parity_file_import() {
+        assert_cross_backend_value(
+            r#"
+            import "tests/parity/modules/import_helper.fg"
+            helper()
+            "#,
+            "42",
+        );
+    }
+
+    #[test]
+    fn cross_backend_parity_named_file_import() {
+        assert_cross_backend_value(
+            r#"
+            import { answer } from "tests/parity/modules/import_helper.fg"
+            answer
+            "#,
+            "42",
+        );
+    }
+
+    #[test]
     fn cross_backend_parity_mutable_closure_counter() {
         assert_cross_backend_value(
             r#"

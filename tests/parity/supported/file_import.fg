@@ -1,0 +1,3 @@
+// expect: 42
+import "tests/parity/modules/import_helper.fg"
+helper()

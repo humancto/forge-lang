@@ -207,6 +207,87 @@ impl VM {
                     count, last_error
                 )))
             }
+            "__forge_import_module" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(VMError::new(
+                        "__forge_import_module() requires (path, [names])",
+                    ));
+                }
+
+                let requested_names = match args.get(1) {
+                    Some(Value::Obj(r)) => self
+                        .gc
+                        .get(*r)
+                        .and_then(|obj| match &obj.kind {
+                            ObjKind::Array(items) => Some(
+                                items.iter()
+                                    .filter_map(|item| self.get_string(item))
+                                    .collect::<Vec<_>>(),
+                            ),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            VMError::new(
+                                "__forge_import_module() second argument must be an array of strings",
+                            )
+                        })?,
+                    Some(Value::Null) | None => Vec::new(),
+                    Some(_) => {
+                        return Err(VMError::new(
+                            "__forge_import_module() second argument must be an array of strings",
+                        ))
+                    }
+                };
+
+                let path = self.get_string_arg(&args, 0)?;
+                let file_path = crate::package::resolve_import(&path)
+                    .unwrap_or_else(|| std::path::PathBuf::from(&path));
+                let source = std::fs::read_to_string(&file_path)
+                    .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
+
+                let mut lexer = crate::lexer::Lexer::new(&source);
+                let tokens = lexer.tokenize().map_err(|e| {
+                    VMError::new(&format!("import '{}' lex error: {}", path, e.message))
+                })?;
+                let mut parser = crate::parser::Parser::new(tokens);
+                let program = parser.parse_program().map_err(|e| {
+                    VMError::new(&format!("import '{}' parse error: {}", path, e.message))
+                })?;
+
+                let export_names = if requested_names.is_empty() {
+                    program
+                        .statements
+                        .iter()
+                        .filter_map(|spanned| match &spanned.stmt {
+                            crate::parser::ast::Stmt::FnDef { name, .. }
+                            | crate::parser::ast::Stmt::Let { name, .. } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    requested_names
+                };
+
+                let chunk = crate::vm::compiler::compile_module(&program).map_err(|e| {
+                    VMError::new(&format!("import '{}' compile error: {}", path, e.message))
+                })?;
+                self.execute_module(&chunk).map_err(|e| {
+                    VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                })?;
+
+                let mut exports = IndexMap::new();
+                for name in export_names {
+                    let value = self.globals.get(&name).cloned().ok_or_else(|| {
+                        VMError::new(&format!(
+                            "import '{}' does not export '{}'",
+                            path, name
+                        ))
+                    })?;
+                    exports.insert(name, value);
+                }
+                let exports_ref = self.gc.alloc(ObjKind::Object(exports));
+                Ok(Value::Obj(exports_ref))
+            }
             "println" | "say" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ");

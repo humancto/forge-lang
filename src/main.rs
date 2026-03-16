@@ -321,27 +321,6 @@ fn emit_type_warnings(warnings: &[typechecker::TypeWarning]) {
     }
 }
 
-fn vm_builtin_import(path: &str) -> bool {
-    matches!(
-        path,
-        "math"
-            | "fs"
-            | "io"
-            | "crypto"
-            | "db"
-            | "pg"
-            | "env"
-            | "json"
-            | "regex"
-            | "log"
-            | "term"
-            | "http"
-            | "csv"
-            | "exec"
-            | "time"
-    )
-}
-
 fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>) {
     match stmt {
         Stmt::TypeDef { .. } => {}
@@ -404,11 +383,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         Stmt::DecoratorStmt(_) => {
             issues.insert("decorator-driven runtime features");
         }
-        Stmt::Import { path, .. } => {
-            if !vm_builtin_import(path) {
-                issues.insert("file/package imports");
-            }
-        }
+        Stmt::Import { .. } => {}
         Stmt::FnDef {
             body, decorators, ..
         } => {
@@ -1036,5 +1011,27 @@ mod tests {
         let (program, _) = prepare_program(source, false).expect("program should parse");
         let issues = vm_incompatibilities(&program);
         assert!(issues.contains(&"timeout blocks"));
+    }
+
+    #[test]
+    fn vm_incompatibilities_allow_file_imports() {
+        let import_path = format!(
+            "/tmp/forge_vm_import_check_{}.fg",
+            std::process::id()
+        );
+        std::fs::write(&import_path, r#"let meaning = 42"#).expect("write import fixture");
+
+        let source = format!(
+            r#"
+            import "{}"
+            meaning
+            "#,
+            import_path
+        );
+
+        let (program, _) = prepare_program(&source, false).expect("program should parse");
+        assert!(vm_incompatibilities(&program).is_empty());
+
+        std::fs::remove_file(&import_path).ok();
     }
 }
