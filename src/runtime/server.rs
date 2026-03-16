@@ -16,100 +16,9 @@ use serde_json::Value as JsonValue;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::interpreter::{Interpreter, RuntimeError, Value};
-use crate::parser::ast::*;
+use crate::runtime::metadata::{CorsMode, ServerPlan};
 
 pub type AppState = Arc<Mutex<Interpreter>>;
-
-#[derive(Clone, Debug)]
-pub struct Route {
-    pub method: String,
-    pub pattern: String,
-    pub handler_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum CorsMode {
-    /// Deny all cross-origin requests (default — safe for production).
-    Restrictive,
-    /// Allow any origin, method, and header. Opt-in via `@server(cors: "permissive")`.
-    Permissive,
-}
-
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    pub port: u16,
-    pub host: String,
-    pub cors: CorsMode,
-}
-
-pub fn extract_routes(program: &Program) -> Vec<Route> {
-    let mut routes = Vec::new();
-    for spanned in &program.statements {
-        if let Stmt::FnDef {
-            name, decorators, ..
-        } = &spanned.stmt
-        {
-            for dec in decorators {
-                let method = match dec.name.as_str() {
-                    "get" => "GET",
-                    "post" => "POST",
-                    "put" => "PUT",
-                    "delete" => "DELETE",
-                    "ws" => "WS",
-                    _ => continue,
-                };
-                let path = dec
-                    .args
-                    .iter()
-                    .find_map(|arg| match arg {
-                        DecoratorArg::Positional(Expr::StringLit(s)) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| format!("/{}", name));
-
-                routes.push(Route {
-                    method: method.to_string(),
-                    pattern: path,
-                    handler_name: name.clone(),
-                });
-            }
-        }
-    }
-    routes
-}
-
-pub fn extract_server_config(program: &Program) -> Option<ServerConfig> {
-    for spanned in &program.statements {
-        if let Stmt::DecoratorStmt(dec) = &spanned.stmt {
-            if dec.name == "server" {
-                let mut config = ServerConfig {
-                    port: 8080,
-                    host: "127.0.0.1".to_string(),
-                    cors: CorsMode::Restrictive,
-                };
-                for arg in &dec.args {
-                    match arg {
-                        DecoratorArg::Named(key, Expr::Int(n)) if key == "port" => {
-                            config.port = *n as u16
-                        }
-                        DecoratorArg::Named(key, Expr::StringLit(s)) if key == "host" => {
-                            config.host = s.clone()
-                        }
-                        DecoratorArg::Named(key, Expr::StringLit(s)) if key == "cors" => {
-                            config.cors = match s.to_lowercase().as_str() {
-                                "permissive" | "any" | "*" => CorsMode::Permissive,
-                                _ => CorsMode::Restrictive,
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-                return Some(config);
-            }
-        }
-    }
-    None
-}
 
 fn to_axum_path(forge_path: &str) -> String {
     forge_path
@@ -178,9 +87,10 @@ fn call_handler(
 
 pub async fn start_server(
     interpreter: Interpreter,
-    config: &ServerConfig,
-    routes: &[Route],
+    server: &ServerPlan,
 ) -> Result<(), RuntimeError> {
+    let config = &server.config;
+    let routes = &server.routes;
     let state: AppState = Arc::new(Mutex::new(interpreter));
     let mut app = Router::new();
 
@@ -384,65 +294,6 @@ pub fn forge_to_json(v: &Value) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
-
-    fn parse_program(src: &str) -> Program {
-        let tokens = Lexer::new(src).tokenize().expect("lex failed");
-        Parser::new(tokens).parse_program().expect("parse failed")
-    }
-
-    // ── ServerConfig / CORS extraction ──────────────────────────────────────
-
-    #[test]
-    fn default_cors_is_restrictive() {
-        let prog = parse_program("@server(port: 3000)\n");
-        let config = extract_server_config(&prog).unwrap();
-        assert_eq!(config.cors, CorsMode::Restrictive);
-        assert_eq!(config.port, 3000);
-    }
-
-    #[test]
-    fn cors_permissive_keyword() {
-        let prog = parse_program("@server(port: 8080, cors: \"permissive\")\n");
-        let config = extract_server_config(&prog).unwrap();
-        assert_eq!(config.cors, CorsMode::Permissive);
-    }
-
-    #[test]
-    fn cors_any_keyword() {
-        let prog = parse_program("@server(port: 8080, cors: \"any\")\n");
-        let config = extract_server_config(&prog).unwrap();
-        assert_eq!(config.cors, CorsMode::Permissive);
-    }
-
-    #[test]
-    fn cors_wildcard_keyword() {
-        let prog = parse_program("@server(port: 8080, cors: \"*\")\n");
-        let config = extract_server_config(&prog).unwrap();
-        assert_eq!(config.cors, CorsMode::Permissive);
-    }
-
-    #[test]
-    fn cors_unknown_value_falls_back_to_restrictive() {
-        let prog = parse_program("@server(port: 8080, cors: \"strict\")\n");
-        let config = extract_server_config(&prog).unwrap();
-        assert_eq!(config.cors, CorsMode::Restrictive);
-    }
-
-    #[test]
-    fn no_server_decorator_returns_none() {
-        let prog = parse_program("let x = 1\n");
-        assert!(extract_server_config(&prog).is_none());
-    }
-
-    #[test]
-    fn server_default_port_and_host() {
-        let prog = parse_program("@server(port: 9000)\n");
-        let config = extract_server_config(&prog).unwrap();
-        assert_eq!(config.port, 9000);
-        assert_eq!(config.host, "127.0.0.1");
-    }
 
     // ── to_axum_path ────────────────────────────────────────────────────────
 
@@ -458,7 +309,10 @@ mod tests {
 
     #[test]
     fn axum_path_multiple_params() {
-        assert_eq!(to_axum_path("/org/:org/repo/:repo"), "/org/{org}/repo/{repo}");
+        assert_eq!(
+            to_axum_path("/org/:org/repo/:repo"),
+            "/org/{org}/repo/{repo}"
+        );
     }
 
     // ── json_to_forge ────────────────────────────────────────────────────────
@@ -538,7 +392,9 @@ mod tests {
 
     #[test]
     fn forge_result_err_to_json() {
-        let result = forge_to_json(&Value::ResultErr(Box::new(Value::String("oops".to_string()))));
+        let result = forge_to_json(&Value::ResultErr(Box::new(Value::String(
+            "oops".to_string(),
+        ))));
         assert_eq!(result, serde_json::json!({"Err": "oops"}));
     }
 

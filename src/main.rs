@@ -608,11 +608,10 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             }
         }
 
-        let server_config = runtime::server::extract_server_config(&program);
-        let routes = runtime::server::extract_routes(&program);
+        let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
 
-        if let Some(config) = server_config {
-            if routes.is_empty() {
+        if let Some(server) = runtime_plan.server {
+            if server.routes.is_empty() {
                 eprintln!(
                     "{}",
                     errors::format_simple_error(
@@ -621,7 +620,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
                 );
                 process::exit(1);
             }
-            if let Err(e) = runtime::server::start_server(interpreter, &config, &routes).await {
+            if let Err(e) = runtime::server::start_server(interpreter, &server).await {
                 eprintln!("{}", errors::format_simple_error(&e.message));
                 process::exit(1);
             }
