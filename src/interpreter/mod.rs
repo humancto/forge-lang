@@ -326,6 +326,7 @@ pub struct Interpreter {
     pub env: Environment,
     call_depth: usize,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    defer_host_runtime: bool,
     /// Instance methods: type_name -> { method_name -> Value::Function }
     pub method_tables: HashMap<String, IndexMap<String, Value>>,
     /// Static methods: type_name -> { method_name -> Value::Function }
@@ -346,6 +347,7 @@ impl Interpreter {
             env: Environment::new(),
             call_depth: 0,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            defer_host_runtime: false,
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
@@ -355,6 +357,27 @@ impl Interpreter {
         };
         interp.register_builtins();
         interp
+    }
+
+    pub(crate) fn set_defer_host_runtime(&mut self, defer: bool) {
+        self.defer_host_runtime = defer;
+    }
+
+    pub(crate) fn fork_for_background_runtime(&self) -> Self {
+        let mut interp = Interpreter::new();
+        interp.env = self.env.clone();
+        interp.method_tables = self.method_tables.clone();
+        interp.static_methods = self.static_methods.clone();
+        interp.embedded_fields = self.embedded_fields.clone();
+        interp.struct_defaults = self.struct_defaults.clone();
+        interp.current_line = self.current_line;
+        interp.source = self.source.clone();
+        interp
+    }
+
+    pub(crate) fn exec_background_block(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
+        let _ = self.exec_block(stmts)?;
+        Ok(())
     }
 
     fn register_builtins(&mut self) {
@@ -1367,44 +1390,33 @@ impl Interpreter {
                 unit,
                 body,
             } => {
-                let secs = match self.eval_expr(interval)? {
-                    Value::Int(n) => match unit.as_str() {
-                        "minutes" => n as u64 * 60,
-                        "hours" => n as u64 * 3600,
-                        _ => n as u64,
+                if self.defer_host_runtime {
+                    return Ok(Signal::None);
+                }
+                crate::runtime::host::spawn_schedule(
+                    self,
+                    &crate::runtime::metadata::SchedulePlan {
+                        interval: interval.clone(),
+                        unit: unit.clone(),
+                        body: body.clone(),
+                        line: self.current_line,
                     },
-                    _ => 60,
-                };
-                let body = body.clone();
-                let mut sched_interp = Interpreter::new();
-                sched_interp.env = self.env.clone();
-                std::thread::spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_secs(secs));
-                    let _ = sched_interp.exec_block(&body);
-                });
+                )?;
                 Ok(Signal::None)
             }
 
             Stmt::WatchBlock { path, body } => {
-                let path_str = match self.eval_expr(path)? {
-                    Value::String(s) => s,
-                    _ => return Err(RuntimeError::new("watch requires a string path")),
-                };
-                let body = body.clone();
-                let mut watch_interp = Interpreter::new();
-                watch_interp.env = self.env.clone();
-                std::thread::spawn(move || {
-                    let mut last_modified =
-                        std::fs::metadata(&path_str).and_then(|m| m.modified()).ok();
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        let current = std::fs::metadata(&path_str).and_then(|m| m.modified()).ok();
-                        if current != last_modified {
-                            last_modified = current;
-                            let _ = watch_interp.exec_block(&body);
-                        }
-                    }
-                });
+                if self.defer_host_runtime {
+                    return Ok(Signal::None);
+                }
+                crate::runtime::host::spawn_watch(
+                    self,
+                    &crate::runtime::metadata::WatchPlan {
+                        path: path.clone(),
+                        body: body.clone(),
+                        line: self.current_line,
+                    },
+                )?;
                 Ok(Signal::None)
             }
 
@@ -4780,6 +4792,24 @@ mod tests {
             let x = 1
         "#,
         );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn deferred_watch_block_skips_inline_validation() {
+        let mut lexer = Lexer::new(
+            r#"
+            let path = 42
+            watch path { let changed = true }
+            "#,
+        );
+        let tokens = lexer.tokenize().expect("lexing should succeed");
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().expect("parsing should succeed");
+        let mut interpreter = Interpreter::new();
+        interpreter.set_defer_host_runtime(true);
+
+        let result = interpreter.run(&program);
         assert!(result.is_ok());
     }
 
