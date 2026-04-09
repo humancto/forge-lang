@@ -63,6 +63,30 @@ fn parse_duration(s: &str) -> Result<i64, String> {
     }
 }
 
+/// Inspect a JWT's raw header (the part before the first `.`) and reject any
+/// token whose `alg` field is missing, `none`, or otherwise unrecognised.
+/// This runs *before* `jsonwebtoken::decode_header` so a malicious token can
+/// never be parsed under an `alg: none` policy.
+fn reject_unsafe_header(token: &str) -> Result<(), String> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header_b64 = token
+        .split('.')
+        .next()
+        .ok_or_else(|| "JWT invalid token format".to_string())?;
+    let header_bytes = b64
+        .decode(header_b64)
+        .map_err(|e| format!("JWT invalid header encoding: {}", e))?;
+    let header_json: serde_json::Value = serde_json::from_slice(&header_bytes)
+        .map_err(|e| format!("JWT invalid header JSON: {}", e))?;
+    let alg = header_json
+        .get("alg")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "JWT header missing 'alg' field".to_string())?;
+    // parse_algorithm already rejects 'none' and unsupported algorithms.
+    parse_algorithm(alg).map(|_| ())
+}
+
 fn parse_algorithm(s: &str) -> Result<Algorithm, String> {
     match s.to_uppercase().as_str() {
         "HS256" => Ok(Algorithm::HS256),
@@ -212,13 +236,14 @@ fn jwt_verify(args: Vec<Value>) -> Result<Value, String> {
         _ => return Err("jwt.verify() requires a string as second argument (secret)".to_string()),
     };
 
+    // Defence-in-depth: explicitly inspect the raw header *before* handing it
+    // to jsonwebtoken so a forged `alg: none` token cannot slip through even
+    // if the upstream crate's behaviour changes.
+    reject_unsafe_header(&token)?;
+
     // Peek at header to determine algorithm
     let header =
         jsonwebtoken::decode_header(&token).map_err(|e| format!("JWT decode error: {}", e))?;
-
-    if header.alg == Algorithm::default() {
-        // Check for alg:none attempt
-    }
 
     let alg = header.alg;
     let key = match alg {
@@ -457,6 +482,80 @@ mod tests {
         let result = parse_algorithm("none");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not allowed"));
+    }
+
+    fn forge_unsigned_token(header_json: &str, payload_json: &str) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let h = b64.encode(header_json.as_bytes());
+        let p = b64.encode(payload_json.as_bytes());
+        format!("{}.{}.", h, p)
+    }
+
+    #[test]
+    fn test_verify_rejects_forged_alg_none_token() {
+        // Classic alg=none attack: header says "none", body claims admin, no signature.
+        let token = forge_unsigned_token(
+            r#"{"alg":"none","typ":"JWT"}"#,
+            r#"{"sub":"admin","user_id":1}"#,
+        );
+        let result = jwt_verify(vec![
+            Value::String(token),
+            Value::String("any-secret".to_string()),
+        ]);
+        assert!(result.is_err(), "alg=none token must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("not allowed") || err.contains("none"),
+            "expected alg=none rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_forged_alg_none_uppercase() {
+        let token = forge_unsigned_token(r#"{"alg":"NONE","typ":"JWT"}"#, r#"{"sub":"admin"}"#);
+        let result = jwt_verify(vec![
+            Value::String(token),
+            Value::String("secret".to_string()),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_token_missing_alg() {
+        let token = forge_unsigned_token(r#"{"typ":"JWT"}"#, r#"{"sub":"admin"}"#);
+        let result = jwt_verify(vec![
+            Value::String(token),
+            Value::String("secret".to_string()),
+        ]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("alg") || err.contains("missing"),
+            "expected missing-alg error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_token_with_unsupported_alg() {
+        let token = forge_unsigned_token(r#"{"alg":"HS999","typ":"JWT"}"#, r#"{"sub":"admin"}"#);
+        let result = jwt_verify(vec![
+            Value::String(token),
+            Value::String("secret".to_string()),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_garbage_header() {
+        let token = "not-base64.eyJzdWIiOiJhZG1pbiJ9.";
+        let result = jwt_verify(vec![
+            Value::String(token.to_string()),
+            Value::String("secret".to_string()),
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
