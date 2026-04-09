@@ -457,7 +457,10 @@ mod tests {
         let html = "<p>Before</p><script>var x = 1; alert('xss');</script><p>After</p>";
         let result = strip_html_tags(html);
         assert_eq!(result, "BeforeAfter");
-        assert!(!result.contains("alert"), "script content should be removed");
+        assert!(
+            !result.contains("alert"),
+            "script content should be removed"
+        );
     }
 
     #[test]
@@ -501,6 +504,9 @@ mod tests {
 
     #[test]
     fn strip_html_self_closing_tags() {
-        assert_eq!(strip_html_tags("Hello<br/>World<img src='x'/>!"), "HelloWorld!");
+        assert_eq!(
+            strip_html_tags("Hello<br/>World<img src='x'/>!"),
+            "HelloWorld!"
+        );
     }
 }

@@ -326,7 +326,10 @@ fn compile_hidden_call_from_regs(
         let slot = c.alloc_reg();
         c.emit(encode_abc(OpCode::Move, slot, arg_reg, 0), 0);
     }
-    c.emit(encode_abc(OpCode::Call, fn_reg, arg_regs.len() as u8, dst), 0);
+    c.emit(
+        encode_abc(OpCode::Call, fn_reg, arg_regs.len() as u8, dst),
+        0,
+    );
     c.free_to(saved);
     Ok(())
 }
@@ -344,7 +347,10 @@ fn compile_call_from_expr_and_regs(
         let slot = c.alloc_reg();
         c.emit(encode_abc(OpCode::Move, slot, arg_reg, 0), 0);
     }
-    c.emit(encode_abc(OpCode::Call, fn_reg, arg_regs.len() as u8, dst), 0);
+    c.emit(
+        encode_abc(OpCode::Call, fn_reg, arg_regs.len() as u8, dst),
+        0,
+    );
     c.free_to(saved);
     Ok(())
 }
@@ -406,17 +412,16 @@ fn resolve_import_path(path: &str) -> Result<std::path::PathBuf, CompileError> {
 
 fn parse_import_program(path: &str) -> Result<(String, Program), CompileError> {
     let resolved = resolve_import_path(path)?;
-    let source = std::fs::read_to_string(&resolved).map_err(|e| {
-        CompileError::new(&format!("cannot import '{}': {}", path, e))
-    })?;
+    let source = std::fs::read_to_string(&resolved)
+        .map_err(|e| CompileError::new(&format!("cannot import '{}': {}", path, e)))?;
     let mut lexer = crate::lexer::Lexer::new(&source);
     let tokens = lexer
         .tokenize()
         .map_err(|e| CompileError::new(&format!("import '{}' lex error: {}", path, e.message)))?;
     let mut parser = crate::parser::Parser::new(tokens);
-    let program = parser.parse_program().map_err(|e| {
-        CompileError::new(&format!("import '{}' parse error: {}", path, e.message))
-    })?;
+    let program = parser
+        .parse_program()
+        .map_err(|e| CompileError::new(&format!("import '{}' parse error: {}", path, e.message)))?;
     Ok((resolved.display().to_string(), program))
 }
 
@@ -1237,7 +1242,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             let one_reg = c.alloc_reg();
             let one_idx = c.const_int(1);
             c.emit(encode_abx(OpCode::LoadConst, one_reg, one_idx), 0);
-            c.emit(encode_abc(OpCode::Add, attempt_reg, attempt_reg, one_reg), 0);
+            c.emit(
+                encode_abc(OpCode::Add, attempt_reg, attempt_reg, one_reg),
+                0,
+            );
             c.free_to(error_reg + 1);
 
             let retry_cond_reg = c.alloc_reg();
@@ -1400,7 +1408,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             for name in export_names {
                 let local_reg = c.add_local(&name, false);
                 let field_idx = c.const_str(&name);
-                c.emit(encode_abc(OpCode::GetField, local_reg, module_reg, field_idx as u8), 0);
+                c.emit(
+                    encode_abc(OpCode::GetField, local_reg, module_reg, field_idx as u8),
+                    0,
+                );
             }
             Ok(())
         }

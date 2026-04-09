@@ -18,15 +18,16 @@ pub fn install(source: &str) {
         std::process::exit(1);
     }
 
-    let result =
-        if source.starts_with("http://") || source.starts_with("https://") || source.starts_with("git@")
-        {
-            let name = package_name_from_source(source);
-            install_from_git_as(&name, source, None, packages_dir)
-        } else {
-            let name = package_name_from_source(source);
-            install_from_local_as(&name, source, packages_dir)
-        };
+    let result = if source.starts_with("http://")
+        || source.starts_with("https://")
+        || source.starts_with("git@")
+    {
+        let name = package_name_from_source(source);
+        install_from_git_as(&name, source, None, packages_dir)
+    } else {
+        let name = package_name_from_source(source);
+        install_from_local_as(&name, source, packages_dir)
+    };
 
     if let Err(message) = result {
         eprintln!("{}", message);
@@ -61,7 +62,10 @@ pub fn install_from_manifest() {
                 summary.processed, manifest.project.name
             );
             if summary.installed > 0 {
-                println!("  Updated forge.lock ({} packages)", summary.locked_packages);
+                println!(
+                    "  Updated forge.lock ({} packages)",
+                    summary.locked_packages
+                );
             }
         }
         Err(message) => {
@@ -203,7 +207,11 @@ fn install_from_registry_as(
     })
 }
 
-fn find_registry_package(name: &str, version: &str, registry_roots: &[PathBuf]) -> Result<PathBuf, String> {
+fn find_registry_package(
+    name: &str,
+    version: &str,
+    registry_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
     let mut searched = Vec::new();
     for root in registry_roots {
         for candidate in registry_candidates(root, name, version) {
@@ -237,7 +245,8 @@ fn install_from_path_as(name: &str, src: &Path, packages_dir: &Path) -> Result<(
 
     let target = packages_dir.join(name);
     if target.exists() {
-        remove_path(&target).map_err(|e| format!("Error: failed to remove existing package: {}", e))?;
+        remove_path(&target)
+            .map_err(|e| format!("Error: failed to remove existing package: {}", e))?;
     }
 
     if src.is_dir() {
@@ -433,7 +442,10 @@ toolkit = { path = "pkg-src" }
 
         let lockfile = load_lockfile_from(&lockfile_path).unwrap();
         let package = lockfile.find("toolkit").unwrap();
-        assert_eq!(package.source, format!("path+{}", workspace.join("pkg-src").display()));
+        assert_eq!(
+            package.source,
+            format!("path+{}", workspace.join("pkg-src").display())
+        );
 
         std::fs::remove_dir_all(&workspace).unwrap();
     }

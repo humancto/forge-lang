@@ -231,7 +231,8 @@ impl VM {
                         "__forge_where_filter() requires (array, field, op, value)",
                     ));
                 }
-                let items = self.array_items(&args[0], "__forge_where_filter() first arg must be array")?;
+                let items =
+                    self.array_items(&args[0], "__forge_where_filter() first arg must be array")?;
                 let field = self.get_string_arg(&args, 1)?;
                 let op = self.get_string_arg(&args, 2)?;
                 let cmp_value = args[3].clone();
@@ -240,7 +241,9 @@ impl VM {
                     .filter(|item| {
                         self.get_object_fields(item)
                             .and_then(|fields| fields.get(&field).cloned())
-                            .is_some_and(|field_value| self.query_compare(&field_value, &op, &cmp_value))
+                            .is_some_and(|field_value| {
+                                self.query_compare(&field_value, &op, &cmp_value)
+                            })
                     })
                     .collect::<Vec<_>>();
                 let r = self.gc.alloc(ObjKind::Array(filtered));
@@ -248,11 +251,10 @@ impl VM {
             }
             "__forge_pipe_sort" => {
                 if args.len() != 2 {
-                    return Err(VMError::new(
-                        "__forge_pipe_sort() requires (array, field)",
-                    ));
+                    return Err(VMError::new("__forge_pipe_sort() requires (array, field)"));
                 }
-                let mut items = self.array_items(&args[0], "__forge_pipe_sort() first arg must be array")?;
+                let mut items =
+                    self.array_items(&args[0], "__forge_pipe_sort() first arg must be array")?;
                 let field = self.get_string_arg(&args, 1)?;
                 items.sort_by(|a, b| {
                     let left = self
@@ -270,24 +272,23 @@ impl VM {
             }
             "__forge_pipe_take" => {
                 if args.len() != 2 {
-                    return Err(VMError::new(
-                        "__forge_pipe_take() requires (array, count)",
-                    ));
+                    return Err(VMError::new("__forge_pipe_take() requires (array, count)"));
                 }
-                let items = self.array_items(&args[0], "__forge_pipe_take() first arg must be array")?;
+                let items =
+                    self.array_items(&args[0], "__forge_pipe_take() first arg must be array")?;
                 let count = match args[1] {
                     Value::Int(n) => n.max(0) as usize,
                     Value::Float(n) => n.max(0.0) as usize,
                     _ => 10,
                 };
-                let r = self.gc.alloc(ObjKind::Array(items.into_iter().take(count).collect()));
+                let r = self
+                    .gc
+                    .alloc(ObjKind::Array(items.into_iter().take(count).collect()));
                 Ok(Value::Obj(r))
             }
             "__forge_raise_error" => {
                 if args.len() != 1 {
-                    return Err(VMError::new(
-                        "__forge_raise_error() requires (error)",
-                    ));
+                    return Err(VMError::new("__forge_raise_error() requires (error)"));
                 }
                 let message = match &args[0] {
                     Value::Obj(r) => self
@@ -374,10 +375,7 @@ impl VM {
                 let mut exports = IndexMap::new();
                 for name in export_names {
                     let value = self.globals.get(&name).cloned().ok_or_else(|| {
-                        VMError::new(&format!(
-                            "import '{}' does not export '{}'",
-                            path, name
-                        ))
+                        VMError::new(&format!("import '{}' does not export '{}'", path, name))
                     })?;
                     exports.insert(name, value);
                 }
@@ -1098,23 +1096,21 @@ impl VM {
                 }
                 Err(VMError::new("ends_with() requires (string, suffix)"))
             }
-            "wait" => {
-                match args.first() {
-                    Some(Value::Int(secs)) => {
-                        self.sleep_with_timeout_checks(std::time::Duration::from_secs(
-                            (*secs).max(0) as u64,
-                        ))?;
-                        Ok(Value::Null)
-                    }
-                    Some(Value::Float(secs)) => {
-                        self.sleep_with_timeout_checks(std::time::Duration::from_secs_f64(
-                            secs.max(0.0),
-                        ))?;
-                        Ok(Value::Null)
-                    }
-                    _ => Err(VMError::new("wait() requires a number of seconds")),
+            "wait" => match args.first() {
+                Some(Value::Int(secs)) => {
+                    self.sleep_with_timeout_checks(std::time::Duration::from_secs(
+                        (*secs).max(0) as u64
+                    ))?;
+                    Ok(Value::Null)
                 }
-            }
+                Some(Value::Float(secs)) => {
+                    self.sleep_with_timeout_checks(std::time::Duration::from_secs_f64(
+                        secs.max(0.0),
+                    ))?;
+                    Ok(Value::Null)
+                }
+                _ => Err(VMError::new("wait() requires a number of seconds")),
+            },
             "uuid" => {
                 let id = uuid::Uuid::new_v4().to_string();
                 Ok(self.alloc_string(&id))
@@ -1984,12 +1980,12 @@ impl VM {
             (Value::Float(a), Value::Float(b)) => {
                 a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
             }
-            (Value::Int(a), Value::Float(b)) => {
-                (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-            }
-            (Value::Float(a), Value::Int(b)) => {
-                a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal)
-            }
+            (Value::Int(a), Value::Float(b)) => (*a as f64)
+                .partial_cmp(b)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Value::Float(a), Value::Int(b)) => a
+                .partial_cmp(&(*b as f64))
+                .unwrap_or(std::cmp::Ordering::Equal),
             _ => left.display(&self.gc).cmp(&right.display(&self.gc)),
         }
     }

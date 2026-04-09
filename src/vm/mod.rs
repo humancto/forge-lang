@@ -199,7 +199,11 @@ mod parity_tests {
             .expect_err("jit-assisted vm should error")
             .to_string();
 
-        assert!(interp_err.contains(expected), "interpreter error: {}", interp_err);
+        assert!(
+            interp_err.contains(expected),
+            "interpreter error: {}",
+            interp_err
+        );
         assert!(vm_err.contains(expected), "vm error: {}", vm_err);
         assert!(
             bytecode_err.contains(expected),

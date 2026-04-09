@@ -1002,10 +1002,7 @@ mod tests {
 
     #[test]
     fn vm_incompatibilities_allow_file_imports() {
-        let import_path = format!(
-            "/tmp/forge_vm_import_check_{}.fg",
-            std::process::id()
-        );
+        let import_path = format!("/tmp/forge_vm_import_check_{}.fg", std::process::id());
         std::fs::write(&import_path, r#"let meaning = 42"#).expect("write import fixture");
 
         let source = format!(

@@ -135,7 +135,13 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Some(Value::String(conn_str)) => {
                 let tls_mode = args
                     .get(1)
-                    .and_then(|v| if let Value::String(s) = v { Some(PgTlsMode::parse(s)) } else { None })
+                    .and_then(|v| {
+                        if let Value::String(s) = v {
+                            Some(PgTlsMode::parse(s))
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(PgTlsMode::NoTls);
 
                 let handle = tokio::runtime::Handle::try_current()
@@ -159,10 +165,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                             }
                             PgTlsMode::Tls => {
                                 let tls = make_tls_connector(true)?;
-                                let (client, connection) =
-                                    tokio_postgres::connect(&conn_str, tls)
-                                        .await
-                                        .map_err(|e| format!("pg.connect (TLS) error: {}", e))?;
+                                let (client, connection) = tokio_postgres::connect(&conn_str, tls)
+                                    .await
+                                    .map_err(|e| format!("pg.connect (TLS) error: {}", e))?;
                                 tokio::spawn(async move {
                                     if let Err(e) = connection.await {
                                         eprintln!("pg TLS connection error: {}", e);
@@ -173,11 +178,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                             PgTlsMode::TlsNoVerify => {
                                 let tls = make_tls_connector(false)?;
                                 let (client, connection) =
-                                    tokio_postgres::connect(&conn_str, tls)
-                                        .await
-                                        .map_err(|e| {
-                                            format!("pg.connect (TLS-no-verify) error: {}", e)
-                                        })?;
+                                    tokio_postgres::connect(&conn_str, tls).await.map_err(|e| {
+                                        format!("pg.connect (TLS-no-verify) error: {}", e)
+                                    })?;
                                 tokio::spawn(async move {
                                     if let Err(e) = connection.await {
                                         eprintln!("pg TLS-no-verify connection error: {}", e);
@@ -208,13 +211,13 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 // Extract the client BEFORE entering block_in_place to avoid nested block_on
                 // deadlock: outer block_on(async { inner block_on }) is undefined/deadlock.
                 // Instead we borrow the client for the TLS/non-TLS call then drop the ref.
-                let client_ptr: Option<*const tokio_postgres::Client> =
-                    PG_CLIENT.with(|cell| {
-                        cell.borrow().as_ref().map(|c| c as *const tokio_postgres::Client)
-                    });
+                let client_ptr: Option<*const tokio_postgres::Client> = PG_CLIENT.with(|cell| {
+                    cell.borrow()
+                        .as_ref()
+                        .map(|c| c as *const tokio_postgres::Client)
+                });
 
-                let client_ref = client_ptr
-                    .ok_or_else(|| "no pg connection open".to_string())?;
+                let client_ref = client_ptr.ok_or_else(|| "no pg connection open".to_string())?;
 
                 // SAFETY: The client lives in thread-local storage for the duration of this
                 // call; block_in_place blocks the current thread so the TLS slot cannot be
@@ -273,12 +276,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                     };
 
                 // Same fix as pg.query: extract client ptr before block_in_place
-                let client_ptr: Option<*const tokio_postgres::Client> =
-                    PG_CLIENT.with(|cell| {
-                        cell.borrow().as_ref().map(|c| c as *const tokio_postgres::Client)
-                    });
-                let client_ref = client_ptr
-                    .ok_or_else(|| "no pg connection open".to_string())?;
+                let client_ptr: Option<*const tokio_postgres::Client> = PG_CLIENT.with(|cell| {
+                    cell.borrow()
+                        .as_ref()
+                        .map(|c| c as *const tokio_postgres::Client)
+                });
+                let client_ref = client_ptr.ok_or_else(|| "no pg connection open".to_string())?;
 
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
@@ -351,7 +354,7 @@ mod tests {
         assert_eq!(PgTlsMode::parse("tls"), PgTlsMode::Tls);
         assert_eq!(PgTlsMode::parse("ssl"), PgTlsMode::Tls);
         assert_eq!(PgTlsMode::parse("require"), PgTlsMode::Tls);
-        assert_eq!(PgTlsMode::parse("TLS"), PgTlsMode::Tls);    // case-insensitive
+        assert_eq!(PgTlsMode::parse("TLS"), PgTlsMode::Tls); // case-insensitive
         assert_eq!(PgTlsMode::parse("SSL"), PgTlsMode::Tls);
     }
 
@@ -404,7 +407,10 @@ mod tests {
 
     #[test]
     fn connect_no_runtime_fails_gracefully() {
-        let result = call("pg.connect", vec![Value::String("host=localhost".to_string())]);
+        let result = call(
+            "pg.connect",
+            vec![Value::String("host=localhost".to_string())],
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(

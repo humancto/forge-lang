@@ -269,7 +269,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             (Some(Value::Int(y)), Some(Value::Int(m)), Some(Value::Int(d))) => {
                 let date = NaiveDate::from_ymd_opt(*y as i32, *m as u32, *d as u32)
                     .ok_or_else(|| format!("invalid date: {}-{}-{}", y, m, d))?;
-                let dt = date.and_hms_opt(0, 0, 0)
+                let dt = date
+                    .and_hms_opt(0, 0, 0)
                     .ok_or_else(|| format!("invalid date: {}-{}-{}", y, m, d))?;
                 let utc = DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
                 Ok(datetime_to_value(utc, "UTC"))
@@ -482,7 +483,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             let new_dt = match unit {
                 "day" => {
                     let d = dt.date_naive();
-                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).ok_or_else(err)?, Utc)
+                    DateTime::<Utc>::from_naive_utc_and_offset(
+                        d.and_hms_opt(0, 0, 0).ok_or_else(err)?,
+                        Utc,
+                    )
                 }
                 "hour" => {
                     let d = dt.date_naive();
@@ -493,21 +497,32 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 }
                 "month" => {
                     let d = NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).ok_or_else(err)?;
-                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).ok_or_else(err)?, Utc)
+                    DateTime::<Utc>::from_naive_utc_and_offset(
+                        d.and_hms_opt(0, 0, 0).ok_or_else(err)?,
+                        Utc,
+                    )
                 }
                 "year" => {
                     let d = NaiveDate::from_ymd_opt(dt.year(), 1, 1).ok_or_else(err)?;
-                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).ok_or_else(err)?, Utc)
+                    DateTime::<Utc>::from_naive_utc_and_offset(
+                        d.and_hms_opt(0, 0, 0).ok_or_else(err)?,
+                        Utc,
+                    )
                 }
                 "week" => {
                     let weekday = dt.weekday().num_days_from_monday() as i64;
                     let d = dt.date_naive() - Duration::days(weekday);
-                    DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).ok_or_else(err)?, Utc)
+                    DateTime::<Utc>::from_naive_utc_and_offset(
+                        d.and_hms_opt(0, 0, 0).ok_or_else(err)?,
+                        Utc,
+                    )
                 }
                 "minute" => {
                     let d = dt.date_naive();
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 0).ok_or_else(err)?),
+                        d.and_time(
+                            NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 0).ok_or_else(err)?,
+                        ),
                         Utc,
                     )
                 }
@@ -578,7 +593,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 "minute" => {
                     let d = dt.date_naive();
                     DateTime::<Utc>::from_naive_utc_and_offset(
-                        d.and_time(NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 59).ok_or_else(err)?),
+                        d.and_time(
+                            NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 59).ok_or_else(err)?,
+                        ),
                         Utc,
                     )
                 }

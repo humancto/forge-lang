@@ -18,14 +18,22 @@ pub fn build_native_launcher(source: &str, source_path: &Path) -> Result<PathBuf
         let default_forge_bin = env::var("FORGE_NATIVE_FORGE_BIN")
             .ok()
             .filter(|value| !value.is_empty())
-            .or_else(|| env::current_exe().ok().map(|path| path.display().to_string()))
+            .or_else(|| {
+                env::current_exe()
+                    .ok()
+                    .map(|path| path.display().to_string())
+            })
             .unwrap_or_else(|| "forge".to_string());
 
         let build_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| format!("failed to create native launcher timestamp: {}", e))?
             .as_nanos();
-        let c_path = env::temp_dir().join(format!("forge-native-{}-{}.c", std::process::id(), build_id));
+        let c_path = env::temp_dir().join(format!(
+            "forge-native-{}-{}.c",
+            std::process::id(),
+            build_id
+        ));
         let c_source = native_launcher_c_source(source.as_bytes(), &default_forge_bin);
         fs::write(&c_path, c_source)
             .map_err(|e| format!("failed to write native launcher source: {}", e))?;

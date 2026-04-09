@@ -1104,7 +1104,9 @@ impl Parser {
             if self.check(&Token::Fn) || self.check(&Token::Define) {
                 self.parse_fn_def(decorators)
             } else {
-                Ok(Stmt::DecoratorStmt(decorators.pop().ok_or_else(|| self.error("internal: empty decorator list"))?))
+                Ok(Stmt::DecoratorStmt(decorators.pop().ok_or_else(|| {
+                    self.error("internal: empty decorator list")
+                })?))
             }
         } else {
             // Standalone decorator
@@ -2177,7 +2179,9 @@ mod tests {
 
         match &spanned.stmt {
             Stmt::Let { value, .. } => match value {
-                Expr::WhereFilter { field, op, value, .. } => {
+                Expr::WhereFilter {
+                    field, op, value, ..
+                } => {
                     assert_eq!(field, "age");
                     assert_eq!(*op, BinOp::GtEq);
                     assert!(matches!(value.as_ref(), Expr::Int(18)));

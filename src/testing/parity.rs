@@ -128,7 +128,9 @@ fn load_cases(kind: &str) -> Vec<(PathBuf, String)> {
 }
 
 fn fixtures_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("parity")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("parity")
 }
 
 fn metadata_value(source: &str, key: &str) -> Option<String> {
@@ -194,14 +196,14 @@ fn run_on_jit_value(program: &Program) -> String {
         let info = type_analysis::analyze(proto);
         if !info.has_unsupported_ops {
             if let Some(ptr) = jit.get_compiled(&name) {
-            vm.jit_cache.insert(
-                name,
-                JitEntry {
-                    ptr,
-                    uses_float: info.has_float,
-                },
-            );
-        }
+                vm.jit_cache.insert(
+                    name,
+                    JitEntry {
+                        ptr,
+                        uses_float: info.has_float,
+                    },
+                );
+            }
         }
     }
 

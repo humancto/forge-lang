@@ -210,10 +210,15 @@ impl Environment {
         // Use poison-recovery: if another thread panicked while holding the lock,
         // we still get a usable guard rather than propagating the panic.
         if let Some(scope) = self.scopes.last() {
-            scope.lock().unwrap_or_else(|p| p.into_inner()).insert(name.clone(), value);
+            scope
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(name.clone(), value);
         }
         if let Some(muts) = self.mutability.last() {
-            muts.lock().unwrap_or_else(|p| p.into_inner()).insert(name, mutable);
+            muts.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(name, mutable);
         }
     }
 
@@ -260,12 +265,20 @@ impl Environment {
             scopes: self
                 .scopes
                 .iter()
-                .map(|s| Arc::new(std::sync::Mutex::new(s.lock().unwrap_or_else(|p| p.into_inner()).clone())))
+                .map(|s| {
+                    Arc::new(std::sync::Mutex::new(
+                        s.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+                    ))
+                })
                 .collect(),
             mutability: self
                 .mutability
                 .iter()
-                .map(|m| Arc::new(std::sync::Mutex::new(m.lock().unwrap_or_else(|p| p.into_inner()).clone())))
+                .map(|m| {
+                    Arc::new(std::sync::Mutex::new(
+                        m.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+                    ))
+                })
                 .collect(),
         }
     }
@@ -2319,9 +2332,9 @@ impl Interpreter {
 
                                         match (&left, &right) {
                                             (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                                            (Value::Float(x), Value::Float(y)) => {
-                                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                                            }
+                                            (Value::Float(x), Value::Float(y)) => x
+                                                .partial_cmp(y)
+                                                .unwrap_or(std::cmp::Ordering::Equal),
                                             (Value::String(x), Value::String(y)) => x.cmp(y),
                                             _ => format!("{}", left).cmp(&format!("{}", right)),
                                         }

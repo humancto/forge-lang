@@ -339,26 +339,76 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         (
             "math",
             vec![
-                "sqrt", "pow", "abs", "max", "min", "floor", "ceil", "round", "random",
-                "random_int", "sin", "cos", "tan", "log", "pi", "e", "clamp",
+                "sqrt",
+                "pow",
+                "abs",
+                "max",
+                "min",
+                "floor",
+                "ceil",
+                "round",
+                "random",
+                "random_int",
+                "sin",
+                "cos",
+                "tan",
+                "log",
+                "pi",
+                "e",
+                "clamp",
             ],
         ),
         (
             "fs",
             vec![
-                "read", "write", "append", "exists", "list", "remove", "mkdir", "copy",
-                "rename", "size", "ext", "read_json", "write_json", "lines", "dirname",
-                "basename", "join_path", "is_dir", "is_file", "temp_dir",
+                "read",
+                "write",
+                "append",
+                "exists",
+                "list",
+                "remove",
+                "mkdir",
+                "copy",
+                "rename",
+                "size",
+                "ext",
+                "read_json",
+                "write_json",
+                "lines",
+                "dirname",
+                "basename",
+                "join_path",
+                "is_dir",
+                "is_file",
+                "temp_dir",
             ],
         ),
-        ("io", vec!["prompt", "print", "args", "args_parse", "args_get", "args_has"]),
+        (
+            "io",
+            vec![
+                "prompt",
+                "print",
+                "args",
+                "args_parse",
+                "args_get",
+                "args_has",
+            ],
+        ),
         (
             "crypto",
             vec![
-                "sha256", "md5", "base64_encode", "base64_decode", "hex_encode", "hex_decode",
+                "sha256",
+                "md5",
+                "base64_encode",
+                "base64_decode",
+                "hex_encode",
+                "hex_decode",
             ],
         ),
-        ("db", vec!["open", "query", "execute", "close", "last_insert_rowid"]),
+        (
+            "db",
+            vec!["open", "query", "execute", "close", "last_insert_rowid"],
+        ),
         ("pg", vec!["connect", "query", "execute", "close"]),
         ("mysql", vec!["connect", "query", "execute", "close"]),
         ("jwt", vec!["sign", "verify", "decode", "valid"]),
@@ -379,25 +429,76 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         (
             "term",
             vec![
-                "red", "green", "blue", "yellow", "cyan", "magenta", "bold", "dim", "table",
-                "hr", "clear", "confirm", "sparkline", "bar", "banner", "box", "gradient",
-                "success", "error",
+                "red",
+                "green",
+                "blue",
+                "yellow",
+                "cyan",
+                "magenta",
+                "bold",
+                "dim",
+                "table",
+                "hr",
+                "clear",
+                "confirm",
+                "sparkline",
+                "bar",
+                "banner",
+                "box",
+                "gradient",
+                "success",
+                "error",
             ],
         ),
         (
             "time",
             vec![
-                "now", "unix", "parse", "format", "diff", "add", "sub", "zone", "zones",
-                "elapsed", "today", "date", "sleep", "measure", "local", "is_before",
-                "is_after", "start_of", "end_of", "from_unix", "is_weekend", "is_weekday",
-                "day_of_week", "days_in_month", "is_leap_year",
+                "now",
+                "unix",
+                "parse",
+                "format",
+                "diff",
+                "add",
+                "sub",
+                "zone",
+                "zones",
+                "elapsed",
+                "today",
+                "date",
+                "sleep",
+                "measure",
+                "local",
+                "is_before",
+                "is_after",
+                "start_of",
+                "end_of",
+                "from_unix",
+                "is_weekend",
+                "is_weekday",
+                "day_of_week",
+                "days_in_month",
+                "is_leap_year",
             ],
         ),
         (
             "npc",
             vec![
-                "name", "first_name", "last_name", "email", "username", "phone", "number",
-                "pick", "bool", "sentence", "word", "id", "color", "ip", "url", "company",
+                "name",
+                "first_name",
+                "last_name",
+                "email",
+                "username",
+                "phone",
+                "number",
+                "pick",
+                "bool",
+                "sentence",
+                "word",
+                "id",
+                "color",
+                "ip",
+                "url",
+                "company",
             ],
         ),
         ("exec", vec!["run_command"]),
@@ -499,7 +600,8 @@ fn get_definition(uri: &str, line: usize, character: usize) -> serde_json::Value
 
     let Some(symbol) = collect_document_symbols(&text)
         .into_iter()
-        .find(|symbol| symbol.name == word) else {
+        .find(|symbol| symbol.name == word)
+    else {
         return serde_json::Value::Null;
     };
 
@@ -669,10 +771,9 @@ mod tests {
 
     #[test]
     fn initialize_advertises_navigation_capabilities() {
-        let response = handle_message(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-        )
-        .unwrap();
+        let response =
+            handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+                .unwrap();
         let json: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(
             json.pointer("/result/capabilities/definitionProvider")
@@ -696,9 +797,15 @@ mod tests {
             "#,
         );
 
-        assert!(symbols.iter().any(|symbol| symbol.name == "add" && symbol.kind == 12));
-        assert!(symbols.iter().any(|symbol| symbol.name == "answer" && symbol.kind == 13));
-        assert!(symbols.iter().any(|symbol| symbol.name == "User" && symbol.kind == 23));
+        assert!(symbols
+            .iter()
+            .any(|symbol| symbol.name == "add" && symbol.kind == 12));
+        assert!(symbols
+            .iter()
+            .any(|symbol| symbol.name == "answer" && symbol.kind == 13));
+        assert!(symbols
+            .iter()
+            .any(|symbol| symbol.name == "User" && symbol.kind == 23));
     }
 
     #[test]
