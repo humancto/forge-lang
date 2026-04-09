@@ -1129,4 +1129,97 @@ mod jit_tests {
         let result = jit.compile_function(&chunk.prototypes[0], "make_arr");
         assert!(result.is_err());
     }
+
+    // ----- VMError stack trace tests -----
+    //
+    // Before this work the compiler emitted every instruction with line=0,
+    // so VMError.stack_trace either stayed empty or reported "(line 0)" for
+    // every frame. These tests pin the new behaviour: real source lines
+    // surface in the trace, and frames stack up across function calls.
+
+    fn compile_source(source: &str) -> crate::vm::bytecode::Chunk {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize().expect("lex");
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().expect("parse");
+        compiler::compile(&program).expect("compile")
+    }
+
+    #[test]
+    fn vm_error_stack_trace_reports_top_level_line() {
+        // Three blank lines so the failing statement is on line 4 — we want
+        // to confirm the trace doesn't always report line 1.
+        let chunk = compile_source("\n\n\nlet arr = [1, 2, 3]\nprintln(arr[100])\n");
+        let mut vm = VM::new();
+        let err = vm.execute(&chunk).expect_err("should fail");
+
+        assert!(err.message.contains("index out of bounds"));
+        assert!(
+            !err.stack_trace.is_empty(),
+            "expected non-empty stack trace, got: {:?}",
+            err
+        );
+        let top = &err.stack_trace[0];
+        assert_eq!(top.function, "<main>");
+        assert!(
+            top.line >= 4,
+            "expected top-level frame to report line >= 4, got line {}",
+            top.line
+        );
+    }
+
+    #[test]
+    fn vm_error_stack_trace_includes_called_function() {
+        // The error originates inside `inner`, called from top-level. The
+        // trace should include both frames in caller order (innermost first).
+        let chunk = compile_source(
+            r#"
+fn inner() {
+    let arr = [1, 2, 3]
+    return arr[100]
+}
+let _ = inner()
+"#,
+        );
+        let mut vm = VM::new();
+        let err = vm.execute(&chunk).expect_err("should fail");
+
+        let function_names: Vec<&str> = err
+            .stack_trace
+            .iter()
+            .map(|f| f.function.as_str())
+            .collect();
+        assert!(
+            function_names.contains(&"inner"),
+            "expected `inner` in trace, got: {:?}",
+            function_names
+        );
+        assert!(
+            function_names.contains(&"<main>"),
+            "expected `<main>` in trace, got: {:?}",
+            function_names
+        );
+    }
+
+    #[test]
+    fn vm_error_display_includes_trace() {
+        // The Display impl is what main.rs prints to the user — confirm it
+        // serialises the trace, not just the message.
+        let chunk = compile_source("let arr = [1, 2, 3]\nprintln(arr[100])\n");
+        let mut vm = VM::new();
+        let err = vm.execute(&chunk).expect_err("should fail");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("index out of bounds"));
+        assert!(
+            rendered.contains("at <main>"),
+            "expected trace in Display output, got: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("(line "),
+            "expected `(line N)` in Display output, got: {}",
+            rendered
+        );
+    }
 }

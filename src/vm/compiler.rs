@@ -42,6 +42,10 @@ pub struct Compiler {
     parent_locals: Vec<(String, u8)>,
     parent_upvalues: Vec<(String, u8)>,
     module_mode: bool,
+    /// Source line currently being compiled. Top-level loops update this
+    /// from `SpannedStmt::line` before each statement so any `emit` that
+    /// passes `0` for the line picks up a real number instead.
+    current_line: usize,
 }
 
 #[derive(Debug)]
@@ -71,6 +75,7 @@ impl Compiler {
             parent_locals: Vec::new(),
             parent_upvalues: Vec::new(),
             module_mode: false,
+            current_line: 0,
         }
     }
 
@@ -103,7 +108,12 @@ impl Compiler {
     }
 
     fn emit(&mut self, inst: u32, line: usize) {
-        self.chunk.emit(inst, line);
+        // Most call sites pass `0` because per-instruction source tracking
+        // never got plumbed through. Fall back to `current_line`, which is
+        // updated per top-level statement, so runtime stack traces at least
+        // point at the right statement instead of always reporting line 0.
+        let actual = if line == 0 { self.current_line } else { line };
+        self.chunk.emit(inst, actual);
     }
 
     fn emit_jump(&mut self, op: OpCode, a: u8, line: usize) -> usize {
@@ -231,6 +241,7 @@ pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
     let mut c = Compiler::new("<main>");
     c.begin_scope();
     for spanned in &program.statements {
+        c.current_line = spanned.line;
         compile_stmt(&mut c, &spanned.stmt)?;
     }
     c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -243,6 +254,7 @@ pub fn compile_module(program: &Program) -> Result<Chunk, CompileError> {
     c.module_mode = true;
     c.begin_scope();
     for spanned in &program.statements {
+        c.current_line = spanned.line;
         compile_stmt(&mut c, &spanned.stmt)?;
     }
     c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -258,6 +270,7 @@ pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
     let mut has_result = false;
 
     for spanned in &program.statements {
+        c.current_line = spanned.line;
         match &spanned.stmt {
             Stmt::Expression(expr) if !is_output_expr(expr) => {
                 compile_expr(&mut c, expr, result_reg)?;
@@ -616,6 +629,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             let mut fc = Compiler::new(name);
             fc.parent_locals = parent_locals;
             fc.parent_upvalues = parent_upvalues;
+            fc.current_line = c.current_line;
             fc.begin_scope();
             for param in params {
                 fc.add_local(&param.name, true);
@@ -1418,6 +1432,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::Spawn { body } => {
             let mut sc = Compiler::new("<spawn>");
+            sc.current_line = c.current_line;
             sc.begin_scope();
             for s in body {
                 compile_stmt(&mut sc, s)?;
@@ -1605,6 +1620,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             let mut lc = Compiler::new("<lambda>");
             lc.parent_locals = parent_locals;
             lc.parent_upvalues = parent_upvalues;
+            lc.current_line = c.current_line;
             lc.begin_scope();
             for p in params {
                 lc.add_local(&p.name, true);

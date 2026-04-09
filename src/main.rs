@@ -591,7 +591,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             match vm::run_with_profiling(&program) {
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("{}", errors::format_simple_error(&e.message));
+                    eprintln!("{}", errors::format_simple_error(&e.to_string()));
                     process::exit(1);
                 }
             }
@@ -599,7 +599,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             match vm::run(&program) {
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("{}", errors::format_simple_error(&e.message));
+                    eprintln!("{}", errors::format_simple_error(&e.to_string()));
                     process::exit(1);
                 }
             }
@@ -710,7 +710,9 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
     match vm.execute(&chunk) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("{}", errors::format_simple_error(&e.message));
+            // Use the full Display impl so the stack trace (function +
+            // source line) gets printed, not just the bare message.
+            eprintln!("{}", errors::format_simple_error(&e.to_string()));
             process::exit(1);
         }
     }
@@ -827,7 +829,9 @@ fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
     match vm.execute(&chunk) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("{}", errors::format_simple_error(&e.message));
+            // Use the full Display impl so the stack trace (function +
+            // source line) gets printed, not just the bare message.
+            eprintln!("{}", errors::format_simple_error(&e.to_string()));
             process::exit(1);
         }
     }
