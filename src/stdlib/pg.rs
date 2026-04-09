@@ -1,5 +1,6 @@
 use crate::interpreter::Value;
 use indexmap::IndexMap;
+use std::sync::Arc;
 
 pub fn create_module() -> Value {
     let mut m = IndexMap::new();
@@ -16,23 +17,31 @@ pub fn create_module() -> Value {
     Value::Object(m)
 }
 
-/// TLS mode for pg.connect().
+/// TLS mode for pg.connect(). Defaults to [`PgTlsMode::Tls`] when no mode is
+/// specified — connecting to production databases over plain TCP would leak
+/// credentials and query data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PgTlsMode {
-    /// Plain TCP — no encryption. Default for backward compatibility.
+    /// Plain TCP — no encryption. Must be requested explicitly via "disable"
+    /// (or "none"/"no-tls"/"plain"). Use only for local sockets / dev.
     NoTls,
-    /// TLS with full certificate verification. Use in production.
+    /// TLS with full certificate verification. The secure default.
     Tls,
     /// TLS with certificate verification disabled. Dev/testing only.
     TlsNoVerify,
 }
 
 impl PgTlsMode {
-    fn parse(s: &str) -> Self {
+    /// Parse a mode string. Empty / unknown values fall back to the secure
+    /// [`PgTlsMode::Tls`] default — explicit opt-outs require an explicit
+    /// keyword like "disable".
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "tls" | "ssl" | "require" => PgTlsMode::Tls,
+            "" => PgTlsMode::Tls,
+            "tls" | "ssl" | "require" | "verify-full" => PgTlsMode::Tls,
             "tls-no-verify" | "ssl-no-verify" | "no-verify" => PgTlsMode::TlsNoVerify,
-            _ => PgTlsMode::NoTls,
+            "disable" | "none" | "no-tls" | "plain" => PgTlsMode::NoTls,
+            _ => PgTlsMode::Tls,
         }
     }
 }
@@ -128,9 +137,10 @@ fn forge_to_pg_param(val: &Value) -> Box<dyn tokio_postgres::types::ToSql + Sync
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
-        // ── pg.connect(conn_str)                  → no TLS (backward compat)
+        // ── pg.connect(conn_str)                  → TLS with verification (secure default)
         // ── pg.connect(conn_str, "tls")           → TLS + cert verification
         // ── pg.connect(conn_str, "tls-no-verify") → TLS, skip cert verify (dev)
+        // ── pg.connect(conn_str, "disable")       → plain TCP, no TLS
         "pg.connect" => match args.first() {
             Some(Value::String(conn_str)) => {
                 let tls_mode = args
@@ -142,7 +152,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                             None
                         }
                     })
-                    .unwrap_or(PgTlsMode::NoTls);
+                    .unwrap_or(PgTlsMode::Tls);
 
                 let handle = tokio::runtime::Handle::try_current()
                     .map_err(|_| "pg.connect requires async runtime".to_string())?;
@@ -161,7 +171,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                                         eprintln!("pg connection error: {}", e);
                                     }
                                 });
-                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(client));
+                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(Arc::new(client)));
                             }
                             PgTlsMode::Tls => {
                                 let tls = make_tls_connector(true)?;
@@ -173,7 +183,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                                         eprintln!("pg TLS connection error: {}", e);
                                     }
                                 });
-                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(client));
+                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(Arc::new(client)));
                             }
                             PgTlsMode::TlsNoVerify => {
                                 let tls = make_tls_connector(false)?;
@@ -186,7 +196,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                                         eprintln!("pg TLS-no-verify connection error: {}", e);
                                     }
                                 });
-                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(client));
+                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(Arc::new(client)));
                             }
                         }
                         Ok::<Value, String>(Value::Bool(true))
@@ -208,23 +218,16 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         _ => vec![],
                     };
 
-                // Extract the client BEFORE entering block_in_place to avoid nested block_on
-                // deadlock: outer block_on(async { inner block_on }) is undefined/deadlock.
-                // Instead we borrow the client for the TLS/non-TLS call then drop the ref.
-                let client_ptr: Option<*const tokio_postgres::Client> = PG_CLIENT.with(|cell| {
-                    cell.borrow()
-                        .as_ref()
-                        .map(|c| c as *const tokio_postgres::Client)
-                });
+                // Clone the Arc out of the thread-local before doing any async work.
+                // This drops the RefCell borrow immediately and gives the async task
+                // independent ownership — no raw pointers, no `unsafe`, and the client
+                // stays alive even if the slot is later cleared.
+                let client = PG_CLIENT
+                    .with(|cell| cell.borrow().as_ref().map(Arc::clone))
+                    .ok_or_else(|| "no pg connection open".to_string())?;
 
-                let client_ref = client_ptr.ok_or_else(|| "no pg connection open".to_string())?;
-
-                // SAFETY: The client lives in thread-local storage for the duration of this
-                // call; block_in_place blocks the current thread so the TLS slot cannot be
-                // replaced while the raw pointer is live.
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
-                        let client = unsafe { &*client_ref };
                         let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
                             param_vals
                                 .iter()
@@ -275,17 +278,14 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         _ => vec![],
                     };
 
-                // Same fix as pg.query: extract client ptr before block_in_place
-                let client_ptr: Option<*const tokio_postgres::Client> = PG_CLIENT.with(|cell| {
-                    cell.borrow()
-                        .as_ref()
-                        .map(|c| c as *const tokio_postgres::Client)
-                });
-                let client_ref = client_ptr.ok_or_else(|| "no pg connection open".to_string())?;
+                // Clone the Arc out of the thread-local before any async work — same
+                // pattern as pg.query.
+                let client = PG_CLIENT
+                    .with(|cell| cell.borrow().as_ref().map(Arc::clone))
+                    .ok_or_else(|| "no pg connection open".to_string())?;
 
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
-                        let client = unsafe { &*client_ref };
                         let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
                             param_vals
                                 .iter()
@@ -316,7 +316,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 }
 
 thread_local! {
-    static PG_CLIENT: std::cell::RefCell<Option<tokio_postgres::Client>> =
+    static PG_CLIENT: std::cell::RefCell<Option<Arc<tokio_postgres::Client>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -343,10 +343,22 @@ mod tests {
     // ── PgTlsMode parsing ────────────────────────────────────────────────────
 
     #[test]
-    fn tls_mode_notls_is_default() {
-        assert_eq!(PgTlsMode::parse(""), PgTlsMode::NoTls);
+    fn tls_mode_explicit_disable_keywords() {
+        // Plain TCP only when explicitly requested via libpq-style "disable"
+        // or its aliases.
+        assert_eq!(PgTlsMode::parse("disable"), PgTlsMode::NoTls);
         assert_eq!(PgTlsMode::parse("none"), PgTlsMode::NoTls);
+        assert_eq!(PgTlsMode::parse("no-tls"), PgTlsMode::NoTls);
         assert_eq!(PgTlsMode::parse("plain"), PgTlsMode::NoTls);
+        assert_eq!(PgTlsMode::parse("DISABLE"), PgTlsMode::NoTls);
+    }
+
+    #[test]
+    fn tls_mode_default_is_secure() {
+        // Empty string and unknown values must default to TLS (secure-by-default).
+        assert_eq!(PgTlsMode::parse(""), PgTlsMode::Tls);
+        assert_eq!(PgTlsMode::parse("garbage"), PgTlsMode::Tls);
+        assert_eq!(PgTlsMode::parse("verify-full"), PgTlsMode::Tls);
     }
 
     #[test]
