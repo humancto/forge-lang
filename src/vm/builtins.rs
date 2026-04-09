@@ -1335,7 +1335,9 @@ impl VM {
                 Some(Value::Obj(r)) => {
                     let url = self.get_string(&Value::Obj(*r)).unwrap_or_default();
                     let method = "GET".to_string();
-                    match crate::runtime::client::fetch_blocking(&url, &method, None, None, None) {
+                    match crate::runtime::client::fetch_blocking(
+                        &url, &method, None, None, None, None, None,
+                    ) {
                         Ok(interp_val) => Ok(self.convert_interp_value(&interp_val)),
                         Err(e) => Err(VMError::new(&format!("fetch error: {}", e))),
                     }

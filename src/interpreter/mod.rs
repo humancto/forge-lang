@@ -2244,6 +2244,8 @@ impl Interpreter {
                         h
                     }),
                     None,
+                    None,
+                    None,
                 ) {
                     Ok(Value::Object(resp)) => {
                         if let Some(Value::Object(json_body)) = resp.get("json") {

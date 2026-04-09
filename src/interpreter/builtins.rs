@@ -384,7 +384,9 @@ impl Interpreter {
                         _ => None,
                     };
 
-                    match crate::runtime::client::fetch_blocking(url, &method, body, None, None) {
+                    match crate::runtime::client::fetch_blocking(
+                        url, &method, body, None, None, None, None,
+                    ) {
                         Ok(value) => Ok(value),
                         Err(e) => Err(RuntimeError::new(&format!("fetch error: {}", e))),
                     }
