@@ -517,12 +517,34 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
                 }
             }
         }
-        Expr::Await(expr)
-        | Expr::Freeze(expr)
-        | Expr::Spread(expr)
-        | Expr::Must(expr)
-        | Expr::Ask(expr) => collect_vm_incompatible_expr(expr, issues),
+        // These are silently flattened to their inner expression by the VM
+        // compiler, which produces wrong results: `must` would not crash on
+        // Err, `ask` would not call the LLM, `await` would not actually
+        // wait, and `freeze` would not enforce immutability. Reject them up
+        // front so the user sees a clear "unsupported in --vm" error instead
+        // of running and silently getting the wrong answer.
+        Expr::Must(expr) => {
+            issues.insert("must expressions");
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Ask(expr) => {
+            issues.insert("ask expressions");
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Await(expr) => {
+            issues.insert("await expressions");
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Freeze(expr) => {
+            issues.insert("freeze expressions");
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Spread(expr) => collect_vm_incompatible_expr(expr, issues),
         Expr::Spawn(body) => {
+            // The expression form of spawn silently flattens to a synchronous
+            // block returning null in the VM compiler, so user code that
+            // depends on its parallel semantics is wrong. Reject it.
+            issues.insert("spawn expressions");
             for stmt in body {
                 collect_vm_incompatible_stmt(stmt, issues);
             }

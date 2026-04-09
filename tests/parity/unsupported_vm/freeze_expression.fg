@@ -1,0 +1,4 @@
+// expect-error: freeze expressions
+
+let frozen = freeze [1, 2, 3]
+println(frozen)

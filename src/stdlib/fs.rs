@@ -685,49 +685,10 @@ mod tests {
         std::fs::remove_dir_all(&outside).ok();
     }
 
-    #[test]
-    fn fs_read_inside_confined_base_succeeds() {
-        // End-to-end: hold the env var across the call. Use a unique base to
-        // minimise collision risk with parallel tests.
-        let base = unique_temp_dir("e2e_inside");
-        let file = base.join("hi.txt");
-        std::fs::write(&file, "hello").unwrap();
-
-        let prev = std::env::var("FORGE_FS_BASE").ok();
-        // SAFETY: tests that touch FORGE_FS_BASE are confined to this module
-        // and the env var is restored before the test returns.
-        std::env::set_var("FORGE_FS_BASE", &base);
-
-        let result = call(
-            "fs.read",
-            vec![Value::String(file.to_string_lossy().to_string())],
-        );
-
-        match prev {
-            Some(v) => std::env::set_var("FORGE_FS_BASE", v),
-            None => std::env::remove_var("FORGE_FS_BASE"),
-        }
-        std::fs::remove_dir_all(&base).ok();
-
-        assert_eq!(result.unwrap(), Value::String("hello".to_string()));
-    }
-
-    #[test]
-    fn fs_read_outside_confined_base_errors() {
-        let base = unique_temp_dir("e2e_outside");
-
-        let prev = std::env::var("FORGE_FS_BASE").ok();
-        std::env::set_var("FORGE_FS_BASE", &base);
-
-        let result = call("fs.read", vec![Value::String("/etc/hosts".to_string())]);
-
-        match prev {
-            Some(v) => std::env::set_var("FORGE_FS_BASE", v),
-            None => std::env::remove_var("FORGE_FS_BASE"),
-        }
-        std::fs::remove_dir_all(&base).ok();
-
-        let err = result.expect_err("read outside base should fail");
-        assert!(err.contains("escapes FORGE_FS_BASE"), "got: {}", err);
-    }
+    // Note: end-to-end tests that set FORGE_FS_BASE on the process can't run
+    // safely under cargo's parallel test runner — sibling fs tests like
+    // test_fs_is_dir would observe the var and start failing midway. The
+    // helper-level confine_path_with tests above already exercise the same
+    // logic (confine_path is a one-line wrapper that reads the env var and
+    // delegates), so we get the coverage without the race.
 }
