@@ -244,7 +244,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
 /// field that wasn't present or wasn't a valid integer.
 fn parse_http_opts(opts: &IndexMap<String, Value>) -> (Option<u64>, Option<usize>, Option<u64>) {
     let timeout = match opts.get("timeout") {
-        Some(Value::Int(t)) if *t > 0 => Some(*t as u64),
+        Some(Value::Int(t)) if *t >= 0 => Some(*t as u64),
         _ => None,
     };
     let max_redirects = match opts.get("max_redirects") {
@@ -276,12 +276,14 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
             let d = url.rsplit('/').next().unwrap_or("download").to_string();
             (d, Some(o))
         }
-        _ => (url.rsplit('/').next().unwrap_or("download").to_string(), None),
+        _ => (
+            url.rsplit('/').next().unwrap_or("download").to_string(),
+            None,
+        ),
     };
 
-    let (timeout_secs, max_redirects, max_bytes) = opts
-        .map(|o| parse_http_opts(o))
-        .unwrap_or((None, None, None));
+    let (timeout_secs, max_redirects, max_bytes) =
+        opts.map(parse_http_opts).unwrap_or((None, None, None));
 
     let validated = crate::runtime::client::validate_url_full(&url)?;
 

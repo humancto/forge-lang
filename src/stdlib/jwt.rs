@@ -701,6 +701,60 @@ mod tests {
     }
 
     #[test]
+    fn test_key_confusion_attack_vector() {
+        // The actual documented attack: attacker has the server's RSA
+        // public key (which is public). They sign a token with HS256
+        // using the RSA public key bytes as the HMAC secret. Without
+        // algorithm pinning, a naive verifier trusts the token's
+        // "alg":"HS256" header and verifies with the same public key —
+        // signature matches, attacker wins.
+        //
+        // With pinning to RS256, the verify call rejects the token
+        // because its header says HS256 ≠ RS256.
+        //
+        // We use a fake RSA public key string (not valid PEM, but the
+        // attack works with any shared byte string). The important
+        // thing is that the same string is used as both the HMAC
+        // signing secret and the "RSA public key" passed to verify.
+        let fake_rsa_pubkey = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn\n-----END PUBLIC KEY-----";
+
+        // Attacker signs with HS256 using the RSA public key as HMAC secret.
+        let attacker_token = jwt_sign(vec![
+            make_claims(),
+            Value::String(fake_rsa_pubkey.to_string()),
+        ])
+        .unwrap();
+
+        // Without algorithm pin: verify trusts HS256 from the header and
+        // uses the same key as HMAC secret — this succeeds (the attack).
+        let result_no_pin = jwt_verify(vec![
+            attacker_token.clone(),
+            Value::String(fake_rsa_pubkey.to_string()),
+        ]);
+        assert!(
+            result_no_pin.is_ok(),
+            "without pinning, HS256 + shared key should verify (this is the attack)"
+        );
+
+        // With RS256 pin: verify sees HS256 ≠ RS256 and rejects.
+        let mut opts = IndexMap::new();
+        opts.insert("algorithm".to_string(), Value::String("RS256".to_string()));
+        let result_pinned = jwt_verify(vec![
+            attacker_token,
+            Value::String(fake_rsa_pubkey.to_string()),
+            Value::Object(opts),
+        ]);
+        assert!(
+            result_pinned.is_err(),
+            "with RS256 pin, HS256 token must be rejected"
+        );
+        assert!(
+            result_pinned.unwrap_err().contains("mismatch"),
+            "error should mention algorithm mismatch"
+        );
+    }
+
+    #[test]
     fn test_create_module() {
         let module = create_module();
         if let Value::Object(m) = module {

@@ -13,21 +13,19 @@ Baseline: v0.4.3, 37k LOC, 805 cargo tests, production-readiness hardening merge
 
 Already uses `getrandom::getrandom()`. No further work needed.
 
-### 0.2 JWT key-confusion defence
+### ~~0.2 JWT key-confusion defence~~ ✅ DONE (PR #5)
 
-- **Where:** `src/stdlib/jwt.rs` — `jwt_verify` function
-- **Problem:** `jwt.verify(token, secret)` doesn't let the caller pin the expected algorithm. An attacker can forge a token by signing with HS256 using the RSA public key as the HMAC secret. The `jsonwebtoken` crate supports `Validation::set_required_spec_claims` and algorithm whitelisting.
-- **Fix:** Accept optional third argument: `jwt.verify(token, secret, { algorithm: "RS256" })`. When provided, set `Validation.algorithms = [algo]`. When omitted, keep current behaviour (accept HS256/384/512 + RS256 + ES256) but log a deprecation warning to stderr on first call.
-- **Tests:** Sign with HS256 + RSA pubkey as secret → verify with RS256 pinned → must reject. Sign with RS256 → verify with RS256 pinned → must accept.
-- **Effort:** ~1 hr
+Implemented algorithm pinning via optional third argument `{ algorithm: "RS256" }`.
+Header mismatch fails with a clear error. 6 tests including the actual attack vector
+(HS256 + RSA pubkey as HMAC secret → succeeds without pin, fails with RS256 pin).
+Deprecation warning for unpinned calls deferred — current behaviour (trust header) is
+preserved for back-compat; pinning is opt-in.
 
-### 0.3 `http.download` / `http.crawl` — thread user options
+### ~~0.3 `http.download` / `http.crawl` — thread user options~~ ✅ DONE (PR #5)
 
-- **Where:** `src/stdlib/http.rs:242-364` — `do_download` and `do_crawl`
-- **Problem:** These functions accept `(url)` or `(url, dest)` but ignore any options object. `do_request` already parses `timeout`, `max_redirects`, `max_bytes` from an options map. Downloads and crawls should do the same.
-- **Fix:** Accept optional trailing `Value::Object` argument. Parse `timeout`, `max_redirects`, `max_bytes` the same way `do_request` does. Pass through to `build_client` / `read_body_capped`.
-- **Tests:** Unit test that `do_download` with `{ timeout: 5 }` doesn't panic. Integration test optional.
-- **Effort:** ~30 min
+Both now accept `timeout`, `max_redirects`, `max_bytes` via options object.
+Shared `parse_http_opts` helper. Flexible arg parsing for download:
+`(url)`, `(url, dest)`, `(url, opts)`, `(url, dest, opts)`.
 
 ### ~~0.4 `drop(&obj)` compiler warning~~ ✅ DONE (merged in PR #4)
 
@@ -193,4 +191,4 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 0 — not started**
+Current status: **Phase 0 — items 0.1-0.4 complete, 0.5 (v0.5.0 release cut) remaining**
