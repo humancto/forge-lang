@@ -4,11 +4,14 @@ use crate::runtime::server::json_to_forge;
 /// Full HTTP/HTTPS client with JSON, headers, timeouts, and safety guards.
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 /// Default ceiling on HTTP redirect chains. Applies to fetch, download, and crawl
-/// unless an explicit override is supplied.
-pub const DEFAULT_MAX_REDIRECTS: usize = 10;
+/// unless an explicit override is supplied. Tighter than reqwest's default of 10
+/// because every additional hop is another opportunity for SSRF / open-redirect
+/// abuse.
+pub const DEFAULT_MAX_REDIRECTS: usize = 5;
 
 /// Default ceiling on response body size for `fetch` (bytes). Larger responses
 /// abort with an error to prevent memory exhaustion.
@@ -21,17 +24,46 @@ pub const DEFAULT_DOWNLOAD_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 /// Default ceiling on HTML body size for crawl (bytes).
 pub const DEFAULT_CRAWL_MAX_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
 
+/// A URL that has passed Forge's scheme/host/private-address checks, plus an
+/// optional pinned `(host, socket_addr)` tuple for use with `reqwest`'s
+/// `.resolve()` builder. Pinning short-circuits reqwest's own DNS lookup so
+/// the connection goes to the exact address the validator checked, closing
+/// the TOCTOU window between DNS resolution and TCP connect (i.e. DNS
+/// rebinding). Only the *initial* URL of a request can be pinned this way;
+/// redirected hops are re-validated via [`validate_url_with`] but still rely
+/// on reqwest's connect-time DNS.
+#[derive(Debug, Clone)]
+pub struct ValidatedUrl {
+    pub url: url::Url,
+    /// `Some((host, addr))` when the host was a DNS name that resolved to
+    /// a safe address we want reqwest to reuse. `None` when the URL already
+    /// used an IP literal (nothing to pin).
+    pub pinned: Option<(String, SocketAddr)>,
+}
+
 /// Validate a URL string for use as an HTTP request target. Reads the
 /// `FORGE_HTTP_DENY_PRIVATE` env var; when set to `1`, also rejects private,
 /// loopback, link-local, and multicast addresses (basic SSRF defence).
 pub fn validate_url(raw: &str) -> Result<url::Url, String> {
+    validate_url_full(raw).map(|v| v.url)
+}
+
+/// Full-detail variant of [`validate_url`] that also returns a pinned
+/// `SocketAddr` when the host is a DNS name. Use this before constructing a
+/// client so the pinning can be installed via [`build_client`].
+pub fn validate_url_full(raw: &str) -> Result<ValidatedUrl, String> {
     let deny_private = std::env::var("FORGE_HTTP_DENY_PRIVATE").as_deref() == Ok("1");
-    validate_url_with(raw, deny_private)
+    validate_url_full_with(raw, deny_private)
 }
 
 /// Test-friendly variant of [`validate_url`] that accepts an explicit
 /// `deny_private` flag instead of consulting the environment.
 pub fn validate_url_with(raw: &str, deny_private: bool) -> Result<url::Url, String> {
+    validate_url_full_with(raw, deny_private).map(|v| v.url)
+}
+
+/// Test-friendly full-detail variant of [`validate_url_full`].
+pub fn validate_url_full_with(raw: &str, deny_private: bool) -> Result<ValidatedUrl, String> {
     let parsed =
         url::Url::parse(raw).map_err(|e| format!("invalid url '{}': {}", raw, e))?;
     match parsed.scheme() {
@@ -43,34 +75,68 @@ pub fn validate_url_with(raw: &str, deny_private: bool) -> Result<url::Url, Stri
             ))
         }
     }
-    if deny_private {
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| format!("url '{}' has no host", raw))?;
-        if host_resolves_to_private(host)? {
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("url '{}' has no host", raw))?
+        .to_string();
+    let port = parsed.port_or_known_default().unwrap_or(match parsed.scheme() {
+        "https" => 443,
+        _ => 80,
+    });
+
+    // If the host is already an IP literal, there's no DNS to pin — just
+    // classify it and (optionally) reject.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if deny_private && ip_is_private(&ip) {
             return Err(format!(
-                "url host '{}' resolves to a private/loopback address (FORGE_HTTP_DENY_PRIVATE=1)",
+                "url host '{}' is a private/loopback address (FORGE_HTTP_DENY_PRIVATE=1)",
                 host
             ));
         }
+        return Ok(ValidatedUrl {
+            url: parsed,
+            pinned: None,
+        });
     }
-    Ok(parsed)
+
+    // DNS hostname. When `deny_private` is on we *must* resolve (and fail
+    // closed on errors) so every returned address is inspected. When it's
+    // off, we still try to resolve so we can pin the address into reqwest
+    // (defeating DNS rebinding on the initial connection), but a resolver
+    // failure is non-fatal — we just skip pinning and let reqwest do its
+    // own lookup later.
+    if deny_private {
+        let resolved = resolve_host(&host, port)?;
+        for addr in &resolved {
+            if ip_is_private(&addr.ip()) {
+                return Err(format!(
+                    "url host '{}' resolves to a private/loopback address (FORGE_HTTP_DENY_PRIVATE=1)",
+                    host
+                ));
+            }
+        }
+        let pin = resolved.into_iter().next().map(|addr| (host.clone(), addr));
+        return Ok(ValidatedUrl {
+            url: parsed,
+            pinned: pin,
+        });
+    }
+    let pin = resolve_host(&host, port)
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .map(|addr| (host.clone(), addr));
+    Ok(ValidatedUrl {
+        url: parsed,
+        pinned: pin,
+    })
 }
 
-fn host_resolves_to_private(host: &str) -> Result<bool, String> {
-    use std::net::{IpAddr, ToSocketAddrs};
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(ip_is_private(&ip));
-    }
-    let addrs = (host, 80u16)
+fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    use std::net::ToSocketAddrs;
+    let iter = (host, port)
         .to_socket_addrs()
         .map_err(|e| format!("dns resolution failed for '{}': {}", host, e))?;
-    for addr in addrs {
-        if ip_is_private(&addr.ip()) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(iter.collect())
 }
 
 fn ip_is_private(ip: &std::net::IpAddr) -> bool {
@@ -84,6 +150,12 @@ fn ip_is_private(ip: &std::net::IpAddr) -> bool {
                 || v4.is_broadcast()
         }
         std::net::IpAddr::V6(v6) => {
+            // IPv4-mapped IPv6 (::ffff:0:0/96) must be classified against the
+            // wrapped IPv4 address. Otherwise an attacker could bypass the guard
+            // with e.g. http://[::ffff:127.0.0.1]/.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_private(&std::net::IpAddr::V4(v4));
+            }
             let segs = v6.segments();
             v6.is_loopback()
                 || v6.is_multicast()
@@ -96,10 +168,48 @@ fn ip_is_private(ip: &std::net::IpAddr) -> bool {
 
 /// Build a reqwest client with timeout + redirect cap configured. All Forge
 /// HTTP entry points must go through this so safety policy stays in one place.
-pub fn build_client(timeout: Duration, max_redirects: usize) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::limited(max_redirects))
+///
+/// If `pinned` is `Some((host, addr))`, reqwest will use the pinned address
+/// for `host` instead of doing its own DNS lookup. This defeats DNS rebinding
+/// on the *initial* request because we hand reqwest the exact address that
+/// passed our private-address check. Redirected hops to a different host go
+/// through reqwest's normal resolver.
+///
+/// The redirect policy is custom rather than `Policy::limited` so that every
+/// redirect target is re-checked for scheme and (if `FORGE_HTTP_DENY_PRIVATE=1`)
+/// for private-address resolution. A malicious server that 302s to
+/// `http://127.0.0.1/` or `http://169.254.169.254/` gets rejected at the
+/// client level, not discovered at the TCP layer.
+pub fn build_client(
+    timeout: Duration,
+    max_redirects: usize,
+    pinned: Option<(String, SocketAddr)>,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if let Some((host, addr)) = pinned {
+        builder = builder.resolve(&host, addr);
+    }
+    // Capture the env var *now* so the policy's behaviour matches the
+    // state at build time rather than shifting mid-request.
+    let deny_private = std::env::var("FORGE_HTTP_DENY_PRIVATE").as_deref() == Ok("1");
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= max_redirects {
+            return attempt.error(format!(
+                "too many redirects (cap {})",
+                max_redirects
+            ));
+        }
+        // Re-validate the next hop: scheme + host + (optional) private-IP
+        // resolution. This closes open-redirect-to-file:// and redirect-to-
+        // internal-host classes of attack that `Policy::limited` would let
+        // through.
+        if let Err(e) = validate_url_with(attempt.url().as_str(), deny_private) {
+            return attempt.error(format!("redirect rejected: {}", e));
+        }
+        attempt.follow()
+    });
+    builder
+        .redirect(policy)
         .build()
         .map_err(|e| format!("client error: {}", e))
 }
@@ -145,13 +255,13 @@ pub async fn fetch(
     max_redirects: Option<usize>,
     max_bytes: Option<u64>,
 ) -> Result<Value, String> {
-    let parsed = validate_url(url)?;
+    let validated = validate_url_full(url)?;
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(30));
     let redirects = max_redirects.unwrap_or(DEFAULT_MAX_REDIRECTS);
     let cap = max_bytes.unwrap_or(DEFAULT_FETCH_MAX_BYTES);
-    let client = build_client(timeout, redirects)?;
+    let client = build_client(timeout, redirects, validated.pinned.clone())?;
 
-    let url_str = parsed.as_str();
+    let url_str = validated.url.as_str();
     let mut req = match method.to_uppercase().as_str() {
         "GET" => client.get(url_str),
         "POST" => client.post(url_str),
@@ -316,9 +426,22 @@ mod tests {
 
     // === Live HTTP server tests for redirect cap & body cap ===
 
-    use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// Process-wide guard for tests that mutate `FORGE_HTTP_DENY_PRIVATE`.
+    /// Cargo runs unit tests in parallel by default, so any test that
+    /// reads or writes that env var must hold this lock to avoid races.
+    /// Recover from poisoning by reusing the inner guard — a poisoned
+    /// mutex here just means an earlier test panicked, not that the
+    /// shared state is invalid.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// Start a server that always responds with a 302 to itself, forever.
     /// Used to verify the redirect limit is enforced.
@@ -445,6 +568,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_aborts_on_redirect_loop_default_cap() {
+        let _guard = env_lock();
+        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
         let addr = spawn_redirect_loop_server().await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, None, None).await;
@@ -459,6 +584,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_aborts_on_redirect_loop_custom_cap() {
+        let _guard = env_lock();
+        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
         let addr = spawn_redirect_loop_server().await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, Some(2), None).await;
@@ -467,6 +594,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_aborts_on_oversized_streamed_body() {
+        let _guard = env_lock();
+        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
         // Server streams 4 MiB; cap at 1 MiB.
         let addr = spawn_giant_body_server(4 * 1024 * 1024).await;
         let url = format!("http://{}/", addr);
@@ -482,6 +611,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_aborts_on_advertised_oversized_content_length() {
+        let _guard = env_lock();
+        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
         // Content-Length says 50 MB but cap is 1 MB. Should fast-fail.
         let addr = spawn_advertised_giant_server(50 * 1024 * 1024).await;
         let url = format!("http://{}/", addr);
@@ -497,6 +628,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_succeeds_with_small_body_under_cap() {
+        let _guard = env_lock();
+        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
         let addr = spawn_ok_server("hello world").await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, None, Some(1024 * 1024)).await;
@@ -540,8 +673,142 @@ mod tests {
         assert!(ip_is_private(&"::1".parse::<IpAddr>().unwrap()));
         assert!(ip_is_private(&"fe80::1".parse::<IpAddr>().unwrap()));
         assert!(ip_is_private(&"fc00::1".parse::<IpAddr>().unwrap()));
+        // IPv4-mapped IPv6 must be classified against the wrapped IPv4
+        // address. These previously bypassed the guard.
+        assert!(
+            ip_is_private(&"::ffff:127.0.0.1".parse::<IpAddr>().unwrap()),
+            "::ffff:127.0.0.1 should be classified as private (loopback)"
+        );
+        assert!(
+            ip_is_private(&"::ffff:10.0.0.1".parse::<IpAddr>().unwrap()),
+            "::ffff:10.0.0.1 should be classified as private (RFC1918)"
+        );
+        assert!(
+            ip_is_private(&"::ffff:169.254.169.254".parse::<IpAddr>().unwrap()),
+            "::ffff:169.254.169.254 should be classified as private (link-local)"
+        );
         assert!(!ip_is_private(&"8.8.8.8".parse::<IpAddr>().unwrap()));
         assert!(!ip_is_private(&"1.1.1.1".parse::<IpAddr>().unwrap()));
         assert!(!ip_is_private(&"2606:4700:4700::1111".parse::<IpAddr>().unwrap()));
+        // Public IPv4 wrapped in IPv6 must NOT trip the guard.
+        assert!(!ip_is_private(&"::ffff:8.8.8.8".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn validate_rejects_ipv4_mapped_ipv6_private() {
+        // Bracketed IPv4-mapped IPv6 syntax is the documented bypass: a
+        // request for http://[::ffff:127.0.0.1]/ used to slip past the
+        // guard because the IPv6 arm of `ip_is_private` only inspected the
+        // segment pattern, not the wrapped IPv4 octets.
+        assert!(validate_url_with("http://[::ffff:127.0.0.1]", true).is_err());
+        assert!(validate_url_with("http://[::ffff:10.0.0.1]", true).is_err());
+        assert!(validate_url_with("http://[::ffff:169.254.169.254]", true).is_err());
+    }
+
+    /// Server that returns a 302 to a target URL (one-shot, not a loop).
+    async fn spawn_redirect_to_server(target: String) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let target = target.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        target
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_does_not_follow_redirect_to_file_scheme() {
+        let _guard = env_lock();
+        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        // A 302 to file:///etc/passwd must NOT be followed. reqwest itself
+        // refuses to dispatch a request to an unsupported scheme, so the
+        // observable outcome is that we get the 302 back as the *final*
+        // response with an empty body — never the file contents. This test
+        // is a guard against any future change that would trick us into
+        // dispatching the redirected request.
+        let addr = spawn_redirect_to_server("file:///etc/passwd".to_string()).await;
+        let url = format!("http://{}/", addr);
+        let result = fetch(&url, "GET", None, None, None, None, None).await;
+        match result {
+            Ok(Value::Object(resp)) => {
+                if let Some(Value::Int(status)) = resp.get("status") {
+                    assert_eq!(*status, 302, "should report 302, not 200 from file://");
+                }
+                if let Some(Value::String(body)) = resp.get("body") {
+                    assert!(body.is_empty(), "body must be empty, never file contents");
+                    assert!(!body.contains("root:"), "must not leak /etc/passwd");
+                }
+            }
+            Ok(other) => panic!("expected response object, got {:?}", other),
+            // An error here is also acceptable (and arguably more
+            // user-friendly) — what we must NOT see is a 200 with file
+            // contents.
+            Err(_) => {}
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_rejects_invalid_scheme_redirect_target() {
+        // A 302 whose Location is an *unsupported* scheme (e.g. ftp) is
+        // caught by the custom redirect policy's validate_url_with
+        // callback. reqwest itself would also stop, but going through
+        // our policy means the error surfaces as "redirect rejected:
+        // unsupported url scheme" rather than a silent stop — a clearer
+        // signal when users hit unexpected redirects.
+        let _guard = env_lock();
+        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        let addr = spawn_redirect_to_server("ftp://example.com/".to_string()).await;
+        let url = format!("http://{}/", addr);
+        let result = fetch(&url, "GET", None, None, None, None, None).await;
+        match result {
+            Ok(Value::Object(resp)) => {
+                // Either we get the 302 back unchanged (reqwest filtered
+                // it) or an error (our policy fired). Both are safe.
+                if let Some(Value::Int(status)) = resp.get("status") {
+                    assert_eq!(*status, 302, "must not successfully resolve ftp://");
+                }
+            }
+            Ok(other) => panic!("unexpected response value: {:?}", other),
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn validate_url_full_pins_dns_host_when_resolvable() {
+        // Best-effort: when the resolver succeeds we should produce a pin.
+        // If DNS isn't available (offline test runner) the call still
+        // succeeds with `pinned = None` — we just can't assert the Some
+        // case in that environment, so we skip the body.
+        if let Ok(v) = validate_url_full_with("http://localhost", false) {
+            // localhost should resolve everywhere; if it does, the pin's
+            // host string must match.
+            if let Some((host, _addr)) = v.pinned {
+                assert_eq!(host, "localhost");
+            }
+        }
+    }
+
+    #[test]
+    fn validate_url_full_skips_pin_for_ip_literal() {
+        let v = validate_url_full_with("http://127.0.0.1:8080", false).unwrap();
+        assert!(
+            v.pinned.is_none(),
+            "IP-literal URLs have nothing to pin"
+        );
     }
 }

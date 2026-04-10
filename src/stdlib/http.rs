@@ -250,17 +250,22 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
     };
 
     // Validate scheme + (optionally) host before any network activity.
-    let parsed = crate::runtime::client::validate_url(&url)?;
+    // Use the full validator so we can pin the DNS answer into reqwest —
+    // downloads are the highest-value SSRF target and must share the same
+    // TOCTOU protections as fetch().
+    let validated = crate::runtime::client::validate_url_full(&url)?;
 
     eprintln!("  Downloading {}...", url);
 
-    let url_string = parsed.as_str().to_string();
+    let url_string = validated.url.as_str().to_string();
+    let pinned = validated.pinned.clone();
     let dest_clone = dest.clone();
 
     run_async(async move {
         let client = crate::runtime::client::build_client(
             std::time::Duration::from_secs(300),
             crate::runtime::client::DEFAULT_MAX_REDIRECTS,
+            pinned,
         )?;
 
         let resp = client
@@ -298,13 +303,15 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
         _ => return Err("http.crawl() requires a URL string".to_string()),
     };
 
-    let parsed = crate::runtime::client::validate_url(&url)?;
-    let url_clone = parsed.as_str().to_string();
+    let validated = crate::runtime::client::validate_url_full(&url)?;
+    let url_clone = validated.url.as_str().to_string();
+    let pinned = validated.pinned.clone();
 
     run_async(async move {
         let client = crate::runtime::client::build_client(
             std::time::Duration::from_secs(30),
             crate::runtime::client::DEFAULT_MAX_REDIRECTS,
+            pinned,
         )?;
 
         let resp = client
