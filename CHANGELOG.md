@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] - 2026-04-10
+
 ### Added
 
 - **`db.begin` / `db.commit` / `db.rollback`** — explicit transaction control for the SQLite module, sharing the existing thread-local connection.
