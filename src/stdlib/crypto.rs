@@ -118,27 +118,14 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Some(Value::Int(n)) => {
                 let n = *n as usize;
                 let mut bytes = vec![0u8; n];
-                for byte in &mut bytes {
-                    *byte = rand_byte();
-                }
+                getrandom::getrandom(&mut bytes)
+                    .map_err(|e| format!("crypto.random_bytes error: {}", e))?;
                 Ok(Value::String(hex::encode(&bytes)))
             }
             _ => Err("crypto.random_bytes() requires an integer length".to_string()),
         },
         _ => Err(format!("unknown crypto function: {}", name)),
     }
-}
-
-fn rand_byte() -> u8 {
-    use std::time::SystemTime;
-    // duration_since fails only if the wall clock is before 1970, which means
-    // the host has bigger problems than a weak RNG. Fall back to zero rather
-    // than panicking out of a stdlib helper.
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    (nanos ^ (nanos >> 8) ^ (nanos >> 16)) as u8
 }
 
 #[cfg(test)]

@@ -41,14 +41,7 @@ pub struct ValidatedUrl {
     pub pinned: Option<(String, SocketAddr)>,
 }
 
-/// Validate a URL string for use as an HTTP request target. Reads the
-/// `FORGE_HTTP_DENY_PRIVATE` env var; when set to `1`, also rejects private,
-/// loopback, link-local, and multicast addresses (basic SSRF defence).
-pub fn validate_url(raw: &str) -> Result<url::Url, String> {
-    validate_url_full(raw).map(|v| v.url)
-}
-
-/// Full-detail variant of [`validate_url`] that also returns a pinned
+/// Full-detail variant that also returns a pinned
 /// `SocketAddr` when the host is a DNS name. Use this before constructing a
 /// client so the pinning can be installed via [`build_client`].
 pub fn validate_url_full(raw: &str) -> Result<ValidatedUrl, String> {

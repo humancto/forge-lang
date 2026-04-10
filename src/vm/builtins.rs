@@ -993,7 +993,7 @@ impl VM {
                         if let ObjKind::Object(map) = &obj.kind {
                             // Collect keys as owned Strings first to release gc borrow
                             let key_strings: Vec<String> = map.keys().cloned().collect();
-                            drop(obj); // release gc borrow before alloc_string calls
+                            let _ = obj; // release gc borrow before alloc_string calls
                             let keys: Vec<Value> =
                                 key_strings.iter().map(|k| self.alloc_string(k)).collect();
                             let nr = self.gc.alloc(ObjKind::Array(keys));
