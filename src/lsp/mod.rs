@@ -86,6 +86,7 @@ fn handle_message(body: &str) -> Option<String> {
                         },
                         "hoverProvider": true,
                         "definitionProvider": true,
+                        "referencesProvider": true,
                         "documentSymbolProvider": true
                     }
                 }
@@ -162,6 +163,21 @@ fn handle_message(body: &str) -> Option<String> {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": definition
+            });
+            Some(result.to_string())
+        }
+        "textDocument/references" => {
+            let params = json.get("params")?;
+            let doc = params.get("textDocument")?;
+            let uri = doc.get("uri")?.as_str()?;
+            let position = params.get("position")?;
+            let line = position.get("line")?.as_u64()? as usize;
+            let character = position.get("character")?.as_u64()? as usize;
+            let references = get_references(uri, line, character);
+            let result = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": references
             });
             Some(result.to_string())
         }
@@ -351,7 +367,9 @@ fn get_completions() -> Vec<serde_json::Value> {
 }
 
 fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> {
-    let _doc = params.get("textDocument");
+    // Detect which module the user typed before the dot
+    let typed_module = detect_module_prefix(params);
+
     let module_members: std::collections::HashMap<&str, Vec<&str>> = [
         (
             "math",
@@ -524,6 +542,22 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
     .collect();
 
     let mut items = Vec::new();
+
+    // If we detected a specific module prefix, only return that module's members
+    if let Some(ref prefix) = typed_module {
+        if let Some(members) = module_members.get(prefix.as_str()) {
+            for member in members {
+                items.push(serde_json::json!({
+                    "label": member,
+                    "kind": 3,
+                    "detail": format!("{}.{}", prefix, member),
+                }));
+            }
+            return items;
+        }
+    }
+
+    // Fallback: return all module members (shouldn't normally happen)
     for (module, members) in &module_members {
         for member in members {
             items.push(serde_json::json!({
@@ -535,6 +569,45 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         }
     }
     items
+}
+
+/// Detect which module name the user typed before the `.` trigger character.
+/// Reads the document text and cursor position to extract the identifier before the dot.
+fn detect_module_prefix(params: &serde_json::Value) -> Option<String> {
+    let uri = params.pointer("/textDocument/uri")?.as_str()?;
+    let line = params.pointer("/position/line")?.as_u64()? as usize;
+    let character = params.pointer("/position/character")?.as_u64()? as usize;
+
+    let text = get_document(uri).or_else(|| read_document(uri))?;
+    let line_text = text.lines().nth(line)?;
+
+    // The dot is at `character`, so the module name ends just before it
+    if character == 0 {
+        return None;
+    }
+    let chars: Vec<char> = line_text.chars().collect();
+    let dot_pos = character.min(chars.len());
+    if dot_pos == 0 {
+        return None;
+    }
+
+    // Walk backwards from just before the dot to find the identifier
+    let mut end = dot_pos;
+    // Skip the dot itself if cursor is on it
+    if end > 0 && chars.get(end.wrapping_sub(1)) == Some(&'.') {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+        start -= 1;
+    }
+
+    if start == end {
+        return None;
+    }
+
+    let word: String = chars[start..end].iter().collect();
+    Some(word)
 }
 
 #[derive(Debug, Clone)]
@@ -615,17 +688,207 @@ fn get_definition(uri: &str, line: usize, character: usize) -> serde_json::Value
         return serde_json::Value::Null;
     }
 
-    let Some(symbol) = collect_document_symbols(&text)
-        .into_iter()
-        .find(|symbol| symbol.name == word)
-    else {
-        return serde_json::Value::Null;
+    // Try deep symbol search first (includes params, locals inside functions)
+    let deep = collect_all_symbols(&text);
+    if let Some(symbol) = deep.iter().find(|s| s.name == word) {
+        return serde_json::json!({
+            "uri": uri,
+            "range": symbol_range(&text, symbol.line, &symbol.name)
+        });
+    }
+
+    serde_json::Value::Null
+}
+
+/// Find all references to a symbol in the document (text-based search with word boundaries).
+fn get_references(uri: &str, line: usize, character: usize) -> Vec<serde_json::Value> {
+    let Some(text) = get_document(uri).or_else(|| read_document(uri)) else {
+        return Vec::new();
+    };
+    let line_text = text.lines().nth(line).unwrap_or("");
+    let word = extract_word_at(line_text, character);
+    if word.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    for (line_num, line_content) in text.lines().enumerate() {
+        let mut search_from = 0;
+        while let Some(col) = line_content[search_from..].find(&word) {
+            let abs_col = search_from + col;
+            // Check word boundaries
+            let before_ok = abs_col == 0
+                || !line_content.as_bytes()[abs_col - 1].is_ascii_alphanumeric()
+                    && line_content.as_bytes()[abs_col - 1] != b'_';
+            let after_pos = abs_col + word.len();
+            let after_ok = after_pos >= line_content.len()
+                || !line_content.as_bytes()[after_pos].is_ascii_alphanumeric()
+                    && line_content.as_bytes()[after_pos] != b'_';
+
+            if before_ok && after_ok {
+                results.push(serde_json::json!({
+                    "uri": uri,
+                    "range": {
+                        "start": { "line": line_num, "character": abs_col },
+                        "end": { "line": line_num, "character": abs_col + word.len() }
+                    }
+                }));
+            }
+            search_from = abs_col + word.len();
+        }
+    }
+    results
+}
+
+/// Collect all symbols including those inside function bodies (params, locals, nested fns).
+fn collect_all_symbols(source: &str) -> Vec<DocumentSymbolInfo> {
+    let mut lexer = crate::lexer::Lexer::new(source);
+    let tokens = match lexer.tokenize() {
+        Ok(tokens) => tokens,
+        Err(_) => return Vec::new(),
+    };
+    let mut parser = crate::parser::Parser::new(tokens);
+    let program = match parser.parse_program() {
+        Ok(program) => program,
+        Err(_) => return Vec::new(),
     };
 
-    serde_json::json!({
-        "uri": uri,
-        "range": symbol_range(&text, symbol.line, &symbol.name)
-    })
+    let mut symbols = Vec::new();
+    for spanned in &program.statements {
+        collect_symbols_from_stmt(&spanned.stmt, spanned.line.saturating_sub(1), &mut symbols);
+    }
+    symbols
+}
+
+fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<DocumentSymbolInfo>) {
+    match stmt {
+        Stmt::FnDef {
+            name, params, body, ..
+        } => {
+            symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 12,
+                line,
+            });
+            // Add parameters as variable symbols
+            for param in params {
+                symbols.push(DocumentSymbolInfo {
+                    name: param.name.clone(),
+                    kind: 13,
+                    line,
+                });
+            }
+            // Recurse into body
+            for inner in body {
+                collect_symbols_from_stmt(inner, line, symbols);
+            }
+        }
+        Stmt::Let { name, .. } => {
+            symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 13,
+                line,
+            });
+        }
+        Stmt::StructDef { name, .. } => {
+            symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 23,
+                line,
+            });
+        }
+        Stmt::TypeDef { name, .. } => {
+            symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 10,
+                line,
+            });
+        }
+        Stmt::InterfaceDef { name, .. } => {
+            symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 11,
+                line,
+            });
+        }
+        Stmt::PromptDef { name, .. } => {
+            symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 12,
+                line,
+            });
+        }
+        Stmt::AgentDef { name, .. } => {
+            symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 5,
+                line,
+            });
+        }
+        Stmt::For {
+            var, var2, body, ..
+        } => {
+            symbols.push(DocumentSymbolInfo {
+                name: var.clone(),
+                kind: 13,
+                line,
+            });
+            if let Some(v2) = var2 {
+                symbols.push(DocumentSymbolInfo {
+                    name: v2.clone(),
+                    kind: 13,
+                    line,
+                });
+            }
+            for s in body {
+                collect_symbols_from_stmt(s, line, symbols);
+            }
+        }
+        Stmt::TryCatch {
+            try_body,
+            catch_var,
+            catch_body,
+        } => {
+            for s in try_body {
+                collect_symbols_from_stmt(s, line, symbols);
+            }
+            symbols.push(DocumentSymbolInfo {
+                name: catch_var.clone(),
+                kind: 13,
+                line,
+            });
+            for s in catch_body {
+                collect_symbols_from_stmt(s, line, symbols);
+            }
+        }
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            for s in then_body {
+                collect_symbols_from_stmt(s, line, symbols);
+            }
+            if let Some(eb) = else_body {
+                for s in eb {
+                    collect_symbols_from_stmt(s, line, symbols);
+                }
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body, .. }
+        | Stmt::Spawn { body }
+        | Stmt::SafeBlock { body }
+        | Stmt::TimeoutBlock { body, .. }
+        | Stmt::RetryBlock { body, .. }
+        | Stmt::ScheduleBlock { body, .. }
+        | Stmt::WatchBlock { body, .. } => {
+            for s in body {
+                collect_symbols_from_stmt(s, line, symbols);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
@@ -726,13 +989,13 @@ fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
     .into_iter()
     .collect();
 
-    // Use in-memory document store (populated by didOpen/didChange),
-    // falling back to disk for files not yet opened in the editor.
     let doc_text = get_document(uri).or_else(|| read_document(uri));
     if let Some(text) = doc_text {
         let lines: Vec<&str> = text.lines().collect();
         if let Some(line_text) = lines.get(line) {
             let word = extract_word_at(line_text, character);
+
+            // Check builtins first
             if let Some(doc) = builtins.get(word.as_str()) {
                 return serde_json::json!({
                     "contents": {
@@ -741,15 +1004,249 @@ fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
                     }
                 });
             }
+
+            // Check user-defined symbols
+            if let Some(hover_text) = get_user_symbol_hover(&text, &word) {
+                return serde_json::json!({
+                    "contents": {
+                        "kind": "markdown",
+                        "value": hover_text
+                    }
+                });
+            }
         }
     }
 
-    serde_json::json!({
-        "contents": {
-            "kind": "markdown",
-            "value": "Forge Language Server"
+    serde_json::Value::Null
+}
+
+/// Generate hover text for a user-defined symbol (function, variable, struct, etc.)
+fn get_user_symbol_hover(source: &str, name: &str) -> Option<String> {
+    let mut lexer = crate::lexer::Lexer::new(source);
+    let tokens = lexer.tokenize().ok()?;
+    let mut parser = crate::parser::Parser::new(tokens);
+    let program = parser.parse_program().ok()?;
+
+    for spanned in &program.statements {
+        if let Some(hover) = hover_from_stmt(&spanned.stmt, name) {
+            return Some(hover);
         }
-    })
+    }
+    None
+}
+
+fn hover_from_stmt(stmt: &Stmt, name: &str) -> Option<String> {
+    match stmt {
+        Stmt::FnDef {
+            name: fn_name,
+            params,
+            return_type,
+            is_async,
+            body,
+            ..
+        } => {
+            if fn_name == name {
+                let params_str = params
+                    .iter()
+                    .map(|p| {
+                        let mut s = p.name.clone();
+                        if let Some(ref t) = p.type_ann {
+                            s.push_str(&format!(": {}", format_type_ann(t)));
+                        }
+                        if let Some(ref d) = p.default {
+                            s.push_str(&format!(" = {}", format_expr_brief(d)));
+                        }
+                        s
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let ret = return_type
+                    .as_ref()
+                    .map(|t| format!(" -> {}", format_type_ann(t)))
+                    .unwrap_or_default();
+                let prefix = if *is_async { "async fn" } else { "fn" };
+                return Some(format!(
+                    "```forge\n{} {}({}){}\n```",
+                    prefix, fn_name, params_str, ret
+                ));
+            }
+            // Search inside function body
+            for inner in body {
+                if let Some(hover) = hover_from_stmt(inner, name) {
+                    return Some(hover);
+                }
+            }
+            None
+        }
+        Stmt::Let {
+            name: var_name,
+            mutable,
+            type_ann,
+            ..
+        } => {
+            if var_name == name {
+                let mut_str = if *mutable { "let mut" } else { "let" };
+                let type_str = type_ann
+                    .as_ref()
+                    .map(|t| format!(": {}", format_type_ann(t)))
+                    .unwrap_or_default();
+                return Some(format!(
+                    "```forge\n{} {}{}\n```",
+                    mut_str, var_name, type_str
+                ));
+            }
+            None
+        }
+        Stmt::StructDef {
+            name: struct_name,
+            fields,
+        } => {
+            if struct_name == name {
+                let fields_str = fields
+                    .iter()
+                    .map(|f| format!("  {}: {}", f.name, format_type_ann(&f.type_ann)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Some(format!(
+                    "```forge\nthing {} {{\n{}\n}}\n```",
+                    struct_name, fields_str
+                ));
+            }
+            None
+        }
+        Stmt::TypeDef {
+            name: type_name,
+            variants,
+        } => {
+            if type_name == name {
+                let variants_str = variants
+                    .iter()
+                    .map(|v| v.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                return Some(format!(
+                    "```forge\ntype {} = {}\n```",
+                    type_name, variants_str
+                ));
+            }
+            None
+        }
+        Stmt::InterfaceDef {
+            name: iface_name,
+            methods,
+        } => {
+            if iface_name == name {
+                let methods_str = methods
+                    .iter()
+                    .map(|m| {
+                        let params = m
+                            .params
+                            .iter()
+                            .map(|p| p.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("  fn {}({})", m.name, params)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Some(format!(
+                    "```forge\ninterface {} {{\n{}\n}}\n```",
+                    iface_name, methods_str
+                ));
+            }
+            None
+        }
+        // Recurse into blocks
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            for s in then_body {
+                if let Some(h) = hover_from_stmt(s, name) {
+                    return Some(h);
+                }
+            }
+            if let Some(eb) = else_body {
+                for s in eb {
+                    if let Some(h) = hover_from_stmt(s, name) {
+                        return Some(h);
+                    }
+                }
+            }
+            None
+        }
+        Stmt::For { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::Loop { body, .. }
+        | Stmt::Spawn { body }
+        | Stmt::SafeBlock { body }
+        | Stmt::TimeoutBlock { body, .. }
+        | Stmt::RetryBlock { body, .. }
+        | Stmt::ScheduleBlock { body, .. }
+        | Stmt::WatchBlock { body, .. } => {
+            for s in body {
+                if let Some(h) = hover_from_stmt(s, name) {
+                    return Some(h);
+                }
+            }
+            None
+        }
+        Stmt::TryCatch {
+            try_body,
+            catch_body,
+            ..
+        } => {
+            for s in try_body {
+                if let Some(h) = hover_from_stmt(s, name) {
+                    return Some(h);
+                }
+            }
+            for s in catch_body {
+                if let Some(h) = hover_from_stmt(s, name) {
+                    return Some(h);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn format_type_ann(t: &crate::parser::ast::TypeAnn) -> String {
+    use crate::parser::ast::TypeAnn;
+    match t {
+        TypeAnn::Simple(s) => s.clone(),
+        TypeAnn::Array(inner) => format!("[{}]", format_type_ann(inner)),
+        TypeAnn::Generic(name, args) => {
+            let args_str = args
+                .iter()
+                .map(format_type_ann)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}<{}>", name, args_str)
+        }
+        TypeAnn::Function(params, ret) => {
+            let params_str = params
+                .iter()
+                .map(format_type_ann)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("fn({}) -> {}", params_str, format_type_ann(ret))
+        }
+        TypeAnn::Optional(inner) => format!("{}?", format_type_ann(inner)),
+    }
+}
+
+fn format_expr_brief(expr: &crate::parser::ast::Expr) -> String {
+    use crate::parser::ast::Expr;
+    match expr {
+        Expr::Int(i) => i.to_string(),
+        Expr::Float(f) => f.to_string(),
+        Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::Bool(b) => b.to_string(),
+        _ => "...".to_string(),
+    }
 }
 
 /// Extract the word at a given character position in a line.
@@ -876,5 +1373,134 @@ mod tests {
                 .and_then(|value| value.as_u64()),
             Some(3)
         );
+    }
+
+    #[test]
+    fn hover_shows_user_defined_function_signature() {
+        let uri = "file:///tmp/forge-lsp-hover-fn.fg";
+        let text = "fn greet(name: String, age: Int) -> String { return name }\ngreet(\"hi\", 1)\n";
+        store_document(uri, text);
+
+        let hover = get_hover(uri, 1, 0);
+        let value = hover
+            .pointer("/contents/value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(value.contains("fn greet(name: String, age: Int) -> String"));
+    }
+
+    #[test]
+    fn hover_shows_user_defined_variable() {
+        let uri = "file:///tmp/forge-lsp-hover-var.fg";
+        let text = "let mut count = 0\ncount\n";
+        store_document(uri, text);
+
+        let hover = get_hover(uri, 1, 0);
+        let value = hover
+            .pointer("/contents/value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(value.contains("let mut count"));
+    }
+
+    #[test]
+    fn hover_shows_struct_fields() {
+        let uri = "file:///tmp/forge-lsp-hover-struct.fg";
+        let text = "thing User { name: String, age: Int }\nUser\n";
+        store_document(uri, text);
+
+        let hover = get_hover(uri, 1, 0);
+        let value = hover
+            .pointer("/contents/value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(value.contains("thing User"));
+        assert!(value.contains("name: String"));
+    }
+
+    #[test]
+    fn hover_returns_null_for_unknown_symbol() {
+        let uri = "file:///tmp/forge-lsp-hover-unknown.fg";
+        let text = "let x = 1\nunknown_thing\n";
+        store_document(uri, text);
+
+        let hover = get_hover(uri, 1, 0);
+        assert!(hover.is_null());
+    }
+
+    #[test]
+    fn references_finds_all_occurrences() {
+        let uri = "file:///tmp/forge-lsp-refs.fg";
+        let text = "let count = 0\ncount = count + 1\nsay(count)\n";
+        store_document(uri, text);
+
+        let refs = get_references(uri, 0, 4);
+        assert!(
+            refs.len() >= 3,
+            "expected at least 3 references to 'count', got {}",
+            refs.len()
+        );
+    }
+
+    #[test]
+    fn references_respects_word_boundaries() {
+        let uri = "file:///tmp/forge-lsp-refs-boundary.fg";
+        let text = "let name = \"test\"\nlet name_long = \"other\"\nname\n";
+        store_document(uri, text);
+
+        let refs = get_references(uri, 0, 4);
+        // Should find "name" on lines 0 and 2, but NOT inside "name_long"
+        assert_eq!(
+            refs.len(),
+            2,
+            "expected 2 references to 'name', got {}",
+            refs.len()
+        );
+    }
+
+    #[test]
+    fn deep_symbols_finds_function_params() {
+        let symbols = collect_all_symbols("fn add(a, b) { let result = a + b }\n");
+        assert!(symbols.iter().any(|s| s.name == "add"));
+        assert!(symbols.iter().any(|s| s.name == "a"));
+        assert!(symbols.iter().any(|s| s.name == "b"));
+        assert!(symbols.iter().any(|s| s.name == "result"));
+    }
+
+    #[test]
+    fn initialize_advertises_references_capability() {
+        let response =
+            handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+                .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            json.pointer("/result/capabilities/referencesProvider")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn module_completions_context_aware() {
+        let uri = "file:///tmp/forge-lsp-module-ctx.fg";
+        let text = "let x = math.sqrt(4)\n";
+        store_document(uri, text);
+
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 13 },
+            "context": { "triggerCharacter": "." }
+        });
+        let completions = get_module_completions(&params);
+        // All completions should be from math module
+        for item in &completions {
+            let detail = item.get("detail").and_then(|d| d.as_str()).unwrap_or("");
+            assert!(
+                detail.starts_with("math."),
+                "expected math module, got: {}",
+                detail
+            );
+        }
+        assert!(!completions.is_empty());
     }
 }
