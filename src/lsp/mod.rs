@@ -711,19 +711,17 @@ fn get_references(uri: &str, line: usize, character: usize) -> Vec<serde_json::V
         return Vec::new();
     }
 
+    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
     let mut results = Vec::new();
     for (line_num, line_content) in text.lines().enumerate() {
         let mut search_from = 0;
+        let bytes = line_content.as_bytes();
         while let Some(col) = line_content[search_from..].find(&word) {
             let abs_col = search_from + col;
-            // Check word boundaries
-            let before_ok = abs_col == 0
-                || !line_content.as_bytes()[abs_col - 1].is_ascii_alphanumeric()
-                    && line_content.as_bytes()[abs_col - 1] != b'_';
             let after_pos = abs_col + word.len();
-            let after_ok = after_pos >= line_content.len()
-                || !line_content.as_bytes()[after_pos].is_ascii_alphanumeric()
-                    && line_content.as_bytes()[after_pos] != b'_';
+            let before_ok = abs_col == 0 || !is_ident_byte(bytes[abs_col - 1]);
+            let after_ok = after_pos >= bytes.len() || !is_ident_byte(bytes[after_pos]);
 
             if before_ok && after_ok {
                 results.push(serde_json::json!({
@@ -873,6 +871,11 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
                 for s in eb {
                     collect_symbols_from_stmt(s, line, symbols);
                 }
+            }
+        }
+        Stmt::ImplBlock { methods, .. } => {
+            for m in methods {
+                collect_symbols_from_stmt(m, line, symbols);
             }
         }
         Stmt::While { body, .. }
@@ -1153,6 +1156,14 @@ fn hover_from_stmt(stmt: &Stmt, name: &str) -> Option<String> {
                     "```forge\ninterface {} {{\n{}\n}}\n```",
                     iface_name, methods_str
                 ));
+            }
+            None
+        }
+        Stmt::ImplBlock { methods, .. } => {
+            for m in methods {
+                if let Some(h) = hover_from_stmt(m, name) {
+                    return Some(h);
+                }
             }
             None
         }

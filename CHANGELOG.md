@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **LSP `textDocument/references`** — find all references to any identifier in the current document with word-boundary matching
+- **LSP hover for user-defined symbols** — functions show full signature, variables show mutability/type, structs show fields, types show variants, interfaces show methods
+- **LSP deep go-to-definition** — finds function parameters, local variables, for-loop vars, catch vars, and impl block methods — not just top-level symbols
+- **LSP context-aware module completions** — typing `math.` now only shows `math` module members instead of all 200+ members from every module
+
 ---
 
 ## [0.5.0] - 2026-04-10
