@@ -239,20 +239,52 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
     }
 }
 
+/// Extract `timeout`, `max_redirects`, and `max_bytes` from an options object.
+/// Returns `(timeout_secs, max_redirects, max_bytes)` with `None` for any
+/// field that wasn't present or wasn't a valid integer.
+fn parse_http_opts(opts: &IndexMap<String, Value>) -> (Option<u64>, Option<usize>, Option<u64>) {
+    let timeout = match opts.get("timeout") {
+        Some(Value::Int(t)) if *t >= 0 => Some(*t as u64),
+        _ => None,
+    };
+    let max_redirects = match opts.get("max_redirects") {
+        Some(Value::Int(r)) if *r >= 0 => Some(*r as usize),
+        _ => None,
+    };
+    let max_bytes = match opts.get("max_bytes") {
+        Some(Value::Int(b)) if *b >= 0 => Some(*b as u64),
+        _ => None,
+    };
+    (timeout, max_redirects, max_bytes)
+}
+
 fn do_download(args: &[Value]) -> Result<Value, String> {
     let url = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => return Err("http.download() requires a URL string".to_string()),
     };
-    let dest = match args.get(1) {
-        Some(Value::String(s)) => s.clone(),
-        _ => url.rsplit('/').next().unwrap_or("download").to_string(),
+
+    // Flexible arg parsing:
+    //   http.download(url)
+    //   http.download(url, dest)
+    //   http.download(url, opts)
+    //   http.download(url, dest, opts)
+    let (dest, opts) = match (args.get(1), args.get(2)) {
+        (Some(Value::String(d)), Some(Value::Object(o))) => (d.clone(), Some(o)),
+        (Some(Value::String(d)), _) => (d.clone(), None),
+        (Some(Value::Object(o)), _) => {
+            let d = url.rsplit('/').next().unwrap_or("download").to_string();
+            (d, Some(o))
+        }
+        _ => (
+            url.rsplit('/').next().unwrap_or("download").to_string(),
+            None,
+        ),
     };
 
-    // Validate scheme + (optionally) host before any network activity.
-    // Use the full validator so we can pin the DNS answer into reqwest —
-    // downloads are the highest-value SSRF target and must share the same
-    // TOCTOU protections as fetch().
+    let (timeout_secs, max_redirects, max_bytes) =
+        opts.map(parse_http_opts).unwrap_or((None, None, None));
+
     let validated = crate::runtime::client::validate_url_full(&url)?;
 
     eprintln!("  Downloading {}...", url);
@@ -260,13 +292,12 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
     let url_string = validated.url.as_str().to_string();
     let pinned = validated.pinned.clone();
     let dest_clone = dest.clone();
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(300));
+    let redirects = max_redirects.unwrap_or(crate::runtime::client::DEFAULT_MAX_REDIRECTS);
+    let cap = max_bytes.unwrap_or(crate::runtime::client::DEFAULT_DOWNLOAD_MAX_BYTES);
 
     run_async(async move {
-        let client = crate::runtime::client::build_client(
-            std::time::Duration::from_secs(300),
-            crate::runtime::client::DEFAULT_MAX_REDIRECTS,
-            pinned,
-        )?;
+        let client = crate::runtime::client::build_client(timeout, redirects, pinned)?;
 
         let resp = client
             .get(&url_string)
@@ -279,11 +310,7 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
             return Err(format!("download failed: HTTP {}", status));
         }
 
-        let bytes = crate::runtime::client::read_body_capped(
-            resp,
-            crate::runtime::client::DEFAULT_DOWNLOAD_MAX_BYTES,
-        )
-        .await?;
+        let bytes = crate::runtime::client::read_body_capped(resp, cap).await?;
 
         std::fs::write(&dest_clone, &bytes).map_err(|e| format!("write error: {}", e))?;
 
@@ -303,16 +330,21 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
         _ => return Err("http.crawl() requires a URL string".to_string()),
     };
 
+    // http.crawl(url) or http.crawl(url, opts)
+    let (timeout_secs, max_redirects, max_bytes) = match args.get(1) {
+        Some(Value::Object(o)) => parse_http_opts(o),
+        _ => (None, None, None),
+    };
+
     let validated = crate::runtime::client::validate_url_full(&url)?;
     let url_clone = validated.url.as_str().to_string();
     let pinned = validated.pinned.clone();
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(30));
+    let redirects = max_redirects.unwrap_or(crate::runtime::client::DEFAULT_MAX_REDIRECTS);
+    let cap = max_bytes.unwrap_or(crate::runtime::client::DEFAULT_CRAWL_MAX_BYTES);
 
     run_async(async move {
-        let client = crate::runtime::client::build_client(
-            std::time::Duration::from_secs(30),
-            crate::runtime::client::DEFAULT_MAX_REDIRECTS,
-            pinned,
-        )?;
+        let client = crate::runtime::client::build_client(timeout, redirects, pinned)?;
 
         let resp = client
             .get(&url_clone)
@@ -321,11 +353,7 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
             .map_err(|e| format!("crawl error: {}", e))?;
 
         let status = resp.status().as_u16();
-        let body_bytes = crate::runtime::client::read_body_capped(
-            resp,
-            crate::runtime::client::DEFAULT_CRAWL_MAX_BYTES,
-        )
-        .await?;
+        let body_bytes = crate::runtime::client::read_body_capped(resp, cap).await?;
         let html = String::from_utf8_lossy(&body_bytes).into_owned();
 
         let title = extract_between(&html, "<title>", "</title>").unwrap_or_default();

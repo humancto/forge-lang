@@ -57,8 +57,7 @@ pub fn validate_url_with(raw: &str, deny_private: bool) -> Result<url::Url, Stri
 
 /// Test-friendly full-detail variant of [`validate_url_full`].
 pub fn validate_url_full_with(raw: &str, deny_private: bool) -> Result<ValidatedUrl, String> {
-    let parsed =
-        url::Url::parse(raw).map_err(|e| format!("invalid url '{}': {}", raw, e))?;
+    let parsed = url::Url::parse(raw).map_err(|e| format!("invalid url '{}': {}", raw, e))?;
     match parsed.scheme() {
         "http" | "https" => {}
         other => {
@@ -72,10 +71,12 @@ pub fn validate_url_full_with(raw: &str, deny_private: bool) -> Result<Validated
         .host_str()
         .ok_or_else(|| format!("url '{}' has no host", raw))?
         .to_string();
-    let port = parsed.port_or_known_default().unwrap_or(match parsed.scheme() {
-        "https" => 443,
-        _ => 80,
-    });
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or(match parsed.scheme() {
+            "https" => 443,
+            _ => 80,
+        });
 
     // If the host is already an IP literal, there's no DNS to pin — just
     // classify it and (optionally) reject.
@@ -187,10 +188,7 @@ pub fn build_client(
     let deny_private = std::env::var("FORGE_HTTP_DENY_PRIVATE").as_deref() == Ok("1");
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= max_redirects {
-            return attempt.error(format!(
-                "too many redirects (cap {})",
-                max_redirects
-            ));
+            return attempt.error(format!("too many redirects (cap {})", max_redirects));
         }
         // Re-validate the next hop: scheme + host + (optional) private-IP
         // resolution. This closes open-redirect-to-file:// and redirect-to-
@@ -209,10 +207,7 @@ pub fn build_client(
 
 /// Stream a response body up to `max_bytes` then abort. Pre-checks
 /// `Content-Length` for fast-fail when the server advertises an oversized body.
-pub async fn read_body_capped(
-    resp: reqwest::Response,
-    max_bytes: u64,
-) -> Result<Vec<u8>, String> {
+pub async fn read_body_capped(resp: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, String> {
     if let Some(len) = resp.content_length() {
         if len > max_bytes {
             return Err(format!(
@@ -227,10 +222,7 @@ pub async fn read_body_capped(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("body read error: {}", e))?;
         if buf.len() as u64 + chunk.len() as u64 > max_bytes {
-            return Err(format!(
-                "response body exceeded cap of {} bytes",
-                max_bytes
-            ));
+            return Err(format!("response body exceeded cap of {} bytes", max_bytes));
         }
         buf.extend_from_slice(&chunk);
     }
@@ -566,7 +558,11 @@ mod tests {
         let addr = spawn_redirect_loop_server().await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, None, None).await;
-        assert!(result.is_err(), "expected redirect-cap error, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected redirect-cap error, got {:?}",
+            result
+        );
         let err = result.unwrap_err().to_lowercase();
         assert!(
             err.contains("redirect") || err.contains("too many"),
@@ -582,7 +578,11 @@ mod tests {
         let addr = spawn_redirect_loop_server().await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, Some(2), None).await;
-        assert!(result.is_err(), "expected redirect-cap error, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected redirect-cap error, got {:?}",
+            result
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -610,7 +610,11 @@ mod tests {
         let addr = spawn_advertised_giant_server(50 * 1024 * 1024).await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, None, Some(1024 * 1024)).await;
-        assert!(result.is_err(), "expected fast-fail error, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected fast-fail error, got {:?}",
+            result
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("advertises") || err.contains("exceed") || err.contains("cap"),
@@ -641,16 +645,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_rejects_invalid_scheme_before_network() {
         // Should fail at validate_url, never touch the network.
-        let result = fetch(
-            "file:///etc/passwd",
-            "GET",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await;
+        let result = fetch("file:///etc/passwd", "GET", None, None, None, None, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("scheme"));
     }
@@ -682,7 +677,9 @@ mod tests {
         );
         assert!(!ip_is_private(&"8.8.8.8".parse::<IpAddr>().unwrap()));
         assert!(!ip_is_private(&"1.1.1.1".parse::<IpAddr>().unwrap()));
-        assert!(!ip_is_private(&"2606:4700:4700::1111".parse::<IpAddr>().unwrap()));
+        assert!(!ip_is_private(
+            &"2606:4700:4700::1111".parse::<IpAddr>().unwrap()
+        ));
         // Public IPv4 wrapped in IPv6 must NOT trip the guard.
         assert!(!ip_is_private(&"::ffff:8.8.8.8".parse::<IpAddr>().unwrap()));
     }
@@ -799,9 +796,6 @@ mod tests {
     #[test]
     fn validate_url_full_skips_pin_for_ip_literal() {
         let v = validate_url_full_with("http://127.0.0.1:8080", false).unwrap();
-        assert!(
-            v.pinned.is_none(),
-            "IP-literal URLs have nothing to pin"
-        );
+        assert!(v.pinned.is_none(), "IP-literal URLs have nothing to pin");
     }
 }

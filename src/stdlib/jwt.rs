@@ -241,11 +241,41 @@ fn jwt_verify(args: Vec<Value>) -> Result<Value, String> {
     // if the upstream crate's behaviour changes.
     reject_unsafe_header(&token)?;
 
+    // Optional third argument: { algorithm: "RS256" }
+    // When provided, the caller pins the expected algorithm. This defeats
+    // key-confusion attacks where an attacker signs with HS256 using an RSA
+    // public key as the HMAC secret. Without pinning, jwt_verify trusts
+    // whatever algorithm the token header claims.
+    let pinned_alg = if let Some(Value::Object(opts)) = args.get(2) {
+        if let Some(Value::String(alg_str)) = opts.get("algorithm") {
+            Some(parse_algorithm(alg_str)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Peek at header to determine algorithm
     let header =
         jsonwebtoken::decode_header(&token).map_err(|e| format!("JWT decode error: {}", e))?;
 
-    let alg = header.alg;
+    let alg = if let Some(pinned) = pinned_alg {
+        // Caller pinned the algorithm — reject if the token claims something
+        // different. This is the key-confusion defence: even if an attacker
+        // sets the header to HS256, we refuse to verify with that algorithm
+        // when the caller expected RS256.
+        if header.alg != pinned {
+            return Err(format!(
+                "JWT algorithm mismatch: token header says {:?} but caller expects {:?}",
+                header.alg, pinned
+            ));
+        }
+        pinned
+    } else {
+        header.alg
+    };
+
     let key = match alg {
         Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => {
             DecodingKey::from_rsa_pem(secret.as_bytes())
@@ -594,6 +624,134 @@ mod tests {
             assert_eq!(map.get("field_0"), Some(&Value::Int(0)));
             assert_eq!(map.get("field_49"), Some(&Value::Int(49)));
         }
+    }
+
+    #[test]
+    fn test_verify_with_pinned_algorithm_match() {
+        // Sign with HS256, verify with algorithm pinned to HS256 — should succeed.
+        let secret = Value::String("my-secret".to_string());
+        let token = jwt_sign(vec![make_claims(), secret.clone()]).unwrap();
+        let mut opts = IndexMap::new();
+        opts.insert("algorithm".to_string(), Value::String("HS256".to_string()));
+        let result = jwt_verify(vec![token, secret, Value::Object(opts)]);
+        assert!(result.is_ok(), "pinned HS256 should match HS256 token");
+    }
+
+    #[test]
+    fn test_verify_with_pinned_algorithm_mismatch() {
+        // Sign with HS256, verify with algorithm pinned to RS256.
+        // This must fail with an algorithm mismatch error — not a signature
+        // error, not success. This is the key-confusion defence.
+        let secret = Value::String("my-secret".to_string());
+        let token = jwt_sign(vec![make_claims(), secret.clone()]).unwrap();
+        let mut opts = IndexMap::new();
+        opts.insert("algorithm".to_string(), Value::String("RS256".to_string()));
+        let result = jwt_verify(vec![token, secret, Value::Object(opts)]);
+        assert!(result.is_err(), "HS256 token must fail RS256 pin");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("mismatch"),
+            "expected algorithm mismatch error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_verify_with_pinned_hs384_mismatch() {
+        // Sign with HS512, verify with algorithm pinned to HS384 — mismatch.
+        let mut sign_opts = IndexMap::new();
+        sign_opts.insert("algorithm".to_string(), Value::String("HS512".to_string()));
+        let secret = Value::String("secret".to_string());
+        let token = jwt_sign(vec![
+            make_claims(),
+            secret.clone(),
+            Value::Object(sign_opts),
+        ])
+        .unwrap();
+        let mut verify_opts = IndexMap::new();
+        verify_opts.insert("algorithm".to_string(), Value::String("HS384".to_string()));
+        let result = jwt_verify(vec![token, secret, Value::Object(verify_opts)]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("mismatch"));
+    }
+
+    #[test]
+    fn test_verify_without_pinned_algorithm_still_works() {
+        // Existing behaviour: no third argument, trusts the header's algorithm.
+        let secret = Value::String("secret".to_string());
+        let token = jwt_sign(vec![make_claims(), secret.clone()]).unwrap();
+        let result = jwt_verify(vec![token, secret]);
+        assert!(result.is_ok(), "verify without pinning should still work");
+    }
+
+    #[test]
+    fn test_valid_with_pinned_algorithm() {
+        // jwt.valid delegates to jwt.verify — pinning should work through it.
+        let secret = Value::String("secret".to_string());
+        let token = jwt_sign(vec![make_claims(), secret.clone()]).unwrap();
+        let mut opts = IndexMap::new();
+        opts.insert("algorithm".to_string(), Value::String("HS256".to_string()));
+        let result = jwt_valid(vec![token.clone(), secret.clone(), Value::Object(opts)]).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let mut bad_opts = IndexMap::new();
+        bad_opts.insert("algorithm".to_string(), Value::String("RS256".to_string()));
+        let result = jwt_valid(vec![token, secret, Value::Object(bad_opts)]).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_key_confusion_attack_vector() {
+        // The actual documented attack: attacker has the server's RSA
+        // public key (which is public). They sign a token with HS256
+        // using the RSA public key bytes as the HMAC secret. Without
+        // algorithm pinning, a naive verifier trusts the token's
+        // "alg":"HS256" header and verifies with the same public key —
+        // signature matches, attacker wins.
+        //
+        // With pinning to RS256, the verify call rejects the token
+        // because its header says HS256 ≠ RS256.
+        //
+        // We use a fake RSA public key string (not valid PEM, but the
+        // attack works with any shared byte string). The important
+        // thing is that the same string is used as both the HMAC
+        // signing secret and the "RSA public key" passed to verify.
+        let fake_rsa_pubkey = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn\n-----END PUBLIC KEY-----";
+
+        // Attacker signs with HS256 using the RSA public key as HMAC secret.
+        let attacker_token = jwt_sign(vec![
+            make_claims(),
+            Value::String(fake_rsa_pubkey.to_string()),
+        ])
+        .unwrap();
+
+        // Without algorithm pin: verify trusts HS256 from the header and
+        // uses the same key as HMAC secret — this succeeds (the attack).
+        let result_no_pin = jwt_verify(vec![
+            attacker_token.clone(),
+            Value::String(fake_rsa_pubkey.to_string()),
+        ]);
+        assert!(
+            result_no_pin.is_ok(),
+            "without pinning, HS256 + shared key should verify (this is the attack)"
+        );
+
+        // With RS256 pin: verify sees HS256 ≠ RS256 and rejects.
+        let mut opts = IndexMap::new();
+        opts.insert("algorithm".to_string(), Value::String("RS256".to_string()));
+        let result_pinned = jwt_verify(vec![
+            attacker_token,
+            Value::String(fake_rsa_pubkey.to_string()),
+            Value::Object(opts),
+        ]);
+        assert!(
+            result_pinned.is_err(),
+            "with RS256 pin, HS256 token must be rejected"
+        );
+        assert!(
+            result_pinned.unwrap_err().contains("mismatch"),
+            "error should mention algorithm mismatch"
+        );
     }
 
     #[test]
