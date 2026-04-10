@@ -150,7 +150,7 @@ fn json_to_value(json: serde_json::Value) -> Value {
 
 fn jwt_sign(args: Vec<Value>) -> Result<Value, String> {
     let claims_val = match args.first() {
-        Some(Value::Object(_)) => args.first().unwrap(),
+        Some(v @ Value::Object(_)) => v,
         _ => return Err("jwt.sign() requires an object as first argument (claims)".to_string()),
     };
     let secret = match args.get(1) {

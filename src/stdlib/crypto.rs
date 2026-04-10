@@ -131,10 +131,13 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 
 fn rand_byte() -> u8 {
     use std::time::SystemTime;
+    // duration_since fails only if the wall clock is before 1970, which means
+    // the host has bigger problems than a weak RNG. Fall back to zero rather
+    // than panicking out of a stdlib helper.
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
     (nanos ^ (nanos >> 8) ^ (nanos >> 16)) as u8
 }
 
