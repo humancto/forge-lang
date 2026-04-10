@@ -65,11 +65,19 @@ struct Cli {
     #[arg(short = 'e', long = "eval")]
     eval_code: Option<String>,
 
-    /// Use the bytecode VM (experimental, faster but fewer features)
+    /// Use the bytecode VM. Faster on numeric/loop-heavy code but does not
+    /// support the full language: ask/await/must/freeze/spawn expressions,
+    /// schedule/watch blocks, and decorator-driven runtime features (server
+    /// routes, etc.) are rejected up front. Use the default interpreter for
+    /// HTTP servers, AI calls, file watching, and full stdlib coverage.
     #[arg(long = "vm")]
     use_vm: bool,
 
-    /// Use JIT compilation for hot functions (requires --vm)
+    /// JIT-compile numeric leaf functions via Cranelift on top of --vm.
+    /// Only Int/Float arithmetic and comparisons are supported: any function
+    /// that touches strings, arrays, objects, closures, or builtins falls
+    /// back to the bytecode interpreter automatically. Best for tight math
+    /// loops; for everything else --vm alone is usually enough.
     #[arg(long = "jit")]
     use_jit: bool,
 
