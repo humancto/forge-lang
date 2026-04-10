@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`db.begin` / `db.commit` / `db.rollback`** — explicit transaction control for the SQLite module, sharing the existing thread-local connection.
+- **`pg.begin` / `pg.commit` / `pg.rollback`** — same trio for the PostgreSQL module, backed by `client.batch_execute`.
+- **Opt-in filesystem confinement** — setting `FORGE_FS_BASE=/path` confines every `fs.*` operation that touches a path to that subtree (with symlink resolution). Pure path manipulation helpers (`dirname`, `basename`, `ext`, `join_path`, `temp_dir`) are exempt; `exists`/`is_dir`/`is_file` return `false` instead of erroring on confinement failure so script branches still work.
+- **VM source-line stack traces** — `VMError` now carries real `(function, line)` frames populated from the bytecode line table, and the CLI prints them via the `Display` impl rather than dropping them on the floor. Makes `--vm` errors actionable.
+- **69 new unit tests** for `crypto`, `regex`, `json`, and `time` stdlib modules — these had **zero** prior coverage despite living on the security-critical / format-correctness paths. Includes RFC 4231 HMAC-SHA256 vector, century-rule leap year cases, and JSON deep-merge round trip.
+- **`PRODUCTION_READINESS.md`** — internal punch list tracking all v0.4.3+ hardening work.
+
+### Fixed
+
+- **`http.get/post/...` had no redirect limit** — could be steered around localhost guards with a 302 chain. Capped at 5 redirects via reqwest policy + tests.
+- **`http.download` / `http.crawl` had no body-size cap** — single response could OOM the host. Added a streaming size cap that fast-fails on advertised `Content-Length` _and_ enforces during read.
+- **HTTP SSRF / scheme bypasses** — every HTTP entrypoint now rejects non-`http(s)` schemes, refuses RFC1918 / loopback / link-local / ULA destinations, and re-checks the resolved IP (so DNS-rebind tricks fail). Allow-list escape via `FORGE_HTTP_ALLOW_PRIVATE=1` for local dev.
+- **`jwt.verify` accepted `alg: none` tokens** — header parser now rejects `none` (and case variants) before any signature verification path runs.
+- **`pg.connect` defaulted to plaintext** — now defaults to TLS with full server certificate verification using webpki roots. Plaintext requires an explicit `"disable"` (or `"none"`/`"no-tls"`/`"plain"`) mode argument. `"tls-no-verify"` opts out of cert verification for dev.
+- **`pg.query` / `pg.execute` raw-pointer client extraction** — replaced with a clean `Arc::clone` checkout from the thread-local `RefCell`, eliminating the `unsafe` block and its lifetime hazards. Functionally equivalent under load tests.
+- **VM silently dropped `must` / `ask` / `await` / `freeze` / `spawn` expressions** — the compiler stripped them and ran the inner expression with no error. Now `--vm` rejects programs containing these constructs up front with a specific message naming the unsupported feature.
+- **LSP returned malformed responses for unknown methods** — now responds with proper `MethodNotFound` error per LSP spec.
+- **Two production-path `unwrap()` calls** — `jwt.sign` re-fetched a matched argument via `args.first().unwrap()` (replaced with `Some(v @ Value::Object(_))` binding); `crypto::rand_byte` could panic on a pre-1970 system clock (replaced with `unwrap_or(0)`). Every other `unwrap()` in the tree (309 total) is now confirmed to live in `#[cfg(test)]` modules.
+
+### Security
+
+- HTTP SSRF/scheme/redirect/size hardening (see Fixed).
+- JWT `alg=none` rejection (see Fixed).
+- PostgreSQL TLS-by-default (see Fixed).
+- Filesystem `FORGE_FS_BASE` confinement (see Added).
+
+### Changed
+
+- `--vm` and `--jit` CLI help text rewritten to spell out exact limitations: VM rejects `ask`/`await`/`must`/`freeze`/`spawn` and decorator-driven runtime features; JIT supports only the integer-loop subset and falls back to the bytecode VM for everything else.
+- `mysql.begin`/`commit`/`rollback` are intentionally **not** added — `mysql_async`'s pool returns a fresh physical connection on every `get_conn()`, so transaction control across separate calls would silently target different connections. A note in `mysql::create_module` documents the limitation.
+
 ---
 
 ## [0.4.3] - 2026-03-06
@@ -95,7 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Interpreter is now the *default* engine; VM/JIT are opt-in
+- Interpreter is now the _default_ engine; VM/JIT are opt-in
 - `println` aliased to `say` (both work)
 - Version bump: `0.3.0` → `0.4.0`
 
