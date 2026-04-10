@@ -699,3 +699,308 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         _ => Err(format!("unknown time function: {}", name)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> Value {
+        Value::String(v.to_string())
+    }
+
+    fn get_int(obj: &Value, key: &str) -> i64 {
+        if let Value::Object(m) = obj {
+            if let Some(Value::Int(n)) = m.get(key) {
+                return *n;
+            }
+        }
+        panic!("expected int field {}", key);
+    }
+
+    #[test]
+    fn module_has_core_functions() {
+        if let Value::Object(m) = create_module() {
+            for k in [
+                "now",
+                "unix",
+                "parse",
+                "format",
+                "diff",
+                "add",
+                "sub",
+                "zone",
+                "today",
+                "date",
+                "from_unix",
+                "is_before",
+                "is_after",
+                "is_leap_year",
+                "days_in_month",
+            ] {
+                assert!(m.contains_key(k), "missing {}", k);
+            }
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn now_returns_object_with_expected_fields() {
+        let result = call("time.now", vec![]).unwrap();
+        if let Value::Object(m) = result {
+            for k in ["iso", "unix", "year", "month", "day", "weekday", "timezone"] {
+                assert!(m.contains_key(k), "missing {}", k);
+            }
+            assert_eq!(m.get("timezone"), Some(&s("UTC")));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn now_with_timezone() {
+        let result = call("time.now", vec![s("America/New_York")]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("timezone"), Some(&s("America/New_York")));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn now_with_unknown_timezone_errors() {
+        let result = call("time.now", vec![s("Mars/Olympus")]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown timezone"));
+    }
+
+    #[test]
+    fn unix_returns_positive_int() {
+        let result = call("time.unix", vec![]).unwrap();
+        if let Value::Int(n) = result {
+            assert!(n > 1_700_000_000); // post-2023
+        } else {
+            panic!("expected int");
+        }
+    }
+
+    #[test]
+    fn date_constructs_specific_day() {
+        let result = call(
+            "time.date",
+            vec![Value::Int(2026), Value::Int(4), Value::Int(9)],
+        )
+        .unwrap();
+        assert_eq!(get_int(&result, "year"), 2026);
+        assert_eq!(get_int(&result, "month"), 4);
+        assert_eq!(get_int(&result, "day"), 9);
+    }
+
+    #[test]
+    fn date_invalid_errors() {
+        let result = call(
+            "time.date",
+            vec![Value::Int(2026), Value::Int(13), Value::Int(1)],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_unix_round_trip() {
+        // 2021-01-01 00:00:00 UTC = 1609459200
+        let result = call("time.from_unix", vec![Value::Int(1609459200)]).unwrap();
+        assert_eq!(get_int(&result, "year"), 2021);
+        assert_eq!(get_int(&result, "month"), 1);
+        assert_eq!(get_int(&result, "day"), 1);
+    }
+
+    #[test]
+    fn parse_iso_date() {
+        let result = call("time.parse", vec![s("2026-04-09")]).unwrap();
+        assert_eq!(get_int(&result, "year"), 2026);
+        assert_eq!(get_int(&result, "month"), 4);
+        assert_eq!(get_int(&result, "day"), 9);
+    }
+
+    #[test]
+    fn parse_us_format() {
+        let result = call("time.parse", vec![s("04/09/2026")]).unwrap();
+        assert_eq!(get_int(&result, "year"), 2026);
+    }
+
+    #[test]
+    fn parse_unix_int() {
+        let result = call("time.parse", vec![Value::Int(1609459200)]).unwrap();
+        assert_eq!(get_int(&result, "year"), 2021);
+    }
+
+    #[test]
+    fn parse_invalid_errors() {
+        let result = call("time.parse", vec![s("not a date")]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot parse"));
+    }
+
+    #[test]
+    fn format_with_custom_string() {
+        let t = call("time.from_unix", vec![Value::Int(1609459200)]).unwrap();
+        let result = call("time.format", vec![t, s("%Y/%m/%d")]).unwrap();
+        assert_eq!(result, s("2021/01/01"));
+    }
+
+    #[test]
+    fn diff_between_two_times() {
+        let a = call("time.from_unix", vec![Value::Int(1000)]).unwrap();
+        let b = call("time.from_unix", vec![Value::Int(100)]).unwrap();
+        let result = call("time.diff", vec![a, b]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("seconds"), Some(&Value::Int(900)));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn is_before_and_after() {
+        let earlier = call("time.from_unix", vec![Value::Int(100)]).unwrap();
+        let later = call("time.from_unix", vec![Value::Int(200)]).unwrap();
+        assert_eq!(
+            call("time.is_before", vec![earlier.clone(), later.clone()]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("time.is_after", vec![earlier, later]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn add_duration_object() {
+        let t = call("time.from_unix", vec![Value::Int(0)]).unwrap();
+        let mut dur = IndexMap::new();
+        dur.insert("days".to_string(), Value::Int(1));
+        let result = call("time.add", vec![t, Value::Object(dur)]).unwrap();
+        // 0 + 1 day = 86400
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("unix"), Some(&Value::Int(86400)));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn sub_seconds_int() {
+        let t = call("time.from_unix", vec![Value::Int(1000)]).unwrap();
+        let result = call("time.sub", vec![t, Value::Int(100)]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("unix"), Some(&Value::Int(900)));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn is_leap_year_known_cases() {
+        assert_eq!(
+            call("time.is_leap_year", vec![Value::Int(2024)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("time.is_leap_year", vec![Value::Int(2023)]).unwrap(),
+            Value::Bool(false)
+        );
+        // Century rule: 2000 is leap, 2100 is not.
+        assert_eq!(
+            call("time.is_leap_year", vec![Value::Int(2000)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("time.is_leap_year", vec![Value::Int(2100)]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn days_in_month_known_cases() {
+        assert_eq!(
+            call("time.days_in_month", vec![Value::Int(2024), Value::Int(2)]).unwrap(),
+            Value::Int(29) // leap Feb
+        );
+        assert_eq!(
+            call("time.days_in_month", vec![Value::Int(2023), Value::Int(2)]).unwrap(),
+            Value::Int(28)
+        );
+        assert_eq!(
+            call("time.days_in_month", vec![Value::Int(2026), Value::Int(4)]).unwrap(),
+            Value::Int(30)
+        );
+    }
+
+    #[test]
+    fn start_of_day_zeros_time() {
+        // 2021-01-01 00:00:30 -> start_of("day") -> 2021-01-01 00:00:00
+        let t = call("time.from_unix", vec![Value::Int(1609459230)]).unwrap();
+        let result = call("time.start_of", vec![t, s("day")]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("hour"), Some(&Value::Int(0)));
+            assert_eq!(m.get("minute"), Some(&Value::Int(0)));
+            assert_eq!(m.get("second"), Some(&Value::Int(0)));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn end_of_day_maxes_time() {
+        let t = call("time.from_unix", vec![Value::Int(1609459200)]).unwrap();
+        let result = call("time.end_of", vec![t, s("day")]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("hour"), Some(&Value::Int(23)));
+            assert_eq!(m.get("minute"), Some(&Value::Int(59)));
+            assert_eq!(m.get("second"), Some(&Value::Int(59)));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn start_of_unknown_unit_errors() {
+        let t = call("time.from_unix", vec![Value::Int(0)]).unwrap();
+        let result = call("time.start_of", vec![t, s("fortnight")]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zones_returns_array() {
+        let result = call("time.zones", vec![]).unwrap();
+        if let Value::Array(arr) = result {
+            assert!(arr.len() > 100);
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn zones_filtered() {
+        let result = call("time.zones", vec![s("america")]).unwrap();
+        if let Value::Array(arr) = result {
+            assert!(!arr.is_empty());
+            assert!(arr.iter().all(|v| {
+                if let Value::String(s) = v {
+                    s.to_lowercase().contains("america")
+                } else {
+                    false
+                }
+            }));
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn unknown_function_errors() {
+        let result = call("time.bogus", vec![]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown time function"));
+    }
+}

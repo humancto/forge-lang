@@ -179,3 +179,240 @@ fn forge_to_json_pretty(v: &Value, depth: usize, indent: usize) -> String {
         _ => "null".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> Value {
+        Value::String(v.to_string())
+    }
+
+    #[test]
+    fn module_has_all_functions() {
+        if let Value::Object(m) = create_module() {
+            for k in ["parse", "stringify", "pretty", "valid", "merge"] {
+                assert!(m.contains_key(k), "missing {}", k);
+            }
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn parse_primitives() {
+        assert_eq!(call("json.parse", vec![s("null")]).unwrap(), Value::Null);
+        assert_eq!(
+            call("json.parse", vec![s("true")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("json.parse", vec![s("false")]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(call("json.parse", vec![s("42")]).unwrap(), Value::Int(42));
+        assert_eq!(
+            call("json.parse", vec![s("3.14")]).unwrap(),
+            Value::Float(3.14)
+        );
+        assert_eq!(call("json.parse", vec![s("\"hi\"")]).unwrap(), s("hi"));
+    }
+
+    #[test]
+    fn parse_array() {
+        let result = call("json.parse", vec![s("[1, 2, 3]")]).unwrap();
+        assert_eq!(
+            result,
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
+    }
+
+    #[test]
+    fn parse_object() {
+        let result = call("json.parse", vec![s("{\"a\": 1, \"b\": \"two\"}")]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("a"), Some(&Value::Int(1)));
+            assert_eq!(m.get("b"), Some(&s("two")));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn parse_nested() {
+        let result = call(
+            "json.parse",
+            vec![s("{\"users\": [{\"id\": 1}, {\"id\": 2}]}")],
+        )
+        .unwrap();
+        if let Value::Object(m) = result {
+            if let Some(Value::Array(users)) = m.get("users") {
+                assert_eq!(users.len(), 2);
+            } else {
+                panic!("expected users array");
+            }
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn parse_invalid_errors() {
+        let result = call("json.parse", vec![s("not json")]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("JSON parse error"));
+    }
+
+    #[test]
+    fn stringify_primitives() {
+        assert_eq!(
+            call("json.stringify", vec![Value::Null]).unwrap(),
+            s("null")
+        );
+        assert_eq!(
+            call("json.stringify", vec![Value::Bool(true)]).unwrap(),
+            s("true")
+        );
+        assert_eq!(
+            call("json.stringify", vec![Value::Int(42)]).unwrap(),
+            s("42")
+        );
+        assert_eq!(call("json.stringify", vec![s("hi")]).unwrap(), s("\"hi\""));
+    }
+
+    #[test]
+    fn stringify_array() {
+        let result = call(
+            "json.stringify",
+            vec![Value::Array(vec![Value::Int(1), Value::Int(2)])],
+        )
+        .unwrap();
+        assert_eq!(result, s("[1, 2]"));
+    }
+
+    #[test]
+    fn stringify_escapes_quotes() {
+        let result = call("json.stringify", vec![s("she said \"hi\"")]).unwrap();
+        assert_eq!(result, s("\"she said \\\"hi\\\"\""));
+    }
+
+    #[test]
+    fn pretty_indents_object() {
+        let mut obj = IndexMap::new();
+        obj.insert("a".to_string(), Value::Int(1));
+        let result = call("json.pretty", vec![Value::Object(obj)]).unwrap();
+        if let Value::String(out) = result {
+            assert!(out.contains("\n"));
+            assert!(out.contains("\"a\": 1"));
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn pretty_empty_collections() {
+        let result = call("json.pretty", vec![Value::Array(vec![])]).unwrap();
+        assert_eq!(result, s("[]"));
+        let result = call("json.pretty", vec![Value::Object(IndexMap::new())]).unwrap();
+        assert_eq!(result, s("{}"));
+    }
+
+    #[test]
+    fn valid_returns_bool() {
+        assert_eq!(
+            call("json.valid", vec![s("{\"a\": 1}")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("json.valid", vec![s("not json")]).unwrap(),
+            Value::Bool(false)
+        );
+        // Non-string input -> false (not error)
+        assert_eq!(
+            call("json.valid", vec![Value::Int(1)]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn merge_shallow() {
+        let mut a = IndexMap::new();
+        a.insert("x".to_string(), Value::Int(1));
+        let mut b = IndexMap::new();
+        b.insert("y".to_string(), Value::Int(2));
+        let result = call("json.merge", vec![Value::Object(a), Value::Object(b)]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("x"), Some(&Value::Int(1)));
+            assert_eq!(m.get("y"), Some(&Value::Int(2)));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn merge_deep() {
+        // Nested objects should merge recursively rather than replace.
+        let mut a_inner = IndexMap::new();
+        a_inner.insert("p".to_string(), Value::Int(1));
+        let mut a = IndexMap::new();
+        a.insert("nested".to_string(), Value::Object(a_inner));
+
+        let mut b_inner = IndexMap::new();
+        b_inner.insert("q".to_string(), Value::Int(2));
+        let mut b = IndexMap::new();
+        b.insert("nested".to_string(), Value::Object(b_inner));
+
+        let result = call("json.merge", vec![Value::Object(a), Value::Object(b)]).unwrap();
+        if let Value::Object(outer) = result {
+            if let Some(Value::Object(nested)) = outer.get("nested") {
+                assert_eq!(nested.get("p"), Some(&Value::Int(1)));
+                assert_eq!(nested.get("q"), Some(&Value::Int(2)));
+            } else {
+                panic!("expected nested object");
+            }
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn merge_b_overrides_a_for_scalars() {
+        let mut a = IndexMap::new();
+        a.insert("x".to_string(), Value::Int(1));
+        let mut b = IndexMap::new();
+        b.insert("x".to_string(), Value::Int(99));
+        let result = call("json.merge", vec![Value::Object(a), Value::Object(b)]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("x"), Some(&Value::Int(99)));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn merge_requires_two_objects() {
+        let result = call(
+            "json.merge",
+            vec![Value::Object(IndexMap::new()), Value::Int(1)],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn round_trip_object() {
+        let json_str = "{\"name\": \"Forge\", \"version\": 4}";
+        let parsed = call("json.parse", vec![s(json_str)]).unwrap();
+        let stringified = call("json.stringify", vec![parsed]).unwrap();
+        // Re-parse and verify equality of the parsed forms.
+        let reparsed = call("json.parse", vec![stringified]).unwrap();
+        let original = call("json.parse", vec![s(json_str)]).unwrap();
+        assert_eq!(reparsed, original);
+    }
+
+    #[test]
+    fn unknown_function_errors() {
+        let result = call("json.bogus", vec![]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown json function"));
+    }
+}

@@ -77,3 +77,97 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         _ => Err(format!("unknown regex function: {}", name)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> Value {
+        Value::String(v.to_string())
+    }
+
+    #[test]
+    fn module_has_all_functions() {
+        if let Value::Object(m) = create_module() {
+            for k in ["test", "find", "find_all", "replace", "split"] {
+                assert!(m.contains_key(k), "missing {}", k);
+            }
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn test_matches() {
+        // Argument order is (text, pattern) — see CLAUDE.md.
+        assert_eq!(
+            call("regex.test", vec![s("hello world"), s(r"\w+")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("regex.test", vec![s("12345"), s(r"^\d+$")]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("regex.test", vec![s("hello"), s(r"^\d+$")]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn find_returns_first_match() {
+        let result = call("regex.find", vec![s("the rain in Spain"), s(r"\w+ain")]).unwrap();
+        assert_eq!(result, s("rain"));
+    }
+
+    #[test]
+    fn find_no_match_returns_null() {
+        let result = call("regex.find", vec![s("hello"), s(r"\d+")]).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn find_all_returns_array() {
+        let result = call("regex.find_all", vec![s("a1 b2 c3"), s(r"\d")]).unwrap();
+        assert_eq!(result, Value::Array(vec![s("1"), s("2"), s("3")]));
+    }
+
+    #[test]
+    fn find_all_empty_when_no_matches() {
+        let result = call("regex.find_all", vec![s("abc"), s(r"\d")]).unwrap();
+        assert_eq!(result, Value::Array(vec![]));
+    }
+
+    #[test]
+    fn replace_substitutes_all_matches() {
+        let result = call("regex.replace", vec![s("hello world"), s(r"\w+"), s("X")]).unwrap();
+        assert_eq!(result, s("X X"));
+    }
+
+    #[test]
+    fn split_basic() {
+        let result = call("regex.split", vec![s("a,b;c,d"), s(r"[,;]")]).unwrap();
+        assert_eq!(result, Value::Array(vec![s("a"), s("b"), s("c"), s("d")]));
+    }
+
+    #[test]
+    fn invalid_pattern_errors() {
+        let result = call("regex.test", vec![s("anything"), s(r"(unclosed")]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid regex"));
+    }
+
+    #[test]
+    fn wrong_arg_types_error() {
+        assert!(call("regex.test", vec![s("text")]).is_err());
+        assert!(call("regex.find", vec![Value::Int(1), s(r"\d")]).is_err());
+        assert!(call("regex.replace", vec![s("a"), s("b")]).is_err());
+    }
+
+    #[test]
+    fn unknown_function_errors() {
+        let result = call("regex.bogus", vec![]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown regex function"));
+    }
+}
