@@ -113,7 +113,7 @@ forge test           # integration tests pass (run after cargo build)
 
 All 18 example files run successfully.
 
-## Known Limitations (v0.4.2)
+## Known Limitations (v0.5.0)
 
 - All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
 - Interpreter is ~20x slower than Python for deep recursion; use `--jit` (11x faster than Python) or `--vm` (2x slower than Python)
