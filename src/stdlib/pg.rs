@@ -14,7 +14,36 @@ pub fn create_module() -> Value {
         Value::BuiltIn("pg.execute".to_string()),
     );
     m.insert("close".to_string(), Value::BuiltIn("pg.close".to_string()));
+    m.insert("begin".to_string(), Value::BuiltIn("pg.begin".to_string()));
+    m.insert(
+        "commit".to_string(),
+        Value::BuiltIn("pg.commit".to_string()),
+    );
+    m.insert(
+        "rollback".to_string(),
+        Value::BuiltIn("pg.rollback".to_string()),
+    );
     Value::Object(m)
+}
+
+/// Run a transaction control statement (BEGIN/COMMIT/ROLLBACK) against the
+/// open pg client. Shared by pg.begin/pg.commit/pg.rollback so the dispatch
+/// arms stay tiny.
+fn run_tx_control(stmt: &'static str, label: &'static str) -> Result<Value, String> {
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| format!("{} requires async runtime", label))?;
+    let client = PG_CLIENT
+        .with(|cell| cell.borrow().as_ref().map(Arc::clone))
+        .ok_or_else(|| "no pg connection open".to_string())?;
+    tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            client
+                .batch_execute(stmt)
+                .await
+                .map_err(|e| format!("{} error: {}", label, e))?;
+            Ok(Value::Null)
+        })
+    })
 }
 
 /// TLS mode for pg.connect(). Defaults to [`PgTlsMode::Tls`] when no mode is
@@ -311,6 +340,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Ok(Value::Null)
         }
 
+        "pg.begin" => run_tx_control("BEGIN", "pg.begin"),
+        "pg.commit" => run_tx_control("COMMIT", "pg.commit"),
+        "pg.rollback" => run_tx_control("ROLLBACK", "pg.rollback"),
+
         _ => Err(format!("unknown pg function: {}", name)),
     }
 }
@@ -334,7 +367,10 @@ mod tests {
             assert!(m.contains_key("query"), "missing query");
             assert!(m.contains_key("execute"), "missing execute");
             assert!(m.contains_key("close"), "missing close");
-            assert_eq!(m.len(), 4, "unexpected extra keys");
+            assert!(m.contains_key("begin"), "missing begin");
+            assert!(m.contains_key("commit"), "missing commit");
+            assert!(m.contains_key("rollback"), "missing rollback");
+            assert_eq!(m.len(), 7, "unexpected extra keys");
         } else {
             panic!("expected Object, got {:?}", module);
         }
@@ -502,6 +538,39 @@ mod tests {
         // close() when nothing is open should succeed silently
         let result = call("pg.close", vec![]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn begin_without_connection_errors() {
+        let result = call("pg.begin", vec![]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("no pg connection") || err.contains("async runtime"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn commit_without_connection_errors() {
+        let result = call("pg.commit", vec![]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("no pg connection") || err.contains("async runtime"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn rollback_without_connection_errors() {
+        let result = call("pg.rollback", vec![]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("no pg connection") || err.contains("async runtime"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
