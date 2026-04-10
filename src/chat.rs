@@ -96,6 +96,8 @@ pub fn run_chat() {
             Some(body.to_string()),
             Some(&headers),
             None,
+            None,
+            None,
         ) {
             Ok(crate::interpreter::Value::Object(resp)) => {
                 if let Some(crate::interpreter::Value::Object(json_body)) = resp.get("json") {

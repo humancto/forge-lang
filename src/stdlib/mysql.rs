@@ -21,6 +21,12 @@ pub fn create_module() -> Value {
         "close".to_string(),
         Value::BuiltIn("mysql.close".to_string()),
     );
+    // NOTE: mysql.begin/commit/rollback are intentionally absent. mysql_async's
+    // pool returns a fresh connection on every get_conn(), so issuing BEGIN
+    // on one call and COMMIT on a later call would target different physical
+    // connections — silently broken transactions. For multi-statement work,
+    // use a dedicated transaction API (future) or run all statements inside a
+    // single SQL string via the underlying server's batch execution.
     Value::Object(m)
 }
 

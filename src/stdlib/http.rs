@@ -110,6 +110,8 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
     let mut headers_map = std::collections::HashMap::new();
     let mut body_str = None;
     let mut timeout_secs: Option<u64> = None;
+    let mut max_redirects: Option<usize> = None;
+    let mut max_bytes: Option<u64> = None;
     let mut final_url = url.clone();
 
     if let Some(Value::Object(opt_map)) = opts {
@@ -194,6 +196,16 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
         if let Some(Value::Int(t)) = opt_map.get("timeout") {
             timeout_secs = Some(*t as u64);
         }
+        if let Some(Value::Int(r)) = opt_map.get("max_redirects") {
+            if *r >= 0 {
+                max_redirects = Some(*r as usize);
+            }
+        }
+        if let Some(Value::Int(b)) = opt_map.get("max_bytes") {
+            if *b >= 0 {
+                max_bytes = Some(*b as u64);
+            }
+        }
     }
 
     let start = Instant::now();
@@ -210,6 +222,8 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
         body_str,
         headers_ref,
         timeout_secs,
+        max_redirects,
+        max_bytes,
     ) {
         Ok(resp_val) => {
             let elapsed = start.elapsed().as_millis() as i64;
@@ -235,19 +249,27 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
         _ => url.rsplit('/').next().unwrap_or("download").to_string(),
     };
 
+    // Validate scheme + (optionally) host before any network activity.
+    // Use the full validator so we can pin the DNS answer into reqwest —
+    // downloads are the highest-value SSRF target and must share the same
+    // TOCTOU protections as fetch().
+    let validated = crate::runtime::client::validate_url_full(&url)?;
+
     eprintln!("  Downloading {}...", url);
 
-    let url_clone = url.clone();
+    let url_string = validated.url.as_str().to_string();
+    let pinned = validated.pinned.clone();
     let dest_clone = dest.clone();
 
     run_async(async move {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .map_err(|e| format!("client error: {}", e))?;
+        let client = crate::runtime::client::build_client(
+            std::time::Duration::from_secs(300),
+            crate::runtime::client::DEFAULT_MAX_REDIRECTS,
+            pinned,
+        )?;
 
         let resp = client
-            .get(&url_clone)
+            .get(&url_string)
             .send()
             .await
             .map_err(|e| format!("download error: {}", e))?;
@@ -257,11 +279,11 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
             return Err(format!("download failed: HTTP {}", status));
         }
 
-        let _content_length = resp.content_length().unwrap_or(0);
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("download read error: {}", e))?;
+        let bytes = crate::runtime::client::read_body_capped(
+            resp,
+            crate::runtime::client::DEFAULT_DOWNLOAD_MAX_BYTES,
+        )
+        .await?;
 
         std::fs::write(&dest_clone, &bytes).map_err(|e| format!("write error: {}", e))?;
 
@@ -281,13 +303,16 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
         _ => return Err("http.crawl() requires a URL string".to_string()),
     };
 
-    let url_clone = url.clone();
+    let validated = crate::runtime::client::validate_url_full(&url)?;
+    let url_clone = validated.url.as_str().to_string();
+    let pinned = validated.pinned.clone();
 
     run_async(async move {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| format!("client error: {}", e))?;
+        let client = crate::runtime::client::build_client(
+            std::time::Duration::from_secs(30),
+            crate::runtime::client::DEFAULT_MAX_REDIRECTS,
+            pinned,
+        )?;
 
         let resp = client
             .get(&url_clone)
@@ -296,10 +321,12 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
             .map_err(|e| format!("crawl error: {}", e))?;
 
         let status = resp.status().as_u16();
-        let html = resp
-            .text()
-            .await
-            .map_err(|e| format!("crawl read error: {}", e))?;
+        let body_bytes = crate::runtime::client::read_body_capped(
+            resp,
+            crate::runtime::client::DEFAULT_CRAWL_MAX_BYTES,
+        )
+        .await?;
+        let html = String::from_utf8_lossy(&body_bytes).into_owned();
 
         let title = extract_between(&html, "<title>", "</title>").unwrap_or_default();
 

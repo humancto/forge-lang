@@ -30,7 +30,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # === HTTP Client (production-grade) ===
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # === CLI & REPL ===
 clap = { version = "4", features = ["derive"] }
@@ -52,6 +52,7 @@ md-5 = "0.10"
 base64 = "0.22"
 hex = "0.4"
 hmac = "0.12"
+getrandom = "0.2"
 
 # === URL Parsing ===
 url = "2"

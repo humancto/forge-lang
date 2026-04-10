@@ -993,7 +993,7 @@ impl VM {
                         if let ObjKind::Object(map) = &obj.kind {
                             // Collect keys as owned Strings first to release gc borrow
                             let key_strings: Vec<String> = map.keys().cloned().collect();
-                            drop(obj); // release gc borrow before alloc_string calls
+                            let _ = obj; // release gc borrow before alloc_string calls
                             let keys: Vec<Value> =
                                 key_strings.iter().map(|k| self.alloc_string(k)).collect();
                             let nr = self.gc.alloc(ObjKind::Array(keys));
@@ -1335,7 +1335,9 @@ impl VM {
                 Some(Value::Obj(r)) => {
                     let url = self.get_string(&Value::Obj(*r)).unwrap_or_default();
                     let method = "GET".to_string();
-                    match crate::runtime::client::fetch_blocking(&url, &method, None, None, None) {
+                    match crate::runtime::client::fetch_blocking(
+                        &url, &method, None, None, None, None, None,
+                    ) {
                         Ok(interp_val) => Ok(self.convert_interp_value(&interp_val)),
                         Err(e) => Err(VMError::new(&format!("fetch error: {}", e))),
                     }

@@ -185,7 +185,24 @@ fn handle_message(body: &str) -> Option<String> {
             });
             Some(result.to_string())
         }
-        _ => None,
+        // Per LSP spec, requests (messages with an id) for unhandled methods
+        // must return a JSON-RPC MethodNotFound error rather than silently
+        // dropping the request. Notifications (no id) may still be ignored.
+        other => {
+            if id.is_some() {
+                let error = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32601,
+                        "message": format!("method not found: {}", other)
+                    }
+                });
+                Some(error.to_string())
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -806,6 +823,38 @@ mod tests {
         assert!(symbols
             .iter()
             .any(|symbol| symbol.name == "User" && symbol.kind == 23));
+    }
+
+    #[test]
+    fn unknown_request_returns_method_not_found_error() {
+        let response = handle_message(
+            r#"{"jsonrpc":"2.0","id":42,"method":"textDocument/codeAction","params":{}}"#,
+        )
+        .expect("requests must always get a response");
+        let json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            json.pointer("/error/code").and_then(|v| v.as_i64()),
+            Some(-32601)
+        );
+        assert_eq!(
+            json.pointer("/id").and_then(|v| v.as_i64()),
+            Some(42),
+            "the response must echo the request id"
+        );
+        let msg = json
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(msg.contains("textDocument/codeAction"));
+    }
+
+    #[test]
+    fn unknown_notification_is_silently_ignored() {
+        // No id field — this is a notification, not a request, so dropping it
+        // is the spec-compliant behaviour.
+        let response =
+            handle_message(r#"{"jsonrpc":"2.0","method":"$/some/notification","params":{}}"#);
+        assert!(response.is_none());
     }
 
     #[test]

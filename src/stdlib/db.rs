@@ -16,6 +16,15 @@ pub fn create_module() -> Value {
         "last_insert_rowid".to_string(),
         Value::BuiltIn("db.last_insert_rowid".to_string()),
     );
+    m.insert("begin".to_string(), Value::BuiltIn("db.begin".to_string()));
+    m.insert(
+        "commit".to_string(),
+        Value::BuiltIn("db.commit".to_string()),
+    );
+    m.insert(
+        "rollback".to_string(),
+        Value::BuiltIn("db.rollback".to_string()),
+    );
     Value::Object(m)
 }
 
@@ -166,6 +175,30 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Ok(Value::Int(c.last_insert_rowid()))
         }
 
+        "db.begin" => {
+            let conn = get_conn()?;
+            let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+            c.execute_batch("BEGIN")
+                .map(|_| Value::Null)
+                .map_err(|e| format!("db.begin error: {}", e))
+        }
+
+        "db.commit" => {
+            let conn = get_conn()?;
+            let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+            c.execute_batch("COMMIT")
+                .map(|_| Value::Null)
+                .map_err(|e| format!("db.commit error: {}", e))
+        }
+
+        "db.rollback" => {
+            let conn = get_conn()?;
+            let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+            c.execute_batch("ROLLBACK")
+                .map(|_| Value::Null)
+                .map_err(|e| format!("db.rollback error: {}", e))
+        }
+
         _ => Err(format!("unknown db function: {}", name)),
     }
 }
@@ -283,6 +316,87 @@ mod tests {
         let rowid2 = call("db.last_insert_rowid".into(), vec![]).unwrap();
         assert_eq!(rowid2, Value::Int(2));
 
+        call("db.close".into(), vec![]).unwrap();
+    }
+
+    #[test]
+    fn db_transaction_commit_persists() {
+        call("db.open".into(), vec![Value::String(":memory:".into())]).unwrap();
+        call(
+            "db.execute".into(),
+            vec![Value::String("CREATE TABLE tx (id INTEGER)".into())],
+        )
+        .unwrap();
+
+        call("db.begin".into(), vec![]).unwrap();
+        call(
+            "db.execute".into(),
+            vec![
+                Value::String("INSERT INTO tx VALUES (?)".into()),
+                Value::Array(vec![Value::Int(1)]),
+            ],
+        )
+        .unwrap();
+        call("db.commit".into(), vec![]).unwrap();
+
+        let result = call(
+            "db.query".into(),
+            vec![Value::String("SELECT * FROM tx".into())],
+        )
+        .unwrap();
+        if let Value::Array(rows) = result {
+            assert_eq!(rows.len(), 1);
+        } else {
+            panic!("expected array");
+        }
+        call("db.close".into(), vec![]).unwrap();
+    }
+
+    #[test]
+    fn db_transaction_rollback_discards() {
+        call("db.open".into(), vec![Value::String(":memory:".into())]).unwrap();
+        call(
+            "db.execute".into(),
+            vec![Value::String("CREATE TABLE tx2 (id INTEGER)".into())],
+        )
+        .unwrap();
+        // Seed one row outside any transaction.
+        call(
+            "db.execute".into(),
+            vec![
+                Value::String("INSERT INTO tx2 VALUES (?)".into()),
+                Value::Array(vec![Value::Int(99)]),
+            ],
+        )
+        .unwrap();
+
+        call("db.begin".into(), vec![]).unwrap();
+        call(
+            "db.execute".into(),
+            vec![
+                Value::String("INSERT INTO tx2 VALUES (?)".into()),
+                Value::Array(vec![Value::Int(1)]),
+            ],
+        )
+        .unwrap();
+        call("db.rollback".into(), vec![]).unwrap();
+
+        let result = call(
+            "db.query".into(),
+            vec![Value::String("SELECT * FROM tx2".into())],
+        )
+        .unwrap();
+        if let Value::Array(rows) = result {
+            // Only the seeded row should remain.
+            assert_eq!(rows.len(), 1);
+            if let Value::Object(row) = &rows[0] {
+                assert_eq!(row.get("id"), Some(&Value::Int(99)));
+            } else {
+                panic!("expected object row");
+            }
+        } else {
+            panic!("expected array");
+        }
         call("db.close".into(), vec![]).unwrap();
     }
 }

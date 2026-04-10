@@ -65,11 +65,19 @@ struct Cli {
     #[arg(short = 'e', long = "eval")]
     eval_code: Option<String>,
 
-    /// Use the bytecode VM (experimental, faster but fewer features)
+    /// Use the bytecode VM. Faster on numeric/loop-heavy code but does not
+    /// support the full language: ask/await/must/freeze/spawn expressions,
+    /// schedule/watch blocks, and decorator-driven runtime features (server
+    /// routes, etc.) are rejected up front. Use the default interpreter for
+    /// HTTP servers, AI calls, file watching, and full stdlib coverage.
     #[arg(long = "vm")]
     use_vm: bool,
 
-    /// Use JIT compilation for hot functions (requires --vm)
+    /// JIT-compile numeric leaf functions via Cranelift on top of --vm.
+    /// Only Int/Float arithmetic and comparisons are supported: any function
+    /// that touches strings, arrays, objects, closures, or builtins falls
+    /// back to the bytecode interpreter automatically. Best for tight math
+    /// loops; for everything else --vm alone is usually enough.
     #[arg(long = "jit")]
     use_jit: bool,
 
@@ -517,12 +525,34 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
                 }
             }
         }
-        Expr::Await(expr)
-        | Expr::Freeze(expr)
-        | Expr::Spread(expr)
-        | Expr::Must(expr)
-        | Expr::Ask(expr) => collect_vm_incompatible_expr(expr, issues),
+        // These are silently flattened to their inner expression by the VM
+        // compiler, which produces wrong results: `must` would not crash on
+        // Err, `ask` would not call the LLM, `await` would not actually
+        // wait, and `freeze` would not enforce immutability. Reject them up
+        // front so the user sees a clear "unsupported in --vm" error instead
+        // of running and silently getting the wrong answer.
+        Expr::Must(expr) => {
+            issues.insert("must expressions");
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Ask(expr) => {
+            issues.insert("ask expressions");
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Await(expr) => {
+            issues.insert("await expressions");
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Freeze(expr) => {
+            issues.insert("freeze expressions");
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Spread(expr) => collect_vm_incompatible_expr(expr, issues),
         Expr::Spawn(body) => {
+            // The expression form of spawn silently flattens to a synchronous
+            // block returning null in the VM compiler, so user code that
+            // depends on its parallel semantics is wrong. Reject it.
+            issues.insert("spawn expressions");
             for stmt in body {
                 collect_vm_incompatible_stmt(stmt, issues);
             }
@@ -569,7 +599,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             match vm::run_with_profiling(&program) {
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("{}", errors::format_simple_error(&e.message));
+                    eprintln!("{}", errors::format_simple_error(&e.to_string()));
                     process::exit(1);
                 }
             }
@@ -577,7 +607,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             match vm::run(&program) {
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("{}", errors::format_simple_error(&e.message));
+                    eprintln!("{}", errors::format_simple_error(&e.to_string()));
                     process::exit(1);
                 }
             }
@@ -688,7 +718,9 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
     match vm.execute(&chunk) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("{}", errors::format_simple_error(&e.message));
+            // Use the full Display impl so the stack trace (function +
+            // source line) gets printed, not just the bare message.
+            eprintln!("{}", errors::format_simple_error(&e.to_string()));
             process::exit(1);
         }
     }
@@ -805,7 +837,9 @@ fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
     match vm.execute(&chunk) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("{}", errors::format_simple_error(&e.message));
+            // Use the full Display impl so the stack trace (function +
+            // source line) gets printed, not just the bare message.
+            eprintln!("{}", errors::format_simple_error(&e.to_string()));
             process::exit(1);
         }
     }
