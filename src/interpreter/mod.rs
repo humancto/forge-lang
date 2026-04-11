@@ -259,6 +259,18 @@ impl Environment {
         Err(RuntimeError::new(&format!("undefined variable: {}", name)))
     }
 
+    /// Collect all defined variable names across all scopes (for REPL tab completion).
+    pub fn all_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for scope in &self.scopes {
+            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
+            names.extend(guard.keys().cloned());
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Deep clone for spawn — breaks sharing so thread gets independent copy
     pub fn deep_clone(&self) -> Self {
         Self {

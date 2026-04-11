@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **LSP deep go-to-definition** — finds function parameters, local variables, for-loop vars, catch vars, and impl block methods — not just top-level symbols
 - **LSP context-aware module completions** — typing `math.` now only shows `math` module members instead of all 200+ members from every module
 - **LSP type-check diagnostics** — the gradual type checker now runs on every edit, surfacing type mismatches, arity errors, and return type mismatches as editor warnings with line numbers
+- **REPL syntax highlighting** — keywords (magenta), builtins (blue), modules (green), strings (yellow), numbers (cyan), comments (dim)
+- **REPL live tab completion** — user-defined variables and functions now appear in tab completion alongside builtins
+- **REPL `env` command** — now shows all defined variables and their values instead of just `_last`
+- **`forge doc` variable extraction** — `let`/`let mut` declarations now appear in doc output (previously silently skipped)
+- **`forge doc` comment extraction** — `//` comments preceding functions, structs, and variables are now captured and displayed
 
 ---
 
