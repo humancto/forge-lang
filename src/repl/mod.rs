@@ -4,7 +4,11 @@ use crate::parser::Parser;
 /// Forge REPL — Interactive Shell
 /// Read-Eval-Print Loop for Forge, powered by rustyline.
 use rustyline::completion::{Completer, Pair};
-use rustyline::{Config, Editor, Helper, Highlighter, Hinter, Validator};
+use rustyline::highlight::Highlighter;
+use rustyline::{Config, Editor, Helper, Hinter, Validator};
+use std::borrow::Cow;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -163,10 +167,17 @@ const KEYWORDS: &[&str] = &[
     "seconds",
 ];
 
-#[derive(Helper, Validator, Highlighter, Hinter)]
-struct ForgeCompleter;
+const MODULES: &[&str] = &[
+    "math", "fs", "io", "crypto", "db", "pg", "mysql", "env", "json", "regex", "log", "http",
+    "csv", "term", "time", "jwt", "npc", "exec",
+];
 
-impl Completer for ForgeCompleter {
+#[derive(Helper, Validator, Hinter)]
+struct ForgeHelper {
+    user_names: Arc<Mutex<Vec<String>>>,
+}
+
+impl Completer for ForgeHelper {
     type Candidate = Pair;
 
     fn complete(
@@ -185,15 +196,164 @@ impl Completer for ForgeCompleter {
         }
 
         let mut candidates = Vec::new();
-        for word in BUILTINS.iter().chain(KEYWORDS.iter()) {
-            if word.starts_with(prefix) {
+        let mut seen = HashSet::new();
+
+        // Static builtins, keywords, modules
+        for word in BUILTINS.iter().chain(KEYWORDS.iter()).chain(MODULES.iter()) {
+            if word.starts_with(prefix) && seen.insert(word.to_string()) {
                 candidates.push(Pair {
                     display: word.to_string(),
                     replacement: word.to_string(),
                 });
             }
         }
+
+        // User-defined names from the interpreter environment
+        if let Ok(names) = self.user_names.lock() {
+            for name in names.iter() {
+                if name.starts_with(prefix) && seen.insert(name.clone()) {
+                    candidates.push(Pair {
+                        display: name.clone(),
+                        replacement: name.clone(),
+                    });
+                }
+            }
+        }
+
         Ok((start, candidates))
+    }
+}
+
+impl Highlighter for ForgeHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        let mut result = String::with_capacity(line.len() * 2);
+        let chars: Vec<char> = line.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+
+        while i < len {
+            // String literals
+            if chars[i] == '"' {
+                result.push_str("\x1B[33m\""); // yellow
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        result.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    result.push('"');
+                    i += 1;
+                }
+                result.push_str("\x1B[0m");
+                continue;
+            }
+
+            // Single-quoted strings
+            if chars[i] == '\'' {
+                result.push_str("\x1B[33m'"); // yellow
+                i += 1;
+                while i < len && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        result.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    result.push('\'');
+                    i += 1;
+                }
+                result.push_str("\x1B[0m");
+                continue;
+            }
+
+            // Numbers (allow at most one decimal point)
+            if chars[i].is_ascii_digit() {
+                result.push_str("\x1B[36m"); // cyan
+                let mut has_dot = false;
+                while i < len {
+                    if chars[i].is_ascii_digit() {
+                        result.push(chars[i]);
+                        i += 1;
+                    } else if chars[i] == '.'
+                        && !has_dot
+                        && i + 1 < len
+                        && chars[i + 1].is_ascii_digit()
+                    {
+                        has_dot = true;
+                        result.push(chars[i]);
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                result.push_str("\x1B[0m");
+                continue;
+            }
+
+            // Comments
+            if chars[i] == '/' && i + 1 < len && chars[i + 1] == '/' {
+                result.push_str("\x1B[90m"); // dim
+                while i < len {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                result.push_str("\x1B[0m");
+                continue;
+            }
+
+            // Identifiers and keywords
+            if chars[i].is_alphabetic() || chars[i] == '_' {
+                let start = i;
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                if word == "true" || word == "false" {
+                    result.push_str("\x1B[36m"); // cyan for booleans
+                    result.push_str(&word);
+                    result.push_str("\x1B[0m");
+                } else if KEYWORDS.contains(&word.as_str()) {
+                    result.push_str("\x1B[35m"); // magenta for keywords
+                    result.push_str(&word);
+                    result.push_str("\x1B[0m");
+                } else if BUILTINS.contains(&word.as_str()) {
+                    result.push_str("\x1B[34m"); // blue for builtins
+                    result.push_str(&word);
+                    result.push_str("\x1B[0m");
+                } else if MODULES.contains(&word.as_str()) {
+                    result.push_str("\x1B[32m"); // green for modules
+                    result.push_str(&word);
+                    result.push_str("\x1B[0m");
+                } else {
+                    result.push_str(&word);
+                }
+                continue;
+            }
+
+            result.push(chars[i]);
+            i += 1;
+        }
+
+        Cow::Owned(result)
+    }
+
+    fn highlight_char(
+        &self,
+        _line: &str,
+        _pos: usize,
+        _kind: rustyline::highlight::CmdKind,
+    ) -> bool {
+        true
     }
 }
 
@@ -208,7 +368,11 @@ pub fn run_repl() {
             std::process::exit(1);
         }
     };
-    rl.set_helper(Some(ForgeCompleter));
+
+    let user_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    rl.set_helper(Some(ForgeHelper {
+        user_names: Arc::clone(&user_names),
+    }));
 
     let history_path = dirs_home().join(".forge_history");
     let _ = rl.load_history(&history_path);
@@ -240,9 +404,15 @@ pub fn run_repl() {
                             continue;
                         }
                         "env" => {
-                            println!("[debug] Environment state:");
-                            if let Some(val) = interpreter.env.get("_last") {
-                                println!("  _last = {}", val);
+                            let names = interpreter.env.all_names();
+                            if names.is_empty() {
+                                println!("  (no variables defined)");
+                            } else {
+                                for name in &names {
+                                    if let Some(val) = interpreter.env.get(name) {
+                                        println!("  {} = {}", name, val);
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -319,6 +489,11 @@ pub fn run_repl() {
                         eprintln!("\x1B[31m{}\x1B[0m", e);
                     }
                 }
+
+                // Update tab-completion with current environment names
+                if let Ok(mut names) = user_names.lock() {
+                    *names = interpreter.env.all_names();
+                }
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
                 println!("^C");
@@ -355,7 +530,7 @@ fn print_help() {
     learn <n>   Jump to lesson n
     version     Show version
     clear       Clear the screen
-    env         Show environment state
+    env         Show all defined variables
     exit        Quit the REPL
 
   Quick Examples:

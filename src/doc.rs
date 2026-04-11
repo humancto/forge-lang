@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::lexer::Lexer;
-use crate::parser::ast::{self, *};
+use crate::parser::ast::*;
 use crate::parser::Parser;
 
 pub fn generate_docs(paths: &[PathBuf]) {
@@ -180,7 +180,7 @@ fn extract_docs(program: &Program, lines: &[&str]) -> Vec<DocEntry> {
                 return_type,
                 ..
             } => {
-                let comments = extract_preceding_comments(lines, &spanned.stmt);
+                let comments = extract_preceding_comments(lines, spanned.line.saturating_sub(1));
                 let param_docs: Vec<ParamDoc> = params
                     .iter()
                     .map(|p| ParamDoc {
@@ -223,7 +223,7 @@ fn extract_docs(program: &Program, lines: &[&str]) -> Vec<DocEntry> {
                 });
             }
             Stmt::StructDef { name, fields, .. } => {
-                let comments = extract_preceding_comments(lines, &spanned.stmt);
+                let comments = extract_preceding_comments(lines, spanned.line.saturating_sub(1));
                 let field_names: Vec<String> = fields
                     .iter()
                     .map(|f| format!("{}: {}", f.name, format_type_ann(&f.type_ann)))
@@ -237,6 +237,17 @@ fn extract_docs(program: &Program, lines: &[&str]) -> Vec<DocEntry> {
                     decorators: Vec::new(),
                 });
             }
+            Stmt::Let { name, mutable, .. } => {
+                let comments = extract_preceding_comments(lines, spanned.line.saturating_sub(1));
+                entries.push(DocEntry {
+                    kind: DocKind::Variable {
+                        name: name.clone(),
+                        mutable: *mutable,
+                    },
+                    comments,
+                    decorators: Vec::new(),
+                });
+            }
             _ => {}
         }
     }
@@ -244,9 +255,27 @@ fn extract_docs(program: &Program, lines: &[&str]) -> Vec<DocEntry> {
     entries
 }
 
-fn extract_preceding_comments(_lines: &[&str], _stmt: &Stmt) -> Vec<String> {
-    // AST doesn't carry line info for statements yet — return empty
-    Vec::new()
+fn extract_preceding_comments(lines: &[&str], stmt_line: usize) -> Vec<String> {
+    let mut comments = Vec::new();
+    if stmt_line == 0 {
+        return comments;
+    }
+    // Walk backwards from the line above the statement
+    let mut i = stmt_line.saturating_sub(1);
+    loop {
+        let trimmed = lines.get(i).map(|l| l.trim()).unwrap_or("");
+        if let Some(comment) = trimmed.strip_prefix("//") {
+            comments.push(comment.trim().to_string());
+        } else {
+            break;
+        }
+        if i == 0 {
+            break;
+        }
+        i -= 1;
+    }
+    comments.reverse();
+    comments
 }
 
 fn format_type_ann(t: &TypeAnn) -> String {

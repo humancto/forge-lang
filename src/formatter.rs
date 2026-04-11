@@ -80,7 +80,7 @@ fn count_leading_closes(line: &str) -> i32 {
     let mut count = 0i32;
     for c in line.chars() {
         match c {
-            '}' | ']' => count += 1,
+            '}' | ']' | ')' => count += 1,
             ' ' | '\t' => continue,
             _ => break,
         }
@@ -88,8 +88,9 @@ fn count_leading_closes(line: &str) -> i32 {
     count
 }
 
-/// Count braces in a line, ignoring those inside strings and comments.
-fn count_braces(line: &str) -> (i32, i32) {
+/// Count opening/closing delimiters (braces, brackets, parens) in a line,
+/// ignoring those inside strings and comments.
+fn count_delimiters(line: &str) -> (i32, i32) {
     let mut opens = 0i32;
     let mut closes = 0i32;
     let mut in_string = false;
@@ -120,10 +121,10 @@ fn count_braces(line: &str) -> (i32, i32) {
             continue;
         }
 
-        // Count braces and brackets outside strings
-        if c == '{' || c == '[' {
+        // Count braces, brackets, and parens outside strings
+        if c == '{' || c == '[' || c == '(' {
             opens += 1;
-        } else if c == '}' || c == ']' {
+        } else if c == '}' || c == ']' || c == ')' {
             closes += 1;
         }
     }
@@ -149,7 +150,7 @@ fn format_source(source: &str) -> String {
         }
         prev_blank = false;
 
-        let (opens, closes) = count_braces(trimmed);
+        let (opens, closes) = count_delimiters(trimmed);
         let leading_closes = count_leading_closes(trimmed);
 
         // Decrease indent for leading close braces (before writing the line)
@@ -250,20 +251,20 @@ mod tests {
     }
 
     #[test]
-    fn count_braces_ignores_strings() {
-        assert_eq!(count_braces("let x = \"{\""), (0, 0));
-        assert_eq!(count_braces("if true {"), (1, 0));
-        assert_eq!(count_braces("}"), (0, 1));
-        assert_eq!(count_braces("} else {"), (1, 1));
-        assert_eq!(count_braces("let s = \"} else {\""), (0, 0));
+    fn count_delimiters_ignores_strings() {
+        assert_eq!(count_delimiters("let x = \"{\""), (0, 0));
+        assert_eq!(count_delimiters("if true {"), (1, 0));
+        assert_eq!(count_delimiters("}"), (0, 1));
+        assert_eq!(count_delimiters("} else {"), (1, 1));
+        assert_eq!(count_delimiters("let s = \"} else {\""), (0, 0));
     }
 
     #[test]
-    fn count_braces_includes_brackets() {
-        assert_eq!(count_braces("let a = ["), (1, 0));
-        assert_eq!(count_braces("]"), (0, 1));
-        assert_eq!(count_braces("[{"), (2, 0));
-        assert_eq!(count_braces("}]"), (0, 2));
+    fn count_delimiters_includes_brackets() {
+        assert_eq!(count_delimiters("let a = ["), (1, 0));
+        assert_eq!(count_delimiters("]"), (0, 1));
+        assert_eq!(count_delimiters("[{"), (2, 0));
+        assert_eq!(count_delimiters("}]"), (0, 2));
     }
 
     #[test]
@@ -271,5 +272,22 @@ mod tests {
         let input = "let a = [\n1,\n2,\n3\n]\n";
         let result = format_source(input);
         assert_eq!(result, "let a = [\n    1,\n    2,\n    3\n]\n");
+    }
+
+    #[test]
+    fn handles_paren_continuation() {
+        let input = "let result = some_function(\narg1,\narg2,\narg3\n)\n";
+        let result = format_source(input);
+        assert_eq!(
+            result,
+            "let result = some_function(\n    arg1,\n    arg2,\n    arg3\n)\n"
+        );
+    }
+
+    #[test]
+    fn count_delimiters_includes_parens() {
+        assert_eq!(count_delimiters("fn call("), (1, 0));
+        assert_eq!(count_delimiters(")"), (0, 1));
+        assert_eq!(count_delimiters("fn call(arg) {"), (2, 1));
     }
 }
