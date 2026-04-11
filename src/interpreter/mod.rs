@@ -1215,24 +1215,54 @@ impl Interpreter {
                     // Import all top-level definitions
                     for spanned in &program.statements {
                         match &spanned.stmt {
-                            Stmt::FnDef { name, .. }
-                            | Stmt::Let { name, .. }
-                            | Stmt::StructDef { name, .. }
-                            | Stmt::TypeDef { name, .. } => {
+                            Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
                                 if let Some(val) = import_interp.env.get(name) {
                                     self.env.define(name.clone(), val);
                                 }
                             }
-                            Stmt::ImplBlock {
-                                type_name, methods, ..
-                            } => {
-                                // Import methods defined in impl blocks
-                                for method in methods {
-                                    if let Stmt::FnDef { name, .. } = method {
-                                        let qualified = format!("{}::{}", type_name, name);
-                                        if let Some(val) = import_interp.env.get(&qualified) {
-                                            self.env.define(qualified, val);
-                                        }
+                            Stmt::StructDef { name, .. } => {
+                                if let Some(val) = import_interp.env.get(name) {
+                                    self.env.define(name.clone(), val);
+                                }
+                                // Copy struct defaults and embedded fields
+                                if let Some(defaults) = import_interp.struct_defaults.get(name) {
+                                    self.struct_defaults.insert(name.clone(), defaults.clone());
+                                }
+                                if let Some(embeds) = import_interp.embedded_fields.get(name) {
+                                    self.embedded_fields.insert(name.clone(), embeds.clone());
+                                }
+                            }
+                            Stmt::TypeDef { name, variants } => {
+                                // Import each variant individually
+                                for variant in variants {
+                                    if let Some(val) = import_interp.env.get(&variant.name) {
+                                        self.env.define(variant.name.clone(), val);
+                                    }
+                                }
+                                // Import type metadata
+                                let meta_key = format!("__type_{}__", name);
+                                if let Some(val) = import_interp.env.get(&meta_key) {
+                                    self.env.define(meta_key, val);
+                                }
+                            }
+                            Stmt::ImplBlock { type_name, .. } => {
+                                // Copy method tables and static methods
+                                if let Some(methods) = import_interp.method_tables.get(type_name) {
+                                    let entry = self
+                                        .method_tables
+                                        .entry(type_name.clone())
+                                        .or_insert_with(IndexMap::new);
+                                    for (k, v) in methods {
+                                        entry.insert(k.clone(), v.clone());
+                                    }
+                                }
+                                if let Some(statics) = import_interp.static_methods.get(type_name) {
+                                    let entry = self
+                                        .static_methods
+                                        .entry(type_name.clone())
+                                        .or_insert_with(IndexMap::new);
+                                    for (k, v) in statics {
+                                        entry.insert(k.clone(), v.clone());
                                     }
                                 }
                             }

@@ -181,6 +181,15 @@ async fn main() {
                 Some(f) => f,
                 None => {
                     if let Some(m) = manifest::load_manifest() {
+                        if m.project.entry.is_empty() {
+                            eprintln!(
+                                "{}",
+                                errors::format_simple_error(
+                                    "forge.toml found but no 'entry' field set. Add entry = \"src/main.fg\" to [project] or specify a file: forge run <file>"
+                                )
+                            );
+                            process::exit(1);
+                        }
                         PathBuf::from(&m.project.entry)
                     } else {
                         eprintln!(
