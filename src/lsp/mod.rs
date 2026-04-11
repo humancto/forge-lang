@@ -240,7 +240,26 @@ fn get_diagnostics(source: &str) -> Vec<serde_json::Value> {
 
     let mut parser = crate::parser::Parser::new(tokens);
     match parser.parse_program() {
-        Ok(_) => Vec::new(),
+        Ok(program) => {
+            let mut checker = crate::typechecker::TypeChecker::with_strict(false);
+            let warnings = checker.check(&program);
+            warnings
+                .into_iter()
+                .map(|w| {
+                    let line = w.line.saturating_sub(1);
+                    let severity = if w.is_error { 1 } else { 2 };
+                    serde_json::json!({
+                        "range": {
+                            "start": {"line": line, "character": 0},
+                            "end": {"line": line, "character": 0}
+                        },
+                        "severity": severity,
+                        "source": "forge-typecheck",
+                        "message": w.message
+                    })
+                })
+                .collect()
+        }
         Err(e) => {
             vec![serde_json::json!({
                 "range": {
@@ -1513,5 +1532,50 @@ mod tests {
             );
         }
         assert!(!completions.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_reports_type_warnings() {
+        let diags = get_diagnostics("let x: Int = \"hello\"");
+        assert_eq!(diags.len(), 1);
+        let msg = diags[0]
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(msg.contains("type mismatch"));
+        // Severity 2 = warning (not strict mode)
+        assert_eq!(diags[0].get("severity").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            diags[0].get("source").and_then(|v| v.as_str()),
+            Some("forge-typecheck")
+        );
+    }
+
+    #[test]
+    fn diagnostics_includes_line_number() {
+        let diags = get_diagnostics("let y = 1\nlet x: Int = \"hello\"");
+        assert_eq!(diags.len(), 1);
+        // Line 2 in source (1-indexed) → line 1 in LSP (0-indexed)
+        let line = diags[0]
+            .pointer("/range/start/line")
+            .and_then(|v| v.as_u64());
+        assert_eq!(line, Some(1));
+    }
+
+    #[test]
+    fn diagnostics_empty_for_valid_code() {
+        let diags = get_diagnostics("let x = 42\nlet y = x + 1");
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_reports_arity_mismatch() {
+        let diags = get_diagnostics("fn add(a, b) { return a + b }\nadd(1, 2, 3)");
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0]
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("expects 2"));
     }
 }

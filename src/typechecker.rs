@@ -43,6 +43,7 @@ pub struct TypeChecker {
     structs: HashMap<String, Vec<String>>,
     variables: HashMap<String, InferredType>,
     current_fn_return: Option<InferredType>,
+    current_line: usize,
     strict: bool,
     warnings: Vec<TypeWarning>,
 }
@@ -184,6 +185,7 @@ impl TypeChecker {
             structs: HashMap::new(),
             variables: HashMap::new(),
             current_fn_return: None,
+            current_line: 0,
             strict: false,
             warnings: Vec::new(),
         }
@@ -197,17 +199,20 @@ impl TypeChecker {
             structs: HashMap::new(),
             variables: HashMap::new(),
             current_fn_return: None,
+            current_line: 0,
             strict,
             warnings: Vec::new(),
         }
     }
 
     fn emit(&mut self, msg: impl Into<String>) {
-        if self.strict {
-            self.warnings.push(TypeWarning::error(msg));
+        let mut warning = if self.strict {
+            TypeWarning::error(msg)
         } else {
-            self.warnings.push(TypeWarning::warn(msg));
-        }
+            TypeWarning::warn(msg)
+        };
+        warning.line = self.current_line;
+        self.warnings.push(warning);
     }
 
     pub fn check(&mut self, program: &Program) -> Vec<TypeWarning> {
@@ -215,6 +220,7 @@ impl TypeChecker {
             self.collect_definitions(&spanned.stmt);
         }
         for spanned in &program.statements {
+            self.current_line = spanned.line;
             self.check_stmt(&spanned.stmt);
         }
         std::mem::take(&mut self.warnings)

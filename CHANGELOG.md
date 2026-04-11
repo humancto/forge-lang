@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **LSP hover for user-defined symbols** — functions show full signature, variables show mutability/type, structs show fields, types show variants, interfaces show methods
 - **LSP deep go-to-definition** — finds function parameters, local variables, for-loop vars, catch vars, and impl block methods — not just top-level symbols
 - **LSP context-aware module completions** — typing `math.` now only shows `math` module members instead of all 200+ members from every module
+- **LSP type-check diagnostics** — the gradual type checker now runs on every edit, surfacing type mismatches, arity errors, and return type mismatches as editor warnings with line numbers
 
 ---
 
