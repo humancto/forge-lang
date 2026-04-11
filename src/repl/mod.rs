@@ -254,12 +254,47 @@ impl Highlighter for ForgeHelper {
                 continue;
             }
 
-            // Numbers
+            // Single-quoted strings
+            if chars[i] == '\'' {
+                result.push_str("\x1B[33m'"); // yellow
+                i += 1;
+                while i < len && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        result.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    result.push('\'');
+                    i += 1;
+                }
+                result.push_str("\x1B[0m");
+                continue;
+            }
+
+            // Numbers (allow at most one decimal point)
             if chars[i].is_ascii_digit() {
                 result.push_str("\x1B[36m"); // cyan
-                while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                    result.push(chars[i]);
-                    i += 1;
+                let mut has_dot = false;
+                while i < len {
+                    if chars[i].is_ascii_digit() {
+                        result.push(chars[i]);
+                        i += 1;
+                    } else if chars[i] == '.'
+                        && !has_dot
+                        && i + 1 < len
+                        && chars[i + 1].is_ascii_digit()
+                    {
+                        has_dot = true;
+                        result.push(chars[i]);
+                        i += 1;
+                    } else {
+                        break;
+                    }
                 }
                 result.push_str("\x1B[0m");
                 continue;
@@ -283,7 +318,11 @@ impl Highlighter for ForgeHelper {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                if KEYWORDS.contains(&word.as_str()) {
+                if word == "true" || word == "false" {
+                    result.push_str("\x1B[36m"); // cyan for booleans
+                    result.push_str(&word);
+                    result.push_str("\x1B[0m");
+                } else if KEYWORDS.contains(&word.as_str()) {
                     result.push_str("\x1B[35m"); // magenta for keywords
                     result.push_str(&word);
                     result.push_str("\x1B[0m");
@@ -293,10 +332,6 @@ impl Highlighter for ForgeHelper {
                     result.push_str("\x1B[0m");
                 } else if MODULES.contains(&word.as_str()) {
                     result.push_str("\x1B[32m"); // green for modules
-                    result.push_str(&word);
-                    result.push_str("\x1B[0m");
-                } else if word == "true" || word == "false" {
-                    result.push_str("\x1B[36m"); // cyan for booleans
                     result.push_str(&word);
                     result.push_str("\x1B[0m");
                 } else {

@@ -88,8 +88,9 @@ fn count_leading_closes(line: &str) -> i32 {
     count
 }
 
-/// Count braces in a line, ignoring those inside strings and comments.
-fn count_braces(line: &str) -> (i32, i32) {
+/// Count opening/closing delimiters (braces, brackets, parens) in a line,
+/// ignoring those inside strings and comments.
+fn count_delimiters(line: &str) -> (i32, i32) {
     let mut opens = 0i32;
     let mut closes = 0i32;
     let mut in_string = false;
@@ -149,7 +150,7 @@ fn format_source(source: &str) -> String {
         }
         prev_blank = false;
 
-        let (opens, closes) = count_braces(trimmed);
+        let (opens, closes) = count_delimiters(trimmed);
         let leading_closes = count_leading_closes(trimmed);
 
         // Decrease indent for leading close braces (before writing the line)
@@ -250,20 +251,20 @@ mod tests {
     }
 
     #[test]
-    fn count_braces_ignores_strings() {
-        assert_eq!(count_braces("let x = \"{\""), (0, 0));
-        assert_eq!(count_braces("if true {"), (1, 0));
-        assert_eq!(count_braces("}"), (0, 1));
-        assert_eq!(count_braces("} else {"), (1, 1));
-        assert_eq!(count_braces("let s = \"} else {\""), (0, 0));
+    fn count_delimiters_ignores_strings() {
+        assert_eq!(count_delimiters("let x = \"{\""), (0, 0));
+        assert_eq!(count_delimiters("if true {"), (1, 0));
+        assert_eq!(count_delimiters("}"), (0, 1));
+        assert_eq!(count_delimiters("} else {"), (1, 1));
+        assert_eq!(count_delimiters("let s = \"} else {\""), (0, 0));
     }
 
     #[test]
-    fn count_braces_includes_brackets() {
-        assert_eq!(count_braces("let a = ["), (1, 0));
-        assert_eq!(count_braces("]"), (0, 1));
-        assert_eq!(count_braces("[{"), (2, 0));
-        assert_eq!(count_braces("}]"), (0, 2));
+    fn count_delimiters_includes_brackets() {
+        assert_eq!(count_delimiters("let a = ["), (1, 0));
+        assert_eq!(count_delimiters("]"), (0, 1));
+        assert_eq!(count_delimiters("[{"), (2, 0));
+        assert_eq!(count_delimiters("}]"), (0, 2));
     }
 
     #[test]
@@ -284,9 +285,9 @@ mod tests {
     }
 
     #[test]
-    fn count_braces_includes_parens() {
-        assert_eq!(count_braces("fn call("), (1, 0));
-        assert_eq!(count_braces(")"), (0, 1));
-        assert_eq!(count_braces("fn call(arg) {"), (2, 1));
+    fn count_delimiters_includes_parens() {
+        assert_eq!(count_delimiters("fn call("), (1, 0));
+        assert_eq!(count_delimiters(")"), (0, 1));
+        assert_eq!(count_delimiters("fn call(arg) {"), (2, 1));
     }
 }
