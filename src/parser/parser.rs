@@ -20,13 +20,13 @@ impl Parser {
         self.skip_newlines();
 
         while !self.is_at_end() {
-            let line = if self.pos < self.tokens.len() {
-                self.tokens[self.pos].line
+            let (line, col) = if self.pos < self.tokens.len() {
+                (self.tokens[self.pos].line, self.tokens[self.pos].col)
             } else {
-                0
+                (0, 0)
             };
             let stmt = self.parse_statement()?;
-            statements.push(SpannedStmt { stmt, line });
+            statements.push(SpannedStmt::new(stmt, line, col));
             self.skip_newlines();
         }
 
@@ -277,8 +277,13 @@ impl Parser {
 
         let mut methods = Vec::new();
         while !self.check(&Token::RBrace) {
+            let (line, col) = if self.pos < self.tokens.len() {
+                (self.tokens[self.pos].line, self.tokens[self.pos].col)
+            } else {
+                (0, 0)
+            };
             let stmt = self.parse_fn_def(Vec::new())?;
-            methods.push(stmt);
+            methods.push(SpannedStmt::new(stmt, line, col));
             self.skip_newlines();
         }
         self.expect(Token::RBrace)?;
@@ -939,8 +944,13 @@ impl Parser {
         let else_body = if self.check_else_keyword() {
             self.advance();
             if self.check(&Token::If) {
+                let (line, col) = if self.pos < self.tokens.len() {
+                    (self.tokens[self.pos].line, self.tokens[self.pos].col)
+                } else {
+                    (0, 0)
+                };
                 let elif = self.parse_if()?;
-                Some(vec![elif])
+                Some(vec![SpannedStmt::new(elif, line, col)])
             } else {
                 Some(self.parse_block()?)
             }
@@ -970,8 +980,13 @@ impl Parser {
             let body = if self.check(&Token::LBrace) {
                 self.parse_block()?
             } else {
+                let (line, col) = if self.pos < self.tokens.len() {
+                    (self.tokens[self.pos].line, self.tokens[self.pos].col)
+                } else {
+                    (0, 0)
+                };
                 let stmt = self.parse_statement()?;
-                vec![stmt]
+                vec![SpannedStmt::new(stmt, line, col)]
             };
 
             arms.push(MatchArm { pattern, body });
@@ -1302,7 +1317,7 @@ impl Parser {
                 type_ann: None,
                 default: None,
             }],
-            body: vec![Stmt::Return(Some(predicate))],
+            body: vec![SpannedStmt::unspanned(Stmt::Return(Some(predicate)))],
         })
     }
 
@@ -1670,11 +1685,11 @@ impl Parser {
                     None
                 };
                 // Wrap as block expression
-                Ok(Expr::Block(vec![Stmt::If {
+                Ok(Expr::Block(vec![SpannedStmt::unspanned(Stmt::If {
                     condition: cond,
                     then_body,
                     else_body,
-                }]))
+                })]))
             }
 
             Token::Type => {
@@ -1693,12 +1708,12 @@ impl Parser {
 
             Token::When => {
                 let when_stmt = self.parse_when()?;
-                Ok(Expr::Block(vec![when_stmt]))
+                Ok(Expr::Block(vec![SpannedStmt::unspanned(when_stmt)]))
             }
 
             Token::Safe => {
                 let safe_stmt = self.parse_safe_block()?;
-                Ok(Expr::Block(vec![safe_stmt]))
+                Ok(Expr::Block(vec![SpannedStmt::unspanned(safe_stmt)]))
             }
 
             _ => Err(self.error(&format!("unexpected token: {:?}", self.current_token()))),
@@ -1811,7 +1826,13 @@ impl Parser {
         // Otherwise it's a block
         let mut stmts = Vec::new();
         while !self.check(&Token::RBrace) {
-            stmts.push(self.parse_statement()?);
+            let (line, col) = if self.pos < self.tokens.len() {
+                (self.tokens[self.pos].line, self.tokens[self.pos].col)
+            } else {
+                (0, 0)
+            };
+            let stmt = self.parse_statement()?;
+            stmts.push(SpannedStmt::new(stmt, line, col));
             self.skip_newlines();
         }
         self.expect(Token::RBrace)?;
@@ -1846,14 +1867,20 @@ impl Parser {
 
     // ========== Helpers ==========
 
-    fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
+    fn parse_block(&mut self) -> Result<Vec<SpannedStmt>, ParseError> {
         self.skip_newlines();
         self.expect(Token::LBrace)?;
         self.skip_newlines();
 
         let mut stmts = Vec::new();
         while !self.check(&Token::RBrace) {
-            stmts.push(self.parse_statement()?);
+            let (line, col) = if self.pos < self.tokens.len() {
+                (self.tokens[self.pos].line, self.tokens[self.pos].col)
+            } else {
+                (0, 0)
+            };
+            let stmt = self.parse_statement()?;
+            stmts.push(SpannedStmt::new(stmt, line, col));
             self.skip_newlines();
         }
 

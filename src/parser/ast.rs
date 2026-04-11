@@ -5,6 +5,22 @@
 pub struct SpannedStmt {
     pub stmt: Stmt,
     pub line: usize,
+    pub col: usize,
+}
+
+impl SpannedStmt {
+    pub fn new(stmt: Stmt, line: usize, col: usize) -> Self {
+        Self { stmt, line, col }
+    }
+
+    /// Create a SpannedStmt with no position info (for generated/test code)
+    pub fn unspanned(stmt: Stmt) -> Self {
+        Self {
+            stmt,
+            line: 0,
+            col: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -30,7 +46,7 @@ pub enum Stmt {
         name: String,
         params: Vec<Param>,
         return_type: Option<TypeAnn>,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
         decorators: Vec<Decorator>,
         is_async: bool,
     },
@@ -45,8 +61,8 @@ pub enum Stmt {
     Return(Option<Expr>),
     If {
         condition: Expr,
-        then_body: Vec<Stmt>,
-        else_body: Option<Vec<Stmt>>,
+        then_body: Vec<SpannedStmt>,
+        else_body: Option<Vec<SpannedStmt>>,
     },
     Match {
         subject: Expr,
@@ -56,19 +72,19 @@ pub enum Stmt {
         var: String,
         var2: Option<String>,
         iterable: Expr,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     While {
         condition: Expr,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     Loop {
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     Break,
     Continue,
     Spawn {
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     DecoratorStmt(Decorator),
     TypeDef {
@@ -83,12 +99,12 @@ pub enum Stmt {
     ImplBlock {
         type_name: String,
         ability: Option<String>,
-        methods: Vec<Stmt>,
+        methods: Vec<SpannedStmt>,
     },
     TryCatch {
-        try_body: Vec<Stmt>,
+        try_body: Vec<SpannedStmt>,
         catch_var: String,
-        catch_body: Vec<Stmt>,
+        catch_body: Vec<SpannedStmt>,
     },
     Import {
         path: String,
@@ -107,28 +123,28 @@ pub enum Stmt {
     },
     /// safe { body } -- null-safe execution
     SafeBlock {
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     /// timeout N seconds { body }
     TimeoutBlock {
         duration: Expr,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     /// retry N times { body }
     RetryBlock {
         count: Expr,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     /// schedule every N seconds/minutes { body }
     ScheduleBlock {
         interval: Expr,
         unit: String,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     /// watch "path" { body }
     WatchBlock {
         path: Expr,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     /// prompt name(params) { system/user/returns }
     PromptDef {
@@ -205,10 +221,10 @@ pub enum Expr {
     },
     Lambda {
         params: Vec<Param>,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
     },
     Await(Box<Expr>),
-    Spawn(Vec<Stmt>),
+    Spawn(Vec<SpannedStmt>),
     Spread(Box<Expr>),
     Must(Box<Expr>),
     Freeze(Box<Expr>),
@@ -232,7 +248,7 @@ pub enum Expr {
         name: String,
         fields: Vec<(String, Expr)>,
     },
-    Block(Vec<Stmt>),
+    Block(Vec<SpannedStmt>),
 }
 
 #[derive(Debug, Clone)]
@@ -306,7 +322,7 @@ pub enum DecoratorArg {
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
-    pub body: Vec<Stmt>,
+    pub body: Vec<SpannedStmt>,
 }
 
 #[derive(Debug, Clone)]

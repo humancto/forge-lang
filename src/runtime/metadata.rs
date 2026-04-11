@@ -31,7 +31,7 @@ pub struct ServerPlan {
 pub struct SchedulePlan {
     pub interval: Expr,
     pub unit: String,
-    pub body: Vec<Stmt>,
+    pub body: Vec<SpannedStmt>,
     pub line: usize,
 }
 
@@ -39,7 +39,7 @@ pub struct SchedulePlan {
 #[derive(Clone, Debug)]
 pub struct WatchPlan {
     pub path: Expr,
-    pub body: Vec<Stmt>,
+    pub body: Vec<SpannedStmt>,
     pub line: usize,
 }
 

@@ -635,7 +635,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 fc.add_local(&param.name, true);
             }
             for s in body {
-                compile_stmt(&mut fc, s)?;
+                fc.current_line = s.line;
+                compile_stmt(&mut fc, &s.stmt)?;
             }
             fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             fc.chunk.max_registers = fc.max_register;
@@ -684,7 +685,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             for s in then_body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
 
@@ -693,7 +695,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 c.patch_jump(else_jump);
                 c.begin_scope();
                 for s in eb {
-                    compile_stmt(c, s)?;
+                    c.current_line = s.line;
+                    compile_stmt(c, &s.stmt)?;
                 }
                 c.end_scope();
                 c.patch_jump(end_jump);
@@ -718,7 +721,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             for s in body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
 
@@ -744,7 +748,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             for s in body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
 
@@ -792,7 +797,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             c.emit(encode_abc(OpCode::GetIndex, var_reg, arr_reg, idx_reg), 0);
 
             for s in body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
 
@@ -845,7 +851,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     Pattern::Wildcard => {
                         c.begin_scope();
                         for s in &arm.body {
-                            compile_stmt(c, s)?;
+                            c.current_line = s.line;
+                            compile_stmt(c, &s.stmt)?;
                         }
                         c.end_scope();
                         break;
@@ -872,7 +879,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         let vr = c.add_local(name, false);
                         c.emit(encode_abc(OpCode::Move, vr, subj, 0), 0);
                         for s in &arm.body {
-                            compile_stmt(c, s)?;
+                            c.current_line = s.line;
+                            compile_stmt(c, &s.stmt)?;
                         }
                         c.end_scope();
 
@@ -890,7 +898,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
                         c.begin_scope();
                         for s in &arm.body {
-                            compile_stmt(c, s)?;
+                            c.current_line = s.line;
+                            compile_stmt(c, &s.stmt)?;
                         }
                         c.end_scope();
 
@@ -918,7 +927,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                             }
                         }
                         for s in &arm.body {
-                            compile_stmt(c, s)?;
+                            c.current_line = s.line;
+                            compile_stmt(c, &s.stmt)?;
                         }
                         c.end_scope();
 
@@ -970,10 +980,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     .collect::<Vec<_>>();
                 let constructor = Expr::Lambda {
                     params,
-                    body: vec![Stmt::Return(Some(variant_object_expr(
-                        name,
-                        &variant.name,
-                        &param_names,
+                    body: vec![SpannedStmt::unspanned(Stmt::Return(Some(
+                        variant_object_expr(name, &variant.name, &param_names),
                     )))],
                 };
                 compile_set_global_expr(c, &variant.name, constructor)?;
@@ -1160,7 +1168,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             });
             c.begin_scope();
             for s in body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
             c.cleanup_contexts.pop();
@@ -1191,7 +1200,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             for s in body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
 
@@ -1244,7 +1254,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             });
             c.begin_scope();
             for s in body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
             c.cleanup_contexts.pop();
@@ -1304,10 +1315,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             ability,
             methods,
         } => {
-            for method_stmt in methods {
+            for method_spanned in methods {
                 let Stmt::FnDef {
                     name, params, body, ..
-                } = method_stmt
+                } = &method_spanned.stmt
                 else {
                     return Err(CompileError::new(
                         "impl/give blocks may only contain methods",
@@ -1357,7 +1368,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             });
             c.begin_scope();
             for s in try_body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
             c.cleanup_contexts.pop();
@@ -1373,7 +1385,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 mutable: false,
             });
             for s in catch_body {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
             c.patch_jump(end_jump);
@@ -1435,7 +1448,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             sc.current_line = c.current_line;
             sc.begin_scope();
             for s in body {
-                compile_stmt(&mut sc, s)?;
+                sc.current_line = s.line;
+                compile_stmt(&mut sc, &s.stmt)?;
             }
             sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             sc.chunk.max_registers = sc.max_register;
@@ -1626,7 +1640,8 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 lc.add_local(&p.name, true);
             }
             for s in body {
-                compile_stmt(&mut lc, s)?;
+                lc.current_line = s.line;
+                compile_stmt(&mut lc, &s.stmt)?;
             }
             lc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             lc.chunk.max_registers = lc.max_register;
@@ -1653,7 +1668,8 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Block(stmts) => {
             c.begin_scope();
             for s in stmts {
-                compile_stmt(c, s)?;
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
         }
@@ -1663,7 +1679,8 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Spawn(body) => {
             // VM spawn: compile as synchronous call for now (VM concurrency is M4.3)
             for stmt in body {
-                compile_stmt(c, stmt)?;
+                c.current_line = stmt.line;
+                compile_stmt(c, &stmt.stmt)?;
             }
             c.emit(encode_abc(OpCode::LoadNull, dst, 0, 0), 0);
         }

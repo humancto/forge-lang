@@ -28,13 +28,13 @@ pub enum Value {
     Function {
         name: String,
         params: Vec<Param>,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
         closure: Environment,
         decorators: Vec<Decorator>,
     },
     Lambda {
         params: Vec<Param>,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
         closure: Arc<std::sync::Mutex<Environment>>,
     },
     ResultOk(Box<Value>),
@@ -404,7 +404,10 @@ impl Interpreter {
         interp
     }
 
-    pub(crate) fn exec_background_block(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
+    pub(crate) fn exec_background_block(
+        &mut self,
+        stmts: &[SpannedStmt],
+    ) -> Result<(), RuntimeError> {
         let _ = self.exec_block(stmts)?;
         Ok(())
     }
@@ -867,7 +870,7 @@ impl Interpreter {
             } => {
                 // Phase 4 will fully implement method tables + dispatch
                 // For now, register each method function in the environment
-                for method_stmt in methods {
+                for method_spanned in methods {
                     if let Stmt::FnDef {
                         name: method_name,
                         params,
@@ -875,7 +878,7 @@ impl Interpreter {
                         body,
                         is_async,
                         ..
-                    } = method_stmt
+                    } = &method_spanned.stmt
                     {
                         let has_receiver = params.first().map_or(false, |p| p.name == "it");
                         let qualified_name = if has_receiver {
@@ -1529,17 +1532,19 @@ impl Interpreter {
         }
     }
 
-    fn exec_block(&mut self, stmts: &[Stmt]) -> Result<Signal, RuntimeError> {
+    fn exec_block(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
         self.env.push_scope();
         let result = self.exec_stmts(stmts);
         self.env.pop_scope();
         result
     }
 
-    fn exec_stmts(&mut self, stmts: &[Stmt]) -> Result<Signal, RuntimeError> {
+    fn exec_stmts(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
         let mut result = Signal::None;
         let mut last_expr_value = Value::Null;
-        for stmt in stmts {
+        for s in stmts {
+            self.current_line = s.line;
+            let stmt = &s.stmt;
             if let Stmt::Expression(expr) = stmt {
                 last_expr_value = self.eval_expr(expr)?;
                 continue;
@@ -2198,7 +2203,9 @@ impl Interpreter {
             Expr::Block(stmts) => {
                 self.env.push_scope();
                 let mut last = Value::Null;
-                for stmt in stmts {
+                for spanned in stmts {
+                    self.current_line = spanned.line;
+                    let stmt = &spanned.stmt;
                     match stmt {
                         Stmt::If {
                             condition,
@@ -2214,11 +2221,12 @@ impl Interpreter {
                                 &vec![]
                             };
                             for s in branch {
-                                if let Signal::Return(v) = self.exec_stmt(s)? {
+                                self.current_line = s.line;
+                                if let Signal::Return(v) = self.exec_stmt(&s.stmt)? {
                                     self.env.pop_scope();
                                     return Ok(v);
                                 }
-                                if let Stmt::Expression(e) = s {
+                                if let Stmt::Expression(e) = &s.stmt {
                                     last = self.eval_expr(e)?;
                                 }
                             }
@@ -2756,7 +2764,7 @@ impl Interpreter {
     }
 
     /// Spawn a block as a concurrent task, returning a TaskHandle.
-    fn spawn_task(&mut self, body: &[Stmt]) -> Result<Value, RuntimeError> {
+    fn spawn_task(&mut self, body: &[SpannedStmt]) -> Result<Value, RuntimeError> {
         let body = body.to_vec();
         let result_slot: Arc<(std::sync::Mutex<Option<Value>>, std::sync::Condvar)> =
             Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
@@ -2973,6 +2981,7 @@ fn json_to_value(v: serde_json::Value) -> Value {
 pub struct RuntimeError {
     pub message: String,
     pub line: usize,
+    pub col: usize,
     propagated: Option<Value>,
 }
 
@@ -2981,6 +2990,7 @@ impl RuntimeError {
         Self {
             message: msg.to_string(),
             line: 0,
+            col: 0,
             propagated: None,
         }
     }
@@ -2993,6 +3003,7 @@ impl RuntimeError {
         Self {
             message,
             line: 0,
+            col: 0,
             propagated: Some(value),
         }
     }

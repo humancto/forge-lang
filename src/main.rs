@@ -360,7 +360,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         Stmt::InterfaceDef { .. } => {}
         Stmt::ImplBlock { methods, .. } => {
             for method in methods {
-                collect_vm_incompatible_stmt(method, issues);
+                collect_vm_incompatible_stmt(&method.stmt, issues);
             }
         }
         Stmt::Destructure { pattern: _, value } => {
@@ -371,39 +371,39 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
             catch_body,
             ..
         } => {
-            for stmt in try_body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in try_body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
-            for stmt in catch_body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in catch_body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::SafeBlock { body } => {
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::TimeoutBlock { body, .. } => {
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::RetryBlock { count, body } => {
             collect_vm_incompatible_expr(count, issues);
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::ScheduleBlock { body, .. } => {
             issues.insert("schedule blocks");
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::WatchBlock { body, .. } => {
             issues.insert("watch blocks");
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::PromptDef { .. } => {}
@@ -421,8 +421,8 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
             {
                 issues.insert("decorator-driven runtime features");
             }
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::If {
@@ -430,19 +430,19 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
             else_body,
             ..
         } => {
-            for stmt in then_body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in then_body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
             if let Some(else_body) = else_body {
-                for stmt in else_body {
-                    collect_vm_incompatible_stmt(stmt, issues);
+                for s in else_body {
+                    collect_vm_incompatible_stmt(&s.stmt, issues);
                 }
             }
         }
         Stmt::Match { arms, .. } => {
             for arm in arms {
-                for stmt in &arm.body {
-                    collect_vm_incompatible_stmt(stmt, issues);
+                for s in &arm.body {
+                    collect_vm_incompatible_stmt(&s.stmt, issues);
                 }
             }
         }
@@ -450,8 +450,8 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         | Stmt::While { body, .. }
         | Stmt::Loop { body }
         | Stmt::Spawn { body } => {
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::Let { value, .. } | Stmt::Expression(value) | Stmt::YieldStmt(value) => {
@@ -506,8 +506,8 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
             collect_vm_incompatible_expr(function, issues);
         }
         Expr::Lambda { body, .. } | Expr::Block(body) => {
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Expr::Object(fields) | Expr::StructInit { fields, .. } => {
@@ -578,8 +578,8 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
             // block returning null in the VM compiler, so user code that
             // depends on its parallel semantics is wrong. Reject it.
             issues.insert("spawn expressions");
-            for stmt in body {
-                collect_vm_incompatible_stmt(stmt, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => {}
