@@ -28,13 +28,13 @@ pub enum Value {
     Function {
         name: String,
         params: Vec<Param>,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
         closure: Environment,
         decorators: Vec<Decorator>,
     },
     Lambda {
         params: Vec<Param>,
-        body: Vec<Stmt>,
+        body: Vec<SpannedStmt>,
         closure: Arc<std::sync::Mutex<Environment>>,
     },
     ResultOk(Box<Value>),
@@ -404,7 +404,10 @@ impl Interpreter {
         interp
     }
 
-    pub(crate) fn exec_background_block(&mut self, stmts: &[Stmt]) -> Result<(), RuntimeError> {
+    pub(crate) fn exec_background_block(
+        &mut self,
+        stmts: &[SpannedStmt],
+    ) -> Result<(), RuntimeError> {
         let _ = self.exec_block(stmts)?;
         Ok(())
     }
@@ -614,6 +617,7 @@ impl Interpreter {
                 Err(mut e) => {
                     if e.line == 0 {
                         e.line = spanned.line;
+                        e.col = spanned.col;
                     }
                     return Err(e);
                 }
@@ -627,7 +631,13 @@ impl Interpreter {
         let mut last = Value::Null;
         for spanned in &program.statements {
             self.current_line = spanned.line;
-            match self.exec_stmt(&spanned.stmt)? {
+            match self.exec_stmt(&spanned.stmt).map_err(|mut e| {
+                if e.line == 0 {
+                    e.line = spanned.line;
+                    e.col = spanned.col;
+                }
+                e
+            })? {
                 Signal::Return(v) => return Ok(v),
                 Signal::Break => return Err(RuntimeError::new("break outside of loop")),
                 Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
@@ -867,7 +877,7 @@ impl Interpreter {
             } => {
                 // Phase 4 will fully implement method tables + dispatch
                 // For now, register each method function in the environment
-                for method_stmt in methods {
+                for method_spanned in methods {
                     if let Stmt::FnDef {
                         name: method_name,
                         params,
@@ -875,7 +885,7 @@ impl Interpreter {
                         body,
                         is_async,
                         ..
-                    } = method_stmt
+                    } = &method_spanned.stmt
                     {
                         let has_receiver = params.first().map_or(false, |p| p.name == "it");
                         let qualified_name = if has_receiver {
@@ -1529,23 +1539,37 @@ impl Interpreter {
         }
     }
 
-    fn exec_block(&mut self, stmts: &[Stmt]) -> Result<Signal, RuntimeError> {
+    fn exec_block(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
         self.env.push_scope();
         let result = self.exec_stmts(stmts);
         self.env.pop_scope();
         result
     }
 
-    fn exec_stmts(&mut self, stmts: &[Stmt]) -> Result<Signal, RuntimeError> {
+    fn exec_stmts(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
         let mut result = Signal::None;
         let mut last_expr_value = Value::Null;
-        for stmt in stmts {
+        for s in stmts {
+            self.current_line = s.line;
+            let stmt = &s.stmt;
             if let Stmt::Expression(expr) = stmt {
-                last_expr_value = self.eval_expr(expr)?;
+                last_expr_value = self.eval_expr(expr).map_err(|mut e| {
+                    if e.line == 0 {
+                        e.line = s.line;
+                        e.col = s.col;
+                    }
+                    e
+                })?;
                 continue;
             }
             last_expr_value = Value::Null;
-            result = self.exec_stmt(stmt)?;
+            result = self.exec_stmt(stmt).map_err(|mut e| {
+                if e.line == 0 {
+                    e.line = s.line;
+                    e.col = s.col;
+                }
+                e
+            })?;
             match &result {
                 Signal::Return(_) | Signal::Break | Signal::Continue => break,
                 Signal::None | Signal::ImplicitReturn(_) => {}
@@ -2198,14 +2222,25 @@ impl Interpreter {
             Expr::Block(stmts) => {
                 self.env.push_scope();
                 let mut last = Value::Null;
-                for stmt in stmts {
+                let patch_err = |mut e: RuntimeError, s: &SpannedStmt| -> RuntimeError {
+                    if e.line == 0 {
+                        e.line = s.line;
+                        e.col = s.col;
+                    }
+                    e
+                };
+                for spanned in stmts {
+                    self.current_line = spanned.line;
+                    let stmt = &spanned.stmt;
                     match stmt {
                         Stmt::If {
                             condition,
                             then_body,
                             else_body,
                         } => {
-                            let cond = self.eval_expr(condition)?;
+                            let cond = self
+                                .eval_expr(condition)
+                                .map_err(|e| patch_err(e, spanned))?;
                             let branch = if cond.is_truthy() {
                                 then_body
                             } else if let Some(eb) = else_body {
@@ -2214,16 +2249,19 @@ impl Interpreter {
                                 &vec![]
                             };
                             for s in branch {
-                                if let Signal::Return(v) = self.exec_stmt(s)? {
+                                self.current_line = s.line;
+                                if let Signal::Return(v) =
+                                    self.exec_stmt(&s.stmt).map_err(|e| patch_err(e, s))?
+                                {
                                     self.env.pop_scope();
                                     return Ok(v);
                                 }
-                                if let Stmt::Expression(e) = s {
-                                    last = self.eval_expr(e)?;
+                                if let Stmt::Expression(e) = &s.stmt {
+                                    last = self.eval_expr(e).map_err(|e| patch_err(e, s))?;
                                 }
                             }
                         }
-                        _ => match self.exec_stmt(stmt)? {
+                        _ => match self.exec_stmt(stmt).map_err(|e| patch_err(e, spanned))? {
                             Signal::Return(v) => {
                                 self.env.pop_scope();
                                 return Ok(v);
@@ -2233,7 +2271,8 @@ impl Interpreter {
                             }
                             _ => {
                                 if let Stmt::Expression(expr) = stmt {
-                                    last = self.eval_expr(expr)?;
+                                    last =
+                                        self.eval_expr(expr).map_err(|e| patch_err(e, spanned))?;
                                 }
                             }
                         },
@@ -2756,7 +2795,7 @@ impl Interpreter {
     }
 
     /// Spawn a block as a concurrent task, returning a TaskHandle.
-    fn spawn_task(&mut self, body: &[Stmt]) -> Result<Value, RuntimeError> {
+    fn spawn_task(&mut self, body: &[SpannedStmt]) -> Result<Value, RuntimeError> {
         let body = body.to_vec();
         let result_slot: Arc<(std::sync::Mutex<Option<Value>>, std::sync::Condvar)> =
             Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
@@ -2973,6 +3012,7 @@ fn json_to_value(v: serde_json::Value) -> Value {
 pub struct RuntimeError {
     pub message: String,
     pub line: usize,
+    pub col: usize,
     propagated: Option<Value>,
 }
 
@@ -2981,6 +3021,7 @@ impl RuntimeError {
         Self {
             message: msg.to_string(),
             line: 0,
+            col: 0,
             propagated: None,
         }
     }
@@ -2993,6 +3034,7 @@ impl RuntimeError {
         Self {
             message,
             line: 0,
+            col: 0,
             propagated: Some(value),
         }
     }

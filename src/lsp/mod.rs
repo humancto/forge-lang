@@ -799,7 +799,7 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
             }
             // Recurse into body
             for inner in body {
-                collect_symbols_from_stmt(inner, line, symbols);
+                collect_symbols_from_stmt(&inner.stmt, inner.line.saturating_sub(1), symbols);
             }
         }
         Stmt::Let { name, .. } => {
@@ -860,7 +860,7 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
                 });
             }
             for s in body {
-                collect_symbols_from_stmt(s, line, symbols);
+                collect_symbols_from_stmt(&s.stmt, s.line.saturating_sub(1), symbols);
             }
         }
         Stmt::TryCatch {
@@ -869,7 +869,7 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
             catch_body,
         } => {
             for s in try_body {
-                collect_symbols_from_stmt(s, line, symbols);
+                collect_symbols_from_stmt(&s.stmt, s.line.saturating_sub(1), symbols);
             }
             symbols.push(DocumentSymbolInfo {
                 name: catch_var.clone(),
@@ -877,7 +877,7 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
                 line,
             });
             for s in catch_body {
-                collect_symbols_from_stmt(s, line, symbols);
+                collect_symbols_from_stmt(&s.stmt, s.line.saturating_sub(1), symbols);
             }
         }
         Stmt::If {
@@ -886,17 +886,17 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
             ..
         } => {
             for s in then_body {
-                collect_symbols_from_stmt(s, line, symbols);
+                collect_symbols_from_stmt(&s.stmt, s.line.saturating_sub(1), symbols);
             }
             if let Some(eb) = else_body {
                 for s in eb {
-                    collect_symbols_from_stmt(s, line, symbols);
+                    collect_symbols_from_stmt(&s.stmt, s.line.saturating_sub(1), symbols);
                 }
             }
         }
         Stmt::ImplBlock { methods, .. } => {
             for m in methods {
-                collect_symbols_from_stmt(m, line, symbols);
+                collect_symbols_from_stmt(&m.stmt, m.line.saturating_sub(1), symbols);
             }
         }
         Stmt::While { body, .. }
@@ -908,7 +908,7 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
         | Stmt::ScheduleBlock { body, .. }
         | Stmt::WatchBlock { body, .. } => {
             for s in body {
-                collect_symbols_from_stmt(s, line, symbols);
+                collect_symbols_from_stmt(&s.stmt, s.line.saturating_sub(1), symbols);
             }
         }
         _ => {}
@@ -1096,7 +1096,7 @@ fn hover_from_stmt(stmt: &Stmt, name: &str) -> Option<String> {
             }
             // Search inside function body
             for inner in body {
-                if let Some(hover) = hover_from_stmt(inner, name) {
+                if let Some(hover) = hover_from_stmt(&inner.stmt, name) {
                     return Some(hover);
                 }
             }
@@ -1182,7 +1182,7 @@ fn hover_from_stmt(stmt: &Stmt, name: &str) -> Option<String> {
         }
         Stmt::ImplBlock { methods, .. } => {
             for m in methods {
-                if let Some(h) = hover_from_stmt(m, name) {
+                if let Some(h) = hover_from_stmt(&m.stmt, name) {
                     return Some(h);
                 }
             }
@@ -1195,13 +1195,13 @@ fn hover_from_stmt(stmt: &Stmt, name: &str) -> Option<String> {
             ..
         } => {
             for s in then_body {
-                if let Some(h) = hover_from_stmt(s, name) {
+                if let Some(h) = hover_from_stmt(&s.stmt, name) {
                     return Some(h);
                 }
             }
             if let Some(eb) = else_body {
                 for s in eb {
-                    if let Some(h) = hover_from_stmt(s, name) {
+                    if let Some(h) = hover_from_stmt(&s.stmt, name) {
                         return Some(h);
                     }
                 }
@@ -1218,7 +1218,7 @@ fn hover_from_stmt(stmt: &Stmt, name: &str) -> Option<String> {
         | Stmt::ScheduleBlock { body, .. }
         | Stmt::WatchBlock { body, .. } => {
             for s in body {
-                if let Some(h) = hover_from_stmt(s, name) {
+                if let Some(h) = hover_from_stmt(&s.stmt, name) {
                     return Some(h);
                 }
             }
@@ -1230,12 +1230,12 @@ fn hover_from_stmt(stmt: &Stmt, name: &str) -> Option<String> {
             ..
         } => {
             for s in try_body {
-                if let Some(h) = hover_from_stmt(s, name) {
+                if let Some(h) = hover_from_stmt(&s.stmt, name) {
                     return Some(h);
                 }
             }
             for s in catch_body {
-                if let Some(h) = hover_from_stmt(s, name) {
+                if let Some(h) = hover_from_stmt(&s.stmt, name) {
                     return Some(h);
                 }
             }

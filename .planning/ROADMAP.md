@@ -68,11 +68,14 @@ structs (with fields), types (with variants), interfaces (with methods). Recursi
 walks into function bodies and impl blocks. Context-aware module completions filter
 to the specific module typed before the dot.
 
-### 1.5 Error messages with source spans
+### ~~1.5 Error messages with source spans~~ ✅ DONE
 
-- **Where:** `src/errors.rs`, `src/interpreter/mod.rs`, `src/parser/parser.rs`
-- **What:** Rust-style error messages with source snippets, underline carets, and context. Currently errors are just strings. This is a cross-cutting change: parser errors, type errors, and runtime errors all need span info threaded through.
-- **Note:** This is the biggest item in Phase 1. Consider doing it early since 1.1-1.4 depend on good span coverage.
+Changed all `Vec<Stmt>` body fields in the AST to `Vec<SpannedStmt>` with line+col.
+Parser now wraps every inner statement with position from the token stream.
+`exec_stmts` patches `RuntimeError.line` from `SpannedStmt` on bubble-up.
+Runtime errors now show exact source line with ariadne snippets and carets.
+`RuntimeError` gained `col` field (ready for expression-level spans in future).
+8 files changed across parser, interpreter, VM compiler, type checker, LSP.
 
 ### ~~1.6 `forge fmt` — paren continuation~~ ✅ DONE (PR #9)
 
@@ -192,4 +195,4 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 2 — items 2.1-2.3 complete. Remaining: 2.4 (publish — deferred until registry exists). Phase 1 item 1.5 (source spans) also deferred. Ready for Phase 3.**
+Current status: **Phase 1 complete (all items including 1.5). Phase 2 items 2.1-2.3 complete. Remaining: 2.4 (publish — deferred until registry exists). Ready for Phase 3.**

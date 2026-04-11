@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`forge run` with manifest entry** — `forge run` without a file argument now reads the `entry` field from `forge.toml`, enabling project-level `forge run` workflows
 - **Relative import resolution** — `import "helper"` now resolves relative to the importing file's directory first, then falls back to CWD and `forge_modules/`. Enables packages with internal imports.
 - **Import struct/type/impl definitions** — wildcard imports (`import "lib"`) now copy struct definitions, type definitions, and impl block methods in addition to functions and variables
+- **Source spans in AST** — all inner statement bodies (`if`, `for`, `while`, `fn`, `match`, `try/catch`, etc.) now carry per-statement line and column info via `SpannedStmt`. Runtime errors report the exact source line, even inside deeply nested blocks.
+- **Line-accurate runtime errors** — errors inside nested blocks now show the correct inner line with source snippets via ariadne, instead of pointing at the top-level statement
 
 ---
 

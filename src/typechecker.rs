@@ -219,10 +219,6 @@ impl TypeChecker {
         for spanned in &program.statements {
             self.collect_definitions(&spanned.stmt);
         }
-        // Note: current_line only updates for top-level SpannedStmt. Warnings inside
-        // function bodies inherit the parent function's line because body: Vec<Stmt>
-        // has no span info. This is an AST limitation — fixing it requires making
-        // inner statements Spanned (tracked as roadmap item 1.5).
         for spanned in &program.statements {
             self.current_line = spanned.line;
             self.check_stmt(&spanned.stmt);
@@ -278,13 +274,13 @@ impl TypeChecker {
             Stmt::ImplBlock {
                 type_name, methods, ..
             } => {
-                for method in methods {
+                for spanned_method in methods {
                     if let Stmt::FnDef {
                         name: method_name,
                         params,
                         return_type,
                         ..
-                    } = method
+                    } = &spanned_method.stmt
                     {
                         let qualified = format!("{}::{}", type_name, method_name);
                         let param_info: Vec<(String, Option<InferredType>)> = params
@@ -395,12 +391,13 @@ impl TypeChecker {
                 }
 
                 for s in body {
-                    self.check_stmt(s);
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
                 }
 
                 // Collect definitions for nested functions
                 for s in body {
-                    self.collect_definitions(s);
+                    self.collect_definitions(&s.stmt);
                 }
 
                 self.current_fn_return = prev_return;
@@ -427,29 +424,34 @@ impl TypeChecker {
                     // Not an error in a dynamic language, just informational
                 }
                 for s in then_body {
-                    self.check_stmt(s);
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
                 }
                 if let Some(else_b) = else_body {
                     for s in else_b {
-                        self.check_stmt(s);
+                        self.current_line = s.line;
+                        self.check_stmt(&s.stmt);
                     }
                 }
             }
             Stmt::For { iterable, body, .. } => {
                 self.infer_expr(iterable);
                 for s in body {
-                    self.check_stmt(s);
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
                 }
             }
             Stmt::While { condition, body } => {
                 self.infer_expr(condition);
                 for s in body {
-                    self.check_stmt(s);
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
                 }
             }
             Stmt::Loop { body } | Stmt::Spawn { body } => {
                 for s in body {
-                    self.check_stmt(s);
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
                 }
             }
             Stmt::Return(None) => {}
@@ -460,7 +462,8 @@ impl TypeChecker {
                 self.infer_expr(subject);
                 for arm in arms {
                     for s in &arm.body {
-                        self.check_stmt(s);
+                        self.current_line = s.line;
+                        self.check_stmt(&s.stmt);
                     }
                 }
             }
@@ -672,7 +675,8 @@ impl TypeChecker {
                     }
                 }
                 for s in body {
-                    self.check_stmt(s);
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
                 }
                 InferredType::Function(vec![], Box::new(InferredType::Unknown))
             }
@@ -699,7 +703,8 @@ impl TypeChecker {
 
             Expr::Block(stmts) => {
                 for s in stmts {
-                    self.check_stmt(s);
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
                 }
                 InferredType::Unknown
             }
@@ -709,8 +714,9 @@ impl TypeChecker {
             }
 
             Expr::Spawn(body) => {
-                for stmt in body {
-                    self.check_stmt(stmt);
+                for s in body {
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
                 }
                 InferredType::Unknown // TaskHandle type
             }
