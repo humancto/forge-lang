@@ -46,24 +46,27 @@ Already changed to `let _ = obj;`. No further work needed.
 
 **Goal:** Make Forge pleasant to write real programs in. The LSP is the highest-leverage item because every editor user benefits without changing the language.
 
-### 1.1 LSP: go-to-definition
+### ~~1.1 LSP: go-to-definition~~ ✅ DONE (PR #7)
 
-- **Where:** `src/lsp/mod.rs`
-- **What:** Resolve symbol under cursor to its definition location. Requires building a symbol table from the AST (variable bindings, function definitions, imports).
-- **Depends on:** A `SymbolTable` struct that maps `(name, scope)` → `(file, line, col)`.
+Deep go-to-definition finds top-level symbols, function params, local variables, for-loop
+vars, catch vars, and impl block methods via `collect_all_symbols`.
 
-### 1.2 LSP: find-references
+### ~~1.2 LSP: find-references~~ ✅ DONE (PR #7)
 
-- **What:** Inverse of go-to-definition. Given a definition, find all uses. Same symbol table, walked in reverse.
+`textDocument/references` with word-boundary matching. Single-file for now.
 
-### 1.3 LSP: real diagnostics
+### ~~1.3 LSP: real diagnostics~~ ✅ DONE (PR #8)
 
-- **What:** Run the parser + type checker on every `textDocument/didChange` and push diagnostics. Currently the LSP only does basic syntax errors.
-- **Depends on:** Parser producing span-annotated AST nodes (partially done — check `Span` coverage).
+Type checker wired into `get_diagnostics` — runs on every didOpen/didChange. Surfaces
+type mismatches, arity errors, return type mismatches as warnings with line numbers.
+Source tagged as `forge-typecheck`.
 
-### 1.4 LSP: hover + signature help
+### ~~1.4 LSP: hover + signature help~~ ✅ DONE (PR #7)
 
-- **What:** Show type/doc info on hover. Show function parameter hints while typing. Requires the symbol table from 1.1 + type info from the type checker.
+Hover shows full signatures for user-defined functions, variables (with mutability/type),
+structs (with fields), types (with variants), interfaces (with methods). Recursively
+walks into function bodies and impl blocks. Context-aware module completions filter
+to the specific module typed before the dot.
 
 ### 1.5 Error messages with source spans
 
@@ -191,4 +194,4 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 0 — items 0.1-0.4 complete, 0.5 (v0.5.0 release cut) remaining**
+Current status: **Phase 1 — items 1.1-1.4 complete. Next: 1.5 (spans), then 1.6-1.8 (fmt, doc, REPL)**
