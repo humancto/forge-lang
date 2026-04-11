@@ -219,6 +219,10 @@ impl TypeChecker {
         for spanned in &program.statements {
             self.collect_definitions(&spanned.stmt);
         }
+        // Note: current_line only updates for top-level SpannedStmt. Warnings inside
+        // function bodies inherit the parent function's line because body: Vec<Stmt>
+        // has no span info. This is an AST limitation — fixing it requires making
+        // inner statements Spanned (tracked as roadmap item 1.5).
         for spanned in &program.statements {
             self.current_line = spanned.line;
             self.check_stmt(&spanned.stmt);

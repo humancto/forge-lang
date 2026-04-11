@@ -241,17 +241,19 @@ fn get_diagnostics(source: &str) -> Vec<serde_json::Value> {
     let mut parser = crate::parser::Parser::new(tokens);
     match parser.parse_program() {
         Ok(program) => {
+            let source_lines: Vec<&str> = source.lines().collect();
             let mut checker = crate::typechecker::TypeChecker::with_strict(false);
             let warnings = checker.check(&program);
             warnings
                 .into_iter()
                 .map(|w| {
                     let line = w.line.saturating_sub(1);
+                    let end_char = source_lines.get(line).map(|l| l.len()).unwrap_or(0);
                     let severity = if w.is_error { 1 } else { 2 };
                     serde_json::json!({
                         "range": {
                             "start": {"line": line, "character": 0},
-                            "end": {"line": line, "character": 0}
+                            "end": {"line": line, "character": end_char}
                         },
                         "severity": severity,
                         "source": "forge-typecheck",
