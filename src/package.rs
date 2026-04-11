@@ -353,9 +353,29 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Resolve an import path, checking forge_modules/ and .forge/packages/
+/// Resolve an import path, checking relative to the importing file first,
+/// then forge_modules/ and .forge/packages/.
+///
+/// `base_dir` is the directory of the file containing the import statement.
+/// When `None`, only CWD-relative and package paths are checked.
 pub fn resolve_import(path: &str) -> Option<PathBuf> {
-    // Direct file path
+    resolve_import_from(path, None)
+}
+
+pub fn resolve_import_from(path: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
+    // If a base directory is provided, check relative to it first
+    if let Some(base) = base_dir {
+        let relative = base.join(path);
+        if relative.exists() {
+            return Some(relative);
+        }
+        let relative_fg = base.join(format!("{}.fg", path));
+        if relative_fg.exists() {
+            return Some(relative_fg);
+        }
+    }
+
+    // Direct file path (CWD-relative)
     let direct = Path::new(path);
     if direct.exists() {
         return Some(direct.to_path_buf());
@@ -486,6 +506,37 @@ toolkit = "1.2.3"
         let package = lockfile.find("toolkit").unwrap();
         assert_eq!(package.version, "1.2.3");
         assert!(package.source.starts_with("registry+"));
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_import_from_checks_base_dir_first() {
+        let workspace = temp_path("resolve");
+        let subdir = workspace.join("lib");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("helper.fg"), "let x = 1").unwrap();
+
+        // Without base_dir, won't find it (not in CWD or forge_modules)
+        assert!(resolve_import_from("helper", None).is_none());
+
+        // With base_dir pointing to the lib/ directory, finds it
+        let result = resolve_import_from("helper", Some(&subdir));
+        assert!(result.is_some());
+        assert!(result.unwrap().ends_with("helper.fg"));
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_import_from_falls_back_to_packages() {
+        let workspace = temp_path("fallback");
+        let base = workspace.join("src");
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Even with a base_dir, should still fall back to CWD-relative checks
+        let result = resolve_import_from("nonexistent_pkg", Some(&base));
+        assert!(result.is_none());
 
         std::fs::remove_dir_all(&workspace).unwrap();
     }

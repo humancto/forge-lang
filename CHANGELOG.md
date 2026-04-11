@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`forge doc` variable extraction** — `let`/`let mut` declarations now appear in doc output (previously silently skipped)
 - **`forge doc` comment extraction** — `//` comments preceding functions, structs, and variables are now captured and displayed
 - **`forge fmt` paren continuation** — multi-line function calls with open parens now auto-indent correctly (previously only braces and brackets were tracked)
+- **`forge run` with manifest entry** — `forge run` without a file argument now reads the `entry` field from `forge.toml`, enabling project-level `forge run` workflows
+- **Relative import resolution** — `import "helper"` now resolves relative to the importing file's directory first, then falls back to CWD and `forge_modules/`. Enables packages with internal imports.
+- **Import struct/type/impl definitions** — wildcard imports (`import "lib"`) now copy struct definitions, type definitions, and impl block methods in addition to functions and variables
 
 ---
 

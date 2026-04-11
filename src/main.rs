@@ -94,8 +94,8 @@ struct Cli {
 enum Command {
     /// Run a Forge source file (.fg) or compiled bytecode (.fgc)
     Run {
-        /// Path to a .fg or .fgc file
-        file: PathBuf,
+        /// Path to a .fg or .fgc file (reads entry from forge.toml if omitted)
+        file: Option<PathBuf>,
     },
     /// Start the interactive REPL
     Repl,
@@ -177,6 +177,31 @@ async fn main() {
 
     match cli.command {
         Some(Command::Run { file }) => {
+            let file = match file {
+                Some(f) => f,
+                None => {
+                    if let Some(m) = manifest::load_manifest() {
+                        if m.project.entry.is_empty() {
+                            eprintln!(
+                                "{}",
+                                errors::format_simple_error(
+                                    "forge.toml found but no 'entry' field set. Add entry = \"src/main.fg\" to [project] or specify a file: forge run <file>"
+                                )
+                            );
+                            process::exit(1);
+                        }
+                        PathBuf::from(&m.project.entry)
+                    } else {
+                        eprintln!(
+                            "{}",
+                            errors::format_simple_error(
+                                "no file specified and no forge.toml found. Usage: forge run <file>"
+                            )
+                        );
+                        process::exit(1);
+                    }
+                }
+            };
             if file.extension().map(|e| e == "fgc").unwrap_or(false) {
                 run_bytecode_file(&file, profile);
                 return;
@@ -615,6 +640,10 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     } else {
         let mut interpreter = Interpreter::new();
         interpreter.source = Some(source.to_string());
+        let path = std::path::Path::new(filename);
+        if path.exists() {
+            interpreter.source_file = Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        }
         interpreter.set_defer_host_runtime(true);
         match interpreter.run(&program) {
             Ok(_) => {}

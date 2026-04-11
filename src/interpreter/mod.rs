@@ -364,6 +364,8 @@ pub struct Interpreter {
     pub current_line: usize,
     /// Source code (for error display)
     pub source: Option<String>,
+    /// Path of the currently executing source file (for relative imports)
+    pub source_file: Option<std::path::PathBuf>,
 }
 
 impl Interpreter {
@@ -379,6 +381,7 @@ impl Interpreter {
             struct_defaults: HashMap::new(),
             current_line: 0,
             source: None,
+            source_file: None,
         };
         interp.register_builtins();
         interp
@@ -397,6 +400,7 @@ impl Interpreter {
         interp.struct_defaults = self.struct_defaults.clone();
         interp.current_line = self.current_line;
         interp.source = self.source.clone();
+        interp.source_file = self.source_file.clone();
         interp
     }
 
@@ -1172,7 +1176,12 @@ impl Interpreter {
                     )));
                 }
 
-                let file_path = match crate::package::resolve_import(path) {
+                let base_dir = self
+                    .source_file
+                    .as_ref()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                let file_path = match crate::package::resolve_import_from(path, base_dir.as_deref())
+                {
                     Some(p) => p,
                     None => {
                         return Err(RuntimeError::new(&format!(
@@ -1193,6 +1202,7 @@ impl Interpreter {
                 })?;
 
                 let mut import_interp = Interpreter::new();
+                import_interp.source_file = Some(file_path.clone());
                 import_interp.run(&program)?;
 
                 if let Some(name_list) = names {
@@ -1203,12 +1213,57 @@ impl Interpreter {
                     }
                 } else {
                     // Import all top-level definitions
-                    // We check what the import interpreter defined beyond builtins
                     for spanned in &program.statements {
                         match &spanned.stmt {
                             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
                                 if let Some(val) = import_interp.env.get(name) {
                                     self.env.define(name.clone(), val);
+                                }
+                            }
+                            Stmt::StructDef { name, .. } => {
+                                if let Some(val) = import_interp.env.get(name) {
+                                    self.env.define(name.clone(), val);
+                                }
+                                // Copy struct defaults and embedded fields
+                                if let Some(defaults) = import_interp.struct_defaults.get(name) {
+                                    self.struct_defaults.insert(name.clone(), defaults.clone());
+                                }
+                                if let Some(embeds) = import_interp.embedded_fields.get(name) {
+                                    self.embedded_fields.insert(name.clone(), embeds.clone());
+                                }
+                            }
+                            Stmt::TypeDef { name, variants } => {
+                                // Import each variant individually
+                                for variant in variants {
+                                    if let Some(val) = import_interp.env.get(&variant.name) {
+                                        self.env.define(variant.name.clone(), val);
+                                    }
+                                }
+                                // Import type metadata
+                                let meta_key = format!("__type_{}__", name);
+                                if let Some(val) = import_interp.env.get(&meta_key) {
+                                    self.env.define(meta_key, val);
+                                }
+                            }
+                            Stmt::ImplBlock { type_name, .. } => {
+                                // Copy method tables and static methods
+                                if let Some(methods) = import_interp.method_tables.get(type_name) {
+                                    let entry = self
+                                        .method_tables
+                                        .entry(type_name.clone())
+                                        .or_insert_with(IndexMap::new);
+                                    for (k, v) in methods {
+                                        entry.insert(k.clone(), v.clone());
+                                    }
+                                }
+                                if let Some(statics) = import_interp.static_methods.get(type_name) {
+                                    let entry = self
+                                        .static_methods
+                                        .entry(type_name.clone())
+                                        .or_insert_with(IndexMap::new);
+                                    for (k, v) in statics {
+                                        entry.insert(k.clone(), v.clone());
+                                    }
                                 }
                             }
                             _ => {}

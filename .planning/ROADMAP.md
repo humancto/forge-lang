@@ -106,31 +106,24 @@ Implemented `extract_preceding_comments` using `SpannedStmt.line` to capture
 
 **Goal:** Enable multi-file, multi-author Forge projects. This is what turns Forge from a scripting tool into a language people build real things with.
 
-### 2.1 `forge.toml` project manifest
+### ~~2.1 `forge.toml` project manifest~~ ✅ DONE (pre-existing)
 
-- **What:** Define project name, version, entry point, dependencies. Minimal spec:
+Already implemented in `src/manifest.rs`: `Manifest`, `ProjectConfig`, `DependencySpec`
+(version/git/path/branch), `TestConfig`, `Lockfile`, `LockedPackage`. 10 tests.
+`forge run` now reads `entry` from `forge.toml` when no file argument is given.
 
-  ```toml
-  [package]
-  name = "my-app"
-  version = "0.1.0"
-  entry = "src/main.fg"
+### ~~2.2 Module resolution across packages~~ ✅ DONE
 
-  [dependencies]
-  http-utils = "0.2"
-  ```
+`resolve_import_from()` resolves relative to the importing file's directory first,
+then falls back to CWD-relative, `forge_modules/`, and `.forge/packages/`. The interpreter
+tracks `source_file` and passes the base directory to the resolver. Wildcard imports
+now copy struct defs, type defs, and impl block methods alongside functions and variables.
 
-- **Where:** New `src/manifest.rs` or `src/package.rs` (already exists for scaffolding — extend it).
+### ~~2.3 `forge install <pkg>`~~ ✅ DONE (pre-existing)
 
-### 2.2 Module resolution across packages
-
-- **Where:** `src/interpreter/mod.rs` (import resolution), `src/parser/parser.rs` (import statements)
-- **What:** `import "http-utils"` resolves to `~/.forge/packages/http-utils/src/mod.fg` (or similar). Define the resolution algorithm: local → project deps → global.
-
-### 2.3 `forge install <pkg>`
-
-- **What:** Fetch a package from a git repo (initially) or a registry (later). Write it to a local `forge_packages/` directory. Update a lock file.
-- **Note:** Start with git-based packages. A central registry is a Phase 3+ concern.
+Already implemented in `src/package.rs`: `install()` handles git URLs, local paths,
+and registry sources. `install_from_manifest()` reads `forge.toml` dependencies,
+installs to `forge_modules/`, manages `forge.lock`. 4 tests.
 
 ### 2.4 `forge publish`
 
@@ -199,4 +192,4 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 1 — items 1.1-1.4, 1.6-1.8 complete. Remaining: 1.5 (source spans — deferred, biggest item). Ready for Phase 2.**
+Current status: **Phase 2 — items 2.1-2.3 complete. Remaining: 2.4 (publish — deferred until registry exists). Phase 1 item 1.5 (source spans) also deferred. Ready for Phase 3.**
