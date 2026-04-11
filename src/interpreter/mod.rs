@@ -1546,11 +1546,21 @@ impl Interpreter {
             self.current_line = s.line;
             let stmt = &s.stmt;
             if let Stmt::Expression(expr) = stmt {
-                last_expr_value = self.eval_expr(expr)?;
+                last_expr_value = self.eval_expr(expr).map_err(|mut e| {
+                    if e.line == 0 {
+                        e.line = s.line;
+                    }
+                    e
+                })?;
                 continue;
             }
             last_expr_value = Value::Null;
-            result = self.exec_stmt(stmt)?;
+            result = self.exec_stmt(stmt).map_err(|mut e| {
+                if e.line == 0 {
+                    e.line = s.line;
+                }
+                e
+            })?;
             match &result {
                 Signal::Return(_) | Signal::Break | Signal::Continue => break,
                 Signal::None | Signal::ImplicitReturn(_) => {}

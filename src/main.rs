@@ -654,7 +654,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
                         errors::format_error(
                             source,
                             e.line,
-                            1,
+                            if e.col > 0 { e.col } else { 1 },
                             &format!("[{}] {}", filename, e.message)
                         )
                     );
