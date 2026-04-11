@@ -617,6 +617,7 @@ impl Interpreter {
                 Err(mut e) => {
                     if e.line == 0 {
                         e.line = spanned.line;
+                        e.col = spanned.col;
                     }
                     return Err(e);
                 }
@@ -630,7 +631,13 @@ impl Interpreter {
         let mut last = Value::Null;
         for spanned in &program.statements {
             self.current_line = spanned.line;
-            match self.exec_stmt(&spanned.stmt)? {
+            match self.exec_stmt(&spanned.stmt).map_err(|mut e| {
+                if e.line == 0 {
+                    e.line = spanned.line;
+                    e.col = spanned.col;
+                }
+                e
+            })? {
                 Signal::Return(v) => return Ok(v),
                 Signal::Break => return Err(RuntimeError::new("break outside of loop")),
                 Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
@@ -1549,6 +1556,7 @@ impl Interpreter {
                 last_expr_value = self.eval_expr(expr).map_err(|mut e| {
                     if e.line == 0 {
                         e.line = s.line;
+                        e.col = s.col;
                     }
                     e
                 })?;
@@ -1558,6 +1566,7 @@ impl Interpreter {
             result = self.exec_stmt(stmt).map_err(|mut e| {
                 if e.line == 0 {
                     e.line = s.line;
+                    e.col = s.col;
                 }
                 e
             })?;
@@ -2213,6 +2222,13 @@ impl Interpreter {
             Expr::Block(stmts) => {
                 self.env.push_scope();
                 let mut last = Value::Null;
+                let patch_err = |mut e: RuntimeError, s: &SpannedStmt| -> RuntimeError {
+                    if e.line == 0 {
+                        e.line = s.line;
+                        e.col = s.col;
+                    }
+                    e
+                };
                 for spanned in stmts {
                     self.current_line = spanned.line;
                     let stmt = &spanned.stmt;
@@ -2222,7 +2238,9 @@ impl Interpreter {
                             then_body,
                             else_body,
                         } => {
-                            let cond = self.eval_expr(condition)?;
+                            let cond = self
+                                .eval_expr(condition)
+                                .map_err(|e| patch_err(e, spanned))?;
                             let branch = if cond.is_truthy() {
                                 then_body
                             } else if let Some(eb) = else_body {
@@ -2232,16 +2250,18 @@ impl Interpreter {
                             };
                             for s in branch {
                                 self.current_line = s.line;
-                                if let Signal::Return(v) = self.exec_stmt(&s.stmt)? {
+                                if let Signal::Return(v) =
+                                    self.exec_stmt(&s.stmt).map_err(|e| patch_err(e, s))?
+                                {
                                     self.env.pop_scope();
                                     return Ok(v);
                                 }
                                 if let Stmt::Expression(e) = &s.stmt {
-                                    last = self.eval_expr(e)?;
+                                    last = self.eval_expr(e).map_err(|e| patch_err(e, s))?;
                                 }
                             }
                         }
-                        _ => match self.exec_stmt(stmt)? {
+                        _ => match self.exec_stmt(stmt).map_err(|e| patch_err(e, spanned))? {
                             Signal::Return(v) => {
                                 self.env.pop_scope();
                                 return Ok(v);
@@ -2251,7 +2271,8 @@ impl Interpreter {
                             }
                             _ => {
                                 if let Stmt::Expression(expr) = stmt {
-                                    last = self.eval_expr(expr)?;
+                                    last =
+                                        self.eval_expr(expr).map_err(|e| patch_err(e, spanned))?;
                                 }
                             }
                         },

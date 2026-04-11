@@ -15,16 +15,21 @@ impl Parser {
         Self { tokens, pos: 0 }
     }
 
+    /// Return (line, col) of the current token position.
+    fn current_pos(&self) -> (usize, usize) {
+        if self.pos < self.tokens.len() {
+            (self.tokens[self.pos].line, self.tokens[self.pos].col)
+        } else {
+            (0, 0)
+        }
+    }
+
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
         let mut statements = Vec::new();
         self.skip_newlines();
 
         while !self.is_at_end() {
-            let (line, col) = if self.pos < self.tokens.len() {
-                (self.tokens[self.pos].line, self.tokens[self.pos].col)
-            } else {
-                (0, 0)
-            };
+            let (line, col) = self.current_pos();
             let stmt = self.parse_statement()?;
             statements.push(SpannedStmt::new(stmt, line, col));
             self.skip_newlines();
@@ -277,11 +282,7 @@ impl Parser {
 
         let mut methods = Vec::new();
         while !self.check(&Token::RBrace) {
-            let (line, col) = if self.pos < self.tokens.len() {
-                (self.tokens[self.pos].line, self.tokens[self.pos].col)
-            } else {
-                (0, 0)
-            };
+            let (line, col) = self.current_pos();
             let stmt = self.parse_fn_def(Vec::new())?;
             methods.push(SpannedStmt::new(stmt, line, col));
             self.skip_newlines();
@@ -1826,11 +1827,7 @@ impl Parser {
         // Otherwise it's a block
         let mut stmts = Vec::new();
         while !self.check(&Token::RBrace) {
-            let (line, col) = if self.pos < self.tokens.len() {
-                (self.tokens[self.pos].line, self.tokens[self.pos].col)
-            } else {
-                (0, 0)
-            };
+            let (line, col) = self.current_pos();
             let stmt = self.parse_statement()?;
             stmts.push(SpannedStmt::new(stmt, line, col));
             self.skip_newlines();
@@ -1874,11 +1871,7 @@ impl Parser {
 
         let mut stmts = Vec::new();
         while !self.check(&Token::RBrace) {
-            let (line, col) = if self.pos < self.tokens.len() {
-                (self.tokens[self.pos].line, self.tokens[self.pos].col)
-            } else {
-                (0, 0)
-            };
+            let (line, col) = self.current_pos();
             let stmt = self.parse_statement()?;
             stmts.push(SpannedStmt::new(stmt, line, col));
             self.skip_newlines();

@@ -642,7 +642,8 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
         interpreter.source = Some(source.to_string());
         let path = std::path::Path::new(filename);
         if path.exists() {
-            interpreter.source_file = Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+            interpreter.source_file =
+                Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
         }
         interpreter.set_defer_host_runtime(true);
         match interpreter.run(&program) {
