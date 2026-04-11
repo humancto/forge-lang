@@ -364,6 +364,8 @@ pub struct Interpreter {
     pub current_line: usize,
     /// Source code (for error display)
     pub source: Option<String>,
+    /// Path of the currently executing source file (for relative imports)
+    pub source_file: Option<std::path::PathBuf>,
 }
 
 impl Interpreter {
@@ -379,6 +381,7 @@ impl Interpreter {
             struct_defaults: HashMap::new(),
             current_line: 0,
             source: None,
+            source_file: None,
         };
         interp.register_builtins();
         interp
@@ -397,6 +400,7 @@ impl Interpreter {
         interp.struct_defaults = self.struct_defaults.clone();
         interp.current_line = self.current_line;
         interp.source = self.source.clone();
+        interp.source_file = self.source_file.clone();
         interp
     }
 
@@ -1172,7 +1176,12 @@ impl Interpreter {
                     )));
                 }
 
-                let file_path = match crate::package::resolve_import(path) {
+                let base_dir = self
+                    .source_file
+                    .as_ref()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                let file_path = match crate::package::resolve_import_from(path, base_dir.as_deref())
+                {
                     Some(p) => p,
                     None => {
                         return Err(RuntimeError::new(&format!(
@@ -1193,6 +1202,7 @@ impl Interpreter {
                 })?;
 
                 let mut import_interp = Interpreter::new();
+                import_interp.source_file = Some(file_path.clone());
                 import_interp.run(&program)?;
 
                 if let Some(name_list) = names {
@@ -1203,12 +1213,27 @@ impl Interpreter {
                     }
                 } else {
                     // Import all top-level definitions
-                    // We check what the import interpreter defined beyond builtins
                     for spanned in &program.statements {
                         match &spanned.stmt {
-                            Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
+                            Stmt::FnDef { name, .. }
+                            | Stmt::Let { name, .. }
+                            | Stmt::StructDef { name, .. }
+                            | Stmt::TypeDef { name, .. } => {
                                 if let Some(val) = import_interp.env.get(name) {
                                     self.env.define(name.clone(), val);
+                                }
+                            }
+                            Stmt::ImplBlock {
+                                type_name, methods, ..
+                            } => {
+                                // Import methods defined in impl blocks
+                                for method in methods {
+                                    if let Stmt::FnDef { name, .. } = method {
+                                        let qualified = format!("{}::{}", type_name, name);
+                                        if let Some(val) = import_interp.env.get(&qualified) {
+                                            self.env.define(qualified, val);
+                                        }
+                                    }
                                 }
                             }
                             _ => {}
