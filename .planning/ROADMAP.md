@@ -74,19 +74,24 @@ to the specific module typed before the dot.
 - **What:** Rust-style error messages with source snippets, underline carets, and context. Currently errors are just strings. This is a cross-cutting change: parser errors, type errors, and runtime errors all need span info threaded through.
 - **Note:** This is the biggest item in Phase 1. Consider doing it early since 1.1-1.4 depend on good span coverage.
 
-### 1.6 `forge fmt` — full syntax coverage
+### ~~1.6 `forge fmt` — paren continuation~~ ✅ DONE (PR #9)
 
-- **Where:** `src/formatter.rs` (or wherever the formatter lives)
-- **What:** Currently handles basic formatting. Extend to cover all syntax forms including natural-language keywords, decorators, destructuring, async, etc.
+Added parenthesis depth tracking alongside existing brace/bracket tracking.
+Multi-line function calls now auto-indent correctly.
 
-### 1.7 `forge doc` — auto-generated module docs
+### ~~1.7 `forge doc` — variable extraction + comments~~ ✅ DONE (PR #9)
 
-- **What:** New CLI command that introspects stdlib modules and prints/generates markdown documentation for each function with its signature and a one-line description.
-- **Note:** Lower priority than LSP. Nice-to-have for the website.
+Fixed `let`/`let mut` declarations being silently skipped in doc output.
+Implemented `extract_preceding_comments` using `SpannedStmt.line` to capture
+`//` comments above declarations. Removed unused import.
 
-### 1.8 REPL improvements
+### ~~1.8 REPL improvements~~ ✅ DONE (PR #9)
 
-- **What:** Tab completion for builtins/module names, syntax highlighting, multi-line editing improvements. Consider integrating `rustyline` features if not already using them.
+- Syntax highlighting: keywords (magenta), builtins (blue), modules (green),
+  strings (yellow), numbers (cyan), comments (dim)
+- Live tab completion from interpreter environment (user-defined vars/fns)
+- `env` command shows all defined variables instead of just `_last`
+- Added `Environment::all_names()` for tab completion support
 
 ### Order of attack
 
@@ -194,4 +199,4 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 1 — items 1.1-1.4 complete. Next: 1.5 (spans), then 1.6-1.8 (fmt, doc, REPL)**
+Current status: **Phase 1 — items 1.1-1.4, 1.6-1.8 complete. Remaining: 1.5 (source spans — deferred, biggest item). Ready for Phase 2.**

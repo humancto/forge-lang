@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **REPL `env` command** — now shows all defined variables and their values instead of just `_last`
 - **`forge doc` variable extraction** — `let`/`let mut` declarations now appear in doc output (previously silently skipped)
 - **`forge doc` comment extraction** — `//` comments preceding functions, structs, and variables are now captured and displayed
+- **`forge fmt` paren continuation** — multi-line function calls with open parens now auto-indent correctly (previously only braces and brackets were tracked)
 
 ---
 

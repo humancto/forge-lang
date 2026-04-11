@@ -80,7 +80,7 @@ fn count_leading_closes(line: &str) -> i32 {
     let mut count = 0i32;
     for c in line.chars() {
         match c {
-            '}' | ']' => count += 1,
+            '}' | ']' | ')' => count += 1,
             ' ' | '\t' => continue,
             _ => break,
         }
@@ -120,10 +120,10 @@ fn count_braces(line: &str) -> (i32, i32) {
             continue;
         }
 
-        // Count braces and brackets outside strings
-        if c == '{' || c == '[' {
+        // Count braces, brackets, and parens outside strings
+        if c == '{' || c == '[' || c == '(' {
             opens += 1;
-        } else if c == '}' || c == ']' {
+        } else if c == '}' || c == ']' || c == ')' {
             closes += 1;
         }
     }
@@ -271,5 +271,22 @@ mod tests {
         let input = "let a = [\n1,\n2,\n3\n]\n";
         let result = format_source(input);
         assert_eq!(result, "let a = [\n    1,\n    2,\n    3\n]\n");
+    }
+
+    #[test]
+    fn handles_paren_continuation() {
+        let input = "let result = some_function(\narg1,\narg2,\narg3\n)\n";
+        let result = format_source(input);
+        assert_eq!(
+            result,
+            "let result = some_function(\n    arg1,\n    arg2,\n    arg3\n)\n"
+        );
+    }
+
+    #[test]
+    fn count_braces_includes_parens() {
+        assert_eq!(count_braces("fn call("), (1, 0));
+        assert_eq!(count_braces(")"), (0, 1));
+        assert_eq!(count_braces("fn call(arg) {"), (2, 1));
     }
 }
