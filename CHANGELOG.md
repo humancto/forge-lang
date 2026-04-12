@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-12
+
 ### Added
 
 - **`forge test --coverage`** — line coverage reporting for Forge test files. Tracks executed lines during test runs and displays per-file and overall coverage percentages with color-coded output (green ≥80%, yellow ≥50%, red <50%).
-
 - **`forge publish`** — package and publish Forge projects to the local filesystem registry (`~/.forge/registry/<name>/<version>/`). Supports `--dry-run` to preview without publishing and `--registry` to specify a custom registry path. Validates manifest fields, computes SHA-256 checksums, and excludes non-source files (forge_modules, .git, tests, etc.).
 - **VM as default engine** — the bytecode VM is now the default execution engine for `forge run`. The interpreter is available via `--interp` flag. Programs using decorator-driven HTTP servers (`@server`, `@get`, etc.) automatically fall back to the interpreter.
 - **VM `must` expression** — `must Ok(42)` unwraps to `42`, `must Err("x")` crashes with clear error, `must null` crashes. Full parity with interpreter semantics.
