@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 /// Run the DAP server over stdin/stdout.
 pub fn run_dap() {
-    let stdin = io::stdin();
+    let mut reader = io::BufReader::new(io::stdin());
     let stdout = Arc::new(Mutex::new(io::stdout()));
 
     eprintln!("Forge DAP server started");
@@ -17,11 +17,13 @@ pub fn run_dap() {
     let mut pending_breakpoints: HashSet<usize> = HashSet::new();
     let mut interpreter_handle: Option<InterpreterSession> = None;
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            _ => {}
+        }
+        let line = line.trim().to_string();
 
         if line.starts_with("Content-Length:") {
             let len: usize = line
@@ -31,12 +33,12 @@ pub fn run_dap() {
                 .unwrap_or(0);
 
             // Read empty line separator
-            let mut empty = String::new();
-            io::stdin().read_line(&mut empty).ok();
+            let mut sep = String::new();
+            reader.read_line(&mut sep).ok();
 
             // Read content body
             let mut content = vec![0u8; len];
-            io::stdin().lock().read_exact(&mut content).ok();
+            reader.read_exact(&mut content).ok();
             let body = String::from_utf8_lossy(&content).to_string();
 
             let msg: JsonValue = match serde_json::from_str(&body) {
