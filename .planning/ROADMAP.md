@@ -283,7 +283,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 - [x] 5C.3 Use `getenv("TMPDIR")` in AOT generated C code (`native.rs:146,266`) (PR #33)
 - [x] 5C.4 Deduplicate AOT/native build functions and C templates (`native.rs:7-366`) (PR #34)
 - [x] 5C.5 Improve executable-line heuristic for coverage (`testing/mod.rs:297-325`) (PR #35)
-- [ ] 5C.6 Key DAP breakpoints by source file (`dap/mod.rs:136-152`)
+- [x] 5C.6 Key DAP breakpoints by source file (`dap/mod.rs:136-152`) (PR #36)
 - [ ] 5C.7 Register overflow bounds check in compiler (`compiler.rs:97-104`)
 
 ### Order of attack
