@@ -366,7 +366,7 @@ pub struct DebugFrame {
 
 /// Shared state between DAP server and interpreter
 pub struct DebugState {
-    pub breakpoints: Mutex<std::collections::HashSet<usize>>,
+    pub breakpoints: Mutex<std::collections::HashMap<String, std::collections::HashSet<usize>>>,
     pub action: Mutex<DebugAction>,
     pub step_depth: Mutex<usize>,
     /// Interpreter signals it has paused (sends current line)
@@ -1655,12 +1655,19 @@ impl Interpreter {
             let action = *ds.action.lock().unwrap_or_else(|e| e.into_inner());
             let step_depth = *ds.step_depth.lock().unwrap_or_else(|e| e.into_inner());
 
+            let has_breakpoint = if let Some(ref sf) = self.source_file {
+                bps.get(sf.to_string_lossy().as_ref())
+                    .map_or(false, |lines| lines.contains(&line))
+            } else {
+                bps.values().any(|lines| lines.contains(&line))
+            };
+
             match action {
                 DebugAction::Pause => true,
                 DebugAction::StepOver => self.call_depth <= step_depth,
                 DebugAction::StepIn => true,
                 DebugAction::StepOut => self.call_depth < step_depth,
-                DebugAction::Continue => bps.contains(&line),
+                DebugAction::Continue => has_breakpoint,
             }
         };
 
