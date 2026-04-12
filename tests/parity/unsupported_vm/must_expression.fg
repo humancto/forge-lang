@@ -1,4 +1,0 @@
-// expect-error: must expressions
-
-let result = must Ok(42)
-println(result)

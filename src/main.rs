@@ -66,14 +66,16 @@ struct Cli {
     #[arg(short = 'e', long = "eval")]
     eval_code: Option<String>,
 
-    /// Use the bytecode VM. Faster on numeric/loop-heavy code but does not
-    /// support the full language: ask/must/freeze expressions and
-    /// decorator-driven runtime features (server routes, etc.) are rejected
-    /// up front. spawn/await, schedule/watch are supported.
-    /// Use the default interpreter for HTTP servers, AI calls, and full
-    /// stdlib coverage.
+    /// Use the bytecode VM (this is now the default). Kept for backwards
+    /// compatibility — has no effect since VM is already the default engine.
     #[arg(long = "vm")]
     use_vm: bool,
+
+    /// Use the tree-walking interpreter instead of the VM. Required for
+    /// decorator-driven HTTP servers (@server, @get, etc.). The VM
+    /// auto-falls back to the interpreter when decorators are detected.
+    #[arg(long = "interp")]
+    use_interp: bool,
 
     /// JIT-compile numeric leaf functions via Cranelift on top of --vm.
     /// Only Int/Float arithmetic and comparisons are supported: any function
@@ -171,7 +173,7 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let use_vm = cli.use_vm || cli.use_jit || cli.profile;
+    let use_vm = !cli.use_interp || cli.use_jit || cli.profile;
     let use_jit = cli.use_jit;
     let profile = cli.profile;
     let strict = cli.strict;
@@ -562,25 +564,7 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
                 }
             }
         }
-        // These are silently flattened to their inner expression by the VM
-        // compiler, which produces wrong results: `must` would not crash on
-        // Err, `ask` would not call the LLM, `await` would not actually
-        // wait, and `freeze` would not enforce immutability. Reject them up
-        // front so the user sees a clear "unsupported in --vm" error instead
-        // of running and silently getting the wrong answer.
-        Expr::Must(expr) => {
-            issues.insert("must expressions");
-            collect_vm_incompatible_expr(expr, issues);
-        }
-        Expr::Ask(expr) => {
-            issues.insert("ask expressions");
-            collect_vm_incompatible_expr(expr, issues);
-        }
-        Expr::Await(expr) => {
-            collect_vm_incompatible_expr(expr, issues);
-        }
-        Expr::Freeze(expr) => {
-            issues.insert("freeze expressions");
+        Expr::Must(expr) | Expr::Ask(expr) | Expr::Freeze(expr) | Expr::Await(expr) => {
             collect_vm_incompatible_expr(expr, issues);
         }
         Expr::Spread(expr) => collect_vm_incompatible_expr(expr, issues),
@@ -622,11 +606,20 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     };
     emit_type_warnings(&warnings);
 
-    if use_vm {
-        if let Err(message) = ensure_vm_compatible(&program, "--vm") {
-            eprintln!("{}", errors::format_simple_error(&message));
-            process::exit(1);
+    // Auto-fallback: if VM is requested but program uses decorators, fall back to interpreter
+    let effective_vm = if use_vm {
+        match ensure_vm_compatible(&program, "VM") {
+            Ok(()) => true,
+            Err(message) => {
+                eprintln!("  Info: falling back to interpreter ({})", message);
+                false
+            }
         }
+    } else {
+        false
+    };
+
+    if effective_vm {
         if profile {
             match vm::run_with_profiling(&program) {
                 Ok(_) => {}

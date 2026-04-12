@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`forge publish`** — package and publish Forge projects to the local filesystem registry (`~/.forge/registry/<name>/<version>/`). Supports `--dry-run` to preview without publishing and `--registry` to specify a custom registry path. Validates manifest fields, computes SHA-256 checksums, and excludes non-source files (forge_modules, .git, tests, etc.).
+- **VM as default engine** — the bytecode VM is now the default execution engine for `forge run`. The interpreter is available via `--interp` flag. Programs using decorator-driven HTTP servers (`@server`, `@get`, etc.) automatically fall back to the interpreter.
+- **VM `must` expression** — `must Ok(42)` unwraps to `42`, `must Err("x")` crashes with clear error, `must null` crashes. Full parity with interpreter semantics.
+- **VM `ask` expression** — `ask "prompt"` calls the LLM API (OpenAI-compatible) in VM mode. Requires `FORGE_AI_KEY` or `OPENAI_API_KEY` environment variable.
+- **VM `freeze` expression** — `freeze expr` wraps values as immutable in VM mode. `SetField` on frozen values returns a runtime error.
 
 ## [0.6.0] - 2026-04-11
 

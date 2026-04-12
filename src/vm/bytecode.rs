@@ -57,6 +57,9 @@ pub enum OpCode {
     Await,    // A=dst, B=src (if TaskHandle: block + deserialize; else: pass through)
     Schedule, // A=closure_reg, B=interval_reg, C=unit_reg
     Watch,    // A=closure_reg, B=path_reg
+    Must,     // A=dst, B=src (unwrap Ok, crash on Err/null)
+    Ask,      // A=dst, B=prompt_reg (call LLM API)
+    Freeze,   // A=dst, B=src (wrap value as frozen/immutable)
 }
 
 /// Compile-time constant — can hold strings, unlike the runtime Value.
