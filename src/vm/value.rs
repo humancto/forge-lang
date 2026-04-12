@@ -4,6 +4,27 @@ use indexmap::IndexMap;
 use std::fmt;
 use std::sync::Arc;
 
+/// Escape a string for safe JSON embedding.
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// GC-free value representation for crossing thread boundaries.
 /// Used for spawn result slots and globals transfer during fork_for_spawn.
 #[derive(Clone)]
@@ -215,7 +236,7 @@ impl GcObject {
             ObjKind::Object(map) => {
                 let entries: Vec<String> = map
                     .iter()
-                    .map(|(k, v)| format!("\"{}\": {}", k, v.to_json_string(gc)))
+                    .map(|(k, v)| format!("{}: {}", escape_json_string(k), v.to_json_string(gc)))
                     .collect();
                 format!("{{ {} }}", entries.join(", "))
             }
@@ -232,7 +253,7 @@ impl GcObject {
 
     pub fn to_json_string(&self, gc: &super::gc::Gc) -> String {
         match &self.kind {
-            ObjKind::String(s) => format!("\"{}\"", s),
+            ObjKind::String(s) => escape_json_string(s),
             ObjKind::Array(items) => {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string(gc)).collect();
                 format!("[{}]", entries.join(", "))
@@ -240,7 +261,7 @@ impl GcObject {
             ObjKind::Object(map) => {
                 let entries: Vec<String> = map
                     .iter()
-                    .map(|(k, v)| format!("\"{}\": {}", k, v.to_json_string(gc)))
+                    .map(|(k, v)| format!("{}: {}", escape_json_string(k), v.to_json_string(gc)))
                     .collect();
                 format!("{{ {} }}", entries.join(", "))
             }
