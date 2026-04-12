@@ -266,7 +266,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 - [x] 5A.1 Replace `transmute(op)` with safe `TryFrom<u8>` in VM dispatch (`machine.rs:1061`, `type_analysis.rs:60`, `ir_builder.rs:88`) — eliminates UB on invalid opcodes (PR #22)
 - [x] 5A.2 Add `method_tables`, `static_methods`, `struct_defaults` to GC root scanning (`machine.rs:1940-1957`) — fixes use-after-free risk (PR #23)
 - [x] 5A.3 Fix DAP stdin reader to use single `BufReader<Stdin>` (`dap/mod.rs:20,35,39`) — fixes message corruption under pipelining (PR #24)
-- [ ] 5A.4 Add coverage tracking in interpreter `run()` method (`interpreter/mod.rs:656-676`) — fixes systematically deflated coverage
+- [x] 5A.4 Add coverage tracking in interpreter `run()` method (`interpreter/mod.rs:656-676`) — fixes systematically deflated coverage (PR #25)
 
 ### Phase 5B — High Priority
 
