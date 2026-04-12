@@ -759,6 +759,43 @@ impl VM {
                 .insert("mysql".to_string(), Value::Obj(mysql_ref));
         }
 
+        // os module
+        let mut os_map = IndexMap::new();
+        for name in &["hostname", "platform", "arch", "pid", "cpus", "homedir"] {
+            let full = format!("os.{}", name);
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
+            os_map.insert(name.to_string(), Value::Obj(nr));
+        }
+        let os_ref = self.gc.alloc(ObjKind::Object(os_map));
+        self.globals.insert("os".to_string(), Value::Obj(os_ref));
+
+        // path module
+        let mut path_map = IndexMap::new();
+        for name in &[
+            "join",
+            "resolve",
+            "relative",
+            "is_absolute",
+            "dirname",
+            "basename",
+            "extname",
+        ] {
+            let full = format!("path.{}", name);
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
+            path_map.insert(name.to_string(), Value::Obj(nr));
+        }
+        path_map.insert(
+            "separator".to_string(),
+            self.alloc_string(std::path::MAIN_SEPARATOR_STR),
+        );
+        let path_ref = self.gc.alloc(ObjKind::Object(path_map));
+        self.globals
+            .insert("path".to_string(), Value::Obj(path_ref));
+
         // Option prelude
         let mut none_obj = IndexMap::new();
         none_obj.insert("__type__".to_string(), self.alloc_string("Option"));

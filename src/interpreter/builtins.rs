@@ -1353,6 +1353,12 @@ impl Interpreter {
             _ if name.starts_with("jwt.") => {
                 crate::stdlib::jwt::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
+            _ if name.starts_with("os.") => {
+                crate::stdlib::os_module::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
+            _ if name.starts_with("path.") => {
+                crate::stdlib::path_module::call(name, args).map_err(|e| RuntimeError::new(&e))
+            }
             #[cfg(feature = "mysql")]
             _ if name.starts_with("mysql.") => {
                 crate::stdlib::mysql::call(name, args).map_err(|e| RuntimeError::new(&e))

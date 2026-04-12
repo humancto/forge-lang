@@ -1492,7 +1492,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Import { path, names } => {
             let builtin_modules = [
                 "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log", "term",
-                "http", "csv", "exec", "time", "url", "toml", "npc", "ws", "jwt", "mysql",
+                "http", "csv", "exec", "time", "url", "toml", "npc", "ws", "jwt", "mysql", "os",
+                "path",
             ];
             if builtin_modules.contains(&path.as_str()) {
                 return Ok(());

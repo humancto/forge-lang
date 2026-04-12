@@ -525,6 +525,10 @@ impl Interpreter {
             .define("ws".to_string(), crate::stdlib::create_ws_module());
         self.env
             .define("jwt".to_string(), crate::stdlib::create_jwt_module());
+        self.env
+            .define("os".to_string(), crate::stdlib::create_os_module());
+        self.env
+            .define("path".to_string(), crate::stdlib::create_path_module());
         #[cfg(feature = "mysql")]
         self.env
             .define("mysql".to_string(), crate::stdlib::create_mysql_module());

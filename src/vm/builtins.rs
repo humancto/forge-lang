@@ -1371,6 +1371,45 @@ impl VM {
                     crate::stdlib::exec_module::call(interp_args).map_err(|e| VMError::new(&e))?;
                 Ok(self.convert_interp_value(&result))
             }
+            n if n.starts_with("os.") => {
+                let interp_args: Vec<crate::interpreter::Value> = args
+                    .iter()
+                    .map(|v| match v {
+                        Value::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                                crate::interpreter::Value::String(s)
+                            } else {
+                                crate::interpreter::Value::Null
+                            }
+                        }
+                        _ => crate::interpreter::Value::Null,
+                    })
+                    .collect();
+                let result =
+                    crate::stdlib::os_module::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("path.") => {
+                let interp_args: Vec<crate::interpreter::Value> = args
+                    .iter()
+                    .map(|v| match v {
+                        Value::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                                crate::interpreter::Value::String(s)
+                            } else {
+                                crate::interpreter::Value::Null
+                            }
+                        }
+                        Value::Int(n) => crate::interpreter::Value::Int(*n),
+                        Value::Float(n) => crate::interpreter::Value::Float(*n),
+                        Value::Bool(b) => crate::interpreter::Value::Bool(*b),
+                        _ => crate::interpreter::Value::Null,
+                    })
+                    .collect();
+                let result = crate::stdlib::path_module::call(n, interp_args)
+                    .map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
             n if n.starts_with("env.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
