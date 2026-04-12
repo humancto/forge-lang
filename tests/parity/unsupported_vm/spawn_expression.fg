@@ -1,4 +1,0 @@
-// expect-error: spawn expressions
-
-let handle = spawn { println("from spawn") }
-println(handle)

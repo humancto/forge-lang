@@ -560,7 +560,9 @@ mod tests {
         chunk.emit(encode_abc(OpCode::Neg, 5, 0, 0), 10);
         chunk.emit(encode_abc(OpCode::Eq, 6, 0, 1), 11);
         chunk.emit(encode_abc(OpCode::Move, 7, 0, 0), 12);
-        chunk.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 13);
+        chunk.emit(encode_abc(OpCode::Spawn, 0, 0, 0), 13);
+        chunk.emit(encode_abc(OpCode::Await, 1, 0, 0), 14);
+        chunk.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 15);
 
         let bytes = serialize_chunk(&chunk).unwrap();
         let restored = deserialize_chunk(&bytes).unwrap();

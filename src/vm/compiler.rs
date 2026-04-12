@@ -1444,7 +1444,12 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::Spawn { body } => {
+            let parent_locals = c.snapshot_locals();
+            let parent_upvalues = c.snapshot_upvalues();
+
             let mut sc = Compiler::new("<spawn>");
+            sc.parent_locals = parent_locals;
+            sc.parent_upvalues = parent_upvalues;
             sc.current_line = c.current_line;
             sc.begin_scope();
             for s in body {
@@ -1452,9 +1457,14 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 compile_stmt(&mut sc, &s.stmt)?;
             }
             sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+            sc.chunk.upvalue_count = sc.upvalues.len() as u8;
             sc.chunk.max_registers = sc.max_register;
+            let upvalue_sources: Vec<UpvalueSource> =
+                sc.upvalues.iter().map(|u| u.source).collect();
+            let mut proto_chunk = sc.chunk;
+            proto_chunk.upvalue_sources = upvalue_sources;
             let proto = c.chunk.prototypes.len() as u16;
-            c.chunk.prototypes.push(sc.chunk);
+            c.chunk.prototypes.push(proto_chunk);
             let cr = c.alloc_reg();
             c.emit(encode_abx(OpCode::Closure, cr, proto), 0);
             c.emit(encode_abc(OpCode::Spawn, cr, 0, 0), 0);
@@ -1673,16 +1683,39 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             }
             c.end_scope();
         }
-        Expr::Await(inner) | Expr::Must(inner) | Expr::Freeze(inner) | Expr::Ask(inner) => {
+        Expr::Await(inner) => {
+            let src = c.alloc_reg();
+            compile_expr(c, inner, src)?;
+            c.emit(encode_abc(OpCode::Await, dst, src, 0), c.current_line);
+            c.free_to(src);
+        }
+        Expr::Must(inner) | Expr::Freeze(inner) | Expr::Ask(inner) => {
             compile_expr(c, inner, dst)?;
         }
         Expr::Spawn(body) => {
-            // VM spawn: compile as synchronous call for now (VM concurrency is M4.3)
-            for stmt in body {
-                c.current_line = stmt.line;
-                compile_stmt(c, &stmt.stmt)?;
+            let parent_locals = c.snapshot_locals();
+            let parent_upvalues = c.snapshot_upvalues();
+
+            let mut sc = Compiler::new("<spawn>");
+            sc.parent_locals = parent_locals;
+            sc.parent_upvalues = parent_upvalues;
+            sc.current_line = c.current_line;
+            sc.begin_scope();
+            for s in body {
+                sc.current_line = s.line;
+                compile_stmt(&mut sc, &s.stmt)?;
             }
-            c.emit(encode_abc(OpCode::LoadNull, dst, 0, 0), 0);
+            sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+            sc.chunk.upvalue_count = sc.upvalues.len() as u8;
+            sc.chunk.max_registers = sc.max_register;
+            let upvalue_sources: Vec<UpvalueSource> =
+                sc.upvalues.iter().map(|u| u.source).collect();
+            let mut proto_chunk = sc.chunk;
+            proto_chunk.upvalue_sources = upvalue_sources;
+            let proto = c.chunk.prototypes.len() as u16;
+            c.chunk.prototypes.push(proto_chunk);
+            c.emit(encode_abx(OpCode::Closure, dst, proto), 0);
+            c.emit(encode_abc(OpCode::Spawn, dst, 0, 0), 0);
         }
         Expr::Spread(inner) => {
             compile_expr(c, inner, dst)?;

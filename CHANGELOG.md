@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Line-accurate runtime errors** — errors inside nested blocks now show the correct inner line with source snippets via ariadne, instead of pointing at the top-level statement
 - **JIT: logical And/Or** — `&&`/`||` in JIT-compiled functions now use logical semantics (result is 0 or 1) instead of bitwise AND/OR which produced wrong results for non-boolean integers (e.g. `2 && 3` was `2`, now correctly `1`)
 - **JIT: support up to 8 function arguments** — JIT dispatch previously silently dropped arguments beyond 3; now supports 0–8 arguments for both integer and float functions
+- **VM async: spawn/await** — `spawn { }` now runs on a real OS thread in `--vm` mode (previously ran synchronously inline). `await` blocks on the spawned task's result via `Condvar`. Cross-thread value transfer uses `SharedValue` enum to avoid GC reference leaks. Supports nested spawn, variable capture via upvalues, string/object/array return values, and error isolation. 12 new tests.
 - **JIT: 24 new tests** — comprehensive coverage for logical operators, multi-argument functions, float arithmetic, recursive algorithms, and comparison operators
 
 ---
