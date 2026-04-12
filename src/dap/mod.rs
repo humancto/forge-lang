@@ -13,7 +13,8 @@ pub fn run_dap() {
 
     eprintln!("Forge DAP server started");
 
-    let mut seq = 1;
+    let seq = Arc::new(Mutex::new(1i64));
+    let mut pending_breakpoints: HashSet<usize> = HashSet::new();
     let mut interpreter_handle: Option<InterpreterSession> = None;
 
     for line in stdin.lock().lines() {
@@ -52,7 +53,7 @@ pub fn run_dap() {
                     let resp = make_response(
                         request_seq,
                         command,
-                        &mut seq,
+                        &seq,
                         json!({
                             "supportsConfigurationDoneRequest": true,
                             "supportsFunctionBreakpoints": false,
@@ -71,7 +72,7 @@ pub fn run_dap() {
                     send_message(&stdout, &resp);
 
                     // Send initialized event
-                    let event = make_event("initialized", &mut seq, json!({}));
+                    let event = make_event("initialized", &seq, json!({}));
                     send_message(&stdout, &event);
                 }
 
@@ -79,33 +80,46 @@ pub fn run_dap() {
                     let program = args["program"].as_str().unwrap_or("").to_string();
                     let stop_on_entry = args["stopOnEntry"].as_bool().unwrap_or(false);
 
-                    let resp = make_response(request_seq, command, &mut seq, json!(null));
+                    let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
 
                     // Launch the interpreter in a background thread
-                    let session =
-                        launch_interpreter(&program, stop_on_entry, stdout.clone(), &mut seq);
+                    let session = launch_interpreter(&program, stop_on_entry, stdout.clone(), &seq);
 
                     match session {
-                        Ok(s) => interpreter_handle = Some(s),
+                        Ok(s) => {
+                            // Apply any pre-launch breakpoints
+                            if !pending_breakpoints.is_empty() {
+                                let mut bps = s
+                                    .debug_state
+                                    .breakpoints
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                for &l in &pending_breakpoints {
+                                    bps.insert(l);
+                                }
+                                pending_breakpoints.clear();
+                            }
+                            interpreter_handle = Some(s);
+                        }
                         Err(e) => {
                             let event = make_event(
                                 "output",
-                                &mut seq,
+                                &seq,
                                 json!({
                                     "category": "stderr",
                                     "output": format!("Launch failed: {}\n", e),
                                 }),
                             );
                             send_message(&stdout, &event);
-                            let event = make_event("terminated", &mut seq, json!({}));
+                            let event = make_event("terminated", &seq, json!({}));
                             send_message(&stdout, &event);
                         }
                     }
                 }
 
                 "configurationDone" => {
-                    let resp = make_response(request_seq, command, &mut seq, json!(null));
+                    let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
                 }
 
@@ -129,6 +143,12 @@ pub fn run_dap() {
                         for &l in &lines {
                             bps.insert(l);
                         }
+                    } else {
+                        // Buffer breakpoints before launch
+                        pending_breakpoints.clear();
+                        for &l in &lines {
+                            pending_breakpoints.insert(l);
+                        }
                     }
 
                     let verified: Vec<JsonValue> = lines
@@ -139,7 +159,7 @@ pub fn run_dap() {
                     let resp = make_response(
                         request_seq,
                         command,
-                        &mut seq,
+                        &seq,
                         json!({
                             "breakpoints": verified,
                         }),
@@ -151,7 +171,7 @@ pub fn run_dap() {
                     let resp = make_response(
                         request_seq,
                         command,
-                        &mut seq,
+                        &seq,
                         json!({
                             "threads": [{"id": 1, "name": "main"}],
                         }),
@@ -205,7 +225,7 @@ pub fn run_dap() {
                     let resp = make_response(
                         request_seq,
                         command,
-                        &mut seq,
+                        &seq,
                         json!({
                             "stackFrames": frames,
                             "totalFrames": frames.len(),
@@ -218,7 +238,7 @@ pub fn run_dap() {
                     let resp = make_response(
                         request_seq,
                         command,
-                        &mut seq,
+                        &seq,
                         json!({
                             "scopes": [{
                                 "name": "Locals",
@@ -253,7 +273,7 @@ pub fn run_dap() {
                     let resp = make_response(
                         request_seq,
                         command,
-                        &mut seq,
+                        &seq,
                         json!({
                             "variables": variables,
                         }),
@@ -268,7 +288,7 @@ pub fn run_dap() {
                     let resp = make_response(
                         request_seq,
                         command,
-                        &mut seq,
+                        &seq,
                         json!({
                             "allThreadsContinued": true,
                         }),
@@ -285,7 +305,7 @@ pub fn run_dap() {
                             .unwrap_or_else(|e| e.into_inner());
                         resume_interpreter(&session.debug_state, DebugAction::StepOver, depth);
                     }
-                    let resp = make_response(request_seq, command, &mut seq, json!(null));
+                    let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
                 }
 
@@ -293,7 +313,7 @@ pub fn run_dap() {
                     if let Some(ref session) = interpreter_handle {
                         resume_interpreter(&session.debug_state, DebugAction::StepIn, 0);
                     }
-                    let resp = make_response(request_seq, command, &mut seq, json!(null));
+                    let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
                 }
 
@@ -306,7 +326,7 @@ pub fn run_dap() {
                             .unwrap_or_else(|e| e.into_inner());
                         resume_interpreter(&session.debug_state, DebugAction::StepOut, depth);
                     }
-                    let resp = make_response(request_seq, command, &mut seq, json!(null));
+                    let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
                 }
 
@@ -318,27 +338,27 @@ pub fn run_dap() {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner()) = DebugAction::Pause;
                     }
-                    let resp = make_response(request_seq, command, &mut seq, json!(null));
+                    let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
                 }
 
                 "disconnect" | "terminate" => {
-                    let resp = make_response(request_seq, command, &mut seq, json!(null));
+                    let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
                     break;
                 }
 
                 _ => {
                     // Unknown command — send empty success response
-                    let resp = make_response(request_seq, command, &mut seq, json!(null));
+                    let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
                 }
             }
 
             // Drain output and paused events from the interpreter
             if let Some(ref session) = interpreter_handle {
-                drain_output(&session.output_sink, &stdout, &mut seq);
-                drain_paused_events(session, &stdout, &mut seq);
+                drain_output(&session.output_sink, &stdout, &seq);
+                drain_paused_events(session, &stdout, &seq);
             }
         }
     }
@@ -358,7 +378,7 @@ fn launch_interpreter(
     program_path: &str,
     stop_on_entry: bool,
     stdout: Arc<Mutex<io::Stdout>>,
-    seq: &mut i64,
+    seq: &Arc<Mutex<i64>>,
 ) -> Result<InterpreterSession, String> {
     let source = std::fs::read_to_string(program_path)
         .map_err(|e| format!("could not read '{}': {}", program_path, e))?;
@@ -396,7 +416,7 @@ fn launch_interpreter(
     let ds = debug_state.clone();
     let sink = output_sink.clone();
     let stdout_clone = stdout.clone();
-    let mut seq_clone = *seq;
+    let seq_clone = seq.clone();
 
     let source_name = std::path::Path::new(program_path)
         .file_name()
@@ -413,7 +433,7 @@ fn launch_interpreter(
         let result = interp.run(&program);
 
         // Send output events for any remaining output
-        drain_output(&sink, &stdout_clone, &mut seq_clone);
+        drain_output(&sink, &stdout_clone, &seq_clone);
 
         // Send terminated event
         match result {
@@ -421,7 +441,7 @@ fn launch_interpreter(
             Err(e) => {
                 let event = make_event(
                     "output",
-                    &mut seq_clone,
+                    &seq_clone,
                     json!({
                         "category": "stderr",
                         "output": format!("Runtime error (line {}): {}\n", e.line, e.message),
@@ -431,7 +451,7 @@ fn launch_interpreter(
             }
         }
 
-        let event = make_event("terminated", &mut seq_clone, json!({}));
+        let event = make_event("terminated", &seq_clone, json!({}));
         send_message(&stdout_clone, &event);
     });
 
@@ -476,7 +496,11 @@ fn resume_interpreter(debug_state: &Arc<DebugState>, action: DebugAction, depth:
     cvar.notify_all();
 }
 
-fn drain_output(sink: &Arc<Mutex<Vec<String>>>, stdout: &Arc<Mutex<io::Stdout>>, seq: &mut i64) {
+fn drain_output(
+    sink: &Arc<Mutex<Vec<String>>>,
+    stdout: &Arc<Mutex<io::Stdout>>,
+    seq: &Arc<Mutex<i64>>,
+) {
     let messages: Vec<String> = {
         let mut buf = sink.lock().unwrap_or_else(|e| e.into_inner());
         buf.drain(..).collect()
@@ -497,7 +521,7 @@ fn drain_output(sink: &Arc<Mutex<Vec<String>>>, stdout: &Arc<Mutex<io::Stdout>>,
 fn drain_paused_events(
     session: &InterpreterSession,
     stdout: &Arc<Mutex<io::Stdout>>,
-    seq: &mut i64,
+    seq: &Arc<Mutex<i64>>,
 ) {
     // Non-blocking check for pause events from the interpreter
     while let Ok(line) = session.paused_receiver.try_recv() {
@@ -536,28 +560,38 @@ fn drain_paused_events(
     }
 }
 
-fn make_response(request_seq: i64, command: &str, seq: &mut i64, body: JsonValue) -> String {
-    let resp = json!({
-        "seq": *seq,
+fn next_seq(seq: &Arc<Mutex<i64>>) -> i64 {
+    let mut s = seq.lock().unwrap_or_else(|e| e.into_inner());
+    let val = *s;
+    *s += 1;
+    val
+}
+
+fn make_response(
+    request_seq: i64,
+    command: &str,
+    seq: &Arc<Mutex<i64>>,
+    body: JsonValue,
+) -> String {
+    json!({
+        "seq": next_seq(seq),
         "type": "response",
         "request_seq": request_seq,
         "success": true,
         "command": command,
         "body": body,
-    });
-    *seq += 1;
-    resp.to_string()
+    })
+    .to_string()
 }
 
-fn make_event(event: &str, seq: &mut i64, body: JsonValue) -> String {
-    let resp = json!({
-        "seq": *seq,
+fn make_event(event: &str, seq: &Arc<Mutex<i64>>, body: JsonValue) -> String {
+    json!({
+        "seq": next_seq(seq),
         "type": "event",
         "event": event,
         "body": body,
-    });
-    *seq += 1;
-    resp.to_string()
+    })
+    .to_string()
 }
 
 fn send_message(stdout: &Arc<Mutex<io::Stdout>>, msg: &str) {
@@ -574,26 +608,26 @@ mod tests {
 
     #[test]
     fn make_response_includes_required_fields() {
-        let mut seq = 1;
-        let resp = make_response(5, "initialize", &mut seq, json!({"foo": "bar"}));
+        let seq = Arc::new(Mutex::new(1i64));
+        let resp = make_response(5, "initialize", &seq, json!({"foo": "bar"}));
         let parsed: JsonValue = serde_json::from_str(&resp).unwrap();
         assert_eq!(parsed["type"], "response");
         assert_eq!(parsed["request_seq"], 5);
         assert_eq!(parsed["command"], "initialize");
         assert_eq!(parsed["success"], true);
         assert_eq!(parsed["body"]["foo"], "bar");
-        assert_eq!(seq, 2);
+        assert_eq!(*seq.lock().unwrap(), 2);
     }
 
     #[test]
     fn make_event_includes_required_fields() {
-        let mut seq = 1;
-        let event = make_event("stopped", &mut seq, json!({"reason": "breakpoint"}));
+        let seq = Arc::new(Mutex::new(1i64));
+        let event = make_event("stopped", &seq, json!({"reason": "breakpoint"}));
         let parsed: JsonValue = serde_json::from_str(&event).unwrap();
         assert_eq!(parsed["type"], "event");
         assert_eq!(parsed["event"], "stopped");
         assert_eq!(parsed["body"]["reason"], "breakpoint");
-        assert_eq!(seq, 2);
+        assert_eq!(*seq.lock().unwrap(), 2);
     }
 
     #[test]
