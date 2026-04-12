@@ -14,7 +14,8 @@ pub fn run_dap() {
     eprintln!("Forge DAP server started");
 
     let seq = Arc::new(Mutex::new(1i64));
-    let mut pending_breakpoints: HashSet<usize> = HashSet::new();
+    let mut pending_breakpoints: std::collections::HashMap<String, HashSet<usize>> =
+        std::collections::HashMap::new();
     let mut interpreter_handle: Option<InterpreterSession> = None;
 
     loop {
@@ -97,8 +98,11 @@ pub fn run_dap() {
                                     .breakpoints
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner());
-                                for &l in &pending_breakpoints {
-                                    bps.insert(l);
+                                for (path, lines) in &pending_breakpoints {
+                                    let entry = bps.entry(path.clone()).or_default();
+                                    for &l in lines {
+                                        entry.insert(l);
+                                    }
                                 }
                                 pending_breakpoints.clear();
                             }
@@ -126,6 +130,7 @@ pub fn run_dap() {
                 }
 
                 "setBreakpoints" => {
+                    let source_path = args["source"]["path"].as_str().unwrap_or("").to_string();
                     let lines: Vec<usize> = args["breakpoints"]
                         .as_array()
                         .map(|arr| {
@@ -141,15 +146,16 @@ pub fn run_dap() {
                             .breakpoints
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
-                        bps.clear();
+                        let entry = bps.entry(source_path.clone()).or_default();
+                        entry.clear();
                         for &l in &lines {
-                            bps.insert(l);
+                            entry.insert(l);
                         }
                     } else {
-                        // Buffer breakpoints before launch
-                        pending_breakpoints.clear();
+                        let entry = pending_breakpoints.entry(source_path.clone()).or_default();
+                        entry.clear();
                         for &l in &lines {
-                            pending_breakpoints.insert(l);
+                            entry.insert(l);
                         }
                     }
 
@@ -398,7 +404,7 @@ fn launch_interpreter(
     let (paused_sender, paused_receiver) = std::sync::mpsc::channel::<usize>();
 
     let debug_state = Arc::new(DebugState {
-        breakpoints: Mutex::new(HashSet::new()),
+        breakpoints: Mutex::new(std::collections::HashMap::new()),
         action: Mutex::new(if stop_on_entry {
             DebugAction::Pause
         } else {
@@ -654,7 +660,11 @@ mod tests {
     fn debug_state_breakpoint_matching() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let state = DebugState {
-            breakpoints: Mutex::new(HashSet::from([5, 10, 15])),
+            breakpoints: Mutex::new({
+                let mut m = std::collections::HashMap::new();
+                m.insert("test.fg".to_string(), HashSet::from([5, 10, 15]));
+                m
+            }),
             action: Mutex::new(DebugAction::Continue),
             step_depth: Mutex::new(0),
             paused_sender: tx,
@@ -665,16 +675,17 @@ mod tests {
         };
 
         let bps = state.breakpoints.lock().unwrap();
-        assert!(bps.contains(&5));
-        assert!(bps.contains(&10));
-        assert!(!bps.contains(&7));
+        let file_bps = bps.get("test.fg").unwrap();
+        assert!(file_bps.contains(&5));
+        assert!(file_bps.contains(&10));
+        assert!(!file_bps.contains(&7));
     }
 
     #[test]
     fn resume_interpreter_sets_action_and_signals() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let state = Arc::new(DebugState {
-            breakpoints: Mutex::new(HashSet::new()),
+            breakpoints: Mutex::new(std::collections::HashMap::new()),
             action: Mutex::new(DebugAction::Pause),
             step_depth: Mutex::new(0),
             paused_sender: tx,
