@@ -380,4 +380,4 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 - [x] 7E.1 Add curl-pipe-sh installer — already exists at `install.sh` with OS/arch detection, version resolution, PATH setup, and fallback instructions.
 - [x] 7E.2 Add `os` and `path` stdlib modules — hostname, platform, pid, arch, cpus, homedir, path.join, path.resolve, path.relative, path.is_absolute, path.dirname, path.basename, path.extname, path.separator. (PR #59)
-- [ ] 7E.3 VS Code extension with TextMate grammar — proper syntax highlighting, snippets, debugger launch config. The LSP exists but has no extension wrapper for marketplace distribution.
+- [x] 7E.3 VS Code extension with TextMate grammar — full keyword/builtin/module grammar, 24 snippets, extension README. LSP client deferred to separate item. (PR #60)
