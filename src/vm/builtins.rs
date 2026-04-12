@@ -412,7 +412,7 @@ impl VM {
                 Some(v) => {
                     let len = match v {
                         Value::Obj(r) => self.gc.get(*r).map_or(0, |o| match &o.kind {
-                            ObjKind::String(s) => s.len() as i64,
+                            ObjKind::String(s) => s.chars().count() as i64,
                             ObjKind::Array(a) => a.len() as i64,
                             ObjKind::Object(o) => o.len() as i64,
                             _ => 0,
