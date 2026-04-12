@@ -1352,6 +1352,7 @@ impl VM {
                 std::process::exit(code);
             }
             "run_command" => {
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v {
@@ -1552,6 +1553,7 @@ impl VM {
                 Ok(self.convert_interp_value(&result))
             }
             "shell" => {
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1576,6 +1578,7 @@ impl VM {
                 Ok(Value::Obj(r))
             }
             "sh" => {
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1589,6 +1592,7 @@ impl VM {
                 ))
             }
             "sh_lines" => {
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1605,6 +1609,7 @@ impl VM {
                 Ok(Value::Obj(r))
             }
             "sh_json" => {
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1618,6 +1623,7 @@ impl VM {
                 Ok(self.convert_interp_value(&interp_val))
             }
             "sh_ok" => {
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let status = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1657,6 +1663,7 @@ impl VM {
                 Ok(Value::Obj(r))
             }
             "pipe_to" => {
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let input = self.get_string_arg(&args, 0)?;
                 let cmd = self.get_string_arg(&args, 1)?;
                 use std::io::Write;

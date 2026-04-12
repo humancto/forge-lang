@@ -12,6 +12,7 @@ mod lsp;
 mod manifest;
 mod native;
 mod package;
+mod permissions;
 mod parser;
 mod publish;
 mod repl;
@@ -93,6 +94,11 @@ struct Cli {
     /// Enforce type annotations as errors (gradual strict mode)
     #[arg(long = "strict")]
     strict: bool,
+
+    /// Allow shell execution (sh, shell, run_command, sh_lines, sh_json, sh_ok, pipe_to).
+    /// Without this flag, these builtins return a permission error.
+    #[arg(long = "allow-run")]
+    allow_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -191,6 +197,11 @@ async fn main() {
     let use_vm = !cli.use_interp || cli.use_jit || cli.profile;
     let profile = cli.profile;
     let strict = cli.strict;
+    // REPL and -e are user-invoked contexts — always allow shell execution.
+    // For file execution (forge run), require explicit --allow-run.
+    let is_interactive = cli.eval_code.is_some()
+        || matches!(cli.command, Some(Command::Repl) | None);
+    permissions::set_allow_run(cli.allow_run || is_interactive);
 
     if let Some(code) = cli.eval_code {
         let code = code.replace(';', "\n");
