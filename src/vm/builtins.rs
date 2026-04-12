@@ -1520,6 +1520,7 @@ impl VM {
                     crate::stdlib::jwt::call(n, interp_args).map_err(|e| VMError::new(&e))?;
                 Ok(self.convert_interp_value(&result))
             }
+            #[cfg(feature = "mysql")]
             n if n.starts_with("mysql.") => {
                 let interp_args = self.args_to_interp(&args);
                 let result =

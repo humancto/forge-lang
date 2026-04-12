@@ -10,6 +10,7 @@ pub mod json_module;
 pub mod jwt;
 pub mod log;
 pub mod math;
+#[cfg(feature = "mysql")]
 pub mod mysql;
 pub mod npc;
 #[cfg(feature = "postgres")]
@@ -81,6 +82,7 @@ pub fn create_ws_module() -> Value {
 pub fn create_jwt_module() -> Value {
     jwt::create_module()
 }
+#[cfg(feature = "mysql")]
 pub fn create_mysql_module() -> Value {
     mysql::create_module()
 }
