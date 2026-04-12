@@ -210,7 +210,7 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phases 0–3 complete. Phase 4: 4.1–4.4 done, working on 4.5.**
+Current status: **All phases complete (0–4). Roadmap fully shipped.**
 
 ---
 
@@ -241,10 +241,11 @@ Unlike `--native` (raw source), `--aot` provides no source exposure and faster s
 Mutually exclusive flags via clap. Full standalone binary (no forge runtime) deferred
 to NaN-boxing milestone.
 
-### 4.5 Debugger (DAP)
+### ~~4.5 Debugger (DAP)~~ ✅ DONE (PR #21)
 
-- **What:** Implement the Debug Adapter Protocol for VS Code step-through debugging. Set breakpoints, inspect variables, step into/over/out.
-- **Impact:** Medium — critical for complex program development. Builds on source spans (1.5) and LSP infrastructure.
+`forge dap` starts a DAP server over stdio. Supports breakpoints, step over/in/out,
+continue, pause, variable inspection, call stack traces. Output captured via sink
+to prevent stdout corruption. Thread-safe shared seq counter.
 
 ### Order of attack
 
