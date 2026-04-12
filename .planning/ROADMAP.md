@@ -378,6 +378,6 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 ### Phase 7E — Distribution & Real-World Readiness
 
-- [ ] 7E.1 Add curl-pipe-sh installer — `curl -fsSL https://forge-lang.dev/install | sh` for Linux/macOS. Detects arch, downloads release binary, installs to `/usr/local/bin`.
+- [x] 7E.1 Add curl-pipe-sh installer — already exists at `install.sh` with OS/arch detection, version resolution, PATH setup, and fallback instructions.
 - [ ] 7E.2 Add `os` and `path` stdlib modules — hostname, platform, pid, arch, path.normalize, path.resolve, path.relative, path.is_absolute, path.separator. Table-stakes for real programs.
 - [ ] 7E.3 VS Code extension with TextMate grammar — proper syntax highlighting, snippets, debugger launch config. The LSP exists but has no extension wrapper for marketplace distribution.
