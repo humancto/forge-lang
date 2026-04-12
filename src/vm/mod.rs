@@ -1367,6 +1367,210 @@ mod jit_tests {
         assert!(result.is_err());
     }
 
+    // ----- And/Or logical semantics -----
+
+    #[test]
+    fn jit_logical_and() {
+        // 2 && 3 should produce 1 (true), not 2 (bitwise)
+        let out = run_jit_function("fn test(a, b) { return a && b }\nprintln(test(2, 3))");
+        assert_eq!(out, vec!["1"]);
+    }
+
+    #[test]
+    fn jit_logical_and_falsy() {
+        let out = run_jit_function("fn test(a, b) { return a && b }\nprintln(test(0, 3))");
+        assert_eq!(out, vec!["0"]);
+    }
+
+    #[test]
+    fn jit_logical_or() {
+        // 2 || 0 should produce 1 (true), not 2 (bitwise)
+        let out = run_jit_function("fn test(a, b) { return a || b }\nprintln(test(2, 0))");
+        assert_eq!(out, vec!["1"]);
+    }
+
+    #[test]
+    fn jit_logical_or_both_false() {
+        let out = run_jit_function("fn test(a, b) { return a || b }\nprintln(test(0, 0))");
+        assert_eq!(out, vec!["0"]);
+    }
+
+    #[test]
+    fn jit_logical_not() {
+        let out = run_jit_function("fn test(x) { return !x }\nprintln(test(0))\nprintln(test(42))");
+        assert_eq!(out, vec!["1", "0"]);
+    }
+
+    // ----- Multi-argument functions (4+) -----
+
+    #[test]
+    fn jit_four_args() {
+        let out = run_jit_function(
+            "fn sum4(a, b, c, d) { return a + b + c + d }\nprintln(sum4(1, 2, 3, 4))",
+        );
+        assert_eq!(out, vec!["10"]);
+    }
+
+    #[test]
+    fn jit_five_args() {
+        let out = run_jit_function(
+            "fn sum5(a, b, c, d, e) { return a + b + c + d + e }\nprintln(sum5(1, 2, 3, 4, 5))",
+        );
+        assert_eq!(out, vec!["15"]);
+    }
+
+    #[test]
+    fn jit_six_args() {
+        let out = run_jit_function(
+            "fn sum6(a, b, c, d, e, f) { return a + b + c + d + e + f }\nprintln(sum6(1, 2, 3, 4, 5, 6))",
+        );
+        assert_eq!(out, vec!["21"]);
+    }
+
+    #[test]
+    fn jit_four_args_float() {
+        let out = run_jit_function(
+            "fn sum4f(a, b, c, d) { return a + b + c + d + 0.5 }\nprintln(sum4f(1, 2, 3, 4))",
+        );
+        assert_eq!(out, vec!["10.5"]);
+    }
+
+    // ----- Float operations -----
+
+    #[test]
+    fn jit_float_division() {
+        // Use 0.0 to force float mode in type analysis
+        let out =
+            run_jit_function("fn fdiv(a, b) { return (a + 0.0) / b }\nprintln(fdiv(7.0, 2.0))");
+        assert_eq!(out, vec!["3.5"]);
+    }
+
+    #[test]
+    fn jit_float_modulo() {
+        let out =
+            run_jit_function("fn fmod(a, b) { return (a + 0.0) % b }\nprintln(fmod(7.5, 2.0))");
+        assert_eq!(out, vec!["1.5"]);
+    }
+
+    #[test]
+    fn jit_float_comparison() {
+        let out = run_jit_function(
+            "fn fmax(a, b) { if a > b + 0.0 { return a } return b }\nprintln(fmax(1.5, 2.5))\nprintln(fmax(3.5, 0.5))",
+        );
+        assert_eq!(out, vec!["2.5", "3.5"]);
+    }
+
+    #[test]
+    fn jit_float_equality() {
+        let out = run_jit_function(
+            "fn feq(a, b) { return a + 0.0 == b }\nprintln(feq(1.5, 1.5))\nprintln(feq(1.5, 2.5))",
+        );
+        assert_eq!(out, vec!["1", "0"]);
+    }
+
+    #[test]
+    fn jit_float_and_or() {
+        // Use 0.0 constant to force float mode
+        let out = run_jit_function(
+            "fn fand(a, b) { return (a + 0.0) && (b + 0.0) }\nfn foor(a, b) { return (a + 0.0) || (b + 0.0) }\nprintln(fand(1.5, 2.5))\nprintln(fand(0.0, 2.5))\nprintln(foor(0.0, 0.0))\nprintln(foor(0.0, 1.5))",
+        );
+        assert_eq!(out, vec!["1", "0", "0", "1"]);
+    }
+
+    #[test]
+    fn jit_mixed_int_float_args() {
+        // When function has float constants, all args are promoted to f64
+        let out = run_jit_function("fn scale(x) { return x * 2.5 }\nprintln(scale(4))");
+        assert_eq!(out, vec!["10"]);
+    }
+
+    // ----- Recursive + complex -----
+
+    #[test]
+    fn jit_fib_30() {
+        let out = run_jit_function(
+            "fn fib(n) { if n <= 1 { return n } return fib(n - 1) + fib(n - 2) }\nprintln(fib(30))",
+        );
+        assert_eq!(out, vec!["832040"]);
+    }
+
+    #[test]
+    fn jit_gcd() {
+        let out = run_jit_function(
+            "fn gcd(a, b) { if b == 0 { return a } return gcd(b, a % b) }\nprintln(gcd(48, 18))",
+        );
+        assert_eq!(out, vec!["6"]);
+    }
+
+    #[test]
+    fn jit_power() {
+        let out = run_jit_function(
+            "fn pow_rec(base, exp) { if exp == 0 { return 1 } return base * pow_rec(base, exp - 1) }\nprintln(pow_rec(2, 10))",
+        );
+        assert_eq!(out, vec!["1024"]);
+    }
+
+    #[test]
+    fn jit_collatz_steps() {
+        let out = run_jit_function(
+            "fn collatz(n) { if n == 1 { return 0 } if n % 2 == 0 { return 1 + collatz(n / 2) } return 1 + collatz(3 * n + 1) }\nprintln(collatz(27))",
+        );
+        assert_eq!(out, vec!["111"]);
+    }
+
+    #[test]
+    fn jit_nested_conditionals() {
+        let out = run_jit_function(
+            "fn classify(n) { if n < 0 { return -1 } if n == 0 { return 0 } return 1 }\nprintln(classify(-5))\nprintln(classify(0))\nprintln(classify(42))",
+        );
+        assert_eq!(out, vec!["-1", "0", "1"]);
+    }
+
+    #[test]
+    fn jit_while_loop_countdown() {
+        let out = run_jit_function(
+            "fn countdown(n) { let mut total = 0\nwhile n > 0 { total = total + n\nn = n - 1 }\nreturn total }\nprintln(countdown(10))",
+        );
+        assert_eq!(out, vec!["55"]);
+    }
+
+    #[test]
+    fn jit_boolean_chain() {
+        // Test chaining logical operators
+        let out = run_jit_function(
+            "fn test(a, b, c) { return a && b && c }\nprintln(test(1, 1, 1))\nprintln(test(1, 0, 1))",
+        );
+        assert_eq!(out, vec!["1", "0"]);
+    }
+
+    #[test]
+    fn jit_all_comparisons() {
+        let out = run_jit_function(
+            "fn cmp(a, b) { \
+            if a == b { return 1 } \
+            if a != b { return 2 } \
+            return 0 }\n\
+            println(cmp(5, 5))\n\
+            println(cmp(5, 3))",
+        );
+        assert_eq!(out, vec!["1", "2"]);
+    }
+
+    #[test]
+    fn jit_lte_gte() {
+        let out = run_jit_function(
+            "fn test_lte(a, b) { return a <= b }\n\
+            fn test_gte(a, b) { return a >= b }\n\
+            println(test_lte(3, 5))\n\
+            println(test_lte(5, 5))\n\
+            println(test_lte(7, 5))\n\
+            println(test_gte(3, 5))\n\
+            println(test_gte(5, 5))\n\
+            println(test_gte(7, 5))",
+        );
+        assert_eq!(out, vec!["1", "1", "0", "0", "1", "1"]);
+    }
+
     // ----- VMError stack trace tests -----
     //
     // Before this work the compiler emitted every instruction with line=0,

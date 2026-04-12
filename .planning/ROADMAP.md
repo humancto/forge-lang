@@ -172,10 +172,13 @@ Plus GenZ debug kit (sus, bruh, bet, no_cap, ick) and execution helpers (cook, y
 
 - **What:** These are runtime features (cron + file watcher). Currently rejected by the compiler. Implementing them requires the async runtime from 3.1.
 
-### 3.6 JIT expansion
+### ~~3.6 JIT expansion~~ ✅ DONE (PR #13)
 
-- **What:** Extend JIT beyond integer loops. Float arithmetic, string operations, function calls. This is Cranelift IR work in `src/vm/jit/ir_builder.rs`.
-- **Note:** Only valuable after VM parity is solid. JIT is a performance optimization on top of a working VM.
+Fixed And/Or from bitwise to logical semantics (result is 0/1, not the raw operand value).
+Extended JIT dispatch from max 3 arguments to 8 for both integer and float functions.
+24 new tests covering logical operators, multi-arg functions, float operations, recursive
+algorithms (fib(30), GCD, Collatz), and comparison operators. String operations and
+inter-function calls deferred — requires NaN-boxing runtime (Milestone 2).
 
 ### Order of attack
 
@@ -198,4 +201,4 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 3 — items 3.2-3.4 complete. Remaining: 3.1 (async VM), 3.5 (schedule/watch), 3.6 (JIT expansion). Phase 2 item 2.4 (publish) deferred.**
+Current status: **Phase 3 — items 3.2-3.4, 3.6 complete. Remaining: 3.1 (async VM), 3.5 (schedule/watch). Phase 2 item 2.4 (publish) deferred.**
