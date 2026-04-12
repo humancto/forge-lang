@@ -6,5 +6,8 @@ fn fib(n) {
     return fib(n - 1) + fib(n - 2)
 }
 
+let start = time.elapsed()
 let result = fib(30)
+let elapsed = time.elapsed() - start
 println("fib(30) = {result}")
+println("Time: {elapsed}ms")
