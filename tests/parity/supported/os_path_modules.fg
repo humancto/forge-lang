@@ -1,0 +1,4 @@
+// expect: [src/main.rs, /, main.rs, .rs, src, false]
+
+let p = path.join("src", "main.rs")
+[p, path.separator, path.basename(p), path.extname(p), path.dirname(p), path.is_absolute(p)]
