@@ -210,7 +210,7 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 3 complete. Phase 2 complete. Starting Phase 4.**
+Current status: **Phases 0–3 complete. Phase 4: 4.1–4.4 done, working on 4.5.**
 
 ---
 
@@ -218,27 +218,28 @@ Current status: **Phase 3 complete. Phase 2 complete. Starting Phase 4.**
 
 **Goal:** Expand Forge from a capable scripting language into a production-grade development platform.
 
-### 4.1 VM as default engine
+### ~~4.1 VM as default engine~~ ✅ DONE (PR #17)
 
-- **What:** Flip the default execution engine from interpreter to VM. Phase 3 made the VM feature-complete (spawn/await, schedule/watch, try/catch, destructuring, full stdlib). Remaining gaps: ask/must/freeze expressions, decorator-driven server routes.
-- **Impact:** Very high — users get faster execution without `--vm` flag. The interpreter becomes the fallback for features the VM doesn't support.
-- **Prerequisite:** Audit remaining VM incompatibilities, ensure all examples pass under `--vm`.
+VM is now the default execution engine. Added Must/Ask/Freeze opcodes. `--interp` flag
+for fallback. Auto-detects VM-incompatible features (decorators) and falls back gracefully.
 
-### 4.2 Cross-file LSP
+### ~~4.2 Cross-file LSP~~ ✅ DONE (PR #18)
 
-- **What:** Extend go-to-definition and find-references to work across files. Currently single-file only. Requires building a project-wide symbol index from `forge.toml` or workspace root.
-- **Impact:** High — transformative for multi-file projects. Currently the #1 LSP limitation.
+Go-to-definition and find-references now follow imports across files. Uses
+`resolve_import_from` for resolution. Searches imported files and sibling .fg files.
 
-### 4.3 `forge test` coverage
+### ~~4.3 `forge test` coverage~~ ✅ DONE (PR #19)
 
-- **What:** Add code coverage reporting to `forge test`. Show line/branch coverage percentages. Could use source spans from Phase 1.5 to track executed lines.
-- **Impact:** Medium — helps adoption for serious projects, signals production-readiness.
+`forge test --coverage` reports line coverage per file with color-coded percentages.
+Interpreter tracks executed lines via HashSet. Executable line set properly handles
+multi-line comments and intersects with executed set for accurate counts.
 
-### 4.4 Native compilation (AOT)
+### ~~4.4 Native compilation (AOT)~~ ✅ DONE (PR #20)
 
-- **What:** Expand `forge build` to produce standalone binaries. The JIT (cranelift) already compiles hot functions — extend to full ahead-of-time compilation.
-- **Impact:** High — major differentiator vs other scripting languages. Enables deployment without the Forge runtime.
-- **Prerequisite:** VM as default (4.1), NaN-boxing runtime for string/object JIT support.
+`forge build --aot` compiles source to bytecode and embeds it in a native C launcher.
+Unlike `--native` (raw source), `--aot` provides no source exposure and faster startup.
+Mutually exclusive flags via clap. Full standalone binary (no forge runtime) deferred
+to NaN-boxing milestone.
 
 ### 4.5 Debugger (DAP)
 
