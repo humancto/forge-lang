@@ -1942,24 +1942,20 @@ impl VM {
 
             // ===== Collection builtins =====
             "first" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(items) = &obj.kind {
-                            return Ok(items.first().cloned().unwrap_or(Value::Null));
-                        }
-                    }
-                }
-                Ok(Value::Null)
+                let items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("first() requires an array"))?,
+                    "first() requires an array",
+                )?;
+                Ok(items.first().cloned().unwrap_or(Value::Null))
             }
             "last" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::Array(items) = &obj.kind {
-                            return Ok(items.last().cloned().unwrap_or(Value::Null));
-                        }
-                    }
-                }
-                Ok(Value::Null)
+                let items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("last() requires an array"))?,
+                    "last() requires an array",
+                )?;
+                Ok(items.last().cloned().unwrap_or(Value::Null))
             }
             "zip" => {
                 if args.len() < 2 {
@@ -2136,10 +2132,7 @@ impl VM {
                 let mut result = IndexMap::new();
                 for (k, v) in groups {
                     let arr = self.gc.alloc(ObjKind::Array(v));
-                    let key = self.alloc_string(&k);
-                    // Extract the string from the key Value
-                    let key_string = self.get_string(&key).unwrap_or_default();
-                    result.insert(key_string, Value::Obj(arr));
+                    result.insert(k, Value::Obj(arr));
                 }
                 let r = self.gc.alloc(ObjKind::Object(result));
                 Ok(Value::Obj(r))
@@ -2161,6 +2154,12 @@ impl VM {
                     (Value::Float(a), Value::Float(b)) => {
                         a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
                     }
+                    (Value::Int(a), Value::Float(b)) => (*a as f64)
+                        .partial_cmp(b)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float(a), Value::Int(b)) => a
+                        .partial_cmp(&(*b as f64))
+                        .unwrap_or(std::cmp::Ordering::Equal),
                     _ => {
                         let sa = ka.display(&self.gc);
                         let sb = kb.display(&self.gc);
@@ -2262,9 +2261,7 @@ impl VM {
                 let needle = args
                     .get(1)
                     .ok_or_else(|| VMError::new("index_of() requires 2 arguments"))?;
-                let idx = items
-                    .iter()
-                    .position(|v| v.display(&self.gc) == needle.display(&self.gc));
+                let idx = items.iter().position(|v| v.equals(needle, &self.gc));
                 Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
             }
             "last_index_of" => {
@@ -2569,11 +2566,7 @@ impl VM {
                                     }
                                     None => {
                                         let mut change = IndexMap::new();
-                                        change.insert("from".to_string(), val_a.clone());
-                                        change.insert(
-                                            "removed".to_string(),
-                                            crate::interpreter::Value::Bool(true),
-                                        );
+                                        change.insert("removed".to_string(), val_a.clone());
                                         changes.insert(
                                             key.clone(),
                                             crate::interpreter::Value::Object(change),
@@ -2587,11 +2580,7 @@ impl VM {
                                 }
                                 if !map_a.contains_key(key) {
                                     let mut change = IndexMap::new();
-                                    change.insert("to".to_string(), val_b.clone());
-                                    change.insert(
-                                        "added".to_string(),
-                                        crate::interpreter::Value::Bool(true),
-                                    );
+                                    change.insert("added".to_string(), val_b.clone());
                                     changes.insert(
                                         key.clone(),
                                         crate::interpreter::Value::Object(change),
