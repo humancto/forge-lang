@@ -480,6 +480,7 @@ impl Interpreter {
             .define("regex".to_string(), crate::stdlib::create_regex_module());
         self.env
             .define("log".to_string(), crate::stdlib::create_log_module());
+        #[cfg(feature = "postgres")]
         self.env
             .define("pg".to_string(), crate::stdlib::create_pg_module());
         self.env

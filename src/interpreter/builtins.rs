@@ -1322,6 +1322,7 @@ impl Interpreter {
             _ if name.starts_with("log.") => {
                 crate::stdlib::log::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
+            #[cfg(feature = "postgres")]
             _ if name.starts_with("pg.") => {
                 crate::stdlib::pg::call(name, args).map_err(|e| RuntimeError::new(&e))
             }

@@ -12,6 +12,7 @@ pub mod log;
 pub mod math;
 pub mod mysql;
 pub mod npc;
+#[cfg(feature = "postgres")]
 pub mod pg;
 pub mod regex_module;
 pub mod term;
@@ -49,6 +50,7 @@ pub fn create_regex_module() -> Value {
 pub fn create_log_module() -> Value {
     log::create_module()
 }
+#[cfg(feature = "postgres")]
 pub fn create_pg_module() -> Value {
     pg::create_module()
 }
