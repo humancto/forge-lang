@@ -340,13 +340,13 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 - [x] 7A.1 Fix `to_json_string()` injection — added `escape_json_string()` helper, fixed both interpreter and VM. (PR #49)
 - [x] 7A.2 Fix `unsafe impl Send for SendableVM` — promoted debug_assert to assert, enforced in release builds. (PR #50)
-- [ ] 7A.3 Fix GC root scanning — `machine.rs:1961` uses `frames.last()` to compute max register, but should scan across ALL frames via `max_by_key`. Objects in calling frames above the current frame's scan limit can be prematurely freed.
-- [ ] 7A.4 Fix parser panics — 14 `panic!` calls in `parser/parser.rs` that crash on malformed input. Convert all to `ParseError` returns.
+- [x] 7A.3 GC root scanning verified correct — `frames.last()` always gives the highest base since frames stack monotonically (+256 each). Not a bug.
+- [x] 7A.4 Parser panics verified test-only — all 14 panics are in `#[cfg(test)]` module, zero in production parser code.
 - [x] 7A.5 Fix `ask` keyword JSON injection — replaced manual escaping with `serde_json::json!()`. (PR #49)
 
 ### Phase 7B — Dead Code & Warning Elimination
 
-- [ ] 7B.1 Eliminate all compiler warnings — 19 warnings in release build: unused imports, unused variables. A production language must compile warning-free.
+- [x] 7B.1 Eliminate all compiler warnings — 19 warnings in release build: unused imports, unused variables. A production language must compile warning-free. (PR #51)
 - [ ] 7B.2 Audit and remove production `panic!` calls — 92 panics in non-test code. Convert to proper error returns. Target: zero panics reachable from user input.
 - [ ] 7B.3 Fix `serialize.rs` 38 `unwrap()` calls — bytecode deserialization that panics on malformed `.fgc` files is a DoS vector. Convert to `Result` returns.
 - [ ] 7B.4 Fix `npc` module 11 `panic!` calls — fake data generator should never crash. Convert to error returns.
