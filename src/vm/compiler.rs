@@ -95,6 +95,9 @@ impl Compiler {
     }
 
     fn alloc_reg(&mut self) -> u8 {
+        if self.next_register == 255 {
+            panic!("BUG: compiler register overflow — function uses more than 255 registers");
+        }
         let r = self.next_register;
         self.next_register += 1;
         if self.next_register > self.max_register {
