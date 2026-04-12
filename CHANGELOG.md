@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`forge publish`** — package and publish Forge projects to the local filesystem registry (`~/.forge/registry/<name>/<version>/`). Supports `--dry-run` to preview without publishing and `--registry` to specify a custom registry path. Validates manifest fields, computes SHA-256 checksums, and excludes non-source files (forge_modules, .git, tests, etc.).
+
 ## [0.6.0] - 2026-04-11
 
 ### Added
