@@ -1602,7 +1602,7 @@ impl VM {
                             Value::Obj(r) => {
                                 if let Some(obj) = self.gc.get(*r) {
                                     match &obj.kind {
-                                        ObjKind::String(s) => s.len() as i64,
+                                        ObjKind::String(s) => s.chars().count() as i64,
                                         ObjKind::Array(a) => a.len() as i64,
                                         ObjKind::Object(o) => o.len() as i64,
                                         _ => 0,
