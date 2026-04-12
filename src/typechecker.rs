@@ -9,6 +9,7 @@ use crate::parser::ast::*;
 use std::collections::HashMap;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TypeWarning {
     pub message: String,
     pub line: usize,
@@ -176,6 +177,7 @@ fn types_compatible(expected: &InferredType, actual: &InferredType) -> bool {
     false
 }
 
+#[allow(dead_code)]
 impl TypeChecker {
     pub fn new() -> Self {
         Self {
@@ -733,22 +735,6 @@ impl TypeChecker {
                 InferredType::Unknown
             }
         }
-    }
-}
-
-fn type_ann_to_string(ann: &TypeAnn) -> String {
-    match ann {
-        TypeAnn::Simple(name) => name.clone(),
-        TypeAnn::Array(inner) => format!("[{}]", type_ann_to_string(inner)),
-        TypeAnn::Generic(name, args) => {
-            let arg_strs: Vec<String> = args.iter().map(type_ann_to_string).collect();
-            format!("{}<{}>", name, arg_strs.join(", "))
-        }
-        TypeAnn::Function(params, ret) => {
-            let param_strs: Vec<String> = params.iter().map(type_ann_to_string).collect();
-            format!("({}) -> {}", param_strs.join(", "), type_ann_to_string(ret))
-        }
-        TypeAnn::Optional(inner) => format!("?{}", type_ann_to_string(inner)),
     }
 }
 

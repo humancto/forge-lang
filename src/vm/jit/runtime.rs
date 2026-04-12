@@ -96,7 +96,7 @@ pub extern "C" fn rt_print(vm_ptr: *mut VM, encoded: u64) {
 
 /// Bridge: get a global variable by constant index
 pub extern "C" fn rt_get_global(vm_ptr: *mut VM, name_idx: u64) -> u64 {
-    let vm = unsafe { &mut *vm_ptr };
+    let _vm = unsafe { &mut *vm_ptr };
     let _ = name_idx;
     encode_null()
 }

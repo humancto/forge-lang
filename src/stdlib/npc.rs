@@ -309,10 +309,6 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-pub fn call_vm(name: &str, args: Vec<Value>) -> Result<Value, String> {
-    call(name, args)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

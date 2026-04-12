@@ -8,12 +8,14 @@ pub enum RegType {
     Unknown,
 }
 
+#[allow(dead_code)]
 impl RegType {
     pub fn is_numeric(&self) -> bool {
         matches!(self, RegType::Int | RegType::Float)
     }
 }
 
+#[allow(dead_code)]
 pub struct TypeInfo {
     pub reg_types: Vec<RegType>,
     pub has_unsupported_ops: bool,

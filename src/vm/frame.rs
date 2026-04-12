@@ -58,4 +58,5 @@ impl CallFrame {
 pub const MAX_FRAMES: usize = 256;
 
 /// Maximum register count across all frames.
+#[allow(dead_code)]
 pub const MAX_REGISTERS: usize = MAX_FRAMES * 256;
