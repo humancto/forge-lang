@@ -210,7 +210,7 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **All phases complete (0–4). Roadmap fully shipped.**
+Current status: **Phase 5 in progress — expert review fixes for v0.7.1.**
 
 ---
 
@@ -254,3 +254,43 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 3. 4.3 (coverage) — low effort, high signal for adoption
 4. 4.4 (AOT) — ambitious, depends on 4.1
 5. 4.5 (debugger) — nice to have, can be done anytime
+
+---
+
+## Phase 5 — v0.7.1 Expert Review Fixes
+
+**Goal:** Resolve critical and high-priority issues identified by 5 parallel expert reviews of the v0.7.0 codebase. Full report: `.planning/v0.7.0-expert-review-report.md`
+
+### Phase 5A — Critical Fixes (blocking for production)
+
+- [x] 5A.1 Replace `transmute(op)` with safe `TryFrom<u8>` in VM dispatch (`machine.rs:1061`, `type_analysis.rs:60`, `ir_builder.rs:88`) — eliminates UB on invalid opcodes (PR #22)
+- [ ] 5A.2 Add `method_tables`, `static_methods`, `struct_defaults` to GC root scanning (`machine.rs:1940-1957`) — fixes use-after-free risk
+- [ ] 5A.3 Fix DAP stdin reader to use single `BufReader<Stdin>` (`dap/mod.rs:20,35,39`) — fixes message corruption under pipelining
+- [ ] 5A.4 Add coverage tracking in interpreter `run()` method (`interpreter/mod.rs:656-676`) — fixes systematically deflated coverage
+
+### Phase 5B — High Priority
+
+- [ ] 5B.1 Add `debug_assert!` on `SendableVM` jit_cache emptiness (`machine.rs:15`)
+- [ ] 5B.2 Hoist `Arc<Chunk>` reference outside VM dispatch loop (`machine.rs:1025`)
+- [ ] 5B.3 Lazy register allocation or reduced `MAX_REGISTERS` (`machine.rs:295`)
+- [ ] 5B.4 Add internal timing to benchmarks + fix array benchmark fairness (`benchmarks/`)
+- [ ] 5B.5 Add Rust/Go/Node.js fib(30) benchmark files for landing page verification (`benchmarks/`)
+
+### Phase 5C — Medium Priority
+
+- [ ] 5C.1 Fix `len()` to return char count not byte count for VM parity (`machine.rs:1585`, `builtins.rs:415`)
+- [ ] 5C.2 Add Object equality to VM `GcObject::equals` (`value.rs:268-276`)
+- [ ] 5C.3 Use `getenv("TMPDIR")` in AOT generated C code (`native.rs:146,266`)
+- [ ] 5C.4 Deduplicate AOT/native build functions and C templates (`native.rs:7-366`)
+- [ ] 5C.5 Improve executable-line heuristic for coverage (`testing/mod.rs:297-325`)
+- [ ] 5C.6 Key DAP breakpoints by source file (`dap/mod.rs:136-152`)
+- [ ] 5C.7 Register overflow bounds check in compiler (`compiler.rs:97-104`)
+
+### Order of attack
+
+1. 5A.1 + 5A.2 (VM critical) — most important, eliminates UB and use-after-free
+2. 5A.3 (DAP fix) — prevents user-facing crashes
+3. 5A.4 (coverage fix) — quick win, accurate numbers
+4. 5B.1-5B.3 (VM performance/safety) — polish default engine
+5. 5B.4-5B.5 (benchmarks) — defensible landing page claims
+6. 5C.\* (medium priority) — parity, AOT, coverage polish
