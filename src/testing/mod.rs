@@ -9,7 +9,7 @@ use std::time::Instant;
 #[cfg(test)]
 pub mod parity;
 
-pub fn run_tests(test_dir: &str, filter: Option<&str>) {
+pub fn run_tests(test_dir: &str, filter: Option<&str>, coverage: bool) {
     let dir = Path::new(test_dir);
     if !dir.exists() {
         eprintln!(
@@ -26,6 +26,7 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
     let mut passed = 0;
     let mut failed = 0;
     let mut skipped = 0;
+    let mut coverage_data: Vec<(String, usize, usize)> = Vec::new();
 
     println!();
 
@@ -112,6 +113,9 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
 
         // Run the full program first to define all functions
         let mut interpreter = Interpreter::new();
+        if coverage {
+            interpreter.coverage = Some(std::collections::HashSet::new());
+        }
         if let Err(e) = interpreter.run(&program) {
             eprintln!("    \x1B[31mERROR\x1B[0m  setup — {}", e.message);
             failed += 1;
@@ -185,6 +189,25 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
                 }
             }
         }
+        if coverage {
+            if let Some(ref cov) = interpreter.coverage {
+                let executable_lines = source
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| {
+                        let trimmed = line.trim();
+                        !trimmed.is_empty()
+                            && !trimmed.starts_with("//")
+                            && !trimmed.starts_with("/*")
+                            && trimmed != "}"
+                            && trimmed != "{"
+                    })
+                    .count();
+                let executed = cov.len();
+                coverage_data.push((path_str.clone(), executable_lines, executed));
+            }
+        }
+
         println!();
     }
 
@@ -198,6 +221,51 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
         passed, failed, skip_msg, total
     );
     println!();
+
+    if coverage && !coverage_data.is_empty() {
+        println!("  \x1B[1mCoverage\x1B[0m");
+        println!();
+        let mut total_executable = 0usize;
+        let mut total_executed = 0usize;
+        for (file, executable, executed) in &coverage_data {
+            total_executable += executable;
+            total_executed += executed;
+            let pct = if *executable > 0 {
+                (*executed as f64 / *executable as f64 * 100.0).min(100.0)
+            } else {
+                100.0
+            };
+            let color = if pct >= 80.0 {
+                "\x1B[32m"
+            } else if pct >= 50.0 {
+                "\x1B[33m"
+            } else {
+                "\x1B[31m"
+            };
+            println!(
+                "    {}{:5.1}%\x1B[0m  {} ({}/{})",
+                color, pct, file, executed, executable
+            );
+        }
+        let overall = if total_executable > 0 {
+            (total_executed as f64 / total_executable as f64 * 100.0).min(100.0)
+        } else {
+            100.0
+        };
+        println!();
+        let overall_color = if overall >= 80.0 {
+            "\x1B[32m"
+        } else if overall >= 50.0 {
+            "\x1B[33m"
+        } else {
+            "\x1B[31m"
+        };
+        println!(
+            "  {}Overall: {:.1}%\x1B[0m ({}/{})",
+            overall_color, overall, total_executed, total_executable
+        );
+        println!();
+    }
 
     if failed > 0 {
         std::process::exit(1);
