@@ -1630,8 +1630,8 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 BinOp::Gt => OpCode::Gt,
                 BinOp::LtEq => OpCode::LtEq,
                 BinOp::GtEq => OpCode::GtEq,
-                BinOp::And => OpCode::And,
-                BinOp::Or => OpCode::Or,
+                // And/Or handled above via short-circuit jumps
+                BinOp::And | BinOp::Or => unreachable!(),
             };
             c.emit(encode_abc(opcode, dst, lr, rr), 0);
             c.free_to(saved);
