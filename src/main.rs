@@ -12,6 +12,7 @@ mod manifest;
 mod native;
 mod package;
 mod parser;
+mod publish;
 mod repl;
 mod runtime;
 mod scaffold;
@@ -136,6 +137,15 @@ enum Command {
     Install {
         /// Git URL or local path
         source: String,
+    },
+    /// Publish the current project to the local registry
+    Publish {
+        /// Show what would be packaged without publishing
+        #[arg(long)]
+        dry_run: bool,
+        /// Custom registry path (defaults to ~/.forge/registry/)
+        #[arg(long)]
+        registry: Option<String>,
     },
     /// Start the Language Server Protocol server
     Lsp,
@@ -276,6 +286,9 @@ async fn main() {
         }
         Some(Command::Install { source }) => {
             package::install(&source);
+        }
+        Some(Command::Publish { dry_run, registry }) => {
+            publish::publish(dry_run, registry.as_deref());
         }
         Some(Command::Lsp) => {
             lsp::run_lsp();

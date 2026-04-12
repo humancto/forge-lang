@@ -173,7 +173,24 @@ fn default_registry_roots() -> Vec<PathBuf> {
         roots.extend(env::split_paths(&paths));
     }
     roots.push(PathBuf::from(".forge/registry"));
+    // Global user registry (~/.forge/registry/)
+    if let Ok(home) = env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
+        roots.push(PathBuf::from(home).join(".forge").join("registry"));
+    }
     roots
+}
+
+/// Check if a package exists in any of the given registry roots.
+/// Used by `forge publish` to verify the published package is findable.
+pub fn find_in_registry(name: &str, version: &str, roots: &[PathBuf]) -> Option<PathBuf> {
+    for root in roots {
+        for candidate in registry_candidates(root, name, version) {
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn load_lockfile_from(path: &Path) -> Option<Lockfile> {
