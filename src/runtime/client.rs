@@ -45,7 +45,7 @@ pub struct ValidatedUrl {
 /// `SocketAddr` when the host is a DNS name. Use this before constructing a
 /// client so the pinning can be installed via [`build_client`].
 pub fn validate_url_full(raw: &str) -> Result<ValidatedUrl, String> {
-    let deny_private = std::env::var("FORGE_HTTP_DENY_PRIVATE").as_deref() == Ok("1");
+    let deny_private = std::env::var("FORGE_HTTP_ALLOW_PRIVATE").as_deref() != Ok("1");
     validate_url_full_with(raw, deny_private)
 }
 
@@ -83,7 +83,7 @@ pub fn validate_url_full_with(raw: &str, deny_private: bool) -> Result<Validated
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         if deny_private && ip_is_private(&ip) {
             return Err(format!(
-                "url host '{}' is a private/loopback address (FORGE_HTTP_DENY_PRIVATE=1)",
+                "url host '{}' is a private/loopback address (set FORGE_HTTP_ALLOW_PRIVATE=1 to allow)",
                 host
             ));
         }
@@ -104,7 +104,7 @@ pub fn validate_url_full_with(raw: &str, deny_private: bool) -> Result<Validated
         for addr in &resolved {
             if ip_is_private(&addr.ip()) {
                 return Err(format!(
-                    "url host '{}' resolves to a private/loopback address (FORGE_HTTP_DENY_PRIVATE=1)",
+                    "url host '{}' resolves to a private/loopback address (set FORGE_HTTP_ALLOW_PRIVATE=1 to allow)",
                     host
                 ));
             }
@@ -170,7 +170,7 @@ fn ip_is_private(ip: &std::net::IpAddr) -> bool {
 /// through reqwest's normal resolver.
 ///
 /// The redirect policy is custom rather than `Policy::limited` so that every
-/// redirect target is re-checked for scheme and (if `FORGE_HTTP_DENY_PRIVATE=1`)
+/// redirect target is re-checked for scheme and (unless `FORGE_HTTP_ALLOW_PRIVATE=1`)
 /// for private-address resolution. A malicious server that 302s to
 /// `http://127.0.0.1/` or `http://169.254.169.254/` gets rejected at the
 /// client level, not discovered at the TCP layer.
@@ -185,7 +185,7 @@ pub fn build_client(
     }
     // Capture the env var *now* so the policy's behaviour matches the
     // state at build time rather than shifting mid-request.
-    let deny_private = std::env::var("FORGE_HTTP_DENY_PRIVATE").as_deref() == Ok("1");
+    let deny_private = std::env::var("FORGE_HTTP_ALLOW_PRIVATE").as_deref() != Ok("1");
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= max_redirects {
             return attempt.error(format!("too many redirects (cap {})", max_redirects));
@@ -414,7 +414,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// Process-wide guard for tests that mutate `FORGE_HTTP_DENY_PRIVATE`.
+    /// Process-wide guard for tests that mutate `FORGE_HTTP_ALLOW_PRIVATE`.
     /// Cargo runs unit tests in parallel by default, so any test that
     /// reads or writes that env var must hold this lock to avoid races.
     /// Recover from poisoning by reusing the inner guard — a poisoned
@@ -554,7 +554,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_aborts_on_redirect_loop_default_cap() {
         let _guard = env_lock();
-        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        std::env::set_var("FORGE_HTTP_ALLOW_PRIVATE", "1");
         let addr = spawn_redirect_loop_server().await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, None, None).await;
@@ -574,7 +574,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_aborts_on_redirect_loop_custom_cap() {
         let _guard = env_lock();
-        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        std::env::set_var("FORGE_HTTP_ALLOW_PRIVATE", "1");
         let addr = spawn_redirect_loop_server().await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, Some(2), None).await;
@@ -588,7 +588,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_aborts_on_oversized_streamed_body() {
         let _guard = env_lock();
-        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        std::env::set_var("FORGE_HTTP_ALLOW_PRIVATE", "1");
         // Server streams 4 MiB; cap at 1 MiB.
         let addr = spawn_giant_body_server(4 * 1024 * 1024).await;
         let url = format!("http://{}/", addr);
@@ -605,7 +605,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_aborts_on_advertised_oversized_content_length() {
         let _guard = env_lock();
-        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        std::env::set_var("FORGE_HTTP_ALLOW_PRIVATE", "1");
         // Content-Length says 50 MB but cap is 1 MB. Should fast-fail.
         let addr = spawn_advertised_giant_server(50 * 1024 * 1024).await;
         let url = format!("http://{}/", addr);
@@ -626,7 +626,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_succeeds_with_small_body_under_cap() {
         let _guard = env_lock();
-        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        std::env::set_var("FORGE_HTTP_ALLOW_PRIVATE", "1");
         let addr = spawn_ok_server("hello world").await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, None, Some(1024 * 1024)).await;
@@ -724,7 +724,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_does_not_follow_redirect_to_file_scheme() {
         let _guard = env_lock();
-        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        std::env::set_var("FORGE_HTTP_ALLOW_PRIVATE", "1");
         // A 302 to file:///etc/passwd must NOT be followed. reqwest itself
         // refuses to dispatch a request to an unsupported scheme, so the
         // observable outcome is that we get the 302 back as the *final*
@@ -761,7 +761,7 @@ mod tests {
         // unsupported url scheme" rather than a silent stop — a clearer
         // signal when users hit unexpected redirects.
         let _guard = env_lock();
-        std::env::remove_var("FORGE_HTTP_DENY_PRIVATE");
+        std::env::set_var("FORGE_HTTP_ALLOW_PRIVATE", "1");
         let addr = spawn_redirect_to_server("ftp://example.com/".to_string()).await;
         let url = format!("http://{}/", addr);
         let result = fetch(&url, "GET", None, None, None, None, None).await;
