@@ -292,7 +292,7 @@ impl std::fmt::Display for VMError {
 impl VM {
     pub fn new() -> Self {
         let mut vm = Self {
-            registers: vec![Value::Null; MAX_REGISTERS],
+            registers: vec![Value::Null; 256],
             frames: Vec::with_capacity(MAX_FRAMES),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
@@ -311,7 +311,7 @@ impl VM {
 
     pub fn with_profiling() -> Self {
         let mut vm = Self {
-            registers: vec![Value::Null; MAX_REGISTERS],
+            registers: vec![Value::Null; 256],
             frames: Vec::with_capacity(MAX_FRAMES),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
@@ -940,12 +940,19 @@ impl VM {
         };
         let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
         let new_base = self.frames.last().map(|f| f.base + 256).unwrap_or(0);
-        if new_base + 256 > MAX_REGISTERS {
+        if self.frames.len() >= MAX_FRAMES {
             return Err(VMError::new("stack overflow"));
         }
+        self.ensure_registers(new_base + 256);
         self.frames.push(CallFrame::new(closure_ref, new_base));
         let boundary = self.frames.len() - 1;
         self.run_until(boundary)
+    }
+
+    fn ensure_registers(&mut self, needed: usize) {
+        if needed > self.registers.len() {
+            self.registers.resize(needed, Value::Null);
+        }
     }
 
     fn earliest_expired_timeout(&self) -> Option<(usize, TimeoutGuard)> {
@@ -2087,9 +2094,10 @@ impl VM {
 
                         let arity = chunk.arity as usize;
                         let new_base = self.frames.last().map(|f| f.base + 256).unwrap_or(0);
-                        if new_base + 256 > MAX_REGISTERS {
+                        if self.frames.len() >= MAX_FRAMES {
                             return Err(VMError::new("stack overflow"));
                         }
+                        self.ensure_registers(new_base + 256);
 
                         for (i, arg) in args.iter().enumerate() {
                             if i < arity {
