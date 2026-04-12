@@ -1,4 +1,6 @@
 // Benchmark: Array operations - create 100,000 items, map, filter, reduce
+let start = time.elapsed()
+
 let mut arr = []
 let mut i = 0
 while i < 100000 {
@@ -17,4 +19,6 @@ println("Filter done, length = {len(evens)}")
 
 // Reduce: sum
 let total = reduce(evens, 0, fn(acc, x) { return acc + x })
+let elapsed = time.elapsed() - start
 println("Reduce sum = {total}")
+println("Time: {elapsed}ms")

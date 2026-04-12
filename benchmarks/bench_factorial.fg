@@ -6,11 +6,14 @@ fn factorial(n) {
     return n * factorial(n - 1)
 }
 
+let start = time.elapsed()
 let mut i = 0
 let mut result = 0
 while i < 10000 {
     result = factorial(20)
     i = i + 1
 }
+let elapsed = time.elapsed() - start
 println("factorial(20) = {result}")
 println("Computed 10000 times")
+println("Time: {elapsed}ms")

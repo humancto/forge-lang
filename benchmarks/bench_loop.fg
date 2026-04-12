@@ -1,8 +1,11 @@
 // Benchmark: Loop - sum 1 to 1,000,000
+let start = time.elapsed()
 let mut total = 0
 let mut i = 1
 while i <= 1000000 {
     total = total + i
     i = i + 1
 }
+let elapsed = time.elapsed() - start
 println("Sum = {total}")
+println("Time: {elapsed}ms")
