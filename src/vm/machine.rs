@@ -857,6 +857,10 @@ impl VM {
             child.struct_defaults.insert(name.clone(), child_defaults);
         }
 
+        debug_assert!(
+            child.jit_cache.is_empty(),
+            "BUG: SendableVM must have empty jit_cache to be safely Send"
+        );
         SendableVM(child)
     }
 
