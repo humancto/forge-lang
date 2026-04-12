@@ -362,7 +362,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 ### Phase 7D — Security Hardening
 
-- [ ] 7D.1 Audit all `format!("\"{}\"", ...)` patterns — find and fix every manual JSON string construction across the codebase.
+- [x] 7D.1 Audit all `format!("\"{}\"", ...)` patterns — find and fix every manual JSON string construction across the codebase. (PR #56)
 - [ ] 7D.2 Add `--allow-run` permission flag — `sh()`/`shell()`/`run_command()` execute arbitrary commands with no sandboxing. Add Deno-style permission model.
 - [ ] 7D.3 Default SSRF protection on — `FORGE_HTTP_DENY_PRIVATE` should be the default; opt out with `FORGE_HTTP_ALLOW_PRIVATE=1`.
 
