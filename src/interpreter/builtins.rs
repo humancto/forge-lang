@@ -25,7 +25,7 @@ impl Interpreter {
                 Ok(Value::Null)
             }
             "len" => match args.first() {
-                Some(Value::String(s)) => Ok(Value::Int(s.len() as i64)),
+                Some(Value::String(s)) => Ok(Value::Int(s.chars().count() as i64)),
                 Some(Value::Array(a)) => Ok(Value::Int(a.len() as i64)),
                 Some(Value::Object(o)) => Ok(Value::Int(o.len() as i64)),
                 _ => Err(RuntimeError::new("len() requires string, array, or object")),
@@ -996,7 +996,7 @@ impl Interpreter {
             "count" => match (args.first(), args.get(1)) {
                 (Some(Value::String(s)), Some(Value::String(substr))) => {
                     if substr.is_empty() {
-                        return Ok(Value::Int((s.len() + 1) as i64));
+                        return Ok(Value::Int((s.chars().count() + 1) as i64));
                     }
                     Ok(Value::Int(s.matches(substr.as_str()).count() as i64))
                 }
