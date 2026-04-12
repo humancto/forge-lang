@@ -210,7 +210,7 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 5 complete — all expert review fixes shipped (PRs #22-37). Ready for v0.7.1 release.**
+Current status: **Phase 6 in progress — v0.7.1 expert audit follow-up.**
 
 ---
 
@@ -294,3 +294,38 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 4. 5B.1-5B.3 (VM performance/safety) — polish default engine
 5. 5B.4-5B.5 (benchmarks) — defensible landing page claims
 6. 5C.\* (medium priority) — parity, AOT, coverage polish
+
+---
+
+## Phase 6 — v0.7.2 Audit Follow-Up
+
+**Goal:** Fix critical bugs, eliminate memory leaks, reduce build bloat, and pay down the highest-impact technical debt identified by the v0.7.1 full-codebase expert audit.
+
+### Phase 6A — Critical Bugs
+
+- [ ] 6A.1 Fix interpreter `len()` byte-vs-char parity bug — `interpreter/builtins.rs:28` uses `s.len()` (byte count) while VM uses `s.chars().count()` (char count). Non-ASCII strings return different values between backends.
+- [ ] 6A.2 Fix `mem::forget(jit)` unbounded memory leak — `machine.rs:2038` leaks every JIT-compiled module. Store JIT modules in a managed `Vec<JitCompiler>` on the VM so they drop with it.
+- [ ] 6A.3 Fix And/Or short-circuit evaluation in VM — `machine.rs:1176-1184` evaluates both operands eagerly. Compile `&&`/`||` to `JumpIfFalse`/`JumpIfTrue` + conditional right-operand evaluation. Current behavior diverges from interpreter for side-effectful expressions.
+
+### Phase 6B — Build & Binary Size
+
+- [ ] 6B.1 Feature-gate Cranelift JIT behind `jit` cargo feature — 5 cranelift crates add significant compile time. Default off, enable with `--features jit`.
+- [ ] 6B.2 Feature-gate PostgreSQL behind `postgres` cargo feature — `tokio-postgres`, `tokio-postgres-rustls`, `rustls`, `webpki-roots`.
+- [ ] 6B.3 Feature-gate MySQL behind `mysql` cargo feature — `mysql_async`.
+- [ ] 6B.4 Trim tokio features from `"full"` to `["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "fs"]`.
+
+### Phase 6C — Code Health
+
+- [ ] 6C.1 Split `interpreter/mod.rs` (7,905 lines) — extract ~359 test functions to `interpreter/tests.rs`, reducing mod.rs to ~5,000 lines.
+- [ ] 6C.2 Extract VM tests from `vm/mod.rs` (2,044 lines, ~1,700 are tests) to `vm/tests.rs`.
+- [ ] 6C.3 Make VM `Value` implement `Copy` — all variants (`i64`, `f64`, `bool`, `()`, `GcRef(usize)`) are Copy-compatible. Eliminates thousands of unnecessary clone calls in the dispatch hot path.
+- [ ] 6C.4 Replace string-based native function dispatch with enum/index — `machine.rs:2116` clones function name string on every native call. Use interned index for zero-cost dispatch.
+
+### Order of attack
+
+1. 6A.1 (len parity) — 5-minute fix, live correctness bug
+2. 6A.2 (JIT leak) — unbounded memory leak in default engine
+3. 6A.3 (short-circuit) — correctness divergence between backends
+4. 6B.1-6B.4 (feature gates) — faster builds, smaller binaries
+5. 6C.1-6C.2 (file splits) — maintainability
+6. 6C.3-6C.4 (VM performance) — hot path optimization
