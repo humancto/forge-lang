@@ -1877,7 +1877,7 @@ impl Interpreter {
                         )))
                     }
                     Value::String(s) => match field.as_str() {
-                        "len" => Ok(Value::Int(s.len() as i64)),
+                        "len" => Ok(Value::Int(s.chars().count() as i64)),
                         "upper" => Ok(Value::String(s.to_uppercase())),
                         "lower" => Ok(Value::String(s.to_lowercase())),
                         "trim" => Ok(Value::String(s.trim().to_string())),
@@ -2177,7 +2177,7 @@ impl Interpreter {
                                     return Ok(Value::String(s.trim_start().to_string()))
                                 }
                                 "trim_end" => return Ok(Value::String(s.trim_end().to_string())),
-                                "len" => return Ok(Value::Int(s.len() as i64)),
+                                "len" => return Ok(Value::Int(s.chars().count() as i64)),
                                 "is_empty" => return Ok(Value::Bool(s.is_empty())),
                                 "is_numeric" => {
                                     return Ok(Value::Bool(

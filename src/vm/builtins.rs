@@ -2386,7 +2386,7 @@ impl VM {
                 let s = self.get_string_arg(&args, 0)?;
                 let substr = self.get_string_arg(&args, 1)?;
                 if substr.is_empty() {
-                    return Ok(Value::Int((s.len() + 1) as i64));
+                    return Ok(Value::Int((s.chars().count() + 1) as i64));
                 }
                 Ok(Value::Int(s.matches(&*substr).count() as i64))
             }
