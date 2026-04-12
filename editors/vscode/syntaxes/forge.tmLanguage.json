@@ -67,7 +67,7 @@
       "name": "support.type.forge"
     },
     "builtins": {
-      "match": "\\b(println|print|len|type|typeof|str|int|float|push|pop|map|filter|reduce|sort|reverse|keys|values|contains|range|enumerate|split|join|replace|starts_with|ends_with|Ok|ok|Err|err|Some|None|is_ok|is_err|is_some|is_none|unwrap|unwrap_or|assert|assert_eq|assert_ne|assert_throws|fetch|time|uuid|exit|run_command|satisfies|sum|min_of|max_of|unique|zip|flatten|group_by|chunk|slice|partition|find|flat_map|any|all|sample|shuffle|has_key|get|pick|omit|merge|entries|from_entries|diff|lines|substring|index_of|last_index_of|pad_start|pad_end|capitalize|title|repeat_str|count|slugify|snake_case|camel_case|sh|shell|sh_lines|sh_json|sh_ok|which|cwd|cd|pipe_to|channel|send|receive|try_send|try_receive|input|sus|bruh|bet|no_cap|ick|cook|yolo|ghost|slay)\\b",
+      "match": "\\b(println|print|len|type|typeof|str|int|float|push|pop|map|filter|reduce|sort|reverse|keys|values|contains|range|enumerate|split|join|replace|starts_with|ends_with|Ok|ok|Err|err|Some|None|is_ok|is_err|is_some|is_none|unwrap|unwrap_or|assert|assert_eq|assert_ne|assert_throws|fetch|uuid|exit|run_command|satisfies|sum|min_of|max_of|unique|zip|flatten|group_by|chunk|slice|partition|find|flat_map|any|all|sample|shuffle|has_key|get|pick|omit|merge|entries|from_entries|diff|lines|substring|index_of|last_index_of|pad_start|pad_end|capitalize|title|repeat_str|count|slugify|snake_case|camel_case|sh|shell|sh_lines|sh_json|sh_ok|which|cwd|cd|pipe_to|channel|send|receive|try_send|try_receive|input|sus|bruh|bet|no_cap|ick|cook|yolo|ghost|slay)\\b",
       "name": "support.function.forge"
     },
     "modules": {
