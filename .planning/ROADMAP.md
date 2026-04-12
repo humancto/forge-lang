@@ -281,7 +281,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 - [x] 5C.1 Fix `len()` to return char count not byte count for VM parity (`machine.rs:1585`, `builtins.rs:415`) (PR #31)
 - [x] 5C.2 Add Object equality to VM `GcObject::equals` (`value.rs:268-276`) (PR #32)
 - [x] 5C.3 Use `getenv("TMPDIR")` in AOT generated C code (`native.rs:146,266`) (PR #33)
-- [ ] 5C.4 Deduplicate AOT/native build functions and C templates (`native.rs:7-366`)
+- [x] 5C.4 Deduplicate AOT/native build functions and C templates (`native.rs:7-366`) (PR #34)
 - [ ] 5C.5 Improve executable-line heuristic for coverage (`testing/mod.rs:297-325`)
 - [ ] 5C.6 Key DAP breakpoints by source file (`dap/mod.rs:136-152`)
 - [ ] 5C.7 Register overflow bounds check in compiler (`compiler.rs:97-104`)
