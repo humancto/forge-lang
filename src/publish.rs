@@ -1,3 +1,4 @@
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{self, Manifest};
@@ -18,24 +19,24 @@ const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &["*.lock", "*.tar.gz", "*.secret*"];
 
 /// Entry point from CLI — uses CWD as project directory.
 pub fn publish(dry_run: bool, registry_override: Option<&str>) {
-    publish_from(Path::new("."), dry_run, registry_override);
-}
-
-/// Publish a project from a given directory to the registry.
-fn publish_from(project_dir: &Path, dry_run: bool, registry_override: Option<&str>) {
-    let manifest_path = project_dir.join("forge.toml");
-    let manifest = match manifest::load_manifest_from(&manifest_path) {
-        Some(m) => m,
-        None => {
-            eprintln!("Error: no forge.toml found in {}", project_dir.display());
-            std::process::exit(1);
-        }
-    };
-
-    if let Err(e) = validate_manifest(&manifest) {
+    if let Err(e) = publish_from(Path::new("."), dry_run, registry_override) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
+}
+
+/// Publish a project from a given directory to the registry.
+/// Returns Ok(()) on success or Err with a description on failure.
+pub fn publish_from(
+    project_dir: &Path,
+    dry_run: bool,
+    registry_override: Option<&str>,
+) -> Result<(), String> {
+    let manifest_path = project_dir.join("forge.toml");
+    let manifest = manifest::load_manifest_from(&manifest_path)
+        .ok_or_else(|| format!("no forge.toml found in {}", project_dir.display()))?;
+
+    validate_manifest(&manifest)?;
 
     let name = &manifest.project.name;
     let version = &manifest.project.version;
@@ -51,8 +52,7 @@ fn publish_from(project_dir: &Path, dry_run: bool, registry_override: Option<&st
     let files = collect_files(project_dir);
 
     if files.is_empty() {
-        eprintln!("Error: no .fg files found to publish");
-        std::process::exit(1);
+        return Err("no .fg files found to publish".into());
     }
 
     if dry_run {
@@ -62,7 +62,7 @@ fn publish_from(project_dir: &Path, dry_run: bool, registry_override: Option<&st
         for f in &files {
             println!("    {}", f.display());
         }
-        return;
+        return Ok(());
     }
 
     // Warn if overwriting
@@ -71,66 +71,50 @@ fn publish_from(project_dir: &Path, dry_run: bool, registry_override: Option<&st
             "  Warning: replacing existing {}@{} in local registry",
             name, version
         );
-        if let Err(e) = std::fs::remove_dir_all(&target_dir) {
-            eprintln!("Error: failed to remove existing version: {}", e);
-            std::process::exit(1);
-        }
+        std::fs::remove_dir_all(&target_dir)
+            .map_err(|e| format!("failed to remove existing version: {}", e))?;
     }
 
     // Create registry directory
-    if let Err(e) = std::fs::create_dir_all(&target_dir) {
-        eprintln!("Error: failed to create registry directory: {}", e);
-        std::process::exit(1);
-    }
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("failed to create registry directory: {}", e))?;
 
     // Copy files and compute checksum
-    let mut hasher = Sha256::new();
+    let mut hasher = sha2::Sha256::new();
     let mut total_size: u64 = 0;
 
     for file in &files {
         let src = project_dir.join(file);
         let dest = target_dir.join(file);
         if let Some(parent) = dest.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "Error: failed to create directory {}: {}",
-                    parent.display(),
-                    e
-                );
-                std::process::exit(1);
-            }
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create directory {}: {}", parent.display(), e))?;
         }
 
-        let content = match std::fs::read(&src) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Error: failed to read {}: {}", src.display(), e);
-                std::process::exit(1);
-            }
-        };
+        let content =
+            std::fs::read(&src).map_err(|e| format!("failed to read {}: {}", src.display(), e))?;
 
         total_size += content.len() as u64;
         hasher.update(&content);
 
-        if let Err(e) = std::fs::write(&dest, &content) {
-            eprintln!("Error: failed to write {}: {}", dest.display(), e);
-            std::process::exit(1);
-        }
+        std::fs::write(&dest, &content)
+            .map_err(|e| format!("failed to write {}: {}", dest.display(), e))?;
     }
 
-    let checksum = hasher.finalize_hex();
+    let result = hasher.finalize();
+    let checksum = hex_encode(&result);
 
     // Write checksum file
     let checksum_content = format!("sha256:{}\n", checksum);
     if let Err(e) = std::fs::write(target_dir.join(".forge-checksum"), &checksum_content) {
-        eprintln!("Warning: failed to write checksum file: {}", e);
+        eprintln!("  Warning: failed to write checksum file: {}", e);
     }
 
     // Verify the package is findable
     let found = crate::package::find_in_registry(name, version, &[registry_root.clone()]);
     if found.is_none() {
         eprintln!(
-            "Warning: published package not found in registry at {}",
+            "  Warning: published package not found in registry at {}",
             target_dir.display()
         );
     }
@@ -147,6 +131,17 @@ fn publish_from(project_dir: &Path, dry_run: bool, registry_override: Option<&st
         }
     );
     println!("    Checksum: {}", &checksum[..16]);
+
+    Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(hex, "{:02x}", byte).expect("BUG: writing to String is infallible");
+    }
+    hex
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
@@ -163,7 +158,13 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
         return Err("project.version must be set in forge.toml".into());
     }
 
-    // Validate name: alphanumeric, hyphens, underscores only
+    // Validate name: must start with alphanumeric, then alphanumeric/hyphens/underscores
+    if !name.starts_with(|c: char| c.is_alphanumeric()) {
+        return Err(format!(
+            "project.name '{}' must start with an alphanumeric character",
+            name
+        ));
+    }
     if !name
         .chars()
         .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
@@ -174,10 +175,19 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
         ));
     }
 
-    // Validate version: no path separators
-    if version.contains('/') || version.contains('\\') || version.contains("..") {
+    // Validate version: printable ASCII, no whitespace, no path separators
+    if !version
+        .chars()
+        .all(|c| c.is_ascii_graphic() && c != '/' && c != '\\')
+    {
         return Err(format!(
             "project.version '{}' contains invalid characters",
+            version
+        ));
+    }
+    if version.contains("..") {
+        return Err(format!(
+            "project.version '{}' contains invalid path traversal",
             version
         ));
     }
@@ -207,17 +217,19 @@ fn collect_files_recursive(base: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
     };
 
     for entry in entries.flatten() {
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
+        let path = entry.path();
+
+        // Use symlink_metadata to detect symlinks before following them
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
             Err(_) => continue,
         };
 
         // Skip symlinks (security: avoid following links outside project)
-        if file_type.is_symlink() {
+        if metadata.file_type().is_symlink() {
             continue;
         }
 
-        let path = entry.path();
         let relative = path.strip_prefix(base).unwrap_or(&path);
         let name = relative
             .components()
@@ -226,7 +238,7 @@ fn collect_files_recursive(base: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
             .unwrap_or_default();
 
         // Check directory excludes
-        if file_type.is_dir() {
+        if metadata.is_dir() {
             if DEFAULT_EXCLUDES.contains(&name.as_str()) {
                 continue;
             }
@@ -281,36 +293,6 @@ pub fn default_global_registry() -> PathBuf {
     PathBuf::from(home).join(".forge").join("registry")
 }
 
-/// SHA-256 hasher wrapping the `sha2` crate.
-struct Sha256 {
-    hasher: sha2::Sha256,
-}
-
-impl Sha256 {
-    fn new() -> Self {
-        use sha2::Digest;
-        Self {
-            hasher: sha2::Sha256::new(),
-        }
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        use sha2::Digest;
-        self.hasher.update(bytes);
-    }
-
-    fn finalize_hex(self) -> String {
-        use sha2::Digest;
-        let result = self.hasher.finalize();
-        let mut hex = String::with_capacity(64);
-        for byte in result.iter() {
-            use std::fmt::Write;
-            write!(hex, "{:02x}", byte).unwrap();
-        }
-        hex
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,7 +303,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("forge-publish-{}-{}", prefix, unique))
+        let tid = format!("{:?}", std::thread::current().id());
+        std::env::temp_dir().join(format!("forge-publish-{}-{}-{}", prefix, unique, tid))
     }
 
     fn create_project(dir: &Path, name: &str, version: &str) {
@@ -355,6 +338,22 @@ mod tests {
         let manifest: Manifest =
             toml::from_str("[project]\nname = \"../../bad\"\nversion = \"1.0.0\"").unwrap();
         let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.contains("invalid") || err.contains("must start"));
+    }
+
+    #[test]
+    fn validate_rejects_name_starting_with_hyphen() {
+        let manifest: Manifest =
+            toml::from_str("[project]\nname = \"-bad\"\nversion = \"1.0.0\"").unwrap();
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.contains("must start with an alphanumeric"));
+    }
+
+    #[test]
+    fn validate_rejects_version_with_whitespace() {
+        let manifest: Manifest =
+            toml::from_str("[project]\nname = \"mylib\"\nversion = \"1.0 0\"").unwrap();
+        let err = validate_manifest(&manifest).unwrap_err();
         assert!(err.contains("invalid characters"));
     }
 
@@ -363,7 +362,7 @@ mod tests {
         let manifest: Manifest =
             toml::from_str("[project]\nname = \"mylib\"\nversion = \"../../../etc\"").unwrap();
         let err = validate_manifest(&manifest).unwrap_err();
-        assert!(err.contains("invalid characters"));
+        assert!(err.contains("invalid"));
     }
 
     #[test]
@@ -391,7 +390,7 @@ mod tests {
         assert!(names.iter().any(|n| n.contains("helper.fg")));
         assert!(!names.iter().any(|n| n.contains("notes.txt")));
 
-        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -410,7 +409,7 @@ mod tests {
             .iter()
             .any(|f| f.display().to_string().contains("forge_modules")));
 
-        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -425,7 +424,28 @@ mod tests {
             .iter()
             .any(|f| f.display().to_string().contains(".lock")));
 
-        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_files_skips_symlinks() {
+        let dir = temp_path("symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.fg"), "let x = 1").unwrap();
+
+        // Create a symlink — skip test if symlink creation fails (e.g., on Windows without privileges)
+        let link_path = dir.join("linked.fg");
+        if std::os::unix::fs::symlink(dir.join("main.fg"), &link_path).is_ok() {
+            let files = collect_files(&dir);
+            assert!(
+                !files
+                    .iter()
+                    .any(|f| f.display().to_string().contains("linked")),
+                "symlinks should be excluded"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -434,28 +454,19 @@ mod tests {
         let registry = temp_path("pub-registry");
         create_project(&project, "testlib", "1.0.0");
 
-        publish_from(&project, false, Some(registry.to_str().unwrap()));
+        publish_from(&project, false, Some(registry.to_str().unwrap())).unwrap();
 
         let entry = registry.join("testlib").join("1.0.0");
         assert!(entry.exists(), "registry entry should exist");
-        assert!(
-            entry.join("main.fg").exists(),
-            "main.fg should be in registry"
-        );
-        assert!(
-            entry.join("forge.toml").exists(),
-            "forge.toml should be in registry"
-        );
-        assert!(
-            entry.join(".forge-checksum").exists(),
-            "checksum should exist"
-        );
+        assert!(entry.join("main.fg").exists());
+        assert!(entry.join("forge.toml").exists());
+        assert!(entry.join(".forge-checksum").exists());
 
         let checksum = std::fs::read_to_string(entry.join(".forge-checksum")).unwrap();
         assert!(checksum.starts_with("sha256:"));
 
-        std::fs::remove_dir_all(&project).unwrap();
-        std::fs::remove_dir_all(&registry).unwrap();
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&registry);
     }
 
     #[test]
@@ -464,14 +475,14 @@ mod tests {
         let registry = temp_path("dry-registry");
         create_project(&project, "drylib", "0.1.0");
 
-        publish_from(&project, true, Some(registry.to_str().unwrap()));
+        publish_from(&project, true, Some(registry.to_str().unwrap())).unwrap();
 
         assert!(
             !registry.exists(),
             "registry should not be created in dry run"
         );
 
-        std::fs::remove_dir_all(&project).unwrap();
+        let _ = std::fs::remove_dir_all(&project);
     }
 
     #[test]
@@ -482,22 +493,22 @@ mod tests {
 
         // First publish with extra file
         std::fs::write(project.join("old_helper.fg"), "let old = true").unwrap();
-        publish_from(&project, false, Some(registry.to_str().unwrap()));
+        publish_from(&project, false, Some(registry.to_str().unwrap())).unwrap();
 
         let entry = registry.join("overlib").join("1.0.0");
         assert!(entry.join("old_helper.fg").exists());
 
         // Remove old file and re-publish
         std::fs::remove_file(project.join("old_helper.fg")).unwrap();
-        publish_from(&project, false, Some(registry.to_str().unwrap()));
+        publish_from(&project, false, Some(registry.to_str().unwrap())).unwrap();
 
         assert!(
             !entry.join("old_helper.fg").exists(),
             "old files should be cleaned up on re-publish"
         );
 
-        std::fs::remove_dir_all(&project).unwrap();
-        std::fs::remove_dir_all(&registry).unwrap();
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&registry);
     }
 
     #[test]
@@ -506,35 +517,45 @@ mod tests {
         let registry = temp_path("roundtrip-registry");
         create_project(&project, "roundlib", "2.0.0");
 
-        publish_from(&project, false, Some(registry.to_str().unwrap()));
+        publish_from(&project, false, Some(registry.to_str().unwrap())).unwrap();
 
-        // Verify the package is findable via the same mechanism forge install uses
         let found = crate::package::find_in_registry("roundlib", "2.0.0", &[registry.clone()]);
         assert!(
             found.is_some(),
             "published package should be findable by install"
         );
 
-        std::fs::remove_dir_all(&project).unwrap();
-        std::fs::remove_dir_all(&registry).unwrap();
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&registry);
+    }
+
+    #[test]
+    fn publish_returns_error_for_missing_manifest() {
+        let project = temp_path("no-manifest");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let result = publish_from(&project, false, None);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&project);
     }
 
     #[test]
     fn checksum_is_content_based() {
         let h1 = {
-            let mut h = Sha256::new();
+            let mut h = sha2::Sha256::new();
             h.update(b"hello world");
-            h.finalize_hex()
+            hex_encode(&h.finalize())
         };
         let h2 = {
-            let mut h = Sha256::new();
+            let mut h = sha2::Sha256::new();
             h.update(b"hello world");
-            h.finalize_hex()
+            hex_encode(&h.finalize())
         };
         let h3 = {
-            let mut h = Sha256::new();
+            let mut h = sha2::Sha256::new();
             h.update(b"different content");
-            h.finalize_hex()
+            hex_encode(&h.finalize())
         };
         assert_eq!(h1, h2, "same content should produce same checksum");
         assert_ne!(
