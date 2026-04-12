@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Cranelift JIT is now an optional cargo feature** — enabled by default. Build without it via `cargo install forge-lang --no-default-features` for faster compile times and broader platform support. ([#41](https://github.com/humancto/forge-lang/pull/41))
+- **PostgreSQL is now an optional cargo feature** — enabled by default. ([#42](https://github.com/humancto/forge-lang/pull/42))
+- **MySQL is now an optional cargo feature** — enabled by default. ([#43](https://github.com/humancto/forge-lang/pull/43))
+- **Trimmed tokio features** from `"full"` to 7 specific features actually used. ([#44](https://github.com/humancto/forge-lang/pull/44))
+- **VM `Value` implements `Copy`** — eliminates 51 unnecessary clone calls in the dispatch hot path. ([#47](https://github.com/humancto/forge-lang/pull/47))
+- **Removed dead `NativeFn.func` field** — unused function pointer placeholder cleaned up. ([#48](https://github.com/humancto/forge-lang/pull/48))
+
+### Refactored
+
+- **Extracted interpreter tests** to `interpreter/tests.rs` — mod.rs reduced from 7,907 to 3,239 lines. ([#45](https://github.com/humancto/forge-lang/pull/45))
+- **Extracted VM tests** to 5 dedicated files — mod.rs reduced from 2,058 to 50 lines. ([#46](https://github.com/humancto/forge-lang/pull/46))
 
 ### Fixed
 
