@@ -1,4 +1,5 @@
 mod chat;
+mod dap;
 mod doc;
 mod errors;
 mod formatter;
@@ -157,6 +158,8 @@ enum Command {
     },
     /// Start the Language Server Protocol server
     Lsp,
+    /// Start the Debug Adapter Protocol server
+    Dap,
     /// Interactive tutorials to learn Forge
     Learn {
         /// Lesson number (optional)
@@ -306,6 +309,9 @@ async fn main() {
         }
         Some(Command::Lsp) => {
             lsp::run_lsp();
+        }
+        Some(Command::Dap) => {
+            dap::run_dap();
         }
         Some(Command::Learn { lesson }) => {
             learn::run_learn(lesson);

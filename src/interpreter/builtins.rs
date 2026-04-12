@@ -15,13 +15,13 @@ impl Interpreter {
             "print" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
                 let output = text.join(" ");
-                print!("{}", output);
+                self.write_output(&output, false);
                 Ok(Value::Null)
             }
             "println" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
                 let output = text.join(" ");
-                println!("{}", output);
+                self.write_output(&output, true);
                 Ok(Value::Null)
             }
             "len" => match args.first() {
@@ -407,17 +407,17 @@ impl Interpreter {
             "uuid" => Ok(Value::String(uuid::Uuid::new_v4().to_string())),
             "say" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
-                println!("{}", text.join(" "));
+                self.write_output(&text.join(" "), true);
                 Ok(Value::Null)
             }
             "yell" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
-                println!("{}", text.join(" ").to_uppercase());
+                self.write_output(&text.join(" ").to_uppercase(), true);
                 Ok(Value::Null)
             }
             "whisper" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
-                println!("{}", text.join(" ").to_lowercase());
+                self.write_output(&text.join(" ").to_lowercase(), true);
                 Ok(Value::Null)
             }
             "wait" => match args.first() {
