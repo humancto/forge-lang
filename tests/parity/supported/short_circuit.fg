@@ -1,0 +1,6 @@
+// expect: [false, true, false, true]
+let a = false && true
+let b = true || false
+let c = true && false
+let d = false || true
+[a, b, c, d]

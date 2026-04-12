@@ -1594,6 +1594,25 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             }
         }
         Expr::BinOp { left, op, right } => {
+            // Short-circuit && and || — evaluate left, conditionally skip right
+            if matches!(op, BinOp::And | BinOp::Or) {
+                compile_expr(c, left, dst)?;
+                // Coerce left to bool via double-Not
+                c.emit(encode_abc(OpCode::Not, dst, dst, 0), 0);
+                c.emit(encode_abc(OpCode::Not, dst, dst, 0), 0);
+                let jump_op = if matches!(op, BinOp::And) {
+                    OpCode::JumpIfFalse
+                } else {
+                    OpCode::JumpIfTrue
+                };
+                let jump_pc = c.emit_jump(jump_op, dst, 0);
+                compile_expr(c, right, dst)?;
+                // Coerce right to bool via double-Not
+                c.emit(encode_abc(OpCode::Not, dst, dst, 0), 0);
+                c.emit(encode_abc(OpCode::Not, dst, dst, 0), 0);
+                c.patch_jump(jump_pc);
+                return Ok(());
+            }
             let saved = c.next_register;
             let lr = c.alloc_reg();
             compile_expr(c, left, lr)?;
