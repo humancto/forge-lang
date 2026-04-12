@@ -210,7 +210,7 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 6 in progress — v0.7.1 expert audit follow-up.**
+Current status: **Phase 7 in progress — hardening for v1.0.**
 
 ---
 
@@ -329,3 +329,55 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 4. 6B.1-6B.4 (feature gates) — faster builds, smaller binaries
 5. 6C.1-6C.2 (file splits) — maintainability
 6. 6C.3-6C.4 (VM performance) — hot path optimization
+
+---
+
+## Phase 7 — Hardening for v1.0
+
+**Goal:** Fix every correctness bug, security hole, and code quality issue that would embarrass a production language. Make Forge brutally good — zero panics in production code, zero compiler warnings, zero injection vectors.
+
+### Phase 7A — Critical Safety Fixes
+
+- [ ] 7A.1 Fix `to_json_string()` injection — both `interpreter/mod.rs:136` and `vm/value.rs:235` use `format!("\"{}\"", s)` without escaping. Backslashes, quotes, newlines, control chars all pass through raw → malformed JSON, injection in HTTP bodies. Use `serde_json::to_string()` or manual escape.
+- [ ] 7A.2 Fix `unsafe impl Send for SendableVM` — `debug_assert!` at `machine.rs:862` disappears in release builds. Raw JIT pointers could cross threads. Promote to real `assert!` or restructure to remove the `unsafe impl`.
+- [ ] 7A.3 Fix GC root scanning — `machine.rs:1961` uses `frames.last()` to compute max register, but should scan across ALL frames via `max_by_key`. Objects in calling frames above the current frame's scan limit can be prematurely freed.
+- [ ] 7A.4 Fix parser panics — 14 `panic!` calls in `parser/parser.rs` that crash on malformed input. Convert all to `ParseError` returns.
+- [ ] 7A.5 Fix `ask` keyword JSON injection — `machine.rs:1857` uses `format!()` for API request body with incomplete escaping (only `\` and `"`). Newlines and control chars produce invalid JSON. Use `serde_json`.
+
+### Phase 7B — Dead Code & Warning Elimination
+
+- [ ] 7B.1 Eliminate all compiler warnings — 19 warnings in release build: unused imports, unused variables. A production language must compile warning-free.
+- [ ] 7B.2 Audit and remove production `panic!` calls — 92 panics in non-test code. Convert to proper error returns. Target: zero panics reachable from user input.
+- [ ] 7B.3 Fix `serialize.rs` 38 `unwrap()` calls — bytecode deserialization that panics on malformed `.fgc` files is a DoS vector. Convert to `Result` returns.
+- [ ] 7B.4 Fix `npc` module 11 `panic!` calls — fake data generator should never crash. Convert to error returns.
+- [ ] 7B.5 Fix `time` module 12 `panic!` calls — same treatment.
+- [ ] 7B.6 Remove dead interpreter fallback paths — identify and prune code paths in the interpreter that the VM has fully replaced.
+
+### Phase 7C — Performance & Simplification
+
+- [ ] 7C.1 Unify async runtime — `stdlib/http.rs:407` creates a new Tokio runtime per HTTP call. Unify on the pg/mysql pattern: `Handle::try_current()` with `block_in_place`, fallback to thread-local runtime.
+- [ ] 7C.2 Fix string `.len` property inconsistency — `machine.rs` GetField returns `s.len()` (bytes) but `Len` opcode returns `s.chars().count()` (chars). Must agree.
+- [ ] 7C.3 Variable-width VM frames — 256 registers per frame is wasteful (a 3-arg function wastes 253 slots). Use compiler's `max_register` for tighter allocation.
+- [ ] 7C.4 Remove dispatch loop closure wrapper — `machine.rs:1085` wraps every instruction in `(|| { ... })()`. Direct `match` with labeled loops is more conventional and potentially faster.
+
+### Phase 7D — Security Hardening
+
+- [ ] 7D.1 Audit all `format!("\"{}\"", ...)` patterns — find and fix every manual JSON string construction across the codebase.
+- [ ] 7D.2 Add `--allow-run` permission flag — `sh()`/`shell()`/`run_command()` execute arbitrary commands with no sandboxing. Add Deno-style permission model.
+- [ ] 7D.3 Default SSRF protection on — `FORGE_HTTP_DENY_PRIVATE` should be the default; opt out with `FORGE_HTTP_ALLOW_PRIVATE=1`.
+
+### Order of attack
+
+1. 7A.1-7A.5 (safety) — every one of these is a live bug or security hole
+2. 7B.1 (warnings) — takes 10 minutes, instant credibility
+3. 7B.2-7B.5 (panics) — systematic panic elimination
+4. 7C.1-7C.2 (performance/correctness) — quick wins
+5. 7C.3-7C.4 (VM optimization) — bigger refactors
+6. 7D.1-7D.3 (security) — hardening layer
+7. 7E.1-7E.3 (distribution & ecosystem) — reach and adoption
+
+### Phase 7E — Distribution & Real-World Readiness
+
+- [ ] 7E.1 Add curl-pipe-sh installer — `curl -fsSL https://forge-lang.dev/install | sh` for Linux/macOS. Detects arch, downloads release binary, installs to `/usr/local/bin`.
+- [ ] 7E.2 Add `os` and `path` stdlib modules — hostname, platform, pid, arch, path.normalize, path.resolve, path.relative, path.is_absolute, path.separator. Table-stakes for real programs.
+- [ ] 7E.3 VS Code extension with TextMate grammar — proper syntax highlighting, snippets, debugger launch config. The LSP exists but has no extension wrapper for marketplace distribution.
