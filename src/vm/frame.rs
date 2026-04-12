@@ -26,6 +26,8 @@ pub struct CallFrame {
     pub ip: usize,
     /// Base index into the VM's register array for this frame's window
     pub base: usize,
+    /// Number of registers this frame uses (from chunk.max_registers)
+    pub size: usize,
     /// Active exception handlers for this frame, innermost last.
     pub handlers: Vec<ExceptionHandler>,
     /// Active timeout scopes for this frame, innermost last.
@@ -35,11 +37,12 @@ pub struct CallFrame {
 }
 
 impl CallFrame {
-    pub fn new(closure: GcRef, base: usize) -> Self {
+    pub fn new(closure: GcRef, base: usize, size: usize) -> Self {
         Self {
             closure,
             ip: 0,
             base,
+            size,
             handlers: Vec::new(),
             timeouts: Vec::new(),
             open_upvalues: HashMap::new(),

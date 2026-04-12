@@ -934,7 +934,9 @@ impl VM {
         };
         let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
 
-        self.frames.push(CallFrame::new(closure_ref, 0));
+        let frame_size = (chunk.max_registers as usize).max(1);
+        self.ensure_registers(frame_size);
+        self.frames.push(CallFrame::new(closure_ref, 0, frame_size));
         self.run_until(0)
     }
 
@@ -948,12 +950,14 @@ impl VM {
             upvalues: Vec::new(),
         };
         let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
-        let new_base = self.frames.last().map(|f| f.base + 256).unwrap_or(0);
+        let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
+        let frame_size = (chunk.max_registers as usize).max(1);
         if self.frames.len() >= MAX_FRAMES {
             return Err(VMError::new("stack overflow"));
         }
-        self.ensure_registers(new_base + 256);
-        self.frames.push(CallFrame::new(closure_ref, new_base));
+        self.ensure_registers(new_base + frame_size);
+        self.frames
+            .push(CallFrame::new(closure_ref, new_base, frame_size));
         let boundary = self.frames.len() - 1;
         self.run_until(boundary)
     }
@@ -1967,7 +1971,7 @@ impl VM {
 
             // GC check
             if self.gc.should_collect() {
-                let max_reg = self.frames.last().map(|f| f.base + 256).unwrap_or(256);
+                let max_reg = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
                 let scan_limit = max_reg.min(self.registers.len());
                 let mut roots = Vec::with_capacity(scan_limit / 4);
                 for r in &self.registers[..scan_limit] {
@@ -2106,11 +2110,12 @@ impl VM {
                         }
 
                         let arity = chunk.arity as usize;
-                        let new_base = self.frames.last().map(|f| f.base + 256).unwrap_or(0);
+                        let frame_size = (chunk.max_registers as usize).max(1);
+                        let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
                         if self.frames.len() >= MAX_FRAMES {
                             return Err(VMError::new("stack overflow"));
                         }
-                        self.ensure_registers(new_base + 256);
+                        self.ensure_registers(new_base + frame_size);
 
                         for (i, arg) in args.iter().enumerate() {
                             if i < arity {
@@ -2121,7 +2126,7 @@ impl VM {
                             self.registers[new_base + i] = Value::Null;
                         }
 
-                        self.frames.push(CallFrame::new(*r, new_base));
+                        self.frames.push(CallFrame::new(*r, new_base, frame_size));
                         let boundary = self.frames.len() - 1;
                         self.run_until(boundary)
                     }
