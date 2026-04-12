@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VM `ask` expression** — `ask "prompt"` calls the LLM API (OpenAI-compatible) in VM mode. Requires `FORGE_AI_KEY` or `OPENAI_API_KEY` environment variable.
 - **VM `freeze` expression** — `freeze expr` wraps values as immutable in VM mode. `SetField` on frozen values returns a runtime error.
 - **Cross-file LSP** — go-to-definition and find-references now work across files. Imported symbols resolve to their source file via `import` statement following. Find-references searches imported files and sibling `.fg` files in the same directory. Import statements now appear in document symbols.
+- **`forge build --aot`** — compiles Forge source to bytecode and embeds it in a native binary. Unlike `--native` (which embeds raw source), `--aot` embeds serialized bytecode for faster startup and no source exposure. The binary still requires the Forge VM runtime at execution time.
 
 ## [0.6.0] - 2026-04-11
 
