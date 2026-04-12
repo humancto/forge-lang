@@ -316,7 +316,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 ### Phase 6C — Code Health
 
-- [ ] 6C.1 Split `interpreter/mod.rs` (7,905 lines) — extract ~359 test functions to `interpreter/tests.rs`, reducing mod.rs to ~5,000 lines.
+- [x] 6C.1 Split `interpreter/mod.rs` (7,907→3,239 lines) — extracted 359 test functions to `interpreter/tests.rs`. (PR #45)
 - [ ] 6C.2 Extract VM tests from `vm/mod.rs` (2,044 lines, ~1,700 are tests) to `vm/tests.rs`.
 - [ ] 6C.3 Make VM `Value` implement `Copy` — all variants (`i64`, `f64`, `bool`, `()`, `GcRef(usize)`) are Copy-compatible. Eliminates thousands of unnecessary clone calls in the dispatch hot path.
 - [ ] 6C.4 Replace string-based native function dispatch with enum/index — `machine.rs:2116` clones function name string on every native call. Use interned index for zero-cost dispatch.
