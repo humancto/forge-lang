@@ -94,16 +94,18 @@ impl Compiler {
             .collect()
     }
 
-    fn alloc_reg(&mut self) -> u8 {
+    fn alloc_reg(&mut self) -> Result<u8, CompileError> {
         if self.next_register == 255 {
-            panic!("BUG: compiler register overflow — function uses more than 255 registers");
+            return Err(CompileError::new(
+                "Function too complex: uses more than 255 registers. Try splitting into smaller functions.",
+            ));
         }
         let r = self.next_register;
         self.next_register += 1;
         if self.next_register > self.max_register {
             self.max_register = self.next_register;
         }
-        r
+        Ok(r)
     }
 
     fn free_to(&mut self, target: u8) {
@@ -163,15 +165,15 @@ impl Compiler {
         }
     }
 
-    fn add_local(&mut self, name: &str, mutable: bool) -> u8 {
-        let reg = self.alloc_reg();
+    fn add_local(&mut self, name: &str, mutable: bool) -> Result<u8, CompileError> {
+        let reg = self.alloc_reg()?;
         self.locals.push(Local {
             name: name.to_string(),
             depth: self.scope_depth,
             register: reg,
             mutable,
         });
-        reg
+        Ok(reg)
     }
 
     fn resolve_local(&self, name: &str) -> Option<(u8, bool)> {
@@ -269,7 +271,7 @@ pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
     let mut c = Compiler::new("<repl>");
     c.begin_scope();
 
-    let result_reg = c.alloc_reg();
+    let result_reg = c.alloc_reg()?;
     let mut has_result = false;
 
     for spanned in &program.statements {
@@ -322,7 +324,7 @@ fn compile_hidden_call(
 
 fn compile_hidden_stmt(c: &mut Compiler, name: &str, args: Vec<Expr>) -> Result<(), CompileError> {
     let saved = c.next_register;
-    let reg = c.alloc_reg();
+    let reg = c.alloc_reg()?;
     compile_hidden_call(c, name, args, reg)?;
     c.free_to(saved);
     Ok(())
@@ -335,11 +337,11 @@ fn compile_hidden_call_from_regs(
     dst: u8,
 ) -> Result<(), CompileError> {
     let saved = c.next_register;
-    let fn_reg = c.alloc_reg();
+    let fn_reg = c.alloc_reg()?;
     let fn_idx = c.const_str(name);
     c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
     for &arg_reg in arg_regs {
-        let slot = c.alloc_reg();
+        let slot = c.alloc_reg()?;
         c.emit(encode_abc(OpCode::Move, slot, arg_reg, 0), 0);
     }
     c.emit(
@@ -357,10 +359,10 @@ fn compile_call_from_expr_and_regs(
     dst: u8,
 ) -> Result<(), CompileError> {
     let saved = c.next_register;
-    let fn_reg = c.alloc_reg();
+    let fn_reg = c.alloc_reg()?;
     compile_expr(c, function, fn_reg)?;
     for &arg_reg in arg_regs {
-        let slot = c.alloc_reg();
+        let slot = c.alloc_reg()?;
         c.emit(encode_abc(OpCode::Move, slot, arg_reg, 0), 0);
     }
     c.emit(
@@ -385,7 +387,7 @@ fn query_op_name(op: &BinOp) -> &'static str {
 
 fn compile_set_global_expr(c: &mut Compiler, name: &str, expr: Expr) -> Result<(), CompileError> {
     let saved = c.next_register;
-    let reg = c.alloc_reg();
+    let reg = c.alloc_reg()?;
     compile_expr(c, &expr, reg)?;
     let name_idx = c.const_str(name);
     c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
@@ -542,7 +544,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             value,
             ..
         } => {
-            let reg = c.add_local(name, *mutable);
+            let reg = c.add_local(name, *mutable)?;
             compile_expr(c, value, reg)?;
             if c.module_mode && c.scope_depth == 1 {
                 let name_idx = c.const_str(name);
@@ -562,32 +564,32 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                             )));
                         }
                         let saved = c.next_register;
-                        let tmp = c.alloc_reg();
+                        let tmp = c.alloc_reg()?;
                         compile_expr(c, value, tmp)?;
                         c.emit(encode_abc(OpCode::SetLocal, reg, tmp, 0), 0);
                         c.free_to(saved);
                     } else if let Some(uv_idx) = c.resolve_upvalue(name) {
                         let saved = c.next_register;
-                        let tmp = c.alloc_reg();
+                        let tmp = c.alloc_reg()?;
                         compile_expr(c, value, tmp)?;
                         c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, tmp, 0), 0);
                         c.free_to(saved);
                     } else if let Some(parent_reg) = c.resolve_in_parent(name) {
                         let uv_idx = c.add_upvalue(name, UpvalueSource::Local(parent_reg));
                         let saved = c.next_register;
-                        let tmp = c.alloc_reg();
+                        let tmp = c.alloc_reg()?;
                         compile_expr(c, value, tmp)?;
                         c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, tmp, 0), 0);
                         c.free_to(saved);
                     } else if let Some(parent_upvalue) = c.resolve_parent_upvalue(name) {
                         let uv_idx = c.add_upvalue(name, UpvalueSource::Upvalue(parent_upvalue));
                         let saved = c.next_register;
-                        let tmp = c.alloc_reg();
+                        let tmp = c.alloc_reg()?;
                         compile_expr(c, value, tmp)?;
                         c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, tmp, 0), 0);
                         c.free_to(saved);
                     } else {
-                        let tmp = c.alloc_reg();
+                        let tmp = c.alloc_reg()?;
                         compile_expr(c, value, tmp)?;
                         let name_idx = c.const_str(name);
                         c.emit(encode_abx(OpCode::SetGlobal, tmp, name_idx), 0);
@@ -596,9 +598,9 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 }
                 Expr::FieldAccess { object, field } => {
                     let saved = c.next_register;
-                    let obj_reg = c.alloc_reg();
+                    let obj_reg = c.alloc_reg()?;
                     compile_expr(c, object, obj_reg)?;
-                    let val_reg = c.alloc_reg();
+                    let val_reg = c.alloc_reg()?;
                     compile_expr(c, value, val_reg)?;
                     let field_idx = c.const_str(field);
                     c.emit(
@@ -609,11 +611,11 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 }
                 Expr::Index { object, index } => {
                     let saved = c.next_register;
-                    let obj_reg = c.alloc_reg();
+                    let obj_reg = c.alloc_reg()?;
                     compile_expr(c, object, obj_reg)?;
-                    let idx_reg = c.alloc_reg();
+                    let idx_reg = c.alloc_reg()?;
                     compile_expr(c, index, idx_reg)?;
-                    let val_reg = c.alloc_reg();
+                    let val_reg = c.alloc_reg()?;
                     compile_expr(c, value, val_reg)?;
                     c.emit(encode_abc(OpCode::SetIndex, obj_reg, idx_reg, val_reg), 0);
                     c.free_to(saved);
@@ -635,7 +637,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             fc.current_line = c.current_line;
             fc.begin_scope();
             for param in params {
-                fc.add_local(&param.name, true);
+                fc.add_local(&param.name, true)?;
             }
             for s in body {
                 fc.current_line = s.line;
@@ -653,7 +655,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             proto_chunk.upvalue_sources = upvalue_sources;
             c.chunk.prototypes.push(proto_chunk);
 
-            let fn_reg = c.add_local(name, false);
+            let fn_reg = c.add_local(name, false)?;
             c.emit(encode_abx(OpCode::Closure, fn_reg, proto_idx), 0);
 
             // Also register as global for recursion and cross-scope access
@@ -665,7 +667,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Return(expr) => {
             if let Some(e) = expr {
                 let saved = c.next_register;
-                let reg = c.alloc_reg();
+                let reg = c.alloc_reg()?;
                 compile_expr(c, e, reg)?;
                 c.emit(encode_abc(OpCode::Return, reg, 0, 0), 0);
                 c.free_to(saved);
@@ -681,7 +683,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             else_body,
         } => {
             let saved = c.next_register;
-            let cond = c.alloc_reg();
+            let cond = c.alloc_reg()?;
             compile_expr(c, condition, cond)?;
             let else_jump = c.emit_jump(OpCode::JumpIfFalse, cond, 0);
             c.free_to(saved);
@@ -717,7 +719,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             });
 
             let saved = c.next_register;
-            let cond = c.alloc_reg();
+            let cond = c.alloc_reg()?;
             compile_expr(c, condition, cond)?;
             let exit = c.emit_jump(OpCode::JumpIfFalse, cond, 0);
             c.free_to(saved);
@@ -775,10 +777,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             ..
         } => {
             let saved = c.next_register;
-            let arr_reg = c.alloc_reg();
+            let arr_reg = c.alloc_reg()?;
             compile_expr(c, iterable, arr_reg)?;
 
-            let idx_reg = c.alloc_reg();
+            let idx_reg = c.alloc_reg()?;
             let zero = c.const_int(0);
             c.emit(encode_abx(OpCode::LoadConst, idx_reg, zero), 0);
 
@@ -788,15 +790,15 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 break_jumps: Vec::new(),
             });
 
-            let len_reg = c.alloc_reg();
+            let len_reg = c.alloc_reg()?;
             c.emit(encode_abc(OpCode::Len, len_reg, arr_reg, 0), 0);
-            let cond_reg = c.alloc_reg();
+            let cond_reg = c.alloc_reg()?;
             c.emit(encode_abc(OpCode::Lt, cond_reg, idx_reg, len_reg), 0);
             let exit = c.emit_jump(OpCode::JumpIfFalse, cond_reg, 0);
             c.free_to(len_reg); // free len and cond temps
 
             c.begin_scope();
-            let var_reg = c.add_local(var, false);
+            let var_reg = c.add_local(var, false)?;
             c.emit(encode_abc(OpCode::GetIndex, var_reg, arr_reg, idx_reg), 0);
 
             for s in body {
@@ -806,7 +808,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             c.end_scope();
 
             let one = c.const_int(1);
-            let one_reg = c.alloc_reg();
+            let one_reg = c.alloc_reg()?;
             c.emit(encode_abx(OpCode::LoadConst, one_reg, one), 0);
             c.emit(encode_abc(OpCode::Add, idx_reg, idx_reg, one_reg), 0);
             c.free_to(one_reg);
@@ -845,7 +847,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::Match { subject, arms } => {
             let saved = c.next_register;
-            let subj = c.alloc_reg();
+            let subj = c.alloc_reg()?;
             compile_expr(c, subject, subj)?;
             let mut end_jumps = Vec::new();
 
@@ -862,24 +864,24 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     }
                     Pattern::Binding(name) => {
                         let saved = c.next_register;
-                        let fn_reg = c.alloc_reg();
+                        let fn_reg = c.alloc_reg()?;
                         let fn_idx = c.const_str("__forge_binding_matches");
                         c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
 
-                        let name_reg = c.alloc_reg();
+                        let name_reg = c.alloc_reg()?;
                         let name_idx = c.const_str(name);
                         c.emit(encode_abx(OpCode::LoadConst, name_reg, name_idx), 0);
 
-                        let value_reg = c.alloc_reg();
+                        let value_reg = c.alloc_reg()?;
                         c.emit(encode_abc(OpCode::Move, value_reg, subj, 0), 0);
 
-                        let check_reg = c.alloc_reg();
+                        let check_reg = c.alloc_reg()?;
                         c.emit(encode_abc(OpCode::Call, fn_reg, 2, check_reg), 0);
                         let skip = c.emit_jump(OpCode::JumpIfFalse, check_reg, 0);
                         c.free_to(saved);
 
                         c.begin_scope();
-                        let vr = c.add_local(name, false);
+                        let vr = c.add_local(name, false)?;
                         c.emit(encode_abc(OpCode::Move, vr, subj, 0), 0);
                         for s in &arm.body {
                             c.current_line = s.line;
@@ -892,9 +894,9 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         c.patch_jump(skip);
                     }
                     Pattern::Literal(lit) => {
-                        let lr = c.alloc_reg();
+                        let lr = c.alloc_reg()?;
                         compile_expr(c, lit, lr)?;
-                        let cr = c.alloc_reg();
+                        let cr = c.alloc_reg()?;
                         c.emit(encode_abc(OpCode::Eq, cr, subj, lr), 0);
                         let skip = c.emit_jump(OpCode::JumpIfFalse, cr, 0);
                         c.free_to(lr);
@@ -913,11 +915,11 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     Pattern::Constructor { name, fields } => {
                         let variant_idx = c.const_str(name);
                         let field_name = c.const_str("__variant__");
-                        let vr = c.alloc_reg();
+                        let vr = c.alloc_reg()?;
                         c.emit(encode_abc(OpCode::GetField, vr, subj, field_name as u8), 0);
-                        let nr = c.alloc_reg();
+                        let nr = c.alloc_reg()?;
                         c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
-                        let cr = c.alloc_reg();
+                        let cr = c.alloc_reg()?;
                         c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
                         let skip = c.emit_jump(OpCode::JumpIfFalse, cr, 0);
                         c.free_to(vr);
@@ -925,7 +927,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         c.begin_scope();
                         for (i, fp) in fields.iter().enumerate() {
                             if let Pattern::Binding(bname) = fp {
-                                let fr = c.add_local(bname, false);
+                                let fr = c.add_local(bname, false)?;
                                 c.emit(encode_abc(OpCode::ExtractField, fr, subj, i as u8), 0);
                             }
                         }
@@ -950,7 +952,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::Expression(expr) => {
             let saved = c.next_register;
-            let reg = c.alloc_reg();
+            let reg = c.alloc_reg()?;
             compile_expr(c, expr, reg)?;
             c.free_to(saved);
             Ok(())
@@ -1026,13 +1028,15 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::Destructure { pattern, value } => {
-            let value_reg = c.alloc_reg();
+            let value_reg = c.alloc_reg()?;
             compile_expr(c, value, value_reg)?;
 
             match pattern {
                 DestructurePattern::Object(names) => {
-                    let target_regs: Vec<u8> =
-                        names.iter().map(|name| c.add_local(name, false)).collect();
+                    let target_regs: Vec<u8> = names
+                        .iter()
+                        .map(|name| c.add_local(name, false))
+                        .collect::<Result<_, _>>()?;
                     for (name, target_reg) in names.iter().zip(target_regs.iter().copied()) {
                         let field_idx = c.const_str(name);
                         c.emit(
@@ -1042,13 +1046,18 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     }
                 }
                 DestructurePattern::Array { items, rest } => {
-                    let item_regs: Vec<u8> =
-                        items.iter().map(|name| c.add_local(name, false)).collect();
-                    let rest_reg = rest.as_ref().map(|name| c.add_local(name, false));
+                    let item_regs: Vec<u8> = items
+                        .iter()
+                        .map(|name| c.add_local(name, false))
+                        .collect::<Result<_, _>>()?;
+                    let rest_reg = rest
+                        .as_ref()
+                        .map(|name| c.add_local(name, false))
+                        .transpose()?;
 
                     let temp_base = c.next_register;
                     for (index, target_reg) in item_regs.iter().copied().enumerate() {
-                        let idx_reg = c.alloc_reg();
+                        let idx_reg = c.alloc_reg()?;
                         let const_idx = c.const_int(index as i64);
                         c.emit(encode_abx(OpCode::LoadConst, idx_reg, const_idx), 0);
                         c.emit(
@@ -1061,32 +1070,32 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     if let Some(rest_reg) = rest_reg {
                         c.emit(encode_abc(OpCode::NewArray, rest_reg, temp_base, 0), 0);
 
-                        let idx_reg = c.alloc_reg();
+                        let idx_reg = c.alloc_reg()?;
                         let start_idx = c.const_int(items.len() as i64);
                         c.emit(encode_abx(OpCode::LoadConst, idx_reg, start_idx), 0);
 
                         let loop_start = c.chunk.code_len();
-                        let len_reg = c.alloc_reg();
+                        let len_reg = c.alloc_reg()?;
                         c.emit(encode_abc(OpCode::Len, len_reg, value_reg, 0), 0);
-                        let cond_reg = c.alloc_reg();
+                        let cond_reg = c.alloc_reg()?;
                         c.emit(encode_abc(OpCode::Lt, cond_reg, idx_reg, len_reg), 0);
                         let exit = c.emit_jump(OpCode::JumpIfFalse, cond_reg, 0);
                         c.free_to(len_reg);
 
-                        let push_fn_reg = c.alloc_reg();
+                        let push_fn_reg = c.alloc_reg()?;
                         let push_idx = c.const_str("push");
                         c.emit(encode_abx(OpCode::GetGlobal, push_fn_reg, push_idx), 0);
 
-                        let rest_src_reg = c.alloc_reg();
+                        let rest_src_reg = c.alloc_reg()?;
                         c.emit(encode_abc(OpCode::GetLocal, rest_src_reg, rest_reg, 0), 0);
 
-                        let item_reg = c.alloc_reg();
+                        let item_reg = c.alloc_reg()?;
                         c.emit(
                             encode_abc(OpCode::GetIndex, item_reg, value_reg, idx_reg),
                             0,
                         );
 
-                        let updated_rest_reg = c.alloc_reg();
+                        let updated_rest_reg = c.alloc_reg()?;
                         c.emit(
                             encode_abc(OpCode::Call, push_fn_reg, 2, updated_rest_reg),
                             0,
@@ -1096,7 +1105,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                             0,
                         );
 
-                        let one_reg = c.alloc_reg();
+                        let one_reg = c.alloc_reg()?;
                         let one_idx = c.const_int(1);
                         c.emit(encode_abx(OpCode::LoadConst, one_reg, one_idx), 0);
                         c.emit(encode_abc(OpCode::Add, idx_reg, idx_reg, one_reg), 0);
@@ -1113,20 +1122,20 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::YieldStmt(_) => Ok(()),
 
         Stmt::When { subject, arms } => {
-            let subj_reg = c.alloc_reg();
+            let subj_reg = c.alloc_reg()?;
             compile_expr(c, subject, subj_reg)?;
             let mut end_jumps = Vec::new();
             for arm in arms {
                 if arm.is_else {
-                    let result_reg = c.alloc_reg();
+                    let result_reg = c.alloc_reg()?;
                     compile_expr(c, &arm.result, result_reg)?;
                     c.free_to(result_reg);
                     break;
                 }
                 if let (Some(op), Some(cmp_val)) = (&arm.op, &arm.value) {
-                    let cmp_reg = c.alloc_reg();
+                    let cmp_reg = c.alloc_reg()?;
                     compile_expr(c, cmp_val, cmp_reg)?;
-                    let cond_reg = c.alloc_reg();
+                    let cond_reg = c.alloc_reg()?;
                     let opcode = match op {
                         BinOp::Lt => OpCode::Lt,
                         BinOp::Gt => OpCode::Gt,
@@ -1138,7 +1147,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     };
                     c.emit(encode_abc(opcode, cond_reg, subj_reg, cmp_reg), 0);
                     let skip = c.emit_jump(OpCode::JumpIfFalse, cond_reg, 0);
-                    let result_reg = c.alloc_reg();
+                    let result_reg = c.alloc_reg()?;
                     compile_expr(c, &arm.result, result_reg)?;
                     c.free_to(result_reg);
                     end_jumps.push(c.emit_jump(OpCode::Jump, 0, 0));
@@ -1154,7 +1163,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::CheckStmt { expr, check_kind } => {
-            let val_reg = c.alloc_reg();
+            let val_reg = c.alloc_reg()?;
             compile_expr(c, expr, val_reg)?;
             c.free_to(val_reg);
             let _ = check_kind;
@@ -1163,7 +1172,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::SafeBlock { body } => {
             let saved = c.next_register;
-            let err_reg = c.alloc_reg();
+            let err_reg = c.alloc_reg()?;
             let handler_jump = c.emit_jump(OpCode::PushHandler, err_reg, 0);
             c.cleanup_contexts.push(CleanupContext {
                 kind: CleanupKind::Handler,
@@ -1186,7 +1195,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::TimeoutBlock { duration, body } => {
             let saved = c.next_register;
-            let error_reg = c.alloc_reg();
+            let error_reg = c.alloc_reg()?;
             compile_expr(c, duration, error_reg)?;
 
             let handler_jump = c.emit_jump(OpCode::PushHandler, error_reg, 0);
@@ -1226,22 +1235,22 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::RetryBlock { count, body } => {
             let saved = c.next_register;
-            let raw_count_reg = c.alloc_reg();
+            let raw_count_reg = c.alloc_reg()?;
             compile_expr(c, count, raw_count_reg)?;
 
-            let count_reg = c.alloc_reg();
+            let count_reg = c.alloc_reg()?;
             compile_hidden_call_from_regs(c, "__forge_retry_count", &[raw_count_reg], count_reg)?;
 
-            let attempt_reg = c.alloc_reg();
+            let attempt_reg = c.alloc_reg()?;
             let zero_idx = c.const_int(0);
             c.emit(encode_abx(OpCode::LoadConst, attempt_reg, zero_idx), 0);
 
-            let error_reg = c.alloc_reg();
+            let error_reg = c.alloc_reg()?;
             c.emit(encode_abc(OpCode::LoadNull, error_reg, 0, 0), 0);
 
-            let zero_cmp_reg = c.alloc_reg();
+            let zero_cmp_reg = c.alloc_reg()?;
             c.emit(encode_abx(OpCode::LoadConst, zero_cmp_reg, zero_idx), 0);
-            let can_run_reg = c.alloc_reg();
+            let can_run_reg = c.alloc_reg()?;
             c.emit(
                 encode_abc(OpCode::Lt, can_run_reg, zero_cmp_reg, count_reg),
                 0,
@@ -1267,7 +1276,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.patch_jump(handler_jump);
 
-            let one_reg = c.alloc_reg();
+            let one_reg = c.alloc_reg()?;
             let one_idx = c.const_int(1);
             c.emit(encode_abx(OpCode::LoadConst, one_reg, one_idx), 0);
             c.emit(
@@ -1276,7 +1285,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             );
             c.free_to(error_reg + 1);
 
-            let retry_cond_reg = c.alloc_reg();
+            let retry_cond_reg = c.alloc_reg()?;
             c.emit(
                 encode_abc(OpCode::Lt, retry_cond_reg, attempt_reg, count_reg),
                 0,
@@ -1307,11 +1316,11 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             body,
         } => {
             // Compile interval expression into a register
-            let interval_reg = c.alloc_reg();
+            let interval_reg = c.alloc_reg()?;
             compile_expr(c, interval, interval_reg)?;
 
             // Load unit string into a register
-            let unit_reg = c.alloc_reg();
+            let unit_reg = c.alloc_reg()?;
             let unit_idx = c.const_str(unit);
             c.emit(encode_abx(OpCode::LoadConst, unit_reg, unit_idx), 0);
 
@@ -1337,7 +1346,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             proto_chunk.upvalue_sources = upvalue_sources;
             let proto = c.chunk.prototypes.len() as u16;
             c.chunk.prototypes.push(proto_chunk);
-            let closure_reg = c.alloc_reg();
+            let closure_reg = c.alloc_reg()?;
             c.emit(encode_abx(OpCode::Closure, closure_reg, proto), 0);
 
             // Emit Schedule opcode: A=closure, B=interval, C=unit
@@ -1351,7 +1360,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::WatchBlock { path, body } => {
             // Compile path expression into a register
-            let path_reg = c.alloc_reg();
+            let path_reg = c.alloc_reg()?;
             compile_expr(c, path, path_reg)?;
 
             // Compile body as closure (same pattern as Stmt::Spawn)
@@ -1376,7 +1385,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             proto_chunk.upvalue_sources = upvalue_sources;
             let proto = c.chunk.prototypes.len() as u16;
             c.chunk.prototypes.push(proto_chunk);
-            let closure_reg = c.alloc_reg();
+            let closure_reg = c.alloc_reg()?;
             c.emit(encode_abx(OpCode::Closure, closure_reg, proto), 0);
 
             // Emit Watch opcode: A=closure, B=path
@@ -1447,7 +1456,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             catch_var,
             catch_body,
         } => {
-            let catch_reg = c.alloc_reg();
+            let catch_reg = c.alloc_reg()?;
             let handler_jump = c.emit_jump(OpCode::PushHandler, catch_reg, 0);
             c.cleanup_contexts.push(CleanupContext {
                 kind: CleanupKind::Handler,
@@ -1517,10 +1526,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 None => vec![Expr::StringLit(resolved_path)],
             };
 
-            let module_reg = c.alloc_reg();
+            let module_reg = c.alloc_reg()?;
             compile_hidden_call(c, "__forge_import_module", import_args, module_reg)?;
             for name in export_names {
-                let local_reg = c.add_local(&name, false);
+                let local_reg = c.add_local(&name, false)?;
                 let field_idx = c.const_str(&name);
                 c.emit(
                     encode_abc(OpCode::GetField, local_reg, module_reg, field_idx as u8),
@@ -1552,7 +1561,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             proto_chunk.upvalue_sources = upvalue_sources;
             let proto = c.chunk.prototypes.len() as u16;
             c.chunk.prototypes.push(proto_chunk);
-            let cr = c.alloc_reg();
+            let cr = c.alloc_reg()?;
             c.emit(encode_abx(OpCode::Closure, cr, proto), 0);
             c.emit(encode_abc(OpCode::Spawn, cr, 0, 0), 0);
             c.free_to(cr);
@@ -1614,9 +1623,9 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 return Ok(());
             }
             let saved = c.next_register;
-            let lr = c.alloc_reg();
+            let lr = c.alloc_reg()?;
             compile_expr(c, left, lr)?;
-            let rr = c.alloc_reg();
+            let rr = c.alloc_reg()?;
             compile_expr(c, right, rr)?;
             let opcode = match op {
                 BinOp::Add => OpCode::Add,
@@ -1638,7 +1647,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::UnaryOp { op, operand } => {
             let saved = c.next_register;
-            let sr = c.alloc_reg();
+            let sr = c.alloc_reg()?;
             compile_expr(c, operand, sr)?;
             let opcode = match op {
                 UnaryOp::Neg => OpCode::Neg,
@@ -1656,10 +1665,10 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 return compile_hidden_call(c, "__forge_call_method", lowered_args, dst);
             }
             let saved = c.next_register;
-            let fr = c.alloc_reg();
+            let fr = c.alloc_reg()?;
             compile_expr(c, function, fr)?;
             for arg in args {
-                let ar = c.alloc_reg();
+                let ar = c.alloc_reg()?;
                 compile_expr(c, arg, ar)?;
             }
             c.emit(encode_abc(OpCode::Call, fr, args.len() as u8, dst), 0);
@@ -1667,16 +1676,16 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::Pipeline { value, function } => {
             let saved = c.next_register;
-            let fr = c.alloc_reg();
+            let fr = c.alloc_reg()?;
             compile_expr(c, function, fr)?;
-            let ar = c.alloc_reg();
+            let ar = c.alloc_reg()?;
             compile_expr(c, value, ar)?;
             c.emit(encode_abc(OpCode::Call, fr, 1, dst), 0);
             c.free_to(saved);
         }
         Expr::FieldAccess { object, field } => {
             let saved = c.next_register;
-            let or = c.alloc_reg();
+            let or = c.alloc_reg()?;
             compile_expr(c, object, or)?;
             let fi = c.const_str(field);
             c.emit(encode_abc(OpCode::GetField, dst, or, fi as u8), 0);
@@ -1684,9 +1693,9 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::Index { object, index } => {
             let saved = c.next_register;
-            let or = c.alloc_reg();
+            let or = c.alloc_reg()?;
             compile_expr(c, object, or)?;
-            let ir = c.alloc_reg();
+            let ir = c.alloc_reg()?;
             compile_expr(c, index, ir)?;
             c.emit(encode_abc(OpCode::GetIndex, dst, or, ir), 0);
             c.free_to(saved);
@@ -1694,7 +1703,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Array(items) => {
             let start = c.next_register;
             for item in items {
-                let r = c.alloc_reg();
+                let r = c.alloc_reg()?;
                 compile_expr(c, item, r)?;
             }
             c.emit(
@@ -1706,10 +1715,10 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Object(fields) => {
             let start = c.next_register;
             for (key, val) in fields {
-                let kr = c.alloc_reg();
+                let kr = c.alloc_reg()?;
                 let ki = c.const_str(key);
                 c.emit(encode_abx(OpCode::LoadConst, kr, ki), 0);
-                let vr = c.alloc_reg();
+                let vr = c.alloc_reg()?;
                 compile_expr(c, val, vr)?;
             }
             c.emit(
@@ -1721,7 +1730,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::StringInterp(parts) => {
             let start = c.next_register;
             for part in parts {
-                let r = c.alloc_reg();
+                let r = c.alloc_reg()?;
                 match part {
                     StringPart::Literal(s) => {
                         let idx = c.const_str(s);
@@ -1738,7 +1747,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::Try(inner) => {
             let saved = c.next_register;
-            let sr = c.alloc_reg();
+            let sr = c.alloc_reg()?;
             compile_expr(c, inner, sr)?;
             c.emit(encode_abc(OpCode::Try, dst, sr, 0), 0);
             c.free_to(saved);
@@ -1753,7 +1762,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             lc.current_line = c.current_line;
             lc.begin_scope();
             for p in params {
-                lc.add_local(&p.name, true);
+                lc.add_local(&p.name, true)?;
             }
             for s in body {
                 lc.current_line = s.line;
@@ -1790,25 +1799,25 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             c.end_scope();
         }
         Expr::Await(inner) => {
-            let src = c.alloc_reg();
+            let src = c.alloc_reg()?;
             compile_expr(c, inner, src)?;
             c.emit(encode_abc(OpCode::Await, dst, src, 0), c.current_line);
             c.free_to(src);
         }
         Expr::Must(inner) => {
-            let src = c.alloc_reg();
+            let src = c.alloc_reg()?;
             compile_expr(c, inner, src)?;
             c.emit(encode_abc(OpCode::Must, dst, src, 0), c.current_line);
             c.free_to(src);
         }
         Expr::Ask(inner) => {
-            let src = c.alloc_reg();
+            let src = c.alloc_reg()?;
             compile_expr(c, inner, src)?;
             c.emit(encode_abc(OpCode::Ask, dst, src, 0), c.current_line);
             c.free_to(src);
         }
         Expr::Freeze(inner) => {
-            let src = c.alloc_reg();
+            let src = c.alloc_reg()?;
             compile_expr(c, inner, src)?;
             c.emit(encode_abc(OpCode::Freeze, dst, src, 0), c.current_line);
             c.free_to(src);
@@ -1866,14 +1875,14 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 match step {
                     PipeStep::Keep(predicate) => {
                         let saved = c.next_register;
-                        let pred_reg = c.alloc_reg();
+                        let pred_reg = c.alloc_reg()?;
                         compile_expr(c, predicate, pred_reg)?;
                         compile_hidden_call_from_regs(c, "filter", &[dst, pred_reg], dst)?;
                         c.free_to(saved);
                     }
                     PipeStep::Sort(Some(field)) => {
                         let saved = c.next_register;
-                        let field_reg = c.alloc_reg();
+                        let field_reg = c.alloc_reg()?;
                         compile_expr(c, &Expr::StringLit(field.clone()), field_reg)?;
                         compile_hidden_call_from_regs(
                             c,
@@ -1888,7 +1897,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                     }
                     PipeStep::Take(count) => {
                         let saved = c.next_register;
-                        let count_reg = c.alloc_reg();
+                        let count_reg = c.alloc_reg()?;
                         compile_expr(c, count, count_reg)?;
                         compile_hidden_call_from_regs(
                             c,
