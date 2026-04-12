@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Cranelift JIT is now an optional cargo feature** — enabled by default. Build without it via `cargo install forge-lang --no-default-features` for faster compile times and broader platform support. ([#41](https://github.com/humancto/forge-lang/pull/41))
+
+### Fixed
+
+- **`len()` and `count("")` use char count across all backends** — interpreter and VM now return Unicode character count consistently. ([#38](https://github.com/humancto/forge-lang/pull/38))
+- **JIT memory leak fixed** — replaced `mem::forget(jit)` with owned `Vec<JitCompiler>` to keep code pages alive without leaking. ([#39](https://github.com/humancto/forge-lang/pull/39))
+- **Short-circuit `&&`/`||` in VM** — logical operators now skip right-hand evaluation when unnecessary, matching interpreter behavior. ([#40](https://github.com/humancto/forge-lang/pull/40))
+
 ## [0.7.1] - 2026-04-12
 
 ### Fixed
