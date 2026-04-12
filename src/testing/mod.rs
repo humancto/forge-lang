@@ -189,23 +189,10 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>, coverage: bool) {
                 }
             }
         }
-        if coverage {
-            if let Some(ref cov) = interpreter.coverage {
-                let executable_lines = source
-                    .lines()
-                    .enumerate()
-                    .filter(|(_, line)| {
-                        let trimmed = line.trim();
-                        !trimmed.is_empty()
-                            && !trimmed.starts_with("//")
-                            && !trimmed.starts_with("/*")
-                            && trimmed != "}"
-                            && trimmed != "{"
-                    })
-                    .count();
-                let executed = cov.len();
-                coverage_data.push((path_str.clone(), executable_lines, executed));
-            }
+        if let Some(ref cov) = interpreter.coverage {
+            let executable_set = executable_line_set(&source);
+            let executed = cov.intersection(&executable_set).count();
+            coverage_data.push((path_str.clone(), executable_set.len(), executed));
         }
 
         println!();
@@ -231,7 +218,7 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>, coverage: bool) {
             total_executable += executable;
             total_executed += executed;
             let pct = if *executable > 0 {
-                (*executed as f64 / *executable as f64 * 100.0).min(100.0)
+                *executed as f64 / *executable as f64 * 100.0
             } else {
                 100.0
             };
@@ -248,7 +235,7 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>, coverage: bool) {
             );
         }
         let overall = if total_executable > 0 {
-            (total_executed as f64 / total_executable as f64 * 100.0).min(100.0)
+            total_executed as f64 / total_executable as f64 * 100.0
         } else {
             100.0
         };
@@ -303,6 +290,38 @@ fn find_test_functions(program: &Program) -> Vec<TestInfo> {
         }
     }
     tests
+}
+
+/// Build a set of 1-indexed line numbers considered executable.
+/// Excludes blank lines, single-line comments, multi-line comment blocks, and lone braces.
+fn executable_line_set(source: &str) -> std::collections::HashSet<usize> {
+    let mut set = std::collections::HashSet::new();
+    let mut in_block_comment = false;
+    for (i, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if in_block_comment {
+            if let Some(pos) = trimmed.find("*/") {
+                in_block_comment = false;
+                // If there's code after the closing */, count this line
+                let after = trimmed[pos + 2..].trim();
+                if !after.is_empty() {
+                    set.insert(i + 1);
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with("/*") {
+            if !trimmed.contains("*/") {
+                in_block_comment = true;
+            }
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed == "}" {
+            continue;
+        }
+        set.insert(i + 1); // 1-indexed to match parser line numbers
+    }
+    set
 }
 
 fn find_hook_function(program: &Program, hook_name: &str) -> Option<String> {
