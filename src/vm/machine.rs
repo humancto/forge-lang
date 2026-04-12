@@ -59,18 +59,18 @@ impl SendableVM {
         let vm = &mut self.0;
         // Root the closure in register 0 so GC can't collect it between calls
         if vm.registers.is_empty() {
-            vm.registers.push(closure.clone());
+            vm.registers.push(closure);
         } else {
-            vm.registers[0] = closure.clone();
+            vm.registers[0] = closure;
         }
         loop {
             std::thread::sleep(interval);
-            let _ = vm.call_value(closure.clone(), vec![]);
+            let _ = vm.call_value(closure, vec![]);
             // Re-root after call (call_value may have modified registers)
             if vm.registers.is_empty() {
-                vm.registers.push(closure.clone());
+                vm.registers.push(closure);
             } else {
-                vm.registers[0] = closure.clone();
+                vm.registers[0] = closure;
             }
         }
     }
@@ -79,9 +79,9 @@ impl SendableVM {
         let vm = &mut self.0;
         // Root the closure in register 0 so GC can't collect it between calls
         if vm.registers.is_empty() {
-            vm.registers.push(closure.clone());
+            vm.registers.push(closure);
         } else {
-            vm.registers[0] = closure.clone();
+            vm.registers[0] = closure;
         }
         let mut last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         loop {
@@ -89,12 +89,12 @@ impl SendableVM {
             let current = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             if current != last_modified {
                 last_modified = current;
-                let _ = vm.call_value(closure.clone(), vec![]);
+                let _ = vm.call_value(closure, vec![]);
                 // Re-root after call
                 if vm.registers.is_empty() {
-                    vm.registers.push(closure.clone());
+                    vm.registers.push(closure);
                 } else {
-                    vm.registers[0] = closure.clone();
+                    vm.registers[0] = closure;
                 }
             }
         }
@@ -1117,36 +1117,35 @@ impl VM {
                         self.registers[base + a as usize] = Value::Bool(false);
                     }
                     OpCode::Move => {
-                        self.registers[base + a as usize] =
-                            self.registers[base + b as usize].clone();
+                        self.registers[base + a as usize] = self.registers[base + b as usize];
                     }
                     OpCode::Add => {
-                        let left = self.registers[base + b as usize].clone();
-                        let right = self.registers[base + c as usize].clone();
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
                             self.arith_op(&left, &right, OpCode::Add)?;
                     }
                     OpCode::Sub => {
-                        let left = self.registers[base + b as usize].clone();
-                        let right = self.registers[base + c as usize].clone();
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
                             self.arith_op(&left, &right, OpCode::Sub)?;
                     }
                     OpCode::Mul => {
-                        let left = self.registers[base + b as usize].clone();
-                        let right = self.registers[base + c as usize].clone();
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
                             self.arith_op(&left, &right, OpCode::Mul)?;
                     }
                     OpCode::Div => {
-                        let left = self.registers[base + b as usize].clone();
-                        let right = self.registers[base + c as usize].clone();
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
                             self.arith_op(&left, &right, OpCode::Div)?;
                     }
                     OpCode::Mod => {
-                        let left = self.registers[base + b as usize].clone();
-                        let right = self.registers[base + c as usize].clone();
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
                             self.arith_op(&left, &right, OpCode::Mod)?;
                     }
@@ -1220,7 +1219,7 @@ impl VM {
                     OpCode::SetGlobal => {
                         let name_const = &chunk.constants[bx as usize];
                         if let Constant::Str(name) = name_const {
-                            let val = self.registers[base + a as usize].clone();
+                            let val = self.registers[base + a as usize];
                             self.globals.insert(name.clone(), val);
                         }
                     }
@@ -1235,20 +1234,20 @@ impl VM {
                                 .gc
                                 .get(uv_ref)
                                 .and_then(|uv_obj| match &uv_obj.kind {
-                                    ObjKind::Upvalue(uv) => Some(uv.value.clone()),
+                                    ObjKind::Upvalue(uv) => Some(uv.value),
                                     _ => None,
                                 })
                                 .ok_or_else(|| VMError::new("invalid open upvalue"))?;
-                            self.registers[base + local_slot as usize] = value.clone();
+                            self.registers[base + local_slot as usize] = value;
                             value
                         } else {
-                            self.registers[base + local_slot as usize].clone()
+                            self.registers[base + local_slot as usize]
                         };
                         self.registers[base + a as usize] = value;
                     }
                     OpCode::SetLocal => {
-                        let val = self.registers[base + b as usize].clone();
-                        self.registers[base + a as usize] = val.clone();
+                        let val = self.registers[base + b as usize];
+                        self.registers[base + a as usize] = val;
                         let open_upvalue = self.frames[frame_idx].open_upvalues.get(&a).copied();
                         if let Some(uv_ref) = open_upvalue {
                             if let Some(uv_obj) = self.gc.get_mut(uv_ref) {
@@ -1281,20 +1280,20 @@ impl VM {
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
                     }
                     OpCode::Call => {
-                        let func_val = self.registers[base + a as usize].clone();
+                        let func_val = self.registers[base + a as usize];
                         let arg_count = b as usize;
                         let dst_reg = base + c as usize;
 
                         let mut args = Vec::with_capacity(arg_count);
                         for i in 0..arg_count {
-                            args.push(self.registers[base + a as usize + 1 + i].clone());
+                            args.push(self.registers[base + a as usize + 1 + i]);
                         }
 
                         let result = self.call_value(func_val, args)?;
                         self.registers[dst_reg] = result;
                     }
                     OpCode::Return => {
-                        let val = self.registers[base + a as usize].clone();
+                        let val = self.registers[base + a as usize];
                         self.profiler.exit_function();
                         self.frames.pop();
                         return Ok(Some(val));
@@ -1328,7 +1327,7 @@ impl VM {
                                     {
                                         existing
                                     } else {
-                                        let val = self.registers[base + *src_reg as usize].clone();
+                                        let val = self.registers[base + *src_reg as usize];
                                         let uv_ref = self
                                             .gc
                                             .alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
@@ -1366,8 +1365,7 @@ impl VM {
                                         let uv_ref = closure.upvalues[uv_idx];
                                         if let Some(uv_obj) = self.gc.get(uv_ref) {
                                             if let ObjKind::Upvalue(uv) = &uv_obj.kind {
-                                                self.registers[base + a as usize] =
-                                                    uv.value.clone();
+                                                self.registers[base + a as usize] = uv.value;
                                             }
                                         }
                                     }
@@ -1377,7 +1375,7 @@ impl VM {
                     }
                     OpCode::SetUpvalue => {
                         let uv_idx = a as usize;
-                        let val = self.registers[base + b as usize].clone();
+                        let val = self.registers[base + b as usize];
                         if let Some(frame) = self.frames.last() {
                             let closure_ref = frame.closure;
                             if let Some(obj) = self.gc.get(closure_ref) {
@@ -1399,7 +1397,7 @@ impl VM {
                         let count = c as usize;
                         let mut items = Vec::with_capacity(count);
                         for i in 0..count {
-                            items.push(self.registers[start + i].clone());
+                            items.push(self.registers[start + i]);
                         }
                         let r = self.gc.alloc(ObjKind::Array(items));
                         self.registers[base + a as usize] = Value::Obj(r);
@@ -1410,7 +1408,7 @@ impl VM {
                         let mut map = IndexMap::new();
                         for i in 0..pair_count {
                             let key_val = &self.registers[start + i * 2];
-                            let val = self.registers[start + i * 2 + 1].clone();
+                            let val = self.registers[start + i * 2 + 1];
                             if let Some(key) = self.get_string(key_val) {
                                 map.insert(key, val);
                             }
@@ -1455,7 +1453,7 @@ impl VM {
                                                         continue;
                                                     };
                                                     if let Some(value) = embed_map.get(&field) {
-                                                        delegated = Some(value.clone());
+                                                        delegated = Some(*value);
                                                         break;
                                                     }
                                                 }
@@ -1537,7 +1535,7 @@ impl VM {
                     }
                     OpCode::SetField => {
                         let field_const = &chunk.constants[b as usize];
-                        let val = self.registers[base + c as usize].clone();
+                        let val = self.registers[base + c as usize];
                         if let Constant::Str(field) = field_const {
                             let obj_ref = if let Value::Obj(r) = &self.registers[base + a as usize]
                             {
@@ -1558,8 +1556,8 @@ impl VM {
                         }
                     }
                     OpCode::GetIndex => {
-                        let obj = self.registers[base + b as usize].clone();
-                        let idx = self.registers[base + c as usize].clone();
+                        let obj = self.registers[base + b as usize];
+                        let idx = self.registers[base + c as usize];
                         let result = match (&obj, &idx) {
                             (Value::Obj(r), Value::Int(i)) => {
                                 if let Some(o) = self.gc.get(*r) {
@@ -1594,8 +1592,8 @@ impl VM {
                         self.registers[base + a as usize] = result;
                     }
                     OpCode::SetIndex => {
-                        let idx = self.registers[base + b as usize].clone();
-                        let val = self.registers[base + c as usize].clone();
+                        let idx = self.registers[base + b as usize];
+                        let val = self.registers[base + c as usize];
                         if let Value::Obj(r) = &self.registers[base + a as usize] {
                             let r = *r;
                             let key_str = self.get_string(&idx);
@@ -1670,10 +1668,10 @@ impl VM {
                             if let Some(obj) = self.gc.get(*r) {
                                 match &obj.kind {
                                     ObjKind::ResultOk(v) => {
-                                        self.registers[base + a as usize] = v.clone();
+                                        self.registers[base + a as usize] = *v;
                                     }
                                     ObjKind::ResultErr(_) => {
-                                        let val = self.registers[base + b as usize].clone();
+                                        let val = self.registers[base + b as usize];
                                         self.frames.pop();
                                         return Ok(Some(val));
                                     }
@@ -1689,7 +1687,7 @@ impl VM {
                         }
                     }
                     OpCode::Spawn => {
-                        let closure_val = self.registers[base + a as usize].clone();
+                        let closure_val = self.registers[base + a as usize];
                         let result_slot: Arc<(Mutex<Option<SharedValue>>, Condvar)> =
                             Arc::new((Mutex::new(None), Condvar::new()));
                         let slot_clone = result_slot.clone();
@@ -1707,7 +1705,7 @@ impl VM {
                         self.registers[base + a as usize] = Value::Obj(handle);
                     }
                     OpCode::Await => {
-                        let src = self.registers[base + b as usize].clone();
+                        let src = self.registers[base + b as usize];
                         // Extract the Arc first, releasing the GC borrow
                         let maybe_slot = if let Value::Obj(r) = &src {
                             self.gc.get(*r).and_then(|obj| {
@@ -1775,7 +1773,7 @@ impl VM {
                         self.frames[frame_idx].timeouts.pop();
                     }
                     OpCode::Schedule => {
-                        let closure_val = self.registers[base + a as usize].clone();
+                        let closure_val = self.registers[base + a as usize];
                         let interval_val = &self.registers[base + b as usize];
                         let secs = match interval_val {
                             Value::Int(n) if *n > 0 => {
@@ -1816,7 +1814,7 @@ impl VM {
                         spawn_schedule_thread(sendable, child_closure, Duration::from_secs(secs));
                     }
                     OpCode::Watch => {
-                        let closure_val = self.registers[base + a as usize].clone();
+                        let closure_val = self.registers[base + a as usize];
                         let path_val = &self.registers[base + b as usize];
                         let path = if let Value::Obj(r) = path_val {
                             self.gc.get(*r).and_then(|o| match &o.kind {
@@ -1839,7 +1837,7 @@ impl VM {
                         spawn_watch_thread(sendable, child_closure, path);
                     }
                     OpCode::Must => {
-                        let src = self.registers[base + b as usize].clone();
+                        let src = self.registers[base + b as usize];
                         let result = match &src {
                             Value::Null => {
                                 return Err(VMError::new("must failed: got null"));
@@ -1849,7 +1847,7 @@ impl VM {
                                     let msg = v.display(&self.gc);
                                     return Err(VMError::new(&format!("must failed: {}", msg)));
                                 }
-                                Some(ObjKind::ResultOk(v)) => v.clone(),
+                                Some(ObjKind::ResultOk(v)) => *v,
                                 _ => src,
                             },
                             _ => src,
@@ -1946,7 +1944,7 @@ impl VM {
                         }
                     }
                     OpCode::Freeze => {
-                        let src = self.registers[base + b as usize].clone();
+                        let src = self.registers[base + b as usize];
                         let frozen_ref = self.gc.alloc(ObjKind::Frozen(src));
                         self.registers[base + a as usize] = Value::Obj(frozen_ref);
                     }
@@ -2124,7 +2122,7 @@ impl VM {
 
                         for (i, arg) in args.iter().enumerate() {
                             if i < arity {
-                                self.registers[new_base + i] = arg.clone();
+                                self.registers[new_base + i] = *arg;
                             }
                         }
                         for i in args.len()..arity {

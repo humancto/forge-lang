@@ -92,7 +92,7 @@ pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
 pub struct GcRef(pub usize);
 
 /// Runtime value. Primitives inline; heap objects via GcRef.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum Value {
     Int(i64),
     Float(f64),
