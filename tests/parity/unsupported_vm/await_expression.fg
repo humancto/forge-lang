@@ -1,4 +1,0 @@
-// expect-error: await expressions
-
-let value = await 42
-println(value)

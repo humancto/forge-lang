@@ -1,7 +1,91 @@
 use super::bytecode::Chunk;
+use super::gc::Gc;
 use indexmap::IndexMap;
 use std::fmt;
 use std::sync::Arc;
+
+/// GC-free value representation for crossing thread boundaries.
+/// Used for spawn result slots and globals transfer during fork_for_spawn.
+#[derive(Clone)]
+pub enum SharedValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Null,
+    String(String),
+    Array(Vec<SharedValue>),
+    Object(IndexMap<String, SharedValue>),
+    ResultOk(Box<SharedValue>),
+    ResultErr(Box<SharedValue>),
+}
+
+/// Convert a VM Value to a SharedValue (owns all data, no GcRefs).
+/// Functions/closures/natives/upvalues/task handles map to Null.
+pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
+    match val {
+        Value::Int(n) => SharedValue::Int(*n),
+        Value::Float(n) => SharedValue::Float(*n),
+        Value::Bool(b) => SharedValue::Bool(*b),
+        Value::Null => SharedValue::Null,
+        Value::Obj(r) => match gc.get(*r) {
+            Some(obj) => match &obj.kind {
+                ObjKind::String(s) => SharedValue::String(s.clone()),
+                ObjKind::Array(items) => {
+                    SharedValue::Array(items.iter().map(|v| value_to_shared(gc, v)).collect())
+                }
+                ObjKind::Object(map) => {
+                    let entries = map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), value_to_shared(gc, v)))
+                        .collect();
+                    SharedValue::Object(entries)
+                }
+                ObjKind::ResultOk(v) => SharedValue::ResultOk(Box::new(value_to_shared(gc, v))),
+                ObjKind::ResultErr(v) => SharedValue::ResultErr(Box::new(value_to_shared(gc, v))),
+                // Functions, closures, natives, upvalues, task handles are not transferable
+                _ => SharedValue::Null,
+            },
+            None => SharedValue::Null,
+        },
+    }
+}
+
+/// Convert a SharedValue back to a VM Value (allocates in target GC).
+pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
+    match sv {
+        SharedValue::Int(n) => Value::Int(*n),
+        SharedValue::Float(n) => Value::Float(*n),
+        SharedValue::Bool(b) => Value::Bool(*b),
+        SharedValue::Null => Value::Null,
+        SharedValue::String(s) => {
+            let r = gc.alloc(ObjKind::String(s.clone()));
+            Value::Obj(r)
+        }
+        SharedValue::Array(items) => {
+            let vals: Vec<Value> = items.iter().map(|sv| shared_to_value(gc, sv)).collect();
+            let r = gc.alloc(ObjKind::Array(vals));
+            Value::Obj(r)
+        }
+        SharedValue::Object(map) => {
+            let entries: IndexMap<String, Value> = map
+                .iter()
+                .map(|(k, sv)| (k.clone(), shared_to_value(gc, sv)))
+                .collect();
+            let r = gc.alloc(ObjKind::Object(entries));
+            Value::Obj(r)
+        }
+        SharedValue::ResultOk(v) => {
+            let inner = shared_to_value(gc, v);
+            let r = gc.alloc(ObjKind::ResultOk(inner));
+            Value::Obj(r)
+        }
+        SharedValue::ResultErr(v) => {
+            let inner = shared_to_value(gc, v);
+            let r = gc.alloc(ObjKind::ResultErr(inner));
+            Value::Obj(r)
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GcRef(pub usize);
@@ -140,6 +224,7 @@ impl GcObject {
             ObjKind::Upvalue(uv) => uv.value.display(gc),
             ObjKind::ResultOk(v) => format!("Ok({})", v.display(gc)),
             ObjKind::ResultErr(v) => format!("Err({})", v.display(gc)),
+            ObjKind::TaskHandle(_) => "<task>".to_string(),
         }
     }
 
@@ -173,6 +258,7 @@ impl GcObject {
             ObjKind::NativeFunction(_) => "BuiltIn",
             ObjKind::Upvalue(_) => "Upvalue",
             ObjKind::ResultOk(_) | ObjKind::ResultErr(_) => "Result",
+            ObjKind::TaskHandle(_) => "TaskHandle",
         }
     }
 
@@ -233,6 +319,7 @@ pub enum ObjKind {
     Upvalue(ObjUpvalue),
     ResultOk(Value),
     ResultErr(Value),
+    TaskHandle(Arc<(std::sync::Mutex<Option<SharedValue>>, std::sync::Condvar)>),
 }
 
 #[derive(Clone)]

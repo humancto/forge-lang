@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::bytecode::*;
@@ -7,6 +8,39 @@ use super::frame::*;
 use super::gc::Gc;
 use super::jit::profiler::Profiler;
 use super::value::*;
+
+/// Wrapper for sending a VM to another thread.
+/// Safe because forked VMs have empty jit_cache (no raw pointers).
+struct SendableVM(VM);
+unsafe impl Send for SendableVM {}
+
+/// Run a spawned closure on a forked VM in a new OS thread.
+fn spawn_thread(
+    sendable: SendableVM,
+    closure: Value,
+    slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>,
+) {
+    std::thread::spawn(move || {
+        sendable.run(closure, slot);
+    });
+}
+
+impl SendableVM {
+    fn run(mut self, closure: Value, slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>) {
+        let vm = &mut self.0;
+        let val = match vm.call_value(closure, vec![]) {
+            Ok(v) => value_to_shared(&vm.gc, &v),
+            Err(e) => {
+                eprintln!("spawn error: {}", e.message);
+                SharedValue::Null
+            }
+        };
+        if let Ok(mut guard) = slot.0.lock() {
+            *guard = Some(val);
+            slot.1.notify_all();
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct JitEntry {
@@ -707,6 +741,114 @@ impl VM {
             }
         }
         None
+    }
+
+    /// Create a new VM for a spawn thread with copies of this VM's state.
+    /// Calls VM::new() for fresh builtins + empty jit_cache, then copies
+    /// non-function globals and struct metadata from the parent.
+    fn fork_for_spawn(&self) -> SendableVM {
+        let mut child = VM::new();
+
+        // Copy non-function globals. Skip globals where value_to_shared returns
+        // Null but the original wasn't Null (i.e., functions/closures/natives) —
+        // these would overwrite the child's freshly-registered builtins.
+        for (name, val) in &self.globals {
+            let shared = value_to_shared(&self.gc, val);
+            if matches!(shared, SharedValue::Null) && !matches!(val, Value::Null) {
+                continue;
+            }
+            let child_val = shared_to_value(&mut child.gc, &shared);
+            child.globals.insert(name.clone(), child_val);
+        }
+
+        for (name, methods) in &self.method_tables {
+            let mut child_methods = IndexMap::new();
+            for (k, v) in methods {
+                let shared = value_to_shared(&self.gc, v);
+                if matches!(shared, SharedValue::Null) && !matches!(v, Value::Null) {
+                    continue;
+                }
+                child_methods.insert(k.clone(), shared_to_value(&mut child.gc, &shared));
+            }
+            child.method_tables.insert(name.clone(), child_methods);
+        }
+        for (name, methods) in &self.static_methods {
+            let mut child_methods = IndexMap::new();
+            for (k, v) in methods {
+                let shared = value_to_shared(&self.gc, v);
+                if matches!(shared, SharedValue::Null) && !matches!(v, Value::Null) {
+                    continue;
+                }
+                child_methods.insert(k.clone(), shared_to_value(&mut child.gc, &shared));
+            }
+            child.static_methods.insert(name.clone(), child_methods);
+        }
+
+        child.embedded_fields = self.embedded_fields.clone();
+
+        for (name, defaults) in &self.struct_defaults {
+            let mut child_defaults = IndexMap::new();
+            for (k, v) in defaults {
+                let shared = value_to_shared(&self.gc, v);
+                if matches!(shared, SharedValue::Null) && !matches!(v, Value::Null) {
+                    continue;
+                }
+                child_defaults.insert(k.clone(), shared_to_value(&mut child.gc, &shared));
+            }
+            child.struct_defaults.insert(name.clone(), child_defaults);
+        }
+
+        SendableVM(child)
+    }
+
+    /// Re-create a closure from parent GC in a child VM's GC.
+    /// The Arc<Chunk> is shared; upvalue values are copied via SharedValue.
+    fn transfer_closure(&self, closure_ref: GcRef, child: &mut VM) -> Value {
+        let obj = self
+            .gc
+            .get(closure_ref)
+            .expect("BUG: closure ref invalid in transfer_closure");
+        match &obj.kind {
+            ObjKind::Closure(c) => {
+                let function = ObjFunction {
+                    name: c.function.name.clone(),
+                    chunk: std::sync::Arc::clone(&c.function.chunk),
+                };
+                let mut child_upvalues = Vec::new();
+                for uv_ref in &c.upvalues {
+                    let uv_val = self
+                        .gc
+                        .get(*uv_ref)
+                        .and_then(|o| match &o.kind {
+                            ObjKind::Upvalue(uv) => Some(&uv.value),
+                            _ => None,
+                        })
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let shared = value_to_shared(&self.gc, &uv_val);
+                    let child_val = shared_to_value(&mut child.gc, &shared);
+                    let child_uv = child
+                        .gc
+                        .alloc(ObjKind::Upvalue(ObjUpvalue { value: child_val }));
+                    child_upvalues.push(child_uv);
+                }
+                let closure = ObjClosure {
+                    function,
+                    upvalues: child_upvalues,
+                };
+                let r = child.gc.alloc(ObjKind::Closure(closure));
+                Value::Obj(r)
+            }
+            ObjKind::Function(f) => {
+                let function = ObjFunction {
+                    name: f.name.clone(),
+                    chunk: std::sync::Arc::clone(&f.chunk),
+                };
+                let r = child.gc.alloc(ObjKind::Function(function));
+                Value::Obj(r)
+            }
+            _ => Value::Null,
+        }
     }
 
     pub fn execute(&mut self, chunk: &Chunk) -> Result<Value, VMError> {
@@ -1443,7 +1585,53 @@ impl VM {
                     }
                     OpCode::Spawn => {
                         let closure_val = self.registers[base + a as usize].clone();
-                        self.call_value(closure_val, vec![])?;
+                        let result_slot: Arc<(Mutex<Option<SharedValue>>, Condvar)> =
+                            Arc::new((Mutex::new(None), Condvar::new()));
+                        let slot_clone = result_slot.clone();
+
+                        let mut sendable = self.fork_for_spawn();
+                        let child_closure = if let Value::Obj(r) = &closure_val {
+                            self.transfer_closure(*r, &mut sendable.0)
+                        } else {
+                            Value::Null
+                        };
+
+                        spawn_thread(sendable, child_closure, slot_clone);
+
+                        let handle = self.gc.alloc(ObjKind::TaskHandle(result_slot));
+                        self.registers[base + a as usize] = Value::Obj(handle);
+                    }
+                    OpCode::Await => {
+                        let src = self.registers[base + b as usize].clone();
+                        // Extract the Arc first, releasing the GC borrow
+                        let maybe_slot = if let Value::Obj(r) = &src {
+                            self.gc.get(*r).and_then(|obj| {
+                                if let ObjKind::TaskHandle(slot) = &obj.kind {
+                                    Some(slot.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        // GC borrow released — safe to call shared_to_value
+                        let result = if let Some(slot) = maybe_slot {
+                            let (lock, cvar) = &*slot;
+                            let mut guard = lock
+                                .lock()
+                                .map_err(|_| VMError::new("await: spawned task panicked"))?;
+                            while guard.is_none() {
+                                guard = cvar
+                                    .wait(guard)
+                                    .map_err(|_| VMError::new("await: wait interrupted"))?;
+                            }
+                            let shared = guard.take().unwrap_or(SharedValue::Null);
+                            shared_to_value(&mut self.gc, &shared)
+                        } else {
+                            src
+                        };
+                        self.registers[base + a as usize] = result;
                     }
                     OpCode::PushHandler => {
                         let catch_ip = {

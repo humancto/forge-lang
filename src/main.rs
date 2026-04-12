@@ -565,7 +565,6 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
             collect_vm_incompatible_expr(expr, issues);
         }
         Expr::Await(expr) => {
-            issues.insert("await expressions");
             collect_vm_incompatible_expr(expr, issues);
         }
         Expr::Freeze(expr) => {
@@ -574,10 +573,6 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
         }
         Expr::Spread(expr) => collect_vm_incompatible_expr(expr, issues),
         Expr::Spawn(body) => {
-            // The expression form of spawn silently flattens to a synchronous
-            // block returning null in the VM compiler, so user code that
-            // depends on its parallel semantics is wrong. Reject it.
-            issues.insert("spawn expressions");
             for s in body {
                 collect_vm_incompatible_stmt(&s.stmt, issues);
             }
