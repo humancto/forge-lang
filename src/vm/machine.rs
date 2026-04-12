@@ -1466,7 +1466,8 @@ impl VM {
                                     }
                                     ObjKind::String(s) => match field.as_str() {
                                         "len" => {
-                                            direct_result = Some(Value::Int(s.len() as i64));
+                                            direct_result =
+                                                Some(Value::Int(s.chars().count() as i64));
                                             needs_alloc = None;
                                         }
                                         "upper" => {
