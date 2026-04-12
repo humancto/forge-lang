@@ -357,7 +357,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 - [x] 7C.1 Unify async runtime — `stdlib/http.rs:407` creates a new Tokio runtime per HTTP call. Unify on the pg/mysql pattern: `Handle::try_current()` with `block_in_place`, fallback to thread-local runtime. (PR #53)
 - [x] 7C.2 Fix string `.len` property inconsistency — `machine.rs` GetField returns `s.len()` (bytes) but `Len` opcode returns `s.chars().count()` (chars). Must agree. (PR #54)
-- [ ] 7C.3 Variable-width VM frames — 256 registers per frame is wasteful (a 3-arg function wastes 253 slots). Use compiler's `max_register` for tighter allocation.
+- [x] 7C.3 Variable-width VM frames — 256 registers per frame is wasteful (a 3-arg function wastes 253 slots). Use compiler's `max_register` for tighter allocation. (PR #55)
 - [ ] 7C.4 Remove dispatch loop closure wrapper — `machine.rs:1085` wraps every instruction in `(|| { ... })()`. Direct `match` with labeled loops is more conventional and potentially faster.
 
 ### Phase 7D — Security Hardening
