@@ -150,6 +150,50 @@ These rules are non-negotiable. Follow them on every change.
 13. **Update CHANGELOG.md.** Every PR that ships user-facing changes must have an entry under `[Unreleased]`. Format: `- Description of change ([#PR](link))`. On release, `[Unreleased]` is cut into a version block.
 14. **Bump the version together.** When cutting a release, update `Cargo.toml` version, add CHANGELOG heading (e.g. `## [0.5.0] - 2026-03-06`), and tag the commit.
 
+### Release Checklist (`/release-verify`)
+
+Run this checklist after every version bump. Grep for stale version strings and verify all targets. **Every item must pass before shipping.**
+
+#### Version touchpoints (update ALL to new version)
+
+| # | File | What to update |
+|---|------|----------------|
+| 1 | `Cargo.toml` | `version = "X.Y.Z"` |
+| 2 | `CHANGELOG.md` | Cut `[Unreleased]` into `[X.Y.Z] - YYYY-MM-DD` |
+| 3 | `README.md` | Version output example + project status section |
+| 4 | `CLAUDE.md` | `## Known Limitations (vX.Y.Z)` |
+| 5 | `docs/index.html` | Hero badge text |
+| 6 | `docs/spec/theme/forge-9e99b408.js` | `badge.textContent` |
+| 7 | `docs/spec/index.html` | Spec version label (`version <strong>X.Y.Z</strong>`) |
+| 8 | `docs/spec/introduction.html` | Same spec version label |
+| 9 | `docs/spec/print.html` | Same spec version label |
+| 10 | `docs/PROGRAMMING_FORGE.md` | Front-matter `version:` + example output |
+| 11 | `docs/FORGE_BOOK.md` | Front-matter `version:` + example output |
+| 12 | `docs/BOOK_FRONT_MATTER.md` | Front-matter `version:` |
+| 13 | `docs/book/template.tex` | Title page edition line |
+| 14 | `docs/part4_internals.md` | Example output `# Output: Forge vX.Y.Z` |
+
+#### Publish targets
+
+| # | Target | Command / Action |
+|---|--------|------------------|
+| 1 | GitHub release | `gh release create vX.Y.Z --title "..." --notes-file /tmp/release-notes.md` + attach binary |
+| 2 | crates.io | `cargo publish` (run `cargo clean -p forge-lang` first to bust `env!` cache) |
+| 3 | Homebrew | Update `humancto/homebrew-tap/Formula/forge.rb` — version, URL, sha256 |
+
+#### Verification command
+
+After updating, run this to catch strays (excludes `target/`, `.git/`, changelogs, and "as of vX.Y.Z" historical markers):
+
+```bash
+# Replace OLD with the previous version (e.g., 0.7.0)
+rg --glob '!target' --glob '!.git' --glob '!Cargo.lock' --glob '!*.d' \
+   "v?OLD" --type-not lock \
+   | grep -v 'as of v' | grep -v 'CHANGELOG\|changelog' | grep -v '\[0\.' | grep -v 'ROADMAP'
+```
+
+Zero output = clean release. Any remaining hits are stale references to fix.
+
 ### CHANGELOG Format (Keep-a-Changelog)
 
 ```markdown
