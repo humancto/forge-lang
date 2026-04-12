@@ -66,11 +66,11 @@ struct Cli {
     eval_code: Option<String>,
 
     /// Use the bytecode VM. Faster on numeric/loop-heavy code but does not
-    /// support the full language: ask/must/freeze expressions,
-    /// schedule/watch blocks, and decorator-driven runtime features (server
-    /// routes, etc.) are rejected up front. spawn/await are supported.
-    /// Use the default interpreter for HTTP servers, AI calls, file watching,
-    /// and full stdlib coverage.
+    /// support the full language: ask/must/freeze expressions and
+    /// decorator-driven runtime features (server routes, etc.) are rejected
+    /// up front. spawn/await, schedule/watch are supported.
+    /// Use the default interpreter for HTTP servers, AI calls, and full
+    /// stdlib coverage.
     #[arg(long = "vm")]
     use_vm: bool,
 
@@ -396,13 +396,11 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
             }
         }
         Stmt::ScheduleBlock { body, .. } => {
-            issues.insert("schedule blocks");
             for s in body {
                 collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
         Stmt::WatchBlock { body, .. } => {
-            issues.insert("watch blocks");
             for s in body {
                 collect_vm_incompatible_stmt(&s.stmt, issues);
             }

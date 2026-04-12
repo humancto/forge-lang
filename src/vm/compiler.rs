@@ -1298,8 +1298,92 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             Ok(())
         }
 
-        Stmt::ScheduleBlock { .. } => Ok(()),
-        Stmt::WatchBlock { .. } => Ok(()),
+        Stmt::ScheduleBlock {
+            interval,
+            unit,
+            body,
+        } => {
+            // Compile interval expression into a register
+            let interval_reg = c.alloc_reg();
+            compile_expr(c, interval, interval_reg)?;
+
+            // Load unit string into a register
+            let unit_reg = c.alloc_reg();
+            let unit_idx = c.const_str(unit);
+            c.emit(encode_abx(OpCode::LoadConst, unit_reg, unit_idx), 0);
+
+            // Compile body as closure (same pattern as Stmt::Spawn)
+            let parent_locals = c.snapshot_locals();
+            let parent_upvalues = c.snapshot_upvalues();
+
+            let mut sc = Compiler::new("<schedule>");
+            sc.parent_locals = parent_locals;
+            sc.parent_upvalues = parent_upvalues;
+            sc.current_line = c.current_line;
+            sc.begin_scope();
+            for s in body {
+                sc.current_line = s.line;
+                compile_stmt(&mut sc, &s.stmt)?;
+            }
+            sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+            sc.chunk.upvalue_count = sc.upvalues.len() as u8;
+            sc.chunk.max_registers = sc.max_register;
+            let upvalue_sources: Vec<UpvalueSource> =
+                sc.upvalues.iter().map(|u| u.source).collect();
+            let mut proto_chunk = sc.chunk;
+            proto_chunk.upvalue_sources = upvalue_sources;
+            let proto = c.chunk.prototypes.len() as u16;
+            c.chunk.prototypes.push(proto_chunk);
+            let closure_reg = c.alloc_reg();
+            c.emit(encode_abx(OpCode::Closure, closure_reg, proto), 0);
+
+            // Emit Schedule opcode: A=closure, B=interval, C=unit
+            c.emit(
+                encode_abc(OpCode::Schedule, closure_reg, interval_reg, unit_reg),
+                c.current_line,
+            );
+            c.free_to(interval_reg);
+            Ok(())
+        }
+
+        Stmt::WatchBlock { path, body } => {
+            // Compile path expression into a register
+            let path_reg = c.alloc_reg();
+            compile_expr(c, path, path_reg)?;
+
+            // Compile body as closure (same pattern as Stmt::Spawn)
+            let parent_locals = c.snapshot_locals();
+            let parent_upvalues = c.snapshot_upvalues();
+
+            let mut sc = Compiler::new("<watch>");
+            sc.parent_locals = parent_locals;
+            sc.parent_upvalues = parent_upvalues;
+            sc.current_line = c.current_line;
+            sc.begin_scope();
+            for s in body {
+                sc.current_line = s.line;
+                compile_stmt(&mut sc, &s.stmt)?;
+            }
+            sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+            sc.chunk.upvalue_count = sc.upvalues.len() as u8;
+            sc.chunk.max_registers = sc.max_register;
+            let upvalue_sources: Vec<UpvalueSource> =
+                sc.upvalues.iter().map(|u| u.source).collect();
+            let mut proto_chunk = sc.chunk;
+            proto_chunk.upvalue_sources = upvalue_sources;
+            let proto = c.chunk.prototypes.len() as u16;
+            c.chunk.prototypes.push(proto_chunk);
+            let closure_reg = c.alloc_reg();
+            c.emit(encode_abx(OpCode::Closure, closure_reg, proto), 0);
+
+            // Emit Watch opcode: A=closure, B=path
+            c.emit(
+                encode_abc(OpCode::Watch, closure_reg, path_reg, 0),
+                c.current_line,
+            );
+            c.free_to(path_reg);
+            Ok(())
+        }
         Stmt::PromptDef { name, .. } => compile_hidden_stmt(
             c,
             "__forge_register_prompt",
