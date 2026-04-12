@@ -318,7 +318,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 - [x] 6C.1 Split `interpreter/mod.rs` (7,907→3,239 lines) — extracted 359 test functions to `interpreter/tests.rs`. (PR #45)
 - [x] 6C.2 Extract VM tests from `vm/mod.rs` (2,058→50 lines) — 5 test files: parity_tests, async_tests, jit_tests, schedule_watch_tests, must_ask_freeze_tests. (PR #46)
-- [ ] 6C.3 Make VM `Value` implement `Copy` — all variants (`i64`, `f64`, `bool`, `()`, `GcRef(usize)`) are Copy-compatible. Eliminates thousands of unnecessary clone calls in the dispatch hot path.
+- [x] 6C.3 Make VM `Value` implement `Copy` — removed 51 unnecessary `.clone()` calls in dispatch hot path. (PR #47)
 - [ ] 6C.4 Replace string-based native function dispatch with enum/index — `machine.rs:2116` clones function name string on every native call. Use interned index for zero-cost dispatch.
 
 ### Order of attack
