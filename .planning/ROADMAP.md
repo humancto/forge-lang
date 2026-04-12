@@ -348,7 +348,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 - [x] 7B.1 Eliminate all compiler warnings — 19 warnings in release build: unused imports, unused variables. A production language must compile warning-free. (PR #51)
 - [x] 7B.2 Audit and remove production `panic!` calls — 92 panics in non-test code. Convert to proper error returns. Target: zero panics reachable from user input. (PR #52)
-- [ ] 7B.3 Fix `serialize.rs` 38 `unwrap()` calls — bytecode deserialization that panics on malformed `.fgc` files is a DoS vector. Convert to `Result` returns.
+- [x] 7B.3 Fix `serialize.rs` 38 `unwrap()` calls — all 38 are in `#[cfg(test)]` only; production code already uses `Result` with `?`. No changes needed.
 - [ ] 7B.4 Fix `npc` module 11 `panic!` calls — fake data generator should never crash. Convert to error returns.
 - [ ] 7B.5 Fix `time` module 12 `panic!` calls — same treatment.
 - [ ] 7B.6 Remove dead interpreter fallback paths — identify and prune code paths in the interpreter that the VM has fully replaced.
