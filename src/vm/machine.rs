@@ -10,7 +10,9 @@ use super::profiler::Profiler;
 use super::value::*;
 
 /// Wrapper for sending a VM to another thread.
-/// Safe because forked VMs have empty jit_cache (no raw pointers).
+/// SAFETY: fork_for_spawn() asserts jit_cache/jit_modules are empty (no raw
+/// pointers cross threads). All other VM fields are owned or Arc-wrapped.
+/// The assert runs in release builds to prevent UB if the invariant breaks.
 struct SendableVM(VM);
 unsafe impl Send for SendableVM {}
 
@@ -859,7 +861,7 @@ impl VM {
         }
 
         #[cfg(feature = "jit")]
-        debug_assert!(
+        assert!(
             child.jit_cache.is_empty() && child.jit_modules.is_empty(),
             "BUG: SendableVM must have empty jit_cache/jit_modules to be safely Send"
         );
