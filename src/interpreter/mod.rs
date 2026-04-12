@@ -656,6 +656,11 @@ impl Interpreter {
     pub fn run(&mut self, program: &Program) -> Result<Value, RuntimeError> {
         for spanned in &program.statements {
             self.current_line = spanned.line;
+            if let Some(ref mut cov) = self.coverage {
+                if spanned.line > 0 {
+                    cov.insert(spanned.line);
+                }
+            }
             match self.exec_stmt(&spanned.stmt) {
                 Ok(signal) => match signal {
                     Signal::Return(v) => return Ok(v),
