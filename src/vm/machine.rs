@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use super::bytecode::*;
 use super::frame::*;
 use super::gc::Gc;
-use super::jit::profiler::Profiler;
+use super::profiler::Profiler;
 use super::value::*;
 
 /// Wrapper for sending a VM to another thread.
@@ -101,12 +101,14 @@ impl SendableVM {
     }
 }
 
+#[cfg(feature = "jit")]
 #[derive(Clone, Copy)]
 pub struct JitEntry {
     pub ptr: *const u8,
     pub uses_float: bool,
 }
 
+#[cfg(feature = "jit")]
 /// Call a JIT-compiled function with arbitrary i64 arguments.
 /// Supports 0–8 args; panics beyond that (Forge functions rarely exceed 8).
 unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> i64 {
@@ -160,6 +162,7 @@ unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> i64 {
     }
 }
 
+#[cfg(feature = "jit")]
 /// Call a JIT-compiled function with arbitrary f64 arguments.
 unsafe fn jit_call_f64(ptr: *const u8, args: &[f64]) -> f64 {
     match args.len() {
@@ -222,7 +225,9 @@ pub struct VM {
     pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
     pub gc: Gc,
     pub output: Vec<String>,
+    #[cfg(feature = "jit")]
     pub jit_cache: HashMap<String, JitEntry>,
+    #[cfg(feature = "jit")]
     /// Keeps JIT-compiled code pages alive. Must never be shrunk while
     /// `jit_cache` holds pointers into these modules.
     jit_modules: Vec<super::jit::jit_module::JitCompiler>,
@@ -304,7 +309,9 @@ impl VM {
             struct_defaults: HashMap::new(),
             gc: Gc::new(),
             output: Vec::new(),
+            #[cfg(feature = "jit")]
             jit_cache: HashMap::new(),
+            #[cfg(feature = "jit")]
             jit_modules: Vec::new(),
             profiler: Profiler::new(false),
             skip_timeout_check_once: false,
@@ -324,7 +331,9 @@ impl VM {
             struct_defaults: HashMap::new(),
             gc: Gc::new(),
             output: Vec::new(),
+            #[cfg(feature = "jit")]
             jit_cache: HashMap::new(),
+            #[cfg(feature = "jit")]
             jit_modules: Vec::new(),
             profiler: Profiler::new(true),
             skip_timeout_check_once: false,
@@ -862,6 +871,7 @@ impl VM {
             child.struct_defaults.insert(name.clone(), child_defaults);
         }
 
+        #[cfg(feature = "jit")]
         debug_assert!(
             child.jit_cache.is_empty() && child.jit_modules.is_empty(),
             "BUG: SendableVM must have empty jit_cache/jit_modules to be safely Send"
@@ -2025,6 +2035,7 @@ impl VM {
                         }
 
                         // Auto-JIT: compile hot functions on the fly
+                        #[cfg(feature = "jit")]
                         if !func_name.is_empty()
                             && !self.jit_cache.contains_key(&func_name)
                             && self.profiler.is_hot(&func_name)
@@ -2047,6 +2058,7 @@ impl VM {
                         }
 
                         // JIT dispatch
+                        #[cfg(feature = "jit")]
                         if !func_name.is_empty() {
                             if let Some(&entry) = self.jit_cache.get(&func_name) {
                                 let result_val = if entry.uses_float {

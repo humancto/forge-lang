@@ -4,8 +4,10 @@ pub mod compiler;
 pub mod frame;
 pub mod gc;
 pub mod green;
+#[cfg(feature = "jit")]
 pub mod jit;
 pub mod machine;
+pub mod profiler;
 pub mod serialize;
 pub mod value;
 
@@ -42,8 +44,11 @@ mod parity_tests {
     use crate::interpreter::Interpreter;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+    #[cfg(feature = "jit")]
     use crate::vm::jit::jit_module::JitCompiler;
+    #[cfg(feature = "jit")]
     use crate::vm::jit::type_analysis;
+    #[cfg(feature = "jit")]
     use crate::vm::machine::JitEntry;
 
     fn parse_program(source: &str) -> crate::parser::ast::Program {
@@ -86,6 +91,7 @@ mod parity_tests {
         value.display(&vm.gc)
     }
 
+    #[cfg(feature = "jit")]
     fn run_on_jit_value(source: &str) -> String {
         let program = parse_program(source);
         let chunk = compiler::compile_repl(&program).expect("compile error");
@@ -132,12 +138,16 @@ mod parity_tests {
         let interp = run_on_interpreter_value(source);
         let vm = run_on_vm_value(source);
         let bytecode = run_on_bytecode_value(source);
-        let jit = run_on_jit_value(source);
 
         assert_eq!(interp, expected);
         assert_eq!(vm, expected);
         assert_eq!(bytecode, expected);
-        assert_eq!(jit, expected);
+
+        #[cfg(feature = "jit")]
+        {
+            let jit = run_on_jit_value(source);
+            assert_eq!(jit, expected);
+        }
     }
 
     fn assert_cross_backend_error_contains(source: &str, expected: &str) {
@@ -162,42 +172,45 @@ mod parity_tests {
             .expect_err("bytecode should error")
             .to_string();
 
-        let mut jit = JitCompiler::new().expect("jit init error");
-        for (index, proto) in chunk.prototypes.iter().enumerate() {
-            let name = if proto.name.is_empty() {
-                format!("fn_{}", index)
-            } else {
-                proto.name.clone()
-            };
-            let info = type_analysis::analyze(proto);
-            if !info.has_unsupported_ops {
-                let _ = jit.compile_function(proto, &name);
-            }
-        }
-        let mut jit_vm = VM::new();
-        for (index, proto) in chunk.prototypes.iter().enumerate() {
-            let name = if proto.name.is_empty() {
-                format!("fn_{}", index)
-            } else {
-                proto.name.clone()
-            };
-            let info = type_analysis::analyze(proto);
-            if !info.has_unsupported_ops {
-                if let Some(ptr) = jit.get_compiled(&name) {
-                    jit_vm.jit_cache.insert(
-                        name,
-                        JitEntry {
-                            ptr,
-                            uses_float: info.has_float,
-                        },
-                    );
+        #[cfg(feature = "jit")]
+        let jit_err = {
+            let mut jit = JitCompiler::new().expect("jit init error");
+            for (index, proto) in chunk.prototypes.iter().enumerate() {
+                let name = if proto.name.is_empty() {
+                    format!("fn_{}", index)
+                } else {
+                    proto.name.clone()
+                };
+                let info = type_analysis::analyze(proto);
+                if !info.has_unsupported_ops {
+                    let _ = jit.compile_function(proto, &name);
                 }
             }
-        }
-        let jit_err = jit_vm
-            .execute(&chunk)
-            .expect_err("jit-assisted vm should error")
-            .to_string();
+            let mut jit_vm = VM::new();
+            for (index, proto) in chunk.prototypes.iter().enumerate() {
+                let name = if proto.name.is_empty() {
+                    format!("fn_{}", index)
+                } else {
+                    proto.name.clone()
+                };
+                let info = type_analysis::analyze(proto);
+                if !info.has_unsupported_ops {
+                    if let Some(ptr) = jit.get_compiled(&name) {
+                        jit_vm.jit_cache.insert(
+                            name,
+                            JitEntry {
+                                ptr,
+                                uses_float: info.has_float,
+                            },
+                        );
+                    }
+                }
+            }
+            jit_vm
+                .execute(&chunk)
+                .expect_err("jit-assisted vm should error")
+                .to_string()
+        };
 
         assert!(
             interp_err.contains(expected),
@@ -210,6 +223,7 @@ mod parity_tests {
             "bytecode error: {}",
             bytecode_err
         );
+        #[cfg(feature = "jit")]
         assert!(jit_err.contains(expected), "jit error: {}", jit_err);
     }
 
@@ -1364,7 +1378,7 @@ mod async_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "jit"))]
 mod jit_tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;

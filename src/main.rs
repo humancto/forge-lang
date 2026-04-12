@@ -182,13 +182,19 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let use_vm = !cli.use_interp || cli.use_jit || cli.profile;
     let use_jit = cli.use_jit;
+    #[cfg(not(feature = "jit"))]
+    if use_jit {
+        eprintln!("error: --jit requires the 'jit' feature (install with: cargo install forge-lang --features jit)");
+        std::process::exit(1);
+    }
+    let use_vm = !cli.use_interp || cli.use_jit || cli.profile;
     let profile = cli.profile;
     let strict = cli.strict;
 
     if let Some(code) = cli.eval_code {
         let code = code.replace(';', "\n");
+        #[cfg(feature = "jit")]
         if use_jit && !profile {
             run_jit(&code, "<eval>", strict);
             return;
@@ -242,6 +248,7 @@ async fn main() {
                     process::exit(1);
                 }
             };
+            #[cfg(feature = "jit")]
             if use_jit && !profile {
                 run_jit(&source, &path_str, strict);
                 return;
@@ -695,6 +702,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     }
 }
 
+#[cfg(feature = "jit")]
 fn run_jit(source: &str, filename: &str, strict: bool) {
     let (program, warnings) = match prepare_program(source, strict) {
         Ok(prepared) => prepared,
