@@ -8,6 +8,28 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+/// Escape a string for safe JSON embedding. Handles backslashes, quotes,
+/// newlines, tabs, carriage returns, and control characters.
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Thread-safe channel inner type
 #[derive(Debug)]
 pub struct ChannelInner {
@@ -125,7 +147,7 @@ impl Value {
             Value::Object(map) => {
                 let entries: Vec<String> = map
                     .iter()
-                    .map(|(k, v)| format!("\"{}\": {}", k, v.to_json_string()))
+                    .map(|(k, v)| format!("{}: {}", escape_json_string(k), v.to_json_string()))
                     .collect();
                 format!("{{ {} }}", entries.join(", "))
             }
@@ -133,7 +155,7 @@ impl Value {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
-            Value::String(s) => format!("\"{}\"", s),
+            Value::String(s) => escape_json_string(s),
             Value::Int(n) => n.to_string(),
             Value::Float(n) => format!("{}", n),
             Value::Bool(b) => b.to_string(),
@@ -3233,7 +3255,6 @@ impl fmt::Display for RuntimeError {
         write!(f, "Runtime error: {}", self.message)
     }
 }
-
 
 #[cfg(test)]
 mod tests;

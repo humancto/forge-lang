@@ -1853,11 +1853,12 @@ impl VM {
                         let url = std::env::var("FORGE_AI_URL").unwrap_or_else(|_| {
                             "https://api.openai.com/v1/chat/completions".to_string()
                         });
-                        let body = format!(
-                            r#"{{"model":"{}","messages":[{{"role":"user","content":"{}"}}],"max_tokens":1000}}"#,
-                            model,
-                            prompt_str.replace('\\', "\\\\").replace('"', "\\\"")
-                        );
+                        let body = serde_json::json!({
+                            "model": model,
+                            "messages": [{"role": "user", "content": prompt_str}],
+                            "max_tokens": 1000
+                        })
+                        .to_string();
                         let mut headers = std::collections::HashMap::new();
                         headers.insert("Authorization".to_string(), format!("Bearer {}", api_key));
                         headers.insert("Content-Type".to_string(), "application/json".to_string());
