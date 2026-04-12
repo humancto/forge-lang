@@ -112,13 +112,34 @@ fn json_to_forge(v: serde_json::Value) -> Value {
     }
 }
 
+/// Escape a string for safe JSON embedding.
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn forge_to_json_compact(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
         Value::Float(n) => format!("{}", n),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
-        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::String(s) => escape_json_string(s),
         Value::Array(items) => {
             let entries: Vec<String> = items.iter().map(forge_to_json_compact).collect();
             format!("[{}]", entries.join(", "))
@@ -126,7 +147,7 @@ fn forge_to_json_compact(v: &Value) -> String {
         Value::Object(map) => {
             let entries: Vec<String> = map
                 .iter()
-                .map(|(k, v)| format!("\"{}\": {}", k, forge_to_json_compact(v)))
+                .map(|(k, v)| format!("{}: {}", escape_json_string(k), forge_to_json_compact(v)))
                 .collect();
             format!("{{{}}}", entries.join(", "))
         }
@@ -142,7 +163,7 @@ fn forge_to_json_pretty(v: &Value, depth: usize, indent: usize) -> String {
         Value::Float(n) => format!("{}", n),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
-        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::String(s) => escape_json_string(s),
         Value::Array(items) => {
             if items.is_empty() {
                 return "[]".to_string();
@@ -167,9 +188,9 @@ fn forge_to_json_pretty(v: &Value, depth: usize, indent: usize) -> String {
                 .iter()
                 .map(|(k, v)| {
                     format!(
-                        "{}\"{}\": {}",
+                        "{}{}: {}",
                         inner_pad,
-                        k,
+                        escape_json_string(k),
                         forge_to_json_pretty(v, depth + 1, indent)
                     )
                 })
