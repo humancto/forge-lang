@@ -316,7 +316,17 @@ fn executable_line_set(source: &str) -> std::collections::HashSet<usize> {
             }
             continue;
         }
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed == "}" {
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed == "}"
+            || trimmed == "{"
+            || trimmed == "} else {"
+            || trimmed == "} else if"
+            || trimmed.starts_with("} else if ")
+            || trimmed == "otherwise {"
+            || trimmed == "} otherwise {"
+            || trimmed.starts_with("@")
+        {
             continue;
         }
         set.insert(i + 1); // 1-indexed to match parser line numbers
