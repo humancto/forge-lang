@@ -303,7 +303,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 ### Phase 6A — Critical Bugs
 
-- [ ] 6A.1 Fix interpreter `len()` byte-vs-char parity bug — `interpreter/builtins.rs:28` uses `s.len()` (byte count) while VM uses `s.chars().count()` (char count). Non-ASCII strings return different values between backends.
+- [x] 6A.1 Fix interpreter `len()` byte-vs-char parity bug — `interpreter/builtins.rs:28` uses `s.len()` (byte count) while VM uses `s.chars().count()` (char count). Non-ASCII strings return different values between backends.
 - [ ] 6A.2 Fix `mem::forget(jit)` unbounded memory leak — `machine.rs:2038` leaks every JIT-compiled module. Store JIT modules in a managed `Vec<JitCompiler>` on the VM so they drop with it.
 - [ ] 6A.3 Fix And/Or short-circuit evaluation in VM — `machine.rs:1176-1184` evaluates both operands eagerly. Compile `&&`/`||` to `JumpIfFalse`/`JumpIfTrue` + conditional right-operand evaluation. Current behavior diverges from interpreter for side-effectful expressions.
 
