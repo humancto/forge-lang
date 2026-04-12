@@ -272,7 +272,12 @@ pub fn build_function<M: Module>(
                         let extended = b.ins().uextend(I64, both);
                         b.ins().fcvt_from_uint(F64, extended)
                     } else {
-                        b.ins().band(l, r)
+                        // Logical AND: both operands must be non-zero → result is 1 or 0
+                        let zero = b.ins().iconst(I64, 0);
+                        let l_truthy = b.ins().icmp(IntCC::NotEqual, l, zero);
+                        let r_truthy = b.ins().icmp(IntCC::NotEqual, r, zero);
+                        let both = b.ins().band(l_truthy, r_truthy);
+                        b.ins().uextend(I64, both)
                     };
                     b.def_var(regs[a], result);
                     b.ins().jump(next, &[]);
@@ -288,7 +293,12 @@ pub fn build_function<M: Module>(
                         let extended = b.ins().uextend(I64, either);
                         b.ins().fcvt_from_uint(F64, extended)
                     } else {
-                        b.ins().bor(l, r)
+                        // Logical OR: either operand non-zero → result is 1 or 0
+                        let zero = b.ins().iconst(I64, 0);
+                        let l_truthy = b.ins().icmp(IntCC::NotEqual, l, zero);
+                        let r_truthy = b.ins().icmp(IntCC::NotEqual, r, zero);
+                        let either = b.ins().bor(l_truthy, r_truthy);
+                        b.ins().uextend(I64, either)
                     };
                     b.def_var(regs[a], result);
                     b.ins().jump(next, &[]);
