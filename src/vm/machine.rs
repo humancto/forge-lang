@@ -112,9 +112,9 @@ pub struct JitEntry {
 
 #[cfg(feature = "jit")]
 /// Call a JIT-compiled function with arbitrary i64 arguments.
-/// Supports 0–8 args; panics beyond that (Forge functions rarely exceed 8).
-unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> i64 {
-    match args.len() {
+/// Supports 0–8 args; returns Err beyond that.
+unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> Result<i64, VMError> {
+    Ok(match args.len() {
         0 => {
             let f: extern "C" fn() -> i64 = std::mem::transmute(ptr);
             f()
@@ -157,17 +157,20 @@ unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> i64 {
                 args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
             )
         }
-        _ => panic!(
-            "JIT dispatch supports up to 8 arguments, got {}",
-            args.len()
-        ),
-    }
+        n => {
+            return Err(VMError::new(&format!(
+                "JIT dispatch supports up to 8 arguments, got {}",
+                n
+            )))
+        }
+    })
 }
 
 #[cfg(feature = "jit")]
 /// Call a JIT-compiled function with arbitrary f64 arguments.
-unsafe fn jit_call_f64(ptr: *const u8, args: &[f64]) -> f64 {
-    match args.len() {
+/// Supports 0–8 args; returns Err beyond that.
+unsafe fn jit_call_f64(ptr: *const u8, args: &[f64]) -> Result<f64, VMError> {
+    Ok(match args.len() {
         0 => {
             let f: extern "C" fn() -> f64 = std::mem::transmute(ptr);
             f()
@@ -210,11 +213,13 @@ unsafe fn jit_call_f64(ptr: *const u8, args: &[f64]) -> f64 {
                 args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
             )
         }
-        _ => panic!(
-            "JIT dispatch supports up to 8 arguments, got {}",
-            args.len()
-        ),
-    }
+        n => {
+            return Err(VMError::new(&format!(
+                "JIT dispatch supports up to 8 arguments, got {}",
+                n
+            )))
+        }
+    })
 }
 
 pub struct VM {
@@ -2065,7 +2070,8 @@ impl VM {
                                             _ => 0.0,
                                         })
                                         .collect();
-                                    let result: f64 = unsafe { jit_call_f64(entry.ptr, &raw_args) };
+                                    let result: f64 =
+                                        unsafe { jit_call_f64(entry.ptr, &raw_args)? };
                                     if result.fract() == 0.0
                                         && result >= i64::MIN as f64
                                         && result <= i64::MAX as f64
@@ -2089,7 +2095,8 @@ impl VM {
                                             _ => 0,
                                         })
                                         .collect();
-                                    let result: i64 = unsafe { jit_call_i64(entry.ptr, &raw_args) };
+                                    let result: i64 =
+                                        unsafe { jit_call_i64(entry.ptr, &raw_args)? };
                                     Value::Int(result)
                                 };
                                 self.profiler.exit_function();
