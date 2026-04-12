@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VM `must` expression** — `must Ok(42)` unwraps to `42`, `must Err("x")` crashes with clear error, `must null` crashes. Full parity with interpreter semantics.
 - **VM `ask` expression** — `ask "prompt"` calls the LLM API (OpenAI-compatible) in VM mode. Requires `FORGE_AI_KEY` or `OPENAI_API_KEY` environment variable.
 - **VM `freeze` expression** — `freeze expr` wraps values as immutable in VM mode. `SetField` on frozen values returns a runtime error.
+- **Cross-file LSP** — go-to-definition and find-references now work across files. Imported symbols resolve to their source file via `import` statement following. Find-references searches imported files and sibling `.fg` files in the same directory. Import statements now appear in document symbols.
 
 ## [0.6.0] - 2026-04-11
 

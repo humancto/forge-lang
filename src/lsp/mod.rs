@@ -718,10 +718,61 @@ fn get_definition(uri: &str, line: usize, character: usize) -> serde_json::Value
         });
     }
 
+    // Cross-file: check imported files for the symbol
+    let imports = collect_imports(&text);
+    for (import_path, names) in &imports {
+        // If named import, only follow if the word is in the name list
+        if let Some(name_list) = names {
+            if !name_list.iter().any(|n| n == &word) {
+                continue;
+            }
+        }
+        if let Some(resolved) = resolve_import_for_lsp(import_path, uri) {
+            if let Ok(imported_text) = std::fs::read_to_string(&resolved) {
+                let exported = collect_exported_symbols(&imported_text);
+                if let Some(symbol) = exported.iter().find(|s| s.name == word) {
+                    let target_uri = path_to_uri(&resolved);
+                    return serde_json::json!({
+                        "uri": target_uri,
+                        "range": symbol_range(&imported_text, symbol.line, &symbol.name)
+                    });
+                }
+            }
+        }
+    }
+
     serde_json::Value::Null
 }
 
-/// Find all references to a symbol in the document (text-based search with word boundaries).
+/// Find word-boundary references in a single text, returning results tagged with the given URI.
+fn find_word_references(text: &str, word: &str, target_uri: &str) -> Vec<serde_json::Value> {
+    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut results = Vec::new();
+    for (line_num, line_content) in text.lines().enumerate() {
+        let mut search_from = 0;
+        let bytes = line_content.as_bytes();
+        while let Some(col) = line_content[search_from..].find(word) {
+            let abs_col = search_from + col;
+            let after_pos = abs_col + word.len();
+            let before_ok = abs_col == 0 || !is_ident_byte(bytes[abs_col - 1]);
+            let after_ok = after_pos >= bytes.len() || !is_ident_byte(bytes[after_pos]);
+
+            if before_ok && after_ok {
+                results.push(serde_json::json!({
+                    "uri": target_uri,
+                    "range": {
+                        "start": { "line": line_num, "character": abs_col },
+                        "end": { "line": line_num, "character": abs_col + word.len() }
+                    }
+                }));
+            }
+            search_from = abs_col + word.len();
+        }
+    }
+    results
+}
+
+/// Find all references to a symbol across the current file and imported files.
 fn get_references(uri: &str, line: usize, character: usize) -> Vec<serde_json::Value> {
     let Some(text) = get_document(uri).or_else(|| read_document(uri)) else {
         return Vec::new();
@@ -732,30 +783,53 @@ fn get_references(uri: &str, line: usize, character: usize) -> Vec<serde_json::V
         return Vec::new();
     }
 
-    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    // Search current file
+    let mut results = find_word_references(&text, &word, uri);
 
-    let mut results = Vec::new();
-    for (line_num, line_content) in text.lines().enumerate() {
-        let mut search_from = 0;
-        let bytes = line_content.as_bytes();
-        while let Some(col) = line_content[search_from..].find(&word) {
-            let abs_col = search_from + col;
-            let after_pos = abs_col + word.len();
-            let before_ok = abs_col == 0 || !is_ident_byte(bytes[abs_col - 1]);
-            let after_ok = after_pos >= bytes.len() || !is_ident_byte(bytes[after_pos]);
+    // Cross-file: search imported files
+    let imports = collect_imports(&text);
+    let mut searched = std::collections::HashSet::new();
+    searched.insert(uri.to_string());
 
-            if before_ok && after_ok {
-                results.push(serde_json::json!({
-                    "uri": uri,
-                    "range": {
-                        "start": { "line": line_num, "character": abs_col },
-                        "end": { "line": line_num, "character": abs_col + word.len() }
-                    }
-                }));
+    for (import_path, _) in &imports {
+        if let Some(resolved) = resolve_import_for_lsp(import_path, uri) {
+            let imported_uri = path_to_uri(&resolved);
+            if searched.contains(&imported_uri) {
+                continue;
             }
-            search_from = abs_col + word.len();
+            searched.insert(imported_uri.clone());
+            if let Ok(imported_text) = std::fs::read_to_string(&resolved) {
+                results.extend(find_word_references(&imported_text, &word, &imported_uri));
+            }
         }
     }
+
+    // Also search files that import the current file (reverse references)
+    // Look for .fg files in the same directory
+    if let Some(current_path) = uri.strip_prefix("file://") {
+        if let Some(parent) = std::path::Path::new(current_path).parent() {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "fg") {
+                        let sibling_uri = path_to_uri(&path);
+                        if searched.contains(&sibling_uri) {
+                            continue;
+                        }
+                        searched.insert(sibling_uri.clone());
+                        if let Ok(sibling_text) = std::fs::read_to_string(&path) {
+                            // Only include if this file imports or references the word
+                            let refs = find_word_references(&sibling_text, &word, &sibling_uri);
+                            if !refs.is_empty() {
+                                results.extend(refs);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     results
 }
 
@@ -909,6 +983,24 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
         | Stmt::WatchBlock { body, .. } => {
             for s in body {
                 collect_symbols_from_stmt(&s.stmt, s.line.saturating_sub(1), symbols);
+            }
+        }
+        Stmt::Import { path, names } => {
+            // Show named imports as symbols; for wildcard imports, show the module path
+            if let Some(name_list) = names {
+                for n in name_list {
+                    symbols.push(DocumentSymbolInfo {
+                        name: n.clone(),
+                        kind: 2, // Module
+                        line,
+                    });
+                }
+            } else {
+                symbols.push(DocumentSymbolInfo {
+                    name: path.clone(),
+                    kind: 2,
+                    line,
+                });
             }
         }
         _ => {}
@@ -1309,6 +1401,86 @@ fn read_document(uri: &str) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+fn path_to_uri(path: &std::path::Path) -> String {
+    format!("file://{}", path.display())
+}
+
+/// Extract import statements from source code.
+fn collect_imports(source: &str) -> Vec<(String, Option<Vec<String>>)> {
+    let mut lexer = crate::lexer::Lexer::new(source);
+    let tokens = match lexer.tokenize() {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut parser = crate::parser::Parser::new(tokens);
+    let program = match parser.parse_program() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let mut imports = Vec::new();
+    for spanned in &program.statements {
+        if let Stmt::Import { path, names } = &spanned.stmt {
+            imports.push((path.clone(), names.clone()));
+        }
+    }
+    imports
+}
+
+/// Resolve an import path to a file path, given the importing file's URI.
+fn resolve_import_for_lsp(import_path: &str, current_uri: &str) -> Option<std::path::PathBuf> {
+    let current_file = current_uri.strip_prefix("file://")?;
+    let base_dir = std::path::Path::new(current_file).parent();
+    crate::package::resolve_import_from(import_path, base_dir)
+}
+
+/// Collect top-level (exported) symbols from a file — only FnDef, Let, StructDef,
+/// TypeDef, InterfaceDef at the top level (not nested inside functions).
+fn collect_exported_symbols(source: &str) -> Vec<DocumentSymbolInfo> {
+    let mut lexer = crate::lexer::Lexer::new(source);
+    let tokens = match lexer.tokenize() {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut parser = crate::parser::Parser::new(tokens);
+    let program = match parser.parse_program() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let mut symbols = Vec::new();
+    for spanned in &program.statements {
+        let line = spanned.line.saturating_sub(1);
+        match &spanned.stmt {
+            Stmt::FnDef { name, .. } => symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 12,
+                line,
+            }),
+            Stmt::Let { name, .. } => symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 13,
+                line,
+            }),
+            Stmt::StructDef { name, .. } => symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 23,
+                line,
+            }),
+            Stmt::TypeDef { name, .. } => symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 10,
+                line,
+            }),
+            Stmt::InterfaceDef { name, .. } => symbols.push(DocumentSymbolInfo {
+                name: name.clone(),
+                kind: 11,
+                line,
+            }),
+            _ => {}
+        }
+    }
+    symbols
+}
+
 use std::io::Read;
 
 #[cfg(test)]
@@ -1579,5 +1751,105 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .contains("expects 2"));
+    }
+
+    #[test]
+    fn collect_imports_extracts_import_statements() {
+        let imports = collect_imports("import \"helper\"\nimport { foo, bar } from \"utils\"");
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0].0, "helper");
+        assert!(imports[0].1.is_none());
+        assert_eq!(imports[1].0, "utils");
+        assert_eq!(
+            imports[1].1.as_ref().unwrap(),
+            &vec!["foo".to_string(), "bar".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_exported_symbols_finds_top_level_only() {
+        let symbols = collect_exported_symbols(
+            "fn greet(name) {\n  let msg = \"hi\"\n  return msg\n}\nlet x = 42\n",
+        );
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"greet"));
+        assert!(names.contains(&"x"));
+        // Inner variable 'msg' should NOT be exported
+        assert!(!names.contains(&"msg"));
+    }
+
+    #[test]
+    fn cross_file_definition_resolves_import() {
+        // Create temp files
+        let dir = std::env::temp_dir().join("forge-lsp-test-xfile");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write a helper module
+        std::fs::write(
+            dir.join("helper.fg"),
+            "fn greet(name) {\n  return \"hi \" + name\n}\n",
+        )
+        .unwrap();
+
+        // Write a main file that imports helper
+        let main_source = "import \"helper\"\nlet result = greet(\"world\")\n";
+        std::fs::write(dir.join("main.fg"), main_source).unwrap();
+
+        let main_uri = format!("file://{}", dir.join("main.fg").display());
+        store_document(&main_uri, main_source);
+
+        // Ask for definition of "greet" on line 1, char 13
+        let def = get_definition(&main_uri, 1, 13);
+        assert!(!def.is_null(), "should find cross-file definition");
+        let def_uri = def.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            def_uri.contains("helper.fg"),
+            "definition should point to helper.fg, got: {}",
+            def_uri
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cross_file_references_finds_across_files() {
+        let dir = std::env::temp_dir().join("forge-lsp-test-xref");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("lib.fg"), "fn helper() { return 1 }\n").unwrap();
+        let main_source = "import \"lib\"\nlet x = helper()\n";
+        std::fs::write(dir.join("main.fg"), main_source).unwrap();
+
+        let main_uri = format!("file://{}", dir.join("main.fg").display());
+        store_document(&main_uri, main_source);
+
+        // Find references to "helper" from main.fg line 1, char 8
+        let refs = get_references(&main_uri, 1, 8);
+        // Should find at least 2: one in main.fg (usage), one in lib.fg (definition)
+        assert!(
+            refs.len() >= 2,
+            "should find references across files, found: {}",
+            refs.len()
+        );
+
+        let uris: Vec<&str> = refs
+            .iter()
+            .filter_map(|r| r.get("uri").and_then(|v| v.as_str()))
+            .collect();
+        assert!(uris.iter().any(|u| u.contains("main.fg")));
+        assert!(uris.iter().any(|u| u.contains("lib.fg")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_symbols_show_in_document_symbols() {
+        let symbols = collect_all_symbols("import { foo, bar } from \"utils\"\nlet x = 1\n");
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foo"));
+        assert!(names.contains(&"bar"));
+        assert!(names.contains(&"x"));
     }
 }
