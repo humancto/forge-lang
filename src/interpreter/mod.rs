@@ -6,7 +6,7 @@ use crate::parser::ast::*;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Thread-safe channel inner type
 #[derive(Debug)]
@@ -346,6 +346,41 @@ enum Signal {
 
 const MAX_CALL_DEPTH: usize = 512;
 
+/// Debug action requested by the DAP client
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DebugAction {
+    Continue,
+    StepOver,
+    StepIn,
+    StepOut,
+    Pause,
+}
+
+/// Debug frame for stack trace reporting
+#[derive(Clone)]
+pub struct DebugFrame {
+    pub name: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// Shared state between DAP server and interpreter
+pub struct DebugState {
+    pub breakpoints: Mutex<std::collections::HashSet<usize>>,
+    pub action: Mutex<DebugAction>,
+    pub step_depth: Mutex<usize>,
+    /// Interpreter signals it has paused (sends current line)
+    pub paused_sender: std::sync::mpsc::Sender<usize>,
+    /// DAP server signals interpreter to resume
+    pub resume: (Mutex<bool>, std::sync::Condvar),
+    /// Snapshot of variables at last pause point (written by interpreter, read by DAP)
+    pub variables: Mutex<Vec<(String, String)>>,
+    /// Snapshot of call stack at last pause point
+    pub call_frames: Mutex<Vec<DebugFrame>>,
+    /// Current call depth at last pause point
+    pub paused_depth: Mutex<usize>,
+}
+
 /// The interpreter
 pub struct Interpreter {
     pub env: Environment,
@@ -368,6 +403,12 @@ pub struct Interpreter {
     pub source_file: Option<std::path::PathBuf>,
     /// Coverage tracking: set of executed line numbers (when enabled)
     pub coverage: Option<std::collections::HashSet<usize>>,
+    /// Debug state for DAP debugger (breakpoints, stepping, pause control)
+    pub debug_state: Option<Arc<DebugState>>,
+    /// Output sink: when set, print/say/yell/whisper write here instead of stdout
+    pub output_sink: Option<Arc<Mutex<Vec<String>>>>,
+    /// Call stack frames for debugger stack traces
+    pub call_stack: Vec<DebugFrame>,
 }
 
 impl Interpreter {
@@ -385,6 +426,9 @@ impl Interpreter {
             source: None,
             source_file: None,
             coverage: None,
+            debug_state: None,
+            output_sink: None,
+            call_stack: Vec::new(),
         };
         interp.register_builtins();
         interp
@@ -404,6 +448,8 @@ impl Interpreter {
         interp.current_line = self.current_line;
         interp.source = self.source.clone();
         interp.source_file = self.source_file.clone();
+        interp.debug_state = self.debug_state.clone();
+        interp.output_sink = self.output_sink.clone();
         interp
     }
 
@@ -1559,6 +1605,9 @@ impl Interpreter {
                     cov.insert(s.line);
                 }
             }
+            if s.line > 0 {
+                self.debug_check(s.line);
+            }
             let stmt = &s.stmt;
             if let Stmt::Expression(expr) = stmt {
                 last_expr_value = self.eval_expr(expr).map_err(|mut e| {
@@ -1587,6 +1636,97 @@ impl Interpreter {
             Signal::Return(_) | Signal::Break | Signal::Continue => Ok(result),
             Signal::None | Signal::ImplicitReturn(_) => Ok(Signal::ImplicitReturn(last_expr_value)),
         }
+    }
+
+    /// Check if the debugger should pause at this line
+    fn debug_check(&mut self, line: usize) {
+        let ds = match self.debug_state {
+            Some(ref ds) => ds.clone(),
+            None => return,
+        };
+
+        let should_stop = {
+            let bps = ds.breakpoints.lock().unwrap_or_else(|e| e.into_inner());
+            let action = *ds.action.lock().unwrap_or_else(|e| e.into_inner());
+            let step_depth = *ds.step_depth.lock().unwrap_or_else(|e| e.into_inner());
+
+            match action {
+                DebugAction::Pause => true,
+                DebugAction::StepOver => self.call_depth <= step_depth,
+                DebugAction::StepIn => true,
+                DebugAction::StepOut => self.call_depth < step_depth,
+                DebugAction::Continue => bps.contains(&line),
+            }
+        };
+
+        if should_stop {
+            // Snapshot state before pausing
+            if let Ok(mut vars) = ds.variables.lock() {
+                *vars = self.snapshot_user_variables();
+            }
+            if let Ok(mut frames) = ds.call_frames.lock() {
+                *frames = self.call_stack.clone();
+            }
+            if let Ok(mut d) = ds.paused_depth.lock() {
+                *d = self.call_depth;
+            }
+
+            // Notify DAP server we've paused
+            let _ = ds.paused_sender.send(line);
+
+            // Wait for resume signal
+            let (lock, cvar) = &ds.resume;
+            let mut resumed = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *resumed = false;
+            while !*resumed {
+                // Use timeout to keep cooperative cancellation alive
+                let result = cvar
+                    .wait_timeout(resumed, std::time::Duration::from_millis(50))
+                    .unwrap_or_else(|e| e.into_inner());
+                resumed = result.0;
+                if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Write output to sink (for DAP) or stdout
+    pub fn write_output(&self, text: &str, newline: bool) {
+        if let Some(ref sink) = self.output_sink {
+            if let Ok(mut buf) = sink.lock() {
+                if newline {
+                    buf.push(format!("{}\n", text));
+                } else {
+                    buf.push(text.to_string());
+                }
+                return;
+            }
+        }
+        if newline {
+            println!("{}", text);
+        } else {
+            print!("{}", text);
+        }
+    }
+
+    /// Snapshot user-defined variables (excludes modules, builtins, internal vars)
+    pub fn snapshot_user_variables(&self) -> Vec<(String, String)> {
+        self.env
+            .all_names()
+            .into_iter()
+            .filter_map(|name| {
+                if name.starts_with("__") {
+                    return None;
+                }
+                let val = self.env.get(&name)?;
+                match val {
+                    Value::BuiltIn(_) | Value::Function { .. } | Value::Lambda { .. } => None,
+                    Value::Object(ref map) if map.contains_key("__module__") => None,
+                    _ => Some((name, format!("{}", val))),
+                }
+            })
+            .collect()
     }
 
     // ========== Expression Evaluation ==========
@@ -2677,7 +2817,29 @@ impl Interpreter {
                 "maximum recursion depth exceeded (512 frames)\n  hint: check for infinite recursion, or restructure to use iteration",
             ));
         }
+        let frame_name = match &func {
+            Value::Function { name, .. } => {
+                if name.is_empty() {
+                    "<anonymous>".to_string()
+                } else {
+                    name.clone()
+                }
+            }
+            Value::Lambda { .. } => "<lambda>".to_string(),
+            Value::BuiltIn(n) => n.clone(),
+            _ => "<call>".to_string(),
+        };
+        if self.debug_state.is_some() {
+            self.call_stack.push(DebugFrame {
+                name: frame_name,
+                line: self.current_line,
+                col: 0,
+            });
+        }
         let result = self.call_function_inner(func, args);
+        if self.debug_state.is_some() {
+            self.call_stack.pop();
+        }
         self.call_depth = self.call_depth.saturating_sub(1);
         result
     }
