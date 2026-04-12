@@ -278,7 +278,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 ### Phase 5C — Medium Priority
 
-- [ ] 5C.1 Fix `len()` to return char count not byte count for VM parity (`machine.rs:1585`, `builtins.rs:415`)
+- [x] 5C.1 Fix `len()` to return char count not byte count for VM parity (`machine.rs:1585`, `builtins.rs:415`) (PR #31)
 - [ ] 5C.2 Add Object equality to VM `GcObject::equals` (`value.rs:268-276`)
 - [ ] 5C.3 Use `getenv("TMPDIR")` in AOT generated C code (`native.rs:146,266`)
 - [ ] 5C.4 Deduplicate AOT/native build functions and C templates (`native.rs:7-366`)
