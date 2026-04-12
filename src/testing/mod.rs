@@ -9,7 +9,7 @@ use std::time::Instant;
 #[cfg(test)]
 pub mod parity;
 
-pub fn run_tests(test_dir: &str, filter: Option<&str>) {
+pub fn run_tests(test_dir: &str, filter: Option<&str>, coverage: bool) {
     let dir = Path::new(test_dir);
     if !dir.exists() {
         eprintln!(
@@ -26,6 +26,7 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
     let mut passed = 0;
     let mut failed = 0;
     let mut skipped = 0;
+    let mut coverage_data: Vec<(String, usize, usize)> = Vec::new();
 
     println!();
 
@@ -112,6 +113,9 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
 
         // Run the full program first to define all functions
         let mut interpreter = Interpreter::new();
+        if coverage {
+            interpreter.coverage = Some(std::collections::HashSet::new());
+        }
         if let Err(e) = interpreter.run(&program) {
             eprintln!("    \x1B[31mERROR\x1B[0m  setup — {}", e.message);
             failed += 1;
@@ -185,6 +189,12 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
                 }
             }
         }
+        if let Some(ref cov) = interpreter.coverage {
+            let executable_set = executable_line_set(&source);
+            let executed = cov.intersection(&executable_set).count();
+            coverage_data.push((path_str.clone(), executable_set.len(), executed));
+        }
+
         println!();
     }
 
@@ -198,6 +208,51 @@ pub fn run_tests(test_dir: &str, filter: Option<&str>) {
         passed, failed, skip_msg, total
     );
     println!();
+
+    if coverage && !coverage_data.is_empty() {
+        println!("  \x1B[1mCoverage\x1B[0m");
+        println!();
+        let mut total_executable = 0usize;
+        let mut total_executed = 0usize;
+        for (file, executable, executed) in &coverage_data {
+            total_executable += executable;
+            total_executed += executed;
+            let pct = if *executable > 0 {
+                *executed as f64 / *executable as f64 * 100.0
+            } else {
+                100.0
+            };
+            let color = if pct >= 80.0 {
+                "\x1B[32m"
+            } else if pct >= 50.0 {
+                "\x1B[33m"
+            } else {
+                "\x1B[31m"
+            };
+            println!(
+                "    {}{:5.1}%\x1B[0m  {} ({}/{})",
+                color, pct, file, executed, executable
+            );
+        }
+        let overall = if total_executable > 0 {
+            total_executed as f64 / total_executable as f64 * 100.0
+        } else {
+            100.0
+        };
+        println!();
+        let overall_color = if overall >= 80.0 {
+            "\x1B[32m"
+        } else if overall >= 50.0 {
+            "\x1B[33m"
+        } else {
+            "\x1B[31m"
+        };
+        println!(
+            "  {}Overall: {:.1}%\x1B[0m ({}/{})",
+            overall_color, overall, total_executed, total_executable
+        );
+        println!();
+    }
 
     if failed > 0 {
         std::process::exit(1);
@@ -235,6 +290,38 @@ fn find_test_functions(program: &Program) -> Vec<TestInfo> {
         }
     }
     tests
+}
+
+/// Build a set of 1-indexed line numbers considered executable.
+/// Excludes blank lines, single-line comments, multi-line comment blocks, and lone braces.
+fn executable_line_set(source: &str) -> std::collections::HashSet<usize> {
+    let mut set = std::collections::HashSet::new();
+    let mut in_block_comment = false;
+    for (i, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if in_block_comment {
+            if let Some(pos) = trimmed.find("*/") {
+                in_block_comment = false;
+                // If there's code after the closing */, count this line
+                let after = trimmed[pos + 2..].trim();
+                if !after.is_empty() {
+                    set.insert(i + 1);
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with("/*") {
+            if !trimmed.contains("*/") {
+                in_block_comment = true;
+            }
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed == "}" {
+            continue;
+        }
+        set.insert(i + 1); // 1-indexed to match parser line numbers
+    }
+    set
 }
 
 fn find_hook_function(program: &Program, hook_name: &str) -> Option<String> {

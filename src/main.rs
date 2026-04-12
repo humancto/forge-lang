@@ -121,6 +121,9 @@ enum Command {
         /// Filter tests by name pattern
         #[arg(long)]
         filter: Option<String>,
+        /// Show line coverage report after tests
+        #[arg(long)]
+        coverage: bool,
     },
     /// Create a new Forge project
     New {
@@ -250,7 +253,11 @@ async fn main() {
         Some(Command::Fmt { files, check }) => {
             formatter::format_files(&files, check);
         }
-        Some(Command::Test { dir, filter }) => {
+        Some(Command::Test {
+            dir,
+            filter,
+            coverage,
+        }) => {
             let test_dir = if dir == "tests" {
                 if let Some(m) = manifest::load_manifest() {
                     m.test.directory
@@ -260,7 +267,7 @@ async fn main() {
             } else {
                 dir
             };
-            testing::run_tests(&test_dir, filter.as_deref());
+            testing::run_tests(&test_dir, filter.as_deref(), coverage);
         }
         Some(Command::New { name }) => {
             scaffold::create_project(&name);

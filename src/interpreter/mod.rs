@@ -366,6 +366,8 @@ pub struct Interpreter {
     pub source: Option<String>,
     /// Path of the currently executing source file (for relative imports)
     pub source_file: Option<std::path::PathBuf>,
+    /// Coverage tracking: set of executed line numbers (when enabled)
+    pub coverage: Option<std::collections::HashSet<usize>>,
 }
 
 impl Interpreter {
@@ -382,6 +384,7 @@ impl Interpreter {
             current_line: 0,
             source: None,
             source_file: None,
+            coverage: None,
         };
         interp.register_builtins();
         interp
@@ -1551,6 +1554,11 @@ impl Interpreter {
         let mut last_expr_value = Value::Null;
         for s in stmts {
             self.current_line = s.line;
+            if let Some(ref mut cov) = self.coverage {
+                if s.line > 0 {
+                    cov.insert(s.line);
+                }
+            }
             let stmt = &s.stmt;
             if let Stmt::Expression(expr) = stmt {
                 last_expr_value = self.eval_expr(expr).map_err(|mut e| {
