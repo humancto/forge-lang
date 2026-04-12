@@ -339,7 +339,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 ### Phase 7A — Critical Safety Fixes
 
 - [x] 7A.1 Fix `to_json_string()` injection — added `escape_json_string()` helper, fixed both interpreter and VM. (PR #49)
-- [ ] 7A.2 Fix `unsafe impl Send for SendableVM` — `debug_assert!` at `machine.rs:862` disappears in release builds. Raw JIT pointers could cross threads. Promote to real `assert!` or restructure to remove the `unsafe impl`.
+- [x] 7A.2 Fix `unsafe impl Send for SendableVM` — promoted debug_assert to assert, enforced in release builds. (PR #50)
 - [ ] 7A.3 Fix GC root scanning — `machine.rs:1961` uses `frames.last()` to compute max register, but should scan across ALL frames via `max_by_key`. Objects in calling frames above the current frame's scan limit can be prematurely freed.
 - [ ] 7A.4 Fix parser panics — 14 `panic!` calls in `parser/parser.rs` that crash on malformed input. Convert all to `ParseError` returns.
 - [x] 7A.5 Fix `ask` keyword JSON injection — replaced manual escaping with `serde_json::json!()`. (PR #49)
