@@ -490,7 +490,6 @@ impl VM {
         for name in &builtins {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
                 name: name.to_string(),
-                func: native_dispatch,
             }));
             self.globals.insert(name.to_string(), Value::Obj(name_ref));
         }
@@ -511,10 +510,9 @@ impl VM {
             "tan", "log",
         ] {
             let full = format!("math.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             math_map.insert(name.to_string(), Value::Obj(nr));
         }
         let math_ref = self.gc.alloc(ObjKind::Object(math_map));
@@ -527,10 +525,9 @@ impl VM {
             "read", "write", "append", "exists", "list", "remove", "mkdir",
         ] {
             let full = format!("fs.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             fs_map.insert(name.to_string(), Value::Obj(nr));
         }
         let fs_ref = self.gc.alloc(ObjKind::Object(fs_map));
@@ -540,10 +537,9 @@ impl VM {
         let mut io_map = IndexMap::new();
         for name in &["prompt", "print", "args"] {
             let full = format!("io.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             io_map.insert(name.to_string(), Value::Obj(nr));
         }
         let io_ref = self.gc.alloc(ObjKind::Object(io_map));
@@ -560,10 +556,9 @@ impl VM {
             "hex_decode",
         ] {
             let full = format!("crypto.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             crypto_map.insert(name.to_string(), Value::Obj(nr));
         }
         let crypto_ref = self.gc.alloc(ObjKind::Object(crypto_map));
@@ -574,10 +569,9 @@ impl VM {
         let mut db_map = IndexMap::new();
         for name in &["open", "query", "execute", "close"] {
             let full = format!("db.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             db_map.insert(name.to_string(), Value::Obj(nr));
         }
         let db_ref = self.gc.alloc(ObjKind::Object(db_map));
@@ -587,10 +581,9 @@ impl VM {
         let mut env_map = IndexMap::new();
         for name in &["get", "set", "keys", "has"] {
             let full = format!("env.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             env_map.insert(name.to_string(), Value::Obj(nr));
         }
         let env_ref = self.gc.alloc(ObjKind::Object(env_map));
@@ -600,10 +593,9 @@ impl VM {
         let mut json_map = IndexMap::new();
         for name in &["parse", "stringify"] {
             let full = format!("json.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             json_map.insert(name.to_string(), Value::Obj(nr));
         }
         let json_ref = self.gc.alloc(ObjKind::Object(json_map));
@@ -614,10 +606,9 @@ impl VM {
         let mut regex_map = IndexMap::new();
         for name in &["test", "find", "find_all", "replace", "split"] {
             let full = format!("regex.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             regex_map.insert(name.to_string(), Value::Obj(nr));
         }
         let regex_ref = self.gc.alloc(ObjKind::Object(regex_map));
@@ -628,10 +619,9 @@ impl VM {
         let mut log_map = IndexMap::new();
         for name in &["info", "warn", "error", "debug"] {
             let full = format!("log.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             log_map.insert(name.to_string(), Value::Obj(nr));
         }
         let log_ref = self.gc.alloc(ObjKind::Object(log_map));
@@ -643,10 +633,9 @@ impl VM {
             "get", "post", "put", "delete", "patch", "head", "download", "crawl",
         ] {
             let full = format!("http.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             http_map.insert(name.to_string(), Value::Obj(nr));
         }
         let http_ref = self.gc.alloc(ObjKind::Object(http_map));
@@ -660,10 +649,9 @@ impl VM {
             "clear", "confirm",
         ] {
             let full = format!("term.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             term_map.insert(name.to_string(), Value::Obj(nr));
         }
         let term_ref = self.gc.alloc(ObjKind::Object(term_map));
@@ -674,10 +662,9 @@ impl VM {
         let mut csv_map = IndexMap::new();
         for name in &["parse", "stringify", "read", "write"] {
             let full = format!("csv.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             csv_map.insert(name.to_string(), Value::Obj(nr));
         }
         let csv_ref = self.gc.alloc(ObjKind::Object(csv_map));
@@ -713,10 +700,9 @@ impl VM {
             "is_leap_year",
         ] {
             let full = format!("time.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             time_map.insert(name.to_string(), Value::Obj(nr));
         }
         let time_ref = self.gc.alloc(ObjKind::Object(time_map));
@@ -729,10 +715,9 @@ impl VM {
             let mut pg_map = IndexMap::new();
             for name in &["connect", "query", "execute", "close"] {
                 let full = format!("pg.{}", name);
-                let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                    name: full,
-                    func: native_dispatch,
-                }));
+                let nr = self
+                    .gc
+                    .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
                 pg_map.insert(name.to_string(), Value::Obj(nr));
             }
             let pg_ref = self.gc.alloc(ObjKind::Object(pg_map));
@@ -743,10 +728,9 @@ impl VM {
         let mut jwt_map = IndexMap::new();
         for name in &["sign", "verify", "decode", "valid"] {
             let full = format!("jwt.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
+            let nr = self
+                .gc
+                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             jwt_map.insert(name.to_string(), Value::Obj(nr));
         }
         let jwt_ref = self.gc.alloc(ObjKind::Object(jwt_map));
@@ -758,10 +742,9 @@ impl VM {
             let mut mysql_map = IndexMap::new();
             for name in &["connect", "query", "execute", "close"] {
                 let full = format!("mysql.{}", name);
-                let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                    name: full,
-                    func: native_dispatch,
-                }));
+                let nr = self
+                    .gc
+                    .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
                 mysql_map.insert(name.to_string(), Value::Obj(nr));
             }
             let mysql_ref = self.gc.alloc(ObjKind::Object(mysql_map));
@@ -779,7 +762,6 @@ impl VM {
 
         let some_native = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
             name: "Some".to_string(),
-            func: native_dispatch,
         }));
         self.globals
             .insert("Some".to_string(), Value::Obj(some_native));
@@ -793,7 +775,6 @@ impl VM {
     pub(super) fn alloc_builtin(&mut self, name: &str) -> Value {
         let native = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
             name: name.to_string(),
-            func: native_dispatch,
         }));
         Value::Obj(native)
     }
@@ -2396,8 +2377,4 @@ impl VM {
             _ => Err(VMError::new("cannot compare non-numbers")),
         }
     }
-}
-
-fn native_dispatch(_vm: &mut VM, _args: Vec<Value>) -> Result<Value, String> {
-    Ok(Value::Null)
 }

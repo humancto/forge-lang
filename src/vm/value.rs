@@ -346,8 +346,6 @@ pub struct ObjUpvalue {
     pub value: Value,
 }
 
-#[allow(dead_code)]
 pub struct NativeFn {
     pub name: String,
-    pub func: fn(&mut super::machine::VM, Vec<Value>) -> Result<Value, String>,
 }
