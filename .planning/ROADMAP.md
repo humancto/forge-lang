@@ -309,7 +309,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 ### Phase 6B — Build & Binary Size
 
-- [ ] 6B.1 Feature-gate Cranelift JIT behind `jit` cargo feature — 5 cranelift crates add significant compile time. Default off, enable with `--features jit`.
+- [x] 6B.1 Feature-gate Cranelift JIT behind `jit` cargo feature — 5 cranelift crates add significant compile time. Default on, disable with `--no-default-features`. (PR #41)
 - [ ] 6B.2 Feature-gate PostgreSQL behind `postgres` cargo feature — `tokio-postgres`, `tokio-postgres-rustls`, `rustls`, `webpki-roots`.
 - [ ] 6B.3 Feature-gate MySQL behind `mysql` cargo feature — `mysql_async`.
 - [ ] 6B.4 Trim tokio features from `"full"` to `["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "fs"]`.
