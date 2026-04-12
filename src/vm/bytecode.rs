@@ -62,6 +62,77 @@ pub enum OpCode {
     Freeze,   // A=dst, B=src (wrap value as frozen/immutable)
 }
 
+// Compile-time guard: if a new variant is added to OpCode, this assertion
+// will fail, reminding you to update the TryFrom impl below.
+const _: () = assert!(OpCode::Freeze as u8 + 1 == 57);
+
+impl TryFrom<u8> for OpCode {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(OpCode::LoadConst),
+            1 => Ok(OpCode::LoadNull),
+            2 => Ok(OpCode::LoadTrue),
+            3 => Ok(OpCode::LoadFalse),
+            4 => Ok(OpCode::Add),
+            5 => Ok(OpCode::Sub),
+            6 => Ok(OpCode::Mul),
+            7 => Ok(OpCode::Div),
+            8 => Ok(OpCode::Mod),
+            9 => Ok(OpCode::Neg),
+            10 => Ok(OpCode::Eq),
+            11 => Ok(OpCode::NotEq),
+            12 => Ok(OpCode::Lt),
+            13 => Ok(OpCode::Gt),
+            14 => Ok(OpCode::LtEq),
+            15 => Ok(OpCode::GtEq),
+            16 => Ok(OpCode::And),
+            17 => Ok(OpCode::Or),
+            18 => Ok(OpCode::Not),
+            19 => Ok(OpCode::Move),
+            20 => Ok(OpCode::GetLocal),
+            21 => Ok(OpCode::SetLocal),
+            22 => Ok(OpCode::GetGlobal),
+            23 => Ok(OpCode::SetGlobal),
+            24 => Ok(OpCode::NewArray),
+            25 => Ok(OpCode::NewObject),
+            26 => Ok(OpCode::GetField),
+            27 => Ok(OpCode::SetField),
+            28 => Ok(OpCode::GetIndex),
+            29 => Ok(OpCode::SetIndex),
+            30 => Ok(OpCode::Jump),
+            31 => Ok(OpCode::JumpIfFalse),
+            32 => Ok(OpCode::JumpIfTrue),
+            33 => Ok(OpCode::Loop),
+            34 => Ok(OpCode::Call),
+            35 => Ok(OpCode::Return),
+            36 => Ok(OpCode::ReturnNull),
+            37 => Ok(OpCode::Closure),
+            38 => Ok(OpCode::Concat),
+            39 => Ok(OpCode::Len),
+            40 => Ok(OpCode::Try),
+            41 => Ok(OpCode::Spawn),
+            42 => Ok(OpCode::ExtractField),
+            43 => Ok(OpCode::Interpolate),
+            44 => Ok(OpCode::GetUpvalue),
+            45 => Ok(OpCode::SetUpvalue),
+            46 => Ok(OpCode::Pop),
+            47 => Ok(OpCode::PushHandler),
+            48 => Ok(OpCode::PopHandler),
+            49 => Ok(OpCode::PushTimeout),
+            50 => Ok(OpCode::PopTimeout),
+            51 => Ok(OpCode::Await),
+            52 => Ok(OpCode::Schedule),
+            53 => Ok(OpCode::Watch),
+            54 => Ok(OpCode::Must),
+            55 => Ok(OpCode::Ask),
+            56 => Ok(OpCode::Freeze),
+            _ => Err(value),
+        }
+    }
+}
+
 /// Compile-time constant — can hold strings, unlike the runtime Value.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -192,4 +263,21 @@ pub fn decode_bx(instruction: u32) -> u16 {
 #[inline(always)]
 pub fn decode_sbx(instruction: u32) -> i16 {
     (instruction & 0xFFFF) as i16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_from_valid_opcodes() {
+        assert_eq!(OpCode::try_from(0u8), Ok(OpCode::LoadConst));
+        assert_eq!(OpCode::try_from(56u8), Ok(OpCode::Freeze));
+    }
+
+    #[test]
+    fn try_from_invalid_opcode() {
+        assert_eq!(OpCode::try_from(57u8), Err(57));
+        assert_eq!(OpCode::try_from(255u8), Err(255));
+    }
 }

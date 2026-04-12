@@ -85,8 +85,11 @@ pub fn build_function<M: Module>(
             let cc = decode_c(inst) as usize;
             let bx = decode_bx(inst);
             let sbx = decode_sbx(inst);
-            let opcode: OpCode = unsafe { std::mem::transmute(op) };
             let next = blocks[ip + 1];
+            let Ok(opcode) = OpCode::try_from(op) else {
+                b.ins().jump(next, &[]);
+                continue;
+            };
 
             match opcode {
                 OpCode::LoadNull => {
