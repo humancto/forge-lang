@@ -1224,7 +1224,7 @@ footer {
     <div class="hero-text">
       <div class="hero-badge fade-up">
         <span class="dot"></span>
-        v0.6.0 — Developer Experience, VM Parity &amp; Package Ecosystem
+        v0.7.1 — VM Default, AOT Compilation, DAP Debugger &amp; Cross-File LSP
       </div>
       <h1 class="fade-up stagger-1">
         Code that<br>reads like<br><span class="accent">English.</span>
@@ -1482,7 +1482,7 @@ footer {
   <div class="section-label fade-up">Performance</div>
   <div class="section-title fade-up stagger-1">Three engines. Pick your tradeoff.</div>
   <p class="section-desc fade-up stagger-2">
-    Full stdlib with the interpreter. Raw speed with the JIT. The Cranelift JIT puts Forge alongside Node.js for compute-heavy code.
+    The bytecode VM is the default engine. The Cranelift JIT puts Forge alongside Node.js for compute-heavy code. The interpreter is available via <code>--interp</code> for HTTP server apps.
   </p>
 
   <div class="perf-grid fade-up stagger-3">
@@ -1493,16 +1493,16 @@ footer {
       <div class="label">Cranelift JIT • Hot functions</div>
     </div>
     <div class="perf-card">
-      <div class="engine">--vm</div>
+      <div class="engine">default (VM)</div>
       <div class="time">252<span>ms</span></div>
       <div class="compare">Bytecode VM</div>
-      <div class="label">Compiled bytecode</div>
+      <div class="label">Default engine • All 238+ builtins</div>
     </div>
     <div class="perf-card">
-      <div class="engine">interpreter</div>
+      <div class="engine">--interp</div>
       <div class="time">2.3<span>s</span></div>
-      <div class="compare">Full stdlib access</div>
-      <div class="label">All 238+ functions available</div>
+      <div class="compare">Full feature set</div>
+      <div class="label">HTTP server • DAP debugger</div>
     </div>
   </div>
 

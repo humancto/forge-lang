@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-04-12
+
+### Fixed
+
+- **Eliminated undefined behavior in VM dispatch** — replaced 3 `unsafe { transmute(op) }` sites with safe `TryFrom<u8>` conversion. Invalid opcodes now produce clean errors instead of UB. Compile-time assertion guards against enum drift. ([#22](https://github.com/humancto/forge-lang/pull/22))
+- **Fixed GC use-after-free risk** — added `method_tables`, `static_methods`, `struct_defaults`, and `open_upvalues` to GC root scanning. These structures hold live GcRefs that were previously invisible to the collector. ([#23](https://github.com/humancto/forge-lang/pull/23))
+- **Fixed DAP message corruption** — replaced mixed `stdin.lock().lines()` + separate `io::stdin()` reads with a single `BufReader<Stdin>`, preventing buffer desync under pipelined messages. ([#24](https://github.com/humancto/forge-lang/pull/24))
+- **Fixed deflated coverage numbers** — added coverage line tracking to the interpreter `run()` method. Top-level statements were previously invisible to `forge test --coverage`. ([#25](https://github.com/humancto/forge-lang/pull/25))
+- **VM `len()` returns char count** — `len("emoji")` now returns Unicode character count instead of byte count, matching interpreter behavior. ([#31](https://github.com/humancto/forge-lang/pull/31))
+- **VM object equality** — `==` on objects now compares by key-value equality instead of always returning false. ([#32](https://github.com/humancto/forge-lang/pull/32))
+- **AOT/native uses TMPDIR** — generated C launchers now respect the `TMPDIR` environment variable instead of hardcoding `/tmp`. ([#33](https://github.com/humancto/forge-lang/pull/33))
+- **Improved coverage heuristic** — excludes `} else {`, lone `{`, decorator lines, and `otherwise` from executable line count for more accurate percentages. ([#35](https://github.com/humancto/forge-lang/pull/35))
+- **DAP breakpoints keyed by file** — breakpoints are now stored per source file, preventing cross-file false triggers during multi-file debugging. ([#36](https://github.com/humancto/forge-lang/pull/36))
+- **Compiler register overflow check** — `alloc_reg()` now panics with a clear message at 255 registers instead of silently wrapping to 0. ([#37](https://github.com/humancto/forge-lang/pull/37))
+
+### Changed
+
+- **Lazy register allocation** — VM starts with 256 registers (~6KB) instead of 65,536 (~1.5MB), growing on demand at call sites. ([#28](https://github.com/humancto/forge-lang/pull/28))
+- **Cached chunk lookup in dispatch loop** — the `Arc<Chunk>` is now cached across dispatch iterations, avoiding redundant GC lookups when the closure hasn't changed. ([#27](https://github.com/humancto/forge-lang/pull/27))
+- **`debug_assert!` on SendableVM** — forked VMs now assert that `jit_cache` is empty in debug builds, guarding the `unsafe impl Send` invariant. ([#26](https://github.com/humancto/forge-lang/pull/26))
+- **Deduplicated native.rs** — extracted shared `compile_launcher()` and `launcher_c_template()`, reducing the file by ~120 lines. ([#34](https://github.com/humancto/forge-lang/pull/34))
+- **Fair benchmarks with internal timing** — all benchmarks now use self-reported timing, eliminating 30-80ms process spawn noise. Array benchmark Python uses `append` loop instead of `list(range())`. Runner tests both VM and interpreter modes. ([#29](https://github.com/humancto/forge-lang/pull/29))
+- **Cross-language benchmarks** — added Rust, Go, and Node.js fib(30) benchmark files for landing page verification. ([#30](https://github.com/humancto/forge-lang/pull/30))
+
 ## [0.7.0] - 2026-04-12
 
 ### Added

@@ -127,7 +127,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → forge 0.4.3
+forge version          # → forge 0.7.1
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -599,21 +599,21 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 
 ## 🔧 CLI Commands
 
-| Command               | What It Does             |
-| --------------------- | ------------------------ |
-| `forge run <file>`    | Run a program            |
-| `forge`               | Start REPL               |
-| `forge -e '<code>'`   | Evaluate inline          |
-| `forge learn [n]`     | 30 interactive tutorials |
-| `forge new <name>`    | Scaffold a project       |
-| `forge test [dir]`    | Run tests                |
-| `forge fmt [files]`   | Format code              |
-| `forge build <file>`  | Compile to `.fgc` bytecode |
+| Command                       | What It Does                       |
+| ----------------------------- | ---------------------------------- |
+| `forge run <file>`            | Run a program                      |
+| `forge`                       | Start REPL                         |
+| `forge -e '<code>'`           | Evaluate inline                    |
+| `forge learn [n]`             | 30 interactive tutorials           |
+| `forge new <name>`            | Scaffold a project                 |
+| `forge test [dir]`            | Run tests                          |
+| `forge fmt [files]`           | Format code                        |
+| `forge build <file>`          | Compile to `.fgc` bytecode         |
 | `forge build --native <file>` | Build a native launcher executable |
-| `forge install <src>` | Install a package        |
-| `forge lsp`           | Language server          |
-| `forge chat`          | AI assistant             |
-| `forge version`       | Version info             |
+| `forge install <src>`         | Install a package                  |
+| `forge lsp`                   | Language server                    |
+| `forge chat`                  | AI assistant                       |
+| `forge version`               | Version info                       |
 
 ---
 
@@ -721,10 +721,10 @@ Forge is **v0.4.3**. The language, interpreter, and standard library are stable;
 | ----------- | ------------------------------------------------------------------------------------------------- |
 | **v0.3** ✅ | Type system (thing/power/give/craft/has), 73 new functions, GenZ debug kit, NPC module, 822 tests |
 | **v0.4** ✅ | JWT auth, MySQL, parameterized SQL (all DBs), CORS, PG TLS, 18 modules, 1,019 tests               |
-| **v0.5**    | Backend parity, package foundations, richer LSP                                                    |
-| **v0.6**    | Stronger typing, permissions, profiling and benching                                               |
-| **v0.7**    | Standalone native compilation groundwork                                                           |
-| **v1.0**    | Stable API, compatibility guarantees, production hardening                                         |
+| **v0.5**    | Backend parity, package foundations, richer LSP                                                   |
+| **v0.6**    | Stronger typing, permissions, profiling and benching                                              |
+| **v0.7**    | Standalone native compilation groundwork                                                          |
+| **v1.0**    | Stable API, compatibility guarantees, production hardening                                        |
 
 Near-term execution focus: semantic parity across backends, package/module correctness, stronger typing, better editor tooling, and a path from launcher-based native builds to real standalone binaries.
 

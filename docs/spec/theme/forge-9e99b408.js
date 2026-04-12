@@ -5,7 +5,7 @@ document.addEventListener("DOMContentLoaded", function () {
   if (title && !title.querySelector(".version-badge")) {
     const badge = document.createElement("span");
     badge.className = "version-badge";
-    badge.textContent = "v0.3.3";
+    badge.textContent = "v0.7.1";
     badge.style.marginLeft = "0.8rem";
     badge.style.verticalAlign = "middle";
     badge.style.fontSize = "0.5em";
