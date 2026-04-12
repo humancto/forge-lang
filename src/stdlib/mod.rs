@@ -13,6 +13,8 @@ pub mod math;
 #[cfg(feature = "mysql")]
 pub mod mysql;
 pub mod npc;
+pub mod os_module;
+pub mod path_module;
 #[cfg(feature = "postgres")]
 pub mod pg;
 pub mod regex_module;
@@ -81,6 +83,12 @@ pub fn create_ws_module() -> Value {
 }
 pub fn create_jwt_module() -> Value {
     jwt::create_module()
+}
+pub fn create_os_module() -> Value {
+    os_module::create_module()
+}
+pub fn create_path_module() -> Value {
+    path_module::create_module()
 }
 #[cfg(feature = "mysql")]
 pub fn create_mysql_module() -> Value {

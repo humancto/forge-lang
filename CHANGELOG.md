@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`os` stdlib module** — `hostname()`, `platform()`, `arch()`, `pid()`, `cpus()`, `homedir()` for runtime OS introspection. ([#59](https://github.com/humancto/forge-lang/pull/59))
+- **`path` stdlib module** — `join()`, `resolve()`, `relative()`, `is_absolute()`, `dirname()`, `basename()`, `extname()`, `separator` for cross-platform path manipulation. ([#59](https://github.com/humancto/forge-lang/pull/59))
+
 ### Changed
 
 - **Cranelift JIT is now an optional cargo feature** — enabled by default. Build without it via `cargo install forge-lang --no-default-features` for faster compile times and broader platform support. ([#41](https://github.com/humancto/forge-lang/pull/41))

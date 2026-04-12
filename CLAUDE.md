@@ -64,7 +64,7 @@ forge fmt                    # format code
 
 run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, chat, doc, help, -e
 
-## Standard Library (18 modules, 238+ functions)
+## Standard Library (20 modules, 250+ functions)
 
 | Module   | Key Functions                                                                                                                                                    |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -84,6 +84,8 @@ run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, ch
 | `csv`    | parse, stringify, read, write                                                                                                                                    |
 | `term`   | red/green/blue/yellow/bold/dim, table, hr, sparkline, bar, banner, box, gradient, success/error                                                                  |
 | `exec`   | run_command                                                                                                                                                      |
+| `os`     | hostname, platform, arch, pid, cpus, homedir                                                                                                                     |
+| `path`   | join, resolve, relative, is_absolute, dirname, basename, extname, separator                                                                                      |
 | `npc`    | name, first_name, last_name, email, username, phone, number, pick, bool, sentence, word, id, color, ip, url, company                                             |
 
 ## Core Builtins (beyond modules)
