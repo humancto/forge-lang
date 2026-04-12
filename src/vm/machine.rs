@@ -223,6 +223,9 @@ pub struct VM {
     pub gc: Gc,
     pub output: Vec<String>,
     pub jit_cache: HashMap<String, JitEntry>,
+    /// Keeps JIT-compiled code pages alive. Must never be shrunk while
+    /// `jit_cache` holds pointers into these modules.
+    jit_modules: Vec<super::jit::jit_module::JitCompiler>,
     pub profiler: Profiler,
     skip_timeout_check_once: bool,
 }
@@ -302,6 +305,7 @@ impl VM {
             gc: Gc::new(),
             output: Vec::new(),
             jit_cache: HashMap::new(),
+            jit_modules: Vec::new(),
             profiler: Profiler::new(false),
             skip_timeout_check_once: false,
         };
@@ -321,6 +325,7 @@ impl VM {
             gc: Gc::new(),
             output: Vec::new(),
             jit_cache: HashMap::new(),
+            jit_modules: Vec::new(),
             profiler: Profiler::new(true),
             skip_timeout_check_once: false,
         };
@@ -858,8 +863,8 @@ impl VM {
         }
 
         debug_assert!(
-            child.jit_cache.is_empty(),
-            "BUG: SendableVM must have empty jit_cache to be safely Send"
+            child.jit_cache.is_empty() && child.jit_modules.is_empty(),
+            "BUG: SendableVM must have empty jit_cache/jit_modules to be safely Send"
         );
         SendableVM(child)
     }
@@ -2035,7 +2040,7 @@ impl VM {
                                                 uses_float: type_info.has_float,
                                             },
                                         );
-                                        std::mem::forget(jit);
+                                        self.jit_modules.push(jit);
                                     }
                                 }
                             }
