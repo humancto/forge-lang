@@ -338,11 +338,11 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 
 ### Phase 7A — Critical Safety Fixes
 
-- [ ] 7A.1 Fix `to_json_string()` injection — both `interpreter/mod.rs:136` and `vm/value.rs:235` use `format!("\"{}\"", s)` without escaping. Backslashes, quotes, newlines, control chars all pass through raw → malformed JSON, injection in HTTP bodies. Use `serde_json::to_string()` or manual escape.
+- [x] 7A.1 Fix `to_json_string()` injection — added `escape_json_string()` helper, fixed both interpreter and VM. (PR #49)
 - [ ] 7A.2 Fix `unsafe impl Send for SendableVM` — `debug_assert!` at `machine.rs:862` disappears in release builds. Raw JIT pointers could cross threads. Promote to real `assert!` or restructure to remove the `unsafe impl`.
 - [ ] 7A.3 Fix GC root scanning — `machine.rs:1961` uses `frames.last()` to compute max register, but should scan across ALL frames via `max_by_key`. Objects in calling frames above the current frame's scan limit can be prematurely freed.
 - [ ] 7A.4 Fix parser panics — 14 `panic!` calls in `parser/parser.rs` that crash on malformed input. Convert all to `ParseError` returns.
-- [ ] 7A.5 Fix `ask` keyword JSON injection — `machine.rs:1857` uses `format!()` for API request body with incomplete escaping (only `\` and `"`). Newlines and control chars produce invalid JSON. Use `serde_json`.
+- [x] 7A.5 Fix `ask` keyword JSON injection — replaced manual escaping with `serde_json::json!()`. (PR #49)
 
 ### Phase 7B — Dead Code & Warning Elimination
 
