@@ -132,9 +132,12 @@ enum Command {
     },
     /// Compile Forge source to bytecode
     Build {
-        /// Emit a native launcher executable that shells into the Forge runtime
-        #[arg(long)]
+        /// Emit a native launcher that embeds source and shells into the Forge runtime
+        #[arg(long, conflicts_with = "aot")]
         native: bool,
+        /// Compile to bytecode and embed in a native binary (no source exposure)
+        #[arg(long, conflicts_with = "native")]
+        aot: bool,
         /// Source file to compile
         file: PathBuf,
     },
@@ -272,7 +275,7 @@ async fn main() {
         Some(Command::New { name }) => {
             scaffold::create_project(&name);
         }
-        Some(Command::Build { file, native }) => {
+        Some(Command::Build { file, native, aot }) => {
             let path_str = file.display().to_string();
             let source = match fs::read_to_string(&file) {
                 Ok(s) => s,
@@ -287,7 +290,9 @@ async fn main() {
                     process::exit(1);
                 }
             };
-            if native {
+            if aot {
+                compile_to_native_aot(&source, &path_str, &file, strict);
+            } else if native {
                 compile_to_native_launcher(&source, &path_str, &file, strict);
             } else {
                 compile_to_bytecode(&source, &path_str, &file, strict);
@@ -826,6 +831,50 @@ fn compile_to_native_launcher(source: &str, filename: &str, file_path: &PathBuf,
                 "Built native launcher {} -> {}\n  runtime: Forge interpreter/VM required at execution time",
                 filename,
                 output_path.display()
+            );
+        }
+        Err(message) => {
+            eprintln!("{}", errors::format_simple_error(&message));
+            process::exit(1);
+        }
+    }
+}
+
+fn compile_to_native_aot(source: &str, filename: &str, file_path: &PathBuf, strict: bool) {
+    let (program, warnings) = match prepare_program(source, strict) {
+        Ok(prepared) => prepared,
+        Err(err) => print_frontend_error(source, filename, err),
+    };
+    emit_type_warnings(&warnings);
+
+    if let Err(message) = ensure_vm_compatible(&program, "AOT build") {
+        eprintln!("{}", errors::format_simple_error(&message));
+        process::exit(1);
+    }
+
+    let chunk = match vm::compiler::compile(&program) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e.message));
+            process::exit(1);
+        }
+    };
+
+    let bytecode = match vm::serialize::serialize_chunk(&chunk) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e.message));
+            process::exit(1);
+        }
+    };
+
+    match native::build_native_aot(&bytecode, file_path) {
+        Ok(output_path) => {
+            println!(
+                "Built AOT binary {} -> {}\n  bytecode embedded ({} bytes, no source exposure)\n  runtime: Forge VM required at execution time",
+                filename,
+                output_path.display(),
+                bytecode.len()
             );
         }
         Err(message) => {
