@@ -28,6 +28,7 @@ type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
+#[allow(dead_code)]
 struct WsConnection {
     write: Arc<Mutex<WsSink>>,
     read: Arc<Mutex<WsStream>>,

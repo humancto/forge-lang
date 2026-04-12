@@ -32,6 +32,7 @@ fn escape_json_string(s: &str) -> String {
 
 /// Thread-safe channel inner type
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ChannelInner {
     pub tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Value>>>,
     pub rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<Value>>>,
@@ -380,6 +381,7 @@ pub enum DebugAction {
 
 /// Debug frame for stack trace reporting
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct DebugFrame {
     pub name: String,
     pub line: usize,
@@ -959,9 +961,9 @@ impl Interpreter {
                     if let Stmt::FnDef {
                         name: method_name,
                         params,
-                        return_type,
+                        return_type: _,
                         body,
-                        is_async,
+                        is_async: _,
                         ..
                     } = &method_spanned.stmt
                     {

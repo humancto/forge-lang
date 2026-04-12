@@ -65,6 +65,7 @@ pub struct DetailedDep {
     pub path: String,
 }
 
+#[allow(dead_code)]
 impl DependencySpec {
     pub fn is_git(&self) -> bool {
         match self {
@@ -153,6 +154,7 @@ pub struct LockedPackage {
     pub checksum: String,
 }
 
+#[allow(dead_code)]
 impl Lockfile {
     pub fn load() -> Option<Self> {
         let path = Path::new("forge.lock");

@@ -24,6 +24,7 @@ pub struct Profiler {
     enabled: bool,
 }
 
+#[allow(dead_code)]
 impl Profiler {
     pub fn new(enabled: bool) -> Self {
         Self {
