@@ -1013,24 +1013,32 @@ impl VM {
     }
 
     fn run_until(&mut self, boundary_frame_idx: usize) -> Result<Value, VMError> {
+        let mut cached_closure: Option<(GcRef, Arc<Chunk>)> = None;
+
         loop {
             if self.frames.is_empty() {
                 return Ok(Value::Null);
             }
 
             let frame_idx = self.frames.len() - 1;
-            let chunk = {
-                let frame = &self.frames[frame_idx];
+            let current_closure = self.frames[frame_idx].closure;
+            let need_fetch = match cached_closure {
+                Some((ref r, _)) => *r != current_closure,
+                None => true,
+            };
+            if need_fetch {
                 let closure_obj = self
                     .gc
-                    .get(frame.closure)
+                    .get(current_closure)
                     .ok_or_else(|| VMError::new("invalid closure"))?;
-                if let ObjKind::Closure(c) = &closure_obj.kind {
+                let c = if let ObjKind::Closure(c) = &closure_obj.kind {
                     c.function.chunk.clone()
                 } else {
                     return Err(VMError::new("expected closure"));
-                }
-            };
+                };
+                cached_closure = Some((current_closure, c));
+            }
+            let chunk = cached_closure.as_ref().unwrap().1.clone();
 
             if self.frames[frame_idx].ip >= chunk.code.len() {
                 self.frames.pop();
