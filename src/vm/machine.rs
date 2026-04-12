@@ -753,18 +753,21 @@ impl VM {
         self.globals.insert("jwt".to_string(), Value::Obj(jwt_ref));
 
         // mysql module
-        let mut mysql_map = IndexMap::new();
-        for name in &["connect", "query", "execute", "close"] {
-            let full = format!("mysql.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
-            mysql_map.insert(name.to_string(), Value::Obj(nr));
+        #[cfg(feature = "mysql")]
+        {
+            let mut mysql_map = IndexMap::new();
+            for name in &["connect", "query", "execute", "close"] {
+                let full = format!("mysql.{}", name);
+                let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+                    name: full,
+                    func: native_dispatch,
+                }));
+                mysql_map.insert(name.to_string(), Value::Obj(nr));
+            }
+            let mysql_ref = self.gc.alloc(ObjKind::Object(mysql_map));
+            self.globals
+                .insert("mysql".to_string(), Value::Obj(mysql_ref));
         }
-        let mysql_ref = self.gc.alloc(ObjKind::Object(mysql_map));
-        self.globals
-            .insert("mysql".to_string(), Value::Obj(mysql_ref));
 
         // Option prelude
         let mut none_obj = IndexMap::new();
