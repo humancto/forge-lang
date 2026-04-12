@@ -57,7 +57,9 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         let bb = decode_b(inst) as usize;
         let cc = decode_c(inst) as usize;
         let bx = decode_bx(inst);
-        let opcode: OpCode = unsafe { std::mem::transmute(op) };
+        let Ok(opcode) = OpCode::try_from(op) else {
+            continue;
+        };
 
         match opcode {
             OpCode::LoadConst => {

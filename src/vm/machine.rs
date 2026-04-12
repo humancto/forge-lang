@@ -1058,7 +1058,8 @@ impl VM {
             let c = decode_c(inst);
             let bx = decode_bx(inst);
             let sbx = decode_sbx(inst);
-            let opcode: OpCode = unsafe { std::mem::transmute(op) };
+            let opcode: OpCode = OpCode::try_from(op)
+                .map_err(|bad| VMError::new(&format!("invalid opcode: {bad}")))?;
 
             let step_result = (|| -> Result<Option<Value>, VMError> {
                 match opcode {
