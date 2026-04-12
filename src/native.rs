@@ -143,7 +143,10 @@ static const size_t FORGE_PROGRAM_LEN = sizeof(FORGE_PROGRAM);
 static const char *DEFAULT_FORGE_BIN = "{default_forge_bin}";
 
 int main(int argc, char **argv) {{
-    char tmp_template[] = "/tmp/forge-native-XXXXXX";
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir) tmpdir = "/tmp";
+    char tmp_template[256];
+    snprintf(tmp_template, sizeof(tmp_template), "%s/forge-native-XXXXXX", tmpdir);
     int fd = mkstemp(tmp_template);
     if (fd == -1) {{
         perror("mkstemp");
@@ -263,7 +266,10 @@ static const size_t FORGE_BYTECODE_LEN = sizeof(FORGE_BYTECODE);
 static const char *DEFAULT_FORGE_BIN = "{default_forge_bin}";
 
 int main(int argc, char **argv) {{
-    char tmp_template[] = "/tmp/forge-aot-XXXXXX";
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir) tmpdir = "/tmp";
+    char tmp_template[256];
+    snprintf(tmp_template, sizeof(tmp_template), "%s/forge-aot-XXXXXX", tmpdir);
     int fd = mkstemp(tmp_template);
     if (fd == -1) {{
         perror("mkstemp");
