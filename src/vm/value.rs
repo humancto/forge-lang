@@ -271,6 +271,11 @@ impl GcObject {
             (ObjKind::Array(a), ObjKind::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.equals(y, gc))
             }
+            (ObjKind::Object(a), ObjKind::Object(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(k, v)| b.get(k).map_or(false, |bv| v.equals(bv, gc)))
+            }
             _ => false,
         }
     }
