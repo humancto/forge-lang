@@ -180,7 +180,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
-<p>This document is the formal specification for the <strong>Forge</strong> programming language, version <strong>0.3.3</strong>.</p>
+<p>This document is the formal specification for the <strong>Forge</strong> programming language, version <strong>0.7.0</strong>.</p>
 <p>Forge is an internet-native, general-purpose programming language implemented in Rust. It is designed for application-layer work: web services, scripts, data pipelines, prototypes, and tooling. Forge ships with built-in support for HTTP clients and servers, databases (SQLite and PostgreSQL), cryptography, JSON, CSV, terminal UI, AI/LLM integration, and more — eliminating the need for third-party packages for common internet-oriented tasks.</p>
 <h2 id="design-philosophy"><a class="header" href="#design-philosophy">Design Philosophy</a></h2>
 <p>Forge is guided by three core principles:</p>
@@ -192,17 +192,17 @@
 <p><strong>Dual syntax.</strong> Every construct in Forge has two spellings: a <em>classic syntax</em> familiar to developers who have written JavaScript, Python, Rust, or Go; and a <em>natural-language syntax</em> that reads like English prose. Both forms compile to identical internal representations and may be mixed freely within the same source file.</p>
 </li>
 <li>
-<p><strong>Batteries included.</strong> Forge ships 16 standard library modules with over 230 functions, 30 interactive tutorials, a built-in test runner, a formatter, an LSP server, and a project scaffolding tool. A single <code>cargo install</code> provides a complete development environment.</p>
+<p><strong>Batteries included.</strong> Forge ships 18+ standard library modules with over 238 functions, 30 interactive tutorials, a built-in test runner, a formatter, an LSP server, and a project scaffolding tool. A single <code>cargo install</code> provides a complete development environment.</p>
 </li>
 </ol>
 <h2 id="language-overview"><a class="header" href="#language-overview">Language Overview</a></h2>
 <p>Forge is dynamically typed at runtime with optional type annotations (gradual typing). It supports first-class functions, closures, algebraic data types, pattern matching, Result/Option error handling, structural interfaces, composition via delegation, async/await concurrency, and channels. Programs are executed top-to-bottom without requiring a <code>main</code> function.</p>
-<p>The default execution engine is a tree-walking interpreter. A bytecode VM (<code>--vm</code>) and a JIT compiler (<code>--jit</code>) are available for performance-critical workloads but support fewer features.</p>
+<p>The default execution engine is a bytecode VM (as of v0.7.0). A tree-walking interpreter (<code>--interp</code>) is available as a fallback for features like HTTP server decorators. A JIT compiler (<code>--jit</code>) is available for maximum performance on numeric workloads.</p>
 <h2 id="how-to-read-this-specification"><a class="header" href="#how-to-read-this-specification">How to Read This Specification</a></h2>
 <p>This specification is organized into five parts:</p>
 <ul>
 <li><strong>Part I: Language Core</strong> covers lexical structure, types, expressions, statements, the type system, error handling, and concurrency.</li>
-<li><strong>Part II: Standard Library</strong> documents each of the 16 built-in modules.</li>
+<li><strong>Part II: Standard Library</strong> documents each of the 18+ built-in modules.</li>
 <li><strong>Part III: Built-in Functions</strong> catalogs all globally available functions.</li>
 <li><strong>Part IV: Dual Syntax Reference</strong> provides the complete mapping between classic and natural syntax forms.</li>
 <li><strong>Part V: Runtime and Internals</strong> describes the interpreter, bytecode VM, JIT compiler, and HTTP server runtime.</li>
@@ -5650,7 +5650,7 @@ parallel_sum(3, 4)    // 25
 <p>There is no semantic difference. Use whichever style matches your code’s convention.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="standard-library-overview"><a class="header" href="#standard-library-overview">Standard Library Overview</a></h1>
-<p>Forge ships with <strong>16 built-in modules</strong> containing over 230 functions. All modules are available without any import statement. There is no <code>import math</code> or <code>require("fs")</code> – every module is pre-loaded into the global scope.</p>
+<p>Forge ships with <strong>18+ built-in modules</strong> containing over 238 functions. All modules are available without any import statement. There is no <code>import math</code> or <code>require("fs")</code> – every module is pre-loaded into the global scope.</p>
 <h2 id="accessing-modules"><a class="header" href="#accessing-modules">Accessing Modules</a></h2>
 <p>Modules are accessed via dot notation:</p>
 <pre><code class="language-forge">let root = math.sqrt(144)       // 12.0
@@ -5688,7 +5688,7 @@ say m.pi    // 3.141592653589793
 </table>
 </div>
 <h2 id="execution-tier-support"><a class="header" href="#execution-tier-support">Execution Tier Support</a></h2>
-<p>All modules are fully supported in the <strong>interpreter</strong> (default execution mode). The bytecode VM (<code>--vm</code>) and JIT (<code>--jit</code>) support a subset of modules – primarily <code>math</code>, <code>fs</code>, <code>io</code>, and <code>npc</code>. For full module access, use the interpreter.</p>
+<p>All modules are fully supported in the <strong>bytecode VM</strong> (default execution engine as of v0.7.0) and the <strong>interpreter</strong> (<code>--interp</code>). The JIT (<code>--jit</code>) supports numeric-heavy workloads using <code>math</code> and core arithmetic. Programs using HTTP server decorators (<code>@server</code>, <code>@get</code>, etc.) automatically fall back to the interpreter.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="math"><a class="header" href="#math">math</a></h1>
 <p>Mathematical operations and constants. All trigonometric functions use radians.</p>
@@ -7811,36 +7811,36 @@ say data
 <tr><th>Tier</th><th>Flag</th><th>Implementation</th><th>Performance</th><th>Feature Coverage</th></tr>
 </thead>
 <tbody>
-<tr><td>Interpreter</td><td>(default)</td><td>Tree-walking</td><td>Baseline</td><td>Full (100%)</td></tr>
-<tr><td>Bytecode VM</td><td><code>--vm</code></td><td>Register-based VM</td><td>~10x faster than interpreter</td><td>Partial (~60%)</td></tr>
+<tr><td>Bytecode VM</td><td>(default)</td><td>Register-based VM</td><td>~10x faster than interpreter</td><td>Near-full (~95%)</td></tr>
+<tr><td>Interpreter</td><td><code>--interp</code></td><td>Tree-walking</td><td>Baseline</td><td>Full (100%)</td></tr>
 <tr><td>JIT Compiler</td><td><code>--jit</code></td><td>Cranelift native code</td><td>~50-100x faster than interpreter</td><td>Minimal (~30%)</td></tr>
 </tbody>
 </table>
 </div>
-<pre><code class="language-bash">forge run program.fg          # Interpreter (default)
-forge run program.fg --vm     # Bytecode VM
+<pre><code class="language-bash">forge run program.fg          # Bytecode VM (default)
+forge run program.fg --interp # Tree-walking interpreter
 forge run program.fg --jit    # JIT compiler
 </code></pre>
 <h2 id="when-to-use-each-tier"><a class="header" href="#when-to-use-each-tier">When to Use Each Tier</a></h2>
-<h3 id="interpreter-default"><a class="header" href="#interpreter-default">Interpreter (Default)</a></h3>
-<p>Use the interpreter for:</p>
-<ul>
-<li>All general-purpose development</li>
-<li>HTTP servers (<code>@server</code>, <code>@get</code>, <code>@post</code>)</li>
-<li>Database access (<code>db</code>, <code>pg</code>)</li>
-<li>AI integration (<code>ask</code>)</li>
-<li>File system, crypto, terminal UI</li>
-<li>Any code using the full standard library</li>
-</ul>
-<p>The interpreter supports every feature of the language. It is the reference implementation.</p>
-<h3 id="bytecode-vm---vm"><a class="header" href="#bytecode-vm---vm">Bytecode VM (<code>--vm</code>)</a></h3>
+<h3 id="bytecode-vm-default"><a class="header" href="#bytecode-vm-default">Bytecode VM (Default)</a></h3>
 <p>Use the VM for:</p>
 <ul>
-<li>Compute-intensive loops and numerical work</li>
-<li>Programs that primarily use <code>math</code>, <code>fs</code>, <code>io</code>, and basic control flow</li>
-<li>Benchmarking against the interpreter</li>
+<li>All general-purpose development</li>
+<li>Database access (<code>db</code>, <code>pg</code>, <code>mysql</code>)</li>
+<li>AI integration (<code>ask</code>)</li>
+<li>File system, crypto, terminal UI</li>
+<li>Any code using the full standard library (238+ functions)</li>
+<li>Async/await, concurrency, channels</li>
 </ul>
-<p>The VM compiles Forge source to a register-based bytecode and executes it in a virtual machine with mark-sweep garbage collection. It does not support HTTP servers, database connections, or several stdlib modules.</p>
+<p>The VM is the default execution engine as of v0.7.0. It supports the vast majority of Forge features. Programs using VM-incompatible features (HTTP server decorators) are auto-detected and fall back to the interpreter.</p>
+<h3 id="interpreter---interp"><a class="header" href="#interpreter---interp">Interpreter (<code>--interp</code>)</a></h3>
+<p>Use the interpreter for:</p>
+<ul>
+<li>HTTP servers (<code>@server</code>, <code>@get</code>, <code>@post</code>, <code>@ws</code>)</li>
+<li>DAP debugger sessions (<code>forge dap</code>)</li>
+<li>Any code that requires decorator-driven HTTP routing</li>
+</ul>
+<p>The interpreter supports every feature of the language. It is the reference implementation and is available via the <code>--interp</code> flag.</p>
 <h3 id="jit-compiler---jit"><a class="header" href="#jit-compiler---jit">JIT Compiler (<code>--jit</code>)</a></h3>
 <p>Use the JIT for:</p>
 <ul>
@@ -7852,12 +7852,12 @@ forge run program.fg --jit    # JIT compiler
 <h2 id="trade-off-summary"><a class="header" href="#trade-off-summary">Trade-off Summary</a></h2>
 <pre><code>Feature Coverage:  Interpreter &gt; VM &gt; JIT
 Performance:       JIT &gt; VM &gt; Interpreter
-Startup Time:      Interpreter &lt; VM &lt; JIT
+Startup Time:      VM &lt; Interpreter &lt; JIT
 </code></pre>
-<p>The interpreter is always the safe default. Switch to <code>--vm</code> or <code>--jit</code> only when you need the performance and have verified your program works on that tier.</p>
+<p>The bytecode VM is the default engine. Use <code>--interp</code> for HTTP server applications or debugger sessions. Use <code>--jit</code> for maximum numeric performance.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="interpreter"><a class="header" href="#interpreter">Interpreter</a></h1>
-<p>The Forge interpreter is a <strong>tree-walking interpreter</strong> implemented in Rust. It traverses the AST directly, evaluating each node as it encounters it. This is the default and most complete execution engine.</p>
+<p>The Forge interpreter is a <strong>tree-walking interpreter</strong> implemented in Rust. It traverses the AST directly, evaluating each node as it encounters it. As of v0.7.0, the bytecode VM is the default engine; the interpreter is available via the <code>--interp</code> flag and serves as the fallback for features that require it (HTTP server decorators, DAP debugger integration). It remains the most complete execution engine.</p>
 <h2 id="architecture"><a class="header" href="#architecture">Architecture</a></h2>
 <pre><code>Source (.fg) -&gt; Lexer -&gt; Parser -&gt; AST -&gt; Interpreter -&gt; Result
                                             |
@@ -7911,12 +7911,13 @@ Startup Time:      Interpreter &lt; VM &lt; JIT
 </ul>
 <h2 id="performance-characteristics"><a class="header" href="#performance-characteristics">Performance Characteristics</a></h2>
 <p>The tree-walking approach means the interpreter re-traverses the AST on every loop iteration and function call. This makes it approximately 20x slower than Python for deep recursion benchmarks like <code>fib(35)</code>.</p>
-<p>For most real-world scripts (file processing, HTTP handlers, database queries), interpreter overhead is negligible compared to I/O latency. The interpreter is the recommended tier for all general-purpose work.</p>
+<p>For most real-world scripts (file processing, HTTP handlers, database queries), interpreter overhead is negligible compared to I/O latency. While the VM is now the default for general-purpose work, the interpreter remains the recommended tier for HTTP server applications and debugger sessions.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="bytecode-vm"><a class="header" href="#bytecode-vm">Bytecode VM</a></h1>
-<p>The Forge bytecode VM is a <strong>register-based virtual machine</strong> that compiles Forge source to 32-bit instructions and executes them in a loop. It provides significantly better performance than the tree-walking interpreter at the cost of reduced feature coverage.</p>
+<p>The Forge bytecode VM is a <strong>register-based virtual machine</strong> that compiles Forge source to 32-bit instructions and executes them in a loop. As of v0.7.0, the VM is the <strong>default execution engine</strong>. It provides significantly better performance than the tree-walking interpreter and supports the vast majority of Forge features.</p>
 <h2 id="invocation-1"><a class="header" href="#invocation-1">Invocation</a></h2>
-<pre><code class="language-bash">forge run program.fg --vm
+<p>The VM is used by default. To explicitly use the interpreter instead:</p>
+<pre><code class="language-bash">forge run program.fg --interp
 </code></pre>
 <h2 id="architecture-1"><a class="header" href="#architecture-1">Architecture</a></h2>
 <pre><code>Source -&gt; Lexer -&gt; Parser -&gt; AST -&gt; Compiler -&gt; Bytecode Chunks -&gt; Machine -&gt; Result
@@ -7962,24 +7963,25 @@ Startup Time:      Interpreter &lt; VM &lt; JIT
 <h2 id="green-threads"><a class="header" href="#green-threads">Green Threads</a></h2>
 <p>The VM includes a cooperative green thread scheduler (<code>src/vm/green.rs</code>). Green threads are multiplexed over a single OS thread with explicit yield points.</p>
 <h2 id="supported-features"><a class="header" href="#supported-features">Supported Features</a></h2>
-<p>The VM supports core language features:</p>
+<p>The VM supports the vast majority of Forge features:</p>
 <ul>
-<li>Variables, functions, closures</li>
-<li>Control flow (if/else, for, while, match)</li>
-<li>Arrays and objects</li>
-<li>Arithmetic and comparison operators</li>
-<li>String operations</li>
-<li><code>math</code>, <code>fs</code>, <code>io</code>, <code>npc</code> modules</li>
-<li>Basic built-in functions</li>
+<li>Variables, functions, closures, lambdas</li>
+<li>Control flow (if/else, for, while, match, when guards)</li>
+<li>Arrays, objects, destructuring</li>
+<li>Arithmetic, comparison, and logical operators</li>
+<li>String operations and interpolation</li>
+<li>All 18+ stdlib modules (math, fs, io, crypto, db, pg, mysql, http, json, csv, regex, log, env, jwt, term, exec, npc, url, toml, ws)</li>
+<li>Try-catch error handling</li>
+<li>Async/await with spawn and channels</li>
+<li>Schedule and watch</li>
+<li>Must, ask, freeze expressions</li>
+<li>All built-in functions (238+)</li>
 </ul>
-<h2 id="unsupported-features"><a class="header" href="#unsupported-features">Unsupported Features</a></h2>
-<p>The following require the interpreter:</p>
+<h2 id="interpreter-only-features"><a class="header" href="#interpreter-only-features">Interpreter-Only Features</a></h2>
+<p>The following features require the interpreter (<code>--interp</code> flag) and are auto-detected for fallback:</p>
 <ul>
-<li>HTTP server and client</li>
-<li>Database connections</li>
-<li>AI integration</li>
-<li>Terminal UI widgets</li>
-<li>Most execution helpers</li>
+<li>HTTP server decorators (<code>@server</code>, <code>@get</code>, <code>@post</code>, <code>@delete</code>, <code>@ws</code>)</li>
+<li>DAP debugger integration</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="jit-compiler"><a class="header" href="#jit-compiler">JIT Compiler</a></h1>
@@ -8001,7 +8003,7 @@ Startup Time:      Interpreter &lt; VM &lt; JIT
 </ul>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h2>
 <ol>
-<li>The program is first compiled to bytecode (same as the <code>--vm</code> path).</li>
+<li>The program is first compiled to bytecode (same as the default VM compilation path).</li>
 <li>Functions selected for JIT compilation are translated from bytecode into Cranelift’s intermediate representation (IR).</li>
 <li>Cranelift compiles the IR to native machine code for the host architecture.</li>
 <li>The native code is loaded into memory and called directly, bypassing the bytecode interpreter.</li>
@@ -8721,6 +8723,42 @@ let result = 5 + 3 |&gt; double  // double(8), not 5 + double(3)
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="changelog"><a class="header" href="#changelog">Changelog</a></h1>
+<h2 id="v070"><a class="header" href="#v070">v0.7.0</a></h2>
+<p><strong>VM as default engine, AOT compilation, DAP debugger</strong></p>
+<ul>
+<li>VM is now the default execution engine; interpreter available via <code>--interp</code></li>
+<li>Auto-detection of VM-incompatible features (decorators) with graceful fallback</li>
+<li>Cross-file LSP: go-to-definition and find-references follow imports across files</li>
+<li><code>forge test --coverage</code>: line coverage reporting with color-coded percentages</li>
+<li><code>forge build --aot</code>: ahead-of-time compilation embeds bytecode in native binary</li>
+<li><code>forge dap</code>: Debug Adapter Protocol server for VS Code integration (breakpoints, stepping, variable inspection, call stacks)</li>
+<li>948+ Rust tests passing</li>
+</ul>
+<h2 id="v060"><a class="header" href="#v060">v0.6.0</a></h2>
+<p><strong>Developer experience, package ecosystem, VM parity</strong></p>
+<ul>
+<li>Deep LSP: go-to-definition, find-references, hover (full signatures), signature help, type-check diagnostics</li>
+<li>Source spans with ariadne error reporting (exact line and column)</li>
+<li>REPL improvements: syntax highlighting, tab completion, <code>env</code> command</li>
+<li><code>forge publish</code>: local filesystem registry with SHA-256 checksums</li>
+<li>Cross-file module resolution</li>
+<li>VM parity: async/await with spawn, try-catch, destructuring, full stdlib, schedule/watch</li>
+<li>JIT expansion: logical operators, multi-arg functions, float operations</li>
+</ul>
+<h2 id="v050"><a class="header" href="#v050">v0.5.0</a></h2>
+<p><strong>Production-readiness hardening</strong></p>
+<ul>
+<li>JWT key-confusion defence: algorithm pinning</li>
+<li><code>http.download</code> / <code>http.crawl</code>: timeout, max_redirects, max_bytes options</li>
+<li>CSPRNG audit confirmed</li>
+</ul>
+<h2 id="v040"><a class="header" href="#v040">v0.4.0</a></h2>
+<p><strong>JWT, MySQL, expanded stdlib</strong></p>
+<ul>
+<li>JWT authentication module (HS256/384/512, RS256, ES256)</li>
+<li>MySQL/MariaDB module with parameterized queries and connection pooling</li>
+<li>21 stdlib modules, 280+ functions, 862 tests</li>
+</ul>
 <h2 id="v033"><a class="header" href="#v033">v0.3.3</a></h2>
 <p><strong>Type system – natural syntax</strong></p>
 <ul>

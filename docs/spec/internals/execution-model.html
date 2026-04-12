@@ -190,36 +190,34 @@
 <tr><th>Tier</th><th>Flag</th><th>Implementation</th><th>Performance</th><th>Feature Coverage</th></tr>
 </thead>
 <tbody>
-<tr><td>Interpreter</td><td>(default)</td><td>Tree-walking</td><td>Baseline</td><td>Full (100%)</td></tr>
-<tr><td>Bytecode VM</td><td><code>--vm</code></td><td>Register-based VM</td><td>~10x faster than interpreter</td><td>Partial (~60%)</td></tr>
+<tr><td>Bytecode VM</td><td>(default)</td><td>Register-based VM</td><td>~10x faster than interpreter</td><td>Near-full (~95%)</td></tr>
+<tr><td>Interpreter</td><td><code>--interp</code></td><td>Tree-walking</td><td>Baseline</td><td>Full (100%)</td></tr>
 <tr><td>JIT Compiler</td><td><code>--jit</code></td><td>Cranelift native code</td><td>~50-100x faster than interpreter</td><td>Minimal (~30%)</td></tr>
 </tbody>
 </table>
 </div>
-<pre><code class="language-bash">forge run program.fg          # Interpreter (default)
-forge run program.fg --vm     # Bytecode VM
-forge run program.fg --jit    # JIT compiler
+<pre><code class="language-bash">forge run program.fg            # Bytecode VM (default)
+forge run program.fg --interp   # Interpreter (full feature coverage)
+forge run program.fg --jit      # JIT compiler (maximum speed)
 </code></pre>
 <h2 id="when-to-use-each-tier"><a class="header" href="#when-to-use-each-tier">When to Use Each Tier</a></h2>
-<h3 id="interpreter-default"><a class="header" href="#interpreter-default">Interpreter (Default)</a></h3>
-<p>Use the interpreter for:</p>
+<h3 id="bytecode-vm-default"><a class="header" href="#bytecode-vm-default">Bytecode VM (Default)</a></h3>
+<p>The VM is the default engine as of v0.7.0. Use it for:</p>
 <ul>
 <li>All general-purpose development</li>
-<li>HTTP servers (<code>@server</code>, <code>@get</code>, <code>@post</code>)</li>
-<li>Database access (<code>db</code>, <code>pg</code>)</li>
-<li>AI integration (<code>ask</code>)</li>
-<li>File system, crypto, terminal UI</li>
-<li>Any code using the full standard library</li>
-</ul>
-<p>The interpreter supports every feature of the language. It is the reference implementation.</p>
-<h3 id="bytecode-vm---vm"><a class="header" href="#bytecode-vm---vm">Bytecode VM (<code>--vm</code>)</a></h3>
-<p>Use the VM for:</p>
-<ul>
 <li>Compute-intensive loops and numerical work</li>
-<li>Programs that primarily use <code>math</code>, <code>fs</code>, <code>io</code>, and basic control flow</li>
-<li>Benchmarking against the interpreter</li>
+<li>Programs using <code>must</code>, <code>ask</code>, <code>freeze</code>, spawn/await, schedule/watch</li>
+<li>Full standard library access (<code>math</code>, <code>fs</code>, <code>io</code>, <code>crypto</code>, <code>http</code>, etc.)</li>
 </ul>
-<p>The VM compiles Forge source to a register-based bytecode and executes it in a virtual machine with mark-sweep garbage collection. It does not support HTTP servers, database connections, or several stdlib modules.</p>
+<p>The VM compiles Forge source to register-based bytecode and executes it in a virtual machine with mark-sweep garbage collection. Programs using decorator-driven HTTP servers (<code>@server</code>, <code>@get</code>, etc.) automatically fall back to the interpreter.</p>
+<h3 id="interpreter---interp"><a class="header" href="#interpreter---interp">Interpreter (<code>--interp</code>)</a></h3>
+<p>Use the interpreter for:</p>
+<ul>
+<li>HTTP servers (<code>@server</code>, <code>@get</code>, <code>@post</code>)</li>
+<li>Any features not yet ported to the VM</li>
+<li>Debugging with the DAP server (<code>forge dap</code>)</li>
+</ul>
+<p>The interpreter supports every feature of the language. It is the reference implementation and fallback for VM-incompatible programs.</p>
 <h3 id="jit-compiler---jit"><a class="header" href="#jit-compiler---jit">JIT Compiler (<code>--jit</code>)</a></h3>
 <p>Use the JIT for:</p>
 <ul>
@@ -233,7 +231,7 @@ forge run program.fg --jit    # JIT compiler
 Performance:       JIT &gt; VM &gt; Interpreter
 Startup Time:      Interpreter &lt; VM &lt; JIT
 </code></pre>
-<p>The interpreter is always the safe default. Switch to <code>--vm</code> or <code>--jit</code> only when you need the performance and have verified your program works on that tier.</p>
+<p>The bytecode VM is the default for a balance of performance and feature coverage. Use <code>--interp</code> for full features (decorator-driven servers), or <code>--jit</code> for maximum speed on numeric workloads.</p>
 
                     </main>
 

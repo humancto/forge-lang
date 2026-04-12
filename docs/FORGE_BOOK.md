@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.3.0"
+version: "0.7.0"
 year: "2026"
 publisher: "Self-Published"
 cover_description: "A glowing anvil in a digital forge, sparks flying as molten code streams pour from it, forming HTTP requests, database queries, and terminal UI elements — all set against a dark navy background with subtle circuit-board patterns. The anvil sits on a workbench made of keyboard keys. The sparks form recognizable code symbols: curly braces, arrows, pipes. Color palette: deep navy (#0a192f), forge orange (#ff6b35), electric blue (#64ffda), white spark highlights."
@@ -70,7 +70,7 @@ Verify your installation:
 
 ```
 $ forge version
-Forge v0.3.0
+Forge v0.7.1
 Internet-native programming language
 Bytecode VM with mark-sweep GC
 ```
@@ -1869,9 +1869,9 @@ Source Code (.fg)
     ↓
   Type Checker (optional warnings)
     ↓
-  Interpreter (tree-walk execution)
+  Bytecode Compiler → VM (default engine)
     or
-  Bytecode Compiler → VM (with --vm flag)
+  Interpreter (tree-walk, via --interp flag)
 ```
 
 ### The Lexer
@@ -1906,7 +1906,7 @@ The tree-walk interpreter (`src/interpreter/`) walks the AST and executes it dir
 
 - **Environment**: a scope stack (Vec of HashMaps) with push/pop for blocks
 - **Closures**: functions capture the environment at definition time
-- **Builtins**: 230+ native functions registered at startup
+- **Builtins**: 238+ native functions registered at startup
 - **Error handling**: Result types, `?` propagation, and descriptive error messages
 
 ### The Bytecode VM
@@ -1918,10 +1918,10 @@ The bytecode VM (`src/vm/`) provides a faster execution path:
 - **Mark-sweep GC**: manages heap-allocated values
 - **Green thread scheduler**: scaffolded for future concurrent execution
 
-Use `--vm` to opt into VM execution:
+The VM is the default engine as of v0.7.0. To use the interpreter instead (e.g., for HTTP server apps):
 
 ```
-forge run --vm myprogram.fg
+forge run --interp myprogram.fg
 ```
 
 ---
@@ -2259,10 +2259,13 @@ COMMANDS:
     lsp               Start Language Server Protocol server
     learn [lesson]    Interactive tutorials (30 lessons)
     chat              AI-powered chat assistant
+    publish           Publish package to local registry
+    dap               Start DAP debugger server
+    doc               Generate documentation
 
 OPTIONS:
     -e <code>         Evaluate inline code
-    --vm              Use bytecode VM (experimental)
+    --interp          Use tree-walking interpreter (VM is default)
     -h, --help        Print help
     -V, --version     Print version
 
@@ -2271,8 +2274,10 @@ EXAMPLES:
     forge run hello.fg                 Run a program
     forge -e 'say "Hello!"'           Evaluate inline
     forge test                         Run all tests
+    forge test --coverage              Run tests with coverage
     forge new myproject                Create project
     forge learn 1                      Start lesson 1
+    forge build main.fg --aot          Compile to native binary
 ```
 
 ---
@@ -2361,7 +2366,7 @@ A type annotation doesn't match the actual value. This is a warning, not an erro
 | HTTP server        | Express (install)          | Built-in (`@server`)            |
 | Type safety        | TypeScript (separate)      | Built-in type checker           |
 | `null` gotchas     | `null`, `undefined`, `NaN` | No null by default, Option type |
-| Package management | npm (1000s of deps)        | 16 built-in modules             |
+| Package management | npm (1000s of deps)        | 18+ built-in modules            |
 | Error handling     | try/catch + callbacks      | Result types with `?`           |
 | Build step         | Webpack/Vite/etc.          | None needed                     |
 

@@ -182,7 +182,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
-<p>This document is the formal specification for the <strong>Forge</strong> programming language, version <strong>0.3.3</strong>.</p>
+<p>This document is the formal specification for the <strong>Forge</strong> programming language, version <strong>0.7.0</strong>.</p>
 <p>Forge is an internet-native, general-purpose programming language implemented in Rust. It is designed for application-layer work: web services, scripts, data pipelines, prototypes, and tooling. Forge ships with built-in support for HTTP clients and servers, databases (SQLite and PostgreSQL), cryptography, JSON, CSV, terminal UI, AI/LLM integration, and more — eliminating the need for third-party packages for common internet-oriented tasks.</p>
 <h2 id="design-philosophy"><a class="header" href="#design-philosophy">Design Philosophy</a></h2>
 <p>Forge is guided by three core principles:</p>
@@ -194,17 +194,17 @@
 <p><strong>Dual syntax.</strong> Every construct in Forge has two spellings: a <em>classic syntax</em> familiar to developers who have written JavaScript, Python, Rust, or Go; and a <em>natural-language syntax</em> that reads like English prose. Both forms compile to identical internal representations and may be mixed freely within the same source file.</p>
 </li>
 <li>
-<p><strong>Batteries included.</strong> Forge ships 16 standard library modules with over 230 functions, 30 interactive tutorials, a built-in test runner, a formatter, an LSP server, and a project scaffolding tool. A single <code>cargo install</code> provides a complete development environment.</p>
+<p><strong>Batteries included.</strong> Forge ships 18+ standard library modules with over 238 functions, 30 interactive tutorials, a built-in test runner, a formatter, an LSP server, and a project scaffolding tool. A single <code>cargo install</code> provides a complete development environment.</p>
 </li>
 </ol>
 <h2 id="language-overview"><a class="header" href="#language-overview">Language Overview</a></h2>
 <p>Forge is dynamically typed at runtime with optional type annotations (gradual typing). It supports first-class functions, closures, algebraic data types, pattern matching, Result/Option error handling, structural interfaces, composition via delegation, async/await concurrency, and channels. Programs are executed top-to-bottom without requiring a <code>main</code> function.</p>
-<p>The default execution engine is a tree-walking interpreter. A bytecode VM (<code>--vm</code>) and a JIT compiler (<code>--jit</code>) are available for performance-critical workloads but support fewer features.</p>
+<p>The default execution engine is a bytecode VM (as of v0.7.0). A tree-walking interpreter (<code>--interp</code>) is available as a fallback for features like HTTP server decorators. A JIT compiler (<code>--jit</code>) is available for maximum performance on numeric workloads.</p>
 <h2 id="how-to-read-this-specification"><a class="header" href="#how-to-read-this-specification">How to Read This Specification</a></h2>
 <p>This specification is organized into five parts:</p>
 <ul>
 <li><strong>Part I: Language Core</strong> covers lexical structure, types, expressions, statements, the type system, error handling, and concurrency.</li>
-<li><strong>Part II: Standard Library</strong> documents each of the 16 built-in modules.</li>
+<li><strong>Part II: Standard Library</strong> documents each of the 18+ built-in modules.</li>
 <li><strong>Part III: Built-in Functions</strong> catalogs all globally available functions.</li>
 <li><strong>Part IV: Dual Syntax Reference</strong> provides the complete mapping between classic and natural syntax forms.</li>
 <li><strong>Part V: Runtime and Internals</strong> describes the interpreter, bytecode VM, JIT compiler, and HTTP server runtime.</li>

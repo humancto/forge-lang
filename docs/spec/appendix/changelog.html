@@ -182,6 +182,44 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="changelog"><a class="header" href="#changelog">Changelog</a></h1>
+<h2 id="v070"><a class="header" href="#v070">v0.7.0</a></h2>
+<p><strong>VM as default engine, AOT compilation, DAP debugger</strong></p>
+<ul>
+<li>VM is now the default execution engine; interpreter available via <code>--interp</code></li>
+<li>Auto-detection of VM-incompatible features (decorators) with graceful fallback</li>
+<li>Cross-file LSP: go-to-definition and find-references follow imports across files</li>
+<li><code>forge test --coverage</code>: line coverage reporting with color-coded percentages</li>
+<li><code>forge build --aot</code>: ahead-of-time compilation embeds bytecode in native binary</li>
+<li><code>forge dap</code>: Debug Adapter Protocol server for VS Code integration (breakpoints, stepping, variable inspection, call stacks)</li>
+<li>948+ Rust tests passing</li>
+</ul>
+<h2 id="v060"><a class="header" href="#v060">v0.6.0</a></h2>
+<p><strong>Developer experience, package ecosystem, VM parity</strong></p>
+<ul>
+<li>Deep LSP: go-to-definition, find-references, hover (full signatures), signature help, type-check diagnostics</li>
+<li>Source spans with ariadne error reporting (exact line and column)</li>
+<li>REPL improvements: syntax highlighting, tab completion, <code>env</code> command</li>
+<li><code>forge fmt</code>: parenthesis continuation support</li>
+<li><code>forge doc</code>: variable extraction and comment capture</li>
+<li><code>forge publish</code>: local filesystem registry with SHA-256 checksums</li>
+<li>Cross-file module resolution (<code>resolve_import_from</code>)</li>
+<li>VM parity: async/await with spawn, try-catch, destructuring, full stdlib (all 18+ modules), schedule/watch</li>
+<li>JIT expansion: logical operators, multi-arg functions (up to 8), float operations</li>
+</ul>
+<h2 id="v050"><a class="header" href="#v050">v0.5.0</a></h2>
+<p><strong>Production-readiness hardening</strong></p>
+<ul>
+<li>JWT key-confusion defence: algorithm pinning via optional <code>{ algorithm: "RS256" }</code> argument</li>
+<li><code>http.download</code> / <code>http.crawl</code>: timeout, max_redirects, max_bytes options</li>
+<li>CSPRNG audit confirmed (<code>getrandom</code>)</li>
+</ul>
+<h2 id="v040"><a class="header" href="#v040">v0.4.0</a></h2>
+<p><strong>JWT, MySQL, expanded stdlib</strong></p>
+<ul>
+<li>JWT authentication module (<code>jwt.sign</code>, <code>jwt.verify</code>, <code>jwt.decode</code>, <code>jwt.valid</code>) with HS256/384/512, RS256, ES256</li>
+<li>MySQL/MariaDB module (<code>mysql.connect</code>, <code>mysql.query</code>, <code>mysql.execute</code>, <code>mysql.close</code>) with parameterized queries and connection pooling</li>
+<li>21 stdlib modules, 280+ functions, 862 tests</li>
+</ul>
 <h2 id="v033"><a class="header" href="#v033">v0.3.3</a></h2>
 <p><strong>Type system – natural syntax</strong></p>
 <ul>

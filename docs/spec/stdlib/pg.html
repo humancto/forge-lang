@@ -226,7 +226,7 @@ pg.close()
 <h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
 <ul>
 <li>PostgreSQL types map to Forge types: <code>integer</code>/<code>bigint</code> -&gt; <code>int</code>, <code>real</code>/<code>double precision</code>/<code>numeric</code> -&gt; <code>float</code>, <code>text</code>/<code>varchar</code> -&gt; <code>string</code>, <code>boolean</code> -&gt; <code>bool</code>, NULL -&gt; <code>null</code>.</li>
-<li>The <code>pg</code> module requires the interpreter (default) execution mode. It is not available in the VM or JIT tiers.</li>
+<li>The <code>pg</code> module is available in both the bytecode VM (default) and interpreter (<code>--interp</code>) execution modes.</li>
 </ul>
 
                     </main>

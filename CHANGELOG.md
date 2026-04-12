@@ -83,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Opt-in filesystem confinement** — setting `FORGE_FS_BASE=/path` confines every `fs.*` operation that touches a path to that subtree (with symlink resolution). Pure path manipulation helpers (`dirname`, `basename`, `ext`, `join_path`, `temp_dir`) are exempt; `exists`/`is_dir`/`is_file` return `false` instead of erroring on confinement failure so script branches still work.
 - **VM source-line stack traces** — `VMError` now carries real `(function, line)` frames populated from the bytecode line table, and the CLI prints them via the `Display` impl rather than dropping them on the floor. Makes `--vm` errors actionable.
 - **69 new unit tests** for `crypto`, `regex`, `json`, and `time` stdlib modules — these had **zero** prior coverage despite living on the security-critical / format-correctness paths. Includes RFC 4231 HMAC-SHA256 vector, century-rule leap year cases, and JSON deep-merge round trip.
-- **`PRODUCTION_READINESS.md`** — internal punch list tracking all v0.4.3+ hardening work.
+- **`PRODUCTION_READINESS.md`** — internal punch list tracking all v0.4.3+ hardening work (through v0.7.1).
 
 ### Fixed
 

@@ -200,7 +200,7 @@
 </ul>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h2>
 <ol>
-<li>The program is first compiled to bytecode (same as the <code>--vm</code> path).</li>
+<li>The program is first compiled to bytecode (same as the default VM compilation path).</li>
 <li>Functions selected for JIT compilation are translated from bytecode into Cranelift’s intermediate representation (IR).</li>
 <li>Cranelift compiles the IR to native machine code for the host architecture.</li>
 <li>The native code is loaded into memory and called directly, bypassing the bytecode interpreter.</li>

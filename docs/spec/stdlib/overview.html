@@ -182,7 +182,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="standard-library-overview"><a class="header" href="#standard-library-overview">Standard Library Overview</a></h1>
-<p>Forge ships with <strong>16 built-in modules</strong> containing over 230 functions. All modules are available without any import statement. There is no <code>import math</code> or <code>require("fs")</code> – every module is pre-loaded into the global scope.</p>
+<p>Forge ships with <strong>18+ built-in modules</strong> containing over 238 functions. All modules are available without any import statement. There is no <code>import math</code> or <code>require("fs")</code> – every module is pre-loaded into the global scope.</p>
 <h2 id="accessing-modules"><a class="header" href="#accessing-modules">Accessing Modules</a></h2>
 <p>Modules are accessed via dot notation:</p>
 <pre><code class="language-forge">let root = math.sqrt(144)       // 12.0
@@ -220,7 +220,7 @@ say m.pi    // 3.141592653589793
 </table>
 </div>
 <h2 id="execution-tier-support"><a class="header" href="#execution-tier-support">Execution Tier Support</a></h2>
-<p>All modules are fully supported in the <strong>interpreter</strong> (default execution mode). The bytecode VM (<code>--vm</code>) and JIT (<code>--jit</code>) support a subset of modules – primarily <code>math</code>, <code>fs</code>, <code>io</code>, and <code>npc</code>. For full module access, use the interpreter.</p>
+<p>All modules are fully supported in the <strong>bytecode VM</strong> (default execution engine as of v0.7.0) and the <strong>interpreter</strong> (<code>--interp</code>). The JIT (<code>--jit</code>) supports numeric-heavy workloads using <code>math</code> and core arithmetic. Programs using HTTP server decorators (<code>@server</code>, <code>@get</code>, etc.) automatically fall back to the interpreter.</p>
 
                     </main>
 

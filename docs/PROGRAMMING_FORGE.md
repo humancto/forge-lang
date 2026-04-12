@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.3.3"
+version: "0.7.0"
 year: "2026"
 publisher: "Self-Published"
 lang: "en"
@@ -8076,7 +8076,7 @@ mysql.close(conn)
 - All queries support `?` placeholders for parameterized queries. Always use parameters for user-provided data.
 - Connection pooling is automatic—each `mysql.connect` creates a pool that handles reconnection and reuse.
 - TLS is supported via `rustls` when connecting to remote servers.
-- The `mysql` module requires the interpreter (default) execution mode.
+- The `mysql` module is available in both the VM (default) and interpreter (`--interp`) execution modes.
 
 ---
 
@@ -10551,16 +10551,16 @@ A Forge program begins its life as a `.fg` source file—a plain text document c
                                          │                   │              │
                                          v                   v              │
                                 ┌─────────────────┐  ┌─────────────┐       │
-                                │   Interpreter    │  │  Bytecode   │       │
-                                │  (tree-walk,     │  │  Compiler   │       │
-                                │   default)       │  │  (--vm flag)│       │
+                                │   Bytecode       │  │ Interpreter │       │
+                                │   Compiler       │  │ (tree-walk, │       │
+                                │   (default)      │  │ --interp)   │       │
                                 └────────┬────────┘  └──────┬──────┘       │
                                          │                   │              │
-                                         │                   v              │
-                                         │           ┌─────────────┐       │
-                                         │           │   VM Engine  │       │
-                                         │           │ (register VM)│       │
-                                         │           └──────┬──────┘       │
+                                         v                   │              │
+                                ┌─────────────┐              │              │
+                                │   VM Engine  │              │              │
+                                │ (register VM)│              │              │
+                                └──────┬──────┘              │              │
                                          │                   │              │
                                          v                   v              │
                                 ┌─────────────────────────────────┐        │
@@ -10577,7 +10577,7 @@ A Forge program begins its life as a `.fg` source file—a plain text document c
 The pipeline is invoked from `main.rs` (293 lines), which uses `clap` to parse CLI arguments and dispatch to the appropriate subsystem. The core execution path is remarkably concise:
 
 ```rust
-async fn run_source(source: &str, filename: &str, use_vm: bool) {
+async fn run_source(source: &str, filename: &str, use_interp: bool) {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize()?;
 
@@ -10587,16 +10587,16 @@ async fn run_source(source: &str, filename: &str, use_vm: bool) {
     let mut checker = typechecker::TypeChecker::new();
     let warnings = checker.check(&program);
 
-    if use_vm {
-        vm::run(&program)?;
-    } else {
+    if use_interp {
         let mut interpreter = Interpreter::new();
         interpreter.run(&program)?;
+    } else {
+        vm::run(&program)?;
     }
 }
 ```
 
-This linear flow—lex, parse, check, execute—is the spine of every Forge execution, whether triggered by `forge run`, `forge -e`, or the REPL.
+This linear flow—lex, parse, check, execute—is the spine of every Forge execution, whether triggered by `forge run`, `forge -e`, or the REPL. As of v0.7.0, the bytecode VM is the default engine. The tree-walking interpreter is available via `--interp` for features that require it (HTTP server decorators, certain runtime capabilities). Programs that use VM-incompatible features are automatically detected and fall back to the interpreter.
 
 ### The Lexer: Tokenization
 
@@ -10909,7 +10909,7 @@ The AST includes several supporting structures:
 
 ### The Interpreter: Tree-Walk Evaluation
 
-The interpreter (`src/interpreter/mod.rs`, 4,584 lines) is the default execution engine. It walks the AST directly, evaluating each node recursively. While slower than bytecode execution, the tree-walk interpreter supports the full Forge feature set including async/await, the HTTP server, and all stdlib modules.
+The interpreter (`src/interpreter/mod.rs`, ~8,100 lines) is the fallback execution engine, available via `--interp`. It walks the AST directly, evaluating each node recursively. While slower than the bytecode VM (which is the default as of v0.7.0), the tree-walk interpreter supports the full Forge feature set including the HTTP server decorators, DAP debugger integration, and all stdlib modules.
 
 #### Runtime Values
 
@@ -11095,7 +11095,7 @@ When an HTTP request arrives, the axum handler locks the interpreter, constructs
 
 ## Chapter 27: The Bytecode VM
 
-While the tree-walk interpreter provides full-featured execution, some workloads benefit from the tighter execution loop of a bytecode virtual machine. Forge includes an experimental register-based VM activated with the `--vm` flag. This chapter examines its design, instruction set, and runtime subsystems.
+As of v0.7.0, the bytecode VM is Forge's **default execution engine**. It provides significantly better performance than the tree-walking interpreter through a register-based virtual machine that compiles source to 32-bit instructions. Programs that use VM-incompatible features (such as HTTP server decorators) are automatically detected and fall back to the interpreter. This chapter examines the VM's design, instruction set, and runtime subsystems.
 
 ### Why a VM?
 
@@ -11420,12 +11420,12 @@ pub fn run_all(&mut self, vm: &mut VM) -> Result<(), VMError> {
 
 The data structures for genuine cooperative scheduling are in place—thread states (`Ready`, `Running`, `Yielded`, `Completed`), a thread ID system, and an active count tracker. Future work will integrate with Tokio for preemption at function calls and loop back-edges.
 
-### Using the --vm Flag
+### Execution Modes
 
-To run a program with the bytecode VM:
+The bytecode VM is the default engine as of v0.7.0. To explicitly use the interpreter instead:
 
 ```bash
-forge run program.fg --vm
+forge run program.fg --interp
 ```
 
 To compile a program to bytecode and view compilation statistics:
@@ -11444,7 +11444,15 @@ Compiled program.fg -> program.fgc
   8 max registers
 ```
 
-The `--vm` flag is experimental. It supports core language features (variables, functions, closures, control flow, data structures, error handling) but does not yet support async/await, the HTTP server, or all standard library modules.
+To compile to a standalone native binary using AOT compilation:
+
+```bash
+forge build program.fg --aot
+```
+
+This embeds the compiled bytecode into a native C launcher, producing a self-contained binary that requires no Forge runtime at execution time.
+
+The VM supports the vast majority of Forge features including variables, functions, closures, control flow, data structures, error handling, async/await, concurrency, and all standard library modules. Features that require the interpreter (HTTP server decorators, certain advanced features) are auto-detected at startup, and Forge falls back to the interpreter automatically.
 
 ---
 
@@ -11575,6 +11583,26 @@ directory = "tests"
 
 The manifest is read by `forge test` to determine the test directory and by future tooling for package metadata.
 
+#### Test Coverage
+
+Run tests with line coverage reporting:
+
+```bash
+forge test --coverage
+```
+
+This outputs per-file line coverage with color-coded percentages:
+
+```
+tests/math_test.fg .............. 94.2%  (49/52 lines)
+tests/string_test.fg ........... 87.1%  (27/31 lines)
+tests/http_test.fg ............. 78.6%  (22/28 lines)
+
+Overall coverage: 88.3%  (98/111 lines)
+```
+
+Coverage tracking works by recording which source lines the interpreter executes (via `HashSet<usize>`), then intersecting with an executable line set that excludes comments, blank lines, and closing braces. Green (≥80%), yellow (≥50%), and red (<50%) coloring provides at-a-glance feedback.
+
 ### forge build: Bytecode Compilation
 
 The `forge build` command compiles a Forge source file to bytecode using the VM's compiler:
@@ -11584,6 +11612,14 @@ forge build program.fg
 ```
 
 This runs the lexer, parser, and bytecode compiler, then reports statistics about the compiled output. The compiled bytecode is represented as a `Chunk` structure containing instructions, constants, and nested prototypes.
+
+#### AOT (Ahead-of-Time) Compilation
+
+```bash
+forge build program.fg --aot
+```
+
+AOT compilation embeds the compiled bytecode into a native C launcher binary. The resulting executable is a standalone binary that writes the embedded bytecode to a temporary `.fgc` file and invokes the Forge runtime. Unlike `--native` (which embeds raw source), `--aot` provides no source exposure and faster startup since the bytecode is pre-compiled. The `--aot` and `--native` flags are mutually exclusive.
 
 ### forge install: Package Management
 
@@ -11613,14 +11649,18 @@ Copies the directory into `.forge/packages/shared-lib/`.
 
 ### forge lsp: Language Server Protocol
 
-The LSP server (`src/lsp/mod.rs`, 261 lines) provides IDE integration over stdin/stdout using the Language Server Protocol:
+The LSP server (`src/lsp/mod.rs`) provides IDE integration over stdin/stdout using the Language Server Protocol:
 
 **Supported capabilities**:
 
-- **Diagnostics**: Real-time parse error reporting as you type
-- **Completions**: Keyword and built-in function suggestions triggered by `.`
+- **Diagnostics**: Real-time type checking with line numbers (type mismatches, arity errors, return type mismatches)
+- **Go-to-definition**: Finds top-level symbols, function params, local variables, for-loop vars, catch vars, and impl block methods — works across files via import resolution
+- **Find references**: Word-boundary matching across the current file and imported files
+- **Hover**: Full signatures for functions, variables (with mutability/type), structs (with fields), types (with variants), interfaces (with methods)
+- **Signature help**: Parameter hints during function calls
+- **Completions**: Context-aware module completions, keyword and built-in function suggestions
 
-**Architecture**: The LSP runs as a long-lived process communicating via JSON-RPC. It re-lexes and re-parses the document on every change, sending diagnostics back to the editor. Completion requests return the full keyword list and standard library function names.
+**Architecture**: The LSP runs as a long-lived process communicating via JSON-RPC. It re-lexes, re-parses, and type-checks the document on every change, sending diagnostics back to the editor. Cross-file features use `resolve_import_from` to follow imports and search sibling `.fg` files.
 
 **Editor setup** (VS Code example):
 
@@ -11978,12 +12018,12 @@ forge [OPTIONS] [COMMAND]
 
 ### Global Options
 
-| Option              | Description                                                   |
-| ------------------- | ------------------------------------------------------------- |
-| `-e, --eval <CODE>` | Evaluate a Forge expression inline                            |
-| `--vm`              | Use the bytecode VM (experimental, faster but fewer features) |
-| `-h, --help`        | Print help information                                        |
-| `-V, --version`     | Print version number                                          |
+| Option              | Description                                                |
+| ------------------- | ---------------------------------------------------------- |
+| `-e, --eval <CODE>` | Evaluate a Forge expression inline                         |
+| `--interp`          | Use the tree-walking interpreter instead of the default VM |
+| `-h, --help`        | Print help information                                     |
+| `-V, --version`     | Print version number                                       |
 
 ### Commands
 
@@ -11993,7 +12033,7 @@ Run a Forge source file.
 
 ```bash
 forge run main.fg
-forge run main.fg --vm
+forge run main.fg --interp    # Use interpreter instead of VM
 ```
 
 | Argument | Description                 |
@@ -12017,7 +12057,7 @@ Display version information.
 
 ```bash
 forge version
-# Output: Forge v0.3.0
+# Output: Forge v0.7.1
 #         Internet-native programming language
 #         Bytecode VM with mark-sweep GC
 ```
@@ -12037,13 +12077,17 @@ forge fmt src/ lib/        # Format directories
 Run tests in the specified directory (default: `tests`).
 
 ```bash
-forge test                 # Run tests in tests/
-forge test integration     # Run tests in integration/
+forge test                     # Run tests in tests/
+forge test integration         # Run tests in integration/
+forge test --coverage          # Run tests with line coverage report
+forge test --filter "math"     # Run only tests matching "math"
 ```
 
-| Argument | Default | Description                     |
-| -------- | ------- | ------------------------------- |
-| `DIR`    | `tests` | Directory containing test files |
+| Argument     | Default | Description                         |
+| ------------ | ------- | ----------------------------------- |
+| `DIR`        | `tests` | Directory containing test files     |
+| `--coverage` |         | Report line coverage per file       |
+| `--filter`   |         | Run only tests matching the pattern |
 
 If a `forge.toml` exists, the `[test].directory` field overrides the default.
 
@@ -12064,12 +12108,18 @@ forge new my-api
 Compile a Forge source file to bytecode and display compilation statistics.
 
 ```bash
-forge build main.fg
+forge build main.fg              # Compile to bytecode
+forge build main.fg --native     # Compile to native binary (embeds source)
+forge build main.fg --aot        # Compile to native binary (embeds bytecode)
 ```
 
-| Argument | Description                    |
-| -------- | ------------------------------ |
-| `FILE`   | Path to source file to compile |
+| Argument   | Description                                          |
+| ---------- | ---------------------------------------------------- |
+| `FILE`     | Path to source file to compile                       |
+| `--native` | Produce a standalone native binary (embeds source)   |
+| `--aot`    | Produce a standalone native binary (embeds bytecode) |
+
+The `--native` and `--aot` flags are mutually exclusive. AOT compilation provides no source exposure and faster startup since bytecode is pre-compiled.
 
 #### `forge install <SOURCE>`
 
@@ -12092,7 +12142,39 @@ Start the Language Server Protocol server for editor integration.
 forge lsp
 ```
 
-Communicates via stdin/stdout using JSON-RPC. Provides diagnostics and completions.
+Communicates via stdin/stdout using JSON-RPC. Provides diagnostics, go-to-definition, find-references, hover, signature help, and context-aware completions. Cross-file features follow imports automatically.
+
+#### `forge publish`
+
+Publish the current project to the local Forge registry.
+
+```bash
+forge publish              # Publish to ~/.forge/registry/
+forge publish --dry-run    # Validate without publishing
+forge publish --registry /path/to/registry
+```
+
+Packages the project, validates the manifest, computes SHA-256 checksums, and copies to `~/.forge/registry/<name>/<version>/`. Includes symlink protection and manifest validation.
+
+#### `forge dap`
+
+Start the Debug Adapter Protocol server for debugger integration.
+
+```bash
+forge dap
+```
+
+Communicates via stdin/stdout using the DAP protocol. Supports breakpoints, step over/in/out, continue, pause, variable inspection, and call stack traces. Compatible with VS Code and other DAP-compatible editors.
+
+#### `forge doc [FILE]`
+
+Generate documentation for a Forge source file.
+
+```bash
+forge doc main.fg
+```
+
+Extracts function signatures, variable declarations, and preceding `//` comments to produce structured documentation output.
 
 #### `forge learn [LESSON]`
 
@@ -12435,8 +12517,8 @@ This appendix provides detailed comparison tables showing how Forge stacks up ag
 | HTTP client          | `fetch("url")` (one function)         | `http.Get()` + response body handling     |
 | Concurrency          | `spawn { }`                           | `go func() { }()`                         |
 | Generics             | Dynamic typing                        | Generics (Go 1.18+)                       |
-| Compilation          | Interpreted (or bytecode VM)          | Compiled to native binary                 |
-| Performance          | Interpreted speed                     | Near-C performance                        |
+| Compilation          | Bytecode VM (default), JIT, or AOT    | Compiled to native binary                 |
+| Performance          | VM/JIT speed (JIT rivals Node.js)     | Near-C performance                        |
 | String interpolation | `"Hello, {name}"`                     | `fmt.Sprintf("Hello, %s", name)`          |
 | Pattern matching     | `match` / `when` guards               | `switch` statement                        |
 | Null handling        | `safe { }`, `None`/`Some`             | Nil checks                                |
@@ -12456,8 +12538,8 @@ This appendix provides detailed comparison tables showing how Forge stacks up ag
 | Memory management    | GC (VM) / clone-based (interpreter) | Ownership + borrowing            |
 | Error handling       | `try/catch`, `must`, `safe`         | `Result<T,E>`, `?` operator      |
 | Null handling        | `Null` value + `safe` blocks        | `Option<T>`, no null             |
-| Compilation speed    | Instant (interpreted)               | Slow (full compile)              |
-| Runtime performance  | Interpreted speed                   | Native speed                     |
+| Compilation speed    | Instant (VM default, JIT/AOT avail) | Slow (full compile)              |
+| Runtime performance  | VM/JIT speed (JIT ~10ms fib30)      | Native speed                     |
 | Learning curve       | Low                                 | High                             |
 | String interpolation | `"Hello, {name}"`                   | `format!("Hello, {name}")`       |
 | HTTP server          | 3 lines (`@server`, `@get fn`)      | ~30 lines (axum setup)           |
@@ -12620,7 +12702,7 @@ for rows.Next() {
 | Keywords recognized          | 80+     |
 | Built-in functions           | 270+    |
 | Standard library modules     | 19      |
-| CLI commands                 | 13      |
+| CLI commands                 | 16      |
 | Interactive tutorial lessons | 30      |
 | Example programs             | 12      |
 
@@ -12680,15 +12762,18 @@ for rows.Next() {
 
 ### Version History
 
-| Version | Milestone                                                                                                       |
-| ------- | --------------------------------------------------------------------------------------------------------------- |
-| 0.1.0   | Initial release: lexer, parser, interpreter, 8 stdlib modules                                                   |
-| 0.2.0   | Bytecode VM, mark-sweep GC, 15 stdlib modules, LSP, tutorials, AI chat, formatter, test runner, package manager |
-| 0.3.0   | 73 new functions, 16 modules, GenZ debug kit, NPC module, structured errors, 30 tutorials, 822 tests            |
-| 0.3.1   | Interface satisfaction checking (Go-style structural typing)                                                    |
-| 0.3.2   | Tokio spawn, language-level channels, native Option/spawn task handles                                          |
-| 0.3.3   | 3 new modules (url, toml, ws), 40+ new stdlib functions, HTTP params/form/auth/cookies, HMAC-SHA256, WebSockets |
-| 0.4.0   | JWT authentication module, MySQL/MariaDB module, 21 stdlib modules, 280+ functions, 862 tests                   |
+| Version | Milestone                                                                                                                                                                                                                                             |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0.1.0   | Initial release: lexer, parser, interpreter, 8 stdlib modules                                                                                                                                                                                         |
+| 0.2.0   | Bytecode VM, mark-sweep GC, 15 stdlib modules, LSP, tutorials, AI chat, formatter, test runner, package manager                                                                                                                                       |
+| 0.3.0   | 73 new functions, 16 modules, GenZ debug kit, NPC module, structured errors, 30 tutorials, 822 tests                                                                                                                                                  |
+| 0.3.1   | Interface satisfaction checking (Go-style structural typing)                                                                                                                                                                                          |
+| 0.3.2   | Tokio spawn, language-level channels, native Option/spawn task handles                                                                                                                                                                                |
+| 0.3.3   | 3 new modules (url, toml, ws), 40+ new stdlib functions, HTTP params/form/auth/cookies, HMAC-SHA256, WebSockets                                                                                                                                       |
+| 0.4.0   | JWT authentication module, MySQL/MariaDB module, 21 stdlib modules, 280+ functions, 862 tests                                                                                                                                                         |
+| 0.5.0   | Production-readiness: JWT key-confusion defence, HTTP option threading, CSPRNG audit                                                                                                                                                                  |
+| 0.6.0   | Developer experience: deep LSP (go-to-def, find-refs, hover, diagnostics), source spans, REPL improvements, package ecosystem (publish, cross-file resolution), VM parity (async, try-catch, destructure, full stdlib, schedule/watch), JIT expansion |
+| 0.7.0   | VM as default engine, cross-file LSP, test coverage (`--coverage`), AOT compilation (`--aot`), DAP debugger, 948+ tests                                                                                                                               |
 
 ### Acknowledgments
 

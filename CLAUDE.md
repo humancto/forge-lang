@@ -7,13 +7,13 @@ Forge is an internet-native programming language built in Rust. ~26,000 lines. D
 ## Architecture
 
 ```
-Source (.fg) → Lexer → Parser → AST → Type Checker → Interpreter → Result
+Source (.fg) → Lexer → Parser → AST → Type Checker → VM / Interpreter → Result
                                                          ↓
                                                   Runtime Bridge
                                               (axum, reqwest, tokio, rusqlite)
 ```
 
-The interpreter is the default engine. A bytecode VM (`--vm` flag) exists for performance-critical workloads but supports fewer features.
+The bytecode VM is the default engine. A tree-walking interpreter (`--interp` flag) is available for full feature coverage (decorator-driven HTTP servers auto-fallback). A JIT compiler (`--jit`) is available for maximum performance on numeric workloads.
 
 ## Quick Start
 
@@ -60,31 +60,31 @@ forge fmt                    # format code
 - `repeat 5 times { }` -- counted loop
 - `wait 2 seconds` -- sleep with units
 
-## CLI Commands (13)
+## CLI Commands (16)
 
-run, repl, version, fmt, test, new, build, install, lsp, learn, chat, help, -e
+run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, chat, doc, help, -e
 
 ## Standard Library (18 modules, 238+ functions)
 
-| Module   | Key Functions                                                                                    |
-| -------- | ------------------------------------------------------------------------------------------------ |
-| `math`   | sqrt, pow, abs, max, min, floor, ceil, round, pi, e, sin, cos, random_int, clamp                |
+| Module   | Key Functions                                                                                                                                                    |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `math`   | sqrt, pow, abs, max, min, floor, ceil, round, pi, e, sin, cos, random_int, clamp                                                                                 |
 | `fs`     | read, write, append, exists, list, remove, mkdir, copy, rename, size, ext, read_json, write_json, lines, dirname, basename, join_path, is_dir, is_file, temp_dir |
-| `io`     | prompt, print, args, args_parse, args_get, args_has                                              |
-| `crypto` | sha256, md5, base64_encode/decode, hex_encode/decode                                             |
-| `db`     | open, query, execute, close (SQLite)                                                             |
-| `pg`     | connect, query, execute, close (PostgreSQL)                                                      |
-| `mysql`  | connect, query, execute, close (MySQL — parameterized queries, connection pooling)               |
-| `jwt`    | sign, verify, decode, valid (HS256/384/512, RS256, ES256)                                        |
-| `env`    | get, set, has, keys                                                                              |
-| `json`   | parse, stringify, pretty                                                                         |
-| `regex`  | test(text, pattern), find, find_all, replace, split                                              |
-| `log`    | info, warn, error, debug                                                                         |
-| `http`   | get, post, put, delete, patch, head, download, crawl                                             |
-| `csv`    | parse, stringify, read, write                                                                    |
-| `term`   | red/green/blue/yellow/bold/dim, table, hr, sparkline, bar, banner, box, gradient, success/error  |
-| `exec`   | run_command                                                                                      |
-| `npc`    | name, first_name, last_name, email, username, phone, number, pick, bool, sentence, word, id, color, ip, url, company |
+| `io`     | prompt, print, args, args_parse, args_get, args_has                                                                                                              |
+| `crypto` | sha256, md5, base64_encode/decode, hex_encode/decode                                                                                                             |
+| `db`     | open, query, execute, close (SQLite)                                                                                                                             |
+| `pg`     | connect, query, execute, close (PostgreSQL)                                                                                                                      |
+| `mysql`  | connect, query, execute, close (MySQL — parameterized queries, connection pooling)                                                                               |
+| `jwt`    | sign, verify, decode, valid (HS256/384/512, RS256, ES256)                                                                                                        |
+| `env`    | get, set, has, keys                                                                                                                                              |
+| `json`   | parse, stringify, pretty                                                                                                                                         |
+| `regex`  | test(text, pattern), find, find_all, replace, split                                                                                                              |
+| `log`    | info, warn, error, debug                                                                                                                                         |
+| `http`   | get, post, put, delete, patch, head, download, crawl                                                                                                             |
+| `csv`    | parse, stringify, read, write                                                                                                                                    |
+| `term`   | red/green/blue/yellow/bold/dim, table, hr, sparkline, bar, banner, box, gradient, success/error                                                                  |
+| `exec`   | run_command                                                                                                                                                      |
+| `npc`    | name, first_name, last_name, email, username, phone, number, pick, bool, sentence, word, id, color, ip, url, company                                             |
 
 ## Core Builtins (beyond modules)
 
@@ -107,17 +107,19 @@ run, repl, version, fmt, test, new, build, install, lsp, learn, chat, help, -e
 
 ```bash
 cargo build          # 0 errors
-cargo test           # 626+ Rust tests pass
+cargo test           # 948+ Rust tests pass
 forge test           # integration tests pass (run after cargo build)
+forge test --coverage # with line coverage report
 ```
 
 All 18 example files run successfully.
 
-## Known Limitations (v0.5.0)
+## Known Limitations (v0.7.1)
 
 - All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
-- Interpreter is ~20x slower than Python for deep recursion; use `--jit` (11x faster than Python) or `--vm` (2x slower than Python)
-- VM/JIT support fewer features than the interpreter — use interpreter (default) for full stdlib, HTTP, DB access
+- The VM is the default engine; programs using decorator-driven HTTP servers (`@server`, `@get`, etc.) auto-fallback to the interpreter
+- Use `--interp` for full feature coverage, `--jit` for maximum numeric performance
+- `forge build --aot` embeds bytecode in a native binary but still requires the Forge runtime at execution time
 - `regex` functions take `(text, pattern)` order, not `(pattern, text)`
 - Result constructors accept both cases: `Ok(42)`/`ok(42)`, `Err("msg")`/`err("msg")`
 
@@ -152,14 +154,21 @@ These rules are non-negotiable. Follow them on every change.
 
 ```markdown
 ## [Unreleased]
+
 ### Added
+
 - New feature X
+
 ### Fixed
+
 - Bug Y in module Z
+
 ### Changed
+
 - Behaviour of W
 
 ## [0.4.2] - 2026-01-15
+
 ...
 ```
 

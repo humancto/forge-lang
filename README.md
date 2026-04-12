@@ -689,7 +689,7 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 
 ## 📊 Project Status
 
-Forge is **v0.4.3**. The language, interpreter, and standard library are stable; VM/JIT backends are fast but still subset runtimes.
+Forge is **v0.7.1**. The language, interpreter, and standard library are stable; VM/JIT backends are fast but still subset runtimes.
 
 | Metric                   |                        Value |
 | ------------------------ | ---------------------------: |

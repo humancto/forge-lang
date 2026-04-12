@@ -182,9 +182,10 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="bytecode-vm"><a class="header" href="#bytecode-vm">Bytecode VM</a></h1>
-<p>The Forge bytecode VM is a <strong>register-based virtual machine</strong> that compiles Forge source to 32-bit instructions and executes them in a loop. It provides significantly better performance than the tree-walking interpreter at the cost of reduced feature coverage.</p>
+<p>The Forge bytecode VM is a <strong>register-based virtual machine</strong> that compiles Forge source to 32-bit instructions and executes them in a loop. As of v0.7.0, the VM is the <strong>default execution engine</strong>. It provides significantly better performance than the tree-walking interpreter and supports the vast majority of Forge features. Programs that use VM-incompatible features (such as HTTP server decorators) are automatically detected and fall back to the interpreter.</p>
 <h2 id="invocation"><a class="header" href="#invocation">Invocation</a></h2>
-<pre><code class="language-bash">forge run program.fg --vm
+<p>The VM is used by default. To explicitly use the interpreter instead:</p>
+<pre><code class="language-bash">forge run program.fg --interp
 </code></pre>
 <h2 id="architecture"><a class="header" href="#architecture">Architecture</a></h2>
 <pre><code>Source -&gt; Lexer -&gt; Parser -&gt; AST -&gt; Compiler -&gt; Bytecode Chunks -&gt; Machine -&gt; Result
@@ -230,24 +231,25 @@
 <h2 id="green-threads"><a class="header" href="#green-threads">Green Threads</a></h2>
 <p>The VM includes a cooperative green thread scheduler (<code>src/vm/green.rs</code>). Green threads are multiplexed over a single OS thread with explicit yield points.</p>
 <h2 id="supported-features"><a class="header" href="#supported-features">Supported Features</a></h2>
-<p>The VM supports core language features:</p>
+<p>The VM supports the vast majority of Forge features:</p>
 <ul>
-<li>Variables, functions, closures</li>
-<li>Control flow (if/else, for, while, match)</li>
-<li>Arrays and objects</li>
-<li>Arithmetic and comparison operators</li>
-<li>String operations</li>
-<li><code>math</code>, <code>fs</code>, <code>io</code>, <code>npc</code> modules</li>
-<li>Basic built-in functions</li>
+<li>Variables, functions, closures, lambdas</li>
+<li>Control flow (if/else, for, while, match, when guards)</li>
+<li>Arrays, objects, destructuring</li>
+<li>Arithmetic, comparison, and logical operators</li>
+<li>String operations and interpolation</li>
+<li>All 18+ stdlib modules (math, fs, io, crypto, db, pg, mysql, http, json, csv, regex, log, env, jwt, term, exec, npc, url, toml, ws)</li>
+<li>Try-catch error handling</li>
+<li>Async/await with spawn and channels</li>
+<li>Schedule and watch</li>
+<li>Must, ask, freeze expressions</li>
+<li>All built-in functions (238+)</li>
 </ul>
-<h2 id="unsupported-features"><a class="header" href="#unsupported-features">Unsupported Features</a></h2>
-<p>The following require the interpreter:</p>
+<h2 id="interpreter-only-features"><a class="header" href="#interpreter-only-features">Interpreter-Only Features</a></h2>
+<p>The following features require the interpreter (<code>--interp</code> flag) and are auto-detected for fallback:</p>
 <ul>
-<li>HTTP server and client</li>
-<li>Database connections</li>
-<li>AI integration</li>
-<li>Terminal UI widgets</li>
-<li>Most execution helpers</li>
+<li>HTTP server decorators (<code>@server</code>, <code>@get</code>, <code>@post</code>, <code>@delete</code>, <code>@ws</code>)</li>
+<li>DAP debugger integration</li>
 </ul>
 
                     </main>
