@@ -1371,9 +1371,11 @@ impl Interpreter {
                 std::process::exit(code);
             }
             "run_command" => {
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 crate::stdlib::exec_module::call(args).map_err(|e| RuntimeError::new(&e))
             }
             "shell" => {
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("shell() requires a command string")),
@@ -1400,6 +1402,7 @@ impl Interpreter {
                 Ok(Value::Object(result))
             }
             "sh" => {
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh() requires a command string")),
@@ -1416,6 +1419,7 @@ impl Interpreter {
                 ))
             }
             "sh_lines" => {
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_lines() requires a command string")),
@@ -1434,6 +1438,7 @@ impl Interpreter {
                 Ok(Value::Array(lines))
             }
             "sh_json" => {
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_json() requires a command string")),
@@ -1449,6 +1454,7 @@ impl Interpreter {
                 Ok(crate::runtime::server::json_to_forge(json))
             }
             "sh_ok" => {
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_ok() requires a command string")),
@@ -1500,6 +1506,7 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("lines() requires a string")),
             },
             "pipe_to" => {
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 let (input, cmd) = match (args.first(), args.get(1)) {
                     (Some(Value::String(data)), Some(Value::String(cmd))) => {
                         (data.clone(), cmd.clone())

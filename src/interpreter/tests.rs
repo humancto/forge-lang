@@ -544,6 +544,7 @@ fn triple_quoted_string() {
 
 #[test]
 fn run_command_works() {
+    crate::permissions::set_allow_run(true);
     let result = try_run_forge(
         r#"
         let r = run_command("echo hello")
