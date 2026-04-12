@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-11
+
 ### Added
 
 - **LSP `textDocument/references`** — find all references to any identifier in the current document with word-boundary matching

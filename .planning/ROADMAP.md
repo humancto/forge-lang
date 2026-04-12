@@ -209,3 +209,44 @@ Each phase is independent. When picking up work:
 6. After each phase: cut a release
 
 Current status: **Phase 3 complete (all items 3.1-3.6 done). Phase 2 item 2.4 (publish) deferred.**
+
+---
+
+## Phase 4 — Beyond v0.6.0
+
+**Goal:** Expand Forge from a capable scripting language into a production-grade development platform.
+
+### 4.1 VM as default engine
+
+- **What:** Flip the default execution engine from interpreter to VM. Phase 3 made the VM feature-complete (spawn/await, schedule/watch, try/catch, destructuring, full stdlib). Remaining gaps: ask/must/freeze expressions, decorator-driven server routes.
+- **Impact:** Very high — users get faster execution without `--vm` flag. The interpreter becomes the fallback for features the VM doesn't support.
+- **Prerequisite:** Audit remaining VM incompatibilities, ensure all examples pass under `--vm`.
+
+### 4.2 Cross-file LSP
+
+- **What:** Extend go-to-definition and find-references to work across files. Currently single-file only. Requires building a project-wide symbol index from `forge.toml` or workspace root.
+- **Impact:** High — transformative for multi-file projects. Currently the #1 LSP limitation.
+
+### 4.3 `forge test` coverage
+
+- **What:** Add code coverage reporting to `forge test`. Show line/branch coverage percentages. Could use source spans from Phase 1.5 to track executed lines.
+- **Impact:** Medium — helps adoption for serious projects, signals production-readiness.
+
+### 4.4 Native compilation (AOT)
+
+- **What:** Expand `forge build` to produce standalone binaries. The JIT (cranelift) already compiles hot functions — extend to full ahead-of-time compilation.
+- **Impact:** High — major differentiator vs other scripting languages. Enables deployment without the Forge runtime.
+- **Prerequisite:** VM as default (4.1), NaN-boxing runtime for string/object JIT support.
+
+### 4.5 Debugger (DAP)
+
+- **What:** Implement the Debug Adapter Protocol for VS Code step-through debugging. Set breakpoints, inspect variables, step into/over/out.
+- **Impact:** Medium — critical for complex program development. Builds on source spans (1.5) and LSP infrastructure.
+
+### Order of attack
+
+1. 4.1 (VM default) — validates Phase 3 completeness, biggest UX win
+2. 4.2 (cross-file LSP) — highest developer experience impact
+3. 4.3 (coverage) — low effort, high signal for adoption
+4. 4.4 (AOT) — ambitious, depends on 4.1
+5. 4.5 (debugger) — nice to have, can be done anytime
