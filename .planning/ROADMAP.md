@@ -273,7 +273,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 - [x] 5B.1 Add `debug_assert!` on `SendableVM` jit_cache emptiness (`machine.rs:15`) (PR #26)
 - [x] 5B.2 Hoist `Arc<Chunk>` reference outside VM dispatch loop (`machine.rs:1025`) (PR #27)
 - [x] 5B.3 Lazy register allocation or reduced `MAX_REGISTERS` (`machine.rs:295`) (PR #28)
-- [ ] 5B.4 Add internal timing to benchmarks + fix array benchmark fairness (`benchmarks/`)
+- [x] 5B.4 Add internal timing to benchmarks + fix array benchmark fairness (`benchmarks/`) (PR #29)
 - [ ] 5B.5 Add Rust/Go/Node.js fib(30) benchmark files for landing page verification (`benchmarks/`)
 
 ### Phase 5C — Medium Priority
