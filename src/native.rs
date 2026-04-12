@@ -5,65 +5,25 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn build_native_launcher(source: &str, source_path: &Path) -> Result<PathBuf, String> {
-    #[cfg(not(unix))]
-    {
-        let _ = source;
-        let _ = source_path;
-        return Err("--native is currently supported on Unix-like systems only".to_string());
-    }
-
-    #[cfg(unix)]
-    {
-        let output_path = native_output_path(source_path);
-        let default_forge_bin = env::var("FORGE_NATIVE_FORGE_BIN")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                env::current_exe()
-                    .ok()
-                    .map(|path| path.display().to_string())
-            })
-            .unwrap_or_else(|| "forge".to_string());
-
-        let build_id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| format!("failed to create native launcher timestamp: {}", e))?
-            .as_nanos();
-        let c_path = env::temp_dir().join(format!(
-            "forge-native-{}-{}.c",
-            std::process::id(),
-            build_id
-        ));
-        let c_source = native_launcher_c_source(source.as_bytes(), &default_forge_bin);
-        fs::write(&c_path, c_source)
-            .map_err(|e| format!("failed to write native launcher source: {}", e))?;
-
-        let status = Command::new("cc")
-            .arg("-O2")
-            .arg(&c_path)
-            .arg("-o")
-            .arg(&output_path)
-            .status()
-            .map_err(|e| format!("failed to invoke C compiler for --native: {}", e))?;
-        let _ = fs::remove_file(&c_path);
-
-        if !status.success() {
-            return Err(format!(
-                "native launcher compilation failed for '{}'",
-                output_path.display()
-            ));
-        }
-
-        Ok(output_path)
-    }
+    let c_source_fn = |forge_bin: &str| native_launcher_c_source(source.as_bytes(), forge_bin);
+    compile_launcher(source_path, "native", c_source_fn)
 }
 
 pub fn build_native_aot(bytecode: &[u8], source_path: &Path) -> Result<PathBuf, String> {
+    let c_source_fn = |forge_bin: &str| aot_launcher_c_source(bytecode, forge_bin);
+    compile_launcher(source_path, "aot", c_source_fn)
+}
+
+fn compile_launcher<F>(source_path: &Path, mode: &str, make_c_source: F) -> Result<PathBuf, String>
+where
+    F: FnOnce(&str) -> String,
+{
     #[cfg(not(unix))]
     {
-        let _ = bytecode;
-        let _ = source_path;
-        return Err("--aot is currently supported on Unix-like systems only".to_string());
+        let _ = (source_path, mode, make_c_source);
+        return Err(format!(
+            "--{mode} is currently supported on Unix-like systems only"
+        ));
     }
 
     #[cfg(unix)]
@@ -81,13 +41,16 @@ pub fn build_native_aot(bytecode: &[u8], source_path: &Path) -> Result<PathBuf, 
 
         let build_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| format!("failed to create AOT timestamp: {}", e))?
+            .map_err(|e| format!("failed to create {mode} timestamp: {e}"))?
             .as_nanos();
-        let c_path =
-            env::temp_dir().join(format!("forge-aot-{}-{}.c", std::process::id(), build_id));
-        let c_source = aot_launcher_c_source(bytecode, &default_forge_bin);
+        let c_path = env::temp_dir().join(format!(
+            "forge-{mode}-{}-{}.c",
+            std::process::id(),
+            build_id
+        ));
+        let c_source = make_c_source(&default_forge_bin);
         fs::write(&c_path, c_source)
-            .map_err(|e| format!("failed to write AOT launcher source: {}", e))?;
+            .map_err(|e| format!("failed to write {mode} launcher source: {e}"))?;
 
         let status = Command::new("cc")
             .arg("-O2")
@@ -95,12 +58,12 @@ pub fn build_native_aot(bytecode: &[u8], source_path: &Path) -> Result<PathBuf, 
             .arg("-o")
             .arg(&output_path)
             .status()
-            .map_err(|e| format!("failed to invoke C compiler for --aot: {}", e))?;
+            .map_err(|e| format!("failed to invoke C compiler for --{mode}: {e}"))?;
         let _ = fs::remove_file(&c_path);
 
         if !status.success() {
             return Err(format!(
-                "AOT launcher compilation failed for '{}'",
+                "{mode} launcher compilation failed for '{}'",
                 output_path.display()
             ));
         }
@@ -123,13 +86,15 @@ pub fn native_output_path(source_path: &Path) -> PathBuf {
     }
 }
 
-fn native_launcher_c_source(source: &[u8], default_forge_bin: &str) -> String {
-    let byte_list = source
-        .iter()
-        .map(|byte| byte.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-
+fn launcher_c_template(
+    data_var: &str,
+    len_var: &str,
+    byte_list: &str,
+    default_forge_bin: &str,
+    tmp_prefix: &str,
+    file_ext: &str,
+    ext_len: usize,
+) -> String {
     format!(
         r#"#include <errno.h>
 #include <stdio.h>
@@ -138,23 +103,23 @@ fn native_launcher_c_source(source: &[u8], default_forge_bin: &str) -> String {
 #include <sys/wait.h>
 #include <unistd.h>
 
-static const unsigned char FORGE_PROGRAM[] = {{ {byte_list} }};
-static const size_t FORGE_PROGRAM_LEN = sizeof(FORGE_PROGRAM);
+static const unsigned char {data_var}[] = {{ {byte_list} }};
+static const size_t {len_var} = sizeof({data_var});
 static const char *DEFAULT_FORGE_BIN = "{default_forge_bin}";
 
 int main(int argc, char **argv) {{
     const char *tmpdir = getenv("TMPDIR");
     if (!tmpdir) tmpdir = "/tmp";
     char tmp_template[256];
-    snprintf(tmp_template, sizeof(tmp_template), "%s/forge-native-XXXXXX", tmpdir);
+    snprintf(tmp_template, sizeof(tmp_template), "%s/{tmp_prefix}-XXXXXX", tmpdir);
     int fd = mkstemp(tmp_template);
     if (fd == -1) {{
         perror("mkstemp");
         return 1;
     }}
 
-    char program_path[sizeof(tmp_template) + 4];
-    if (snprintf(program_path, sizeof(program_path), "%s.fg", tmp_template) < 0) {{
+    char program_path[sizeof(tmp_template) + {ext_len}];
+    if (snprintf(program_path, sizeof(program_path), "%s.{file_ext}", tmp_template) < 0) {{
         perror("snprintf");
         close(fd);
         unlink(tmp_template);
@@ -174,7 +139,7 @@ int main(int argc, char **argv) {{
         unlink(program_path);
         return 1;
     }}
-    if (fwrite(FORGE_PROGRAM, 1, FORGE_PROGRAM_LEN, program) != FORGE_PROGRAM_LEN) {{
+    if (fwrite({data_var}, 1, {len_var}, program) != {len_var}) {{
         perror("fwrite");
         fclose(program);
         unlink(program_path);
@@ -241,8 +206,31 @@ int main(int argc, char **argv) {{
     return 1;
 }}
 "#,
+        data_var = data_var,
+        len_var = len_var,
         byte_list = byte_list,
-        default_forge_bin = c_string_escape(default_forge_bin)
+        default_forge_bin = c_string_escape(default_forge_bin),
+        tmp_prefix = tmp_prefix,
+        file_ext = file_ext,
+        ext_len = ext_len,
+    )
+}
+
+fn native_launcher_c_source(source: &[u8], default_forge_bin: &str) -> String {
+    let byte_list = source
+        .iter()
+        .map(|byte| byte.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    launcher_c_template(
+        "FORGE_PROGRAM",
+        "FORGE_PROGRAM_LEN",
+        &byte_list,
+        default_forge_bin,
+        "forge-native",
+        "fg",
+        4, // ".fg" + null
     )
 }
 
@@ -253,121 +241,14 @@ fn aot_launcher_c_source(bytecode: &[u8], default_forge_bin: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!(
-        r#"#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-static const unsigned char FORGE_BYTECODE[] = {{ {byte_list} }};
-static const size_t FORGE_BYTECODE_LEN = sizeof(FORGE_BYTECODE);
-static const char *DEFAULT_FORGE_BIN = "{default_forge_bin}";
-
-int main(int argc, char **argv) {{
-    const char *tmpdir = getenv("TMPDIR");
-    if (!tmpdir) tmpdir = "/tmp";
-    char tmp_template[256];
-    snprintf(tmp_template, sizeof(tmp_template), "%s/forge-aot-XXXXXX", tmpdir);
-    int fd = mkstemp(tmp_template);
-    if (fd == -1) {{
-        perror("mkstemp");
-        return 1;
-    }}
-
-    /* Rename to .fgc so forge recognizes it as compiled bytecode */
-    char program_path[sizeof(tmp_template) + 5];
-    if (snprintf(program_path, sizeof(program_path), "%s.fgc", tmp_template) < 0) {{
-        perror("snprintf");
-        close(fd);
-        unlink(tmp_template);
-        return 1;
-    }}
-    if (rename(tmp_template, program_path) != 0) {{
-        perror("rename");
-        close(fd);
-        unlink(tmp_template);
-        return 1;
-    }}
-
-    /* Write bytecode through the fd obtained from mkstemp (avoids TOCTOU) */
-    FILE *program = fdopen(fd, "wb");
-    if (!program) {{
-        perror("fdopen");
-        close(fd);
-        unlink(program_path);
-        return 1;
-    }}
-    if (fwrite(FORGE_BYTECODE, 1, FORGE_BYTECODE_LEN, program) != FORGE_BYTECODE_LEN) {{
-        perror("fwrite");
-        fclose(program);
-        unlink(program_path);
-        return 1;
-    }}
-    if (fclose(program) != 0) {{
-        perror("fclose");
-        unlink(program_path);
-        return 1;
-    }}
-
-    const char *forge_bin = getenv("FORGE_NATIVE_FORGE_BIN");
-    if (!forge_bin || !forge_bin[0]) {{
-        forge_bin = DEFAULT_FORGE_BIN;
-    }}
-
-    char **args = calloc((size_t)argc + 3, sizeof(char *));
-    if (!args) {{
-        fprintf(stderr, "calloc failed\n");
-        unlink(program_path);
-        return 1;
-    }}
-
-    args[0] = (char *)forge_bin;
-    args[1] = "run";
-    args[2] = program_path;
-    for (int i = 1; i < argc; ++i) {{
-        args[i + 2] = argv[i];
-    }}
-
-    pid_t child = fork();
-    if (child == 0) {{
-        execv(forge_bin, args);
-        if (strcmp(forge_bin, "forge") != 0) {{
-            args[0] = "forge";
-            execvp("forge", args);
-        }}
-        perror("exec forge");
-        _exit(127);
-    }}
-    if (child < 0) {{
-        perror("fork");
-        unlink(program_path);
-        free(args);
-        return 1;
-    }}
-
-    int status = 0;
-    if (waitpid(child, &status, 0) < 0) {{
-        perror("waitpid");
-        unlink(program_path);
-        free(args);
-        return 1;
-    }}
-
-    unlink(program_path);
-    free(args);
-    if (WIFEXITED(status)) {{
-        return WEXITSTATUS(status);
-    }}
-    if (WIFSIGNALED(status)) {{
-        return 128 + WTERMSIG(status);
-    }}
-    return 1;
-}}
-"#,
-        byte_list = byte_list,
-        default_forge_bin = c_string_escape(default_forge_bin)
+    launcher_c_template(
+        "FORGE_BYTECODE",
+        "FORGE_BYTECODE_LEN",
+        &byte_list,
+        default_forge_bin,
+        "forge-aot",
+        "fgc",
+        5, // ".fgc" + null
     )
 }
 
@@ -439,13 +320,10 @@ mod tests {
     fn aot_launcher_source_embeds_bytecode_not_source() {
         let bytecode: Vec<u8> = vec![0xF0, 0x01, 0x02, 0x03, 42, 99];
         let c_source = aot_launcher_c_source(&bytecode, "/tmp/forge-bin");
-        // Must contain bytecode array, not source text
         assert!(c_source.contains("static const unsigned char FORGE_BYTECODE[]"));
         assert!(c_source.contains("/tmp/forge-bin"));
-        // Must use .fgc extension for temp file
         assert!(c_source.contains(".fgc"));
         assert!(c_source.contains("forge-aot-"));
-        // Must NOT contain the source-embedding array name
         assert!(!c_source.contains("FORGE_PROGRAM[]"));
     }
 
@@ -467,7 +345,6 @@ mod tests {
         let source_path = temp_root.join("hello.fg");
         std::fs::write(&source_path, "println(\"hi\")").unwrap();
 
-        // Fake bytecode — we only verify the binary is produced and executable
         let bytecode = vec![0x00, 0x01, 0x02, 0x03];
         let output_path = build_native_aot(&bytecode, &source_path).unwrap();
         assert!(output_path.exists());
