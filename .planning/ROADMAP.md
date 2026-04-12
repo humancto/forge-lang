@@ -351,7 +351,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 - [x] 7B.3 Fix `serialize.rs` 38 `unwrap()` calls — all 38 are in `#[cfg(test)]` only; production code already uses `Result` with `?`. No changes needed.
 - [x] 7B.4 Fix `npc` module 11 `panic!` calls — all 11 are in `#[cfg(test)]` only. No production panics. No changes needed.
 - [x] 7B.5 Fix `time` module 12 `panic!` calls — all 12 are in `#[cfg(test)]` only. No production panics. No changes needed.
-- [ ] 7B.6 Remove dead interpreter fallback paths — identify and prune code paths in the interpreter that the VM has fully replaced.
+- [x] 7B.6 Remove dead interpreter fallback paths — audit found zero dead paths; interpreter is fully utilized (--interp flag, HTTP server fallback). No changes needed.
 
 ### Phase 7C — Performance & Simplification
 
