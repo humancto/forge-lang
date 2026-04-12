@@ -80,11 +80,15 @@ flate2 = "1"
 jsonwebtoken = "9"
 
 # === JIT / Native Compilation (Cranelift) ===
-cranelift-codegen = "0.129"
-cranelift-frontend = "0.129"
-cranelift-jit = "0.129"
-cranelift-module = "0.129"
-cranelift-native = "0.129"
+cranelift-codegen = { version = "0.129", optional = true }
+cranelift-frontend = { version = "0.129", optional = true }
+cranelift-jit = { version = "0.129", optional = true }
+cranelift-module = { version = "0.129", optional = true }
+cranelift-native = { version = "0.129", optional = true }
+
+[features]
+default = ["jit"]
+jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
 
 [profile.dev]
 opt-level = 1

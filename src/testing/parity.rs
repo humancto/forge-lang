@@ -2,9 +2,13 @@ use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::ast::Program;
 use crate::parser::Parser;
+#[cfg(feature = "jit")]
 use crate::vm::jit::jit_module::JitCompiler;
+#[cfg(feature = "jit")]
 use crate::vm::jit::type_analysis;
-use crate::vm::machine::{JitEntry, VM};
+#[cfg(feature = "jit")]
+use crate::vm::machine::JitEntry;
+use crate::vm::machine::VM;
 use crate::vm::{compiler, serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -69,7 +73,16 @@ pub fn run_value_backends(source: &str) -> BackendOutputs {
         interpreter: run_on_interpreter_value(&program),
         vm: run_on_vm_value(&program),
         bytecode: run_on_bytecode_value(&program),
-        jit: run_on_jit_value(&program),
+        jit: {
+            #[cfg(feature = "jit")]
+            {
+                run_on_jit_value(&program)
+            }
+            #[cfg(not(feature = "jit"))]
+            {
+                String::new()
+            }
+        },
     }
 }
 
@@ -93,6 +106,7 @@ pub fn assert_supported_case(case: &SupportedParityCase) {
         "{} bytecode output mismatch",
         case.path.display()
     );
+    #[cfg(feature = "jit")]
     assert_eq!(
         outputs.jit,
         case.expected,
@@ -170,6 +184,7 @@ fn run_on_bytecode_value(program: &Program) -> String {
     value.display(&vm.gc)
 }
 
+#[cfg(feature = "jit")]
 fn run_on_jit_value(program: &Program) -> String {
     let chunk = compiler::compile_repl(program).expect("jit compile error");
 
