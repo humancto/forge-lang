@@ -724,17 +724,20 @@ impl VM {
             .insert("time".to_string(), Value::Obj(time_ref));
 
         // pg module
-        let mut pg_map = IndexMap::new();
-        for name in &["connect", "query", "execute", "close"] {
-            let full = format!("pg.{}", name);
-            let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-                name: full,
-                func: native_dispatch,
-            }));
-            pg_map.insert(name.to_string(), Value::Obj(nr));
+        #[cfg(feature = "postgres")]
+        {
+            let mut pg_map = IndexMap::new();
+            for name in &["connect", "query", "execute", "close"] {
+                let full = format!("pg.{}", name);
+                let nr = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+                    name: full,
+                    func: native_dispatch,
+                }));
+                pg_map.insert(name.to_string(), Value::Obj(nr));
+            }
+            let pg_ref = self.gc.alloc(ObjKind::Object(pg_map));
+            self.globals.insert("pg".to_string(), Value::Obj(pg_ref));
         }
-        let pg_ref = self.gc.alloc(ObjKind::Object(pg_map));
-        self.globals.insert("pg".to_string(), Value::Obj(pg_ref));
 
         // jwt module
         let mut jwt_map = IndexMap::new();

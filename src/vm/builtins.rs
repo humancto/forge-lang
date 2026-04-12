@@ -1507,6 +1507,7 @@ impl VM {
                     crate::stdlib::time::call(n, interp_args).map_err(|e| VMError::new(&e))?;
                 Ok(self.convert_interp_value(&result))
             }
+            #[cfg(feature = "postgres")]
             n if n.starts_with("pg.") => {
                 let interp_args = self.args_to_interp(&args);
                 let result =
