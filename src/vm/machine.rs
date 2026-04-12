@@ -1626,7 +1626,7 @@ impl VM {
                                     .wait(guard)
                                     .map_err(|_| VMError::new("await: wait interrupted"))?;
                             }
-                            let shared = guard.take().unwrap_or(SharedValue::Null);
+                            let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
                             shared_to_value(&mut self.gc, &shared)
                         } else {
                             src

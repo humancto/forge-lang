@@ -66,10 +66,11 @@ struct Cli {
     eval_code: Option<String>,
 
     /// Use the bytecode VM. Faster on numeric/loop-heavy code but does not
-    /// support the full language: ask/await/must/freeze/spawn expressions,
+    /// support the full language: ask/must/freeze expressions,
     /// schedule/watch blocks, and decorator-driven runtime features (server
-    /// routes, etc.) are rejected up front. Use the default interpreter for
-    /// HTTP servers, AI calls, file watching, and full stdlib coverage.
+    /// routes, etc.) are rejected up front. spawn/await are supported.
+    /// Use the default interpreter for HTTP servers, AI calls, file watching,
+    /// and full stdlib coverage.
     #[arg(long = "vm")]
     use_vm: bool,
 

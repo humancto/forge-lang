@@ -1348,6 +1348,20 @@ mod async_tests {
         );
         assert_eq!(out, vec!["1", "hi"]);
     }
+
+    #[test]
+    fn vm_double_await_returns_same_value() {
+        let out = run_on_vm(
+            r#"
+            let h = spawn { return 99 }
+            let first = await h
+            let second = await h
+            println(first)
+            println(second)
+        "#,
+        );
+        assert_eq!(out, vec!["99", "99"]);
+    }
 }
 
 #[cfg(test)]
