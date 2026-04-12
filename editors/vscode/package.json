@@ -1,14 +1,19 @@
 {
   "name": "forge-lang",
   "displayName": "Forge Language",
-  "description": "Syntax highlighting and language support for the Forge programming language",
-  "version": "0.1.0",
+  "description": "Syntax highlighting, snippets, and language support for the Forge programming language",
+  "version": "0.2.0",
   "publisher": "forge-lang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/humancto/forge-lang"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Snippets"
   ],
   "contributes": {
     "languages": [
@@ -29,6 +34,12 @@
         "language": "forge",
         "scopeName": "source.forge",
         "path": "./syntaxes/forge.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "forge",
+        "path": "./snippets/forge.json"
       }
     ]
   }

@@ -1,0 +1,124 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": ["fn ${1:name}(${2:params}) {", "\t$0", "}"],
+    "description": "Function definition"
+  },
+  "Define Function": {
+    "prefix": "define",
+    "body": ["define ${1:name}(${2:params}) {", "\t$0", "}"],
+    "description": "Function definition (natural syntax)"
+  },
+  "If": {
+    "prefix": "if",
+    "body": ["if ${1:condition} {", "\t$0", "}"],
+    "description": "If block"
+  },
+  "If Else": {
+    "prefix": "ife",
+    "body": ["if ${1:condition} {", "\t$2", "} else {", "\t$0", "}"],
+    "description": "If-else block"
+  },
+  "For Loop": {
+    "prefix": "for",
+    "body": ["for ${1:item} in ${2:collection} {", "\t$0", "}"],
+    "description": "For-in loop"
+  },
+  "Repeat": {
+    "prefix": "repeat",
+    "body": ["repeat ${1:5} times {", "\t$0", "}"],
+    "description": "Repeat N times"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": ["match ${1:value} {", "\t${2:pattern} => $3,", "\t_ => $0", "}"],
+    "description": "Match expression"
+  },
+  "When Guard": {
+    "prefix": "when",
+    "body": ["when ${1:value} {", "\t< ${2:10} -> $3,", "\telse -> $0", "}"],
+    "description": "When guard expression"
+  },
+  "Say": {
+    "prefix": "say",
+    "body": ["say $0"],
+    "description": "Print output"
+  },
+  "Let": {
+    "prefix": "let",
+    "body": ["let ${1:name} = $0"],
+    "description": "Variable binding"
+  },
+  "Let Mutable": {
+    "prefix": "letm",
+    "body": ["let mut ${1:name} = $0"],
+    "description": "Mutable variable binding"
+  },
+  "Set": {
+    "prefix": "set",
+    "body": ["set ${1:name} to $0"],
+    "description": "Variable binding (natural syntax)"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": ["struct ${1:Name} {", "\t${2:field}: ${3:type}", "}"],
+    "description": "Struct definition"
+  },
+  "Import": {
+    "prefix": "import",
+    "body": ["import { ${2:name} } from \"${1:module}\""],
+    "description": "Import statement"
+  },
+  "Retry": {
+    "prefix": "retry",
+    "body": ["retry ${1:3} times {", "\t$0", "}"],
+    "description": "Retry block"
+  },
+  "Safe Block": {
+    "prefix": "safe",
+    "body": ["safe {", "\t$0", "}"],
+    "description": "Null-safe execution block"
+  },
+  "Try Catch": {
+    "prefix": "try",
+    "body": ["try {", "\t$1", "} catch ${2:err} {", "\t$0", "}"],
+    "description": "Try-catch block"
+  },
+  "HTTP Server": {
+    "prefix": "server",
+    "body": [
+      "@server({ port: ${1:3000} })",
+      "",
+      "@get(\"/${2:hello}\")",
+      "fn ${3:handler}(req) {",
+      "\treturn { message: \"$0\" }",
+      "}"
+    ],
+    "description": "HTTP server scaffolding"
+  },
+  "HTTP GET": {
+    "prefix": "httpget",
+    "body": ["let ${1:response} = http.get(\"${2:url}\")"],
+    "description": "HTTP GET request"
+  },
+  "Grab From": {
+    "prefix": "grab",
+    "body": ["grab ${1:resp} from \"${2:url}\""],
+    "description": "Fetch URL (natural syntax)"
+  },
+  "Test Function": {
+    "prefix": "test",
+    "body": ["fn test_${1:name}() {", "\t$0", "}"],
+    "description": "Test function"
+  },
+  "Schedule": {
+    "prefix": "schedule",
+    "body": ["schedule every ${1:5} ${2:minutes} {", "\t$0", "}"],
+    "description": "Scheduled task"
+  },
+  "Check Validation": {
+    "prefix": "check",
+    "body": ["check ${1:value} is not empty"],
+    "description": "Declarative validation"
+  }
+}
