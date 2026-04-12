@@ -146,10 +146,14 @@ installs to `forge_modules/`, manages `forge.lock`. 4 tests.
 
 **Goal:** Make `--vm` capable enough to be the default execution engine. This unlocks the performance story (and eventually the JIT story).
 
-### 3.1 Async runtime in VM
+### ~~3.1 Async runtime in VM~~ ✅ DONE (PR #14)
 
-- **What:** Wire up `await`, `spawn`, `hold` in the VM. Requires integrating tokio into the VM's execution loop or compiling async blocks into state machines.
-- **Note:** This is the hardest item on the entire roadmap. The interpreter uses Rust's native async; the VM would need coroutine-style suspend/resume or a similar mechanism.
+Real threading for spawn/await in `--vm` mode. Spawn launches an OS thread with
+a forked VM (`SendableVM` + `fork_for_spawn`), await blocks via `Condvar`.
+Cross-thread values use `SharedValue` enum (no GcRef leaks). `ObjKind::TaskHandle`
+
+- `OpCode::Await` added. Upvalue capture in spawn closures. 13 tests.
+  `schedule`/`watch` deferred to 3.5.
 
 ### ~~3.2 `try-catch` in compiler~~ ✅ DONE (pre-existing)
 
@@ -168,9 +172,12 @@ Strings: typeof, substring, index_of, last_index_of, capitalize, title, upper, l
 trim, pad_start, pad_end, repeat_str, count, slugify, snake_case, camel_case.
 Plus GenZ debug kit (sus, bruh, bet, no_cap, ick) and execution helpers (cook, yolo, ghost, slay).
 
-### 3.5 `schedule` / `watch` in VM
+### ~~3.5 `schedule` / `watch` in VM~~ ✅ DONE (PR #15)
 
-- **What:** These are runtime features (cron + file watcher). Currently rejected by the compiler. Implementing them requires the async runtime from 3.1.
+Both compile to dedicated opcodes (`Schedule`, `Watch`) and spawn background
+threads using `fork_for_spawn` + `SendableVM`. Schedule supports seconds/minutes/hours
+units with interval validation. Watch polls file mtime at 1s intervals. Upvalue
+capture in closures. 9 tests.
 
 ### ~~3.6 JIT expansion~~ ✅ DONE (PR #13)
 
@@ -201,4 +208,4 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 3 — items 3.2-3.4, 3.6 complete. Remaining: 3.1 (async VM), 3.5 (schedule/watch). Phase 2 item 2.4 (publish) deferred.**
+Current status: **Phase 3 complete (all items 3.1-3.6 done). Phase 2 item 2.4 (publish) deferred.**

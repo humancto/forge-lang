@@ -25,6 +25,20 @@ fn spawn_thread(
     });
 }
 
+/// Run a schedule closure in a loop on a forked VM in a new OS thread.
+fn spawn_schedule_thread(sendable: SendableVM, closure: Value, interval: Duration) {
+    std::thread::spawn(move || {
+        sendable.run_loop(closure, interval);
+    });
+}
+
+/// Run a watch closure on a forked VM, polling a file path for mtime changes.
+fn spawn_watch_thread(sendable: SendableVM, closure: Value, path: String) {
+    std::thread::spawn(move || {
+        sendable.run_watch(closure, path);
+    });
+}
+
 impl SendableVM {
     fn run(mut self, closure: Value, slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>) {
         let vm = &mut self.0;
@@ -38,6 +52,51 @@ impl SendableVM {
         if let Ok(mut guard) = slot.0.lock() {
             *guard = Some(val);
             slot.1.notify_all();
+        }
+    }
+
+    fn run_loop(mut self, closure: Value, interval: Duration) {
+        let vm = &mut self.0;
+        // Root the closure in register 0 so GC can't collect it between calls
+        if vm.registers.is_empty() {
+            vm.registers.push(closure.clone());
+        } else {
+            vm.registers[0] = closure.clone();
+        }
+        loop {
+            std::thread::sleep(interval);
+            let _ = vm.call_value(closure.clone(), vec![]);
+            // Re-root after call (call_value may have modified registers)
+            if vm.registers.is_empty() {
+                vm.registers.push(closure.clone());
+            } else {
+                vm.registers[0] = closure.clone();
+            }
+        }
+    }
+
+    fn run_watch(mut self, closure: Value, path: String) {
+        let vm = &mut self.0;
+        // Root the closure in register 0 so GC can't collect it between calls
+        if vm.registers.is_empty() {
+            vm.registers.push(closure.clone());
+        } else {
+            vm.registers[0] = closure.clone();
+        }
+        let mut last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let current = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            if current != last_modified {
+                last_modified = current;
+                let _ = vm.call_value(closure.clone(), vec![]);
+                // Re-root after call
+                if vm.registers.is_empty() {
+                    vm.registers.push(closure.clone());
+                } else {
+                    vm.registers[0] = closure.clone();
+                }
+            }
         }
     }
 }
@@ -1668,6 +1727,70 @@ impl VM {
                     }
                     OpCode::PopTimeout => {
                         self.frames[frame_idx].timeouts.pop();
+                    }
+                    OpCode::Schedule => {
+                        let closure_val = self.registers[base + a as usize].clone();
+                        let interval_val = &self.registers[base + b as usize];
+                        let secs = match interval_val {
+                            Value::Int(n) if *n > 0 => {
+                                // Read unit string from register C
+                                let unit_val = &self.registers[base + c as usize];
+                                let unit_str = if let Value::Obj(r) = unit_val {
+                                    self.gc
+                                        .get(*r)
+                                        .and_then(|o| match &o.kind {
+                                            ObjKind::String(s) => Some(s.clone()),
+                                            _ => None,
+                                        })
+                                        .unwrap_or_default()
+                                } else {
+                                    String::new()
+                                };
+                                match unit_str.as_str() {
+                                    "minutes" => *n as u64 * 60,
+                                    "hours" => *n as u64 * 3600,
+                                    _ => *n as u64, // "seconds" or default
+                                }
+                            }
+                            Value::Int(_) => {
+                                return Err(VMError::new(
+                                    "schedule interval must be a positive integer",
+                                ));
+                            }
+                            _ => 60, // Non-integer defaults to 60s (matches interpreter)
+                        };
+
+                        let mut sendable = self.fork_for_spawn();
+                        let child_closure = if let Value::Obj(r) = &closure_val {
+                            self.transfer_closure(*r, &mut sendable.0)
+                        } else {
+                            Value::Null
+                        };
+
+                        spawn_schedule_thread(sendable, child_closure, Duration::from_secs(secs));
+                    }
+                    OpCode::Watch => {
+                        let closure_val = self.registers[base + a as usize].clone();
+                        let path_val = &self.registers[base + b as usize];
+                        let path = if let Value::Obj(r) = path_val {
+                            self.gc.get(*r).and_then(|o| match &o.kind {
+                                ObjKind::String(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        };
+                        let path =
+                            path.ok_or_else(|| VMError::new("watch requires a string path"))?;
+
+                        let mut sendable = self.fork_for_spawn();
+                        let child_closure = if let Value::Obj(r) = &closure_val {
+                            self.transfer_closure(*r, &mut sendable.0)
+                        } else {
+                            Value::Null
+                        };
+
+                        spawn_watch_thread(sendable, child_closure, path);
                     }
                     _ => {
                         return Err(VMError::new(&format!("unknown opcode: {}", op)));

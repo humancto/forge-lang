@@ -54,7 +54,9 @@ pub enum OpCode {
     PopHandler,
     PushTimeout, // A=duration/error reg, sBx=catch_target
     PopTimeout,
-    Await, // A=dst, B=src (if TaskHandle: block + deserialize; else: pass through)
+    Await,    // A=dst, B=src (if TaskHandle: block + deserialize; else: pass through)
+    Schedule, // A=closure_reg, B=interval_reg, C=unit_reg
+    Watch,    // A=closure_reg, B=path_reg
 }
 
 /// Compile-time constant — can hold strings, unlike the runtime Value.
