@@ -1553,7 +1553,7 @@ impl VM {
                             && self.profiler.is_hot(&func_name)
                         {
                             let type_info = super::jit::type_analysis::analyze(&chunk);
-                            if !type_info.has_unsupported_ops {
+                            if !type_info.has_unsupported_ops && chunk.arity <= 8 {
                                 if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
                                     if let Ok(ptr) = jit.compile_function(&chunk, &func_name) {
                                         self.jit_cache.insert(
