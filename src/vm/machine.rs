@@ -1954,6 +1954,30 @@ impl VM {
                 }
                 for frame in &self.frames {
                     roots.push(frame.closure);
+                    for gr in frame.open_upvalues.values() {
+                        roots.push(*gr);
+                    }
+                }
+                for methods in self.method_tables.values() {
+                    for v in methods.values() {
+                        if let Value::Obj(gr) = v {
+                            roots.push(*gr);
+                        }
+                    }
+                }
+                for methods in self.static_methods.values() {
+                    for v in methods.values() {
+                        if let Value::Obj(gr) = v {
+                            roots.push(*gr);
+                        }
+                    }
+                }
+                for defaults in self.struct_defaults.values() {
+                    for v in defaults.values() {
+                        if let Value::Obj(gr) = v {
+                            roots.push(*gr);
+                        }
+                    }
                 }
                 self.gc.collect(&roots);
             }
