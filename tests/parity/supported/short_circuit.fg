@@ -1,0 +1,28 @@
+// expect: [false, true, false, true, 0, 0, true, true]
+let a = false && true
+let b = true || false
+let c = true && false
+let d = false || true
+
+// Side-effect tests: prove right side is NOT evaluated
+let mut counter1 = 0
+fn bump1() {
+    change counter1 to counter1 + 1
+    return true
+}
+let e = false && bump1()
+// counter1 should still be 0
+
+let mut counter2 = 0
+fn bump2() {
+    change counter2 to counter2 + 1
+    return false
+}
+let f = true || bump2()
+// counter2 should still be 0
+
+// Truthy coercion of non-booleans
+let g = 1 && 2
+let h = 0 || 1
+
+[a, b, c, d, counter1, counter2, g, h]
