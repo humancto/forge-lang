@@ -948,6 +948,243 @@ mod parity_tests {
         let value = super::run_repl(&mut vm, &program).expect("vm repl error");
         assert_eq!(value.display(&vm.gc), "3");
     }
+
+    // ---- Phase 3.4 VM builtin tests ----
+
+    #[test]
+    fn vm_first_last() {
+        assert_eq!(run_on_vm_value("first([10, 20, 30])"), "10");
+        assert_eq!(run_on_vm_value("last([10, 20, 30])"), "30");
+        assert_eq!(run_on_vm_value("first([])"), "null");
+        assert_eq!(run_on_vm_value("last([])"), "null");
+    }
+
+    #[test]
+    fn vm_zip() {
+        let out = run_on_vm("println(zip([1, 2], [\"a\", \"b\"]))");
+        assert_eq!(out, vec!["[[1, a], [2, b]]"]);
+    }
+
+    #[test]
+    fn vm_flatten() {
+        let out = run_on_vm("println(flatten([[1, 2], [3], [4, 5]]))");
+        assert_eq!(out, vec!["[1, 2, 3, 4, 5]"]);
+    }
+
+    #[test]
+    fn vm_chunk() {
+        let out = run_on_vm("println(chunk([1, 2, 3, 4, 5], 2))");
+        assert_eq!(out, vec!["[[1, 2], [3, 4], [5]]"]);
+    }
+
+    #[test]
+    fn vm_slice() {
+        assert_eq!(run_on_vm_value("slice([10, 20, 30, 40], 1, 3)"), "[20, 30]");
+    }
+
+    #[test]
+    fn vm_compact() {
+        let out = run_on_vm("println(compact([1, null, false, 2, null, 3]))");
+        assert_eq!(out, vec!["[1, 2, 3]"]);
+    }
+
+    #[test]
+    fn vm_partition() {
+        let out = run_on_vm("println(partition([1, 2, 3, 4, 5], fn(x) { return x > 3 }))");
+        assert_eq!(out, vec!["[[4, 5], [1, 2, 3]]"]);
+    }
+
+    #[test]
+    fn vm_group_by() {
+        let out = run_on_vm(
+            r#"let r = group_by(["hi", "hey", "bye"], fn(s) { return first(split(s, "")) })
+println(keys(r))"#,
+        );
+        assert_eq!(out, vec!["[h, b]"]);
+    }
+
+    #[test]
+    fn vm_sort_by() {
+        let out = run_on_vm(
+            r#"println(sort_by([{name: "c"}, {name: "a"}, {name: "b"}], fn(x) { return x.name }))"#,
+        );
+        assert!(out[0].contains("a") && out[0].contains("b") && out[0].contains("c"));
+    }
+
+    #[test]
+    fn vm_sort_by_mixed_numeric() {
+        let out = run_on_vm("println(sort_by([3, 1.5, 2], fn(x) { return x }))");
+        assert_eq!(out, vec!["[1.5, 2, 3]"]);
+    }
+
+    #[test]
+    fn vm_for_each() {
+        let out = run_on_vm("let a = [1, 2, 3]\nfor_each(a, fn(x) { println(x * 10) })");
+        assert_eq!(out, vec!["10", "20", "30"]);
+    }
+
+    #[test]
+    fn vm_take_n_skip() {
+        assert_eq!(run_on_vm_value("take_n([1, 2, 3, 4, 5], 3)"), "[1, 2, 3]");
+        assert_eq!(run_on_vm_value("skip([1, 2, 3, 4, 5], 2)"), "[3, 4, 5]");
+    }
+
+    #[test]
+    fn vm_frequencies() {
+        let out = run_on_vm(r#"println(frequencies(["a", "b", "a", "c", "b", "a"]))"#);
+        // VM displays object keys with quotes
+        assert!(
+            out[0].contains("a")
+                && out[0].contains("3")
+                && out[0].contains("b")
+                && out[0].contains("2")
+        );
+    }
+
+    #[test]
+    fn vm_sample_shuffle() {
+        // Just ensure they don't crash; output is nondeterministic
+        run_on_vm_value("sample([1, 2, 3])");
+        run_on_vm_value("shuffle([1, 2, 3])");
+    }
+
+    #[test]
+    fn vm_index_of_value_equality() {
+        // index_of should use value equality, not display comparison
+        assert_eq!(run_on_vm_value("index_of([1, 2, 3], 2)"), "1");
+        assert_eq!(run_on_vm_value("index_of([1, 2, 3], 4)"), "-1");
+        // Ensure 1 != "1"
+        assert_eq!(run_on_vm_value(r#"index_of([1, 2, 3], "1")"#), "-1");
+    }
+
+    #[test]
+    fn vm_index_of_string() {
+        assert_eq!(run_on_vm_value(r#"index_of("hello world", "world")"#), "6");
+        assert_eq!(run_on_vm_value(r#"index_of("hello", "xyz")"#), "-1");
+    }
+
+    #[test]
+    fn vm_last_index_of() {
+        assert_eq!(
+            run_on_vm_value(r#"last_index_of("hello world hello", "hello")"#),
+            "12"
+        );
+    }
+
+    #[test]
+    fn vm_capitalize_title() {
+        assert_eq!(run_on_vm_value(r#"capitalize("hello")"#), "Hello");
+        assert_eq!(run_on_vm_value(r#"title("hello world")"#), "Hello World");
+    }
+
+    #[test]
+    fn vm_upper_lower() {
+        assert_eq!(run_on_vm_value(r#"upper("hello")"#), "HELLO");
+        assert_eq!(run_on_vm_value(r#"lower("HELLO")"#), "hello");
+    }
+
+    #[test]
+    fn vm_trim() {
+        assert_eq!(run_on_vm_value(r#"trim("  hi  ")"#), "hi");
+    }
+
+    #[test]
+    fn vm_pad_start_end() {
+        assert_eq!(run_on_vm_value(r#"pad_start("5", 3, "0")"#), "005");
+        assert_eq!(run_on_vm_value(r#"pad_end("5", 3, "0")"#), "500");
+    }
+
+    #[test]
+    fn vm_repeat_str() {
+        assert_eq!(run_on_vm_value(r#"repeat_str("ab", 3)"#), "ababab");
+    }
+
+    #[test]
+    fn vm_count() {
+        assert_eq!(run_on_vm_value(r#"count("banana", "a")"#), "3");
+    }
+
+    #[test]
+    fn vm_slugify() {
+        assert_eq!(
+            run_on_vm_value(r#"slugify("Hello World! Test")"#),
+            "hello-world-test"
+        );
+    }
+
+    #[test]
+    fn vm_snake_case_camel_case() {
+        assert_eq!(
+            run_on_vm_value(r#"snake_case("helloWorld")"#),
+            "hello_world"
+        );
+        assert_eq!(
+            run_on_vm_value(r#"camel_case("hello_world")"#),
+            "helloWorld"
+        );
+    }
+
+    #[test]
+    fn vm_typeof() {
+        assert_eq!(run_on_vm_value(r#"typeof(42)"#), "Int");
+        assert_eq!(run_on_vm_value(r#"typeof("hi")"#), "String");
+        assert_eq!(run_on_vm_value(r#"typeof(true)"#), "Bool");
+        assert_eq!(run_on_vm_value(r#"typeof(null)"#), "Null");
+    }
+
+    #[test]
+    fn vm_substring() {
+        assert_eq!(
+            run_on_vm_value(r#"substring("hello world", 6, 11)"#),
+            "world"
+        );
+    }
+
+    #[test]
+    fn vm_diff_changed() {
+        let out = run_on_vm(
+            r#"let d = diff({a: 1, b: 2}, {a: 1, b: 3})
+println(d.b.from)
+println(d.b.to)"#,
+        );
+        assert_eq!(out, vec!["2", "3"]);
+    }
+
+    #[test]
+    fn vm_diff_removed() {
+        let out = run_on_vm(
+            r#"let d = diff({a: 1, b: 2}, {a: 1})
+println(d.b.removed)"#,
+        );
+        assert_eq!(out, vec!["2"]);
+    }
+
+    #[test]
+    fn vm_diff_added() {
+        let out = run_on_vm(
+            r#"let d = diff({a: 1}, {a: 1, c: 3})
+println(d.c.added)"#,
+        );
+        assert_eq!(out, vec!["3"]);
+    }
+
+    #[test]
+    fn vm_diff_equal() {
+        assert_eq!(run_on_vm_value("diff({a: 1}, {a: 1})"), "null");
+    }
+
+    #[test]
+    fn vm_genz_debug() {
+        // sus outputs to stderr — just verify it doesn't crash and returns the value
+        assert_eq!(run_on_vm_value("sus(42)"), "42");
+    }
+
+    #[test]
+    fn vm_bet_no_cap() {
+        // bet(true) and no_cap(1, 1) should not crash
+        run_on_vm("bet(true)");
+        run_on_vm("no_cap(1, 1)");
+    }
 }
 
 #[cfg(test)]

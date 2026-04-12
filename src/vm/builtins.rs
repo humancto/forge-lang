@@ -1525,6 +1525,30 @@ impl VM {
                     crate::stdlib::mysql::call(n, interp_args).map_err(|e| VMError::new(&e))?;
                 Ok(self.convert_interp_value(&result))
             }
+            n if n.starts_with("npc.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result =
+                    crate::stdlib::npc::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("url.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result = crate::stdlib::url_module::call(n, interp_args)
+                    .map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("toml.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result = crate::stdlib::toml_module::call(n, interp_args)
+                    .map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
+            n if n.starts_with("ws.") => {
+                let interp_args = self.args_to_interp(&args);
+                let result =
+                    crate::stdlib::ws::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                Ok(self.convert_interp_value(&result))
+            }
             "shell" => {
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
@@ -1907,6 +1931,842 @@ impl VM {
                 let r = self.gc.alloc(ObjKind::Array(out));
                 Ok(Value::Obj(r))
             }
+            // ===== typeof (alias for "type") =====
+            "typeof" => match args.first() {
+                Some(v) => {
+                    let name = v.type_name(&self.gc);
+                    Ok(self.alloc_string(name))
+                }
+                None => Err(VMError::new("typeof() requires an argument")),
+            },
+
+            // ===== Collection builtins =====
+            "first" => {
+                let items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("first() requires an array"))?,
+                    "first() requires an array",
+                )?;
+                Ok(items.first().cloned().unwrap_or(Value::Null))
+            }
+            "last" => {
+                let items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("last() requires an array"))?,
+                    "last() requires an array",
+                )?;
+                Ok(items.last().cloned().unwrap_or(Value::Null))
+            }
+            "zip" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("zip() requires two arrays"));
+                }
+                let a = self.array_items(&args[0], "zip() first arg must be array")?;
+                let b = self.array_items(&args[1], "zip() second arg must be array")?;
+                let pairs: Vec<Value> = a
+                    .into_iter()
+                    .zip(b.into_iter())
+                    .map(|(x, y)| {
+                        let pair = self.gc.alloc(ObjKind::Array(vec![x, y]));
+                        Value::Obj(pair)
+                    })
+                    .collect();
+                let r = self.gc.alloc(ObjKind::Array(pairs));
+                Ok(Value::Obj(r))
+            }
+            "flatten" => {
+                let items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("flatten() requires an array"))?,
+                    "flatten() requires an array",
+                )?;
+                let mut result = Vec::new();
+                for item in items {
+                    match &item {
+                        Value::Obj(r) => {
+                            if let Some(obj) = self.gc.get(*r) {
+                                if let ObjKind::Array(inner) = &obj.kind {
+                                    result.extend(inner.clone());
+                                    continue;
+                                }
+                            }
+                            result.push(item);
+                        }
+                        other => result.push(other.clone()),
+                    }
+                }
+                let r = self.gc.alloc(ObjKind::Array(result));
+                Ok(Value::Obj(r))
+            }
+            "chunk" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("chunk() requires (array, size)"));
+                }
+                let items = self.array_items(&args[0], "chunk() first arg must be array")?;
+                let size = match args[1] {
+                    Value::Int(n) if n > 0 => n as usize,
+                    _ => return Err(VMError::new("chunk() size must be positive")),
+                };
+                let chunks: Vec<Value> = items
+                    .chunks(size)
+                    .map(|c| {
+                        let arr = self.gc.alloc(ObjKind::Array(c.to_vec()));
+                        Value::Obj(arr)
+                    })
+                    .collect();
+                let r = self.gc.alloc(ObjKind::Array(chunks));
+                Ok(Value::Obj(r))
+            }
+            "slice" => {
+                let first = args
+                    .first()
+                    .ok_or_else(|| VMError::new("slice() requires an argument"))?;
+                // Check if it's a string
+                if let Some(s) = self.get_string(first) {
+                    let chars: Vec<char> = s.chars().collect();
+                    let len = chars.len() as i64;
+                    let start = match args.get(1) {
+                        Some(Value::Int(n)) => {
+                            if *n < 0 {
+                                (len + *n).max(0) as usize
+                            } else {
+                                *n as usize
+                            }
+                        }
+                        _ => 0,
+                    };
+                    let end = match args.get(2) {
+                        Some(Value::Int(n)) => {
+                            if *n < 0 {
+                                (len + *n).max(0) as usize
+                            } else {
+                                (*n as usize).min(chars.len())
+                            }
+                        }
+                        _ => chars.len(),
+                    };
+                    if start >= end || start >= chars.len() {
+                        return Ok(self.alloc_string(""));
+                    }
+                    return Ok(self.alloc_string(&chars[start..end].iter().collect::<String>()));
+                }
+                // Array
+                let items = self.array_items(first, "slice() requires an array or string")?;
+                let len = items.len() as i64;
+                let start = match args.get(1) {
+                    Some(Value::Int(n)) => {
+                        if *n < 0 {
+                            (len + *n).max(0) as usize
+                        } else {
+                            *n as usize
+                        }
+                    }
+                    _ => 0,
+                };
+                let end = match args.get(2) {
+                    Some(Value::Int(n)) => {
+                        if *n < 0 {
+                            (len + *n).max(0) as usize
+                        } else {
+                            (*n as usize).min(items.len())
+                        }
+                    }
+                    _ => items.len(),
+                };
+                if start >= end || start >= items.len() {
+                    let r = self.gc.alloc(ObjKind::Array(vec![]));
+                    return Ok(Value::Obj(r));
+                }
+                let r = self.gc.alloc(ObjKind::Array(items[start..end].to_vec()));
+                Ok(Value::Obj(r))
+            }
+            "compact" => {
+                let items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("compact() requires an array"))?,
+                    "compact() requires an array",
+                )?;
+                let filtered: Vec<Value> = items
+                    .into_iter()
+                    .filter(|v| !matches!(v, Value::Null | Value::Bool(false)))
+                    .collect();
+                let r = self.gc.alloc(ObjKind::Array(filtered));
+                Ok(Value::Obj(r))
+            }
+            "partition" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("partition() requires (array, function)"));
+                }
+                let items = self.array_items(&args[0], "partition() first arg must be array")?;
+                let func = args[1].clone();
+                let mut matches = Vec::new();
+                let mut rest = Vec::new();
+                for item in items {
+                    let result = self.call_value(func.clone(), vec![item.clone()])?;
+                    if result.is_truthy(&self.gc) {
+                        matches.push(item);
+                    } else {
+                        rest.push(item);
+                    }
+                }
+                let matches_r = self.gc.alloc(ObjKind::Array(matches));
+                let rest_r = self.gc.alloc(ObjKind::Array(rest));
+                let r = self.gc.alloc(ObjKind::Array(vec![
+                    Value::Obj(matches_r),
+                    Value::Obj(rest_r),
+                ]));
+                Ok(Value::Obj(r))
+            }
+            "group_by" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("group_by() requires (array, function)"));
+                }
+                let items = self.array_items(&args[0], "group_by() first arg must be array")?;
+                let func = args[1].clone();
+                let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
+                for item in items {
+                    let key = self.call_value(func.clone(), vec![item.clone()])?;
+                    let key_str = key.display(&self.gc);
+                    groups.entry(key_str).or_default().push(item);
+                }
+                let mut result = IndexMap::new();
+                for (k, v) in groups {
+                    let arr = self.gc.alloc(ObjKind::Array(v));
+                    result.insert(k, Value::Obj(arr));
+                }
+                let r = self.gc.alloc(ObjKind::Object(result));
+                Ok(Value::Obj(r))
+            }
+            "sort_by" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("sort_by() requires (array, key_function)"));
+                }
+                let items = self.array_items(&args[0], "sort_by() first arg must be array")?;
+                let key_fn = args[1].clone();
+                // Pre-compute keys to avoid calling inside sort closure
+                let mut pairs: Vec<(Value, Value)> = Vec::new();
+                for item in items {
+                    let key = self.call_value(key_fn.clone(), vec![item.clone()])?;
+                    pairs.push((key, item));
+                }
+                pairs.sort_by(|(ka, _), (kb, _)| match (ka, kb) {
+                    (Value::Int(a), Value::Int(b)) => a.cmp(b),
+                    (Value::Float(a), Value::Float(b)) => {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                    (Value::Int(a), Value::Float(b)) => (*a as f64)
+                        .partial_cmp(b)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float(a), Value::Int(b)) => a
+                        .partial_cmp(&(*b as f64))
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    _ => {
+                        let sa = ka.display(&self.gc);
+                        let sb = kb.display(&self.gc);
+                        sa.cmp(&sb)
+                    }
+                });
+                let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
+                let r = self.gc.alloc(ObjKind::Array(sorted));
+                Ok(Value::Obj(r))
+            }
+            "for_each" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("for_each() requires (array, function)"));
+                }
+                let items = self.array_items(&args[0], "for_each() first arg must be array")?;
+                let func = args[1].clone();
+                for item in items {
+                    self.call_value(func.clone(), vec![item])?;
+                }
+                Ok(Value::Null)
+            }
+            "take_n" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("take_n() requires (array, count)"));
+                }
+                let items = self.array_items(&args[0], "take_n() first arg must be array")?;
+                let n = match args[1] {
+                    Value::Int(n) => (n.max(0) as usize).min(items.len()),
+                    _ => return Err(VMError::new("take_n() second arg must be int")),
+                };
+                let r = self.gc.alloc(ObjKind::Array(items[..n].to_vec()));
+                Ok(Value::Obj(r))
+            }
+            "skip" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("skip() requires (array, count)"));
+                }
+                let items = self.array_items(&args[0], "skip() first arg must be array")?;
+                let n = match args[1] {
+                    Value::Int(n) => (n.max(0) as usize).min(items.len()),
+                    _ => return Err(VMError::new("skip() second arg must be int")),
+                };
+                let r = self.gc.alloc(ObjKind::Array(items[n..].to_vec()));
+                Ok(Value::Obj(r))
+            }
+            "frequencies" => {
+                let items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("frequencies() requires an array"))?,
+                    "frequencies() requires an array",
+                )?;
+                let mut counts: IndexMap<String, Value> = IndexMap::new();
+                for item in &items {
+                    let key = item.display(&self.gc);
+                    let count = counts
+                        .get(&key)
+                        .and_then(|v| {
+                            if let Value::Int(n) = v {
+                                Some(*n)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    counts.insert(key, Value::Int(count + 1));
+                }
+                let r = self.gc.alloc(ObjKind::Object(counts));
+                Ok(Value::Obj(r))
+            }
+
+            // ===== String builtins =====
+            "substring" => {
+                let s = self.get_string_arg(&args, 0)?;
+                let start = match args.get(1) {
+                    Some(Value::Int(n)) => *n as usize,
+                    _ => return Err(VMError::new("substring() requires (string, start, end?)")),
+                };
+                let chars: Vec<char> = s.chars().collect();
+                let end = match args.get(2) {
+                    Some(Value::Int(n)) => (*n as usize).min(chars.len()),
+                    _ => chars.len(),
+                };
+                if start > chars.len() {
+                    return Ok(self.alloc_string(""));
+                }
+                Ok(self.alloc_string(&chars[start..end].iter().collect::<String>()))
+            }
+            "index_of" => {
+                let first = args
+                    .first()
+                    .ok_or_else(|| VMError::new("index_of() requires an argument"))?;
+                // String case
+                if let Some(s) = self.get_string(first) {
+                    let substr = self.get_string_arg(&args, 1)?;
+                    return Ok(Value::Int(s.find(&substr).map(|i| i as i64).unwrap_or(-1)));
+                }
+                // Array case
+                let items = self.array_items(first, "index_of() requires a string or array")?;
+                let needle = args
+                    .get(1)
+                    .ok_or_else(|| VMError::new("index_of() requires 2 arguments"))?;
+                let idx = items.iter().position(|v| v.equals(needle, &self.gc));
+                Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
+            }
+            "last_index_of" => {
+                let s = self.get_string_arg(&args, 0)?;
+                let substr = self.get_string_arg(&args, 1)?;
+                Ok(Value::Int(s.rfind(&substr).map(|i| i as i64).unwrap_or(-1)))
+            }
+            "capitalize" => {
+                let s = self.get_string_arg(&args, 0)?;
+                let mut chars = s.chars();
+                let result = match chars.next() {
+                    Some(c) => {
+                        let upper: String = c.to_uppercase().collect();
+                        let rest: String = chars.collect::<String>().to_lowercase();
+                        format!("{}{}", upper, rest)
+                    }
+                    None => String::new(),
+                };
+                Ok(self.alloc_string(&result))
+            }
+            "title" => {
+                let s = self.get_string_arg(&args, 0)?;
+                let result = s
+                    .split_whitespace()
+                    .map(|word| {
+                        let mut chars = word.chars();
+                        match chars.next() {
+                            Some(c) => {
+                                let upper: String = c.to_uppercase().collect();
+                                let rest: String = chars.collect::<String>().to_lowercase();
+                                format!("{}{}", upper, rest)
+                            }
+                            None => String::new(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Ok(self.alloc_string(&result))
+            }
+            "upper" => {
+                let s = self.get_string_arg(&args, 0)?;
+                Ok(self.alloc_string(&s.to_uppercase()))
+            }
+            "lower" => {
+                let s = self.get_string_arg(&args, 0)?;
+                Ok(self.alloc_string(&s.to_lowercase()))
+            }
+            "trim" => {
+                let s = self.get_string_arg(&args, 0)?;
+                Ok(self.alloc_string(s.trim()))
+            }
+            "pad_start" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("pad_start() requires (string, length)"));
+                }
+                let s = self.get_string_arg(&args, 0)?;
+                let target = match args[1] {
+                    Value::Int(n) => n as usize,
+                    _ => return Err(VMError::new("pad_start() second arg must be int")),
+                };
+                let pad_char = match args.get(2) {
+                    Some(v) => self
+                        .get_string(v)
+                        .and_then(|c| c.chars().next())
+                        .unwrap_or(' '),
+                    _ => ' ',
+                };
+                let char_count = s.chars().count();
+                if char_count >= target {
+                    Ok(self.alloc_string(&s))
+                } else {
+                    let padding: String = std::iter::repeat(pad_char)
+                        .take(target - char_count)
+                        .collect();
+                    Ok(self.alloc_string(&format!("{}{}", padding, s)))
+                }
+            }
+            "pad_end" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("pad_end() requires (string, length)"));
+                }
+                let s = self.get_string_arg(&args, 0)?;
+                let target = match args[1] {
+                    Value::Int(n) => n as usize,
+                    _ => return Err(VMError::new("pad_end() second arg must be int")),
+                };
+                let pad_char = match args.get(2) {
+                    Some(v) => self
+                        .get_string(v)
+                        .and_then(|c| c.chars().next())
+                        .unwrap_or(' '),
+                    _ => ' ',
+                };
+                let char_count = s.chars().count();
+                if char_count >= target {
+                    Ok(self.alloc_string(&s))
+                } else {
+                    let padding: String = std::iter::repeat(pad_char)
+                        .take(target - char_count)
+                        .collect();
+                    Ok(self.alloc_string(&format!("{}{}", s, padding)))
+                }
+            }
+            "repeat_str" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("repeat_str() requires (string, count)"));
+                }
+                let s = self.get_string_arg(&args, 0)?;
+                let n = match args[1] {
+                    Value::Int(n) if n >= 0 => n as usize,
+                    Value::Int(_) => {
+                        return Err(VMError::new("repeat_str() count must be non-negative"))
+                    }
+                    _ => return Err(VMError::new("repeat_str() second arg must be int")),
+                };
+                Ok(self.alloc_string(&s.repeat(n)))
+            }
+            "count" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("count() requires (string, substring)"));
+                }
+                let s = self.get_string_arg(&args, 0)?;
+                let substr = self.get_string_arg(&args, 1)?;
+                if substr.is_empty() {
+                    return Ok(Value::Int((s.len() + 1) as i64));
+                }
+                Ok(Value::Int(s.matches(&*substr).count() as i64))
+            }
+            "slugify" => {
+                let s = self.get_string_arg(&args, 0)?;
+                let slug: String = s
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                    .collect::<String>()
+                    .split('-')
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<&str>>()
+                    .join("-");
+                Ok(self.alloc_string(&slug))
+            }
+            "snake_case" => {
+                let s = self.get_string_arg(&args, 0)?;
+                let chars: Vec<char> = s.chars().collect();
+                let mut result = String::new();
+                for i in 0..chars.len() {
+                    let c = chars[i];
+                    if c.is_uppercase() {
+                        if i > 0 {
+                            let prev = chars[i - 1];
+                            if prev.is_lowercase() || prev.is_numeric() {
+                                result.push('_');
+                            } else if prev.is_uppercase()
+                                && i + 1 < chars.len()
+                                && chars[i + 1].is_lowercase()
+                            {
+                                result.push('_');
+                            }
+                        }
+                        result.push(c.to_lowercase().next().unwrap_or(c));
+                    } else if c == ' ' || c == '-' {
+                        result.push('_');
+                    } else {
+                        result.push(c);
+                    }
+                }
+                Ok(self.alloc_string(&result))
+            }
+            "camel_case" => {
+                let s = self.get_string_arg(&args, 0)?;
+                let parts: Vec<&str> = s
+                    .split(|c: char| c == '_' || c == ' ' || c == '-')
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let mut result = String::new();
+                for (i, part) in parts.iter().enumerate() {
+                    if i == 0 {
+                        result.push_str(&part.to_lowercase());
+                    } else {
+                        let mut chars = part.chars();
+                        if let Some(first) = chars.next() {
+                            result.push(first.to_uppercase().next().unwrap_or(first));
+                            result.push_str(&chars.as_str().to_lowercase());
+                        }
+                    }
+                }
+                Ok(self.alloc_string(&result))
+            }
+
+            // ===== Medium priority builtins =====
+            "sample" => {
+                let items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("sample() requires an array"))?,
+                    "sample() requires an array",
+                )?;
+                let n = match args.get(1) {
+                    Some(Value::Int(n)) => *n as usize,
+                    _ => 1,
+                };
+                if items.is_empty() {
+                    let r = self.gc.alloc(ObjKind::Array(vec![]));
+                    return Ok(Value::Obj(r));
+                }
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let seed = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                let mut result = Vec::with_capacity(n);
+                for i in 0..n {
+                    let mut x = seed.wrapping_add(i as u64);
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    let idx = (x % items.len() as u64) as usize;
+                    result.push(items[idx].clone());
+                }
+                if n == 1 {
+                    Ok(result.into_iter().next().unwrap_or(Value::Null))
+                } else {
+                    let r = self.gc.alloc(ObjKind::Array(result));
+                    Ok(Value::Obj(r))
+                }
+            }
+            "shuffle" => {
+                let mut items = self.array_items(
+                    args.first()
+                        .ok_or_else(|| VMError::new("shuffle() requires an array"))?,
+                    "shuffle() requires an array",
+                )?;
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let mut seed = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                for i in (1..items.len()).rev() {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let j = (seed % (i as u64 + 1)) as usize;
+                    items.swap(i, j);
+                }
+                let r = self.gc.alloc(ObjKind::Array(items));
+                Ok(Value::Obj(r))
+            }
+            "input" => {
+                use std::io::Read as _;
+                let mut buffer = String::new();
+                std::io::stdin().read_to_string(&mut buffer).ok();
+                Ok(self.alloc_string(buffer.trim_end()))
+            }
+            "unwrap_err" => {
+                if let Some(Value::Obj(r)) = args.first() {
+                    if let Some(obj) = self.gc.get(*r) {
+                        if let ObjKind::ResultErr(v) = &obj.kind {
+                            return Ok(self.alloc_string(&v.display(&self.gc)));
+                        }
+                        if matches!(obj.kind, ObjKind::ResultOk(_)) {
+                            return Err(VMError::new("unwrap_err() called on Ok"));
+                        }
+                    }
+                }
+                Err(VMError::new("unwrap_err() requires a Result value"))
+            }
+            "diff" => {
+                // Delegate to interpreter for deep diff logic
+                if args.len() < 2 {
+                    return Err(VMError::new("diff() requires two values to compare"));
+                }
+                let interp_args = self.args_to_interp(&args);
+                // Perform diff using interpreter values directly
+                fn diff_interp(
+                    a: &crate::interpreter::Value,
+                    b: &crate::interpreter::Value,
+                ) -> crate::interpreter::Value {
+                    if a == b {
+                        return crate::interpreter::Value::Null;
+                    }
+                    match (a, b) {
+                        (
+                            crate::interpreter::Value::Object(map_a),
+                            crate::interpreter::Value::Object(map_b),
+                        ) => {
+                            let mut changes = IndexMap::new();
+                            for (key, val_a) in map_a {
+                                if key.starts_with("__") {
+                                    continue;
+                                }
+                                match map_b.get(key) {
+                                    Some(val_b) => {
+                                        let d = diff_interp(val_a, val_b);
+                                        if d != crate::interpreter::Value::Null {
+                                            let mut change = IndexMap::new();
+                                            change.insert("from".to_string(), val_a.clone());
+                                            change.insert("to".to_string(), val_b.clone());
+                                            changes.insert(
+                                                key.clone(),
+                                                crate::interpreter::Value::Object(change),
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        let mut change = IndexMap::new();
+                                        change.insert("removed".to_string(), val_a.clone());
+                                        changes.insert(
+                                            key.clone(),
+                                            crate::interpreter::Value::Object(change),
+                                        );
+                                    }
+                                }
+                            }
+                            for (key, val_b) in map_b {
+                                if key.starts_with("__") {
+                                    continue;
+                                }
+                                if !map_a.contains_key(key) {
+                                    let mut change = IndexMap::new();
+                                    change.insert("added".to_string(), val_b.clone());
+                                    changes.insert(
+                                        key.clone(),
+                                        crate::interpreter::Value::Object(change),
+                                    );
+                                }
+                            }
+                            if changes.is_empty() {
+                                crate::interpreter::Value::Null
+                            } else {
+                                crate::interpreter::Value::Object(changes)
+                            }
+                        }
+                        _ => {
+                            let mut change = IndexMap::new();
+                            change.insert("from".to_string(), a.clone());
+                            change.insert("to".to_string(), b.clone());
+                            crate::interpreter::Value::Object(change)
+                        }
+                    }
+                }
+                let result = diff_interp(&interp_args[0], &interp_args[1]);
+                Ok(self.convert_interp_value(&result))
+            }
+            "assert_throws" => {
+                if args.is_empty() {
+                    return Err(VMError::new("assert_throws() requires a function"));
+                }
+                let func = args[0].clone();
+                match self.call_value(func, vec![]) {
+                    Err(_) => Ok(Value::Bool(true)),
+                    Ok(_) => Err(VMError::new(
+                        "assertion failed: expected function to throw an error, but it succeeded",
+                    )),
+                }
+            }
+
+            // ===== GenZ debug kit =====
+            "sus" => {
+                if args.is_empty() {
+                    return Err(VMError::new("sus() needs something to inspect, bestie"));
+                }
+                let val = &args[0];
+                let type_str = val.type_name(&self.gc);
+                let display = val.display(&self.gc);
+                eprintln!(
+                    "\x1b[33m\u{1f50d} SUS CHECK:\x1b[0m {} \x1b[2m({})\x1b[0m",
+                    display, type_str
+                );
+                Ok(args.into_iter().next().unwrap_or(Value::Null))
+            }
+            "bruh" => {
+                let msg = args
+                    .first()
+                    .map(|v| v.display(&self.gc))
+                    .unwrap_or_else(|| "something ain't right".to_string());
+                Err(VMError::new(&format!("BRUH: {}", msg)))
+            }
+            "bet" => {
+                let condition = match args.first() {
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => true,
+                    None => return Err(VMError::new("bet() needs a condition, no cap")),
+                };
+                if condition {
+                    Ok(Value::Bool(true))
+                } else {
+                    let msg = args
+                        .get(1)
+                        .map(|v| v.display(&self.gc))
+                        .unwrap_or_else(|| "condition was false".to_string());
+                    Err(VMError::new(&format!("LOST THE BET: {}", msg)))
+                }
+            }
+            "no_cap" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("no_cap() needs two values to compare, fr fr"));
+                }
+                if args[0].equals(&args[1], &self.gc) {
+                    Ok(Value::Bool(true))
+                } else {
+                    let a = args[0].display(&self.gc);
+                    let b = args[1].display(&self.gc);
+                    Err(VMError::new(&format!("CAP DETECTED: {} \u{2260} {}", a, b)))
+                }
+            }
+            "ick" => {
+                let condition = match args.first() {
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => true,
+                    None => return Err(VMError::new("ick() needs a condition to reject")),
+                };
+                if !condition {
+                    Ok(Value::Bool(true))
+                } else {
+                    let msg = args
+                        .get(1)
+                        .map(|v| v.display(&self.gc))
+                        .unwrap_or_else(|| "that's an ick".to_string());
+                    Err(VMError::new(&format!("ICK: {}", msg)))
+                }
+            }
+
+            // ===== Execution helpers =====
+            "cook" => {
+                if args.is_empty() {
+                    return Err(VMError::new(
+                        "cook() needs a function \u{2014} let him cook!",
+                    ));
+                }
+                let func = args[0].clone();
+                let start = std::time::Instant::now();
+                let result = self.call_value(func, vec![])?;
+                let elapsed = start.elapsed();
+                let ms = elapsed.as_secs_f64() * 1000.0;
+                if ms < 1.0 {
+                    eprintln!(
+                        "\x1b[32m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}\u{00b5}s \u{2014} \x1b[2mspeed demon fr\x1b[0m",
+                        elapsed.as_secs_f64() * 1_000_000.0
+                    );
+                } else if ms < 100.0 {
+                    eprintln!("\x1b[32m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}ms \u{2014} \x1b[2mno cap that was fast\x1b[0m", ms);
+                } else if ms < 1000.0 {
+                    eprintln!("\x1b[33m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.0}ms \u{2014} \x1b[2mit's giving adequate\x1b[0m", ms);
+                } else {
+                    eprintln!("\x1b[31m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}s \u{2014} \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64());
+                }
+                Ok(result)
+            }
+            "yolo" => {
+                if args.is_empty() {
+                    return Err(VMError::new("yolo() needs a function to send it on"));
+                }
+                let func = args[0].clone();
+                match self.call_value(func, vec![]) {
+                    Ok(val) => Ok(val),
+                    Err(_) => Ok(Value::Null),
+                }
+            }
+            "ghost" => {
+                if args.is_empty() {
+                    return Err(VMError::new("ghost() needs a function to haunt"));
+                }
+                let func = args[0].clone();
+                let result = self.call_value(func, vec![])?;
+                Ok(result)
+            }
+            "slay" => {
+                if args.is_empty() {
+                    return Err(VMError::new("slay() needs a function to benchmark"));
+                }
+                let func = args[0].clone();
+                let n = match args.get(1) {
+                    Some(Value::Int(n)) => *n as usize,
+                    _ => 100,
+                };
+                let mut times: Vec<f64> = Vec::with_capacity(n);
+                let mut last_result = Value::Null;
+                for _ in 0..n {
+                    let start = std::time::Instant::now();
+                    last_result = self.call_value(func.clone(), vec![])?;
+                    times.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+                times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let avg = times.iter().sum::<f64>() / times.len() as f64;
+                let min_t = times.first().copied().unwrap_or(0.0);
+                let max_t = times.last().copied().unwrap_or(0.0);
+                let p99_idx = ((times.len() as f64) * 0.99) as usize;
+                let p99 = times
+                    .get(p99_idx.min(times.len() - 1))
+                    .copied()
+                    .unwrap_or(0.0);
+                let mut stats = IndexMap::new();
+                stats.insert("avg_ms".to_string(), Value::Float(avg));
+                stats.insert("min_ms".to_string(), Value::Float(min_t));
+                stats.insert("max_ms".to_string(), Value::Float(max_t));
+                stats.insert("p99_ms".to_string(), Value::Float(p99));
+                stats.insert("runs".to_string(), Value::Int(n as i64));
+                stats.insert("result".to_string(), last_result);
+                eprintln!(
+                    "\x1b[35m\u{1f485} SLAYED:\x1b[0m {}x runs \u{2014} avg {:.3}ms, min {:.3}ms, max {:.3}ms, p99 {:.3}ms",
+                    n, avg, min_t, max_t, p99
+                );
+                let r = self.gc.alloc(ObjKind::Object(stats));
+                Ok(Value::Obj(r))
+            }
+
             // Note: lowercase ok/err aliases are handled ABOVE (before "Ok"/"Err") to avoid
             // unreachable pattern warnings. The dead duplicates below have been removed.
             _ => Err(VMError::new(&format!("unknown builtin: {}", name))),

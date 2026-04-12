@@ -151,19 +151,22 @@ installs to `forge_modules/`, manages `forge.lock`. 4 tests.
 - **What:** Wire up `await`, `spawn`, `hold` in the VM. Requires integrating tokio into the VM's execution loop or compiling async blocks into state machines.
 - **Note:** This is the hardest item on the entire roadmap. The interpreter uses Rust's native async; the VM would need coroutine-style suspend/resume or a similar mechanism.
 
-### 3.2 `try-catch` in compiler
+### ~~3.2 `try-catch` in compiler~~ ✅ DONE (pre-existing)
 
-- **Where:** `src/vm/compiler.rs` — currently logged as TODO (M1.2.2), catch block is dropped
-- **What:** Compile the catch block, emit `TryCatch` / `EndTry` opcodes, wire up the error handler in `machine.rs`.
+Already implemented — compiler emits TryCatch/EndTry opcodes, machine handles error recovery.
 
-### 3.3 `destructure` in compiler
+### ~~3.3 `destructure` in compiler~~ ✅ DONE (pre-existing)
 
-- **Where:** `src/vm/compiler.rs` — currently logged as TODO (M1.2.1), silently skipped
-- **What:** Compile `let {a, b} = obj` and `unpack {a, b} from obj` into register loads from object fields.
+Already implemented — both object and array destructuring compile to GetField/GetIndex ops.
 
-### 3.4 Remaining stdlib in VM
+### ~~3.4 Remaining stdlib in VM~~ ✅ DONE
 
-- **What:** Audit which stdlib functions the VM can't call. Port the dispatch tables from `vm/builtins.rs`. Track parity with the interpreter's `call_builtin.rs`.
+Added 4 missing module namespaces (npc, url, toml, ws) and 43 standalone builtins.
+Collections: first, last, zip, flatten, chunk, slice, compact, partition, group_by,
+sort_by, for_each, take_n, skip, frequencies, sample, shuffle.
+Strings: typeof, substring, index_of, last_index_of, capitalize, title, upper, lower,
+trim, pad_start, pad_end, repeat_str, count, slugify, snake_case, camel_case.
+Plus GenZ debug kit (sus, bruh, bet, no_cap, ick) and execution helpers (cook, yolo, ghost, slay).
 
 ### 3.5 `schedule` / `watch` in VM
 
@@ -195,4 +198,4 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 1 complete (all items including 1.5). Phase 2 items 2.1-2.3 complete. Remaining: 2.4 (publish — deferred until registry exists). Ready for Phase 3.**
+Current status: **Phase 3 — items 3.2-3.4 complete. Remaining: 3.1 (async VM), 3.5 (schedule/watch), 3.6 (JIT expansion). Phase 2 item 2.4 (publish) deferred.**

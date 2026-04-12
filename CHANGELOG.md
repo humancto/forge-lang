@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Relative import resolution** — `import "helper"` now resolves relative to the importing file's directory first, then falls back to CWD and `forge_modules/`. Enables packages with internal imports.
 - **Import struct/type/impl definitions** — wildcard imports (`import "lib"`) now copy struct definitions, type definitions, and impl block methods in addition to functions and variables
 - **Source spans in AST** — all inner statement bodies (`if`, `for`, `while`, `fn`, `match`, `try/catch`, etc.) now carry per-statement line and column info via `SpannedStmt`. Runtime errors report the exact source line, even inside deeply nested blocks.
+- **VM stdlib parity: 47 new builtins** — added 4 missing module namespaces (`npc`, `url`, `toml`, `ws`) and 43 standalone builtins to the VM: collections (`first`, `last`, `zip`, `flatten`, `chunk`, `slice`, `compact`, `partition`, `group_by`, `sort_by`, `for_each`, `take_n`, `skip`, `frequencies`, `sample`, `shuffle`), strings (`typeof`, `substring`, `index_of`, `last_index_of`, `capitalize`, `title`, `upper`, `lower`, `trim`, `pad_start`, `pad_end`, `repeat_str`, `count`, `slugify`, `snake_case`, `camel_case`), GenZ debug kit, and execution helpers
 - **Line-accurate runtime errors** — errors inside nested blocks now show the correct inner line with source snippets via ariadne, instead of pointing at the top-level statement
 
 ---
