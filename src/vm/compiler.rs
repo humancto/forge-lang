@@ -1773,8 +1773,23 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             c.emit(encode_abc(OpCode::Await, dst, src, 0), c.current_line);
             c.free_to(src);
         }
-        Expr::Must(inner) | Expr::Freeze(inner) | Expr::Ask(inner) => {
-            compile_expr(c, inner, dst)?;
+        Expr::Must(inner) => {
+            let src = c.alloc_reg();
+            compile_expr(c, inner, src)?;
+            c.emit(encode_abc(OpCode::Must, dst, src, 0), c.current_line);
+            c.free_to(src);
+        }
+        Expr::Ask(inner) => {
+            let src = c.alloc_reg();
+            compile_expr(c, inner, src)?;
+            c.emit(encode_abc(OpCode::Ask, dst, src, 0), c.current_line);
+            c.free_to(src);
+        }
+        Expr::Freeze(inner) => {
+            let src = c.alloc_reg();
+            compile_expr(c, inner, src)?;
+            c.emit(encode_abc(OpCode::Freeze, dst, src, 0), c.current_line);
+            c.free_to(src);
         }
         Expr::Spawn(body) => {
             let parent_locals = c.snapshot_locals();

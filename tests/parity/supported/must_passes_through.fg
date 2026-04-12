@@ -1,0 +1,3 @@
+// expect: hello
+
+must "hello"

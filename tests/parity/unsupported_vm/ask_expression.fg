@@ -1,4 +1,0 @@
-// expect-error: ask expressions
-
-let answer = ask "what is two plus two?"
-println(answer)

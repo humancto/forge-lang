@@ -1504,6 +1504,11 @@ impl VM {
                             } else {
                                 return Err(VMError::new("cannot set field on non-object"));
                             };
+                            if let Some(obj) = self.gc.get(obj_ref) {
+                                if matches!(&obj.kind, ObjKind::Frozen(_)) {
+                                    return Err(VMError::new("cannot mutate a frozen value"));
+                                }
+                            }
                             if let Some(obj) = self.gc.get_mut(obj_ref) {
                                 if let ObjKind::Object(map) = &mut obj.kind {
                                     map.insert(field.clone(), val);
@@ -1791,6 +1796,118 @@ impl VM {
                         };
 
                         spawn_watch_thread(sendable, child_closure, path);
+                    }
+                    OpCode::Must => {
+                        let src = self.registers[base + b as usize].clone();
+                        let result = match &src {
+                            Value::Null => {
+                                return Err(VMError::new("must failed: got null"));
+                            }
+                            Value::Obj(r) => match self.gc.get(*r).map(|o| &o.kind) {
+                                Some(ObjKind::ResultErr(v)) => {
+                                    let msg = v.display(&self.gc);
+                                    return Err(VMError::new(&format!("must failed: {}", msg)));
+                                }
+                                Some(ObjKind::ResultOk(v)) => v.clone(),
+                                _ => src,
+                            },
+                            _ => src,
+                        };
+                        self.registers[base + a as usize] = result;
+                    }
+                    OpCode::Ask => {
+                        let prompt_val = &self.registers[base + b as usize];
+                        let prompt_str = prompt_val.display(&self.gc);
+
+                        let api_key = std::env::var("FORGE_AI_KEY")
+                            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                            .unwrap_or_default();
+                        if api_key.is_empty() {
+                            return Err(VMError::new(
+                                "ask requires FORGE_AI_KEY or OPENAI_API_KEY environment variable",
+                            ));
+                        }
+
+                        let model = std::env::var("FORGE_AI_MODEL")
+                            .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+                        let url = std::env::var("FORGE_AI_URL").unwrap_or_else(|_| {
+                            "https://api.openai.com/v1/chat/completions".to_string()
+                        });
+                        let body = format!(
+                            r#"{{"model":"{}","messages":[{{"role":"user","content":"{}"}}],"max_tokens":1000}}"#,
+                            model,
+                            prompt_str.replace('\\', "\\\\").replace('"', "\\\"")
+                        );
+                        let mut headers = std::collections::HashMap::new();
+                        headers.insert("Authorization".to_string(), format!("Bearer {}", api_key));
+                        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+                        match crate::runtime::client::fetch_blocking(
+                            &url,
+                            "POST",
+                            Some(body),
+                            Some(&headers),
+                            None,
+                            None,
+                            None,
+                        ) {
+                            Ok(crate::interpreter::Value::Object(resp)) => {
+                                let content = resp
+                                    .get("json")
+                                    .and_then(|j| {
+                                        if let crate::interpreter::Value::Object(json) = j {
+                                            json.get("choices")
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .and_then(|c| {
+                                        if let crate::interpreter::Value::Array(choices) = c {
+                                            choices.first()
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .and_then(|c| {
+                                        if let crate::interpreter::Value::Object(choice) = c {
+                                            choice.get("message")
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .and_then(|m| {
+                                        if let crate::interpreter::Value::Object(msg) = m {
+                                            msg.get("content")
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .and_then(|c| {
+                                        if let crate::interpreter::Value::String(s) = c {
+                                            Some(s.clone())
+                                        } else {
+                                            None
+                                        }
+                                    });
+
+                                if let Some(text) = content {
+                                    self.registers[base + a as usize] = self.alloc_string(&text);
+                                } else {
+                                    self.registers[base + a as usize] = Value::Null;
+                                }
+                            }
+                            Ok(_) => {
+                                self.registers[base + a as usize] = Value::Null;
+                            }
+                            Err(e) => {
+                                return Err(VMError::new(&format!("ask error: {}", e)));
+                            }
+                        }
+                    }
+                    OpCode::Freeze => {
+                        let src = self.registers[base + b as usize].clone();
+                        let frozen_ref = self.gc.alloc(ObjKind::Frozen(src));
+                        self.registers[base + a as usize] = Value::Obj(frozen_ref);
                     }
                     _ => {
                         return Err(VMError::new(&format!("unknown opcode: {}", op)));

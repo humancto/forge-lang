@@ -42,6 +42,7 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
                 }
                 ObjKind::ResultOk(v) => SharedValue::ResultOk(Box::new(value_to_shared(gc, v))),
                 ObjKind::ResultErr(v) => SharedValue::ResultErr(Box::new(value_to_shared(gc, v))),
+                ObjKind::Frozen(v) => value_to_shared(gc, v),
                 // Functions, closures, natives, upvalues, task handles are not transferable
                 _ => SharedValue::Null,
             },
@@ -225,6 +226,7 @@ impl GcObject {
             ObjKind::ResultOk(v) => format!("Ok({})", v.display(gc)),
             ObjKind::ResultErr(v) => format!("Err({})", v.display(gc)),
             ObjKind::TaskHandle(_) => "<task>".to_string(),
+            ObjKind::Frozen(v) => v.display(gc),
         }
     }
 
@@ -259,6 +261,7 @@ impl GcObject {
             ObjKind::Upvalue(_) => "Upvalue",
             ObjKind::ResultOk(_) | ObjKind::ResultErr(_) => "Result",
             ObjKind::TaskHandle(_) => "TaskHandle",
+            ObjKind::Frozen(_) => "Frozen",
         }
     }
 
@@ -298,7 +301,7 @@ impl GcObject {
                     worklist.push(*r);
                 }
             }
-            ObjKind::ResultOk(v) | ObjKind::ResultErr(v) => {
+            ObjKind::ResultOk(v) | ObjKind::ResultErr(v) | ObjKind::Frozen(v) => {
                 if let Value::Obj(r) = v {
                     worklist.push(*r);
                 }
@@ -320,6 +323,7 @@ pub enum ObjKind {
     ResultOk(Value),
     ResultErr(Value),
     TaskHandle(Arc<(std::sync::Mutex<Option<SharedValue>>, std::sync::Condvar)>),
+    Frozen(Value),
 }
 
 #[derive(Clone)]

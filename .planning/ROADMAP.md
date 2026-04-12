@@ -128,10 +128,12 @@ Already implemented in `src/package.rs`: `install()` handles git URLs, local pat
 and registry sources. `install_from_manifest()` reads `forge.toml` dependencies,
 installs to `forge_modules/`, manages `forge.lock`. 4 tests.
 
-### 2.4 `forge publish`
+### ~~2.4 `forge publish`~~ ✅ DONE (PR #16)
 
-- **What:** Package the current project and push to a registry. Requires a registry service (hosted or self-hosted).
-- **Note:** This is the most ambitious item. Defer until 2.1-2.3 are solid.
+Local filesystem registry: `forge publish` packages the project and copies to
+`~/.forge/registry/<name>/<version>/`. SHA-256 checksums, symlink protection,
+manifest validation, `--dry-run` and `--registry` flags. Integrates with
+existing `forge install` via `default_registry_roots()`.
 
 ### Order of attack
 
@@ -208,7 +210,7 @@ Each phase is independent. When picking up work:
 5. After each item: `cargo test`, atomic commit, update CHANGELOG
 6. After each phase: cut a release
 
-Current status: **Phase 3 complete (all items 3.1-3.6 done). Phase 2 item 2.4 (publish) deferred.**
+Current status: **Phase 3 complete. Phase 2 complete. Starting Phase 4.**
 
 ---
 
