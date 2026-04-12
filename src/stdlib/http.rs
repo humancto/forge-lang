@@ -400,17 +400,19 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
 
 fn run_async<F, T>(future: F) -> Result<T, String>
 where
-    F: std::future::Future<Output = Result<T, String>> + Send + 'static,
-    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, String>>,
 {
-    // Always create a fresh runtime on a separate thread to avoid nesting issues
-    let handle = std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime error: {}", e))?;
-        rt.block_on(future)
-    });
-    handle
-        .join()
-        .map_err(|_| "async execution panicked".to_string())?
+    // Reuse the current Tokio runtime if available (VM/interpreter async context),
+    // otherwise fall back to a thread-local runtime to avoid creating one per call.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(future))
+    } else {
+        thread_local! {
+            static RT: tokio::runtime::Runtime = tokio::runtime::Runtime::new()
+                .expect("BUG: failed to create fallback tokio runtime");
+        }
+        RT.with(|rt| rt.block_on(future))
+    }
 }
 
 fn extract_between(html: &str, start_tag: &str, end_tag: &str) -> Option<String> {
