@@ -439,6 +439,8 @@ mod tests {
         // Must use .fgc extension for temp file
         assert!(c_source.contains(".fgc"));
         assert!(c_source.contains("forge-aot-"));
+        // Must NOT contain the source-embedding array name
+        assert!(!c_source.contains("FORGE_PROGRAM[]"));
     }
 
     #[cfg(unix)]
