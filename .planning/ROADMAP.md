@@ -274,7 +274,7 @@ to prevent stdout corruption. Thread-safe shared seq counter.
 - [x] 5B.2 Hoist `Arc<Chunk>` reference outside VM dispatch loop (`machine.rs:1025`) (PR #27)
 - [x] 5B.3 Lazy register allocation or reduced `MAX_REGISTERS` (`machine.rs:295`) (PR #28)
 - [x] 5B.4 Add internal timing to benchmarks + fix array benchmark fairness (`benchmarks/`) (PR #29)
-- [ ] 5B.5 Add Rust/Go/Node.js fib(30) benchmark files for landing page verification (`benchmarks/`)
+- [x] 5B.5 Add Rust/Go/Node.js fib(30) benchmark files for landing page verification (`benchmarks/`) (PR #30)
 
 ### Phase 5C — Medium Priority
 
