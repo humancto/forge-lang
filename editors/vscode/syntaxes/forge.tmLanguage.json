@@ -4,11 +4,12 @@
   "fileTypes": ["fg"],
   "patterns": [
     { "include": "#comments" },
-    { "include": "#strings" },
     { "include": "#triple-strings" },
+    { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#keywords" },
     { "include": "#natural-keywords" },
+    { "include": "#innovation-keywords" },
     { "include": "#types" },
     { "include": "#builtins" },
     { "include": "#modules" },
@@ -22,6 +23,11 @@
     "comments": {
       "match": "//.*$",
       "name": "comment.line.double-slash.forge"
+    },
+    "triple-strings": {
+      "begin": "\"\"\"",
+      "end": "\"\"\"",
+      "name": "string.quoted.triple.forge"
     },
     "strings": {
       "begin": "\"",
@@ -40,34 +46,33 @@
         }
       ]
     },
-    "triple-strings": {
-      "begin": "\"\"\"",
-      "end": "\"\"\"",
-      "name": "string.quoted.triple.forge"
-    },
     "numbers": {
-      "match": "\\b(\\d+\\.\\d+|\\d+(_\\d+)*)\\b",
+      "match": "\\b(0x[0-9a-fA-F]+|0b[01]+|0o[0-7]+|\\d+\\.\\d+|\\d+(_\\d+)*)\\b",
       "name": "constant.numeric.forge"
     },
     "keywords": {
-      "match": "\\b(let|mut|fn|return|if|else|match|for|in|while|loop|break|continue|struct|type|interface|impl|pub|import|spawn|async|await|yield|try|catch)\\b",
+      "match": "\\b(let|mut|fn|return|if|else|match|for|in|while|loop|break|continue|struct|type|interface|impl|pub|import|from|spawn|async|await|yield|try|catch|defer)\\b",
       "name": "keyword.control.forge"
     },
     "natural-keywords": {
-      "match": "\\b(set|to|change|define|otherwise|nah|each|repeat|times|grab|from|wait|seconds|say|yell|whisper|forge|hold|emit|unpack)\\b",
+      "match": "\\b(set|to|change|define|otherwise|nah|each|repeat|times|grab|wait|seconds|minutes|say|yell|whisper|forge|hold|emit|unpack|give|freeze)\\b",
       "name": "keyword.other.forge"
     },
+    "innovation-keywords": {
+      "match": "\\b(must|safe|check|is|not|empty|retry|timeout|schedule|every|watch|ask|download|crawl|when|metadata)\\b",
+      "name": "keyword.other.innovation.forge"
+    },
     "types": {
-      "match": "\\b(Int|Float|String|Bool|Json)\\b",
+      "match": "\\b(Int|Float|String|Bool|Json|Array|Object|Option|Result)\\b",
       "name": "support.type.forge"
     },
     "builtins": {
-      "match": "\\b(println|print|len|type|str|int|float|push|pop|map|filter|reduce|sort|reverse|keys|values|contains|range|enumerate|split|join|replace|starts_with|ends_with|Ok|Err|Some|None|is_ok|is_err|is_some|is_none|unwrap|unwrap_or|assert|assert_eq|fetch|time|uuid|exit|run_command|satisfies)\\b",
+      "match": "\\b(println|print|len|type|typeof|str|int|float|push|pop|map|filter|reduce|sort|reverse|keys|values|contains|range|enumerate|split|join|replace|starts_with|ends_with|Ok|ok|Err|err|Some|None|is_ok|is_err|is_some|is_none|unwrap|unwrap_or|assert|assert_eq|assert_ne|assert_throws|fetch|uuid|exit|run_command|satisfies|sum|min_of|max_of|unique|zip|flatten|group_by|chunk|slice|partition|find|flat_map|any|all|sample|shuffle|has_key|get|pick|omit|merge|entries|from_entries|diff|lines|substring|index_of|last_index_of|pad_start|pad_end|capitalize|title|repeat_str|count|slugify|snake_case|camel_case|sh|shell|sh_lines|sh_json|sh_ok|which|cwd|cd|pipe_to|channel|send|receive|try_send|try_receive|input|sus|bruh|bet|no_cap|ick|cook|yolo|ghost|slay)\\b",
       "name": "support.function.forge"
     },
     "modules": {
-      "match": "\\b(math|fs|io|crypto|db|env|json|regex|log)\\b",
-      "name": "support.class.forge"
+      "match": "\\b(math|fs|io|crypto|db|pg|mysql|env|json|regex|log|http|csv|term|exec|time|npc|url|toml|ws|jwt|os|path)\\b(?=\\.)",
+      "name": "entity.name.namespace.forge"
     },
     "decorators": {
       "match": "@\\w+",
@@ -89,7 +94,7 @@
       }
     },
     "function-call": {
-      "match": "\\b(\\w+)\\s*\\(",
+      "match": "\\b(?!fn|define|forge|if|else|while|for|match|return|let|set|import|spawn|async|await|struct|type|interface|impl|pub|try|catch)([a-zA-Z_]\\w*)\\s*\\(",
       "captures": {
         "1": { "name": "entity.name.function.forge" }
       }
