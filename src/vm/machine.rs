@@ -500,6 +500,9 @@ impl VM {
             "send",
             "receive",
             "close",
+            "try_send",
+            "try_receive",
+            "select",
         ];
         for name in &builtins {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {

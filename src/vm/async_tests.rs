@@ -296,3 +296,131 @@ fn vm_channel_send_receive_array() {
     );
     assert_eq!(out, vec!["3", "20"]);
 }
+
+// ----- Channel extras: try_send, try_receive, select -----
+
+#[test]
+fn vm_try_send_success() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        println(try_send(ch, 42))
+    "#,
+    );
+    assert_eq!(out, vec!["true"]);
+}
+
+#[test]
+fn vm_try_send_full() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        try_send(ch, 1)
+        println(try_send(ch, 2))
+    "#,
+    );
+    assert_eq!(out, vec!["false"]);
+}
+
+#[test]
+fn vm_try_send_closed() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        close(ch)
+        println(try_send(ch, 1))
+    "#,
+    );
+    assert_eq!(out, vec!["false"]);
+}
+
+#[test]
+fn vm_try_receive_available() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        send(ch, 42)
+        let result = try_receive(ch)
+        println(is_some(result))
+        println(unwrap(result))
+    "#,
+    );
+    assert_eq!(out, vec!["true", "42"]);
+}
+
+#[test]
+fn vm_try_receive_empty() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        let result = try_receive(ch)
+        println(is_none(result))
+    "#,
+    );
+    assert_eq!(out, vec!["true"]);
+}
+
+#[test]
+fn vm_select_single_channel() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        send(ch, "hello")
+        let result = select([ch])
+        println(result[0])
+        println(result[1])
+    "#,
+    );
+    assert_eq!(out, vec!["0", "hello"]);
+}
+
+#[test]
+fn vm_select_multiple_channels() {
+    let out = run_on_vm(
+        r#"
+        let ch1 = channel(1)
+        let ch2 = channel(1)
+        send(ch2, "from-ch2")
+        let result = select([ch1, ch2])
+        println(result[0])
+        println(result[1])
+    "#,
+    );
+    assert_eq!(out, vec!["1", "from-ch2"]);
+}
+
+#[test]
+fn vm_select_timeout() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        let result = select([ch], 10)
+        println(result)
+    "#,
+    );
+    assert_eq!(out, vec!["null"]);
+}
+
+#[test]
+fn vm_select_all_closed() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        close(ch)
+        let result = select([ch])
+        println(result)
+    "#,
+    );
+    assert_eq!(out, vec!["null"]);
+}
+
+#[test]
+fn vm_select_empty_array() {
+    let out = run_on_vm(
+        r#"
+        let result = select([])
+        println(result)
+    "#,
+    );
+    assert_eq!(out, vec!["null"]);
+}
