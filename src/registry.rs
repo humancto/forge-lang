@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -36,8 +37,16 @@ pub fn registry_url() -> String {
 }
 
 /// Get the cache directory for registry data.
+/// Uses $HOME/.forge/cache/registry/ so the cache is shared across projects.
 fn cache_dir() -> PathBuf {
-    PathBuf::from(".forge").join("cache").join("registry")
+    if let Ok(home) = env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
+        PathBuf::from(home)
+            .join(".forge")
+            .join("cache")
+            .join("registry")
+    } else {
+        PathBuf::from(".forge").join("cache").join("registry")
+    }
 }
 
 /// Get the configured cache TTL.
@@ -70,7 +79,7 @@ fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let temp = path.with_extension("tmp");
+    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&temp, content)?;
     std::fs::rename(&temp, path)?;
     Ok(())
@@ -219,9 +228,31 @@ pub fn download_to(url: &str, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Verify a file's SHA-256 checksum against an expected value.
+/// Checksum format: "sha256:<hex>" or plain hex.
+pub fn verify_checksum(path: &Path, expected: &str) -> Result<(), String> {
+    let expected_hex = expected.strip_prefix("sha256:").unwrap_or(expected);
+
+    let data =
+        std::fs::read(path).map_err(|e| format!("failed to read file for checksum: {}", e))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    let actual_hex = format!("{:x}", hasher.finalize());
+
+    if actual_hex != expected_hex {
+        return Err(format!(
+            "checksum mismatch: expected {}, got {}",
+            expected_hex, actual_hex
+        ));
+    }
+    Ok(())
+}
+
 /// Download a tarball and extract it to a destination directory.
 /// Handles GitHub-style archives that contain a single root directory.
-pub fn download_and_extract(url: &str, dest: &Path) -> Result<(), String> {
+/// Validates tar entries to prevent path traversal attacks.
+pub fn download_and_extract(url: &str, dest: &Path, checksum: &str) -> Result<(), String> {
     let temp_dir = dest.with_extension("extracting");
     if temp_dir.exists() {
         std::fs::remove_dir_all(&temp_dir)
@@ -231,7 +262,12 @@ pub fn download_and_extract(url: &str, dest: &Path) -> Result<(), String> {
     let temp_archive = dest.with_extension("tar.gz");
     download_to(url, &temp_archive)?;
 
-    // Extract the archive
+    // Verify checksum if provided
+    if !checksum.is_empty() {
+        verify_checksum(&temp_archive, checksum)?;
+    }
+
+    // Extract the archive with path traversal protection
     let file =
         std::fs::File::open(&temp_archive).map_err(|e| format!("failed to open archive: {}", e))?;
     let decoder = flate2::read::GzDecoder::new(file);
@@ -239,9 +275,27 @@ pub fn download_and_extract(url: &str, dest: &Path) -> Result<(), String> {
 
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("failed to create temp dir: {}", e))?;
 
-    archive
-        .unpack(&temp_dir)
-        .map_err(|e| format!("failed to extract archive: {}", e))?;
+    // Validate each entry path before extracting
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("failed to read archive entries: {}", e))?
+    {
+        let mut entry = entry.map_err(|e| format!("corrupt archive entry: {}", e))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("invalid entry path: {}", e))?;
+
+        // Reject absolute paths and path traversal
+        let path_str = path.to_string_lossy().to_string();
+        if path.is_absolute() || path_str.contains("..") {
+            return Err(format!("archive contains unsafe path: {}", path_str));
+        }
+        drop(path);
+
+        entry
+            .unpack_in(&temp_dir)
+            .map_err(|e| format!("failed to extract '{}': {}", path_str, e))?;
+    }
 
     // Clean up the archive
     let _ = std::fs::remove_file(&temp_archive);
@@ -420,5 +474,47 @@ url = "https://example.com/utils.tar.gz"
 
         // Clean up
         std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn checksum_verification_pass() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("forge-checksum-{}", unique));
+        std::fs::write(&path, b"hello world").unwrap();
+
+        // SHA-256 of "hello world"
+        let expected = "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        verify_checksum(&path, expected).unwrap();
+
+        // Also works without prefix
+        verify_checksum(
+            &path,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+        )
+        .unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn checksum_verification_fail() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("forge-checksum-fail-{}", unique));
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let err = verify_checksum(&path, "sha256:0000000000000000").unwrap_err();
+        assert!(err.contains("checksum mismatch"));
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

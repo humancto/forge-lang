@@ -322,6 +322,8 @@ fn install_from_remote_registry(
 ) -> Result<LockedPackage, String> {
     use crate::registry;
 
+    validate_package_name(name)?;
+
     let entry = match registry::fetch_package_entry(name) {
         Ok(Some(e)) => e,
         Ok(None) => {
@@ -351,7 +353,7 @@ fn install_from_remote_registry(
         "  Downloading {} @ {} from remote registry...",
         name, resolved.version
     );
-    registry::download_and_extract(&resolved.url, &packages_dir.join(name))?;
+    registry::download_and_extract(&resolved.url, &packages_dir.join(name), &resolved.checksum)?;
     println!(
         "  \x1B[32m✓\x1B[0m Installed {} @ {} (remote)",
         name, resolved.version
