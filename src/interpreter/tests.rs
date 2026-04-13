@@ -4173,6 +4173,41 @@ fn await_timeout_non_handle_errors() {
     assert!(result.is_err());
 }
 
+#[test]
+fn spawn_result_ok_unwrapped_by_await() {
+    let result = try_run_forge(
+        r#"
+        let h = spawn { 42 }
+        let val = await h
+        assert_eq(val, 42)
+    "#,
+    );
+    assert!(result.is_ok(), "spawn result ok: {:?}", result.err());
+}
+
+#[test]
+fn spawn_error_propagated_by_await() {
+    let result = try_run_forge(
+        r#"
+        let h = spawn { 1 / 0 }
+        await h
+    "#,
+    );
+    assert!(result.is_err(), "spawn error should propagate");
+}
+
+#[test]
+fn await_all_propagates_task_error() {
+    let result = try_run_forge(
+        r#"
+        let h1 = spawn { 10 }
+        let h2 = spawn { 1 / 0 }
+        await_all([h1, h2])
+    "#,
+    );
+    assert!(result.is_err());
+}
+
 // === Phase 2: Short-circuit tests ===
 
 #[test]

@@ -2533,7 +2533,14 @@ impl Interpreter {
                                 .wait(guard)
                                 .map_err(|_| RuntimeError::new("await: condvar wait failed"))?;
                         }
-                        Ok(guard.take().unwrap_or(Value::Null))
+                        let result = guard.take().unwrap_or(Value::Null);
+                        match result {
+                            Value::ResultOk(v) => Ok(*v),
+                            Value::ResultErr(e) => {
+                                Err(RuntimeError::new(&format!("task error: {}", e)))
+                            }
+                            other => Ok(other),
+                        }
                     }
                     // Non-handle values pass through (backward compatible)
                     other => Ok(other),
@@ -3065,12 +3072,11 @@ impl Interpreter {
         std::thread::spawn(move || {
             let result = spawn_interp.exec_block(&body);
             let val = match result {
-                Ok(Signal::Return(v)) | Ok(Signal::ImplicitReturn(v)) => v,
-                Ok(_) => Value::Null,
-                Err(e) => {
-                    eprintln!("spawn error: {}", e.message);
-                    Value::Null
+                Ok(Signal::Return(v)) | Ok(Signal::ImplicitReturn(v)) => {
+                    Value::ResultOk(Box::new(v))
                 }
+                Ok(_) => Value::ResultOk(Box::new(Value::Null)),
+                Err(e) => Value::ResultErr(Box::new(Value::String(e.message))),
             };
             let (lock, cvar) = &*slot_clone;
             if let Ok(mut guard) = lock.lock() {

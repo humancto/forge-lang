@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unbounded channels** — `channel()` with no args creates an unbounded channel; `channel(n)` creates bounded as before. ([#71](https://github.com/humancto/forge-lang/pull/71))
 - **`await_all(handles)` builtin** — wait for multiple spawned tasks and collect results into an array. ([#72](https://github.com/humancto/forge-lang/pull/72))
 - **`await_timeout(handle, ms)` builtin** — wait for a task with a deadline; returns Null on timeout. ([#73](https://github.com/humancto/forge-lang/pull/73))
+- **Spawn Result wrapping** — spawned tasks wrap results in Ok/Err; `await` auto-unwraps Ok and propagates Err as runtime errors. ([#74](https://github.com/humancto/forge-lang/pull/74))
 
 ## [0.8.0] - 2026-04-12
 
