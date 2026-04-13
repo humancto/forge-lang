@@ -26,7 +26,7 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 
 - [x] 8C.1 Union types — `type StringOrInt = String | Int`. Parse `|` in type position, check assignability. Touch: `parser.rs`, `typechecker.rs`.
 - [x] 8C.2 Type aliases — `type UserId = Int`. Simple substitution in the checker. Touch: `parser.rs`, `typechecker.rs`.
-- [ ] 8C.3 Typed collection literals — `let xs: [Int] = [1, 2, 3]` validates element types. Touch: `typechecker.rs`.
+- [x] 8C.3 Typed collection literals — `let xs: [Int] = [1, 2, 3]` validates element types. Touch: `typechecker.rs`.
 
 ---
 
