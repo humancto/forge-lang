@@ -105,49 +105,24 @@ fn install_manifest_dependencies(
     let mut lockfile = load_lockfile_from(lockfile_path).unwrap_or_default();
     let mut installed = 0;
 
+    // Track the root project to detect cycles back to it
+    let mut visiting = vec![manifest.project.name.clone()];
+
     for (name, spec) in &manifest.dependencies {
-        let locked = match spec {
-            DependencySpec::Version(ver) => {
-                install_from_registry_as(name, ver, packages_dir, registry_roots)?
-            }
-            DependencySpec::Detailed(dep) if !dep.git.is_empty() => {
-                let branch = if dep.branch.is_empty() {
-                    None
-                } else {
-                    Some(dep.branch.as_str())
-                };
-                install_from_git_as(name, &dep.git, branch, packages_dir)?;
-                LockedPackage {
-                    name: name.clone(),
-                    version: dep.version.clone(),
-                    source: format!("git+{}", dep.git),
-                    checksum: get_git_rev(packages_dir, name),
-                }
-            }
-            DependencySpec::Detailed(dep) if !dep.path.is_empty() => {
-                let source_path = manifest_root.join(&dep.path);
-                install_from_path_as(name, &source_path, packages_dir)?;
-                LockedPackage {
-                    name: name.clone(),
-                    version: dep.version.clone(),
-                    source: format!("path+{}", source_path.display()),
-                    checksum: String::new(),
-                }
-            }
-            DependencySpec::Detailed(dep) if !dep.version.is_empty() => {
-                install_from_registry_as(name, &dep.version, packages_dir, registry_roots)?
-            }
-            DependencySpec::Detailed(_) => {
-                return Err(format!(
-                    "  Error: dependency '{}' has no supported source. Use version, path, or git.",
-                    name
-                ));
-            }
-        };
+        let locked =
+            install_single_dependency(name, spec, manifest_root, packages_dir, registry_roots)?;
 
         lockfile.packages.retain(|p| p.name != *name);
         lockfile.packages.push(locked);
         installed += 1;
+
+        // Resolve transitive dependencies
+        let transitive = resolve_transitive(name, packages_dir, registry_roots, &mut visiting)?;
+        for tlocked in transitive {
+            lockfile.packages.retain(|p| p.name != tlocked.name);
+            lockfile.packages.push(tlocked);
+            installed += 1;
+        }
     }
 
     save_lockfile_at(&lockfile, lockfile_path)
@@ -166,6 +141,102 @@ fn package_name_from_source(source: &str) -> String {
         .or_else(|| Path::new(source).file_name())
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "package".to_string())
+}
+
+fn install_single_dependency(
+    name: &str,
+    spec: &DependencySpec,
+    context_dir: &Path,
+    packages_dir: &Path,
+    registry_roots: &[PathBuf],
+) -> Result<LockedPackage, String> {
+    match spec {
+        DependencySpec::Version(ver) => {
+            install_from_registry_as(name, ver, packages_dir, registry_roots)
+        }
+        DependencySpec::Detailed(dep) if !dep.git.is_empty() => {
+            let branch = if dep.branch.is_empty() {
+                None
+            } else {
+                Some(dep.branch.as_str())
+            };
+            install_from_git_as(name, &dep.git, branch, packages_dir)?;
+            Ok(LockedPackage {
+                name: name.to_string(),
+                version: dep.version.clone(),
+                source: format!("git+{}", dep.git),
+                checksum: get_git_rev(packages_dir, name),
+            })
+        }
+        DependencySpec::Detailed(dep) if !dep.path.is_empty() => {
+            let source_path = context_dir.join(&dep.path);
+            install_from_path_as(name, &source_path, packages_dir)?;
+            Ok(LockedPackage {
+                name: name.to_string(),
+                version: dep.version.clone(),
+                source: format!("path+{}", source_path.display()),
+                checksum: String::new(),
+            })
+        }
+        DependencySpec::Detailed(dep) if !dep.version.is_empty() => {
+            install_from_registry_as(name, &dep.version, packages_dir, registry_roots)
+        }
+        DependencySpec::Detailed(_) => Err(format!(
+            "  Error: dependency '{}' has no supported source. Use version, path, or git.",
+            name
+        )),
+    }
+}
+
+fn resolve_transitive(
+    parent: &str,
+    packages_dir: &Path,
+    registry_roots: &[PathBuf],
+    visiting: &mut Vec<String>,
+) -> Result<Vec<LockedPackage>, String> {
+    let pkg_dir = packages_dir.join(parent);
+    let manifest_path = pkg_dir.join("forge.toml");
+
+    let sub_manifest = match manifest::load_manifest_from(&manifest_path) {
+        Some(m) => m,
+        None => return Ok(Vec::new()), // Leaf package, no transitive deps
+    };
+
+    if sub_manifest.dependencies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    visiting.push(parent.to_string());
+
+    let mut results = Vec::new();
+
+    for (dep_name, dep_spec) in &sub_manifest.dependencies {
+        // Cycle detection: check before install skip
+        if visiting.iter().any(|v| v == dep_name) {
+            let chain = visiting.join(" -> ");
+            return Err(format!(
+                "  Error: circular dependency detected: {} -> {}",
+                chain, dep_name
+            ));
+        }
+
+        // Skip if already installed (diamond dependency)
+        if packages_dir.join(dep_name).exists() {
+            continue;
+        }
+
+        // Resolve relative to the installed package's directory
+        let locked =
+            install_single_dependency(dep_name, dep_spec, &pkg_dir, packages_dir, registry_roots)?;
+        results.push(locked);
+
+        // Recurse into this transitive dep's own dependencies
+        let nested = resolve_transitive(dep_name, packages_dir, registry_roots, visiting)?;
+        results.extend(nested);
+    }
+
+    visiting.pop();
+    Ok(results)
 }
 
 fn default_registry_roots() -> Vec<PathBuf> {
@@ -751,5 +822,253 @@ toolkit = "1.2.3"
 
         let err = resolve_best_version("", &VersionReq::STAR, &[]).unwrap_err();
         assert!(err.contains("invalid package name"));
+    }
+
+    // --- Transitive dependency tests ---
+
+    fn write_forge_toml(dir: &Path, content: &str) {
+        std::fs::write(dir.join("forge.toml"), content).unwrap();
+    }
+
+    #[test]
+    fn transitive_deps_chain() {
+        // A -> B -> C (all path deps)
+        let workspace = temp_path("trans-chain");
+        let pkg_b_src = workspace.join("pkg-b");
+        let pkg_c_src = workspace.join("pkg-c");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let lockfile_path = workspace.join("forge.lock");
+
+        // Create source packages
+        std::fs::create_dir_all(&pkg_b_src).unwrap();
+        std::fs::write(pkg_b_src.join("main.fg"), "// pkg-b").unwrap();
+        write_forge_toml(
+            &pkg_b_src,
+            &format!(
+                "[project]\nname = \"pkg-b\"\n[dependencies]\npkg-c = {{ path = \"{}\" }}",
+                pkg_c_src.display()
+            ),
+        );
+
+        std::fs::create_dir_all(&pkg_c_src).unwrap();
+        std::fs::write(pkg_c_src.join("main.fg"), "// pkg-c").unwrap();
+
+        let manifest: Manifest = toml::from_str(&format!(
+            "[project]\nname = \"app\"\n[dependencies]\npkg-b = {{ path = \"{}\" }}",
+            pkg_b_src.display()
+        ))
+        .unwrap();
+
+        let summary = install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[],
+        )
+        .unwrap();
+
+        // Both B and C should be installed
+        assert!(packages_dir.join("pkg-b").join("main.fg").exists());
+        assert!(packages_dir.join("pkg-c").join("main.fg").exists());
+        assert!(summary.installed >= 2);
+
+        // Lockfile should have both
+        let lockfile = load_lockfile_from(&lockfile_path).unwrap();
+        assert!(lockfile.find("pkg-b").is_some());
+        assert!(lockfile.find("pkg-c").is_some());
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn transitive_deps_cycle_detected() {
+        // A -> B -> A (cycle)
+        let workspace = temp_path("trans-cycle");
+        let pkg_a_src = workspace.join("pkg-a");
+        let pkg_b_src = workspace.join("pkg-b");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let lockfile_path = workspace.join("forge.lock");
+
+        std::fs::create_dir_all(&pkg_a_src).unwrap();
+        std::fs::write(pkg_a_src.join("main.fg"), "// pkg-a").unwrap();
+        write_forge_toml(
+            &pkg_a_src,
+            &format!(
+                "[project]\nname = \"pkg-a\"\n[dependencies]\npkg-b = {{ path = \"{}\" }}",
+                pkg_b_src.display()
+            ),
+        );
+
+        std::fs::create_dir_all(&pkg_b_src).unwrap();
+        std::fs::write(pkg_b_src.join("main.fg"), "// pkg-b").unwrap();
+        // B depends on A — this creates the cycle
+        write_forge_toml(
+            &pkg_b_src,
+            &format!(
+                "[project]\nname = \"pkg-b\"\n[dependencies]\npkg-a = {{ path = \"{}\" }}",
+                pkg_a_src.display()
+            ),
+        );
+
+        let manifest: Manifest = toml::from_str(&format!(
+            "[project]\nname = \"app\"\n[dependencies]\npkg-a = {{ path = \"{}\" }}",
+            pkg_a_src.display()
+        ))
+        .unwrap();
+
+        let result = install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[],
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("circular dependency"),
+            "Expected circular dependency error, got: {}",
+            err
+        );
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn transitive_deps_diamond() {
+        // A -> B, A -> C, B -> C (diamond, C installed once)
+        let workspace = temp_path("trans-diamond");
+        let pkg_b_src = workspace.join("pkg-b");
+        let pkg_c_src = workspace.join("pkg-c");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let lockfile_path = workspace.join("forge.lock");
+
+        std::fs::create_dir_all(&pkg_c_src).unwrap();
+        std::fs::write(pkg_c_src.join("main.fg"), "// pkg-c").unwrap();
+
+        std::fs::create_dir_all(&pkg_b_src).unwrap();
+        std::fs::write(pkg_b_src.join("main.fg"), "// pkg-b").unwrap();
+        write_forge_toml(
+            &pkg_b_src,
+            &format!(
+                "[project]\nname = \"pkg-b\"\n[dependencies]\npkg-c = {{ path = \"{}\" }}",
+                pkg_c_src.display()
+            ),
+        );
+
+        let manifest: Manifest = toml::from_str(&format!(
+            "[project]\nname = \"app\"\n[dependencies]\npkg-b = {{ path = \"{}\" }}\npkg-c = {{ path = \"{}\" }}",
+            pkg_b_src.display(),
+            pkg_c_src.display()
+        ))
+        .unwrap();
+
+        let summary = install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[],
+        )
+        .unwrap();
+
+        assert!(packages_dir.join("pkg-b").join("main.fg").exists());
+        assert!(packages_dir.join("pkg-c").join("main.fg").exists());
+        // C should appear in lockfile
+        let lockfile = load_lockfile_from(&lockfile_path).unwrap();
+        assert!(lockfile.find("pkg-c").is_some());
+        // processed should be at least 2 (B + C direct), transitive C skipped as already installed
+        assert!(summary.processed >= 2);
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn transitive_deps_leaf_no_manifest() {
+        // A -> B where B has no forge.toml (leaf)
+        let workspace = temp_path("trans-leaf");
+        let pkg_b_src = workspace.join("pkg-b");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let lockfile_path = workspace.join("forge.lock");
+
+        std::fs::create_dir_all(&pkg_b_src).unwrap();
+        std::fs::write(pkg_b_src.join("main.fg"), "// pkg-b").unwrap();
+        // No forge.toml in pkg-b
+
+        let manifest: Manifest = toml::from_str(&format!(
+            "[project]\nname = \"app\"\n[dependencies]\npkg-b = {{ path = \"{}\" }}",
+            pkg_b_src.display()
+        ))
+        .unwrap();
+
+        let summary = install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(summary.installed, 1);
+        assert!(packages_dir.join("pkg-b").join("main.fg").exists());
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn transitive_deps_cycle_back_to_root() {
+        // app -> pkg-a, pkg-a depends on "app" (cycle back to root project)
+        let workspace = temp_path("trans-root-cycle");
+        let pkg_a_src = workspace.join("pkg-a");
+        let app_src = workspace.join("app-src");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let lockfile_path = workspace.join("forge.lock");
+
+        // pkg-a depends on "app" (the root project name)
+        std::fs::create_dir_all(&pkg_a_src).unwrap();
+        std::fs::write(pkg_a_src.join("main.fg"), "// pkg-a").unwrap();
+        write_forge_toml(
+            &pkg_a_src,
+            &format!(
+                "[project]\nname = \"pkg-a\"\n[dependencies]\nmy-app = {{ path = \"{}\" }}",
+                app_src.display()
+            ),
+        );
+
+        // Create a fake "app" source so the path dep can be installed
+        std::fs::create_dir_all(&app_src).unwrap();
+        std::fs::write(app_src.join("main.fg"), "// app").unwrap();
+
+        let manifest: Manifest = toml::from_str(&format!(
+            "[project]\nname = \"my-app\"\n[dependencies]\npkg-a = {{ path = \"{}\" }}",
+            pkg_a_src.display()
+        ))
+        .unwrap();
+
+        let result = install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[],
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("circular dependency"),
+            "Expected circular dependency error, got: {}",
+            err
+        );
+        assert!(
+            err.contains("my-app"),
+            "Error should mention root project name: {}",
+            err
+        );
+
+        std::fs::remove_dir_all(&workspace).unwrap();
     }
 }
