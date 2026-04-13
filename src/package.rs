@@ -4,6 +4,7 @@ use std::process::Command;
 
 use crate::manifest::{self, DependencySpec, LockedPackage, Lockfile, Manifest};
 use semver::{Version, VersionReq};
+use sha2::{Digest, Sha256};
 
 const PACKAGES_DIR: &str = "forge_modules";
 
@@ -167,8 +168,14 @@ fn install_manifest_dependencies(
     let mut visiting = vec![manifest.project.name.clone()];
 
     for (name, spec) in &manifest.dependencies {
-        let locked =
+        let mut locked =
             install_single_dependency(name, spec, manifest_root, packages_dir, registry_roots)?;
+
+        // Compute directory checksum for integrity verification
+        if let Ok(hash) = compute_directory_checksum(&packages_dir.join(name)) {
+            locked.checksum = hash;
+            locked.checksum_kind = Some("directory-sha256".to_string());
+        }
 
         lockfile.packages.retain(|p| p.name != *name);
         lockfile.packages.push(locked);
@@ -177,6 +184,11 @@ fn install_manifest_dependencies(
         // Resolve transitive dependencies
         let transitive = resolve_transitive(name, packages_dir, registry_roots, &mut visiting)?;
         for tlocked in transitive {
+            let mut tlocked = tlocked;
+            if let Ok(hash) = compute_directory_checksum(&packages_dir.join(&tlocked.name)) {
+                tlocked.checksum = hash;
+                tlocked.checksum_kind = Some("directory-sha256".to_string());
+            }
             lockfile.packages.retain(|p| p.name != tlocked.name);
             lockfile.packages.push(tlocked);
             installed += 1;
@@ -185,6 +197,12 @@ fn install_manifest_dependencies(
 
     save_lockfile_at(&lockfile, lockfile_path)
         .map_err(|e| format!("Warning: failed to write forge.lock: {}", e))?;
+
+    // Verify lockfile integrity
+    let warnings = verify_lockfile_integrity(&lockfile, packages_dir);
+    for warning in &warnings {
+        eprintln!("  {}", warning);
+    }
 
     Ok(InstallSummary {
         processed: manifest.dependencies.len(),
@@ -224,6 +242,7 @@ fn install_single_dependency(
                 version: dep.version.clone(),
                 source: format!("git+{}", dep.git),
                 checksum: get_git_rev(packages_dir, name),
+                checksum_kind: None,
             })
         }
         DependencySpec::Detailed(dep) if !dep.path.is_empty() => {
@@ -234,6 +253,7 @@ fn install_single_dependency(
                 version: dep.version.clone(),
                 source: format!("path+{}", source_path.display()),
                 checksum: String::new(),
+                checksum_kind: None,
             })
         }
         DependencySpec::Detailed(dep) if !dep.version.is_empty() => {
@@ -366,6 +386,7 @@ fn install_from_registry_as(
             version: resolved_version,
             source: format!("registry+{}", source.display()),
             checksum: String::new(),
+            checksum_kind: None,
         });
     }
 
@@ -422,7 +443,94 @@ fn install_from_remote_registry(
         version: resolved.version,
         source: format!("remote+{}", resolved.url),
         checksum: resolved.checksum,
+        checksum_kind: None,
     })
+}
+
+fn collect_files_sorted(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    collect_files_recursive(dir, dir, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_files_recursive(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(current)
+        .map_err(|e| format!("failed to read directory {}: {}", current.display(), e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        // Skip platform junk
+        if file_name == ".DS_Store" || file_name == "__MACOSX" || file_name == ".gitkeep" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files_recursive(root, &path, files)?;
+        } else {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|e| format!("path strip error: {}", e))?;
+            files.push(relative.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn compute_directory_checksum(dir: &Path) -> Result<String, String> {
+    if !dir.exists() {
+        return Err(format!("directory does not exist: {}", dir.display()));
+    }
+    let files = collect_files_sorted(dir)?;
+    let mut hasher = Sha256::new();
+    for rel_path in &files {
+        hasher.update(rel_path.to_string_lossy().as_bytes());
+        let full_path = dir.join(rel_path);
+        let contents = std::fs::read(&full_path)
+            .map_err(|e| format!("failed to read {}: {}", full_path.display(), e))?;
+        hasher.update(&contents);
+    }
+    let hash = hasher.finalize();
+    Ok(format!("{:x}", hash))
+}
+
+fn verify_lockfile_integrity(lockfile: &Lockfile, packages_dir: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for pkg in &lockfile.packages {
+        // Only verify packages with directory checksums
+        if pkg.checksum_kind.as_deref() != Some("directory-sha256") {
+            continue;
+        }
+        if pkg.checksum.is_empty() {
+            continue;
+        }
+        let pkg_dir = packages_dir.join(&pkg.name);
+        if !pkg_dir.exists() {
+            warnings.push(format!(
+                "Warning: package '{}' not found in forge_modules/",
+                pkg.name
+            ));
+            continue;
+        }
+        match compute_directory_checksum(&pkg_dir) {
+            Ok(hash) if hash == pkg.checksum => {} // OK
+            Ok(hash) => {
+                warnings.push(format!(
+                    "Warning: checksum mismatch for '{}' — installed package may have been tampered with (expected {}, got {})",
+                    pkg.name,
+                    &pkg.checksum[..8.min(pkg.checksum.len())],
+                    &hash[..8.min(hash.len())]
+                ));
+            }
+            Err(e) => {
+                warnings.push(format!("Warning: could not verify '{}': {}", pkg.name, e));
+            }
+        }
+    }
+    warnings
 }
 
 fn validate_package_name(name: &str) -> Result<(), String> {
@@ -1241,6 +1349,176 @@ foo = "^1.0"
         assert_eq!(summary.installed, 1);
         let lockfile = load_lockfile_from(&lockfile_path).unwrap();
         assert_eq!(lockfile.find("foo").unwrap().version, "1.2.0");
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn directory_checksum_deterministic() {
+        let workspace = temp_path("checksum-det");
+        let pkg_dir = workspace.join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("main.fg"), "let x = 1").unwrap();
+        std::fs::write(pkg_dir.join("lib.fg"), "let y = 2").unwrap();
+
+        let hash1 = compute_directory_checksum(&pkg_dir).unwrap();
+        let hash2 = compute_directory_checksum(&pkg_dir).unwrap();
+        assert_eq!(hash1, hash2);
+        assert!(!hash1.is_empty());
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn directory_checksum_changes_on_tamper() {
+        let workspace = temp_path("checksum-tamper");
+        let pkg_dir = workspace.join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("main.fg"), "let x = 1").unwrap();
+
+        let hash1 = compute_directory_checksum(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("main.fg"), "let x = 999").unwrap();
+        let hash2 = compute_directory_checksum(&pkg_dir).unwrap();
+        assert_ne!(hash1, hash2);
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn directory_checksum_ignores_ds_store() {
+        let workspace = temp_path("checksum-dsstore");
+        let pkg_dir = workspace.join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("main.fg"), "let x = 1").unwrap();
+
+        let hash1 = compute_directory_checksum(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join(".DS_Store"), "junk").unwrap();
+        let hash2 = compute_directory_checksum(&pkg_dir).unwrap();
+        assert_eq!(hash1, hash2);
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn verify_lockfile_integrity_detects_mismatch() {
+        let workspace = temp_path("verify-integrity");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let pkg_dir = packages_dir.join("foo");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("main.fg"), "let x = 1").unwrap();
+
+        let original_hash = compute_directory_checksum(&pkg_dir).unwrap();
+
+        let lockfile = Lockfile {
+            packages: vec![LockedPackage {
+                name: "foo".to_string(),
+                version: "1.0.0".to_string(),
+                source: String::new(),
+                checksum: original_hash,
+                checksum_kind: Some("directory-sha256".to_string()),
+            }],
+        };
+
+        // No tampering — should pass
+        let warnings = verify_lockfile_integrity(&lockfile, &packages_dir);
+        assert!(warnings.is_empty(), "Expected no warnings: {:?}", warnings);
+
+        // Tamper with the file
+        std::fs::write(pkg_dir.join("main.fg"), "let x = HACKED").unwrap();
+        let warnings = verify_lockfile_integrity(&lockfile, &packages_dir);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("checksum mismatch"));
+        assert!(warnings[0].contains("foo"));
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn verify_lockfile_skips_old_format() {
+        let workspace = temp_path("verify-old");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        std::fs::create_dir_all(&packages_dir).unwrap();
+
+        // Old lockfile entry without checksum_kind — should be skipped
+        let lockfile = Lockfile {
+            packages: vec![LockedPackage {
+                name: "foo".to_string(),
+                version: "1.0.0".to_string(),
+                source: String::new(),
+                checksum: "tarball-hash-here".to_string(),
+                checksum_kind: None,
+            }],
+        };
+
+        let warnings = verify_lockfile_integrity(&lockfile, &packages_dir);
+        assert!(warnings.is_empty());
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn verify_lockfile_warns_missing_package() {
+        let workspace = temp_path("verify-missing");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        std::fs::create_dir_all(&packages_dir).unwrap();
+
+        let lockfile = Lockfile {
+            packages: vec![LockedPackage {
+                name: "gone".to_string(),
+                version: "1.0.0".to_string(),
+                source: String::new(),
+                checksum: "abc123".to_string(),
+                checksum_kind: Some("directory-sha256".to_string()),
+            }],
+        };
+
+        let warnings = verify_lockfile_integrity(&lockfile, &packages_dir);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("not found"));
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn install_stores_directory_checksum_in_lockfile() {
+        let workspace = temp_path("install-checksum");
+        let registry = workspace.join("registry");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let lockfile_path = workspace.join("forge.lock");
+        create_registry_versions(&registry, "bar", &["1.0.0"]);
+
+        let manifest: Manifest = toml::from_str(
+            r#"
+[project]
+name = "app"
+
+[dependencies]
+bar = "^1.0"
+"#,
+        )
+        .unwrap();
+
+        install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[registry],
+        )
+        .unwrap();
+
+        let lockfile = load_lockfile_from(&lockfile_path).unwrap();
+        let pkg = lockfile.find("bar").unwrap();
+        assert_eq!(
+            pkg.checksum_kind.as_deref(),
+            Some("directory-sha256"),
+            "checksum_kind should be set"
+        );
+        assert!(!pkg.checksum.is_empty(), "checksum should be non-empty");
+
+        // Verify the checksum matches the installed directory
+        let expected = compute_directory_checksum(&packages_dir.join("bar")).unwrap();
+        assert_eq!(pkg.checksum, expected);
 
         std::fs::remove_dir_all(&workspace).unwrap();
     }
