@@ -51,6 +51,7 @@ pub struct TypeChecker {
 
 #[derive(Debug, Clone)]
 struct FnSignature {
+    type_params: Vec<String>,
     params: Vec<(String, Option<InferredType>)>,
     param_count: usize,
     return_type: Option<InferredType>,
@@ -456,6 +457,7 @@ impl TypeChecker {
         match stmt {
             Stmt::FnDef {
                 name,
+                type_params,
                 params,
                 return_type,
                 ..
@@ -472,6 +474,7 @@ impl TypeChecker {
                 self.functions.insert(
                     name.clone(),
                     FnSignature {
+                        type_params: type_params.clone(),
                         param_count: params.len(),
                         params: param_types,
                         return_type: return_type.as_ref().map(type_ann_to_inferred),
@@ -519,9 +522,16 @@ impl TypeChecker {
                             })
                             .collect();
                         let ret = return_type.as_ref().map(type_ann_to_inferred);
+                        let method_type_params =
+                            if let Stmt::FnDef { type_params, .. } = &spanned_method.stmt {
+                                type_params.clone()
+                            } else {
+                                vec![]
+                            };
                         self.functions.insert(
                             qualified,
                             FnSignature {
+                                type_params: method_type_params,
                                 param_count: params.len(),
                                 params: param_info,
                                 return_type: ret,
@@ -956,6 +966,93 @@ impl TypeChecker {
         }
     }
 
+    /// Substitute generic type parameters with concrete types.
+    /// Only replaces Named types that appear in `substitutions`.
+    fn resolve_type(
+        ty: &InferredType,
+        substitutions: &HashMap<String, InferredType>,
+    ) -> InferredType {
+        match ty {
+            InferredType::Named(name) => {
+                if let Some(concrete) = substitutions.get(name) {
+                    concrete.clone()
+                } else {
+                    ty.clone()
+                }
+            }
+            InferredType::Array(inner) => {
+                InferredType::Array(Box::new(Self::resolve_type(inner, substitutions)))
+            }
+            InferredType::Option(inner) => {
+                InferredType::Option(Box::new(Self::resolve_type(inner, substitutions)))
+            }
+            InferredType::Result(ok, err) => InferredType::Result(
+                Box::new(Self::resolve_type(ok, substitutions)),
+                Box::new(Self::resolve_type(err, substitutions)),
+            ),
+            InferredType::Function(params, ret) => InferredType::Function(
+                params
+                    .iter()
+                    .map(|p| Self::resolve_type(p, substitutions))
+                    .collect(),
+                Box::new(Self::resolve_type(ret, substitutions)),
+            ),
+            _ => ty.clone(),
+        }
+    }
+
+    /// Build a substitution map from type params and argument types.
+    fn build_substitutions(
+        sig: &FnSignature,
+        arg_types: &[InferredType],
+    ) -> HashMap<String, InferredType> {
+        let mut subs = HashMap::new();
+        if sig.type_params.is_empty() {
+            return subs;
+        }
+        for (i, (_, param_type)) in sig.params.iter().enumerate() {
+            if let Some(expected) = param_type {
+                if let Some(arg_type) = arg_types.get(i) {
+                    if *arg_type != InferredType::Unknown {
+                        Self::bind_type_params(&sig.type_params, expected, arg_type, &mut subs);
+                    }
+                }
+            }
+        }
+        subs
+    }
+
+    /// Recursively bind type params by matching expected type structure against actual type.
+    fn bind_type_params(
+        type_params: &[String],
+        expected: &InferredType,
+        actual: &InferredType,
+        subs: &mut HashMap<String, InferredType>,
+    ) {
+        match expected {
+            InferredType::Named(name) if type_params.contains(name) => {
+                subs.entry(name.clone()).or_insert_with(|| actual.clone());
+            }
+            InferredType::Array(inner_expected) => {
+                if let InferredType::Array(inner_actual) = actual {
+                    Self::bind_type_params(type_params, inner_expected, inner_actual, subs);
+                }
+            }
+            InferredType::Option(inner_expected) => {
+                if let InferredType::Option(inner_actual) = actual {
+                    Self::bind_type_params(type_params, inner_expected, inner_actual, subs);
+                }
+            }
+            InferredType::Result(ok_exp, err_exp) => {
+                if let InferredType::Result(ok_act, err_act) = actual {
+                    Self::bind_type_params(type_params, ok_exp, ok_act, subs);
+                    Self::bind_type_params(type_params, err_exp, err_act, subs);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn infer_expr(&mut self, expr: &Expr) -> InferredType {
         match expr {
             Expr::Int(_) => InferredType::Int,
@@ -1039,18 +1136,29 @@ impl TypeChecker {
                             ));
                         }
 
-                        // Argument type check
-                        for (i, arg) in args.iter().enumerate() {
-                            let arg_type = self.infer_expr(arg);
+                        // Infer all argument types first
+                        let arg_types: Vec<InferredType> =
+                            args.iter().map(|a| self.infer_expr(a)).collect();
+
+                        // Build generic substitutions from arguments
+                        let subs = Self::build_substitutions(&sig, &arg_types);
+
+                        // Argument type check (with generic substitution)
+                        for (i, arg_type) in arg_types.iter().enumerate() {
                             if let Some((_, Some(expected))) = sig.params.get(i) {
-                                if arg_type != InferredType::Unknown
-                                    && !types_compatible(expected, &arg_type)
+                                let resolved = if subs.is_empty() {
+                                    expected.clone()
+                                } else {
+                                    Self::resolve_type(expected, &subs)
+                                };
+                                if *arg_type != InferredType::Unknown
+                                    && !types_compatible(&resolved, arg_type)
                                 {
                                     // Check interface satisfaction before emitting error
                                     if let (
                                         InferredType::Named(iface_name),
                                         InferredType::Named(struct_name),
-                                    ) = (expected, &arg_type)
+                                    ) = (&resolved, arg_type)
                                     {
                                         if self.interfaces.contains_key(iface_name) {
                                             self.check_interface_satisfaction(
@@ -1064,14 +1172,20 @@ impl TypeChecker {
                                         "argument {} of '{}': expected {} but got {}",
                                         i + 1,
                                         name,
-                                        expected,
+                                        resolved,
                                         arg_type
                                     ));
                                 }
                             }
                         }
 
-                        return sig.return_type.unwrap_or(InferredType::Unknown);
+                        // Resolve return type with generic substitutions
+                        let ret = sig.return_type.unwrap_or(InferredType::Unknown);
+                        return if subs.is_empty() {
+                            ret
+                        } else {
+                            Self::resolve_type(&ret, &subs)
+                        };
                     }
 
                     match name.as_str() {
@@ -1795,5 +1909,69 @@ mod tests {
             "Int should not trigger exhaustiveness: {:?}",
             w.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
+    }
+
+    // ========== 8B.2: Generic Type Resolution ==========
+
+    #[test]
+    fn generic_identity_resolves_return_type() {
+        // fn identity<T>(x: T) -> T: called with Int → return Int
+        let w =
+            warnings_for("fn identity<T>(x: T) -> T { return x }\nlet y: String = identity(42)");
+        assert_eq!(
+            w.len(),
+            1,
+            "should warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+        assert!(
+            w[0].message.contains("Int"),
+            "return type should resolve to Int: {}",
+            w[0].message
+        );
+    }
+
+    #[test]
+    fn generic_identity_no_false_positive() {
+        let w = warnings_for("fn identity<T>(x: T) -> T { return x }\nlet y: Int = identity(42)");
+        assert!(
+            w.is_empty(),
+            "should not warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn generic_two_params_resolves() {
+        // fn first<T, U>(a: T, b: U) -> T: called with (Int, String) → return Int
+        let w = warnings_for(
+            "fn first<T, U>(a: T, b: U) -> T { return a }\nlet y: String = first(42, \"hi\")",
+        );
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].message.contains("Int"),
+            "T should resolve to Int: {}",
+            w[0].message
+        );
+    }
+
+    #[test]
+    fn generic_array_return_resolves() {
+        // fn wrap<T>(x: T) -> [T]: called with Int → return [Int]
+        let w = warnings_for("fn wrap<T>(x: T) -> [T] { return [x] }\nlet y: String = wrap(42)");
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].message.contains("[Int]"),
+            "return should be [Int]: {}",
+            w[0].message
+        );
+    }
+
+    #[test]
+    fn non_generic_unchanged() {
+        // Non-generic function behavior unchanged
+        let w =
+            warnings_for("fn add(a: Int, b: Int) -> Int { return a + b }\nlet y: Int = add(1, 2)");
+        assert!(w.is_empty());
     }
 }
