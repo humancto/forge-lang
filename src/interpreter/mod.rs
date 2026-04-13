@@ -648,6 +648,7 @@ impl Interpreter {
             "assert_throws",
             "try_send",
             "try_receive",
+            "select",
             // GenZ Debug Kit
             "sus",
             "bruh",
