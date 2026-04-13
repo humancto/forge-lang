@@ -44,6 +44,7 @@ pub enum Stmt {
     },
     FnDef {
         name: String,
+        type_params: Vec<String>,
         params: Vec<Param>,
         return_type: Option<TypeAnn>,
         body: Vec<SpannedStmt>,
@@ -56,6 +57,7 @@ pub enum Stmt {
     },
     StructDef {
         name: String,
+        type_params: Vec<String>,
         fields: Vec<FieldDef>,
     },
     Return(Option<Expr>),

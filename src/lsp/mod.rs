@@ -1216,6 +1216,7 @@ fn hover_from_stmt(stmt: &Stmt, name: &str) -> Option<String> {
         Stmt::StructDef {
             name: struct_name,
             fields,
+            ..
         } => {
             if struct_name == name {
                 let fields_str = fields

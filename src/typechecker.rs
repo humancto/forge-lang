@@ -493,7 +493,7 @@ impl TypeChecker {
                     .collect();
                 self.interfaces.insert(name.clone(), method_sigs);
             }
-            Stmt::StructDef { name, fields } => {
+            Stmt::StructDef { name, fields, .. } => {
                 let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
                 self.structs.insert(name.clone(), field_names);
             }
