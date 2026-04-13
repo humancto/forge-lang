@@ -180,10 +180,18 @@ impl Value {
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
-            (Value::Obj(a), Value::Obj(b)) => match (gc.get(*a), gc.get(*b)) {
-                (Some(oa), Some(ob)) => oa.equals(ob, gc),
-                _ => false,
-            },
+            (Value::Obj(a), Value::Obj(b)) => {
+                // Fast path: two live refs with the same arena index are the same
+                // allocation. No ObjKind variant wraps floats (those use Value::Float),
+                // so NaN self-inequality is not a concern.
+                if a == b {
+                    return true;
+                }
+                match (gc.get(*a), gc.get(*b)) {
+                    (Some(oa), Some(ob)) => oa.equals(ob, gc),
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }
