@@ -1723,6 +1723,11 @@ impl Parser {
                 Ok(Expr::Ident("type".to_string()))
             }
 
+            Token::Select => {
+                self.advance();
+                Ok(Expr::Ident("select".to_string()))
+            }
+
             Token::Fn => {
                 self.advance();
                 self.expect(Token::LParen)?;

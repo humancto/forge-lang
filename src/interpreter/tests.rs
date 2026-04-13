@@ -3907,6 +3907,77 @@ fn channel_send_receive_multiple() {
     assert!(result.is_ok(), "channel multi: {:?}", result.err());
 }
 
+#[test]
+fn select_returns_ready_channel() {
+    let result = try_run_forge(
+        r#"
+        let ch1 = channel()
+        let ch2 = channel()
+        spawn { send(ch2, "hello") }
+        wait 0.05 seconds
+        let result = select([ch1, ch2])
+        assert_eq(result[0], 1)
+        assert_eq(result[1], "hello")
+    "#,
+    );
+    assert!(result.is_ok(), "select ready: {:?}", result.err());
+}
+
+#[test]
+fn select_returns_correct_index() {
+    let result = try_run_forge(
+        r#"
+        let ch1 = channel()
+        let ch2 = channel()
+        let ch3 = channel()
+        spawn { send(ch1, 42) }
+        wait 0.05 seconds
+        let result = select([ch1, ch2, ch3])
+        assert_eq(result[0], 0)
+        assert_eq(result[1], 42)
+    "#,
+    );
+    assert!(result.is_ok(), "select index: {:?}", result.err());
+}
+
+#[test]
+fn select_single_channel() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel()
+        spawn { send(ch, "only") }
+        wait 0.05 seconds
+        let result = select([ch])
+        assert_eq(result[0], 0)
+        assert_eq(result[1], "only")
+    "#,
+    );
+    assert!(result.is_ok(), "select single: {:?}", result.err());
+}
+
+#[test]
+fn select_empty_array_errors() {
+    let result = try_run_forge("select([])");
+    assert!(result.is_err());
+}
+
+#[test]
+fn select_non_array_errors() {
+    let result = try_run_forge("select(42)");
+    assert!(result.is_err());
+}
+
+#[test]
+fn select_timeout_returns_null() {
+    let value = run_forge(
+        r#"
+        let ch = channel()
+        select([ch], 50)
+    "#,
+    );
+    assert_eq!(value, Value::Null);
+}
+
 // === Phase 2: Short-circuit tests ===
 
 #[test]

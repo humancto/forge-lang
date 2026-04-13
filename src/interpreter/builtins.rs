@@ -1295,6 +1295,65 @@ impl Interpreter {
                     None => Ok(Value::None),
                 }
             }
+            "select" => {
+                if args.is_empty() {
+                    return Err(RuntimeError::new("select() requires an array of channels"));
+                }
+                let channels: Vec<Arc<ChannelInner>> = match &args[0] {
+                    Value::Array(items) => {
+                        let mut chs = Vec::with_capacity(items.len());
+                        for item in items {
+                            match item {
+                                Value::Channel(c) => chs.push(c.clone()),
+                                _ => {
+                                    return Err(RuntimeError::new(
+                                        "select() array must contain only channels",
+                                    ))
+                                }
+                            }
+                        }
+                        chs
+                    }
+                    _ => return Err(RuntimeError::new("select() requires an array of channels")),
+                };
+                if channels.is_empty() {
+                    return Err(RuntimeError::new("select() requires a non-empty array"));
+                }
+                let timeout_ms: Option<u128> = match args.get(1) {
+                    Some(Value::Int(ms)) => Some((*ms).max(0) as u128),
+                    Some(Value::Float(ms)) => Some(ms.max(0.0) as u128),
+                    _ => None,
+                };
+                let start = std::time::Instant::now();
+                let len = channels.len();
+                let mut offset = 0usize;
+                loop {
+                    let mut all_closed = true;
+                    for i in 0..len {
+                        let idx = (i + offset) % len;
+                        let rx_guard = channels[idx]
+                            .rx
+                            .lock()
+                            .expect("BUG: channel mutex poisoned");
+                        if let Some(ref rx) = *rx_guard {
+                            all_closed = false;
+                            if let Ok(val) = rx.try_recv() {
+                                return Ok(Value::Array(vec![Value::Int(idx as i64), val]));
+                            }
+                        }
+                    }
+                    if all_closed {
+                        return Ok(Value::Null);
+                    }
+                    if let Some(ms) = timeout_ms {
+                        if start.elapsed().as_millis() >= ms {
+                            return Ok(Value::Null);
+                        }
+                    }
+                    offset = (offset + 1) % len;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             _ if name.starts_with("math.") => {
                 crate::stdlib::math::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
