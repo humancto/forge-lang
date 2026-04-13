@@ -25,7 +25,6 @@ pub fn update() {
     let packages_dir = Path::new(PACKAGES_DIR);
 
     // Remove existing installed packages so install_from_manifest re-resolves
-    let mut removed = Vec::new();
     for name in manifest.dependencies.keys() {
         let pkg_dir = packages_dir.join(name);
         if pkg_dir.exists() {
@@ -33,7 +32,6 @@ pub fn update() {
                 eprintln!("Error: failed to remove {}: {}", name, e);
                 std::process::exit(1);
             }
-            removed.push(name.clone());
         }
     }
 
