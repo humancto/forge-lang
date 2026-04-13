@@ -649,6 +649,7 @@ impl Interpreter {
             "try_send",
             "try_receive",
             "select",
+            "close",
             // GenZ Debug Kit
             "sus",
             "bruh",
@@ -1173,7 +1174,42 @@ impl Interpreter {
                             }
                         }
                     }
-                    _ => return Err(RuntimeError::new("can only iterate over arrays or objects")),
+                    Value::Channel(ch) => loop {
+                        let val = {
+                            let rx_guard = ch.rx.lock().expect("BUG: channel mutex poisoned");
+                            match rx_guard.as_ref() {
+                                Some(rx) => match rx.recv() {
+                                    Ok(v) => v,
+                                    Err(_) => break,
+                                },
+                                None => break,
+                            }
+                        };
+                        self.env.push_scope();
+                        self.env.define(var.clone(), val);
+                        match self.exec_block(body)? {
+                            Signal::Break => {
+                                self.env.pop_scope();
+                                break;
+                            }
+                            Signal::Continue => {
+                                self.env.pop_scope();
+                                continue;
+                            }
+                            Signal::Return(v) => {
+                                self.env.pop_scope();
+                                return Ok(Signal::Return(v));
+                            }
+                            Signal::None | Signal::ImplicitReturn(_) => {
+                                self.env.pop_scope();
+                            }
+                        }
+                    },
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "can only iterate over arrays, objects, or channels",
+                        ))
+                    }
                 }
                 Ok(Signal::None)
             }
