@@ -15,6 +15,7 @@ mod package;
 mod permissions;
 mod parser;
 mod publish;
+mod registry;
 mod repl;
 mod runtime;
 mod scaffold;

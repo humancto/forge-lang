@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Semver constraint parsing** — `forge.toml` dependency specs now support `^1.0`, `~1.5`, `>=1.0.0, <2.0.0`, `*` version constraints via the `semver` crate. ([#75](https://github.com/humancto/forge-lang/pull/75))
 - **Semver resolution algorithm** — `forge install` now resolves the latest compatible version from the registry instead of requiring exact version matches. Includes directory traversal protection and helpful error messages listing available versions. ([#76](https://github.com/humancto/forge-lang/pull/76))
 - **Transitive dependency resolution** — `forge install` now recursively resolves and installs transitive dependencies from `forge.toml`. Detects circular dependencies and handles diamond dependency patterns. ([#77](https://github.com/humancto/forge-lang/pull/77))
+- **GitHub-based remote package registry** — `forge install` now falls back to a remote GitHub-based package index when local registry lookup fails. Supports TOML-based package entries, semver resolution, tarball download/extraction, local caching with TTL, and `GITHUB_TOKEN` authentication. ([#78](https://github.com/humancto/forge-lang/pull/78))
 
 ## [0.8.0] - 2026-04-12
 
