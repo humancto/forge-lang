@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`select(channels, timeout?)` builtin** — wait on multiple channels, returns `[index, value]` for the first ready channel. Optional timeout in ms. ([#69](https://github.com/humancto/forge-lang/pull/69))
 - **`close(ch)` builtin and channel iteration** — close a channel to signal no more values; `for msg in ch { }` drains until closed. ([#70](https://github.com/humancto/forge-lang/pull/70))
 - **Unbounded channels** — `channel()` with no args creates an unbounded channel; `channel(n)` creates bounded as before. ([#71](https://github.com/humancto/forge-lang/pull/71))
+- **`await_all(handles)` builtin** — wait for multiple spawned tasks and collect results into an array. ([#72](https://github.com/humancto/forge-lang/pull/72))
 
 ## [0.8.0] - 2026-04-12
 
