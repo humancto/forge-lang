@@ -154,6 +154,11 @@ enum Command {
         /// Git URL or local path
         source: String,
     },
+    /// Add a dependency to forge.toml and install it
+    Add {
+        /// Package name or name@version (e.g., "router" or "router@^1.0")
+        package: String,
+    },
     /// Publish the current project to the local registry
     Publish {
         /// Show what would be packaged without publishing
@@ -327,6 +332,33 @@ async fn main() {
         }
         Some(Command::Install { source }) => {
             package::install(&source);
+        }
+        Some(Command::Add { package: pkg }) => {
+            match manifest::parse_package_spec(&pkg) {
+                Ok((name, version)) => {
+                    let mut m = manifest::load_manifest().unwrap_or_default();
+                    let action = if m.dependencies.contains_key(&name) {
+                        "Updated"
+                    } else {
+                        "Added"
+                    };
+                    m.dependencies
+                        .insert(name.clone(), manifest::DependencySpec::Version(version.clone()));
+                    if let Err(e) = manifest::save_manifest(&m) {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                    println!(
+                        "  {} {} = \"{}\" to forge.toml",
+                        action, name, version
+                    );
+                    package::install_from_manifest();
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Some(Command::Publish { dry_run, registry }) => {
             publish::publish(dry_run, registry.as_deref());

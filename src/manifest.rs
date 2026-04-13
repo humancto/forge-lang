@@ -159,6 +159,35 @@ pub fn load_manifest_from(path: &Path) -> Option<Manifest> {
     toml::from_str(&content).ok()
 }
 
+pub fn save_manifest(manifest: &Manifest) -> Result<(), String> {
+    save_manifest_to(manifest, Path::new("forge.toml"))
+}
+
+pub fn save_manifest_to(manifest: &Manifest, path: &Path) -> Result<(), String> {
+    let content = toml::to_string_pretty(manifest)
+        .map_err(|e| format!("failed to serialize manifest: {}", e))?;
+    std::fs::write(path, content).map_err(|e| format!("failed to write {}: {}", path.display(), e))
+}
+
+/// Parse a package spec like "name" or "name@^1.0" into (name, version).
+pub fn parse_package_spec(spec: &str) -> Result<(String, String), String> {
+    if spec.is_empty() {
+        return Err("package name cannot be empty".to_string());
+    }
+
+    if let Some((name, version)) = spec.split_once('@') {
+        if name.is_empty() {
+            return Err("package name cannot be empty".to_string());
+        }
+        if version.is_empty() {
+            return Err("version constraint cannot be empty after '@'".to_string());
+        }
+        Ok((name.to_string(), version.to_string()))
+    } else {
+        Ok((spec.to_string(), "*".to_string()))
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Lockfile {
     pub packages: Vec<LockedPackage>,
@@ -431,5 +460,68 @@ test = "forge test"
         let v300 = semver::Version::parse("3.0.0").unwrap();
         assert!(dep.matches_version(&v210).unwrap());
         assert!(!dep.matches_version(&v300).unwrap());
+    }
+
+    #[test]
+    fn parse_package_spec_name_only() {
+        let (name, version) = parse_package_spec("router").unwrap();
+        assert_eq!(name, "router");
+        assert_eq!(version, "*");
+    }
+
+    #[test]
+    fn parse_package_spec_with_version() {
+        let (name, version) = parse_package_spec("router@^1.0").unwrap();
+        assert_eq!(name, "router");
+        assert_eq!(version, "^1.0");
+    }
+
+    #[test]
+    fn parse_package_spec_exact_version() {
+        let (name, version) = parse_package_spec("utils@1.2.3").unwrap();
+        assert_eq!(name, "utils");
+        assert_eq!(version, "1.2.3");
+    }
+
+    #[test]
+    fn parse_package_spec_empty() {
+        assert!(parse_package_spec("").is_err());
+    }
+
+    #[test]
+    fn parse_package_spec_empty_name() {
+        assert!(parse_package_spec("@1.0").is_err());
+    }
+
+    #[test]
+    fn parse_package_spec_empty_version() {
+        assert!(parse_package_spec("router@").is_err());
+    }
+
+    #[test]
+    fn save_manifest_round_trip() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("forge-manifest-{}.toml", unique));
+
+        let mut manifest = Manifest::default();
+        manifest.project.name = "test-app".to_string();
+        manifest.dependencies.insert(
+            "router".to_string(),
+            DependencySpec::Version("^1.0".to_string()),
+        );
+
+        save_manifest_to(&manifest, &path).unwrap();
+
+        let loaded = load_manifest_from(&path).unwrap();
+        assert_eq!(loaded.project.name, "test-app");
+        assert_eq!(loaded.dependencies.len(), 1);
+        assert_eq!(loaded.dependencies["router"].version_str(), "^1.0");
+
+        std::fs::remove_file(&path).unwrap();
     }
 }
