@@ -1321,7 +1321,7 @@ impl Interpreter {
                 }
                 let timeout_ms: Option<u128> = match args.get(1) {
                     Some(Value::Int(ms)) => Some((*ms).max(0) as u128),
-                    Some(Value::Float(s)) => Some((s * 1000.0).max(0.0) as u128),
+                    Some(Value::Float(ms)) => Some(ms.max(0.0) as u128),
                     _ => None,
                 };
                 let start = std::time::Instant::now();
