@@ -164,7 +164,7 @@ impl Parser {
 
         let mut variants = Vec::new();
         loop {
-            let variant_name = self.expect_ident()?;
+            let variant_name = self.expect_ident_or_type_name()?;
             let fields = if self.check(&Token::LParen) {
                 self.advance();
                 let mut fields = Vec::new();
@@ -2104,6 +2104,24 @@ impl Parser {
                 self.current_token()
             ))),
         }
+    }
+
+    /// Like expect_ident but also accepts type keywords (Int, Float, String, Bool, Null)
+    /// for use in type definitions like `type StringOrInt = String | Int`.
+    fn expect_ident_or_type_name(&mut self) -> Result<String, ParseError> {
+        let name = match self.current_token() {
+            Token::IntType => Some("Int".to_string()),
+            Token::FloatType => Some("Float".to_string()),
+            Token::StringType => Some("String".to_string()),
+            Token::BoolType => Some("Bool".to_string()),
+            Token::NullLit => Some("Null".to_string()),
+            _ => None,
+        };
+        if let Some(n) = name {
+            self.advance();
+            return Ok(n);
+        }
+        self.expect_ident()
     }
 
     fn skip_newlines(&mut self) {

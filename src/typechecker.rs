@@ -42,6 +42,7 @@ pub struct TypeChecker {
     type_defs: HashMap<String, Vec<String>>,
     interfaces: HashMap<String, Vec<InterfaceMethod>>,
     structs: HashMap<String, StructInfo>,
+    type_aliases: HashMap<String, InferredType>,
     variables: HashMap<String, InferredType>,
     current_fn_return: Option<InferredType>,
     current_line: usize,
@@ -102,6 +103,7 @@ pub enum InferredType {
     Function(Vec<InferredType>, Box<InferredType>),
     Option(Box<InferredType>),
     Result(Box<InferredType>, Box<InferredType>),
+    Union(Vec<InferredType>),
     Named(std::string::String),
     Unknown,
 }
@@ -123,6 +125,11 @@ impl std::fmt::Display for InferredType {
             }
             InferredType::Option(inner) => write!(f, "?{}", inner),
             InferredType::Result(ok, err) => write!(f, "Result<{}, {}>", ok, err),
+            InferredType::Union(variants) => {
+                let vs: Vec<std::string::String> =
+                    variants.iter().map(|v| format!("{}", v)).collect();
+                write!(f, "{}", vs.join(" | "))
+            }
             InferredType::Named(n) => write!(f, "{}", n),
             InferredType::Unknown => write!(f, "Unknown"),
         }
@@ -170,6 +177,14 @@ fn types_compatible(expected: &InferredType, actual: &InferredType) -> bool {
     if expected == actual {
         return true;
     }
+    // Union types: actual is compatible with expected union if it matches any variant
+    if let InferredType::Union(variants) = expected {
+        return variants.iter().any(|v| types_compatible(v, actual));
+    }
+    // Union actual: compatible if all variants match expected
+    if let InferredType::Union(variants) = actual {
+        return variants.iter().all(|v| types_compatible(expected, v));
+    }
     // Int and Float are compatible (numeric promotion)
     if matches!(
         (expected, actual),
@@ -215,6 +230,7 @@ impl TypeChecker {
             type_defs: HashMap::new(),
             interfaces: HashMap::new(),
             structs: HashMap::new(),
+            type_aliases: HashMap::new(),
             variables: HashMap::new(),
             current_fn_return: None,
             current_line: 0,
@@ -229,6 +245,7 @@ impl TypeChecker {
             type_defs: HashMap::new(),
             interfaces: HashMap::new(),
             structs: HashMap::new(),
+            type_aliases: HashMap::new(),
             variables: HashMap::new(),
             current_fn_return: None,
             current_line: 0,
@@ -245,6 +262,17 @@ impl TypeChecker {
         };
         warning.line = self.current_line;
         self.warnings.push(warning);
+    }
+
+    /// Resolve a type through type aliases. If it's a Named type that matches
+    /// a type alias, return the aliased type. Otherwise return as-is.
+    fn resolve_alias(&self, ty: &InferredType) -> InferredType {
+        if let InferredType::Named(name) = ty {
+            if let Some(aliased) = self.type_aliases.get(name) {
+                return aliased.clone();
+            }
+        }
+        ty.clone()
     }
 
     pub fn check(&mut self, program: &Program) -> Vec<TypeWarning> {
@@ -489,7 +517,24 @@ impl TypeChecker {
             }
             Stmt::TypeDef { name, variants } => {
                 let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                self.type_defs.insert(name.clone(), variant_names);
+                self.type_defs.insert(name.clone(), variant_names.clone());
+
+                // Detect union types: all variants have no fields and are type names
+                let is_union = !variants.is_empty() && variants.iter().all(|v| v.fields.is_empty());
+                if is_union {
+                    let types: Vec<InferredType> = variant_names
+                        .iter()
+                        .map(|n| type_ann_to_inferred(&TypeAnn::Simple(n.clone())))
+                        .collect();
+                    if types.len() == 1 {
+                        // Single-variant: simple alias
+                        self.type_aliases
+                            .insert(name.clone(), types.into_iter().next().unwrap());
+                    } else {
+                        self.type_aliases
+                            .insert(name.clone(), InferredType::Union(types));
+                    }
+                }
             }
             Stmt::InterfaceDef { name, methods } => {
                 let method_sigs: Vec<InterfaceMethod> = methods
@@ -795,7 +840,7 @@ impl TypeChecker {
             } => {
                 let inferred = self.infer_expr(value);
                 if let Some(ann) = type_ann {
-                    let expected = type_ann_to_inferred(ann);
+                    let expected = self.resolve_alias(&type_ann_to_inferred(ann));
                     if inferred != InferredType::Unknown && !types_compatible(&expected, &inferred)
                     {
                         self.emit(format!(
@@ -2021,5 +2066,70 @@ mod tests {
     fn generic_struct_with_multiple_type_params() {
         let w = warnings_for("struct Either<L, R> {\n  left: L\n  right: R\n}");
         assert!(w.is_empty());
+    }
+
+    // ========== 8C.1: Union Types ==========
+
+    #[test]
+    fn union_type_accepts_member() {
+        let w = warnings_for("type StringOrInt = String | Int\nlet x: StringOrInt = 42");
+        assert!(
+            w.is_empty(),
+            "Int should be assignable to String|Int: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn union_type_accepts_other_member() {
+        let w = warnings_for("type StringOrInt = String | Int\nlet x: StringOrInt = \"hello\"");
+        assert!(
+            w.is_empty(),
+            "String should be assignable to String|Int: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn union_type_rejects_non_member() {
+        let w = warnings_for("type StringOrInt = String | Int\nlet x: StringOrInt = true");
+        assert_eq!(
+            w.len(),
+            1,
+            "Bool should not be assignable to String|Int: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn union_type_nullable() {
+        let w = warnings_for("type Nullable = String | Null\nlet x: Nullable = null");
+        assert!(
+            w.is_empty(),
+            "null should be assignable to String|Null: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn single_variant_alias() {
+        // type ID = Int — simple alias
+        let w = warnings_for("type ID = Int\nlet x: ID = 42");
+        assert!(
+            w.is_empty(),
+            "Int should be assignable to ID alias: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn single_variant_alias_rejects_wrong_type() {
+        let w = warnings_for("type ID = Int\nlet x: ID = \"hello\"");
+        assert_eq!(
+            w.len(),
+            1,
+            "String should not be assignable to Int alias: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
     }
 }
