@@ -418,4 +418,18 @@ test = "forge test"
         let dep = DependencySpec::Version("not-a-version".into());
         assert!(dep.version_req().is_err());
     }
+
+    #[test]
+    fn semver_detailed_dep() {
+        let dep = DependencySpec::Detailed(DetailedDep {
+            version: "^2.0".into(),
+            git: String::new(),
+            branch: String::new(),
+            path: String::new(),
+        });
+        let v210 = semver::Version::parse("2.1.0").unwrap();
+        let v300 = semver::Version::parse("3.0.0").unwrap();
+        assert!(dep.matches_version(&v210).unwrap());
+        assert!(!dep.matches_version(&v300).unwrap());
+    }
 }
