@@ -1414,6 +1414,41 @@ impl Interpreter {
                 }
                 Ok(Value::Array(results))
             }
+            "await_timeout" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new(
+                        "await_timeout() requires (handle, timeout_ms)",
+                    ));
+                }
+                let timeout_ms = match &args[1] {
+                    Value::Int(ms) => (*ms).max(0) as u64,
+                    Value::Float(ms) => ms.max(0.0) as u64,
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "await_timeout() second argument must be a number (ms)",
+                        ))
+                    }
+                };
+                match &args[0] {
+                    Value::TaskHandle(slot) => {
+                        let (lock, cvar) = &**slot;
+                        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        if guard.is_none() {
+                            let (g, timeout_result) = cvar
+                                .wait_timeout(guard, std::time::Duration::from_millis(timeout_ms))
+                                .unwrap_or_else(|e| e.into_inner());
+                            guard = g;
+                            if timeout_result.timed_out() && guard.is_none() {
+                                return Ok(Value::Null);
+                            }
+                        }
+                        Ok(guard.take().unwrap_or(Value::Null))
+                    }
+                    _ => Err(RuntimeError::new(
+                        "await_timeout() first argument must be a task handle",
+                    )),
+                }
+            }
             _ if name.starts_with("math.") => {
                 crate::stdlib::math::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
