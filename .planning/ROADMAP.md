@@ -13,7 +13,7 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 ### Phase 8A — Inference & Enforcement
 
 - [x] 8A.1 Bidirectional type inference for function return types — if all return paths return `Int`, infer the return type. Currently only forward inference works (literal → type). Touch: `typechecker.rs`.
-- [ ] 8A.2 Flow-sensitive type narrowing in if/match — `if x != null { x.field }` should know `x` is non-null in the true branch. Enables safe null handling without `unwrap`. Touch: `typechecker.rs`.
+- [x] 8A.2 Flow-sensitive type narrowing in if/match — `if x != null { x.field }` should know `x` is non-null in the true branch. Enables safe null handling without `unwrap`. Touch: `typechecker.rs`.
 - [ ] 8A.3 Exhaustive match checking — warn when a match doesn't cover all variants. Essential for Result/Option patterns. Touch: `typechecker.rs`.
 
 ### Phase 8B — Generics
