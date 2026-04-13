@@ -180,10 +180,16 @@ impl Value {
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
-            (Value::Obj(a), Value::Obj(b)) => match (gc.get(*a), gc.get(*b)) {
-                (Some(oa), Some(ob)) => oa.equals(ob, gc),
-                _ => false,
-            },
+            (Value::Obj(a), Value::Obj(b)) => {
+                // Fast path: interned strings (and any shared object) have the same GcRef
+                if a == b {
+                    return true;
+                }
+                match (gc.get(*a), gc.get(*b)) {
+                    (Some(oa), Some(ob)) => oa.equals(ob, gc),
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }
