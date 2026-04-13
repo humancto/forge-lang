@@ -449,18 +449,25 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new("wait() requires a number of seconds")),
             },
-            "channel" => {
-                let capacity = match args.first() {
-                    Some(Value::Int(n)) => (*n).max(1) as usize,
-                    _ => 32,
-                };
-                let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(capacity);
-                Ok(Value::Channel(Arc::new(ChannelInner {
-                    tx: std::sync::Mutex::new(Some(tx)),
-                    rx: std::sync::Mutex::new(Some(rx)),
-                    capacity,
-                })))
-            }
+            "channel" => match args.first() {
+                Some(Value::Int(n)) => {
+                    let cap = (*n).max(0) as usize;
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(cap);
+                    Ok(Value::Channel(Arc::new(ChannelInner {
+                        tx: std::sync::Mutex::new(Some(ChannelSender::Bounded(tx))),
+                        rx: std::sync::Mutex::new(Some(rx)),
+                        capacity: Some(cap),
+                    })))
+                }
+                _ => {
+                    let (tx, rx) = std::sync::mpsc::channel::<Value>();
+                    Ok(Value::Channel(Arc::new(ChannelInner {
+                        tx: std::sync::Mutex::new(Some(ChannelSender::Unbounded(tx))),
+                        rx: std::sync::Mutex::new(Some(rx)),
+                        capacity: None,
+                    })))
+                }
+            },
             "send" => {
                 if args.len() < 2 {
                     return Err(RuntimeError::new(
@@ -470,15 +477,20 @@ impl Interpreter {
                 let val = args[1].clone();
                 match &args[0] {
                     Value::Channel(ch) => {
-                        if let Ok(guard) = ch.tx.lock() {
-                            if let Some(ref sender) = *guard {
-                                sender
-                                    .send(val)
+                        let guard = ch.tx.lock().expect("BUG: channel mutex poisoned");
+                        match guard.as_ref() {
+                            Some(ChannelSender::Bounded(tx)) => {
+                                tx.send(val)
                                     .map_err(|_| RuntimeError::new("channel closed"))?;
-                                return Ok(Value::Null);
+                                Ok(Value::Null)
                             }
+                            Some(ChannelSender::Unbounded(tx)) => {
+                                tx.send(val)
+                                    .map_err(|_| RuntimeError::new("channel closed"))?;
+                                Ok(Value::Null)
+                            }
+                            None => Err(RuntimeError::new("channel closed")),
                         }
-                        Err(RuntimeError::new("channel closed"))
                     }
                     _ => Err(RuntimeError::new(
                         "send() requires a channel as first argument",
@@ -1259,12 +1271,13 @@ impl Interpreter {
                     }
                 };
                 let val = args[1].clone();
-                let tx_guard = ch
-                    .tx
-                    .lock()
-                    .map_err(|e| RuntimeError::new(&format!("channel lock error: {}", e)))?;
+                let tx_guard = ch.tx.lock().expect("BUG: channel mutex poisoned");
                 match tx_guard.as_ref() {
-                    Some(tx) => match tx.try_send(val) {
+                    Some(ChannelSender::Bounded(tx)) => match tx.try_send(val) {
+                        Ok(()) => Ok(Value::Bool(true)),
+                        Err(_) => Ok(Value::Bool(false)),
+                    },
+                    Some(ChannelSender::Unbounded(tx)) => match tx.send(val) {
                         Ok(()) => Ok(Value::Bool(true)),
                         Err(_) => Ok(Value::Bool(false)),
                     },

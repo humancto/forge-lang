@@ -30,13 +30,20 @@ fn escape_json_string(s: &str) -> String {
     out
 }
 
+/// Sender variant: bounded (sync_channel) or unbounded (channel)
+#[derive(Debug)]
+pub enum ChannelSender {
+    Bounded(std::sync::mpsc::SyncSender<Value>),
+    Unbounded(std::sync::mpsc::Sender<Value>),
+}
+
 /// Thread-safe channel inner type
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ChannelInner {
-    pub tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Value>>>,
+    pub tx: std::sync::Mutex<Option<ChannelSender>>,
     pub rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<Value>>>,
-    pub capacity: usize,
+    pub capacity: Option<usize>,
 }
 
 /// Runtime values
