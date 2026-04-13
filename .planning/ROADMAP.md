@@ -44,7 +44,7 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 
 - [x] 9B.1 Task groups — `task_group { spawn { ... }; spawn { ... } }` waits for all children before continuing. Cancels remaining on first error. Touch: `parser.rs`, `interpreter/mod.rs`, `vm/compiler.rs`, `vm/machine.rs`.
 - [x] 9B.2 Spawn with timeout — `spawn timeout 5 seconds { ... }` cancels after deadline. Touch: `interpreter/mod.rs`, `vm/machine.rs`.
-- [ ] 9B.3 Spawn return type — `let handle = spawn { 42 }; let result = await handle` with proper Result wrapping on panics. Currently partially works. Touch: `vm/machine.rs`.
+- [x] 9B.3 Spawn return type — `let handle = spawn { 42 }; let result = await handle` with proper Result wrapping on panics. Currently partially works. Touch: `vm/machine.rs`.
 
 ---
 
