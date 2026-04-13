@@ -56,7 +56,7 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 
 - [x] 10A.1 Semver constraint parsing — support `^1.0`, `~1.5`, `>=1.0.0, <2.0.0`, `*` in `forge.toml` dependency specs. Touch: `manifest.rs`, add `semver` crate.
 - [x] 10A.2 Semver resolution algorithm — given constraints, find the latest compatible version from available candidates. Touch: `package.rs`.
-- [ ] 10A.3 Transitive dependency resolution — if A depends on B and B depends on C, install all three. Detect cycles. Touch: `package.rs`.
+- [x] 10A.3 Transitive dependency resolution — if A depends on B and B depends on C, install all three. Detect cycles. Touch: `package.rs`.
 
 ### Phase 10B — Remote Registry
 
