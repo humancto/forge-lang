@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,7 +105,8 @@ fn install_manifest_dependencies(
     let mut lockfile = load_lockfile_from(lockfile_path).unwrap_or_default();
     let mut installed = 0;
 
-    let mut visiting = HashSet::new();
+    // Track the root project to detect cycles back to it
+    let mut visiting = vec![manifest.project.name.clone()];
 
     for (name, spec) in &manifest.dependencies {
         let locked =
@@ -192,7 +192,7 @@ fn resolve_transitive(
     parent: &str,
     packages_dir: &Path,
     registry_roots: &[PathBuf],
-    visiting: &mut HashSet<String>,
+    visiting: &mut Vec<String>,
 ) -> Result<Vec<LockedPackage>, String> {
     let pkg_dir = packages_dir.join(parent);
     let manifest_path = pkg_dir.join("forge.toml");
@@ -206,24 +206,17 @@ fn resolve_transitive(
         return Ok(Vec::new());
     }
 
-    if !visiting.insert(parent.to_string()) {
-        let chain: Vec<&str> = visiting.iter().map(|s| s.as_str()).collect();
-        return Err(format!(
-            "  Error: circular dependency detected: {} -> {}",
-            chain.join(" -> "),
-            parent
-        ));
-    }
+    visiting.push(parent.to_string());
 
     let mut results = Vec::new();
 
     for (dep_name, dep_spec) in &sub_manifest.dependencies {
         // Cycle detection: check before install skip
-        if visiting.contains(dep_name.as_str()) {
+        if visiting.iter().any(|v| v == dep_name) {
+            let chain = visiting.join(" -> ");
             return Err(format!(
                 "  Error: circular dependency detected: {} -> {}",
-                visiting.iter().cloned().collect::<Vec<_>>().join(" -> "),
-                dep_name
+                chain, dep_name
             ));
         }
 
@@ -242,7 +235,7 @@ fn resolve_transitive(
         results.extend(nested);
     }
 
-    visiting.remove(parent);
+    visiting.pop();
     Ok(results)
 }
 
@@ -1021,6 +1014,60 @@ toolkit = "1.2.3"
 
         assert_eq!(summary.installed, 1);
         assert!(packages_dir.join("pkg-b").join("main.fg").exists());
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn transitive_deps_cycle_back_to_root() {
+        // app -> pkg-a, pkg-a depends on "app" (cycle back to root project)
+        let workspace = temp_path("trans-root-cycle");
+        let pkg_a_src = workspace.join("pkg-a");
+        let app_src = workspace.join("app-src");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let lockfile_path = workspace.join("forge.lock");
+
+        // pkg-a depends on "app" (the root project name)
+        std::fs::create_dir_all(&pkg_a_src).unwrap();
+        std::fs::write(pkg_a_src.join("main.fg"), "// pkg-a").unwrap();
+        write_forge_toml(
+            &pkg_a_src,
+            &format!(
+                "[project]\nname = \"pkg-a\"\n[dependencies]\nmy-app = {{ path = \"{}\" }}",
+                app_src.display()
+            ),
+        );
+
+        // Create a fake "app" source so the path dep can be installed
+        std::fs::create_dir_all(&app_src).unwrap();
+        std::fs::write(app_src.join("main.fg"), "// app").unwrap();
+
+        let manifest: Manifest = toml::from_str(&format!(
+            "[project]\nname = \"my-app\"\n[dependencies]\npkg-a = {{ path = \"{}\" }}",
+            pkg_a_src.display()
+        ))
+        .unwrap();
+
+        let result = install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[],
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("circular dependency"),
+            "Expected circular dependency error, got: {}",
+            err
+        );
+        assert!(
+            err.contains("my-app"),
+            "Error should mention root project name: {}",
+            err
+        );
 
         std::fs::remove_dir_all(&workspace).unwrap();
     }
