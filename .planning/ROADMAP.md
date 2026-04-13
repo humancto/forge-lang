@@ -38,7 +38,7 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 
 - [x] 9A.1 Channel `select` — wait on multiple channels, return first ready value. `select { ch1 -> v1 { ... }, ch2 -> v2 { ... } }`. Touch: `parser.rs`, `interpreter/mod.rs`, `vm/compiler.rs`, `vm/machine.rs`.
 - [x] 9A.2 Channel `close` and iteration — `close(ch)` signals no more values; `for msg in ch { }` drains until closed. Touch: `interpreter/builtins.rs`, `vm/builtins.rs`.
-- [ ] 9A.3 Unbounded channels — `channel()` with no capacity argument creates unbounded. Currently only `sync_channel` is used. Touch: `interpreter/builtins.rs`, `vm/builtins.rs`.
+- [x] 9A.3 Unbounded channels — `channel()` with no capacity argument creates unbounded. Currently only `sync_channel` is used. Touch: `interpreter/builtins.rs`, `vm/builtins.rs`.
 
 ### Phase 9B — Structured Concurrency
 
