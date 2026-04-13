@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VM channel extras** — `try_send()`, `try_receive()`, `select()` now work in `--vm` mode. Non-blocking channel operations and multi-channel select with optional timeout. ([#88](https://github.com/humancto/forge-lang/pull/88))
 - **VM async coordination** — `await_all()` and `await_timeout()` now work in `--vm` mode. Await multiple task handles or a single handle with a deadline. ([#89](https://github.com/humancto/forge-lang/pull/89))
 - **VM `time()` builtin** — `time()` now works in `--vm` mode, returning a datetime object with iso, unix, year, month, day, hour, minute, second, weekday, and timezone fields. Module-as-function via `__call__` dispatch. ([#90](https://github.com/humancto/forge-lang/pull/90))
+- **NaN-boxed value encoding** — New `nanbox` module implements 8-byte NaN-boxed value representation (vs current 16-byte enum). Encodes Int/Float/Bool/Null/Obj in a single u64 using IEEE 754 quiet NaN payload bits. 40 unit tests. ([#91](https://github.com/humancto/forge-lang/pull/91))
 
 ## [0.8.0] - 2026-04-12
 

@@ -7,6 +7,7 @@ pub mod green;
 #[cfg(feature = "jit")]
 pub mod jit;
 pub mod machine;
+pub mod nanbox;
 pub mod profiler;
 pub mod serialize;
 pub mod value;
