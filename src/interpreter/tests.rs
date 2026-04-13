@@ -4144,6 +4144,35 @@ fn await_all_non_array_errors() {
     assert!(result.is_err());
 }
 
+#[test]
+fn await_timeout_returns_value_when_fast() {
+    let result = try_run_forge(
+        r#"
+        let h = spawn { 42 }
+        let val = await_timeout(h, 5000)
+        assert_eq(val, 42)
+    "#,
+    );
+    assert!(result.is_ok(), "await_timeout fast: {:?}", result.err());
+}
+
+#[test]
+fn await_timeout_returns_null_on_timeout() {
+    let value = run_forge(
+        r#"
+        let h = spawn { wait 10 seconds }
+        await_timeout(h, 50)
+    "#,
+    );
+    assert_eq!(value, Value::Null);
+}
+
+#[test]
+fn await_timeout_non_handle_errors() {
+    let result = try_run_forge("await_timeout(42, 100)");
+    assert!(result.is_err());
+}
+
 // === Phase 2: Short-circuit tests ===
 
 #[test]

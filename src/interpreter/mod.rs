@@ -658,6 +658,7 @@ impl Interpreter {
             "select",
             "close",
             "await_all",
+            "await_timeout",
             // GenZ Debug Kit
             "sus",
             "bruh",
