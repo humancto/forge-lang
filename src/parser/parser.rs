@@ -822,6 +822,24 @@ impl Parser {
         })
     }
 
+    fn parse_type_params(&mut self) -> Result<Vec<String>, ParseError> {
+        if !self.check(&Token::Lt) {
+            return Ok(vec![]);
+        }
+        self.advance(); // consume <
+        let mut params = Vec::new();
+        loop {
+            params.push(self.expect_ident()?);
+            if self.check(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(Token::Gt)?;
+        Ok(params)
+    }
+
     fn parse_fn_def(&mut self, decorators: Vec<Decorator>) -> Result<Stmt, ParseError> {
         let is_async = if self.check(&Token::Async) || self.check(&Token::ForgeKw) {
             self.advance();
@@ -839,6 +857,7 @@ impl Parser {
             return Err(self.error("expected 'fn' or 'define'"));
         }
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
 
         self.expect(Token::LParen)?;
         let params = self.parse_params()?;
@@ -855,6 +874,7 @@ impl Parser {
 
         Ok(Stmt::FnDef {
             name,
+            type_params,
             params,
             return_type,
             body,
@@ -873,6 +893,7 @@ impl Parser {
             return Err(self.error("expected 'struct' or 'thing'"));
         }
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
 
         self.expect(Token::LBrace)?;
         self.skip_newlines();
@@ -917,7 +938,11 @@ impl Parser {
         }
 
         self.expect(Token::RBrace)?;
-        Ok(Stmt::StructDef { name, fields })
+        Ok(Stmt::StructDef {
+            name,
+            type_params,
+            fields,
+        })
     }
 
     fn parse_return(&mut self) -> Result<Stmt, ParseError> {
@@ -2311,6 +2336,80 @@ mod tests {
                 assert_eq!(variants.len(), 2);
             }
             other => panic!("expected type definition, got {:?}", other),
+        }
+    }
+
+    // ========== 8B.1: Generic Type Parameters ==========
+
+    #[test]
+    fn parse_generic_function_single_param() {
+        let program = parse_program("fn identity<T>(x: T) -> T { return x }");
+        match &program.statements[0].stmt {
+            Stmt::FnDef {
+                name,
+                type_params,
+                params,
+                ..
+            } => {
+                assert_eq!(name, "identity");
+                assert_eq!(type_params, &vec!["T".to_string()]);
+                assert_eq!(params.len(), 1);
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_generic_function_multiple_params() {
+        let program = parse_program("fn map<T, U>(arr: [T], b: U) -> [U] { return arr }");
+        match &program.statements[0].stmt {
+            Stmt::FnDef {
+                name, type_params, ..
+            } => {
+                assert_eq!(name, "map");
+                assert_eq!(type_params, &vec!["T".to_string(), "U".to_string()]);
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_non_generic_function_has_empty_type_params() {
+        let program = parse_program("fn add(a: Int, b: Int) { return a + b }");
+        match &program.statements[0].stmt {
+            Stmt::FnDef { type_params, .. } => {
+                assert!(type_params.is_empty());
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_generic_struct() {
+        let program = parse_program("struct Pair<T> {\n  first: T\n  second: T\n}");
+        match &program.statements[0].stmt {
+            Stmt::StructDef {
+                name,
+                type_params,
+                fields,
+                ..
+            } => {
+                assert_eq!(name, "Pair");
+                assert_eq!(type_params, &vec!["T".to_string()]);
+                assert_eq!(fields.len(), 2);
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_non_generic_struct_has_empty_type_params() {
+        let program = parse_program("struct Point {\n  x: Int\n  y: Int\n}");
+        match &program.statements[0].stmt {
+            Stmt::StructDef { type_params, .. } => {
+                assert!(type_params.is_empty());
+            }
+            other => panic!("expected StructDef, got {:?}", other),
         }
     }
 }

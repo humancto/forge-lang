@@ -861,7 +861,7 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
-            Stmt::StructDef { name, fields } => {
+            Stmt::StructDef { name, fields, .. } => {
                 self.env
                     .define(name.clone(), Value::BuiltIn(format!("struct:{}", name)));
 

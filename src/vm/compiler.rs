@@ -1001,7 +1001,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::DecoratorStmt(_) => Ok(()),
 
-        Stmt::StructDef { name, fields } => compile_hidden_stmt(
+        Stmt::StructDef { name, fields, .. } => compile_hidden_stmt(
             c,
             "__forge_register_struct",
             vec![
