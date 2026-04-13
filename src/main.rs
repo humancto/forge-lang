@@ -159,6 +159,8 @@ enum Command {
         /// Package name or name@version (e.g., "router" or "router@^1.0")
         package: String,
     },
+    /// Update all dependencies to latest compatible versions
+    Update,
     /// Publish the current project to the local registry
     Publish {
         /// Show what would be packaged without publishing
@@ -359,6 +361,9 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        Some(Command::Update) => {
+            package::update();
         }
         Some(Command::Publish { dry_run, registry }) => {
             publish::publish(dry_run, registry.as_deref());

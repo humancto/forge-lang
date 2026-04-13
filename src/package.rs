@@ -7,6 +7,64 @@ use semver::{Version, VersionReq};
 
 const PACKAGES_DIR: &str = "forge_modules";
 
+pub fn update() {
+    let manifest_path = Path::new("forge.toml");
+    let manifest = match manifest::load_manifest_from(manifest_path) {
+        Some(m) => m,
+        None => {
+            eprintln!("Error: no forge.toml found in current directory");
+            std::process::exit(1);
+        }
+    };
+
+    if manifest.dependencies.is_empty() {
+        println!("No dependencies to update.");
+        return;
+    }
+
+    let packages_dir = Path::new(PACKAGES_DIR);
+
+    // Remove existing installed packages so install_from_manifest re-resolves
+    for name in manifest.dependencies.keys() {
+        let pkg_dir = packages_dir.join(name);
+        if pkg_dir.exists() {
+            if let Err(e) = remove_path(&pkg_dir) {
+                eprintln!("Error: failed to remove {}: {}", name, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Re-install all dependencies (will re-resolve latest compatible versions)
+    let lockfile_path = Path::new("forge.lock");
+    let registry_roots = default_registry_roots();
+    let manifest_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    match install_manifest_dependencies(
+        &manifest,
+        manifest_root,
+        packages_dir,
+        lockfile_path,
+        &registry_roots,
+    ) {
+        Ok(summary) => {
+            println!(
+                "  Updated {} dependencies for '{}'",
+                summary.processed, manifest.project.name
+            );
+            if summary.locked_packages > 0 {
+                println!(
+                    "  Updated forge.lock ({} packages)",
+                    summary.locked_packages
+                );
+            }
+        }
+        Err(message) => {
+            eprintln!("{}", message);
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn install(source: &str) {
     if source == "." || source.is_empty() {
         install_from_manifest();
@@ -1125,6 +1183,64 @@ toolkit = "1.2.3"
             "Error should mention root project name: {}",
             err
         );
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn update_removes_old_and_reinstalls_latest() {
+        let workspace = temp_path("update-flow");
+        let registry = workspace.join("registry");
+        let packages_dir = workspace.join(PACKAGES_DIR);
+        let lockfile_path = workspace.join("forge.lock");
+
+        // Start with v1.0.0 only
+        create_registry_versions(&registry, "foo", &["1.0.0"]);
+
+        let manifest: Manifest = toml::from_str(
+            r#"
+[project]
+name = "app"
+
+[dependencies]
+foo = "^1.0"
+"#,
+        )
+        .unwrap();
+
+        // Initial install — gets 1.0.0
+        let summary = install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[registry.clone()],
+        )
+        .unwrap();
+        assert_eq!(summary.installed, 1);
+        let lockfile = load_lockfile_from(&lockfile_path).unwrap();
+        assert_eq!(lockfile.find("foo").unwrap().version, "1.0.0");
+
+        // Publish v1.2.0 to the registry
+        create_registry_versions(&registry, "foo", &["1.2.0"]);
+
+        // Simulate update: remove installed package, then re-install
+        let pkg_dir = packages_dir.join("foo");
+        assert!(pkg_dir.exists());
+        remove_path(&pkg_dir).unwrap();
+        assert!(!pkg_dir.exists());
+
+        let summary = install_manifest_dependencies(
+            &manifest,
+            &workspace,
+            &packages_dir,
+            &lockfile_path,
+            &[registry.clone()],
+        )
+        .unwrap();
+        assert_eq!(summary.installed, 1);
+        let lockfile = load_lockfile_from(&lockfile_path).unwrap();
+        assert_eq!(lockfile.find("foo").unwrap().version, "1.2.0");
 
         std::fs::remove_dir_all(&workspace).unwrap();
     }

@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitHub-based remote package registry** — `forge install` now falls back to a remote GitHub-based package index when local registry lookup fails. Supports TOML-based package entries, semver resolution, tarball download/extraction, local caching with TTL, and `GITHUB_TOKEN` authentication. ([#78](https://github.com/humancto/forge-lang/pull/78))
 - **`forge search <query>`** — search the remote package registry by name or description. Case-insensitive substring matching with cached index. ([#79](https://github.com/humancto/forge-lang/pull/79))
 - **`forge add <pkg>`** — add a dependency to `forge.toml` and install it. Supports `forge add router` (any version) and `forge add router@^1.0` (with constraint). ([#80](https://github.com/humancto/forge-lang/pull/80))
+- **`forge update`** — update all dependencies to latest compatible versions by re-resolving from registries. ([#81](https://github.com/humancto/forge-lang/pull/81))
 
 ## [0.8.0] - 2026-04-12
 
