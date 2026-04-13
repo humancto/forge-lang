@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.7.1"
+version: "0.8.0"
 year: "2026"
 publisher: "Self-Published"
 cover_description: "A glowing anvil in a digital forge, sparks flying as molten code streams pour from it, forming HTTP requests, database queries, and terminal UI elements — all set against a dark navy background with subtle circuit-board patterns. The anvil sits on a workbench made of keyboard keys. The sparks form recognizable code symbols: curly braces, arrows, pipes. Color palette: deep navy (#0a192f), forge orange (#ff6b35), electric blue (#64ffda), white spark highlights."
@@ -70,7 +70,7 @@ Verify your installation:
 
 ```
 $ forge version
-Forge v0.7.1
+Forge v0.8.0
 Internet-native programming language
 Bytecode VM with mark-sweep GC
 ```

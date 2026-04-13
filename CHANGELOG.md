@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-12
+
 ### Added
 
 - **`os` stdlib module** — `hostname()`, `platform()`, `arch()`, `pid()`, `cpus()`, `homedir()` for runtime OS introspection. ([#59](https://github.com/humancto/forge-lang/pull/59))
 - **`path` stdlib module** — `join()`, `resolve()`, `relative()`, `is_absolute()`, `dirname()`, `basename()`, `extname()`, `separator` for cross-platform path manipulation. ([#59](https://github.com/humancto/forge-lang/pull/59))
+- **`--allow-run` permission flag** — shell execution (`sh`, `shell`, `run_command`, `pipe_to`) now requires explicit opt-in via `--allow-run`. REPL and `-e` mode auto-enable for convenience. ([#57](https://github.com/humancto/forge-lang/pull/57))
+- **VS Code extension enhanced** — full TextMate grammar covering all 20 modules and 80+ builtins, 24 code snippets, extension README. ([#60](https://github.com/humancto/forge-lang/pull/60))
 
 ### Changed
 
@@ -20,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Trimmed tokio features** from `"full"` to 7 specific features actually used. ([#44](https://github.com/humancto/forge-lang/pull/44))
 - **VM `Value` implements `Copy`** — eliminates 51 unnecessary clone calls in the dispatch hot path. ([#47](https://github.com/humancto/forge-lang/pull/47))
 - **Removed dead `NativeFn.func` field** — unused function pointer placeholder cleaned up. ([#48](https://github.com/humancto/forge-lang/pull/48))
+- **Variable-width VM frames** — frames now use `max_registers` instead of fixed 256 slots, reducing stack memory usage for simple functions. ([#55](https://github.com/humancto/forge-lang/pull/55))
+- **Unified async runtime** — HTTP stdlib reuses existing Tokio handle via `Handle::try_current()` instead of creating a new runtime per call. ([#53](https://github.com/humancto/forge-lang/pull/53))
 
 ### Refactored
 
@@ -31,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`len()` and `count("")` use char count across all backends** — interpreter and VM now return Unicode character count consistently. ([#38](https://github.com/humancto/forge-lang/pull/38))
 - **JIT memory leak fixed** — replaced `mem::forget(jit)` with owned `Vec<JitCompiler>` to keep code pages alive without leaking. ([#39](https://github.com/humancto/forge-lang/pull/39))
 - **Short-circuit `&&`/`||` in VM** — logical operators now skip right-hand evaluation when unnecessary, matching interpreter behavior. ([#40](https://github.com/humancto/forge-lang/pull/40))
+- **Eliminated 16 compiler warnings** — dead code annotations, unused imports, and redundant patterns cleaned up. ([#51](https://github.com/humancto/forge-lang/pull/51))
+- **Converted 3 user-reachable panics to error returns** — `alloc_reg`, `add_local` overflow, and JIT dispatch now return proper errors instead of crashing. ([#52](https://github.com/humancto/forge-lang/pull/52))
+- **String `.len` returns char count, not byte count** — consistent across interpreter, VM, and JIT. ([#54](https://github.com/humancto/forge-lang/pull/54))
+- **Proper JSON string escaping** — `json.stringify` and `json.pretty` now escape control characters, newlines, tabs, and backslashes correctly. ([#56](https://github.com/humancto/forge-lang/pull/56))
+
+### Security
+
+- **SSRF protection on by default** — HTTP client denies requests to private/loopback IPs unless `FORGE_HTTP_ALLOW_PRIVATE=1` is set. ([#58](https://github.com/humancto/forge-lang/pull/58))
 
 ## [0.7.1] - 2026-04-12
 

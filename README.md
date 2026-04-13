@@ -127,7 +127,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → forge 0.7.1
+forge version          # → forge 0.8.0
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -689,7 +689,7 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 
 ## 📊 Project Status
 
-Forge is **v0.7.1**. The language, interpreter, and standard library are stable; VM/JIT backends are fast but still subset runtimes.
+Forge is **v0.8.0**. The language, interpreter, and standard library are stable; VM/JIT backends are fast but still subset runtimes.
 
 | Metric                   |                        Value |
 | ------------------------ | ---------------------------: |

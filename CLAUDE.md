@@ -116,7 +116,7 @@ forge test --coverage # with line coverage report
 
 All 18 example files run successfully.
 
-## Known Limitations (v0.7.1)
+## Known Limitations (v0.8.0)
 
 - All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
 - The VM is the default engine; programs using decorator-driven HTTP servers (`@server`, `@get`, etc.) auto-fallback to the interpreter

@@ -3,7 +3,7 @@ title: "Programming Forge"
 subtitle: "The Internet-Native Language That Reads Like English"
 author: "Archith Rapaka"
 edition: "First Edition"
-version: "0.7.1"
+version: "0.8.0"
 year: "2026"
 publisher: "Self-Published"
 lang: "en"
@@ -12057,7 +12057,7 @@ Display version information.
 
 ```bash
 forge version
-# Output: Forge v0.7.1
+# Output: Forge v0.8.0
 #         Internet-native programming language
 #         Bytecode VM with mark-sweep GC
 ```
