@@ -66,7 +66,7 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 
 ### Phase 10C — Developer Workflow
 
-- [ ] 10C.1 `forge add <pkg>` — shorthand that adds to `forge.toml` and installs. Touch: `main.rs`, `manifest.rs`, `package.rs`.
+- [x] 10C.1 `forge add <pkg>` — shorthand that adds to `forge.toml` and installs. Touch: `main.rs`, `manifest.rs`, `package.rs`.
 - [ ] 10C.2 `forge update` — update all dependencies to latest compatible versions. Touch: `main.rs`, `package.rs`.
 - [ ] 10C.3 Lockfile integrity check — `forge install` verifies `forge.lock` checksums match installed packages, warns on tampering. Touch: `package.rs`.
 
