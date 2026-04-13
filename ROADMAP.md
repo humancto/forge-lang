@@ -134,7 +134,7 @@ var     var   Prototype table (u16 count + recursive Chunk encoding)
 - [x] `forge build app.fg → app.fgc` (binary bytecode file)
 - [x] `forge run app.fgc` (load + execute)
 - [ ] VM runs all programs the interpreter can
-  - [ ] VM channel builtins: `channel()`, `send()`, `receive()`, `close()`
+  - [x] VM channel builtins: `channel()`, `send()`, `receive()`, `close()`
   - [ ] VM channel extras: `try_send()`, `try_receive()`, `select()`
   - [ ] VM async coordination: `await_all()`, `await_timeout()`
   - [ ] VM `time()` builtin
