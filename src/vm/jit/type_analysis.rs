@@ -5,6 +5,8 @@ pub enum RegType {
     Int,
     Float,
     Bool,
+    /// A GcRef index pointing to a string in the GC heap.
+    StringRef,
     Unknown,
 }
 
@@ -20,6 +22,9 @@ pub struct TypeInfo {
     pub reg_types: Vec<RegType>,
     pub has_unsupported_ops: bool,
     pub has_float: bool,
+    pub has_string_ops: bool,
+    /// The type of the value returned by the function (from the last Return opcode).
+    pub return_type: RegType,
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +53,8 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
     let mut constants = vec![None; num_regs];
     let mut has_unsupported = false;
     let mut has_float = false;
+    let mut has_string_ops = false;
+    let mut return_type = RegType::Int;
 
     for i in 0..chunk.arity as usize {
         types[i] = RegType::Int;
@@ -96,8 +103,9 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                             }
                         }
                         Constant::Str(_) => {
-                            has_unsupported = true;
-                            if a < constants.len() {
+                            has_string_ops = true;
+                            if a < types.len() {
+                                types[a] = RegType::StringRef;
                                 constants[a] = None;
                             }
                         }
@@ -181,7 +189,27 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                     constants[dst] = None;
                 }
             }
-            OpCode::Return | OpCode::ReturnNull => {}
+            OpCode::Return => {
+                if a < types.len() {
+                    return_type = types[a];
+                }
+            }
+            OpCode::ReturnNull => {}
+
+            OpCode::Concat => {
+                has_string_ops = true;
+                if a < types.len() {
+                    types[a] = RegType::StringRef;
+                    constants[a] = None;
+                }
+            }
+            OpCode::Len => {
+                has_string_ops = true;
+                if a < types.len() {
+                    types[a] = RegType::Int;
+                    constants[a] = None;
+                }
+            }
 
             OpCode::NewArray
             | OpCode::NewObject
@@ -189,8 +217,6 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
             | OpCode::SetField
             | OpCode::GetIndex
             | OpCode::SetIndex
-            | OpCode::Concat
-            | OpCode::Len
             | OpCode::Interpolate
             | OpCode::Spawn
             | OpCode::ExtractField
@@ -220,10 +246,17 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         }
     }
 
+    // Functions mixing strings with floats are unsupported (would need NaN-boxing)
+    if has_string_ops && has_float {
+        has_unsupported = true;
+    }
+
     TypeInfo {
         reg_types: types,
         has_unsupported_ops: has_unsupported,
         has_float,
+        has_string_ops,
+        return_type,
     }
 }
 
@@ -266,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_string_function_unsupported() {
+    fn analyze_string_function_supported() {
         let mut chunk = Chunk::new("greet");
         chunk.arity = 0;
         chunk.max_registers = 2;
@@ -275,7 +308,61 @@ mod tests {
         chunk.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 2);
 
         let info = analyze(&chunk);
-        assert!(info.has_unsupported_ops);
+        assert!(!info.has_unsupported_ops);
+        assert!(info.has_string_ops);
+        assert_eq!(info.reg_types[0], RegType::StringRef);
+    }
+
+    #[test]
+    fn analyze_string_with_float_unsupported() {
+        let mut chunk = Chunk::new("mixed");
+        chunk.arity = 0;
+        chunk.max_registers = 3;
+        let str_idx = chunk.add_constant(Constant::Str("hello".to_string()));
+        let float_idx = chunk.add_constant(Constant::Float(1.5));
+        chunk.emit(encode_abx(OpCode::LoadConst, 0, str_idx), 1);
+        chunk.emit(encode_abx(OpCode::LoadConst, 1, float_idx), 2);
+        chunk.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 3);
+
+        let info = analyze(&chunk);
+        assert!(
+            info.has_unsupported_ops,
+            "string+float mix should be unsupported"
+        );
+    }
+
+    #[test]
+    fn analyze_concat_produces_string_ref() {
+        let mut chunk = Chunk::new("concat");
+        chunk.arity = 0;
+        chunk.max_registers = 3;
+        let s1 = chunk.add_constant(Constant::Str("hello ".to_string()));
+        let s2 = chunk.add_constant(Constant::Str("world".to_string()));
+        chunk.emit(encode_abx(OpCode::LoadConst, 0, s1), 1);
+        chunk.emit(encode_abx(OpCode::LoadConst, 1, s2), 2);
+        chunk.emit(encode_abc(OpCode::Concat, 2, 0, 1), 3);
+        chunk.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 4);
+
+        let info = analyze(&chunk);
+        assert!(!info.has_unsupported_ops);
+        assert!(info.has_string_ops);
+        assert_eq!(info.reg_types[2], RegType::StringRef);
+    }
+
+    #[test]
+    fn analyze_len_produces_int() {
+        let mut chunk = Chunk::new("strlen");
+        chunk.arity = 0;
+        chunk.max_registers = 2;
+        let s = chunk.add_constant(Constant::Str("hello".to_string()));
+        chunk.emit(encode_abx(OpCode::LoadConst, 0, s), 1);
+        chunk.emit(encode_abc(OpCode::Len, 1, 0, 0), 2);
+        chunk.emit(encode_abc(OpCode::Return, 1, 0, 0), 3);
+
+        let info = analyze(&chunk);
+        assert!(!info.has_unsupported_ops);
+        assert!(info.has_string_ops);
+        assert_eq!(info.reg_types[1], RegType::Int);
     }
 
     #[test]

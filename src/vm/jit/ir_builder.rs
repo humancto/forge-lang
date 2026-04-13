@@ -1,6 +1,6 @@
 /// Translates Forge bytecode to Cranelift IR.
 /// Type-aware: uses I64 for integers, F64 for floats, I8 (0/1) for bools.
-/// Functions with unsupported ops (strings, arrays, objects) are rejected.
+/// Functions with string ops use I64 registers and call runtime bridges.
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, UserFuncName};
@@ -10,20 +10,32 @@ use cranelift_module::Module;
 use crate::vm::bytecode::*;
 use crate::vm::jit::type_analysis::{self, RegType};
 
+/// Pre-allocated GcRef indices for string constants in the chunk.
+/// `string_refs[i]` is `Some(gcref_index)` if `chunk.constants[i]` is a Str,
+/// `None` otherwise.  Only needed when `type_info.has_string_ops` is true.
+pub type StringRefs = Vec<Option<i64>>;
+
 pub fn build_function<M: Module>(
     module: &mut M,
     chunk: &Chunk,
     func_name: &str,
+    string_refs: Option<&StringRefs>,
 ) -> Result<cranelift_module::FuncId, String> {
     let type_info = type_analysis::analyze(chunk);
     if type_info.has_unsupported_ops {
         return Err("function uses unsupported operations (strings/arrays/objects)".to_string());
     }
 
+    // String functions cannot use floats (rejected by type_analysis).
+    // String functions always use I64 (GcRef indices fit in i64).
     let ret_type = if type_info.has_float { F64 } else { I64 };
     let param_type = if type_info.has_float { F64 } else { I64 };
 
     let mut sig = module.make_signature();
+    // String functions get vm_ptr as first parameter
+    if type_info.has_string_ops {
+        sig.params.push(AbiParam::new(I64)); // vm_ptr
+    }
     for _ in 0..chunk.arity {
         sig.params.push(AbiParam::new(param_type));
     }
@@ -48,6 +60,49 @@ pub fn build_function<M: Module>(
 
         let self_ref = module.declare_func_in_func(func_id, b.func);
 
+        // Import runtime bridge functions for string ops
+        let (bridge_concat, bridge_len, bridge_eq) = if type_info.has_string_ops {
+            // rt_string_concat(vm_ptr: i64, a: i64, b: i64) -> i64
+            let mut concat_sig = module.make_signature();
+            concat_sig.params.push(AbiParam::new(I64));
+            concat_sig.params.push(AbiParam::new(I64));
+            concat_sig.params.push(AbiParam::new(I64));
+            concat_sig.returns.push(AbiParam::new(I64));
+            let concat_id = module
+                .declare_function(
+                    "rt_string_concat",
+                    cranelift_module::Linkage::Import,
+                    &concat_sig,
+                )
+                .map_err(|e| format!("declare rt_string_concat: {}", e))?;
+            let concat_ref = module.declare_func_in_func(concat_id, b.func);
+
+            // rt_string_len(vm_ptr: i64, s: i64) -> i64
+            let mut len_sig = module.make_signature();
+            len_sig.params.push(AbiParam::new(I64));
+            len_sig.params.push(AbiParam::new(I64));
+            len_sig.returns.push(AbiParam::new(I64));
+            let len_id = module
+                .declare_function("rt_string_len", cranelift_module::Linkage::Import, &len_sig)
+                .map_err(|e| format!("declare rt_string_len: {}", e))?;
+            let len_ref = module.declare_func_in_func(len_id, b.func);
+
+            // rt_string_eq(vm_ptr: i64, a: i64, b: i64) -> i64
+            let mut eq_sig = module.make_signature();
+            eq_sig.params.push(AbiParam::new(I64));
+            eq_sig.params.push(AbiParam::new(I64));
+            eq_sig.params.push(AbiParam::new(I64));
+            eq_sig.returns.push(AbiParam::new(I64));
+            let eq_id = module
+                .declare_function("rt_string_eq", cranelift_module::Linkage::Import, &eq_sig)
+                .map_err(|e| format!("declare rt_string_eq: {}", e))?;
+            let eq_ref = module.declare_func_in_func(eq_id, b.func);
+
+            (Some(concat_ref), Some(len_ref), Some(eq_ref))
+        } else {
+            (None, None, None)
+        };
+
         let num_regs = (chunk.max_registers.max(chunk.arity) as usize) + 1;
         let var_type = if type_info.has_float { F64 } else { I64 };
         let mut regs: Vec<Variable> = Vec::with_capacity(num_regs);
@@ -55,8 +110,19 @@ pub fn build_function<M: Module>(
             regs.push(b.declare_var(var_type));
         }
 
+        // For string functions, first param is vm_ptr (store in a dedicated variable)
+        let vm_ptr_var = if type_info.has_string_ops {
+            let var = b.declare_var(I64);
+            let vm_param = b.block_params(entry)[0];
+            b.def_var(var, vm_param);
+            Some(var)
+        } else {
+            None
+        };
+
+        let param_offset = if type_info.has_string_ops { 1 } else { 0 };
         for i in 0..chunk.arity as usize {
-            let param = b.block_params(entry)[i];
+            let param = b.block_params(entry)[i + param_offset];
             b.def_var(regs[i], param);
         }
         let zero_val = if type_info.has_float {
@@ -132,6 +198,14 @@ pub fn build_function<M: Module>(
                             Constant::Int(n) => b.ins().iconst(I64, *n),
                             Constant::Float(f) => b.ins().iconst(I64, *f as i64),
                             Constant::Bool(v) => b.ins().iconst(I64, if *v { 1 } else { 0 }),
+                            Constant::Str(_) => {
+                                // Load pre-allocated GcRef index for this string constant
+                                let gc_idx = string_refs
+                                    .and_then(|refs| refs.get(bx as usize))
+                                    .and_then(|r| *r)
+                                    .unwrap_or(0);
+                                b.ins().iconst(I64, gc_idx)
+                            }
                             _ => b.ins().iconst(I64, 0),
                         }
                     };
@@ -220,7 +294,25 @@ pub fn build_function<M: Module>(
                 | OpCode::GtEq => {
                     let l = b.use_var(regs[bb]);
                     let r = b.use_var(regs[cc]);
-                    let cmp_val = if use_float {
+                    // String equality: call rt_string_eq bridge
+                    let is_string_cmp = bb < type_info.reg_types.len()
+                        && cc < type_info.reg_types.len()
+                        && type_info.reg_types[bb] == RegType::StringRef
+                        && type_info.reg_types[cc] == RegType::StringRef
+                        && matches!(opcode, OpCode::Eq | OpCode::NotEq);
+                    let cmp_val = if is_string_cmp {
+                        let vm_val = b.use_var(vm_ptr_var.expect("BUG: string op without vm_ptr"));
+                        let eq_ref = bridge_eq.expect("BUG: string op without bridge_eq");
+                        let call_inst = b.ins().call(eq_ref, &[vm_val, l, r]);
+                        let eq_result = b.inst_results(call_inst)[0];
+                        if matches!(opcode, OpCode::NotEq) {
+                            // Flip: eq returns 1 for equal, we want 1 for not-equal
+                            let one = b.ins().iconst(I64, 1);
+                            b.ins().isub(one, eq_result)
+                        } else {
+                            eq_result
+                        }
+                    } else if use_float {
                         let fcc = match opcode {
                             OpCode::Eq => FloatCC::Equal,
                             OpCode::NotEq => FloatCC::NotEqual,
@@ -381,6 +473,25 @@ pub fn build_function<M: Module>(
                         b.ins().iconst(I64, 0)
                     };
                     b.ins().return_(&[zero]);
+                }
+                OpCode::Concat => {
+                    let vm_val = b.use_var(vm_ptr_var.expect("BUG: Concat without vm_ptr"));
+                    let concat_ref = bridge_concat.expect("BUG: Concat without bridge_concat");
+                    let l = b.use_var(regs[bb]);
+                    let r = b.use_var(regs[cc]);
+                    let call_inst = b.ins().call(concat_ref, &[vm_val, l, r]);
+                    let result = b.inst_results(call_inst)[0];
+                    b.def_var(regs[a], result);
+                    b.ins().jump(next, &[]);
+                }
+                OpCode::Len => {
+                    let vm_val = b.use_var(vm_ptr_var.expect("BUG: Len without vm_ptr"));
+                    let len_ref = bridge_len.expect("BUG: Len without bridge_len");
+                    let s = b.use_var(regs[bb]);
+                    let call_inst = b.ins().call(len_ref, &[vm_val, s]);
+                    let result = b.inst_results(call_inst)[0];
+                    b.def_var(regs[a], result);
+                    b.ins().jump(next, &[]);
                 }
                 _ => {
                     b.ins().jump(next, &[]);

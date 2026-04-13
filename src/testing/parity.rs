@@ -197,7 +197,7 @@ fn run_on_jit_value(program: &Program) -> String {
         };
         let info = type_analysis::analyze(proto);
         if !info.has_unsupported_ops {
-            let _ = jit.compile_function(proto, &name);
+            let _ = jit.compile_function(proto, &name, None);
         }
     }
 
@@ -216,6 +216,8 @@ fn run_on_jit_value(program: &Program) -> String {
                     JitEntry {
                         ptr,
                         uses_float: info.has_float,
+                        has_string_ops: info.has_string_ops,
+                        returns_string: info.return_type == type_analysis::RegType::StringRef,
                     },
                 );
             }

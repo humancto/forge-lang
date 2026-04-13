@@ -824,7 +824,7 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
         } else {
             proto.name.clone()
         };
-        match jit.compile_function(proto, &name) {
+        match jit.compile_function(proto, &name, None) {
             Ok(_ptr) => {
                 eprintln!(
                     "  JIT compiled: {} ({} instructions -> native)",
@@ -854,6 +854,9 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
                 vm::machine::JitEntry {
                     ptr,
                     uses_float: type_info.has_float,
+                    has_string_ops: type_info.has_string_ops,
+                    returns_string: type_info.return_type
+                        == vm::jit::type_analysis::RegType::StringRef,
                 },
             );
         }

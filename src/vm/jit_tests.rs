@@ -5,6 +5,10 @@ use crate::vm::jit::jit_module::JitCompiler;
 use crate::vm::jit::type_analysis;
 use crate::vm::machine::{JitEntry, VM};
 
+use crate::vm::bytecode::{encode_abc, encode_abx, Chunk, Constant, OpCode};
+use crate::vm::jit::ir_builder::{self, StringRefs};
+use crate::vm::value::{GcRef, ObjKind};
+
 fn run_jit_function(source: &str) -> Vec<String> {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize().unwrap();
@@ -12,17 +16,34 @@ fn run_jit_function(source: &str) -> Vec<String> {
     let program = parser.parse_program().unwrap();
     let chunk = compiler::compile(&program).unwrap();
 
+    let mut vm = VM::new();
     let mut jit = JitCompiler::new().unwrap();
+
     for (i, proto) in chunk.prototypes.iter().enumerate() {
         let name = if proto.name.is_empty() {
             format!("fn_{}", i)
         } else {
             proto.name.clone()
         };
-        let _ = jit.compile_function(proto, &name);
+        let type_info = type_analysis::analyze(proto);
+        // Pre-allocate string constants for string-capable functions
+        let string_refs: Option<StringRefs> = if type_info.has_string_ops {
+            Some(
+                proto
+                    .constants
+                    .iter()
+                    .map(|c| match c {
+                        Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let _ = jit.compile_function(proto, &name, string_refs.as_ref());
     }
 
-    let mut vm = VM::new();
     for (i, proto) in chunk.prototypes.iter().enumerate() {
         let name = if proto.name.is_empty() {
             format!("fn_{}", i)
@@ -36,6 +57,8 @@ fn run_jit_function(source: &str) -> Vec<String> {
                 JitEntry {
                     ptr,
                     uses_float: type_info.has_float,
+                    has_string_ops: type_info.has_string_ops,
+                    returns_string: type_info.return_type == type_analysis::RegType::StringRef,
                 },
             );
         }
@@ -159,8 +182,9 @@ fn jit_rejects_string_function() {
     let chunk = compiler::compile(&program).unwrap();
 
     let mut jit = JitCompiler::new().unwrap();
-    let result = jit.compile_function(&chunk.prototypes[0], "greet");
-    assert!(result.is_err());
+    let result = jit.compile_function(&chunk.prototypes[0], "greet", None);
+    // String-only functions are now supported (no float mix)
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -172,7 +196,7 @@ fn jit_rejects_array_function() {
     let chunk = compiler::compile(&program).unwrap();
 
     let mut jit = JitCompiler::new().unwrap();
-    let result = jit.compile_function(&chunk.prototypes[0], "make_arr");
+    let result = jit.compile_function(&chunk.prototypes[0], "make_arr", None);
     assert!(result.is_err());
 }
 
@@ -468,4 +492,137 @@ fn vm_error_display_includes_trace() {
         "expected `(line N)` in Display output, got: {}",
         rendered
     );
+}
+
+// ----- String operations via JIT bridges (bytecode-level) -----
+
+/// Build a JIT function from raw bytecode and execute it, returning the i64 result.
+fn run_jit_chunk(chunk: &Chunk, vm: &mut VM) -> i64 {
+    let type_info = type_analysis::analyze(chunk);
+    let string_refs: Option<ir_builder::StringRefs> = if type_info.has_string_ops {
+        Some(
+            chunk
+                .constants
+                .iter()
+                .map(|c| match c {
+                    Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
+                    _ => None,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
+    let mut jit = JitCompiler::new().unwrap();
+    let ptr = jit
+        .compile_function(chunk, "test_fn", string_refs.as_ref())
+        .expect("JIT compile failed");
+
+    if type_info.has_string_ops {
+        let vm_ptr = vm as *mut VM as i64;
+        unsafe { jit_call_i64(ptr, &[vm_ptr]) }.unwrap()
+    } else {
+        unsafe { jit_call_i64(ptr, &[]) }.unwrap()
+    }
+}
+
+/// Helper to call jit_call_i64
+unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> Result<i64, crate::vm::machine::VMError> {
+    super::machine::jit_call_i64(ptr, args)
+}
+
+#[test]
+fn jit_bridge_string_concat() {
+    // Build bytecode: load "hello ", load "world", concat, return
+    let mut chunk = Chunk::new("concat_test");
+    chunk.arity = 0;
+    chunk.max_registers = 3;
+    let s1 = chunk.add_constant(Constant::Str("hello ".to_string()));
+    let s2 = chunk.add_constant(Constant::Str("world".to_string()));
+    chunk.emit(encode_abx(OpCode::LoadConst, 0, s1), 1);
+    chunk.emit(encode_abx(OpCode::LoadConst, 1, s2), 2);
+    chunk.emit(encode_abc(OpCode::Concat, 2, 0, 1), 3);
+    chunk.emit(encode_abc(OpCode::Return, 2, 0, 0), 4);
+
+    let mut vm = VM::new();
+    let result = run_jit_chunk(&chunk, &mut vm);
+    // Result is a GcRef index — verify the string content
+    let obj = vm
+        .gc
+        .get(GcRef(result as usize))
+        .expect("GcRef should be valid");
+    match &obj.kind {
+        ObjKind::String(s) => assert_eq!(s, "hello world"),
+        _ => panic!("expected String, got non-string ObjKind"),
+    }
+}
+
+#[test]
+fn jit_bridge_string_len() {
+    // Build bytecode: load "hello", len, return
+    let mut chunk = Chunk::new("len_test");
+    chunk.arity = 0;
+    chunk.max_registers = 2;
+    let s = chunk.add_constant(Constant::Str("hello".to_string()));
+    chunk.emit(encode_abx(OpCode::LoadConst, 0, s), 1);
+    chunk.emit(encode_abc(OpCode::Len, 1, 0, 0), 2);
+    chunk.emit(encode_abc(OpCode::Return, 1, 0, 0), 3);
+
+    let mut vm = VM::new();
+    let result = run_jit_chunk(&chunk, &mut vm);
+    assert_eq!(result, 5);
+}
+
+#[test]
+fn jit_bridge_string_eq() {
+    // Build bytecode: load "hi", load "hi", eq, return
+    let mut chunk = Chunk::new("eq_test");
+    chunk.arity = 0;
+    chunk.max_registers = 3;
+    let s1 = chunk.add_constant(Constant::Str("hi".to_string()));
+    let s2 = chunk.add_constant(Constant::Str("hi".to_string()));
+    chunk.emit(encode_abx(OpCode::LoadConst, 0, s1), 1);
+    chunk.emit(encode_abx(OpCode::LoadConst, 1, s2), 2);
+    chunk.emit(encode_abc(OpCode::Eq, 2, 0, 1), 3);
+    chunk.emit(encode_abc(OpCode::Return, 2, 0, 0), 4);
+
+    let mut vm = VM::new();
+    let result = run_jit_chunk(&chunk, &mut vm);
+    assert_eq!(result, 1);
+}
+
+#[test]
+fn jit_bridge_string_neq() {
+    // Build bytecode: load "hi", load "bye", not-eq, return
+    let mut chunk = Chunk::new("neq_test");
+    chunk.arity = 0;
+    chunk.max_registers = 3;
+    let s1 = chunk.add_constant(Constant::Str("hi".to_string()));
+    let s2 = chunk.add_constant(Constant::Str("bye".to_string()));
+    chunk.emit(encode_abx(OpCode::LoadConst, 0, s1), 1);
+    chunk.emit(encode_abx(OpCode::LoadConst, 1, s2), 2);
+    chunk.emit(encode_abc(OpCode::NotEq, 2, 0, 1), 3);
+    chunk.emit(encode_abc(OpCode::Return, 2, 0, 0), 4);
+
+    let mut vm = VM::new();
+    let result = run_jit_chunk(&chunk, &mut vm);
+    assert_eq!(result, 1);
+}
+
+// High-level string eq/neq tests (compiler-generated bytecode)
+
+#[test]
+fn jit_string_eq() {
+    let out = run_jit_function(
+        "fn streq(a, b) { return a == b }\nprintln(streq(\"hi\", \"hi\"))\nprintln(streq(\"hi\", \"bye\"))",
+    );
+    assert_eq!(out, vec!["1", "0"]);
+}
+
+#[test]
+fn jit_string_not_eq() {
+    let out = run_jit_function(
+        "fn strneq(a, b) { return a != b }\nprintln(strneq(\"hi\", \"hi\"))\nprintln(strneq(\"hi\", \"bye\"))",
+    );
+    assert_eq!(out, vec!["0", "1"]);
 }
