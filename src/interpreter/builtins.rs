@@ -1402,7 +1402,14 @@ impl Interpreter {
                             while guard.is_none() {
                                 guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
                             }
-                            results.push(guard.take().unwrap_or(Value::Null));
+                            let result = guard.take().unwrap_or(Value::Null);
+                            match result {
+                                Value::ResultOk(v) => results.push(*v),
+                                Value::ResultErr(e) => {
+                                    return Err(RuntimeError::new(&format!("task error: {}", e)))
+                                }
+                                other => results.push(other),
+                            }
                         }
                         _ => {
                             return Err(RuntimeError::new(&format!(
@@ -1442,7 +1449,14 @@ impl Interpreter {
                                 return Ok(Value::Null);
                             }
                         }
-                        Ok(guard.take().unwrap_or(Value::Null))
+                        let result = guard.take().unwrap_or(Value::Null);
+                        match result {
+                            Value::ResultOk(v) => Ok(*v),
+                            Value::ResultErr(e) => {
+                                Err(RuntimeError::new(&format!("task error: {}", e)))
+                            }
+                            other => Ok(other),
+                        }
                     }
                     _ => Err(RuntimeError::new(
                         "await_timeout() first argument must be a task handle",
