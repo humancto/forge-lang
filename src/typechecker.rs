@@ -657,6 +657,101 @@ impl TypeChecker {
             .map_or(false, |s| matches!(s.stmt, Stmt::Return(_)))
     }
 
+    /// Check if a match expression covers all variants of a known type.
+    fn check_match_exhaustiveness(&mut self, subject_type: &InferredType, arms: &[MatchArm]) {
+        // Check if any arm is a wildcard/catch-all (makes match exhaustive)
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Wildcard => return,
+                Pattern::Binding(_) => return, // any binding is a catch-all
+                _ => {}
+            }
+        }
+
+        // Determine required variants and check coverage
+        match subject_type {
+            InferredType::Option(_) => {
+                let mut has_some = false;
+                let mut has_none = false;
+                for arm in arms {
+                    match &arm.pattern {
+                        Pattern::Constructor { name, .. } if name == "Some" => has_some = true,
+                        Pattern::Literal(expr) if is_null_expr(expr) => has_none = true,
+                        _ => {}
+                    }
+                }
+                let mut missing = Vec::new();
+                if !has_some {
+                    missing.push("Some");
+                }
+                if !has_none {
+                    missing.push("None");
+                }
+                if !missing.is_empty() {
+                    self.emit(format!(
+                        "non-exhaustive match on {} — missing: {}",
+                        subject_type,
+                        missing.join(", ")
+                    ));
+                }
+            }
+            InferredType::Result(_, _) => {
+                let mut has_ok = false;
+                let mut has_err = false;
+                for arm in arms {
+                    if let Pattern::Constructor { name, .. } = &arm.pattern {
+                        match name.as_str() {
+                            "Ok" => has_ok = true,
+                            "Err" => has_err = true,
+                            _ => {}
+                        }
+                    }
+                }
+                let mut missing = Vec::new();
+                if !has_ok {
+                    missing.push("Ok");
+                }
+                if !has_err {
+                    missing.push("Err");
+                }
+                if !missing.is_empty() {
+                    self.emit(format!(
+                        "non-exhaustive match on {} — missing: {}",
+                        subject_type,
+                        missing.join(", ")
+                    ));
+                }
+            }
+            InferredType::Bool => {
+                let mut has_true = false;
+                let mut has_false = false;
+                for arm in arms {
+                    if let Pattern::Literal(Expr::Bool(v)) = &arm.pattern {
+                        if *v {
+                            has_true = true;
+                        } else {
+                            has_false = true;
+                        }
+                    }
+                }
+                let mut missing = Vec::new();
+                if !has_true {
+                    missing.push("true");
+                }
+                if !has_false {
+                    missing.push("false");
+                }
+                if !missing.is_empty() {
+                    self.emit(format!(
+                        "non-exhaustive match on Bool — missing: {}",
+                        missing.join(", ")
+                    ));
+                }
+            }
+            _ => {} // Unknown, Int, String, etc. — cannot check exhaustiveness
+        }
+    }
+
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let {
@@ -853,6 +948,9 @@ impl TypeChecker {
                     }
                     self.variables = saved;
                 }
+
+                // Exhaustiveness check for known types
+                self.check_match_exhaustiveness(&subject_type, arms);
             }
             _ => {}
         }
@@ -1558,7 +1656,7 @@ mod tests {
     fn match_some_constructor_narrows() {
         // Match with Some(...) constructor pattern should narrow Option to inner type
         let w = warnings_for(
-            "fn f(x: ?String) {\n  match x {\n    Some(v) => { let y: String = x }\n  }\n}",
+            "fn f(x: ?String) {\n  match x {\n    Some(v) => { let y: String = x }\n    _ => {}\n  }\n}",
         );
         assert!(
             w.is_empty(),
@@ -1575,6 +1673,126 @@ mod tests {
         assert!(
             w.is_empty(),
             "Ok/Err constructors should narrow Result: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    // ========== 8A.3: Exhaustive Match Checking ==========
+
+    #[test]
+    fn exhaustive_option_missing_none() {
+        let w = warnings_for("fn f(x: ?String) {\n  match x {\n    Some(v) => { say v }\n  }\n}");
+        assert_eq!(
+            w.len(),
+            1,
+            "should warn about missing None: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+        assert!(
+            w[0].message.contains("None"),
+            "warning should mention None: {}",
+            w[0].message
+        );
+    }
+
+    #[test]
+    fn exhaustive_option_complete() {
+        let w = warnings_for(
+            "fn f(x: ?String) {\n  match x {\n    Some(v) => { say v }\n    _ => { say \"none\" }\n  }\n}",
+        );
+        assert!(
+            w.is_empty(),
+            "complete Option match should not warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn exhaustive_result_missing_err() {
+        let w = warnings_for(
+            "fn f(x: Result<Int, String>) {\n  match x {\n    Ok(v) => { say v }\n  }\n}",
+        );
+        assert_eq!(
+            w.len(),
+            1,
+            "should warn about missing Err: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+        assert!(
+            w[0].message.contains("Err"),
+            "warning should mention Err: {}",
+            w[0].message
+        );
+    }
+
+    #[test]
+    fn exhaustive_result_complete() {
+        let w = warnings_for(
+            "fn f(x: Result<Int, String>) {\n  match x {\n    Ok(v) => { say v }\n    Err(e) => { say e }\n  }\n}",
+        );
+        assert!(
+            w.is_empty(),
+            "complete Result match should not warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn exhaustive_bool_missing_false() {
+        let w = warnings_for("fn f(x: Bool) {\n  match x {\n    true => { say \"yes\" }\n  }\n}");
+        assert_eq!(
+            w.len(),
+            1,
+            "should warn about missing false: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+        assert!(
+            w[0].message.contains("false"),
+            "warning should mention false: {}",
+            w[0].message
+        );
+    }
+
+    #[test]
+    fn exhaustive_wildcard_covers_all() {
+        let w = warnings_for(
+            "fn f(x: Result<Int, String>) {\n  match x {\n    _ => { say \"catch all\" }\n  }\n}",
+        );
+        assert!(
+            w.is_empty(),
+            "wildcard should make match exhaustive: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn exhaustive_binding_covers_all() {
+        let w = warnings_for("fn f(x: ?String) {\n  match x {\n    v => { say v }\n  }\n}");
+        assert!(
+            w.is_empty(),
+            "binding should make match exhaustive: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn exhaustive_unknown_no_warning() {
+        // Unknown type — can't check exhaustiveness
+        let w = warnings_for("fn f(x) {\n  match x {\n    1 => { say \"one\" }\n  }\n}");
+        assert!(
+            w.is_empty(),
+            "unknown type should not trigger exhaustiveness: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn exhaustive_int_no_warning() {
+        // Int — can't check exhaustiveness
+        let w = warnings_for("fn f(x: Int) {\n  match x {\n    1 => { say \"one\" }\n  }\n}");
+        assert!(
+            w.is_empty(),
+            "Int should not trigger exhaustiveness: {:?}",
             w.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
     }
