@@ -135,7 +135,7 @@ var     var   Prototype table (u16 count + recursive Chunk encoding)
 - [x] `forge run app.fgc` (load + execute)
 - [ ] VM runs all programs the interpreter can
   - [x] VM channel builtins: `channel()`, `send()`, `receive()`, `close()`
-  - [ ] VM channel extras: `try_send()`, `try_receive()`, `select()`
+  - [x] VM channel extras: `try_send()`, `try_receive()`, `select()`
   - [ ] VM async coordination: `await_all()`, `await_timeout()`
   - [ ] VM `time()` builtin
   - [ ] VM parity: all parity test fixtures pass on VM backend
