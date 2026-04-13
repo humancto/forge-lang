@@ -18,7 +18,7 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 
 ### Phase 8B — Generics
 
-- [ ] 8B.1 Parse generic type parameters — `fn map<T, U>(arr: [T], f: fn(T) -> U) -> [U]`. Add `TypeParam` to AST, parse `<T, U>` after function names and struct names. Touch: `parser.rs`, `ast.rs`.
+- [x] 8B.1 Parse generic type parameters — `fn map<T, U>(arr: [T], f: fn(T) -> U) -> [U]`. Add `TypeParam` to AST, parse `<T, U>` after function names and struct names. Touch: `parser.rs`, `ast.rs`.
 - [ ] 8B.2 Generic type resolution in type checker — resolve `T` to concrete types at call sites. Monomorphization not needed yet — just validate constraints. Touch: `typechecker.rs`.
 - [ ] 8B.3 Generic struct definitions — `struct Pair<T> { first: T, second: T }`. Touch: `parser.rs`, `typechecker.rs`.
 
