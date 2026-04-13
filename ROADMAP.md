@@ -137,7 +137,7 @@ var     var   Prototype table (u16 count + recursive Chunk encoding)
   - [x] VM channel builtins: `channel()`, `send()`, `receive()`, `close()`
   - [x] VM channel extras: `try_send()`, `try_receive()`, `select()`
   - [x] VM async coordination: `await_all()`, `await_timeout()`
-  - [ ] VM `time()` builtin
+  - [x] VM `time()` builtin
   - [ ] VM parity: all parity test fixtures pass on VM backend
 - [x] Profiler integrated, `--profile` flag works
 - [x] Auto-JIT for hot integer functions
