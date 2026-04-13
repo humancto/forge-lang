@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Interned field name lookups** — `GetField` opcode avoids cloning field name strings from the constant pool, using `&str` references directly for object map lookups. ([#85](https://github.com/humancto/forge-lang/pull/85))
 - **JIT string operations** — JIT compiler now supports string concat, length, and equality via runtime bridge calls. Functions with string-only operations (no float mixing) can be JIT-compiled. ([#86](https://github.com/humancto/forge-lang/pull/86))
 - **VM channel builtins** — `channel()`, `send()`, `receive()`, `close()` now work in `--vm` mode. Supports bounded and unbounded channels with cross-spawn communication. ([#87](https://github.com/humancto/forge-lang/pull/87))
+- **VM channel extras** — `try_send()`, `try_receive()`, `select()` now work in `--vm` mode. Non-blocking channel operations and multi-channel select with optional timeout. ([#88](https://github.com/humancto/forge-lang/pull/88))
 
 ## [0.8.0] - 2026-04-12
 

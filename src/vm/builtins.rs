@@ -2881,6 +2881,110 @@ impl VM {
                 *guard = None;
                 Ok(Value::Null)
             }
+            "try_send" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("try_send() requires (channel, value)"));
+                }
+                let ch_arc = self.extract_channel(&args[0])?;
+                let shared = value_to_shared(&self.gc, &args[1]);
+                let guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
+                let ok = match &*guard {
+                    Some(VmChannelSender::Bounded(tx)) => tx.try_send(shared).is_ok(),
+                    // Unbounded send only fails if receiver is dropped
+                    Some(VmChannelSender::Unbounded(tx)) => tx.send(shared).is_ok(),
+                    None => false,
+                };
+                Ok(Value::Bool(ok))
+            }
+            "try_receive" => {
+                if args.is_empty() {
+                    return Err(VMError::new("try_receive() requires (channel)"));
+                }
+                let ch_arc = self.extract_channel(&args[0])?;
+                let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
+                match &*guard {
+                    Some(rx) => match rx.try_recv() {
+                        Ok(shared) => {
+                            let val = shared_to_value(&mut self.gc, &shared);
+                            let r = self.gc.alloc(ObjKind::ResultOk(val));
+                            Ok(Value::Obj(r))
+                        }
+                        Err(_) => Ok(Value::Null),
+                    },
+                    None => Ok(Value::Null),
+                }
+            }
+            "select" => {
+                if args.is_empty() {
+                    return Err(VMError::new("select() requires an array of channels"));
+                }
+                // Extract channels from the array argument
+                let channels: Vec<Arc<VmChannelInner>> = match &args[0] {
+                    Value::Obj(r) => match self.gc.get(*r) {
+                        Some(obj) => match &obj.kind {
+                            ObjKind::Array(items) => {
+                                let mut chs = Vec::with_capacity(items.len());
+                                for item in items {
+                                    chs.push(self.extract_channel(item)?);
+                                }
+                                chs
+                            }
+                            _ => {
+                                return Err(VMError::new("select() requires an array of channels"))
+                            }
+                        },
+                        None => return Err(VMError::new("select() requires an array of channels")),
+                    },
+                    _ => return Err(VMError::new("select() requires an array of channels")),
+                };
+                if channels.is_empty() {
+                    return Ok(Value::Null);
+                }
+                let timeout_ms: Option<u128> = match args.get(1) {
+                    Some(Value::Int(ms)) => Some((*ms).max(0) as u128),
+                    Some(Value::Float(ms)) => Some(ms.max(0.0) as u128),
+                    _ => None,
+                };
+                let start = std::time::Instant::now();
+                let len = channels.len();
+                let mut offset = 0usize;
+                loop {
+                    let mut all_closed = true;
+                    for i in 0..len {
+                        let idx = (i + offset) % len;
+                        let rx_guard = channels[idx]
+                            .receiver
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if let Some(ref rx) = *rx_guard {
+                            match rx.try_recv() {
+                                Ok(shared) => {
+                                    let val = shared_to_value(&mut self.gc, &shared);
+                                    let idx_val = Value::Int(idx as i64);
+                                    let arr = self.gc.alloc(ObjKind::Array(vec![idx_val, val]));
+                                    return Ok(Value::Obj(arr));
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    all_closed = false;
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    // Sender dropped (channel closed) — treat as closed
+                                }
+                            }
+                        }
+                    }
+                    if all_closed {
+                        return Ok(Value::Null);
+                    }
+                    if let Some(ms) = timeout_ms {
+                        if start.elapsed().as_millis() >= ms {
+                            return Ok(Value::Null);
+                        }
+                    }
+                    offset = (offset + 1) % len;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
 
             // Note: lowercase ok/err aliases are handled ABOVE (before "Ok"/"Err") to avoid
             // unreachable pattern warnings. The dead duplicates below have been removed.
