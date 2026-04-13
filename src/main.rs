@@ -163,6 +163,11 @@ enum Command {
         #[arg(long)]
         registry: Option<String>,
     },
+    /// Search the package registry
+    Search {
+        /// Search query (matches name and description)
+        query: Option<String>,
+    },
     /// Start the Language Server Protocol server
     Lsp,
     /// Start the Debug Adapter Protocol server
@@ -325,6 +330,40 @@ async fn main() {
         }
         Some(Command::Publish { dry_run, registry }) => {
             publish::publish(dry_run, registry.as_deref());
+        }
+        Some(Command::Search { query }) => {
+            let q = query.as_deref().unwrap_or("");
+            match registry::fetch_index() {
+                Ok(index) => {
+                    let results = registry::search_packages(q, &index);
+                    if results.is_empty() {
+                        if q.is_empty() {
+                            println!("No packages found in registry.");
+                        } else {
+                            println!("No packages found matching '{}'.", q);
+                        }
+                    } else {
+                        println!(
+                            "{:<20} {:<10} {}",
+                            "NAME", "VERSION", "DESCRIPTION"
+                        );
+                        println!("{}", "-".repeat(60));
+                        for pkg in &results {
+                            println!(
+                                "{:<20} {:<10} {}",
+                                pkg.name,
+                                if pkg.latest.is_empty() { "-" } else { &pkg.latest },
+                                pkg.description
+                            );
+                        }
+                        println!("\n{} package(s) found.", results.len());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Some(Command::Lsp) => {
             lsp::run_lsp();
