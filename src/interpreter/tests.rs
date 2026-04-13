@@ -3908,6 +3908,52 @@ fn channel_send_receive_multiple() {
 }
 
 #[test]
+fn unbounded_channel_send_receive() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel()
+        spawn { send(ch, "unbounded") }
+        let val = receive(ch)
+        assert_eq(val, "unbounded")
+    "#,
+    );
+    assert!(result.is_ok(), "unbounded send/recv: {:?}", result.err());
+}
+
+#[test]
+fn unbounded_channel_many_sends() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel()
+        let mut i = 0
+        while i < 100 {
+            send(ch, i)
+            i = i + 1
+        }
+        let first = receive(ch)
+        assert_eq(first, 0)
+    "#,
+    );
+    assert!(result.is_ok(), "unbounded many: {:?}", result.err());
+}
+
+#[test]
+fn bounded_channel_still_works() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel(2)
+        send(ch, 1)
+        send(ch, 2)
+        let a = receive(ch)
+        let b = receive(ch)
+        assert_eq(a, 1)
+        assert_eq(b, 2)
+    "#,
+    );
+    assert!(result.is_ok(), "bounded: {:?}", result.err());
+}
+
+#[test]
 fn select_returns_ready_channel() {
     let result = try_run_forge(
         r#"
