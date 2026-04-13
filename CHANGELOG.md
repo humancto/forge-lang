@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Lockfile integrity checking** — `forge install` computes directory-content SHA-256 checksums and stores them in `forge.lock`. On subsequent installs, verifies installed packages haven't been tampered with. Backwards-compatible with existing lockfiles via `checksum_kind` field. ([#82](https://github.com/humancto/forge-lang/pull/82))
 - **String interning in GC** — identical strings (≤128 bytes) are deduplicated via hash-consing in the garbage collector. Reduces memory usage for programs with repeated string values. ([#83](https://github.com/humancto/forge-lang/pull/83))
 - **Interned string fast equality** — `==` on interned strings short-circuits via GcRef pointer comparison, skipping byte-by-byte comparison. ([#84](https://github.com/humancto/forge-lang/pull/84))
+- **Interned field name lookups** — `GetField` opcode avoids cloning field name strings from the constant pool, using `&str` references directly for object map lookups. ([#85](https://github.com/humancto/forge-lang/pull/85))
 
 ## [0.8.0] - 2026-04-12
 
