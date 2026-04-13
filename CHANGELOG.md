@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`forge add <pkg>`** — add a dependency to `forge.toml` and install it. Supports `forge add router` (any version) and `forge add router@^1.0` (with constraint). ([#80](https://github.com/humancto/forge-lang/pull/80))
 - **`forge update`** — update all dependencies to latest compatible versions by re-resolving from registries. ([#81](https://github.com/humancto/forge-lang/pull/81))
 - **Lockfile integrity checking** — `forge install` computes directory-content SHA-256 checksums and stores them in `forge.lock`. On subsequent installs, verifies installed packages haven't been tampered with. Backwards-compatible with existing lockfiles via `checksum_kind` field. ([#82](https://github.com/humancto/forge-lang/pull/82))
+- **String interning in GC** — identical strings (≤128 bytes) are deduplicated via hash-consing in the garbage collector. Reduces memory usage for programs with repeated string values. ([#83](https://github.com/humancto/forge-lang/pull/83))
 
 ## [0.8.0] - 2026-04-12
 
