@@ -201,6 +201,8 @@ pub struct LockedPackage {
     pub source: String,
     #[serde(default)]
     pub checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum_kind: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -361,12 +363,14 @@ test = "forge test"
                     version: "1.0.0".to_string(),
                     source: "registry".to_string(),
                     checksum: "abc123".to_string(),
+                    checksum_kind: None,
                 },
                 LockedPackage {
                     name: "auth".to_string(),
                     version: "0.5.0".to_string(),
                     source: "git+https://github.com/x/auth.git".to_string(),
                     checksum: "def456".to_string(),
+                    checksum_kind: None,
                 },
             ],
         };
@@ -385,6 +389,7 @@ test = "forge test"
                 version: "1.0.0".to_string(),
                 source: String::new(),
                 checksum: String::new(),
+                checksum_kind: None,
             }],
         };
         assert!(lockfile.find("foo").is_some());
