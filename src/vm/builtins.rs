@@ -2986,9 +2986,158 @@ impl VM {
                 }
             }
 
+            "await_all" => {
+                if args.is_empty() {
+                    return Err(VMError::new(
+                        "await_all() requires an array of task handles",
+                    ));
+                }
+                // Extract array items, releasing the GC borrow
+                let items: Vec<Value> = match &args[0] {
+                    Value::Obj(r) => match self.gc.get(*r) {
+                        Some(obj) => match &obj.kind {
+                            ObjKind::Array(arr) => arr.clone(),
+                            _ => {
+                                return Err(VMError::new(
+                                    "await_all() requires an array of task handles",
+                                ))
+                            }
+                        },
+                        None => {
+                            return Err(VMError::new(
+                                "await_all() requires an array of task handles",
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(VMError::new(
+                            "await_all() requires an array of task handles",
+                        ))
+                    }
+                };
+                let mut results = Vec::with_capacity(items.len());
+                for item in &items {
+                    let maybe_slot = self.extract_task_handle(item);
+                    if let Some(slot) = maybe_slot {
+                        let (lock, cvar) = &*slot;
+                        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        while guard.is_none() {
+                            guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
+                        }
+                        let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
+                        let val = shared_to_value(&mut self.gc, &shared);
+                        // Fail-fast: propagate ResultErr immediately
+                        match &val {
+                            Value::Obj(r) => {
+                                if let Some(obj) = self.gc.get(*r) {
+                                    if let ObjKind::ResultErr(e) = &obj.kind {
+                                        let msg = e.display(&self.gc);
+                                        return Err(VMError::new(&format!("task error: {}", msg)));
+                                    }
+                                    if let ObjKind::ResultOk(v) = &obj.kind {
+                                        let unwrapped = *v;
+                                        results.push(unwrapped);
+                                        continue;
+                                    }
+                                }
+                                results.push(val);
+                            }
+                            _ => results.push(val),
+                        }
+                    } else {
+                        // Non-task-handle values pass through
+                        results.push(*item);
+                    }
+                }
+                let r = self.gc.alloc(ObjKind::Array(results));
+                Ok(Value::Obj(r))
+            }
+            "await_timeout" => {
+                if args.len() < 2 {
+                    return Err(VMError::new(
+                        "await_timeout() requires (handle, timeout_ms)",
+                    ));
+                }
+                let timeout_ms = match &args[1] {
+                    Value::Int(ms) => (*ms).max(0) as u64,
+                    Value::Float(ms) => ms.max(0.0) as u64,
+                    _ => {
+                        return Err(VMError::new(
+                            "await_timeout() second argument must be a number (ms)",
+                        ))
+                    }
+                };
+                let maybe_slot = self.extract_task_handle(&args[0]);
+                match maybe_slot {
+                    Some(slot) => {
+                        let (lock, cvar) = &*slot;
+                        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        if guard.is_none() {
+                            let deadline = std::time::Duration::from_millis(timeout_ms);
+                            let start = std::time::Instant::now();
+                            loop {
+                                let remaining = deadline.saturating_sub(start.elapsed());
+                                if remaining.is_zero() {
+                                    return Ok(Value::Null);
+                                }
+                                let (g, timeout_result) = cvar
+                                    .wait_timeout(guard, remaining)
+                                    .unwrap_or_else(|e| e.into_inner());
+                                guard = g;
+                                if guard.is_some() {
+                                    break;
+                                }
+                                if timeout_result.timed_out() {
+                                    return Ok(Value::Null);
+                                }
+                            }
+                        }
+                        let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
+                        let val = shared_to_value(&mut self.gc, &shared);
+                        // Unwrap ResultOk, propagate ResultErr
+                        match &val {
+                            Value::Obj(r) => {
+                                if let Some(obj) = self.gc.get(*r) {
+                                    if let ObjKind::ResultOk(v) = &obj.kind {
+                                        return Ok(*v);
+                                    }
+                                    if let ObjKind::ResultErr(e) = &obj.kind {
+                                        let msg = e.display(&self.gc);
+                                        return Err(VMError::new(&format!("task error: {}", msg)));
+                                    }
+                                }
+                                Ok(val)
+                            }
+                            _ => Ok(val),
+                        }
+                    }
+                    None => {
+                        return Err(VMError::new(
+                            "await_timeout() first argument must be a task handle",
+                        ))
+                    }
+                }
+            }
+
             // Note: lowercase ok/err aliases are handled ABOVE (before "Ok"/"Err") to avoid
             // unreachable pattern warnings. The dead duplicates below have been removed.
             _ => Err(VMError::new(&format!("unknown builtin: {}", name))),
+        }
+    }
+
+    fn extract_task_handle(
+        &self,
+        val: &Value,
+    ) -> Option<Arc<(std::sync::Mutex<Option<SharedValue>>, std::sync::Condvar)>> {
+        match val {
+            Value::Obj(r) => self.gc.get(*r).and_then(|obj| {
+                if let ObjKind::TaskHandle(slot) = &obj.kind {
+                    Some(slot.clone())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
         }
     }
 
