@@ -424,3 +424,65 @@ fn vm_select_empty_array() {
     );
     assert_eq!(out, vec!["null"]);
 }
+
+// ----- Async coordination: await_all, await_timeout -----
+
+#[test]
+fn vm_await_all_basic() {
+    let out = run_on_vm(
+        r#"
+        let a = spawn { return 10 }
+        let b = spawn { return 20 }
+        let c = spawn { return 30 }
+        let results = await_all([a, b, c])
+        println(results[0])
+        println(results[1])
+        println(results[2])
+    "#,
+    );
+    assert_eq!(out, vec!["10", "20", "30"]);
+}
+
+#[test]
+fn vm_await_all_empty() {
+    let out = run_on_vm_value("await_all([])");
+    assert_eq!(out, "[]");
+}
+
+#[test]
+fn vm_await_all_mixed() {
+    let out = run_on_vm(
+        r#"
+        let h = spawn { return 42 }
+        let results = await_all([h, 99])
+        println(results[0])
+        println(results[1])
+    "#,
+    );
+    assert_eq!(out, vec!["42", "99"]);
+}
+
+#[test]
+fn vm_await_timeout_completes() {
+    let out = run_on_vm_value(
+        r#"
+        let h = spawn { return 42 }
+        await_timeout(h, 5000)
+    "#,
+    );
+    assert_eq!(out, "42");
+}
+
+#[test]
+fn vm_await_timeout_expires() {
+    let out = run_on_vm_value(
+        r#"
+        let ch = channel()
+        let h = spawn { receive(ch) }
+        let result = await_timeout(h, 10)
+        close(ch)
+        result
+    "#,
+    );
+    assert_eq!(out, "null");
+}
