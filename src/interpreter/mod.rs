@@ -657,6 +657,7 @@ impl Interpreter {
             "try_receive",
             "select",
             "close",
+            "await_all",
             // GenZ Debug Kit
             "sus",
             "bruh",

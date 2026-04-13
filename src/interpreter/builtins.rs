@@ -1379,6 +1379,41 @@ impl Interpreter {
                     _ => Err(RuntimeError::new("close() requires a channel")),
                 }
             }
+            "await_all" => {
+                if args.is_empty() {
+                    return Err(RuntimeError::new(
+                        "await_all() requires an array of task handles",
+                    ));
+                }
+                let handles = match &args[0] {
+                    Value::Array(items) => items.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "await_all() requires an array of task handles",
+                        ))
+                    }
+                };
+                let mut results = Vec::with_capacity(handles.len());
+                for (i, handle) in handles.into_iter().enumerate() {
+                    match handle {
+                        Value::TaskHandle(slot) => {
+                            let (lock, cvar) = &*slot;
+                            let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                            while guard.is_none() {
+                                guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
+                            }
+                            results.push(guard.take().unwrap_or(Value::Null));
+                        }
+                        _ => {
+                            return Err(RuntimeError::new(&format!(
+                                "await_all() element at index {} is not a task handle",
+                                i
+                            )))
+                        }
+                    }
+                }
+                Ok(Value::Array(results))
+            }
             _ if name.starts_with("math.") => {
                 crate::stdlib::math::call(name, args).map_err(|e| RuntimeError::new(&e))
             }

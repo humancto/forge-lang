@@ -4109,6 +4109,41 @@ fn send_after_close_errors() {
     assert!(result.is_err());
 }
 
+#[test]
+fn await_all_collects_results() {
+    let result = try_run_forge(
+        r#"
+        let h1 = spawn { 10 }
+        let h2 = spawn { 20 }
+        let h3 = spawn { 30 }
+        let results = await_all([h1, h2, h3])
+        assert_eq(len(results), 3)
+        assert_eq(results[0], 10)
+        assert_eq(results[1], 20)
+        assert_eq(results[2], 30)
+    "#,
+    );
+    assert!(result.is_ok(), "await_all: {:?}", result.err());
+}
+
+#[test]
+fn await_all_empty_array() {
+    let value = run_forge("await_all([])");
+    assert_eq!(value, Value::Array(vec![]));
+}
+
+#[test]
+fn await_all_non_handle_errors() {
+    let result = try_run_forge("await_all([42])");
+    assert!(result.is_err());
+}
+
+#[test]
+fn await_all_non_array_errors() {
+    let result = try_run_forge("await_all(42)");
+    assert!(result.is_err());
+}
+
 // === Phase 2: Short-circuit tests ===
 
 #[test]
