@@ -218,14 +218,215 @@ impl TypeChecker {
     }
 
     pub fn check(&mut self, program: &Program) -> Vec<TypeWarning> {
+        // Pass 1: collect all function/type/struct/interface definitions
         for spanned in &program.statements {
             self.collect_definitions(&spanned.stmt);
         }
+        // Pass 1.5: infer return types for unannotated functions
+        self.infer_all_return_types(&program.statements);
+        // Pass 2: full type checking
         for spanned in &program.statements {
             self.current_line = spanned.line;
             self.check_stmt(&spanned.stmt);
         }
         std::mem::take(&mut self.warnings)
+    }
+
+    /// Pass 1.5: For each function without an explicit return type annotation,
+    /// walk the body to collect return types and infer a unified return type.
+    fn infer_all_return_types(&mut self, stmts: &[SpannedStmt]) {
+        for spanned in stmts {
+            match &spanned.stmt {
+                Stmt::FnDef {
+                    name,
+                    params,
+                    body,
+                    return_type: None,
+                    ..
+                } => {
+                    // Temporarily register param types so expr inference works
+                    let saved_vars: Vec<_> = params
+                        .iter()
+                        .filter_map(|p| {
+                            let old = self.variables.get(&p.name).cloned();
+                            if let Some(ref ann) = p.type_ann {
+                                self.variables
+                                    .insert(p.name.clone(), type_ann_to_inferred(ann));
+                            }
+                            Some((p.name.clone(), old))
+                        })
+                        .collect();
+
+                    let inferred = self.infer_body_return_type(body);
+
+                    // Restore previous variable state
+                    for (name, old_val) in saved_vars {
+                        match old_val {
+                            Some(v) => {
+                                self.variables.insert(name, v);
+                            }
+                            None => {
+                                self.variables.remove(&name);
+                            }
+                        }
+                    }
+
+                    if inferred != InferredType::Unknown {
+                        if let Some(sig) = self.functions.get_mut(name) {
+                            sig.return_type = Some(inferred);
+                        }
+                    }
+                }
+                Stmt::ImplBlock {
+                    type_name, methods, ..
+                } => {
+                    for method_spanned in methods {
+                        if let Stmt::FnDef {
+                            name: method_name,
+                            params,
+                            body,
+                            return_type: None,
+                            ..
+                        } = &method_spanned.stmt
+                        {
+                            let qualified = format!("{}::{}", type_name, method_name);
+
+                            let saved_vars: Vec<_> = params
+                                .iter()
+                                .filter_map(|p| {
+                                    let old = self.variables.get(&p.name).cloned();
+                                    if let Some(ref ann) = p.type_ann {
+                                        self.variables
+                                            .insert(p.name.clone(), type_ann_to_inferred(ann));
+                                    }
+                                    Some((p.name.clone(), old))
+                                })
+                                .collect();
+
+                            let inferred = self.infer_body_return_type(body);
+
+                            for (name, old_val) in saved_vars {
+                                match old_val {
+                                    Some(v) => {
+                                        self.variables.insert(name, v);
+                                    }
+                                    None => {
+                                        self.variables.remove(&name);
+                                    }
+                                }
+                            }
+
+                            if inferred != InferredType::Unknown {
+                                if let Some(sig) = self.functions.get_mut(&qualified) {
+                                    sig.return_type = Some(inferred);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Infer the return type of a function body by collecting all return types
+    /// (explicit returns + implicit last expression) and unifying them.
+    fn infer_body_return_type(&mut self, body: &[SpannedStmt]) -> InferredType {
+        let mut return_types = Vec::new();
+        self.collect_return_types(body, &mut return_types);
+
+        // Also check the implicit last expression (if the last statement is an expression)
+        if let Some(last) = body.last() {
+            if let Stmt::Expression(expr) = &last.stmt {
+                let t = self.infer_expr(expr);
+                if t != InferredType::Unknown {
+                    return_types.push(t);
+                }
+            }
+        }
+
+        if return_types.is_empty() {
+            return InferredType::Null;
+        }
+
+        self.unify_types(&return_types)
+    }
+
+    /// Recursively walk statements to find all explicit return types.
+    fn collect_return_types(&mut self, stmts: &[SpannedStmt], out: &mut Vec<InferredType>) {
+        for spanned in stmts {
+            match &spanned.stmt {
+                Stmt::Return(Some(expr)) => {
+                    let t = self.infer_expr(expr);
+                    if t != InferredType::Unknown {
+                        out.push(t);
+                    }
+                }
+                Stmt::Return(None) => {
+                    out.push(InferredType::Null);
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    self.collect_return_types(then_body, out);
+                    if let Some(else_b) = else_body {
+                        self.collect_return_types(else_b, out);
+                    }
+                }
+                Stmt::For { body, .. }
+                | Stmt::While { body, .. }
+                | Stmt::Loop { body }
+                | Stmt::Spawn { body } => {
+                    self.collect_return_types(body, out);
+                }
+                Stmt::Match { arms, .. } => {
+                    for arm in arms {
+                        self.collect_return_types(&arm.body, out);
+                    }
+                }
+                Stmt::TryCatch {
+                    try_body,
+                    catch_body,
+                    ..
+                } => {
+                    self.collect_return_types(try_body, out);
+                    self.collect_return_types(catch_body, out);
+                }
+                // Don't recurse into nested function definitions
+                Stmt::FnDef { .. } => {}
+                _ => {}
+            }
+        }
+    }
+
+    /// Unify a list of inferred types into a single type.
+    /// If all agree, returns that type. Int+Float promotes to Float.
+    /// Otherwise returns Unknown.
+    fn unify_types(&self, types: &[InferredType]) -> InferredType {
+        if types.is_empty() {
+            return InferredType::Unknown;
+        }
+
+        let mut unified = types[0].clone();
+        for t in &types[1..] {
+            if *t == unified {
+                continue;
+            }
+            // Numeric promotion: Int + Float → Float
+            if matches!(
+                (&unified, t),
+                (InferredType::Int, InferredType::Float) | (InferredType::Float, InferredType::Int)
+            ) {
+                unified = InferredType::Float;
+                continue;
+            }
+            // Incompatible types
+            return InferredType::Unknown;
+        }
+
+        unified
     }
 
     fn collect_definitions(&mut self, stmt: &Stmt) {
@@ -965,5 +1166,93 @@ mod tests {
         let w = warnings_for("let x: Int = Some(42)");
         assert!(!w.is_empty(), "Some(42) is Option, not Int");
         assert!(w[0].message.contains("Option") || w[0].message.contains("?"));
+    }
+
+    // ========== 8A.1: Return Type Inference ==========
+
+    #[test]
+    fn infers_return_type_from_explicit_return() {
+        // add() returns Int (inferred), so assigning to String should warn
+        let w = warnings_for("fn add(a: Int, b: Int) { return a + b }\nlet x: String = add(1, 2)");
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].message.contains("Int"),
+            "expected Int mismatch, got: {}",
+            w[0].message
+        );
+    }
+
+    #[test]
+    fn inferred_return_type_no_false_positive() {
+        // add() returns Int (inferred), assigned to Int — no warning
+        let w = warnings_for("fn add(a: Int, b: Int) { return a + b }\nlet x: Int = add(1, 2)");
+        assert!(
+            w.is_empty(),
+            "should not warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn infers_string_return_type() {
+        let w = warnings_for(
+            "fn greet(name: String) { return \"hello \" + name }\nlet x: Int = greet(\"world\")",
+        );
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("String"));
+    }
+
+    #[test]
+    fn infers_null_for_no_return() {
+        // Function with no return statements returns Null
+        let w = warnings_for("fn noop() { let x = 1 }\nlet y: Int = noop()");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Null"));
+    }
+
+    #[test]
+    fn infers_from_multiple_consistent_returns() {
+        let w = warnings_for(
+            "fn abs_val(x: Int) {\n  if x > 0 { return x }\n  return 0 - x\n}\nlet y: String = abs_val(5)",
+        );
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Int"));
+    }
+
+    #[test]
+    fn mixed_int_float_promotes_to_float() {
+        let w = warnings_for(
+            "fn mixed(x: Int) {\n  if x > 0 { return x }\n  return 1.5\n}\nlet y: String = mixed(5)",
+        );
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Float"));
+    }
+
+    #[test]
+    fn incompatible_returns_stay_unknown() {
+        // Int and String returns → Unknown, so no warning on caller
+        let w = warnings_for(
+            "fn weird(x: Int) {\n  if x > 0 { return x }\n  return \"negative\"\n}\nlet y: String = weird(5)",
+        );
+        // Unknown return type — no mismatch warning for caller
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn implicit_last_expression_inferred() {
+        // Last expression is the return value
+        let w = warnings_for("fn double(x: Int) { x * 2 }\nlet y: String = double(5)");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("Int"));
+    }
+
+    #[test]
+    fn forward_call_inference_works() {
+        // caller defined before callee — pass 1.5 runs on all functions
+        let w =
+            warnings_for("fn caller() { return callee(5) }\nfn callee(x: Int) { return x * 2 }");
+        // callee's return type is inferred as Int, so caller's return is also Int
+        // No warnings expected (no type annotations to conflict)
+        assert!(w.is_empty());
     }
 }
