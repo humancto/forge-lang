@@ -3967,6 +3967,17 @@ fn select_non_array_errors() {
     assert!(result.is_err());
 }
 
+#[test]
+fn select_timeout_returns_null() {
+    let value = run_forge(
+        r#"
+        let ch = channel()
+        select([ch], 50)
+    "#,
+    );
+    assert_eq!(value, Value::Null);
+}
+
 // === Phase 2: Short-circuit tests ===
 
 #[test]

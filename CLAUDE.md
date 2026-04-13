@@ -103,7 +103,7 @@ run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, ch
 - Validation: assert, assert_eq, assert_ne, assert_throws, satisfies
 - GenZ Debug Kit: sus (inspect), bruh (panic), bet (assert), no_cap (assert_eq), ick (assert-false)
 - Execution: cook (profiling), yolo (fire-and-forget), ghost (silent exec), slay (benchmarking)
-- Concurrency: channel, send, receive, try_send, try_receive
+- Concurrency: channel, send, receive, try_send, try_receive, select
 
 ## Build & Test
 

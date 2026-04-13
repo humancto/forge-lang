@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`select(channels, timeout?)` builtin** — wait on multiple channels, returns `[index, value]` for the first ready channel. Optional timeout in ms. ([#69](https://github.com/humancto/forge-lang/pull/69))
+
 ## [0.8.0] - 2026-04-12
 
 ### Added
