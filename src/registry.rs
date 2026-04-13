@@ -31,6 +31,21 @@ pub struct VersionEntry {
     pub checksum: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PackageIndex {
+    #[serde(default)]
+    pub packages: Vec<PackageSummary>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PackageSummary {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub latest: String,
+}
+
 /// Get the configured registry base URL.
 pub fn registry_url() -> String {
     env::var("FORGE_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
@@ -147,6 +162,87 @@ pub fn fetch_package_entry(name: &str) -> Result<Option<PackageEntry>, String> {
     }
 
     Ok(Some(entry))
+}
+
+/// Fetch the package index from the remote registry.
+/// Lists all available packages with name, description, and latest version.
+/// Uses local cache when fresh.
+pub fn fetch_index() -> Result<PackageIndex, String> {
+    let cache_path = cache_dir().join("index.toml");
+
+    // Check cache first
+    if is_cache_fresh(&cache_path) {
+        let content = std::fs::read_to_string(&cache_path)
+            .map_err(|e| format!("failed to read cached index: {}", e))?;
+        let index: PackageIndex =
+            toml::from_str(&content).map_err(|e| format!("corrupt cached index: {}", e))?;
+        return Ok(index);
+    }
+
+    let base_url = registry_url();
+    let url = format!("{}/index.toml", base_url);
+
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("failed to create HTTP client: {}", e))?
+        .get(&url);
+
+    if let Ok(token) = env::var("GITHUB_TOKEN") {
+        builder = builder.header("Authorization", format!("token {}", token));
+    }
+
+    let response = match builder.send() {
+        Ok(r) => r,
+        Err(e) => {
+            // If we have a stale cache, use it on network failure
+            if cache_path.exists() {
+                eprintln!(
+                    "  Warning: failed to fetch index, using cached version: {}",
+                    e
+                );
+                let content = std::fs::read_to_string(&cache_path)
+                    .map_err(|e| format!("failed to read cached index: {}", e))?;
+                return toml::from_str(&content)
+                    .map_err(|e| format!("corrupt cached index: {}", e));
+            }
+            return Err(format!("failed to fetch package index: {}", e));
+        }
+    };
+
+    if !response.status().is_success() {
+        return Err(format!("registry returned {} for index", response.status()));
+    }
+
+    let body = response
+        .text()
+        .map_err(|e| format!("failed to read index response: {}", e))?;
+
+    let index: PackageIndex =
+        toml::from_str(&body).map_err(|e| format!("invalid package index: {}", e))?;
+
+    if let Err(e) = atomic_write(&cache_path, body.as_bytes()) {
+        eprintln!("  Warning: failed to cache index: {}", e);
+    }
+
+    Ok(index)
+}
+
+/// Search packages by case-insensitive substring match on name or description.
+/// Empty query returns all packages.
+pub fn search_packages<'a>(query: &str, index: &'a PackageIndex) -> Vec<&'a PackageSummary> {
+    let query_lower = query.to_lowercase();
+    index
+        .packages
+        .iter()
+        .filter(|p| {
+            if query_lower.is_empty() {
+                return true;
+            }
+            p.name.to_lowercase().contains(&query_lower)
+                || p.description.to_lowercase().contains(&query_lower)
+        })
+        .collect()
 }
 
 /// Resolve the best version from a list of version entries using semver.
@@ -516,5 +612,93 @@ url = "https://example.com/utils.tar.gz"
         assert!(err.contains("checksum mismatch"));
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    fn test_index() -> PackageIndex {
+        PackageIndex {
+            packages: vec![
+                PackageSummary {
+                    name: "router".into(),
+                    description: "HTTP router for Forge".into(),
+                    latest: "2.0.0".into(),
+                },
+                PackageSummary {
+                    name: "auth".into(),
+                    description: "JWT authentication library".into(),
+                    latest: "1.0.0".into(),
+                },
+                PackageSummary {
+                    name: "csv-utils".into(),
+                    description: "CSV parsing utilities".into(),
+                    latest: "0.5.0".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn search_by_name() {
+        let index = test_index();
+        let results = search_packages("router", &index);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "router");
+    }
+
+    #[test]
+    fn search_by_description() {
+        let index = test_index();
+        let results = search_packages("JWT", &index);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "auth");
+    }
+
+    #[test]
+    fn search_case_insensitive() {
+        let index = test_index();
+        let results = search_packages("ROUTER", &index);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "router");
+    }
+
+    #[test]
+    fn search_no_match() {
+        let index = test_index();
+        let results = search_packages("nonexistent", &index);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_empty_query_returns_all() {
+        let index = test_index();
+        let results = search_packages("", &index);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn search_partial_match() {
+        let index = test_index();
+        // "csv" matches name "csv-utils" and description "CSV parsing utilities"
+        let results = search_packages("csv", &index);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "csv-utils");
+    }
+
+    #[test]
+    fn parse_package_index() {
+        let toml_str = r#"
+[[packages]]
+name = "router"
+description = "HTTP router"
+latest = "1.0.0"
+
+[[packages]]
+name = "auth"
+description = "Auth library"
+latest = "2.0.0"
+"#;
+        let index: PackageIndex = toml::from_str(toml_str).unwrap();
+        assert_eq!(index.packages.len(), 2);
+        assert_eq!(index.packages[0].name, "router");
+        assert_eq!(index.packages[1].latest, "2.0.0");
     }
 }
