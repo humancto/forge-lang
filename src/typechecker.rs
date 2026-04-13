@@ -177,6 +177,12 @@ fn types_compatible(expected: &InferredType, actual: &InferredType) -> bool {
     if expected == actual {
         return true;
     }
+    // Array types: compare element types recursively
+    if let (InferredType::Array(expected_elem), InferredType::Array(actual_elem)) =
+        (expected, actual)
+    {
+        return types_compatible(expected_elem, actual_elem);
+    }
     // Union types: actual is compatible with expected union if it matches any variant
     if let InferredType::Union(variants) = expected {
         return variants.iter().any(|v| types_compatible(v, actual));
@@ -2129,6 +2135,45 @@ mod tests {
             w.len(),
             1,
             "String should not be assignable to Int alias: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    // ========== 8C.3: Typed Collection Literals ==========
+
+    #[test]
+    fn typed_array_correct_elements() {
+        let w = warnings_for("let xs: [Int] = [1, 2, 3]");
+        assert!(
+            w.is_empty(),
+            "should not warn for correct array type: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn typed_array_wrong_elements() {
+        let w = warnings_for("let xs: [Int] = [\"a\", \"b\"]");
+        assert_eq!(
+            w.len(),
+            1,
+            "should warn for wrong element type: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn typed_array_string_elements() {
+        let w = warnings_for("let xs: [String] = [\"a\", \"b\"]");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn typed_array_empty_compatible() {
+        let w = warnings_for("let xs: [Int] = []");
+        assert!(
+            w.is_empty(),
+            "empty array should be compatible with any typed array: {:?}",
             w.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
     }
