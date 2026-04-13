@@ -181,7 +181,9 @@ impl Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::Obj(a), Value::Obj(b)) => {
-                // Fast path: interned strings (and any shared object) have the same GcRef
+                // Fast path: two live refs with the same arena index are the same
+                // allocation. No ObjKind variant wraps floats (those use Value::Float),
+                // so NaN self-inequality is not a concern.
                 if a == b {
                     return true;
                 }
