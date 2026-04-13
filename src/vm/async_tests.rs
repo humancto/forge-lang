@@ -486,3 +486,42 @@ fn vm_await_timeout_expires() {
     );
     assert_eq!(out, "null");
 }
+
+// ----- time() builtin -----
+
+#[test]
+fn vm_time_returns_object() {
+    let out = run_on_vm(
+        r#"
+        let t = time()
+        println(type(t))
+        println(has_key(t, "unix"))
+        println(has_key(t, "year"))
+        println(has_key(t, "iso"))
+        println(has_key(t, "timezone"))
+    "#,
+    );
+    assert_eq!(out, vec!["Object", "true", "true", "true", "true"]);
+}
+
+#[test]
+fn vm_time_unix_positive() {
+    let out = run_on_vm(
+        r#"
+        let t = time()
+        println(t.unix > 1700000000)
+    "#,
+    );
+    assert_eq!(out, vec!["true"]);
+}
+
+#[test]
+fn vm_time_year_reasonable() {
+    let out = run_on_vm(
+        r#"
+        let t = time()
+        println(t.year >= 2026)
+    "#,
+    );
+    assert_eq!(out, vec!["true"]);
+}

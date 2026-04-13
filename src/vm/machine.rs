@@ -724,6 +724,11 @@ impl VM {
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
             time_map.insert(name.to_string(), Value::Obj(nr));
         }
+        // time() as a function calls the "time" builtin (returns datetime object)
+        let time_call = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
+            name: "time".to_string(),
+        }));
+        time_map.insert("__call__".to_string(), Value::Obj(time_call));
         let time_ref = self.gc.alloc(ObjKind::Object(time_map));
         self.globals
             .insert("time".to_string(), Value::Obj(time_ref));
@@ -2219,6 +2224,14 @@ impl VM {
                     ObjKind::NativeFunction(nf) => {
                         let name = nf.name.clone();
                         self.call_native(&name, args)
+                    }
+                    ObjKind::Object(map) => {
+                        // Module-as-function: if the object has a __call__ field, call it
+                        if let Some(call_fn) = map.get("__call__").copied() {
+                            self.call_value(call_fn, args)
+                        } else {
+                            Err(VMError::new("cannot call non-function"))
+                        }
                     }
                     _ => Err(VMError::new("cannot call non-function")),
                 }

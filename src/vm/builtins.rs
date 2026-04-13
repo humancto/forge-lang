@@ -2,6 +2,7 @@
 /// Extracted from machine.rs to keep that file navigable.
 /// This is a continuation of `impl VM` — same struct, separate file.
 /// Do NOT change logic here; this is a pure structural extraction.
+use chrono::{Datelike, Timelike, Utc};
 use indexmap::IndexMap;
 use std::sync::Arc;
 
@@ -2986,6 +2987,31 @@ impl VM {
                 }
             }
 
+            "time" => {
+                let now = Utc::now();
+                let mut m = IndexMap::new();
+                m.insert("iso".to_string(), self.alloc_string(&now.to_rfc3339()));
+                m.insert("unix".to_string(), Value::Int(now.timestamp()));
+                m.insert("unix_ms".to_string(), Value::Int(now.timestamp_millis()));
+                m.insert("year".to_string(), Value::Int(now.year() as i64));
+                m.insert("month".to_string(), Value::Int(now.month() as i64));
+                m.insert("day".to_string(), Value::Int(now.day() as i64));
+                m.insert("hour".to_string(), Value::Int(now.hour() as i64));
+                m.insert("minute".to_string(), Value::Int(now.minute() as i64));
+                m.insert("second".to_string(), Value::Int(now.second() as i64));
+                m.insert(
+                    "weekday".to_string(),
+                    self.alloc_string(&now.format("%A").to_string()),
+                );
+                m.insert(
+                    "weekday_short".to_string(),
+                    self.alloc_string(&now.format("%a").to_string()),
+                );
+                m.insert("day_of_year".to_string(), Value::Int(now.ordinal() as i64));
+                m.insert("timezone".to_string(), self.alloc_string("UTC"));
+                let r = self.gc.alloc(ObjKind::Object(m));
+                Ok(Value::Obj(r))
+            }
             "await_all" => {
                 if args.is_empty() {
                     return Err(VMError::new(
