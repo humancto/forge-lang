@@ -171,3 +171,128 @@ fn vm_double_await_returns_same_value() {
     );
     assert_eq!(out, vec!["99", "99"]);
 }
+
+// ----- Channel builtins -----
+
+#[test]
+fn vm_channel_create_bounded() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        println(type(ch))
+    "#,
+    );
+    assert_eq!(out, vec!["channel"]);
+}
+
+#[test]
+fn vm_channel_create_unbounded() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel()
+        println(type(ch))
+    "#,
+    );
+    assert_eq!(out, vec!["channel"]);
+}
+
+#[test]
+fn vm_channel_send_receive() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        send(ch, 42)
+        let val = receive(ch)
+        println(val)
+    "#,
+    );
+    assert_eq!(out, vec!["42"]);
+}
+
+#[test]
+fn vm_channel_send_receive_string() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        send(ch, "hello")
+        let val = receive(ch)
+        println(val)
+    "#,
+    );
+    assert_eq!(out, vec!["hello"]);
+}
+
+#[test]
+fn vm_channel_close() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(2)
+        send(ch, 1)
+        send(ch, 2)
+        close(ch)
+        let a = receive(ch)
+        let b = receive(ch)
+        let c = receive(ch)
+        println(a)
+        println(b)
+        println(c)
+    "#,
+    );
+    // After close, buffered values are still receivable; then null
+    assert_eq!(out, vec!["1", "2", "null"]);
+}
+
+#[test]
+fn vm_channel_cross_spawn() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        spawn {
+            send(ch, 99)
+        }
+        let val = receive(ch)
+        println(val)
+    "#,
+    );
+    assert_eq!(out, vec!["99"]);
+}
+
+#[test]
+fn vm_channel_double_close() {
+    // Double close should not panic
+    run_on_vm(
+        r#"
+        let ch = channel(1)
+        close(ch)
+        close(ch)
+    "#,
+    );
+}
+
+#[test]
+fn vm_channel_send_receive_object() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        send(ch, { name: "forge", version: 1 })
+        let val = receive(ch)
+        println(val.name)
+        println(val.version)
+    "#,
+    );
+    assert_eq!(out, vec!["forge", "1"]);
+}
+
+#[test]
+fn vm_channel_send_receive_array() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        send(ch, [10, 20, 30])
+        let val = receive(ch)
+        println(len(val))
+        println(val[1])
+    "#,
+    );
+    assert_eq!(out, vec!["3", "20"]);
+}
