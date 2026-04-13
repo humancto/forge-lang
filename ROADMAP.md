@@ -12,13 +12,13 @@
 | Component             | State                | Details                                                                 |
 | --------------------- | -------------------- | ----------------------------------------------------------------------- |
 | Tree-walk interpreter | Complete             | Full language support, 238+ builtins                                    |
-| Bytecode VM           | Partial              | Fast backend for a supported subset; unsupported constructs are blocked  |
-| JIT (Cranelift)       | Partial              | Integer-heavy functions on the same supported subset as the VM           |
+| Bytecode VM           | Partial              | Fast backend for a supported subset; unsupported constructs are blocked |
+| JIT (Cranelift)       | Partial              | Integer-heavy functions on the same supported subset as the VM          |
 | Standard library      | 18 modules           | 238+ functions across math, fs, crypto, db, http, jwt, mysql, etc.      |
 | HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket                              |
 | HTTP client           | Complete             | reqwest, JSON, all methods, benchmarked at 28k req/sec                  |
 | Type checker          | Gradual              | Arity + type warnings, `--strict` turns them into hard errors           |
-| Tests                 | 644 Rust + 631 Forge | Verified locally; one Forge test is intentionally skipped                |
+| Tests                 | 644 Rust + 631 Forge | Verified locally; one Forge test is intentionally skipped               |
 | Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases                    |
 
 ### What Works Today
@@ -135,7 +135,7 @@ var     var   Prototype table (u16 count + recursive Chunk encoding)
 - [x] `forge run app.fgc` (load + execute)
 - [ ] VM runs all programs the interpreter can
 - [x] Profiler integrated, `--profile` flag works
-- [ ] Auto-JIT for hot integer functions
+- [x] Auto-JIT for hot integer functions
 
 ### Commit Breakdown (M1)
 
