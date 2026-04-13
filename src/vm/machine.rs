@@ -495,6 +495,11 @@ impl VM {
             "yolo",
             "ghost",
             "slay",
+            // Channels
+            "channel",
+            "send",
+            "receive",
+            "close",
         ];
         for name in &builtins {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {

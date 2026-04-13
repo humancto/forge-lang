@@ -3,6 +3,7 @@
 /// This is a continuation of `impl VM` — same struct, separate file.
 /// Do NOT change logic here; this is a pure structural extraction.
 use indexmap::IndexMap;
+use std::sync::Arc;
 
 use super::machine::{VMError, VM};
 use super::value::*;
@@ -2815,6 +2816,69 @@ impl VM {
                 Ok(Value::Obj(r))
             }
 
+            // ----- Channel builtins -----
+            "channel" => {
+                let (sender, receiver) = match args.first() {
+                    Some(Value::Int(cap)) if *cap > 0 => {
+                        let (tx, rx) = std::sync::mpsc::sync_channel(*cap as usize);
+                        (VmChannelSender::Bounded(tx), rx)
+                    }
+                    _ => {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        (VmChannelSender::Unbounded(tx), rx)
+                    }
+                };
+                let inner = Arc::new(VmChannelInner {
+                    sender: std::sync::Mutex::new(Some(sender)),
+                    receiver: std::sync::Mutex::new(Some(receiver)),
+                });
+                let r = self.gc.alloc(ObjKind::Channel(inner));
+                Ok(Value::Obj(r))
+            }
+            "send" => {
+                if args.len() < 2 {
+                    return Err(VMError::new("send() requires (channel, value)"));
+                }
+                let ch_arc = self.extract_channel(&args[0])?;
+                let shared = value_to_shared(&self.gc, &args[1]);
+                let guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
+                match &*guard {
+                    Some(VmChannelSender::Bounded(tx)) => {
+                        let _ = tx.send(shared);
+                    }
+                    Some(VmChannelSender::Unbounded(tx)) => {
+                        let _ = tx.send(shared);
+                    }
+                    None => {
+                        return Err(VMError::new("send on closed channel"));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "receive" => {
+                if args.is_empty() {
+                    return Err(VMError::new("receive() requires (channel)"));
+                }
+                let ch_arc = self.extract_channel(&args[0])?;
+                let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
+                match &*guard {
+                    Some(rx) => match rx.recv() {
+                        Ok(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
+                        Err(_) => Ok(Value::Null),
+                    },
+                    None => Ok(Value::Null),
+                }
+            }
+            "close" => {
+                if args.is_empty() {
+                    return Err(VMError::new("close() requires (channel)"));
+                }
+                let ch_arc = self.extract_channel(&args[0])?;
+                let mut guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = None;
+                Ok(Value::Null)
+            }
+
             // Note: lowercase ok/err aliases are handled ABOVE (before "Ok"/"Err") to avoid
             // unreachable pattern warnings. The dead duplicates below have been removed.
             _ => Err(VMError::new(&format!("unknown builtin: {}", name))),
@@ -2827,6 +2891,19 @@ impl VM {
         marker.insert("name".to_string(), self.alloc_string(type_name));
         let r = self.gc.alloc(ObjKind::Object(marker));
         Value::Obj(r)
+    }
+
+    fn extract_channel(&self, val: &Value) -> Result<Arc<VmChannelInner>, VMError> {
+        match val {
+            Value::Obj(r) => match self.gc.get(*r) {
+                Some(obj) => match &obj.kind {
+                    ObjKind::Channel(ch) => Ok(ch.clone()),
+                    _ => Err(VMError::new("expected channel")),
+                },
+                None => Err(VMError::new("dangling reference")),
+            },
+            _ => Err(VMError::new("expected channel")),
+        }
     }
 
     fn parse_object_fields(&self, value: &Value) -> Result<IndexMap<String, Value>, VMError> {

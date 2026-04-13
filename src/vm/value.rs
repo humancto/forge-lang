@@ -2,7 +2,8 @@ use super::bytecode::Chunk;
 use super::gc::Gc;
 use indexmap::IndexMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::{Arc, Mutex};
 
 /// Escape a string for safe JSON embedding.
 fn escape_json_string(s: &str) -> String {
@@ -25,6 +26,19 @@ fn escape_json_string(s: &str) -> String {
     out
 }
 
+/// Sender half of a VM channel. Bounded uses SyncSender for backpressure.
+pub enum VmChannelSender {
+    Bounded(SyncSender<SharedValue>),
+    Unbounded(Sender<SharedValue>),
+}
+
+/// Thread-safe channel internals. Both sender and receiver are wrapped in
+/// Mutex<Option<...>> so `close()` can set sender to None.
+pub struct VmChannelInner {
+    pub sender: Mutex<Option<VmChannelSender>>,
+    pub receiver: Mutex<Option<Receiver<SharedValue>>>,
+}
+
 /// GC-free value representation for crossing thread boundaries.
 /// Used for spawn result slots and globals transfer during fork_for_spawn.
 #[derive(Clone)]
@@ -38,6 +52,7 @@ pub enum SharedValue {
     Object(IndexMap<String, SharedValue>),
     ResultOk(Box<SharedValue>),
     ResultErr(Box<SharedValue>),
+    Channel(Arc<VmChannelInner>),
 }
 
 /// Convert a VM Value to a SharedValue (owns all data, no GcRefs).
@@ -63,6 +78,7 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
                 }
                 ObjKind::ResultOk(v) => SharedValue::ResultOk(Box::new(value_to_shared(gc, v))),
                 ObjKind::ResultErr(v) => SharedValue::ResultErr(Box::new(value_to_shared(gc, v))),
+                ObjKind::Channel(ch) => SharedValue::Channel(ch.clone()),
                 ObjKind::Frozen(v) => value_to_shared(gc, v),
                 // Functions, closures, natives, upvalues, task handles are not transferable
                 _ => SharedValue::Null,
@@ -104,6 +120,10 @@ pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
         SharedValue::ResultErr(v) => {
             let inner = shared_to_value(gc, v);
             let r = gc.alloc(ObjKind::ResultErr(inner));
+            Value::Obj(r)
+        }
+        SharedValue::Channel(ch) => {
+            let r = gc.alloc(ObjKind::Channel(ch.clone()));
             Value::Obj(r)
         }
     }
@@ -255,6 +275,7 @@ impl GcObject {
             ObjKind::ResultOk(v) => format!("Ok({})", v.display(gc)),
             ObjKind::ResultErr(v) => format!("Err({})", v.display(gc)),
             ObjKind::TaskHandle(_) => "<task>".to_string(),
+            ObjKind::Channel(_) => "<channel>".to_string(),
             ObjKind::Frozen(v) => v.display(gc),
         }
     }
@@ -290,6 +311,7 @@ impl GcObject {
             ObjKind::Upvalue(_) => "Upvalue",
             ObjKind::ResultOk(_) | ObjKind::ResultErr(_) => "Result",
             ObjKind::TaskHandle(_) => "TaskHandle",
+            ObjKind::Channel(_) => "channel",
             ObjKind::Frozen(_) => "Frozen",
         }
     }
@@ -357,6 +379,7 @@ pub enum ObjKind {
     ResultOk(Value),
     ResultErr(Value),
     TaskHandle(Arc<(std::sync::Mutex<Option<SharedValue>>, std::sync::Condvar)>),
+    Channel(Arc<VmChannelInner>),
     Frozen(Value),
 }
 
