@@ -296,17 +296,74 @@ fn install_from_registry_as(
         })?
     };
 
-    let (resolved_version, source) = resolve_best_version(name, &req, registry_roots)?;
-    install_from_path_as(name, &source, packages_dir)?;
+    // Try local registry first
+    if let Ok((resolved_version, source)) = resolve_best_version(name, &req, registry_roots) {
+        install_from_path_as(name, &source, packages_dir)?;
+        println!(
+            "  \x1B[32m✓\x1B[0m Installed {} @ {}",
+            name, resolved_version
+        );
+        return Ok(LockedPackage {
+            name: name.to_string(),
+            version: resolved_version,
+            source: format!("registry+{}", source.display()),
+            checksum: String::new(),
+        });
+    }
+
+    // Fall back to remote registry
+    install_from_remote_registry(name, &req, packages_dir)
+}
+
+fn install_from_remote_registry(
+    name: &str,
+    req: &VersionReq,
+    packages_dir: &Path,
+) -> Result<LockedPackage, String> {
+    use crate::registry;
+
+    validate_package_name(name)?;
+
+    let entry = match registry::fetch_package_entry(name) {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            return Err(format!(
+                "  Error: package '{}' not found in local or remote registry",
+                name
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "  Error: failed to fetch '{}' from remote registry: {}",
+                name, e
+            ));
+        }
+    };
+
+    let resolved = registry::resolve_remote_version(name, req, &entry.versions)?;
+
+    if resolved.checksum.is_empty() {
+        eprintln!(
+            "  Warning: no checksum for {} @ {} — integrity not verified",
+            name, resolved.version
+        );
+    }
+
     println!(
-        "  \x1B[32m✓\x1B[0m Installed {} @ {}",
-        name, resolved_version
+        "  Downloading {} @ {} from remote registry...",
+        name, resolved.version
     );
+    registry::download_and_extract(&resolved.url, &packages_dir.join(name), &resolved.checksum)?;
+    println!(
+        "  \x1B[32m✓\x1B[0m Installed {} @ {} (remote)",
+        name, resolved.version
+    );
+
     Ok(LockedPackage {
         name: name.to_string(),
-        version: resolved_version,
-        source: format!("registry+{}", source.display()),
-        checksum: String::new(),
+        version: resolved.version,
+        source: format!("remote+{}", resolved.url),
+        checksum: resolved.checksum,
     })
 }
 

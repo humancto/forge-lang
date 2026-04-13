@@ -30,7 +30,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # === HTTP Client (production-grade) ===
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
 
 # === CLI & REPL ===
 clap = { version = "4", features = ["derive"] }
@@ -87,6 +87,7 @@ cranelift-module = { version = "0.129", optional = true }
 cranelift-native = { version = "0.129", optional = true }
 gethostname = "1.1.0"
 semver = "1"
+tar = "0.4"
 
 [features]
 default = ["jit", "postgres", "mysql"]
