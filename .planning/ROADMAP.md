@@ -80,7 +80,7 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 
 - [x] 11A.1 Intern strings in GC — deduplicate identical strings via hash-consing. Short strings (≤23 bytes) stored inline. Touch: `vm/gc.rs`, `vm/value.rs`.
 - [x] 11A.2 Interned string comparison — `==` on interned strings becomes pointer comparison. Touch: `vm/machine.rs`.
-- [ ] 11A.3 Intern field names — object field lookups use interned keys, eliminating hash computation on hot paths. Touch: `vm/machine.rs`, `vm/gc.rs`.
+- [x] 11A.3 Intern field names — object field lookups use interned keys, eliminating hash computation on hot paths. Touch: `vm/machine.rs`, `vm/gc.rs`.
 
 ### Phase 11B — JIT Expansion
 
