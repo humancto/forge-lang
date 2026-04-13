@@ -65,6 +65,25 @@ struct InterfaceMethod {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+enum NarrowingFact {
+    NonNull,
+    IsNull,
+    IsOk,
+    IsErr,
+}
+
+impl NarrowingFact {
+    fn invert(&self) -> NarrowingFact {
+        match self {
+            NarrowingFact::NonNull => NarrowingFact::IsNull,
+            NarrowingFact::IsNull => NarrowingFact::NonNull,
+            NarrowingFact::IsOk => NarrowingFact::IsErr,
+            NarrowingFact::IsErr => NarrowingFact::IsOk,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum InferredType {
     Int,
     Float,
@@ -131,6 +150,10 @@ fn type_ann_to_inferred(ann: &TypeAnn) -> InferredType {
         }
         TypeAnn::Optional(inner) => InferredType::Option(Box::new(type_ann_to_inferred(inner))),
     }
+}
+
+fn is_null_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Ident(name) if name == "null" || name == "None")
 }
 
 fn types_compatible(expected: &InferredType, actual: &InferredType) -> bool {
@@ -537,6 +560,103 @@ impl TypeChecker {
         }
     }
 
+    /// Extract narrowing facts from a condition expression.
+    /// Returns (variable_name, fact) pairs.
+    fn extract_narrowing(&self, expr: &Expr) -> Vec<(String, NarrowingFact)> {
+        match expr {
+            // x != null / x != None → x is non-null
+            Expr::BinOp {
+                left,
+                op: BinOp::NotEq,
+                right,
+            } => {
+                if let (Expr::Ident(name), true) = (left.as_ref(), is_null_expr(right)) {
+                    vec![(name.clone(), NarrowingFact::NonNull)]
+                } else if let (true, Expr::Ident(name)) = (is_null_expr(left), right.as_ref()) {
+                    vec![(name.clone(), NarrowingFact::NonNull)]
+                } else {
+                    vec![]
+                }
+            }
+            // x == null / x == None → x is null
+            Expr::BinOp {
+                left,
+                op: BinOp::Eq,
+                right,
+            } => {
+                if let (Expr::Ident(name), true) = (left.as_ref(), is_null_expr(right)) {
+                    vec![(name.clone(), NarrowingFact::IsNull)]
+                } else if let (true, Expr::Ident(name)) = (is_null_expr(left), right.as_ref()) {
+                    vec![(name.clone(), NarrowingFact::IsNull)]
+                } else {
+                    vec![]
+                }
+            }
+            // x && y → collect facts from both sides
+            Expr::BinOp {
+                left,
+                op: BinOp::And,
+                right,
+            } => {
+                let mut facts = self.extract_narrowing(left);
+                facts.extend(self.extract_narrowing(right));
+                facts
+            }
+            // !(expr) → invert all facts from inner
+            Expr::UnaryOp {
+                op: UnaryOp::Not,
+                operand,
+            } => self
+                .extract_narrowing(operand)
+                .into_iter()
+                .map(|(name, fact)| (name, fact.invert()))
+                .collect(),
+            // is_some(x) → non-null, is_none(x) → null
+            // is_ok(x) → ok, is_err(x) → err
+            Expr::Call { function, args } => {
+                if let Expr::Ident(fname) = function.as_ref() {
+                    if args.len() == 1 {
+                        if let Expr::Ident(var_name) = &args[0] {
+                            match fname.as_str() {
+                                "is_some" => {
+                                    return vec![(var_name.clone(), NarrowingFact::NonNull)]
+                                }
+                                "is_none" => {
+                                    return vec![(var_name.clone(), NarrowingFact::IsNull)]
+                                }
+                                "is_ok" => return vec![(var_name.clone(), NarrowingFact::IsOk)],
+                                "is_err" => return vec![(var_name.clone(), NarrowingFact::IsErr)],
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                vec![]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Apply a narrowing fact to a type.
+    fn narrow_type(current: &InferredType, fact: &NarrowingFact) -> InferredType {
+        match (current, fact) {
+            (InferredType::Option(inner), NarrowingFact::NonNull) => *inner.clone(),
+            (InferredType::Option(_), NarrowingFact::IsNull) => InferredType::Null,
+            (InferredType::Result(ok, _), NarrowingFact::IsOk) => *ok.clone(),
+            (InferredType::Result(_, err), NarrowingFact::IsErr) => *err.clone(),
+            (InferredType::Unknown, _) => InferredType::Unknown,
+            (t, NarrowingFact::NonNull) => t.clone(), // already non-null
+            (_, NarrowingFact::IsNull) => InferredType::Null,
+            _ => current.clone(),
+        }
+    }
+
+    /// Check if the last statement in a body is a guaranteed exit (return/break).
+    fn body_always_returns(body: &[SpannedStmt]) -> bool {
+        body.last()
+            .map_or(false, |s| matches!(s.stmt, Stmt::Return(_)))
+    }
+
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let {
@@ -626,14 +746,44 @@ impl TypeChecker {
                 if cond_type != InferredType::Unknown && cond_type != InferredType::Bool {
                     // Not an error in a dynamic language, just informational
                 }
+
+                let facts = self.extract_narrowing(condition);
+
+                // Check then-body with positive narrowing
+                let saved = self.variables.clone();
+                for (var, fact) in &facts {
+                    if let Some(current) = saved.get(var) {
+                        let narrowed = Self::narrow_type(current, fact);
+                        self.variables.insert(var.clone(), narrowed);
+                    }
+                }
                 for s in then_body {
                     self.current_line = s.line;
                     self.check_stmt(&s.stmt);
                 }
+                self.variables = saved.clone();
+
+                // Check else-body with inverted narrowing
                 if let Some(else_b) = else_body {
+                    for (var, fact) in &facts {
+                        if let Some(current) = saved.get(var) {
+                            let narrowed = Self::narrow_type(current, &fact.invert());
+                            self.variables.insert(var.clone(), narrowed);
+                        }
+                    }
                     for s in else_b {
                         self.current_line = s.line;
                         self.check_stmt(&s.stmt);
+                    }
+                    self.variables = saved;
+                } else if !facts.is_empty() && Self::body_always_returns(then_body) {
+                    // Early return narrowing: if then-body always returns,
+                    // apply inverted facts to the rest of the scope
+                    for (var, fact) in &facts {
+                        if let Some(current) = saved.get(var) {
+                            let narrowed = Self::narrow_type(current, &fact.invert());
+                            self.variables.insert(var.clone(), narrowed);
+                        }
                     }
                 }
             }
@@ -662,12 +812,46 @@ impl TypeChecker {
                 self.infer_expr(expr);
             }
             Stmt::Match { subject, arms } => {
-                self.infer_expr(subject);
+                let subject_type = self.infer_expr(subject);
+                let subject_name = if let Expr::Ident(name) = subject {
+                    Some(name.clone())
+                } else {
+                    None
+                };
+
                 for arm in arms {
+                    let saved = self.variables.clone();
+
+                    // Narrow the subject's type based on the match pattern
+                    if let Some(ref var) = subject_name {
+                        let narrowed = match &arm.pattern {
+                            Pattern::Literal(expr) if is_null_expr(expr) => {
+                                Some(Self::narrow_type(&subject_type, &NarrowingFact::IsNull))
+                            }
+                            Pattern::Constructor { name, .. } => match name.as_str() {
+                                "Some" => {
+                                    Some(Self::narrow_type(&subject_type, &NarrowingFact::NonNull))
+                                }
+                                "Ok" => {
+                                    Some(Self::narrow_type(&subject_type, &NarrowingFact::IsOk))
+                                }
+                                "Err" => {
+                                    Some(Self::narrow_type(&subject_type, &NarrowingFact::IsErr))
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(t) = narrowed {
+                            self.variables.insert(var.clone(), t);
+                        }
+                    }
+
                     for s in &arm.body {
                         self.current_line = s.line;
                         self.check_stmt(&s.stmt);
                     }
+                    self.variables = saved;
                 }
             }
             _ => {}
@@ -682,6 +866,9 @@ impl TypeChecker {
             Expr::Bool(_) => InferredType::Bool,
 
             Expr::Ident(name) => {
+                if name == "null" {
+                    return InferredType::Null;
+                }
                 if name == "None" {
                     return InferredType::Option(Box::new(InferredType::Unknown));
                 }
@@ -1254,5 +1441,141 @@ mod tests {
         // callee's return type is inferred as Int, so caller's return is also Int
         // No warnings expected (no type annotations to conflict)
         assert!(w.is_empty());
+    }
+
+    // ========== 8A.2: Flow-Sensitive Type Narrowing ==========
+
+    #[test]
+    fn narrowing_not_null_unwraps_option() {
+        // x is ?String, but after `x != null` check it should be String
+        let w = warnings_for("fn f(x: ?String) {\n  if x != null {\n    let y: String = x\n  }\n}");
+        assert!(
+            w.is_empty(),
+            "should not warn when Option narrowed to inner type: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowing_eq_null_narrows_to_null() {
+        // In the then-branch of `x == null`, x is Null
+        // In the else-branch, x should be non-null (String)
+        let w = warnings_for(
+            "fn f(x: ?String) {\n  if x == null {\n    let y: Null = x\n  } else {\n    let z: String = x\n  }\n}",
+        );
+        assert!(
+            w.is_empty(),
+            "should narrow to Null in then, String in else: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowing_does_not_leak_scope() {
+        // After the if-block (no early return), narrowing should not persist
+        let w = warnings_for(
+            "fn f(x: ?String) {\n  if x != null {\n    let y: String = x\n  }\n  let z: String = x\n}",
+        );
+        // The `let z: String = x` should warn because x is still ?String outside the if
+        assert_eq!(
+            w.len(),
+            1,
+            "narrowing should not leak: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowing_negation() {
+        // !(x == null) is the same as x != null
+        let w =
+            warnings_for("fn f(x: ?String) {\n  if !(x == null) {\n    let y: String = x\n  }\n}");
+        assert!(
+            w.is_empty(),
+            "negation should invert narrowing: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowing_and_chain() {
+        // x != null && y != null should narrow both
+        let w = warnings_for(
+            "fn f(x: ?String, y: ?Int) {\n  if x != null && y != null {\n    let a: String = x\n    let b: Int = y\n  }\n}",
+        );
+        assert!(
+            w.is_empty(),
+            "AND chain should narrow both vars: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowing_is_some() {
+        let w =
+            warnings_for("fn f(x: ?String) {\n  if is_some(x) {\n    let y: String = x\n  }\n}");
+        assert!(
+            w.is_empty(),
+            "is_some should narrow Option: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowing_is_ok() {
+        let w = warnings_for(
+            "fn f(x: Result<Int, String>) {\n  if is_ok(x) {\n    let y: Int = x\n  }\n}",
+        );
+        assert!(
+            w.is_empty(),
+            "is_ok should narrow Result to Ok type: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowing_early_return() {
+        // if x == null { return } → x is non-null after the if
+        let w =
+            warnings_for("fn f(x: ?String) {\n  if x == null { return }\n  let y: String = x\n}");
+        assert!(
+            w.is_empty(),
+            "early return should narrow after if: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowing_unknown_not_narrowed() {
+        // Unknown types should stay Unknown (no narrowing)
+        let w = warnings_for("fn f(x) {\n  if x != null {\n    let y: String = x\n  }\n}");
+        // x is Unknown (no annotation), narrowing Unknown stays Unknown,
+        // and Unknown is compatible with anything — no warning
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn match_some_constructor_narrows() {
+        // Match with Some(...) constructor pattern should narrow Option to inner type
+        let w = warnings_for(
+            "fn f(x: ?String) {\n  match x {\n    Some(v) => { let y: String = x }\n  }\n}",
+        );
+        assert!(
+            w.is_empty(),
+            "Some constructor should narrow Option: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn match_ok_constructor_narrows() {
+        let w = warnings_for(
+            "fn f(x: Result<Int, String>) {\n  match x {\n    Ok(v) => { let y: Int = x }\n    Err(e) => { let z: String = x }\n  }\n}",
+        );
+        assert!(
+            w.is_empty(),
+            "Ok/Err constructors should narrow Result: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
     }
 }
