@@ -4030,6 +4030,28 @@ fn for_in_channel_drains_and_exits() {
 }
 
 #[test]
+fn for_in_channel_break_stops_early() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel()
+        spawn {
+            send(ch, 10)
+            send(ch, 20)
+            send(ch, 30)
+            close(ch)
+        }
+        let mut first = 0
+        for msg in ch {
+            first = msg
+            break
+        }
+        assert_eq(first, 10)
+    "#,
+    );
+    assert!(result.is_ok(), "for-in break: {:?}", result.err());
+}
+
+#[test]
 fn send_after_close_errors() {
     let result = try_run_forge(
         r#"
