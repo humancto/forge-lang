@@ -41,7 +41,7 @@ pub struct TypeChecker {
     functions: HashMap<String, FnSignature>,
     type_defs: HashMap<String, Vec<String>>,
     interfaces: HashMap<String, Vec<InterfaceMethod>>,
-    structs: HashMap<String, Vec<String>>,
+    structs: HashMap<String, StructInfo>,
     variables: HashMap<String, InferredType>,
     current_fn_return: Option<InferredType>,
     current_line: usize,
@@ -55,6 +55,12 @@ struct FnSignature {
     params: Vec<(String, Option<InferredType>)>,
     param_count: usize,
     return_type: Option<InferredType>,
+}
+
+#[derive(Debug, Clone)]
+struct StructInfo {
+    type_params: Vec<String>,
+    fields: Vec<(String, InferredType)>,
 }
 
 #[derive(Debug, Clone)]
@@ -496,9 +502,23 @@ impl TypeChecker {
                     .collect();
                 self.interfaces.insert(name.clone(), method_sigs);
             }
-            Stmt::StructDef { name, fields, .. } => {
-                let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-                self.structs.insert(name.clone(), field_names);
+            Stmt::StructDef {
+                name,
+                type_params,
+                fields,
+                ..
+            } => {
+                let field_info: Vec<(String, InferredType)> = fields
+                    .iter()
+                    .map(|f| (f.name.clone(), type_ann_to_inferred(&f.type_ann)))
+                    .collect();
+                self.structs.insert(
+                    name.clone(),
+                    StructInfo {
+                        type_params: type_params.clone(),
+                        fields: field_info,
+                    },
+                );
             }
             Stmt::ImplBlock {
                 type_name, methods, ..
@@ -545,8 +565,8 @@ impl TypeChecker {
     }
 
     fn check_interface_satisfaction(&mut self, struct_name: &str, interface_name: &str) {
-        let struct_fields = match self.structs.get(struct_name) {
-            Some(f) => f.clone(),
+        let struct_info = match self.structs.get(struct_name) {
+            Some(info) => info.clone(),
             None => return,
         };
         let methods = match self.interfaces.get(interface_name) {
@@ -555,7 +575,10 @@ impl TypeChecker {
         };
 
         for method in &methods {
-            let has_field = struct_fields.iter().any(|f| *f == method.name);
+            let has_field = struct_info
+                .fields
+                .iter()
+                .any(|(name, _)| *name == method.name);
             let has_fn = self
                 .functions
                 .get(&format!("{}_{}", struct_name, method.name))
@@ -1972,6 +1995,31 @@ mod tests {
         // Non-generic function behavior unchanged
         let w =
             warnings_for("fn add(a: Int, b: Int) -> Int { return a + b }\nlet y: Int = add(1, 2)");
+        assert!(w.is_empty());
+    }
+
+    // ========== 8B.3: Generic Struct Definitions ==========
+
+    #[test]
+    fn generic_struct_stores_type_params() {
+        // Generic struct should parse and type-check without errors
+        let w = warnings_for("struct Pair<T> {\n  first: T\n  second: T\n}");
+        assert!(
+            w.is_empty(),
+            "generic struct def should not warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn non_generic_struct_still_works() {
+        let w = warnings_for("struct Point {\n  x: Int\n  y: Int\n}");
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn generic_struct_with_multiple_type_params() {
+        let w = warnings_for("struct Either<L, R> {\n  left: L\n  right: R\n}");
         assert!(w.is_empty());
     }
 }
