@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::manifest::{self, DependencySpec, LockedPackage, Lockfile, Manifest};
+use semver::{Version, VersionReq};
 
 const PACKAGES_DIR: &str = "forge_modules";
 
@@ -209,19 +210,99 @@ fn save_lockfile_at(lockfile: &Lockfile, path: &Path) -> std::io::Result<()> {
 
 fn install_from_registry_as(
     name: &str,
-    version: &str,
+    version_str: &str,
     packages_dir: &Path,
     registry_roots: &[PathBuf],
 ) -> Result<LockedPackage, String> {
-    let source = find_registry_package(name, version, registry_roots)?;
+    let req = if version_str.is_empty() || version_str == "*" {
+        VersionReq::STAR
+    } else {
+        VersionReq::parse(version_str).map_err(|e| {
+            format!(
+                "  Error: invalid version constraint '{}': {}",
+                version_str, e
+            )
+        })?
+    };
+
+    let (resolved_version, source) = resolve_best_version(name, &req, registry_roots)?;
     install_from_path_as(name, &source, packages_dir)?;
-    println!("  \x1B[32m✓\x1B[0m Installed {} @ {}", name, version);
+    println!(
+        "  \x1B[32m✓\x1B[0m Installed {} @ {}",
+        name, resolved_version
+    );
     Ok(LockedPackage {
         name: name.to_string(),
-        version: version.to_string(),
+        version: resolved_version,
         source: format!("registry+{}", source.display()),
         checksum: String::new(),
     })
+}
+
+fn validate_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        return Err(format!(
+            "  Error: invalid package name '{}': must not be empty or contain '/' or '..'",
+            name
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_best_version(
+    name: &str,
+    req: &VersionReq,
+    registry_roots: &[PathBuf],
+) -> Result<(String, PathBuf), String> {
+    validate_package_name(name)?;
+
+    let mut all_versions: Vec<(Version, PathBuf)> = Vec::new();
+
+    for root in registry_roots {
+        let pkg_dir = root.join(name);
+        let entries = match std::fs::read_dir(&pkg_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map_or(false, |t| t.is_dir()) {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            if let Ok(ver) = Version::parse(&dir_name) {
+                all_versions.push((ver, entry.path()));
+            }
+        }
+    }
+
+    if all_versions.is_empty() {
+        return Err(format!(
+            "  Error: no versions found for '{}' in registry",
+            name
+        ));
+    }
+
+    let best = all_versions
+        .iter()
+        .filter(|(v, _)| req.matches(v))
+        .max_by(|(a, _), (b, _)| a.cmp(b));
+
+    match best {
+        Some((ver, path)) => Ok((ver.to_string(), path.clone())),
+        None => {
+            let available: Vec<String> = {
+                let mut vs: Vec<&Version> = all_versions.iter().map(|(v, _)| v).collect();
+                vs.sort();
+                vs.iter().map(|v| v.to_string()).collect()
+            };
+            Err(format!(
+                "  Error: no version of '{}' matches '{}' (available: {})",
+                name,
+                req,
+                available.join(", ")
+            ))
+        }
+    }
 }
 
 fn find_registry_package(
@@ -556,5 +637,119 @@ toolkit = "1.2.3"
         assert!(result.is_none());
 
         std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    fn create_registry_versions(root: &Path, name: &str, versions: &[&str]) {
+        for ver in versions {
+            let dir = root.join(name).join(ver);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("main.fg"), format!("// {}-{}", name, ver)).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolve_best_version_caret() {
+        let workspace = temp_path("semver-caret");
+        let registry = workspace.join("registry");
+        create_registry_versions(&registry, "foo", &["1.0.0", "1.0.3", "1.1.0", "2.0.0"]);
+
+        let req = VersionReq::parse("^1.0").unwrap();
+        let (ver, _) = resolve_best_version("foo", &req, &[registry]).unwrap();
+        assert_eq!(ver, "1.1.0");
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_best_version_tilde() {
+        let workspace = temp_path("semver-tilde");
+        let registry = workspace.join("registry");
+        create_registry_versions(&registry, "foo", &["1.0.0", "1.0.3", "1.1.0", "2.0.0"]);
+
+        let req = VersionReq::parse("~1.0").unwrap();
+        let (ver, _) = resolve_best_version("foo", &req, &[registry]).unwrap();
+        assert_eq!(ver, "1.0.3");
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_best_version_star() {
+        let workspace = temp_path("semver-star");
+        let registry = workspace.join("registry");
+        create_registry_versions(&registry, "foo", &["1.0.0", "1.1.0", "2.0.0"]);
+
+        let (ver, _) = resolve_best_version("foo", &VersionReq::STAR, &[registry]).unwrap();
+        assert_eq!(ver, "2.0.0");
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_best_version_range() {
+        let workspace = temp_path("semver-range");
+        let registry = workspace.join("registry");
+        create_registry_versions(&registry, "foo", &["1.0.0", "1.0.3", "1.1.0", "2.0.0"]);
+
+        let req = VersionReq::parse(">=1.0.0, <2.0.0").unwrap();
+        let (ver, _) = resolve_best_version("foo", &req, &[registry]).unwrap();
+        assert_eq!(ver, "1.1.0");
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_best_version_no_match() {
+        let workspace = temp_path("semver-nomatch");
+        let registry = workspace.join("registry");
+        create_registry_versions(&registry, "foo", &["1.0.0", "1.1.0"]);
+
+        let req = VersionReq::parse("^3.0").unwrap();
+        let err = resolve_best_version("foo", &req, &[registry]).unwrap_err();
+        assert!(err.contains("no version of 'foo' matches"));
+        assert!(err.contains("1.0.0"));
+        assert!(err.contains("1.1.0"));
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_best_version_empty_registry() {
+        let workspace = temp_path("semver-empty");
+        let registry = workspace.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+
+        let req = VersionReq::parse("^1.0").unwrap();
+        let err = resolve_best_version("foo", &req, &[registry]).unwrap_err();
+        assert!(err.contains("no versions found"));
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_best_version_skips_non_semver_dirs() {
+        let workspace = temp_path("semver-skip");
+        let registry = workspace.join("registry");
+        create_registry_versions(&registry, "foo", &["1.0.0"]);
+        // Add a non-semver directory that should be ignored
+        std::fs::create_dir_all(registry.join("foo").join("not-a-version")).unwrap();
+
+        let req = VersionReq::parse("^1.0").unwrap();
+        let (ver, _) = resolve_best_version("foo", &req, &[registry]).unwrap();
+        assert_eq!(ver, "1.0.0");
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn resolve_best_version_rejects_traversal() {
+        let err = resolve_best_version("../etc", &VersionReq::STAR, &[]).unwrap_err();
+        assert!(err.contains("invalid package name"));
+
+        let err = resolve_best_version("foo/bar", &VersionReq::STAR, &[]).unwrap_err();
+        assert!(err.contains("invalid package name"));
+
+        let err = resolve_best_version("", &VersionReq::STAR, &[]).unwrap_err();
+        assert!(err.contains("invalid package name"));
     }
 }
