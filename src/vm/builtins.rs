@@ -2819,8 +2819,9 @@ impl VM {
             // ----- Channel builtins -----
             "channel" => {
                 let (sender, receiver) = match args.first() {
-                    Some(Value::Int(cap)) if *cap > 0 => {
-                        let (tx, rx) = std::sync::mpsc::sync_channel(*cap as usize);
+                    Some(Value::Int(cap)) => {
+                        let cap = (*cap).max(0) as usize;
+                        let (tx, rx) = std::sync::mpsc::sync_channel(cap);
                         (VmChannelSender::Bounded(tx), rx)
                     }
                     _ => {
@@ -2844,13 +2845,15 @@ impl VM {
                 let guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
                 match &*guard {
                     Some(VmChannelSender::Bounded(tx)) => {
-                        let _ = tx.send(shared);
+                        tx.send(shared)
+                            .map_err(|_| VMError::new("channel closed"))?;
                     }
                     Some(VmChannelSender::Unbounded(tx)) => {
-                        let _ = tx.send(shared);
+                        tx.send(shared)
+                            .map_err(|_| VMError::new("channel closed"))?;
                     }
                     None => {
-                        return Err(VMError::new("send on closed channel"));
+                        return Err(VMError::new("channel closed"));
                     }
                 }
                 Ok(Value::Null)

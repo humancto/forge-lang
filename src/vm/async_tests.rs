@@ -256,3 +256,43 @@ fn vm_channel_cross_spawn() {
     );
     assert_eq!(out, vec!["99"]);
 }
+
+#[test]
+fn vm_channel_double_close() {
+    // Double close should not panic
+    run_on_vm(
+        r#"
+        let ch = channel(1)
+        close(ch)
+        close(ch)
+    "#,
+    );
+}
+
+#[test]
+fn vm_channel_send_receive_object() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        send(ch, { name: "forge", version: 1 })
+        let val = receive(ch)
+        println(val.name)
+        println(val.version)
+    "#,
+    );
+    assert_eq!(out, vec!["forge", "1"]);
+}
+
+#[test]
+fn vm_channel_send_receive_array() {
+    let out = run_on_vm(
+        r#"
+        let ch = channel(1)
+        send(ch, [10, 20, 30])
+        let val = receive(ch)
+        println(len(val))
+        println(val[1])
+    "#,
+    );
+    assert_eq!(out, vec!["3", "20"]);
+}
