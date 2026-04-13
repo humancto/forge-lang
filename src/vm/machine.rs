@@ -1450,13 +1450,12 @@ impl VM {
                         let field_const = &chunk.constants[c as usize];
                         if let (Value::Obj(r), Constant::Str(field)) = (obj_val, field_const) {
                             let r = *r;
-                            let field = field.clone();
                             let needs_alloc: Option<String>;
                             let direct_result: Option<Value>;
                             if let Some(obj) = self.gc.get(r) {
                                 match &obj.kind {
                                     ObjKind::Object(map) => {
-                                        if let Some(value) = map.get(&field).cloned() {
+                                        if let Some(value) = map.get(field.as_str()).cloned() {
                                             direct_result = Some(value);
                                         } else if let Some(type_name) = map
                                             .get("__type__")
@@ -1481,7 +1480,9 @@ impl VM {
                                                     else {
                                                         continue;
                                                     };
-                                                    if let Some(value) = embed_map.get(&field) {
+                                                    if let Some(value) =
+                                                        embed_map.get(field.as_str())
+                                                    {
                                                         delegated = Some(*value);
                                                         break;
                                                     }
@@ -1494,14 +1495,15 @@ impl VM {
                                                 ))
                                             })?);
                                         } else {
-                                            direct_result = Some(
-                                                map.get(&field).cloned().ok_or_else(|| {
-                                                    VMError::new(&format!(
-                                                        "no field '{}' on object",
-                                                        field
-                                                    ))
-                                                })?,
-                                            );
+                                            direct_result =
+                                                Some(map.get(field.as_str()).cloned().ok_or_else(
+                                                    || {
+                                                        VMError::new(&format!(
+                                                            "no field '{}' on object",
+                                                            field
+                                                        ))
+                                                    },
+                                                )?);
                                         }
                                         needs_alloc = None;
                                     }
