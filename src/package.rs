@@ -459,16 +459,29 @@ fn collect_files_recursive(
     current: &Path,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
-    let entries = std::fs::read_dir(current)
-        .map_err(|e| format!("failed to read directory {}: {}", current.display(), e))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        // Skip platform junk
-        if file_name == ".DS_Store" || file_name == "__MACOSX" || file_name == ".gitkeep" {
+    let entries: Vec<_> = std::fs::read_dir(current)
+        .map_err(|e| format!("failed to read directory {}: {}", current.display(), e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to read entry in {}: {}", current.display(), e))?;
+    for entry in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("failed to get file type: {}", e))?;
+        // Skip symlinks to avoid traversal attacks and cycles
+        if file_type.is_symlink() {
             continue;
         }
-        if path.is_dir() {
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        // Skip platform junk and VCS directories
+        if file_name == ".DS_Store"
+            || file_name == "__MACOSX"
+            || file_name == ".gitkeep"
+            || file_name == ".git"
+        {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_files_recursive(root, &path, files)?;
         } else {
             let relative = path
@@ -487,10 +500,16 @@ fn compute_directory_checksum(dir: &Path) -> Result<String, String> {
     let files = collect_files_sorted(dir)?;
     let mut hasher = Sha256::new();
     for rel_path in &files {
-        hasher.update(rel_path.to_string_lossy().as_bytes());
+        // Normalize path separators for cross-platform consistency
+        let normalized = rel_path.to_string_lossy().replace('\\', "/");
+        let path_bytes = normalized.as_bytes();
+        // Length-prefix to prevent ambiguous concatenation
+        hasher.update(&(path_bytes.len() as u64).to_le_bytes());
+        hasher.update(path_bytes);
         let full_path = dir.join(rel_path);
         let contents = std::fs::read(&full_path)
             .map_err(|e| format!("failed to read {}: {}", full_path.display(), e))?;
+        hasher.update(&(contents.len() as u64).to_le_bytes());
         hasher.update(&contents);
     }
     let hash = hasher.finalize();
