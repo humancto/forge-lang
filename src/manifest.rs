@@ -101,6 +101,26 @@ impl DependencySpec {
             _ => None,
         }
     }
+
+    pub fn version_str(&self) -> &str {
+        match self {
+            DependencySpec::Version(v) => v.as_str(),
+            DependencySpec::Detailed(d) => d.version.as_str(),
+        }
+    }
+
+    pub fn version_req(&self) -> Result<semver::VersionReq, String> {
+        let s = self.version_str();
+        if s.is_empty() || s == "*" {
+            return Ok(semver::VersionReq::STAR);
+        }
+        semver::VersionReq::parse(s)
+            .map_err(|e| format!("invalid version constraint '{}': {}", s, e))
+    }
+
+    pub fn matches_version(&self, version: &semver::Version) -> Result<bool, String> {
+        self.version_req().map(|req| req.matches(version))
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -340,5 +360,76 @@ test = "forge test"
         };
         assert!(lockfile.find("foo").is_some());
         assert!(lockfile.find("bar").is_none());
+    }
+
+    #[test]
+    fn semver_caret() {
+        let dep = DependencySpec::Version("^1.0".into());
+        let v150 = semver::Version::parse("1.5.0").unwrap();
+        let v200 = semver::Version::parse("2.0.0").unwrap();
+        assert!(dep.matches_version(&v150).unwrap());
+        assert!(!dep.matches_version(&v200).unwrap());
+    }
+
+    #[test]
+    fn semver_tilde() {
+        let dep = DependencySpec::Version("~1.5".into());
+        let v153 = semver::Version::parse("1.5.3").unwrap();
+        let v160 = semver::Version::parse("1.6.0").unwrap();
+        assert!(dep.matches_version(&v153).unwrap());
+        assert!(!dep.matches_version(&v160).unwrap());
+    }
+
+    #[test]
+    fn semver_range() {
+        let dep = DependencySpec::Version(">=1.0.0, <2.0.0".into());
+        let v150 = semver::Version::parse("1.5.0").unwrap();
+        let v200 = semver::Version::parse("2.0.0").unwrap();
+        assert!(dep.matches_version(&v150).unwrap());
+        assert!(!dep.matches_version(&v200).unwrap());
+    }
+
+    #[test]
+    fn semver_star() {
+        let dep = DependencySpec::Version("*".into());
+        let v = semver::Version::parse("99.99.99").unwrap();
+        assert!(dep.matches_version(&v).unwrap());
+    }
+
+    #[test]
+    fn semver_empty_is_star() {
+        let dep = DependencySpec::Version(String::new());
+        let v = semver::Version::parse("1.0.0").unwrap();
+        assert!(dep.matches_version(&v).unwrap());
+    }
+
+    #[test]
+    fn semver_exact() {
+        let dep = DependencySpec::Version("1.2.3".into());
+        let v123 = semver::Version::parse("1.2.3").unwrap();
+        let v124 = semver::Version::parse("1.2.4").unwrap();
+        assert!(dep.matches_version(&v123).unwrap());
+        // semver crate treats bare "1.2.3" as "^1.2.3"
+        assert!(dep.matches_version(&v124).unwrap());
+    }
+
+    #[test]
+    fn semver_invalid() {
+        let dep = DependencySpec::Version("not-a-version".into());
+        assert!(dep.version_req().is_err());
+    }
+
+    #[test]
+    fn semver_detailed_dep() {
+        let dep = DependencySpec::Detailed(DetailedDep {
+            version: "^2.0".into(),
+            git: String::new(),
+            branch: String::new(),
+            path: String::new(),
+        });
+        let v210 = semver::Version::parse("2.1.0").unwrap();
+        let v300 = semver::Version::parse("3.0.0").unwrap();
+        assert!(dep.matches_version(&v210).unwrap());
+        assert!(!dep.matches_version(&v300).unwrap());
     }
 }

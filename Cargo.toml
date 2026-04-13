@@ -86,6 +86,7 @@ cranelift-jit = { version = "0.129", optional = true }
 cranelift-module = { version = "0.129", optional = true }
 cranelift-native = { version = "0.129", optional = true }
 gethostname = "1.1.0"
+semver = "1"
 
 [features]
 default = ["jit", "postgres", "mysql"]
