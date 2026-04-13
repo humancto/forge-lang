@@ -23,6 +23,8 @@ pub struct TypeInfo {
     pub has_unsupported_ops: bool,
     pub has_float: bool,
     pub has_string_ops: bool,
+    /// The type of the value returned by the function (from the last Return opcode).
+    pub return_type: RegType,
 }
 
 #[derive(Clone, Copy)]
@@ -52,6 +54,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
     let mut has_unsupported = false;
     let mut has_float = false;
     let mut has_string_ops = false;
+    let mut return_type = RegType::Int;
 
     for i in 0..chunk.arity as usize {
         types[i] = RegType::Int;
@@ -186,7 +189,12 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                     constants[dst] = None;
                 }
             }
-            OpCode::Return | OpCode::ReturnNull => {}
+            OpCode::Return => {
+                if a < types.len() {
+                    return_type = types[a];
+                }
+            }
+            OpCode::ReturnNull => {}
 
             OpCode::Concat => {
                 has_string_ops = true;
@@ -248,6 +256,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         has_unsupported_ops: has_unsupported,
         has_float,
         has_string_ops,
+        return_type,
     }
 }
 

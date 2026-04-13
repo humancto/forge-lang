@@ -58,6 +58,7 @@ fn run_jit_function(source: &str) -> Vec<String> {
                     ptr,
                     uses_float: type_info.has_float,
                     has_string_ops: type_info.has_string_ops,
+                    returns_string: type_info.return_type == type_analysis::RegType::StringRef,
                 },
             );
         }

@@ -109,6 +109,7 @@ pub struct JitEntry {
     pub ptr: *const u8,
     pub uses_float: bool,
     pub has_string_ops: bool,
+    pub returns_string: bool,
 }
 
 #[cfg(feature = "jit")]
@@ -2079,7 +2080,8 @@ impl VM {
                             && self.profiler.is_hot(&func_name)
                         {
                             let type_info = super::jit::type_analysis::analyze(&chunk);
-                            if !type_info.has_unsupported_ops && chunk.arity <= 8 {
+                            let max_arity = if type_info.has_string_ops { 7 } else { 8 };
+                            if !type_info.has_unsupported_ops && chunk.arity <= max_arity {
                                 // Pre-allocate string constants into GC so their
                                 // GcRef indices can be baked into JIT code.
                                 let string_refs = if type_info.has_string_ops {
@@ -2110,6 +2112,8 @@ impl VM {
                                                 ptr,
                                                 uses_float: type_info.has_float,
                                                 has_string_ops: type_info.has_string_ops,
+                                                returns_string: type_info.return_type
+                                                    == super::jit::type_analysis::RegType::StringRef,
                                             },
                                         );
                                         self.jit_modules.push(jit);
@@ -2170,15 +2174,8 @@ impl VM {
                                     }
                                     let result: i64 =
                                         unsafe { jit_call_i64(entry.ptr, &raw_args)? };
-                                    if entry.has_string_ops && result >= 0 {
-                                        // Return value might be a GcRef if the function
-                                        // returns a string. Check if the GC slot holds a
-                                        // string.
-                                        if self.gc.get(GcRef(result as usize)).is_some() {
-                                            Value::Obj(GcRef(result as usize))
-                                        } else {
-                                            Value::Int(result)
-                                        }
+                                    if entry.returns_string {
+                                        Value::Obj(GcRef(result as usize))
                                     } else {
                                         Value::Int(result)
                                     }

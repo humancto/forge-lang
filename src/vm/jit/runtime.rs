@@ -198,7 +198,8 @@ pub extern "C" fn rt_string_concat(vm_ptr: *mut VM, a_ref: i64, b_ref: i64) -> i
         },
         None => return -1,
     };
-    let result = format!("{}{}", a_str, b_str);
+    let mut result = a_str;
+    result.push_str(&b_str);
     let gc_ref = vm.gc.alloc_string(result);
     gc_ref.0 as i64
 }
@@ -217,26 +218,31 @@ pub extern "C" fn rt_string_len(vm_ptr: *mut VM, s_ref: i64) -> i64 {
 }
 
 /// Bridge: compare two GC strings for equality.
-/// Returns 1 if equal, 0 if not, -1 on error.
+/// Returns 1 if equal, 0 if not.
+/// Type analysis guarantees both operands are StringRef, so invalid refs
+/// are impossible — we return 0 defensively rather than -1.
 pub extern "C" fn rt_string_eq(vm_ptr: *mut VM, a_ref: i64, b_ref: i64) -> i64 {
     let vm = unsafe { &mut *vm_ptr };
-    // Fast path: same GcRef index means same string
+    // Fast path: same GcRef index means same string (interning deduplicates)
     if a_ref == b_ref {
         return 1;
     }
+    // SAFETY: Both gc.get() calls borrow vm.gc immutably. gc.get() is a pure
+    // read (no allocation, no collection), so the first &str reference remains
+    // valid while we obtain the second. No mutation can occur between the calls.
     let a_str = match vm.gc.get(GcRef(a_ref as usize)) {
         Some(obj) => match &obj.kind {
             ObjKind::String(s) => s.as_str(),
-            _ => return -1,
+            _ => return 0,
         },
-        None => return -1,
+        None => return 0,
     };
     let b_str = match vm.gc.get(GcRef(b_ref as usize)) {
         Some(obj) => match &obj.kind {
             ObjKind::String(s) => s.as_str(),
-            _ => return -1,
+            _ => return 0,
         },
-        None => return -1,
+        None => return 0,
     };
     if a_str == b_str {
         1

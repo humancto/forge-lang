@@ -217,6 +217,7 @@ fn run_on_jit_value(program: &Program) -> String {
                         ptr,
                         uses_float: info.has_float,
                         has_string_ops: info.has_string_ops,
+                        returns_string: info.return_type == type_analysis::RegType::StringRef,
                     },
                 );
             }
