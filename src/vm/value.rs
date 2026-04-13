@@ -80,6 +80,7 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
                 ObjKind::ResultErr(v) => SharedValue::ResultErr(Box::new(value_to_shared(gc, v))),
                 ObjKind::Channel(ch) => SharedValue::Channel(ch.clone()),
                 ObjKind::Frozen(v) => value_to_shared(gc, v),
+                ObjKind::BoxedInt(n) => SharedValue::Int(*n),
                 // Functions, closures, natives, upvalues, task handles are not transferable
                 _ => SharedValue::Null,
             },
@@ -277,6 +278,7 @@ impl GcObject {
             ObjKind::TaskHandle(_) => "<task>".to_string(),
             ObjKind::Channel(_) => "<channel>".to_string(),
             ObjKind::Frozen(v) => v.display(gc),
+            ObjKind::BoxedInt(n) => n.to_string(),
         }
     }
 
@@ -296,6 +298,7 @@ impl GcObject {
             }
             ObjKind::ResultOk(v) => format!("{{ \"Ok\": {} }}", v.to_json_string(gc)),
             ObjKind::ResultErr(v) => format!("{{ \"Err\": {} }}", v.to_json_string(gc)),
+            ObjKind::BoxedInt(n) => n.to_string(),
             _ => format!("\"<{}>\"", self.type_name()),
         }
     }
@@ -313,6 +316,7 @@ impl GcObject {
             ObjKind::TaskHandle(_) => "TaskHandle",
             ObjKind::Channel(_) => "channel",
             ObjKind::Frozen(_) => "Frozen",
+            ObjKind::BoxedInt(_) => "Int",
         }
     }
 
@@ -327,6 +331,7 @@ impl GcObject {
                     && a.iter()
                         .all(|(k, v)| b.get(k).map_or(false, |bv| v.equals(bv, gc)))
             }
+            (ObjKind::BoxedInt(a), ObjKind::BoxedInt(b)) => a == b,
             _ => false,
         }
     }
@@ -381,6 +386,9 @@ pub enum ObjKind {
     TaskHandle(Arc<(std::sync::Mutex<Option<SharedValue>>, std::sync::Condvar)>),
     Channel(Arc<VmChannelInner>),
     Frozen(Value),
+    /// Heap-boxed i64 for values exceeding 48-bit NaN-box inline range.
+    /// Used when NaN-boxed Value is active; transparent to user code.
+    BoxedInt(i64),
 }
 
 #[derive(Clone)]
