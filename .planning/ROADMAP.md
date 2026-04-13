@@ -61,8 +61,8 @@ Phases 0–7 complete. This roadmap covers the five evolution tracks toward v1.0
 ### Phase 10B — Remote Registry
 
 - [x] 10B.1 GitHub-based package index — packages listed in a central repo (e.g., `forge-lang/registry`) as TOML manifests. `forge install` fetches the index and resolves URLs. Touch: `package.rs`.
-- [ ] 10B.2 `forge search <query>` — search the package index by name/description. Touch: `main.rs`, `package.rs`.
-- [ ] 10B.3 Checksum verification — verify downloaded package SHA256 matches index entry. Touch: `package.rs`.
+- [x] 10B.2 `forge search <query>` — search the package index by name/description. Touch: `main.rs`, `package.rs`.
+- [x] 10B.3 Checksum verification — verify downloaded package SHA256 matches index entry. Touch: `package.rs`.
 
 ### Phase 10C — Developer Workflow
 
