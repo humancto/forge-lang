@@ -3978,6 +3978,91 @@ fn select_timeout_returns_null() {
     assert_eq!(value, Value::Null);
 }
 
+#[test]
+fn close_channel_then_receive_returns_null() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel()
+        send(ch, 1)
+        receive(ch)
+        close(ch)
+        let r = try_receive(ch)
+        assert(is_none(r))
+    "#,
+    );
+    assert!(result.is_ok(), "close+receive: {:?}", result.err());
+}
+
+#[test]
+fn close_non_channel_errors() {
+    let result = try_run_forge("close(42)");
+    assert!(result.is_err());
+}
+
+#[test]
+fn close_no_args_errors() {
+    let result = try_run_forge("close()");
+    assert!(result.is_err());
+}
+
+#[test]
+fn for_in_channel_drains_and_exits() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel()
+        spawn {
+            send(ch, 1)
+            send(ch, 2)
+            send(ch, 3)
+            close(ch)
+        }
+        let mut items = []
+        for msg in ch {
+            items = push(items, msg)
+        }
+        assert_eq(len(items), 3)
+        assert_eq(items[0], 1)
+        assert_eq(items[1], 2)
+        assert_eq(items[2], 3)
+    "#,
+    );
+    assert!(result.is_ok(), "for-in channel: {:?}", result.err());
+}
+
+#[test]
+fn for_in_channel_break_stops_early() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel()
+        spawn {
+            send(ch, 10)
+            send(ch, 20)
+            send(ch, 30)
+            close(ch)
+        }
+        let mut first = 0
+        for msg in ch {
+            first = msg
+            break
+        }
+        assert_eq(first, 10)
+    "#,
+    );
+    assert!(result.is_ok(), "for-in break: {:?}", result.err());
+}
+
+#[test]
+fn send_after_close_errors() {
+    let result = try_run_forge(
+        r#"
+        let ch = channel()
+        close(ch)
+        send(ch, 1)
+    "#,
+    );
+    assert!(result.is_err());
+}
+
 // === Phase 2: Short-circuit tests ===
 
 #[test]

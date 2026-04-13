@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`select(channels, timeout?)` builtin** — wait on multiple channels, returns `[index, value]` for the first ready channel. Optional timeout in ms. ([#69](https://github.com/humancto/forge-lang/pull/69))
+- **`close(ch)` builtin and channel iteration** — close a channel to signal no more values; `for msg in ch { }` drains until closed. ([#70](https://github.com/humancto/forge-lang/pull/70))
 
 ## [0.8.0] - 2026-04-12
 

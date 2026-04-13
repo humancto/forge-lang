@@ -1354,6 +1354,18 @@ impl Interpreter {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
+            "close" => {
+                if args.is_empty() {
+                    return Err(RuntimeError::new("close() requires a channel"));
+                }
+                match &args[0] {
+                    Value::Channel(ch) => {
+                        *ch.tx.lock().expect("BUG: channel mutex poisoned") = None;
+                        Ok(Value::Null)
+                    }
+                    _ => Err(RuntimeError::new("close() requires a channel")),
+                }
+            }
             _ if name.starts_with("math.") => {
                 crate::stdlib::math::call(name, args).map_err(|e| RuntimeError::new(&e))
             }
