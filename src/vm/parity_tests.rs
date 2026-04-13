@@ -63,7 +63,7 @@ fn run_on_jit_value(source: &str) -> String {
         };
         let info = type_analysis::analyze(proto);
         if !info.has_unsupported_ops {
-            let _ = jit.compile_function(proto, &name);
+            let _ = jit.compile_function(proto, &name, None);
         }
     }
 
@@ -82,6 +82,7 @@ fn run_on_jit_value(source: &str) -> String {
                     JitEntry {
                         ptr,
                         uses_float: info.has_float,
+                        has_string_ops: info.has_string_ops,
                     },
                 );
             }
@@ -141,7 +142,7 @@ fn assert_cross_backend_error_contains(source: &str, expected: &str) {
             };
             let info = type_analysis::analyze(proto);
             if !info.has_unsupported_ops {
-                let _ = jit.compile_function(proto, &name);
+                let _ = jit.compile_function(proto, &name, None);
             }
         }
         let mut jit_vm = VM::new();
@@ -159,6 +160,7 @@ fn assert_cross_backend_error_contains(source: &str, expected: &str) {
                         JitEntry {
                             ptr,
                             uses_float: info.has_float,
+                            has_string_ops: info.has_string_ops,
                         },
                     );
                 }

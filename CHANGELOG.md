@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **String interning in GC** — identical strings (≤128 bytes) are deduplicated via hash-consing in the garbage collector. Reduces memory usage for programs with repeated string values. ([#83](https://github.com/humancto/forge-lang/pull/83))
 - **Interned string fast equality** — `==` on interned strings short-circuits via GcRef pointer comparison, skipping byte-by-byte comparison. ([#84](https://github.com/humancto/forge-lang/pull/84))
 - **Interned field name lookups** — `GetField` opcode avoids cloning field name strings from the constant pool, using `&str` references directly for object map lookups. ([#85](https://github.com/humancto/forge-lang/pull/85))
+- **JIT string operations** — JIT compiler now supports string concat, length, and equality via runtime bridge calls. Functions with string-only operations (no float mixing) can be JIT-compiled. ([#86](https://github.com/humancto/forge-lang/pull/86))
 
 ## [0.8.0] - 2026-04-12
 

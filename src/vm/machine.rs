@@ -108,12 +108,13 @@ impl SendableVM {
 pub struct JitEntry {
     pub ptr: *const u8,
     pub uses_float: bool,
+    pub has_string_ops: bool,
 }
 
 #[cfg(feature = "jit")]
 /// Call a JIT-compiled function with arbitrary i64 arguments.
 /// Supports 0–8 args; returns Err beyond that.
-unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> Result<i64, VMError> {
+pub(super) unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> Result<i64, VMError> {
     Ok(match args.len() {
         0 => {
             let f: extern "C" fn() -> i64 = std::mem::transmute(ptr);
@@ -2079,13 +2080,36 @@ impl VM {
                         {
                             let type_info = super::jit::type_analysis::analyze(&chunk);
                             if !type_info.has_unsupported_ops && chunk.arity <= 8 {
+                                // Pre-allocate string constants into GC so their
+                                // GcRef indices can be baked into JIT code.
+                                let string_refs = if type_info.has_string_ops {
+                                    let refs: Vec<Option<i64>> = chunk
+                                        .constants
+                                        .iter()
+                                        .map(|c| match c {
+                                            Constant::Str(s) => {
+                                                let r = self.gc.alloc_string(s.clone());
+                                                Some(r.0 as i64)
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    Some(refs)
+                                } else {
+                                    None
+                                };
                                 if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
-                                    if let Ok(ptr) = jit.compile_function(&chunk, &func_name) {
+                                    if let Ok(ptr) = jit.compile_function(
+                                        &chunk,
+                                        &func_name,
+                                        string_refs.as_ref(),
+                                    ) {
                                         self.jit_cache.insert(
                                             func_name.clone(),
                                             JitEntry {
                                                 ptr,
                                                 uses_float: type_info.has_float,
+                                                has_string_ops: type_info.has_string_ops,
                                             },
                                         );
                                         self.jit_modules.push(jit);
@@ -2125,9 +2149,13 @@ impl VM {
                                         Value::Float(result)
                                     }
                                 } else {
-                                    let raw_args: Vec<i64> = args
-                                        .iter()
-                                        .map(|v| match v {
+                                    let mut raw_args: Vec<i64> = Vec::new();
+                                    // String functions take vm_ptr as first arg
+                                    if entry.has_string_ops {
+                                        raw_args.push(self as *mut VM as *mut () as i64);
+                                    }
+                                    for v in &args {
+                                        raw_args.push(match v {
                                             Value::Int(n) => *n,
                                             Value::Bool(b) => {
                                                 if *b {
@@ -2136,12 +2164,24 @@ impl VM {
                                                     0
                                                 }
                                             }
+                                            Value::Obj(GcRef(idx)) => *idx as i64,
                                             _ => 0,
-                                        })
-                                        .collect();
+                                        });
+                                    }
                                     let result: i64 =
                                         unsafe { jit_call_i64(entry.ptr, &raw_args)? };
-                                    Value::Int(result)
+                                    if entry.has_string_ops && result >= 0 {
+                                        // Return value might be a GcRef if the function
+                                        // returns a string. Check if the GC slot holds a
+                                        // string.
+                                        if self.gc.get(GcRef(result as usize)).is_some() {
+                                            Value::Obj(GcRef(result as usize))
+                                        } else {
+                                            Value::Int(result)
+                                        }
+                                    } else {
+                                        Value::Int(result)
+                                    }
                                 };
                                 self.profiler.exit_function();
                                 return Ok(result_val);

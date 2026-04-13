@@ -5,7 +5,8 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
 
 use crate::vm::bytecode::Chunk;
-use crate::vm::jit::ir_builder;
+use crate::vm::jit::ir_builder::{self, StringRefs};
+use crate::vm::jit::runtime;
 
 pub struct JitCompiler {
     module: JITModule,
@@ -16,8 +17,12 @@ unsafe impl Send for JitCompiler {}
 
 impl JitCompiler {
     pub fn new() -> Result<Self, String> {
-        let builder = JITBuilder::new(cranelift_module::default_libcall_names())
+        let mut builder = JITBuilder::new(cranelift_module::default_libcall_names())
             .map_err(|e| format!("JIT builder error: {}", e))?;
+        // Register runtime bridge symbols so Cranelift can resolve them
+        builder.symbol("rt_string_concat", runtime::rt_string_concat as *const u8);
+        builder.symbol("rt_string_len", runtime::rt_string_len as *const u8);
+        builder.symbol("rt_string_eq", runtime::rt_string_eq as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -25,12 +30,17 @@ impl JitCompiler {
         })
     }
 
-    pub fn compile_function(&mut self, chunk: &Chunk, name: &str) -> Result<*const u8, String> {
+    pub fn compile_function(
+        &mut self,
+        chunk: &Chunk,
+        name: &str,
+        string_refs: Option<&StringRefs>,
+    ) -> Result<*const u8, String> {
         if let Some(ptr) = self.compiled.get(name) {
             return Ok(*ptr);
         }
 
-        let func_id = ir_builder::build_function(&mut self.module, chunk, name)?;
+        let func_id = ir_builder::build_function(&mut self.module, chunk, name, string_refs)?;
 
         self.module
             .finalize_definitions()

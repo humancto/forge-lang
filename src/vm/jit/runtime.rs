@@ -179,3 +179,68 @@ pub extern "C" fn rt_print_f64(val: f64) {
         print!("{}", val);
     }
 }
+
+/// Bridge: concatenate two GC strings, return new GcRef index.
+/// Returns -1 on error (invalid refs).
+pub extern "C" fn rt_string_concat(vm_ptr: *mut VM, a_ref: i64, b_ref: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let a_str = match vm.gc.get(GcRef(a_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::String(s) => s.clone(),
+            _ => return -1,
+        },
+        None => return -1,
+    };
+    let b_str = match vm.gc.get(GcRef(b_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::String(s) => s.clone(),
+            _ => return -1,
+        },
+        None => return -1,
+    };
+    let result = format!("{}{}", a_str, b_str);
+    let gc_ref = vm.gc.alloc_string(result);
+    gc_ref.0 as i64
+}
+
+/// Bridge: return the char count of a GC string.
+/// Returns -1 on error (invalid ref).
+pub extern "C" fn rt_string_len(vm_ptr: *mut VM, s_ref: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    match vm.gc.get(GcRef(s_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::String(s) => s.chars().count() as i64,
+            _ => -1,
+        },
+        None => -1,
+    }
+}
+
+/// Bridge: compare two GC strings for equality.
+/// Returns 1 if equal, 0 if not, -1 on error.
+pub extern "C" fn rt_string_eq(vm_ptr: *mut VM, a_ref: i64, b_ref: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    // Fast path: same GcRef index means same string
+    if a_ref == b_ref {
+        return 1;
+    }
+    let a_str = match vm.gc.get(GcRef(a_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::String(s) => s.as_str(),
+            _ => return -1,
+        },
+        None => return -1,
+    };
+    let b_str = match vm.gc.get(GcRef(b_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::String(s) => s.as_str(),
+            _ => return -1,
+        },
+        None => return -1,
+    };
+    if a_str == b_str {
+        1
+    } else {
+        0
+    }
+}
