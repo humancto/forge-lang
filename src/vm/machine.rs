@@ -1198,7 +1198,10 @@ impl VM {
                     OpCode::Neg => {
                         let src = self.registers[base + b as usize];
                         self.registers[base + a as usize] = match src.classify(&self.gc) {
-                            ValueKind::Int(n) => Value::small_int(-n),
+                            ValueKind::Int(n) => match n.checked_neg() {
+                                Some(neg) => Value::int(neg, &mut self.gc),
+                                None => Value::float(-(n as f64)),
+                            },
                             ValueKind::Float(n) => Value::float(-n),
                             _ => return Err(VMError::new("cannot negate non-number")),
                         };
@@ -2169,7 +2172,7 @@ impl VM {
                                         && result >= i64::MIN as f64
                                         && result <= i64::MAX as f64
                                     {
-                                        Value::small_int(result as i64)
+                                        Value::int(result as i64, &mut self.gc)
                                     } else {
                                         Value::float(result)
                                     }
@@ -2199,7 +2202,7 @@ impl VM {
                                     if entry.returns_string {
                                         Value::obj(GcRef(result as usize))
                                     } else {
-                                        Value::small_int(result)
+                                        Value::int(result, &mut self.gc)
                                     }
                                 };
                                 self.profiler.exit_function();
