@@ -2,7 +2,6 @@
 use std::collections::HashMap;
 
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::Module;
 
 use crate::vm::bytecode::Chunk;
 use crate::vm::jit::ir_builder::{self, StringRefs};

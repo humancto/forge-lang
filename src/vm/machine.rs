@@ -109,7 +109,9 @@ pub struct JitEntry {
     pub ptr: *const u8,
     pub uses_float: bool,
     pub has_string_ops: bool,
-    pub returns_string: bool,
+    pub has_collection_ops: bool,
+    /// True when the function returns a GcRef (string, array, or object).
+    pub returns_obj: bool,
 }
 
 #[cfg(feature = "jit")]
@@ -2101,40 +2103,48 @@ impl VM {
                             && self.profiler.is_hot(&func_name)
                         {
                             let type_info = super::jit::type_analysis::analyze(&chunk);
-                            let max_arity = if type_info.has_string_ops { 7 } else { 8 };
+                            let needs_vm_ptr =
+                                type_info.has_string_ops || type_info.has_collection_ops;
+                            let max_arity: u8 = if needs_vm_ptr { 7 } else { 8 };
                             if !type_info.has_unsupported_ops && chunk.arity <= max_arity {
                                 // Pre-allocate string constants into GC so their
                                 // GcRef indices can be baked into JIT code.
-                                let string_refs = if type_info.has_string_ops {
-                                    let refs: Vec<Option<i64>> = chunk
-                                        .constants
-                                        .iter()
-                                        .map(|c| match c {
-                                            Constant::Str(s) => {
-                                                let r = self.gc.alloc_string(s.clone());
-                                                Some(r.0 as i64)
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect();
-                                    Some(refs)
-                                } else {
-                                    None
-                                };
+                                let string_refs =
+                                    if type_info.has_string_ops || type_info.has_collection_ops {
+                                        let refs: Vec<Option<i64>> = chunk
+                                            .constants
+                                            .iter()
+                                            .map(|c| match c {
+                                                Constant::Str(s) => {
+                                                    let r = self.gc.alloc_string(s.clone());
+                                                    Some(r.0 as i64)
+                                                }
+                                                _ => None,
+                                            })
+                                            .collect();
+                                        Some(refs)
+                                    } else {
+                                        None
+                                    };
                                 if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
                                     if let Ok(ptr) = jit.compile_function(
                                         &chunk,
                                         &func_name,
                                         string_refs.as_ref(),
                                     ) {
+                                        let ret_is_obj = matches!(
+                                            type_info.return_type,
+                                            super::jit::type_analysis::RegType::StringRef
+                                                | super::jit::type_analysis::RegType::ObjRef
+                                        );
                                         self.jit_cache.insert(
                                             func_name.clone(),
                                             JitEntry {
                                                 ptr,
                                                 uses_float: type_info.has_float,
                                                 has_string_ops: type_info.has_string_ops,
-                                                returns_string: type_info.return_type
-                                                    == super::jit::type_analysis::RegType::StringRef,
+                                                has_collection_ops: type_info.has_collection_ops,
+                                                returns_obj: ret_is_obj,
                                             },
                                         );
                                         self.jit_modules.push(jit);
@@ -2178,13 +2188,15 @@ impl VM {
                                     }
                                 } else {
                                     let mut raw_args: Vec<i64> = Vec::new();
-                                    // String functions take vm_ptr as first arg
-                                    if entry.has_string_ops {
+                                    // String/collection functions take vm_ptr as first arg
+                                    if entry.has_string_ops || entry.has_collection_ops {
                                         raw_args.push(self as *mut VM as *mut () as i64);
                                     }
                                     for v in &args {
                                         raw_args.push(if let Some(n) = v.as_inline_int() {
                                             n
+                                        } else if let Some(f) = v.as_float() {
+                                            f as i64
                                         } else if let Some(b) = v.as_bool() {
                                             if b {
                                                 1
@@ -2199,7 +2211,7 @@ impl VM {
                                     }
                                     let result: i64 =
                                         unsafe { jit_call_i64(entry.ptr, &raw_args)? };
-                                    if entry.returns_string {
+                                    if entry.returns_obj {
                                         Value::obj(GcRef(result as usize))
                                     } else {
                                         Value::int(result, &mut self.gc)

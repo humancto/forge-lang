@@ -19,13 +19,13 @@ use indexmap::IndexMap;
 use crate::vm::machine::VM;
 use crate::vm::value::*;
 
-const TAG_INT: u64 = 0;
-const TAG_FLOAT: u64 = 1;
-const TAG_BOOL: u64 = 2;
-const TAG_NULL: u64 = 3;
-const TAG_OBJ: u64 = 4;
-const TAG_SHIFT: u64 = 60;
-const PAYLOAD_MASK: u64 = (1u64 << 60) - 1;
+pub const TAG_INT: u64 = 0;
+pub const TAG_FLOAT: u64 = 1;
+pub const TAG_BOOL: u64 = 2;
+pub const TAG_NULL: u64 = 3;
+pub const TAG_OBJ: u64 = 4;
+pub const TAG_SHIFT: u64 = 60;
+pub const PAYLOAD_MASK: u64 = (1u64 << 60) - 1;
 
 pub fn encode_value(v: &Value, gc: &crate::vm::gc::Gc) -> u64 {
     match v.classify(gc) {

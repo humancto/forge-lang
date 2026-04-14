@@ -855,8 +855,12 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
                     ptr,
                     uses_float: type_info.has_float,
                     has_string_ops: type_info.has_string_ops,
-                    returns_string: type_info.return_type
-                        == vm::jit::type_analysis::RegType::StringRef,
+                    has_collection_ops: type_info.has_collection_ops,
+                    returns_obj: matches!(
+                        type_info.return_type,
+                        vm::jit::type_analysis::RegType::StringRef
+                            | vm::jit::type_analysis::RegType::ObjRef
+                    ),
                 },
             );
         }

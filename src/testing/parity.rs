@@ -3,6 +3,8 @@ use crate::lexer::Lexer;
 use crate::parser::ast::Program;
 use crate::parser::Parser;
 #[cfg(feature = "jit")]
+use crate::vm::bytecode::Constant;
+#[cfg(feature = "jit")]
 use crate::vm::jit::jit_module::JitCompiler;
 #[cfg(feature = "jit")]
 use crate::vm::jit::type_analysis;
@@ -189,21 +191,36 @@ fn run_on_jit_value(program: &Program) -> String {
     let chunk = compiler::compile_repl(program).expect("jit compile error");
 
     let mut jit = JitCompiler::new().expect("jit init error");
+    let mut vm = VM::new();
     for (index, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() {
+        let name = if proto.name.is_empty() || proto.name == "<lambda>" {
             format!("fn_{}", index)
         } else {
             proto.name.clone()
         };
         let info = type_analysis::analyze(proto);
         if !info.has_unsupported_ops {
-            let _ = jit.compile_function(proto, &name, None);
+            let string_refs: Option<Vec<Option<i64>>> =
+                if info.has_string_ops || info.has_collection_ops {
+                    Some(
+                        proto
+                            .constants
+                            .iter()
+                            .map(|c| match c {
+                                Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
+                                _ => None,
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+            let _ = jit.compile_function(proto, &name, string_refs.as_ref());
         }
     }
 
-    let mut vm = VM::new();
     for (index, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() {
+        let name = if proto.name.is_empty() || proto.name == "<lambda>" {
             format!("fn_{}", index)
         } else {
             proto.name.clone()
@@ -217,7 +234,11 @@ fn run_on_jit_value(program: &Program) -> String {
                         ptr,
                         uses_float: info.has_float,
                         has_string_ops: info.has_string_ops,
-                        returns_string: info.return_type == type_analysis::RegType::StringRef,
+                        has_collection_ops: info.has_collection_ops,
+                        returns_obj: matches!(
+                            info.return_type,
+                            type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
+                        ),
                     },
                 );
             }
