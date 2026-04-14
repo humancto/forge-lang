@@ -55,7 +55,7 @@ impl VM {
                 }
                 fields.insert("__type__".to_string(), self.alloc_string(&type_name));
                 let r = self.gc.alloc(ObjKind::Object(fields));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "__forge_register_interface" => {
                 if args.len() != 2 {
@@ -118,7 +118,7 @@ impl VM {
                         .insert(method_name, func);
                 }
 
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "__forge_validate_impl" => {
                 if args.len() != 2 {
@@ -144,7 +144,7 @@ impl VM {
                         )));
                     }
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "__forge_call_method" => {
                 if args.len() < 2 {
@@ -166,25 +166,25 @@ impl VM {
                 let value = args[1].clone();
 
                 let Some(bound_value) = self.globals.get(&binding_name).cloned() else {
-                    return Ok(Value::Bool(true));
+                    return Ok(Value::bool_val(true));
                 };
 
                 if let (Some(bound_variant), Some(value_variant)) = (
                     self.value_variant_name(&bound_value),
                     self.value_variant_name(&value),
                 ) {
-                    return Ok(Value::Bool(bound_variant == value_variant));
+                    return Ok(Value::bool_val(bound_variant == value_variant));
                 }
 
-                Ok(Value::Bool(true))
+                Ok(Value::bool_val(true))
             }
             "__forge_retry_count" => {
                 if args.len() != 1 {
                     return Err(VMError::new("__forge_retry_count() requires (count)"));
                 }
                 match args[0] {
-                    Value::Int(n) => Ok(Value::Int(n.max(0))),
-                    _ => Ok(Value::Int(3)),
+                    Value::Int(n) => Ok(Value::small_int(n.max(0))),
+                    _ => Ok(Value::small_int(3)),
                 }
             }
             "__forge_retry_wait" => {
@@ -198,7 +198,7 @@ impl VM {
                 if attempt > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "__forge_retry_failed" => {
                 if args.len() != 2 {
@@ -249,7 +249,7 @@ impl VM {
                     })
                     .collect::<Vec<_>>();
                 let r = self.gc.alloc(ObjKind::Array(filtered));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "__forge_pipe_sort" => {
                 if args.len() != 2 {
@@ -262,15 +262,15 @@ impl VM {
                     let left = self
                         .get_object_fields(a)
                         .and_then(|fields| fields.get(&field).cloned())
-                        .unwrap_or(Value::Null);
+                        .unwrap_or(Value::null());
                     let right = self
                         .get_object_fields(b)
                         .and_then(|fields| fields.get(&field).cloned())
-                        .unwrap_or(Value::Null);
+                        .unwrap_or(Value::null());
                     self.query_value_cmp(&left, &right)
                 });
                 let r = self.gc.alloc(ObjKind::Array(items));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "__forge_pipe_take" => {
                 if args.len() != 2 {
@@ -286,7 +286,7 @@ impl VM {
                 let r = self
                     .gc
                     .alloc(ObjKind::Array(items.into_iter().take(count).collect()));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "__forge_raise_error" => {
                 if args.len() != 1 {
@@ -382,33 +382,33 @@ impl VM {
                     exports.insert(name, value);
                 }
                 let exports_ref = self.gc.alloc(ObjKind::Object(exports));
-                Ok(Value::Obj(exports_ref))
+                Ok(Value::obj(exports_ref))
             }
             "println" | "say" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ");
                 println!("{}", output);
                 self.output.push(output);
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "print" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 print!("{}", text.join(" "));
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "yell" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ").to_uppercase();
                 println!("{}", output);
                 self.output.push(output);
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "whisper" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ").to_lowercase();
                 println!("{}", output);
                 self.output.push(output);
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "len" => match args.first() {
                 Some(v) => {
@@ -421,7 +421,7 @@ impl VM {
                         }),
                         _ => 0,
                     };
-                    Ok(Value::Int(len))
+                    Ok(Value::small_int(len))
                 }
                 None => Err(VMError::new("len() requires an argument")),
             },
@@ -440,30 +440,33 @@ impl VM {
                 Ok(self.alloc_string(&s))
             }
             "int" => match args.first() {
-                Some(Value::Int(n)) => Ok(Value::Int(*n)),
-                Some(Value::Float(n)) => Ok(Value::Int(*n as i64)),
+                Some(Value::Int(n)) => Ok(Value::int(*n, &mut self.gc)),
+                Some(Value::Float(n)) => Ok(Value::int(*n as i64, &mut self.gc)),
                 // Parity with interpreter: bool → 0/1
-                Some(Value::Bool(b)) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                Some(Value::Bool(b)) => Ok(Value::small_int(if *b { 1 } else { 0 })),
                 Some(Value::Obj(r)) => {
-                    if let Some(obj) = self.gc.get(*r) {
-                        if let ObjKind::String(s) = &obj.kind {
-                            return s.parse::<i64>().map(Value::Int).map_err(|_| {
-                                VMError::new(&format!("cannot convert '{}' to Int", s))
-                            });
-                        }
+                    let s_owned = self.gc.get(*r).and_then(|obj| match &obj.kind {
+                        ObjKind::String(s) => Some(s.clone()),
+                        _ => None,
+                    });
+                    if let Some(s) = s_owned {
+                        return s
+                            .parse::<i64>()
+                            .map(|n| Value::int(n, &mut self.gc))
+                            .map_err(|_| VMError::new(&format!("cannot convert '{}' to Int", s)));
                     }
                     Err(VMError::new("int() requires number, bool, or string"))
                 }
                 _ => Err(VMError::new("int() requires number, bool, or string")),
             },
             "float" => match args.first() {
-                Some(Value::Int(n)) => Ok(Value::Float(*n as f64)),
-                Some(Value::Float(n)) => Ok(Value::Float(*n)),
+                Some(Value::Int(n)) => Ok(Value::float(*n as f64)),
+                Some(Value::Float(n)) => Ok(Value::float(*n)),
                 // Parity with interpreter: parse string to float
                 Some(Value::Obj(r)) => {
                     if let Some(obj) = self.gc.get(*r) {
                         if let ObjKind::String(s) = &obj.kind {
-                            return s.parse::<f64>().map(Value::Float).map_err(|_| {
+                            return s.parse::<f64>().map(Value::float).map_err(|_| {
                                 VMError::new(&format!("cannot convert '{}' to Float", s))
                             });
                         }
@@ -476,12 +479,12 @@ impl VM {
                 (Some(Value::Int(start)), Some(Value::Int(end))) => {
                     let items: Vec<Value> = (*start..*end).map(Value::Int).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
-                    Ok(Value::Obj(r))
+                    Ok(Value::obj(r))
                 }
                 (Some(Value::Int(end_val)), None) => {
                     let items: Vec<Value> = (0..*end_val).map(Value::Int).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
-                    Ok(Value::Obj(r))
+                    Ok(Value::obj(r))
                 }
                 _ => Err(VMError::new("range() requires integer arguments")),
             },
@@ -495,7 +498,7 @@ impl VM {
                             let mut new_items = items.clone();
                             new_items.push(args[1].clone());
                             let nr = self.gc.alloc(ObjKind::Array(new_items));
-                            return Ok(Value::Obj(nr));
+                            return Ok(Value::obj(nr));
                         }
                     }
                 }
@@ -508,7 +511,7 @@ impl VM {
                             let mut new_items = items.clone();
                             new_items.pop();
                             let nr = self.gc.alloc(ObjKind::Array(new_items));
-                            return Ok(Value::Obj(nr));
+                            return Ok(Value::obj(nr));
                         }
                     }
                 }
@@ -517,9 +520,9 @@ impl VM {
             // Lowercase aliases must come BEFORE the capitalized forms
             // so the match arms are not shadowed ("Ok" would match before "ok" | "Ok")
             "ok" => {
-                let val = args.first().cloned().unwrap_or(Value::Null);
+                let val = args.first().cloned().unwrap_or(Value::null());
                 let r = self.gc.alloc(ObjKind::ResultOk(val));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "err" => {
                 let val = args
@@ -527,20 +530,20 @@ impl VM {
                     .cloned()
                     .unwrap_or_else(|| self.alloc_string("error"));
                 let r = self.gc.alloc(ObjKind::ResultErr(val));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "Ok" | "Some" => {
-                let val = args.first().cloned().unwrap_or(Value::Null);
+                let val = args.first().cloned().unwrap_or(Value::null());
                 if name == "Some" {
                     let mut obj = IndexMap::new();
                     obj.insert("__type__".to_string(), self.alloc_string("Option"));
                     obj.insert("__variant__".to_string(), self.alloc_string("Some"));
                     obj.insert("_0".to_string(), val);
                     let r = self.gc.alloc(ObjKind::Object(obj));
-                    Ok(Value::Obj(r))
+                    Ok(Value::obj(r))
                 } else {
                     let r = self.gc.alloc(ObjKind::ResultOk(val));
-                    Ok(Value::Obj(r))
+                    Ok(Value::obj(r))
                 }
             }
             "Err" => {
@@ -549,23 +552,23 @@ impl VM {
                     .cloned()
                     .unwrap_or_else(|| self.alloc_string("error"));
                 let r = self.gc.alloc(ObjKind::ResultErr(val));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "is_ok" => {
                 if let Some(Value::Obj(r)) = args.first() {
                     if let Some(obj) = self.gc.get(*r) {
-                        return Ok(Value::Bool(matches!(obj.kind, ObjKind::ResultOk(_))));
+                        return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultOk(_))));
                     }
                 }
-                Ok(Value::Bool(false))
+                Ok(Value::bool_val(false))
             }
             "is_err" => {
                 if let Some(Value::Obj(r)) = args.first() {
                     if let Some(obj) = self.gc.get(*r) {
-                        return Ok(Value::Bool(matches!(obj.kind, ObjKind::ResultErr(_))));
+                        return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultErr(_))));
                     }
                 }
-                Ok(Value::Bool(false))
+                Ok(Value::bool_val(false))
             }
             "unwrap" => {
                 if let Some(Value::Obj(r)) = args.first() {
@@ -600,7 +603,7 @@ impl VM {
                 Ok(args[1].clone())
             }
             "assert" => {
-                let cond = args.first().cloned().unwrap_or(Value::Bool(false));
+                let cond = args.first().cloned().unwrap_or(Value::bool_val(false));
                 if !cond.is_truthy(&self.gc) {
                     let msg = args
                         .get(1)
@@ -608,7 +611,7 @@ impl VM {
                         .unwrap_or_else(|| "assertion failed".to_string());
                     return Err(VMError::new(&format!("assertion failed: {}", msg)));
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "assert_eq" => {
                 if args.len() < 2 {
@@ -622,7 +625,7 @@ impl VM {
                         right, left
                     )));
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "assert_ne" => {
                 if args.len() < 2 {
@@ -635,7 +638,7 @@ impl VM {
                         left
                     )));
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "any" => {
                 if args.len() < 2 {
@@ -660,10 +663,10 @@ impl VM {
                         .call_value(func.clone(), vec![item])?
                         .is_truthy(&self.gc)
                     {
-                        return Ok(Value::Bool(true));
+                        return Ok(Value::bool_val(true));
                     }
                 }
-                Ok(Value::Bool(false))
+                Ok(Value::bool_val(false))
             }
             "all" => {
                 if args.len() < 2 {
@@ -688,10 +691,10 @@ impl VM {
                         .call_value(func.clone(), vec![item])?
                         .is_truthy(&self.gc)
                     {
-                        return Ok(Value::Bool(false));
+                        return Ok(Value::bool_val(false));
                     }
                 }
-                Ok(Value::Bool(true))
+                Ok(Value::bool_val(true))
             }
             "unique" => {
                 if let Some(Value::Obj(r)) = args.first() {
@@ -714,7 +717,7 @@ impl VM {
                         }
                     }
                     let r = self.gc.alloc(ObjKind::Array(out));
-                    return Ok(Value::Obj(r));
+                    return Ok(Value::obj(r));
                 }
                 Err(VMError::new("unique() requires an array"))
             }
@@ -746,9 +749,9 @@ impl VM {
                         }
                     }
                     return Ok(if is_float {
-                        Value::Float(total_float)
+                        Value::float(total_float)
                     } else {
-                        Value::Int(total_int)
+                        Value::int(total_int, &mut self.gc)
                     });
                 }
                 Err(VMError::new("sum() requires an array"))
@@ -765,7 +768,7 @@ impl VM {
                         return Err(VMError::new("null array"));
                     };
                     if items.is_empty() {
-                        return Ok(Value::Null);
+                        return Ok(Value::null());
                     }
                     let mut min = items[0].clone();
                     for item in &items[1..] {
@@ -796,7 +799,7 @@ impl VM {
                         return Err(VMError::new("null array"));
                     };
                     if items.is_empty() {
-                        return Ok(Value::Null);
+                        return Ok(Value::null());
                     }
                     let mut max = items[0].clone();
                     for item in &items[1..] {
@@ -838,7 +841,7 @@ impl VM {
                     out.push(self.call_value(func.clone(), vec![item])?);
                 }
                 let r = self.gc.alloc(ObjKind::Array(out));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "filter" => {
                 if args.len() != 2 {
@@ -866,7 +869,7 @@ impl VM {
                     }
                 }
                 let r = self.gc.alloc(ObjKind::Array(out));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "reduce" => {
                 if args.len() != 3 {
@@ -933,7 +936,7 @@ impl VM {
                                 return Err(e);
                             }
                             let nr = self.gc.alloc(ObjKind::Array(sorted));
-                            return Ok(Value::Obj(nr));
+                            return Ok(Value::obj(nr));
                         }
                         // Default sort: ints, floats, strings
                         let mut sorted = items;
@@ -943,14 +946,14 @@ impl VM {
                                 x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
                             }
                             (Value::Obj(rx), Value::Obj(ry)) => {
-                                let sx = self.get_string(&Value::Obj(*rx)).unwrap_or_default();
-                                let sy = self.get_string(&Value::Obj(*ry)).unwrap_or_default();
+                                let sx = self.get_string(&Value::obj(*rx)).unwrap_or_default();
+                                let sy = self.get_string(&Value::obj(*ry)).unwrap_or_default();
                                 sx.cmp(&sy)
                             }
                             _ => std::cmp::Ordering::Equal,
                         });
                         let nr = self.gc.alloc(ObjKind::Array(sorted));
-                        return Ok(Value::Obj(nr));
+                        return Ok(Value::obj(nr));
                     }
                 }
                 Err(VMError::new("sort() requires an array"))
@@ -962,7 +965,7 @@ impl VM {
                             let mut rev = items.clone();
                             rev.reverse();
                             let nr = self.gc.alloc(ObjKind::Array(rev));
-                            return Ok(Value::Obj(nr));
+                            return Ok(Value::obj(nr));
                         }
                     }
                 }
@@ -974,18 +977,18 @@ impl VM {
                         match &obj.kind {
                             ObjKind::String(s) => {
                                 let sub = val.display(&self.gc);
-                                return Ok(Value::Bool(s.contains(&sub)));
+                                return Ok(Value::bool_val(s.contains(&sub)));
                             }
                             ObjKind::Array(items) => {
                                 let found = items
                                     .iter()
                                     .any(|v| v.display(&self.gc) == val.display(&self.gc));
-                                return Ok(Value::Bool(found));
+                                return Ok(Value::bool_val(found));
                             }
                             _ => {}
                         }
                     }
-                    Ok(Value::Bool(false))
+                    Ok(Value::bool_val(false))
                 }
                 _ => Err(VMError::new("contains() requires (collection, value)")),
             },
@@ -999,7 +1002,7 @@ impl VM {
                             let keys: Vec<Value> =
                                 key_strings.iter().map(|k| self.alloc_string(k)).collect();
                             let nr = self.gc.alloc(ObjKind::Array(keys));
-                            return Ok(Value::Obj(nr));
+                            return Ok(Value::obj(nr));
                         }
                     }
                 }
@@ -1011,7 +1014,7 @@ impl VM {
                         if let ObjKind::Object(map) = &obj.kind {
                             let vals: Vec<Value> = map.values().cloned().collect();
                             let nr = self.gc.alloc(ObjKind::Array(vals));
-                            return Ok(Value::Obj(nr));
+                            return Ok(Value::obj(nr));
                         }
                     }
                 }
@@ -1032,21 +1035,21 @@ impl VM {
                         let mut pairs = Vec::new();
                         for (idx, item) in items.iter().enumerate() {
                             let mut row = IndexMap::new();
-                            row.insert("index".to_string(), Value::Int(idx as i64));
+                            row.insert("index".to_string(), Value::small_int(idx as i64));
                             row.insert("value".to_string(), item.clone());
                             let rr = self.gc.alloc(ObjKind::Object(row));
-                            pairs.push(Value::Obj(rr));
+                            pairs.push(Value::obj(rr));
                         }
                         let nr = self.gc.alloc(ObjKind::Array(pairs));
-                        return Ok(Value::Obj(nr));
+                        return Ok(Value::obj(nr));
                     }
                 }
                 Err(VMError::new("enumerate() requires an array"))
             }
             "split" => {
                 if let (Some(Value::Obj(r1)), Some(Value::Obj(r2))) = (args.first(), args.get(1)) {
-                    let s = self.get_string(&Value::Obj(*r1)).unwrap_or_default();
-                    let delim = self.get_string(&Value::Obj(*r2)).unwrap_or_default();
+                    let s = self.get_string(&Value::obj(*r1)).unwrap_or_default();
+                    let delim = self.get_string(&Value::obj(*r2)).unwrap_or_default();
                     // Parity with interpreter: empty delimiter splits into individual chars
                     let parts: Vec<Value> = if delim.is_empty() {
                         s.chars()
@@ -1056,7 +1059,7 @@ impl VM {
                         s.split(&delim).map(|p| self.alloc_string(p)).collect()
                     };
                     let nr = self.gc.alloc(ObjKind::Array(parts));
-                    return Ok(Value::Obj(nr));
+                    return Ok(Value::obj(nr));
                 }
                 Err(VMError::new("split() requires (string, delimiter)"))
             }
@@ -1086,7 +1089,7 @@ impl VM {
                 if args.len() == 2 {
                     let s = args[0].display(&self.gc);
                     let prefix = args[1].display(&self.gc);
-                    return Ok(Value::Bool(s.starts_with(&prefix)));
+                    return Ok(Value::bool_val(s.starts_with(&prefix)));
                 }
                 Err(VMError::new("starts_with() requires (string, prefix)"))
             }
@@ -1094,7 +1097,7 @@ impl VM {
                 if args.len() == 2 {
                     let s = args[0].display(&self.gc);
                     let suffix = args[1].display(&self.gc);
-                    return Ok(Value::Bool(s.ends_with(&suffix)));
+                    return Ok(Value::bool_val(s.ends_with(&suffix)));
                 }
                 Err(VMError::new("ends_with() requires (string, suffix)"))
             }
@@ -1103,13 +1106,13 @@ impl VM {
                     self.sleep_with_timeout_checks(std::time::Duration::from_secs(
                         (*secs).max(0) as u64
                     ))?;
-                    Ok(Value::Null)
+                    Ok(Value::null())
                 }
                 Some(Value::Float(secs)) => {
                     self.sleep_with_timeout_checks(std::time::Duration::from_secs_f64(
                         secs.max(0.0),
                     ))?;
-                    Ok(Value::Null)
+                    Ok(Value::null())
                 }
                 _ => Err(VMError::new("wait() requires a number of seconds")),
             },
@@ -1142,16 +1145,16 @@ impl VM {
                                         .get("__variant__")
                                         .and_then(|v| self.get_string(v))
                                         .unwrap_or_default();
-                                    return Ok(Value::Bool(variant == "Some"));
+                                    return Ok(Value::bool_val(variant == "Some"));
                                 }
                                 // Non-Option object is truthy → Some
-                                return Ok(Value::Bool(true));
+                                return Ok(Value::bool_val(true));
                             }
                         }
-                        Ok(Value::Bool(true)) // non-null Obj is Some
+                        Ok(Value::bool_val(true)) // non-null Obj is Some
                     }
-                    Some(Value::Null) => Ok(Value::Bool(false)),
-                    Some(_) => Ok(Value::Bool(true)),
+                    Some(Value::Null) => Ok(Value::bool_val(false)),
+                    Some(_) => Ok(Value::bool_val(true)),
                     None => Err(VMError::new("is_some() requires an argument")),
                 }
             }
@@ -1170,15 +1173,15 @@ impl VM {
                                         .get("__variant__")
                                         .and_then(|v| self.get_string(v))
                                         .unwrap_or_default();
-                                    return Ok(Value::Bool(variant == "None"));
+                                    return Ok(Value::bool_val(variant == "None"));
                                 }
-                                return Ok(Value::Bool(false)); // non-Option object is Some
+                                return Ok(Value::bool_val(false)); // non-Option object is Some
                             }
                         }
-                        Ok(Value::Bool(false)) // non-null Obj is Some
+                        Ok(Value::bool_val(false)) // non-null Obj is Some
                     }
-                    Some(Value::Null) => Ok(Value::Bool(true)),
-                    Some(_) => Ok(Value::Bool(false)),
+                    Some(Value::Null) => Ok(Value::bool_val(true)),
+                    Some(_) => Ok(Value::bool_val(false)),
                     None => Err(VMError::new("is_none() requires an argument")),
                 }
             }
@@ -1188,7 +1191,7 @@ impl VM {
                 }
                 let method_names = self.interface_method_names(&args[1]);
                 if method_names.is_empty() {
-                    return Ok(Value::Bool(false));
+                    return Ok(Value::bool_val(false));
                 }
 
                 let structural = if let Some(map) = self.get_object_fields(&args[0]) {
@@ -1200,7 +1203,7 @@ impl VM {
                     false
                 };
                 if structural {
-                    return Ok(Value::Bool(true));
+                    return Ok(Value::bool_val(true));
                 }
 
                 if let Some(type_name) = self.value_type_name(&args[0]) {
@@ -1208,10 +1211,10 @@ impl VM {
                         let all_satisfied = method_names
                             .iter()
                             .all(|method_name| type_methods.contains_key(method_name));
-                        return Ok(Value::Bool(all_satisfied));
+                        return Ok(Value::bool_val(all_satisfied));
                     }
                 }
-                Ok(Value::Bool(false))
+                Ok(Value::bool_val(false))
             }
             n if n.starts_with("math.") => {
                 crate::stdlib::math::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))
@@ -1221,13 +1224,13 @@ impl VM {
                     crate::stdlib::fs::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))?;
                 match result {
                     crate::stdlib::fs::FsResult::StringVal(s) => Ok(self.alloc_string(&s)),
-                    crate::stdlib::fs::FsResult::BoolVal(b) => Ok(Value::Bool(b)),
+                    crate::stdlib::fs::FsResult::BoolVal(b) => Ok(Value::bool_val(b)),
                     crate::stdlib::fs::FsResult::ArrayVal(items) => {
                         let vals: Vec<Value> = items.iter().map(|s| self.alloc_string(s)).collect();
                         let r = self.gc.alloc(ObjKind::Array(vals));
-                        Ok(Value::Obj(r))
+                        Ok(Value::obj(r))
                     }
-                    crate::stdlib::fs::FsResult::NullVal => Ok(Value::Null),
+                    crate::stdlib::fs::FsResult::NullVal => Ok(Value::null()),
                 }
             }
             n if n.starts_with("io.") => {
@@ -1253,7 +1256,7 @@ impl VM {
                     crate::stdlib::crypto::call(n, str_args).map_err(|e| VMError::new(&e))?;
                 match result {
                     crate::interpreter::Value::String(s) => Ok(self.alloc_string(&s)),
-                    _ => Ok(Value::Null),
+                    _ => Ok(Value::null()),
                 }
             }
             n if n.starts_with("db.") => {
@@ -1274,8 +1277,8 @@ impl VM {
                     .collect();
                 let result = crate::stdlib::db::call(n, str_args).map_err(|e| VMError::new(&e))?;
                 match result {
-                    crate::interpreter::Value::Bool(b) => Ok(Value::Bool(b)),
-                    crate::interpreter::Value::Int(n) => Ok(Value::Int(n)),
+                    crate::interpreter::Value::Bool(b) => Ok(Value::bool_val(b)),
+                    crate::interpreter::Value::Int(n) => Ok(Value::int(n, &mut self.gc)),
                     crate::interpreter::Value::String(s) => Ok(self.alloc_string(&s)),
                     crate::interpreter::Value::Array(items) => {
                         let vm_items: Vec<Value> = items
@@ -1285,26 +1288,30 @@ impl VM {
                                     let mut vm_map = IndexMap::new();
                                     for (k, v) in map {
                                         let vm_v = match v {
-                                            crate::interpreter::Value::Int(n) => Value::Int(*n),
-                                            crate::interpreter::Value::Float(n) => Value::Float(*n),
+                                            crate::interpreter::Value::Int(n) => {
+                                                Value::int(*n, &mut self.gc)
+                                            }
+                                            crate::interpreter::Value::Float(n) => Value::float(*n),
                                             crate::interpreter::Value::String(s) => {
                                                 self.alloc_string(s)
                                             }
-                                            crate::interpreter::Value::Bool(b) => Value::Bool(*b),
-                                            _ => Value::Null,
+                                            crate::interpreter::Value::Bool(b) => {
+                                                Value::bool_val(*b)
+                                            }
+                                            _ => Value::null(),
                                         };
                                         vm_map.insert(k.clone(), vm_v);
                                     }
                                     let r = self.gc.alloc(ObjKind::Object(vm_map));
-                                    Value::Obj(r)
+                                    Value::obj(r)
                                 }
-                                _ => Value::Null,
+                                _ => Value::null(),
                             })
                             .collect();
                         let r = self.gc.alloc(ObjKind::Array(vm_items));
-                        Ok(Value::Obj(r))
+                        Ok(Value::obj(r))
                     }
-                    _ => Ok(Value::Null),
+                    _ => Ok(Value::null()),
                 }
             }
             n if n.starts_with("adt:") => {
@@ -1328,14 +1335,14 @@ impl VM {
                         obj.insert(format!("_{}", i), arg);
                     }
                     let r = self.gc.alloc(ObjKind::Object(obj));
-                    Ok(Value::Obj(r))
+                    Ok(Value::obj(r))
                 } else {
                     Err(VMError::new(&format!("invalid ADT constructor: {}", n)))
                 }
             }
             "fetch" => match args.first() {
                 Some(Value::Obj(r)) => {
-                    let url = self.get_string(&Value::Obj(*r)).unwrap_or_default();
+                    let url = self.get_string(&Value::obj(*r)).unwrap_or_default();
                     let method = "GET".to_string();
                     match crate::runtime::client::fetch_blocking(
                         &url, &method, None, None, None, None, None,
@@ -1359,7 +1366,7 @@ impl VM {
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1378,7 +1385,7 @@ impl VM {
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1396,7 +1403,7 @@ impl VM {
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1417,7 +1424,7 @@ impl VM {
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1435,7 +1442,7 @@ impl VM {
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1456,7 +1463,7 @@ impl VM {
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1474,7 +1481,7 @@ impl VM {
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1485,14 +1492,14 @@ impl VM {
                     })
                     .collect();
                 crate::stdlib::log::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             n if n.starts_with("http.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else if let Some(obj) = self.gc.get(*r) {
                                 if let ObjKind::Object(map) = &obj.kind {
@@ -1523,7 +1530,7 @@ impl VM {
                     .iter()
                     .map(|v| match v {
                         Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::Obj(*r)) {
+                            if let Some(s) = self.get_string(&Value::obj(*r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1612,11 +1619,11 @@ impl VM {
                 map.insert("stderr".to_string(), self.alloc_string(&stderr));
                 map.insert(
                     "status".to_string(),
-                    Value::Int(output.status.code().unwrap_or(-1) as i64),
+                    Value::small_int(output.status.code().unwrap_or(-1) as i64),
                 );
-                map.insert("ok".to_string(), Value::Bool(output.status.success()));
+                map.insert("ok".to_string(), Value::bool_val(output.status.success()));
                 let r = self.gc.alloc(ObjKind::Object(map));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "sh" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
@@ -1647,7 +1654,7 @@ impl VM {
                     .map(|l| self.alloc_string(l))
                     .collect();
                 let r = self.gc.alloc(ObjKind::Array(lines));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "sh_json" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
@@ -1673,7 +1680,7 @@ impl VM {
                     .stderr(std::process::Stdio::null())
                     .status()
                     .map_err(|e| VMError::new(&format!("sh_ok error: {}", e)))?;
-                Ok(Value::Bool(status.success()))
+                Ok(Value::bool_val(status.success()))
             }
             "which" => {
                 let cmd = self.get_string_arg(&args, 0)?;
@@ -1683,7 +1690,7 @@ impl VM {
                 match result {
                     Ok(output) if output.status.success() => Ok(self
                         .alloc_string(&String::from_utf8_lossy(&output.stdout).trim().to_string())),
-                    _ => Ok(Value::Null),
+                    _ => Ok(Value::null()),
                 }
             }
             "cwd" => {
@@ -1701,7 +1708,7 @@ impl VM {
                 let text = self.get_string_arg(&args, 0)?;
                 let result: Vec<Value> = text.lines().map(|l| self.alloc_string(l)).collect();
                 let r = self.gc.alloc(ObjKind::Array(result));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "pipe_to" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
@@ -1741,27 +1748,27 @@ impl VM {
                 );
                 map.insert(
                     "status".to_string(),
-                    Value::Int(output.status.code().unwrap_or(-1) as i64),
+                    Value::small_int(output.status.code().unwrap_or(-1) as i64),
                 );
-                map.insert("ok".to_string(), Value::Bool(output.status.success()));
+                map.insert("ok".to_string(), Value::bool_val(output.status.success()));
                 let r = self.gc.alloc(ObjKind::Object(map));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "has_key" => {
                 if let (Some(Value::Obj(r)), Some(key_val)) = (args.first(), args.get(1)) {
                     let key = self.get_string(key_val).unwrap_or_default();
                     if let Some(obj) = self.gc.get(*r) {
                         if let ObjKind::Object(map) = &obj.kind {
-                            return Ok(Value::Bool(map.contains_key(&key)));
+                            return Ok(Value::bool_val(map.contains_key(&key)));
                         }
                     }
                 }
-                Ok(Value::Bool(false))
+                Ok(Value::bool_val(false))
             }
             "get" => {
                 if let (Some(Value::Obj(r)), Some(key_val)) = (args.first(), args.get(1)) {
                     let key = self.get_string(key_val).unwrap_or_default();
-                    let default = args.get(2).cloned().unwrap_or(Value::Null);
+                    let default = args.get(2).cloned().unwrap_or(Value::null());
                     if let Some(obj) = self.gc.get(*r) {
                         if let ObjKind::Object(map) = &obj.kind {
                             if key.contains('.') {
@@ -1792,7 +1799,7 @@ impl VM {
                     }
                     Ok(default)
                 } else {
-                    Ok(Value::Null)
+                    Ok(Value::null())
                 }
             }
             "pick" => {
@@ -1818,9 +1825,9 @@ impl VM {
                         }
                     }
                     let r = self.gc.alloc(ObjKind::Object(result));
-                    Ok(Value::Obj(r))
+                    Ok(Value::obj(r))
                 } else {
-                    Ok(Value::Null)
+                    Ok(Value::null())
                 }
             }
             "omit" => {
@@ -1846,9 +1853,9 @@ impl VM {
                         }
                     }
                     let r = self.gc.alloc(ObjKind::Object(result));
-                    Ok(Value::Obj(r))
+                    Ok(Value::obj(r))
                 } else {
-                    Ok(Value::Null)
+                    Ok(Value::null())
                 }
             }
             "merge" => {
@@ -1865,7 +1872,7 @@ impl VM {
                     }
                 }
                 let r = self.gc.alloc(ObjKind::Object(result));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "entries" => {
                 if let Some(Value::Obj(r)) = args.first() {
@@ -1883,10 +1890,10 @@ impl VM {
                     for (k, v) in kv_pairs {
                         let key = self.alloc_string(&k);
                         let pair_r = self.gc.alloc(ObjKind::Array(vec![key, v]));
-                        pairs.push(Value::Obj(pair_r));
+                        pairs.push(Value::obj(pair_r));
                     }
                     let r = self.gc.alloc(ObjKind::Array(pairs));
-                    return Ok(Value::Obj(r));
+                    return Ok(Value::obj(r));
                 }
                 Err(VMError::new("entries() requires an object"))
             }
@@ -1910,11 +1917,11 @@ impl VM {
                                 }
                             }
                             let r = self.gc.alloc(ObjKind::Object(result));
-                            return Ok(Value::Obj(r));
+                            return Ok(Value::obj(r));
                         }
                     }
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "find" => {
                 // find(array, predicate) -> first matching element or Null
@@ -1941,7 +1948,7 @@ impl VM {
                         return Ok(item);
                     }
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "flat_map" => {
                 // flat_map(array, function) -> flattened array
@@ -1973,13 +1980,13 @@ impl VM {
                                     continue;
                                 }
                             }
-                            out.push(Value::Obj(r));
+                            out.push(Value::obj(r));
                         }
                         other => out.push(other),
                     }
                 }
                 let r = self.gc.alloc(ObjKind::Array(out));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             // ===== typeof (alias for "type") =====
             "typeof" => match args.first() {
@@ -1997,7 +2004,7 @@ impl VM {
                         .ok_or_else(|| VMError::new("first() requires an array"))?,
                     "first() requires an array",
                 )?;
-                Ok(items.first().cloned().unwrap_or(Value::Null))
+                Ok(items.first().cloned().unwrap_or(Value::null()))
             }
             "last" => {
                 let items = self.array_items(
@@ -2005,7 +2012,7 @@ impl VM {
                         .ok_or_else(|| VMError::new("last() requires an array"))?,
                     "last() requires an array",
                 )?;
-                Ok(items.last().cloned().unwrap_or(Value::Null))
+                Ok(items.last().cloned().unwrap_or(Value::null()))
             }
             "zip" => {
                 if args.len() < 2 {
@@ -2018,11 +2025,11 @@ impl VM {
                     .zip(b.into_iter())
                     .map(|(x, y)| {
                         let pair = self.gc.alloc(ObjKind::Array(vec![x, y]));
-                        Value::Obj(pair)
+                        Value::obj(pair)
                     })
                     .collect();
                 let r = self.gc.alloc(ObjKind::Array(pairs));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "flatten" => {
                 let items = self.array_items(
@@ -2046,7 +2053,7 @@ impl VM {
                     }
                 }
                 let r = self.gc.alloc(ObjKind::Array(result));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "chunk" => {
                 if args.len() < 2 {
@@ -2061,11 +2068,11 @@ impl VM {
                     .chunks(size)
                     .map(|c| {
                         let arr = self.gc.alloc(ObjKind::Array(c.to_vec()));
-                        Value::Obj(arr)
+                        Value::obj(arr)
                     })
                     .collect();
                 let r = self.gc.alloc(ObjKind::Array(chunks));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "slice" => {
                 let first = args
@@ -2125,10 +2132,10 @@ impl VM {
                 };
                 if start >= end || start >= items.len() {
                     let r = self.gc.alloc(ObjKind::Array(vec![]));
-                    return Ok(Value::Obj(r));
+                    return Ok(Value::obj(r));
                 }
                 let r = self.gc.alloc(ObjKind::Array(items[start..end].to_vec()));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "compact" => {
                 let items = self.array_items(
@@ -2141,7 +2148,7 @@ impl VM {
                     .filter(|v| !matches!(v, Value::Null | Value::Bool(false)))
                     .collect();
                 let r = self.gc.alloc(ObjKind::Array(filtered));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "partition" => {
                 if args.len() < 2 {
@@ -2162,10 +2169,10 @@ impl VM {
                 let matches_r = self.gc.alloc(ObjKind::Array(matches));
                 let rest_r = self.gc.alloc(ObjKind::Array(rest));
                 let r = self.gc.alloc(ObjKind::Array(vec![
-                    Value::Obj(matches_r),
-                    Value::Obj(rest_r),
+                    Value::obj(matches_r),
+                    Value::obj(rest_r),
                 ]));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "group_by" => {
                 if args.len() < 2 {
@@ -2182,10 +2189,10 @@ impl VM {
                 let mut result = IndexMap::new();
                 for (k, v) in groups {
                     let arr = self.gc.alloc(ObjKind::Array(v));
-                    result.insert(k, Value::Obj(arr));
+                    result.insert(k, Value::obj(arr));
                 }
                 let r = self.gc.alloc(ObjKind::Object(result));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "sort_by" => {
                 if args.len() < 2 {
@@ -2218,7 +2225,7 @@ impl VM {
                 });
                 let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
                 let r = self.gc.alloc(ObjKind::Array(sorted));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "for_each" => {
                 if args.len() < 2 {
@@ -2229,7 +2236,7 @@ impl VM {
                 for item in items {
                     self.call_value(func.clone(), vec![item])?;
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "take_n" => {
                 if args.len() < 2 {
@@ -2241,7 +2248,7 @@ impl VM {
                     _ => return Err(VMError::new("take_n() second arg must be int")),
                 };
                 let r = self.gc.alloc(ObjKind::Array(items[..n].to_vec()));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "skip" => {
                 if args.len() < 2 {
@@ -2253,7 +2260,7 @@ impl VM {
                     _ => return Err(VMError::new("skip() second arg must be int")),
                 };
                 let r = self.gc.alloc(ObjKind::Array(items[n..].to_vec()));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "frequencies" => {
                 let items = self.array_items(
@@ -2274,10 +2281,10 @@ impl VM {
                             }
                         })
                         .unwrap_or(0);
-                    counts.insert(key, Value::Int(count + 1));
+                    counts.insert(key, Value::small_int(count + 1));
                 }
                 let r = self.gc.alloc(ObjKind::Object(counts));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
 
             // ===== String builtins =====
@@ -2304,7 +2311,9 @@ impl VM {
                 // String case
                 if let Some(s) = self.get_string(first) {
                     let substr = self.get_string_arg(&args, 1)?;
-                    return Ok(Value::Int(s.find(&substr).map(|i| i as i64).unwrap_or(-1)));
+                    return Ok(Value::small_int(
+                        s.find(&substr).map(|i| i as i64).unwrap_or(-1),
+                    ));
                 }
                 // Array case
                 let items = self.array_items(first, "index_of() requires a string or array")?;
@@ -2312,12 +2321,14 @@ impl VM {
                     .get(1)
                     .ok_or_else(|| VMError::new("index_of() requires 2 arguments"))?;
                 let idx = items.iter().position(|v| v.equals(needle, &self.gc));
-                Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
+                Ok(Value::small_int(idx.map(|i| i as i64).unwrap_or(-1)))
             }
             "last_index_of" => {
                 let s = self.get_string_arg(&args, 0)?;
                 let substr = self.get_string_arg(&args, 1)?;
-                Ok(Value::Int(s.rfind(&substr).map(|i| i as i64).unwrap_or(-1)))
+                Ok(Value::small_int(
+                    s.rfind(&substr).map(|i| i as i64).unwrap_or(-1),
+                ))
             }
             "capitalize" => {
                 let s = self.get_string_arg(&args, 0)?;
@@ -2436,9 +2447,9 @@ impl VM {
                 let s = self.get_string_arg(&args, 0)?;
                 let substr = self.get_string_arg(&args, 1)?;
                 if substr.is_empty() {
-                    return Ok(Value::Int((s.chars().count() + 1) as i64));
+                    return Ok(Value::small_int((s.chars().count() + 1) as i64));
                 }
-                Ok(Value::Int(s.matches(&*substr).count() as i64))
+                Ok(Value::small_int(s.matches(&*substr).count() as i64))
             }
             "slugify" => {
                 let s = self.get_string_arg(&args, 0)?;
@@ -2514,7 +2525,7 @@ impl VM {
                 };
                 if items.is_empty() {
                     let r = self.gc.alloc(ObjKind::Array(vec![]));
-                    return Ok(Value::Obj(r));
+                    return Ok(Value::obj(r));
                 }
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let seed = SystemTime::now()
@@ -2531,10 +2542,10 @@ impl VM {
                     result.push(items[idx].clone());
                 }
                 if n == 1 {
-                    Ok(result.into_iter().next().unwrap_or(Value::Null))
+                    Ok(result.into_iter().next().unwrap_or(Value::null()))
                 } else {
                     let r = self.gc.alloc(ObjKind::Array(result));
-                    Ok(Value::Obj(r))
+                    Ok(Value::obj(r))
                 }
             }
             "shuffle" => {
@@ -2556,7 +2567,7 @@ impl VM {
                     items.swap(i, j);
                 }
                 let r = self.gc.alloc(ObjKind::Array(items));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "input" => {
                 use std::io::Read as _;
@@ -2660,7 +2671,7 @@ impl VM {
                 }
                 let func = args[0].clone();
                 match self.call_value(func, vec![]) {
-                    Err(_) => Ok(Value::Bool(true)),
+                    Err(_) => Ok(Value::bool_val(true)),
                     Ok(_) => Err(VMError::new(
                         "assertion failed: expected function to throw an error, but it succeeded",
                     )),
@@ -2679,7 +2690,7 @@ impl VM {
                     "\x1b[33m\u{1f50d} SUS CHECK:\x1b[0m {} \x1b[2m({})\x1b[0m",
                     display, type_str
                 );
-                Ok(args.into_iter().next().unwrap_or(Value::Null))
+                Ok(args.into_iter().next().unwrap_or(Value::null()))
             }
             "bruh" => {
                 let msg = args
@@ -2695,7 +2706,7 @@ impl VM {
                     None => return Err(VMError::new("bet() needs a condition, no cap")),
                 };
                 if condition {
-                    Ok(Value::Bool(true))
+                    Ok(Value::bool_val(true))
                 } else {
                     let msg = args
                         .get(1)
@@ -2709,7 +2720,7 @@ impl VM {
                     return Err(VMError::new("no_cap() needs two values to compare, fr fr"));
                 }
                 if args[0].equals(&args[1], &self.gc) {
-                    Ok(Value::Bool(true))
+                    Ok(Value::bool_val(true))
                 } else {
                     let a = args[0].display(&self.gc);
                     let b = args[1].display(&self.gc);
@@ -2723,7 +2734,7 @@ impl VM {
                     None => return Err(VMError::new("ick() needs a condition to reject")),
                 };
                 if !condition {
-                    Ok(Value::Bool(true))
+                    Ok(Value::bool_val(true))
                 } else {
                     let msg = args
                         .get(1)
@@ -2766,7 +2777,7 @@ impl VM {
                 let func = args[0].clone();
                 match self.call_value(func, vec![]) {
                     Ok(val) => Ok(val),
-                    Err(_) => Ok(Value::Null),
+                    Err(_) => Ok(Value::null()),
                 }
             }
             "ghost" => {
@@ -2787,7 +2798,7 @@ impl VM {
                     _ => 100,
                 };
                 let mut times: Vec<f64> = Vec::with_capacity(n);
-                let mut last_result = Value::Null;
+                let mut last_result = Value::null();
                 for _ in 0..n {
                     let start = std::time::Instant::now();
                     last_result = self.call_value(func.clone(), vec![])?;
@@ -2803,18 +2814,18 @@ impl VM {
                     .copied()
                     .unwrap_or(0.0);
                 let mut stats = IndexMap::new();
-                stats.insert("avg_ms".to_string(), Value::Float(avg));
-                stats.insert("min_ms".to_string(), Value::Float(min_t));
-                stats.insert("max_ms".to_string(), Value::Float(max_t));
-                stats.insert("p99_ms".to_string(), Value::Float(p99));
-                stats.insert("runs".to_string(), Value::Int(n as i64));
+                stats.insert("avg_ms".to_string(), Value::float(avg));
+                stats.insert("min_ms".to_string(), Value::float(min_t));
+                stats.insert("max_ms".to_string(), Value::float(max_t));
+                stats.insert("p99_ms".to_string(), Value::float(p99));
+                stats.insert("runs".to_string(), Value::small_int(n as i64));
                 stats.insert("result".to_string(), last_result);
                 eprintln!(
                     "\x1b[35m\u{1f485} SLAYED:\x1b[0m {}x runs \u{2014} avg {:.3}ms, min {:.3}ms, max {:.3}ms, p99 {:.3}ms",
                     n, avg, min_t, max_t, p99
                 );
                 let r = self.gc.alloc(ObjKind::Object(stats));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
 
             // ----- Channel builtins -----
@@ -2835,7 +2846,7 @@ impl VM {
                     receiver: std::sync::Mutex::new(Some(receiver)),
                 });
                 let r = self.gc.alloc(ObjKind::Channel(inner));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "send" => {
                 if args.len() < 2 {
@@ -2857,7 +2868,7 @@ impl VM {
                         return Err(VMError::new("channel closed"));
                     }
                 }
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "receive" => {
                 if args.is_empty() {
@@ -2868,9 +2879,9 @@ impl VM {
                 match &*guard {
                     Some(rx) => match rx.recv() {
                         Ok(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
-                        Err(_) => Ok(Value::Null),
+                        Err(_) => Ok(Value::null()),
                     },
-                    None => Ok(Value::Null),
+                    None => Ok(Value::null()),
                 }
             }
             "close" => {
@@ -2880,7 +2891,7 @@ impl VM {
                 let ch_arc = self.extract_channel(&args[0])?;
                 let mut guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = None;
-                Ok(Value::Null)
+                Ok(Value::null())
             }
             "try_send" => {
                 if args.len() < 2 {
@@ -2895,7 +2906,7 @@ impl VM {
                     Some(VmChannelSender::Unbounded(tx)) => tx.send(shared).is_ok(),
                     None => false,
                 };
-                Ok(Value::Bool(ok))
+                Ok(Value::bool_val(ok))
             }
             "try_receive" => {
                 if args.is_empty() {
@@ -2908,11 +2919,11 @@ impl VM {
                         Ok(shared) => {
                             let val = shared_to_value(&mut self.gc, &shared);
                             let r = self.gc.alloc(ObjKind::ResultOk(val));
-                            Ok(Value::Obj(r))
+                            Ok(Value::obj(r))
                         }
-                        Err(_) => Ok(Value::Null),
+                        Err(_) => Ok(Value::null()),
                     },
-                    None => Ok(Value::Null),
+                    None => Ok(Value::null()),
                 }
             }
             "select" => {
@@ -2939,7 +2950,7 @@ impl VM {
                     _ => return Err(VMError::new("select() requires an array of channels")),
                 };
                 if channels.is_empty() {
-                    return Ok(Value::Null);
+                    return Ok(Value::null());
                 }
                 let timeout_ms: Option<u128> = match args.get(1) {
                     Some(Value::Int(ms)) => Some((*ms).max(0) as u128),
@@ -2961,9 +2972,9 @@ impl VM {
                             match rx.try_recv() {
                                 Ok(shared) => {
                                     let val = shared_to_value(&mut self.gc, &shared);
-                                    let idx_val = Value::Int(idx as i64);
+                                    let idx_val = Value::small_int(idx as i64);
                                     let arr = self.gc.alloc(ObjKind::Array(vec![idx_val, val]));
-                                    return Ok(Value::Obj(arr));
+                                    return Ok(Value::obj(arr));
                                 }
                                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                                     all_closed = false;
@@ -2975,11 +2986,11 @@ impl VM {
                         }
                     }
                     if all_closed {
-                        return Ok(Value::Null);
+                        return Ok(Value::null());
                     }
                     if let Some(ms) = timeout_ms {
                         if start.elapsed().as_millis() >= ms {
-                            return Ok(Value::Null);
+                            return Ok(Value::null());
                         }
                     }
                     offset = (offset + 1) % len;
@@ -2991,14 +3002,20 @@ impl VM {
                 let now = Utc::now();
                 let mut m = IndexMap::new();
                 m.insert("iso".to_string(), self.alloc_string(&now.to_rfc3339()));
-                m.insert("unix".to_string(), Value::Int(now.timestamp()));
-                m.insert("unix_ms".to_string(), Value::Int(now.timestamp_millis()));
-                m.insert("year".to_string(), Value::Int(now.year() as i64));
-                m.insert("month".to_string(), Value::Int(now.month() as i64));
-                m.insert("day".to_string(), Value::Int(now.day() as i64));
-                m.insert("hour".to_string(), Value::Int(now.hour() as i64));
-                m.insert("minute".to_string(), Value::Int(now.minute() as i64));
-                m.insert("second".to_string(), Value::Int(now.second() as i64));
+                m.insert(
+                    "unix".to_string(),
+                    Value::int(now.timestamp(), &mut self.gc),
+                );
+                m.insert(
+                    "unix_ms".to_string(),
+                    Value::int(now.timestamp_millis(), &mut self.gc),
+                );
+                m.insert("year".to_string(), Value::small_int(now.year() as i64));
+                m.insert("month".to_string(), Value::small_int(now.month() as i64));
+                m.insert("day".to_string(), Value::small_int(now.day() as i64));
+                m.insert("hour".to_string(), Value::small_int(now.hour() as i64));
+                m.insert("minute".to_string(), Value::small_int(now.minute() as i64));
+                m.insert("second".to_string(), Value::small_int(now.second() as i64));
                 m.insert(
                     "weekday".to_string(),
                     self.alloc_string(&now.format("%A").to_string()),
@@ -3007,10 +3024,13 @@ impl VM {
                     "weekday_short".to_string(),
                     self.alloc_string(&now.format("%a").to_string()),
                 );
-                m.insert("day_of_year".to_string(), Value::Int(now.ordinal() as i64));
+                m.insert(
+                    "day_of_year".to_string(),
+                    Value::small_int(now.ordinal() as i64),
+                );
                 m.insert("timezone".to_string(), self.alloc_string("UTC"));
                 let r = self.gc.alloc(ObjKind::Object(m));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "await_all" => {
                 if args.is_empty() {
@@ -3076,7 +3096,7 @@ impl VM {
                     }
                 }
                 let r = self.gc.alloc(ObjKind::Array(results));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             "await_timeout" => {
                 if args.len() < 2 {
@@ -3104,7 +3124,7 @@ impl VM {
                             loop {
                                 let remaining = deadline.saturating_sub(start.elapsed());
                                 if remaining.is_zero() {
-                                    return Ok(Value::Null);
+                                    return Ok(Value::null());
                                 }
                                 let (g, timeout_result) = cvar
                                     .wait_timeout(guard, remaining)
@@ -3114,7 +3134,7 @@ impl VM {
                                     break;
                                 }
                                 if timeout_result.timed_out() {
-                                    return Ok(Value::Null);
+                                    return Ok(Value::null());
                                 }
                             }
                         }
@@ -3172,7 +3192,7 @@ impl VM {
         marker.insert("__kind__".to_string(), self.alloc_string("struct"));
         marker.insert("name".to_string(), self.alloc_string(type_name));
         let r = self.gc.alloc(ObjKind::Object(marker));
-        Value::Obj(r)
+        Value::obj(r)
     }
 
     fn extract_channel(&self, val: &Value) -> Result<Arc<VmChannelInner>, VMError> {
