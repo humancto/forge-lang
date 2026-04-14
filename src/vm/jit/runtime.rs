@@ -14,6 +14,8 @@
 /// NOTE: Many functions here are intentionally "unused" — they are infrastructure
 /// for the M2 NaN-boxing JIT (Milestone 2) and will be wired up in that milestone.
 /// The allow(dead_code) below suppresses the warnings until then.
+use indexmap::IndexMap;
+
 use crate::vm::machine::VM;
 use crate::vm::value::*;
 
@@ -257,4 +259,210 @@ pub extern "C" fn rt_string_eq(vm_ptr: *mut VM, a_ref: i64, b_ref: i64) -> i64 {
     } else {
         0
     }
+}
+
+// ---------------------------------------------------------------------------
+// Collection bridges (arrays, objects, interpolation)
+// ---------------------------------------------------------------------------
+
+/// Bridge: create a new array from tagged elements on a stack buffer.
+/// `elements_ptr` points to `count` tagged i64 values.
+/// Returns the GcRef index of the new array.
+pub extern "C" fn rt_array_new(vm_ptr: *mut VM, elements_ptr: *const i64, count: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let count = count as usize;
+    // Decode all tagged values into a Vec<Value> before allocating (GC safety).
+    let mut items = Vec::with_capacity(count);
+    for i in 0..count {
+        let tagged = unsafe { *elements_ptr.add(i) } as u64;
+        items.push(decode_value(tagged));
+    }
+    let r = vm.gc.alloc(ObjKind::Array(items));
+    r.0 as i64
+}
+
+/// Bridge: create an empty array (avoids zero-size stack slot issues).
+pub extern "C" fn rt_empty_array(vm_ptr: *mut VM) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let r = vm.gc.alloc(ObjKind::Array(Vec::new()));
+    r.0 as i64
+}
+
+/// Bridge: get element from array by integer index.
+/// Returns a tagged value. Returns tagged null on error/out-of-bounds.
+pub extern "C" fn rt_array_get(vm_ptr: *mut VM, arr_ref: i64, idx: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let r = GcRef(arr_ref as usize);
+    if let Some(obj) = vm.gc.get(r) {
+        if let ObjKind::Array(items) = &obj.kind {
+            if let Some(val) = items.get(idx as usize) {
+                return encode_value(val, &vm.gc) as i64;
+            }
+        }
+    }
+    encode_null() as i64
+}
+
+/// Bridge: set element in array by integer index. No-op on error.
+pub extern "C" fn rt_array_set(vm_ptr: *mut VM, arr_ref: i64, idx: i64, val: i64) {
+    let vm = unsafe { &mut *vm_ptr };
+    let decoded = decode_value(val as u64);
+    let r = GcRef(arr_ref as usize);
+    if let Some(obj) = vm.gc.get_mut(r) {
+        if let ObjKind::Array(items) = &mut obj.kind {
+            let i = idx as usize;
+            if i < items.len() {
+                items[i] = decoded;
+            }
+        }
+    }
+}
+
+/// Bridge: return the length of a string, array, or object.
+/// Replaces rt_string_len with a generalized version.
+pub extern "C" fn rt_obj_len(vm_ptr: *mut VM, obj_ref: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    match vm.gc.get(GcRef(obj_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::String(s) => s.chars().count() as i64,
+            ObjKind::Array(a) => a.len() as i64,
+            ObjKind::Object(o) => o.len() as i64,
+            _ => 0,
+        },
+        None => 0,
+    }
+}
+
+/// Bridge: create a new object from tagged key-value pairs on a stack buffer.
+/// `pairs_ptr` points to `pair_count * 2` tagged i64 values: [key, val, key, val, ...].
+/// Keys must be ObjKind::String GcRefs (tag=4). Returns the GcRef index of the new object.
+pub extern "C" fn rt_object_new(vm_ptr: *mut VM, pairs_ptr: *const i64, pair_count: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let pair_count = pair_count as usize;
+    // First pass: collect all key strings and values (GC safety — no allocs during reads).
+    let mut entries: Vec<(String, Value)> = Vec::with_capacity(pair_count);
+    for i in 0..pair_count {
+        let key_tagged = unsafe { *pairs_ptr.add(i * 2) } as u64;
+        let val_tagged = unsafe { *pairs_ptr.add(i * 2 + 1) } as u64;
+        let key_val = decode_value(key_tagged);
+        let val = decode_value(val_tagged);
+        // Key should be a GcRef pointing to a string
+        let key_str = if let Some(r) = key_val.as_obj() {
+            if let Some(obj) = vm.gc.get(r) {
+                if let ObjKind::String(s) = &obj.kind {
+                    s.clone()
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
+        entries.push((key_str, val));
+    }
+    // Second pass: build the IndexMap and allocate
+    let mut map = IndexMap::new();
+    for (key, val) in entries {
+        map.insert(key, val);
+    }
+    let r = vm.gc.alloc(ObjKind::Object(map));
+    r.0 as i64
+}
+
+/// Bridge: create an empty object (avoids zero-size stack slot issues).
+pub extern "C" fn rt_empty_object(vm_ptr: *mut VM) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let r = vm.gc.alloc(ObjKind::Object(IndexMap::new()));
+    r.0 as i64
+}
+
+/// Bridge: get a field from an object by GcRef string key.
+/// Returns a tagged value. Returns tagged null if field not found.
+pub extern "C" fn rt_object_get(vm_ptr: *mut VM, obj_ref: i64, field_ref: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    // Read the field name string first (no allocation)
+    let field_name = match vm.gc.get(GcRef(field_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::String(s) => s.clone(),
+            _ => return encode_null() as i64,
+        },
+        None => return encode_null() as i64,
+    };
+    // Now look up the field in the object
+    match vm.gc.get(GcRef(obj_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::Object(map) => match map.get(&field_name) {
+                Some(val) => encode_value(val, &vm.gc) as i64,
+                None => encode_null() as i64,
+            },
+            _ => encode_null() as i64,
+        },
+        None => encode_null() as i64,
+    }
+}
+
+/// Bridge: set a field on an object by GcRef string key.
+pub extern "C" fn rt_object_set(vm_ptr: *mut VM, obj_ref: i64, field_ref: i64, val: i64) {
+    let vm = unsafe { &mut *vm_ptr };
+    // Read the field name string first
+    let field_name = match vm.gc.get(GcRef(field_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::String(s) => s.clone(),
+            _ => return,
+        },
+        None => return,
+    };
+    let decoded = decode_value(val as u64);
+    if let Some(obj) = vm.gc.get_mut(GcRef(obj_ref as usize)) {
+        if let ObjKind::Object(map) = &mut obj.kind {
+            map.insert(field_name, decoded);
+        }
+    }
+}
+
+/// Bridge: extract a tuple-like field ("_0", "_1", etc.) from an object.
+/// Returns a tagged value.
+pub extern "C" fn rt_extract_field(vm_ptr: *mut VM, obj_ref: i64, field_index: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let field_name = format!("_{}", field_index);
+    match vm.gc.get(GcRef(obj_ref as usize)) {
+        Some(obj) => match &obj.kind {
+            ObjKind::Object(map) => match map.get(&field_name) {
+                Some(val) => encode_value(val, &vm.gc) as i64,
+                None => encode_null() as i64,
+            },
+            _ => encode_null() as i64,
+        },
+        None => encode_null() as i64,
+    }
+}
+
+/// Bridge: interpolate N tagged values into a single string.
+/// `parts_ptr` points to `count` tagged i64 values.
+/// Returns the GcRef index of the resulting string.
+pub extern "C" fn rt_interpolate(vm_ptr: *mut VM, parts_ptr: *const i64, count: i64) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let count = count as usize;
+    // Collect display strings first (GC safety)
+    let mut parts: Vec<String> = Vec::with_capacity(count);
+    for i in 0..count {
+        let tagged = unsafe { *parts_ptr.add(i) } as u64;
+        let val = decode_value(tagged);
+        parts.push(val.display(&vm.gc));
+    }
+    let mut result = String::new();
+    for part in &parts {
+        result.push_str(part);
+    }
+    let r = vm.gc.alloc_string(result);
+    r.0 as i64
+}
+
+/// Bridge: create an empty string (for zero-part interpolation).
+pub extern "C" fn rt_empty_string(vm_ptr: *mut VM) -> i64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let r = vm.gc.alloc_string(String::new());
+    r.0 as i64
 }

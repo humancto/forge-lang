@@ -23,6 +23,19 @@ impl JitCompiler {
         builder.symbol("rt_string_concat", runtime::rt_string_concat as *const u8);
         builder.symbol("rt_string_len", runtime::rt_string_len as *const u8);
         builder.symbol("rt_string_eq", runtime::rt_string_eq as *const u8);
+        // Collection bridges (arrays, objects, interpolation)
+        builder.symbol("rt_array_new", runtime::rt_array_new as *const u8);
+        builder.symbol("rt_empty_array", runtime::rt_empty_array as *const u8);
+        builder.symbol("rt_array_get", runtime::rt_array_get as *const u8);
+        builder.symbol("rt_array_set", runtime::rt_array_set as *const u8);
+        builder.symbol("rt_obj_len", runtime::rt_obj_len as *const u8);
+        builder.symbol("rt_object_new", runtime::rt_object_new as *const u8);
+        builder.symbol("rt_empty_object", runtime::rt_empty_object as *const u8);
+        builder.symbol("rt_object_get", runtime::rt_object_get as *const u8);
+        builder.symbol("rt_object_set", runtime::rt_object_set as *const u8);
+        builder.symbol("rt_extract_field", runtime::rt_extract_field as *const u8);
+        builder.symbol("rt_interpolate", runtime::rt_interpolate as *const u8);
+        builder.symbol("rt_empty_string", runtime::rt_empty_string as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
