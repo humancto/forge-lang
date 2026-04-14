@@ -58,7 +58,11 @@ fn run_jit_function(source: &str) -> Vec<String> {
                     ptr,
                     uses_float: type_info.has_float,
                     has_string_ops: type_info.has_string_ops,
-                    returns_string: type_info.return_type == type_analysis::RegType::StringRef,
+                    has_collection_ops: type_info.has_collection_ops,
+                    returns_obj: matches!(
+                        type_info.return_type,
+                        type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
+                    ),
                 },
             );
         }
@@ -188,7 +192,7 @@ fn jit_rejects_string_function() {
 }
 
 #[test]
-fn jit_rejects_array_function() {
+fn jit_compiles_array_function() {
     let mut lexer = Lexer::new("fn make_arr() { return [1, 2, 3] }");
     let tokens = lexer.tokenize().unwrap();
     let mut parser = Parser::new(tokens);
@@ -197,7 +201,8 @@ fn jit_rejects_array_function() {
 
     let mut jit = JitCompiler::new().unwrap();
     let result = jit.compile_function(&chunk.prototypes[0], "make_arr", None);
-    assert!(result.is_err());
+    // Array functions are now supported by the JIT via collection bridges
+    assert!(result.is_ok());
 }
 
 // ----- And/Or logical semantics -----

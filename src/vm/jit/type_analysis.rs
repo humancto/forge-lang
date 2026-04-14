@@ -7,6 +7,8 @@ pub enum RegType {
     Bool,
     /// A GcRef index pointing to a string in the GC heap.
     StringRef,
+    /// A GcRef index pointing to an array or object in the GC heap.
+    ObjRef,
     Unknown,
 }
 
@@ -23,6 +25,8 @@ pub struct TypeInfo {
     pub has_unsupported_ops: bool,
     pub has_float: bool,
     pub has_string_ops: bool,
+    /// True when the function uses array/object/interpolate/extract opcodes.
+    pub has_collection_ops: bool,
     /// The type of the value returned by the function (from the last Return opcode).
     pub return_type: RegType,
 }
@@ -54,6 +58,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
     let mut has_unsupported = false;
     let mut has_float = false;
     let mut has_string_ops = false;
+    let mut has_collection_ops = false;
     let mut return_type = RegType::Int;
 
     for i in 0..chunk.arity as usize {
@@ -211,15 +216,40 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                 }
             }
 
-            OpCode::NewArray
-            | OpCode::NewObject
-            | OpCode::GetField
-            | OpCode::SetField
-            | OpCode::GetIndex
-            | OpCode::SetIndex
-            | OpCode::Interpolate
-            | OpCode::Spawn
-            | OpCode::ExtractField
+            OpCode::NewArray => {
+                has_collection_ops = true;
+                if a < types.len() {
+                    types[a] = RegType::ObjRef;
+                    constants[a] = None;
+                }
+            }
+            OpCode::NewObject => {
+                has_collection_ops = true;
+                if a < types.len() {
+                    types[a] = RegType::ObjRef;
+                    constants[a] = None;
+                }
+            }
+            OpCode::GetField | OpCode::GetIndex | OpCode::ExtractField => {
+                has_collection_ops = true;
+                if a < types.len() {
+                    types[a] = RegType::Unknown;
+                    constants[a] = None;
+                }
+            }
+            OpCode::SetField | OpCode::SetIndex => {
+                has_collection_ops = true;
+            }
+            OpCode::Interpolate => {
+                has_collection_ops = true;
+                has_string_ops = true;
+                if a < types.len() {
+                    types[a] = RegType::StringRef;
+                    constants[a] = None;
+                }
+            }
+
+            OpCode::Spawn
             | OpCode::Try
             | OpCode::PushHandler
             | OpCode::PopHandler
@@ -246,8 +276,15 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         }
     }
 
-    // Functions mixing strings with floats are unsupported (would need NaN-boxing)
-    if has_string_ops && has_float {
+    // Functions mixing strings/collections with floats are unsupported
+    // (would need per-register Cranelift types)
+    if (has_string_ops || has_collection_ops) && has_float {
+        has_unsupported = true;
+    }
+
+    // Functions returning Unknown type are unsupported — the JIT dispatch
+    // can't determine whether the result is an int or obj at runtime
+    if return_type == RegType::Unknown {
         has_unsupported = true;
     }
 
@@ -256,6 +293,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         has_unsupported_ops: has_unsupported,
         has_float,
         has_string_ops,
+        has_collection_ops,
         return_type,
     }
 }
@@ -366,15 +404,88 @@ mod tests {
     }
 
     #[test]
-    fn analyze_array_unsupported() {
+    fn analyze_array_supported() {
         let mut chunk = Chunk::new("make_arr");
         chunk.arity = 0;
-        chunk.max_registers = 3;
-        chunk.emit(encode_abc(OpCode::NewArray, 0, 1, 2), 1);
+        chunk.max_registers = 4;
+        let one = chunk.add_constant(Constant::Int(1));
+        let two = chunk.add_constant(Constant::Int(2));
+        chunk.emit(encode_abx(OpCode::LoadConst, 1, one), 1);
+        chunk.emit(encode_abx(OpCode::LoadConst, 2, two), 2);
+        chunk.emit(encode_abc(OpCode::NewArray, 0, 1, 2), 3);
+        chunk.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 4);
+
+        let info = analyze(&chunk);
+        assert!(!info.has_unsupported_ops);
+        assert!(info.has_collection_ops);
+        assert_eq!(info.reg_types[0], RegType::ObjRef);
+    }
+
+    #[test]
+    fn analyze_object_supported() {
+        let mut chunk = Chunk::new("make_obj");
+        chunk.arity = 0;
+        chunk.max_registers = 4;
+        chunk.emit(encode_abc(OpCode::NewObject, 0, 1, 1), 1);
         chunk.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 2);
 
         let info = analyze(&chunk);
-        assert!(info.has_unsupported_ops);
+        assert!(!info.has_unsupported_ops);
+        assert!(info.has_collection_ops);
+        assert_eq!(info.reg_types[0], RegType::ObjRef);
+    }
+
+    #[test]
+    fn analyze_get_field_produces_unknown() {
+        // Returning an Unknown register is unsupported (dispatch can't
+        // determine int vs obj), but GetField itself is tracked.
+        let mut chunk = Chunk::new("get_field");
+        chunk.arity = 0;
+        chunk.max_registers = 3;
+        chunk.emit(encode_abc(OpCode::NewObject, 0, 1, 0), 1);
+        chunk.emit(encode_abc(OpCode::GetField, 1, 0, 0), 2);
+        chunk.emit(encode_abc(OpCode::Return, 1, 0, 0), 3);
+
+        let info = analyze(&chunk);
+        assert!(info.has_unsupported_ops); // Unknown return type
+        assert!(info.has_collection_ops);
+        assert_eq!(info.reg_types[1], RegType::Unknown);
+    }
+
+    #[test]
+    fn analyze_collection_with_float_unsupported() {
+        let mut chunk = Chunk::new("mixed");
+        chunk.arity = 0;
+        chunk.max_registers = 3;
+        let f = chunk.add_constant(Constant::Float(1.5));
+        chunk.emit(encode_abx(OpCode::LoadConst, 0, f), 1);
+        chunk.emit(encode_abc(OpCode::NewArray, 1, 0, 1), 2);
+        chunk.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 3);
+
+        let info = analyze(&chunk);
+        assert!(
+            info.has_unsupported_ops,
+            "collection+float mix should be unsupported"
+        );
+    }
+
+    #[test]
+    fn analyze_interpolate_produces_string_ref() {
+        let mut chunk = Chunk::new("interp");
+        chunk.arity = 0;
+        chunk.max_registers = 4;
+        let s = chunk.add_constant(Constant::Str("hello ".to_string()));
+        let n = chunk.add_constant(Constant::Int(42));
+        chunk.emit(encode_abx(OpCode::LoadConst, 1, s), 1);
+        chunk.emit(encode_abx(OpCode::LoadConst, 2, n), 2);
+        chunk.emit(encode_abc(OpCode::Interpolate, 0, 1, 2), 3);
+        chunk.emit(encode_abc(OpCode::Return, 0, 0, 0), 4);
+
+        let info = analyze(&chunk);
+        assert!(!info.has_unsupported_ops);
+        assert!(info.has_collection_ops);
+        assert!(info.has_string_ops);
+        assert_eq!(info.reg_types[0], RegType::StringRef);
     }
 
     #[test]
