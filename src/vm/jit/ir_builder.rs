@@ -25,6 +25,12 @@ pub fn build_function<M: Module>(
     if type_info.has_unsupported_ops {
         return Err("function uses unsupported operations (strings/arrays/objects)".to_string());
     }
+    if type_info.has_collection_ops {
+        return Err(
+            "function uses collection operations (arrays/objects/interpolate) — not yet wired"
+                .to_string(),
+        );
+    }
 
     // String functions cannot use floats (rejected by type_analysis).
     // String functions always use I64 (GcRef indices fit in i64).
