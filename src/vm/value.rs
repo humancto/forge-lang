@@ -133,6 +133,16 @@ pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GcRef(pub usize);
 
+/// Deconstructed value for exhaustive pattern matching.
+/// Use `val.classify(&gc)` to get this from a `Value`.
+pub enum ValueKind {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Null,
+    Obj(GcRef),
+}
+
 /// Runtime value. Primitives inline; heap objects via GcRef.
 #[derive(Clone, Copy)]
 pub enum Value {
@@ -144,6 +154,140 @@ pub enum Value {
 }
 
 impl Value {
+    // ---- Constructors (method-based API for future NaN-box migration) ----
+
+    /// Create an integer value. For values known to be small, prefer `small_int`.
+    /// This allocates a BoxedInt on the GC heap if the value exceeds 48-bit range.
+    #[inline]
+    pub fn int(n: i64, gc: &mut Gc) -> Value {
+        // 48-bit signed range: -(2^47) to (2^47 - 1)
+        const INT48_MAX: i64 = (1_i64 << 47) - 1;
+        const INT48_MIN: i64 = -(1_i64 << 47);
+        if n >= INT48_MIN && n <= INT48_MAX {
+            Value::Int(n)
+        } else {
+            let r = gc.alloc(ObjKind::BoxedInt(n));
+            Value::Obj(r)
+        }
+    }
+
+    /// Create an integer value that is known to fit in 48 bits.
+    /// Panics in debug mode if the value is out of range. Use for literals,
+    /// len, index, bool-to-int, and other known-small values.
+    #[inline]
+    pub fn small_int(n: i64) -> Value {
+        debug_assert!(
+            n >= -(1_i64 << 47) && n <= (1_i64 << 47) - 1,
+            "BUG: small_int({}) exceeds 48-bit range",
+            n
+        );
+        Value::Int(n)
+    }
+
+    #[inline]
+    pub fn float(f: f64) -> Value {
+        Value::Float(f)
+    }
+
+    #[inline]
+    pub fn bool_val(b: bool) -> Value {
+        Value::Bool(b)
+    }
+
+    #[inline]
+    pub fn null() -> Value {
+        Value::Null
+    }
+
+    #[inline]
+    pub fn obj(r: GcRef) -> Value {
+        Value::Obj(r)
+    }
+
+    // ---- Extractors (BoxedInt-aware) ----
+
+    /// Extract an integer, checking both inline Int and heap BoxedInt.
+    #[inline]
+    pub fn as_int(&self, gc: &Gc) -> Option<i64> {
+        match self {
+            Value::Int(n) => Some(*n),
+            Value::Obj(r) => {
+                if let Some(obj) = gc.get(*r) {
+                    if let ObjKind::BoxedInt(n) = &obj.kind {
+                        return Some(*n);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract an inline integer only (no GC lookup). Use in hot paths
+    /// where BoxedInt is impossible (e.g., loop counters, small constants).
+    #[inline]
+    pub fn as_inline_int(&self) -> Option<i64> {
+        match self {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+
+    #[inline]
+    pub fn is_int(&self, gc: &Gc) -> bool {
+        self.as_int(gc).is_some()
+    }
+
+    #[inline]
+    pub fn as_obj(&self) -> Option<GcRef> {
+        match self {
+            Value::Obj(r) => Some(*r),
+            _ => None,
+        }
+    }
+
+    /// Deconstruct into a matchable enum for exhaustive pattern matching.
+    /// BoxedInt is transparently unwrapped to `ValueKind::Int`.
+    pub fn classify(&self, gc: &Gc) -> ValueKind {
+        match self {
+            Value::Int(n) => ValueKind::Int(*n),
+            Value::Float(f) => ValueKind::Float(*f),
+            Value::Bool(b) => ValueKind::Bool(*b),
+            Value::Null => ValueKind::Null,
+            Value::Obj(r) => {
+                if let Some(obj) = gc.get(*r) {
+                    if let ObjKind::BoxedInt(n) = &obj.kind {
+                        return ValueKind::Int(*n);
+                    }
+                }
+                ValueKind::Obj(*r)
+            }
+        }
+    }
+
+    // ---- Existing methods ----
+
     pub fn is_truthy(&self, gc: &super::gc::Gc) -> bool {
         match self {
             Value::Bool(b) => *b,
@@ -156,6 +300,7 @@ impl Value {
                 ObjKind::Object(o) => !o.is_empty(),
                 ObjKind::ResultOk(_) => true,
                 ObjKind::ResultErr(_) => false,
+                ObjKind::BoxedInt(n) => *n != 0,
                 _ => true,
             }),
         }
@@ -194,21 +339,19 @@ impl Value {
     }
 
     pub fn equals(&self, other: &Value, gc: &super::gc::Gc) -> bool {
-        match (self, other) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
-            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Null, Value::Null) => true,
-            (Value::Obj(a), Value::Obj(b)) => {
-                // Fast path: two live refs with the same arena index are the same
-                // allocation. No ObjKind variant wraps floats (those use Value::Float),
-                // so NaN self-inequality is not a concern.
+        // Use classify to handle BoxedInt transparently
+        match (self.classify(gc), other.classify(gc)) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
+            (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
+            (ValueKind::Int(a), ValueKind::Float(b)) => (a as f64) == b,
+            (ValueKind::Float(a), ValueKind::Int(b)) => a == (b as f64),
+            (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
+            (ValueKind::Null, ValueKind::Null) => true,
+            (ValueKind::Obj(a), ValueKind::Obj(b)) => {
                 if a == b {
                     return true;
                 }
-                match (gc.get(*a), gc.get(*b)) {
+                match (gc.get(a), gc.get(b)) {
                     (Some(oa), Some(ob)) => oa.equals(ob, gc),
                     _ => false,
                 }
