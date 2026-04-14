@@ -92,18 +92,18 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
 /// Convert a SharedValue back to a VM Value (allocates in target GC).
 pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
     match sv {
-        SharedValue::Int(n) => Value::Int(*n),
-        SharedValue::Float(n) => Value::Float(*n),
-        SharedValue::Bool(b) => Value::Bool(*b),
-        SharedValue::Null => Value::Null,
+        SharedValue::Int(n) => Value::int(*n, gc),
+        SharedValue::Float(n) => Value::float(*n),
+        SharedValue::Bool(b) => Value::bool_val(*b),
+        SharedValue::Null => Value::null(),
         SharedValue::String(s) => {
             let r = gc.alloc(ObjKind::String(s.clone()));
-            Value::Obj(r)
+            Value::obj(r)
         }
         SharedValue::Array(items) => {
             let vals: Vec<Value> = items.iter().map(|sv| shared_to_value(gc, sv)).collect();
             let r = gc.alloc(ObjKind::Array(vals));
-            Value::Obj(r)
+            Value::obj(r)
         }
         SharedValue::Object(map) => {
             let entries: IndexMap<String, Value> = map
@@ -111,21 +111,21 @@ pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
                 .map(|(k, sv)| (k.clone(), shared_to_value(gc, sv)))
                 .collect();
             let r = gc.alloc(ObjKind::Object(entries));
-            Value::Obj(r)
+            Value::obj(r)
         }
         SharedValue::ResultOk(v) => {
             let inner = shared_to_value(gc, v);
             let r = gc.alloc(ObjKind::ResultOk(inner));
-            Value::Obj(r)
+            Value::obj(r)
         }
         SharedValue::ResultErr(v) => {
             let inner = shared_to_value(gc, v);
             let r = gc.alloc(ObjKind::ResultErr(inner));
-            Value::Obj(r)
+            Value::obj(r)
         }
         SharedValue::Channel(ch) => {
             let r = gc.alloc(ObjKind::Channel(ch.clone()));
-            Value::Obj(r)
+            Value::obj(r)
         }
     }
 }

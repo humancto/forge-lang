@@ -48,16 +48,16 @@ pub fn decode_value(encoded: u64) -> Value {
             } else {
                 payload as i64
             };
-            Value::Int(n)
+            Value::small_int(n)
         }
         TAG_FLOAT => {
             let bits = payload;
-            Value::Float(f64::from_bits(bits))
+            Value::float(f64::from_bits(bits))
         }
-        TAG_BOOL => Value::Bool(payload != 0),
-        TAG_NULL => Value::Null,
-        TAG_OBJ => Value::Obj(GcRef(payload as usize)),
-        _ => Value::Null,
+        TAG_BOOL => Value::bool_val(payload != 0),
+        TAG_NULL => Value::null(),
+        TAG_OBJ => Value::obj(GcRef(payload as usize)),
+        _ => Value::null(),
     }
 }
 
