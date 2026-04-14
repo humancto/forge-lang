@@ -309,7 +309,7 @@ impl std::fmt::Display for VMError {
 impl VM {
     pub fn new() -> Self {
         let mut vm = Self {
-            registers: vec![Value::Null; 256],
+            registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(MAX_FRAMES),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
@@ -331,7 +331,7 @@ impl VM {
 
     pub fn with_profiling() -> Self {
         let mut vm = Self {
-            registers: vec![Value::Null; 256],
+            registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(MAX_FRAMES),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
@@ -510,10 +510,10 @@ impl VM {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
                 name: name.to_string(),
             }));
-            self.globals.insert(name.to_string(), Value::Obj(name_ref));
+            self.globals.insert(name.to_string(), Value::obj(name_ref));
         }
 
-        self.globals.insert("null".to_string(), Value::Null);
+        self.globals.insert("null".to_string(), Value::null());
 
         // Register stdlib modules
         self.register_stdlib();
@@ -522,8 +522,8 @@ impl VM {
     fn register_stdlib(&mut self) {
         // math module
         let mut math_map = IndexMap::new();
-        math_map.insert("pi".to_string(), Value::Float(std::f64::consts::PI));
-        math_map.insert("e".to_string(), Value::Float(std::f64::consts::E));
+        math_map.insert("pi".to_string(), Value::float(std::f64::consts::PI));
+        math_map.insert("e".to_string(), Value::float(std::f64::consts::E));
         for name in &[
             "sqrt", "pow", "abs", "max", "min", "floor", "ceil", "round", "random", "sin", "cos",
             "tan", "log",
@@ -532,11 +532,11 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            math_map.insert(name.to_string(), Value::Obj(nr));
+            math_map.insert(name.to_string(), Value::obj(nr));
         }
         let math_ref = self.gc.alloc(ObjKind::Object(math_map));
         self.globals
-            .insert("math".to_string(), Value::Obj(math_ref));
+            .insert("math".to_string(), Value::obj(math_ref));
 
         // fs module
         let mut fs_map = IndexMap::new();
@@ -547,10 +547,10 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            fs_map.insert(name.to_string(), Value::Obj(nr));
+            fs_map.insert(name.to_string(), Value::obj(nr));
         }
         let fs_ref = self.gc.alloc(ObjKind::Object(fs_map));
-        self.globals.insert("fs".to_string(), Value::Obj(fs_ref));
+        self.globals.insert("fs".to_string(), Value::obj(fs_ref));
 
         // io module
         let mut io_map = IndexMap::new();
@@ -559,10 +559,10 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            io_map.insert(name.to_string(), Value::Obj(nr));
+            io_map.insert(name.to_string(), Value::obj(nr));
         }
         let io_ref = self.gc.alloc(ObjKind::Object(io_map));
-        self.globals.insert("io".to_string(), Value::Obj(io_ref));
+        self.globals.insert("io".to_string(), Value::obj(io_ref));
 
         // crypto module
         let mut crypto_map = IndexMap::new();
@@ -578,11 +578,11 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            crypto_map.insert(name.to_string(), Value::Obj(nr));
+            crypto_map.insert(name.to_string(), Value::obj(nr));
         }
         let crypto_ref = self.gc.alloc(ObjKind::Object(crypto_map));
         self.globals
-            .insert("crypto".to_string(), Value::Obj(crypto_ref));
+            .insert("crypto".to_string(), Value::obj(crypto_ref));
 
         // db module
         let mut db_map = IndexMap::new();
@@ -591,10 +591,10 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            db_map.insert(name.to_string(), Value::Obj(nr));
+            db_map.insert(name.to_string(), Value::obj(nr));
         }
         let db_ref = self.gc.alloc(ObjKind::Object(db_map));
-        self.globals.insert("db".to_string(), Value::Obj(db_ref));
+        self.globals.insert("db".to_string(), Value::obj(db_ref));
 
         // env module
         let mut env_map = IndexMap::new();
@@ -603,10 +603,10 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            env_map.insert(name.to_string(), Value::Obj(nr));
+            env_map.insert(name.to_string(), Value::obj(nr));
         }
         let env_ref = self.gc.alloc(ObjKind::Object(env_map));
-        self.globals.insert("env".to_string(), Value::Obj(env_ref));
+        self.globals.insert("env".to_string(), Value::obj(env_ref));
 
         // json module
         let mut json_map = IndexMap::new();
@@ -615,11 +615,11 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            json_map.insert(name.to_string(), Value::Obj(nr));
+            json_map.insert(name.to_string(), Value::obj(nr));
         }
         let json_ref = self.gc.alloc(ObjKind::Object(json_map));
         self.globals
-            .insert("json".to_string(), Value::Obj(json_ref));
+            .insert("json".to_string(), Value::obj(json_ref));
 
         // regex module
         let mut regex_map = IndexMap::new();
@@ -628,11 +628,11 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            regex_map.insert(name.to_string(), Value::Obj(nr));
+            regex_map.insert(name.to_string(), Value::obj(nr));
         }
         let regex_ref = self.gc.alloc(ObjKind::Object(regex_map));
         self.globals
-            .insert("regex".to_string(), Value::Obj(regex_ref));
+            .insert("regex".to_string(), Value::obj(regex_ref));
 
         // log module
         let mut log_map = IndexMap::new();
@@ -641,10 +641,10 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            log_map.insert(name.to_string(), Value::Obj(nr));
+            log_map.insert(name.to_string(), Value::obj(nr));
         }
         let log_ref = self.gc.alloc(ObjKind::Object(log_map));
-        self.globals.insert("log".to_string(), Value::Obj(log_ref));
+        self.globals.insert("log".to_string(), Value::obj(log_ref));
 
         // http module
         let mut http_map = IndexMap::new();
@@ -655,11 +655,11 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            http_map.insert(name.to_string(), Value::Obj(nr));
+            http_map.insert(name.to_string(), Value::obj(nr));
         }
         let http_ref = self.gc.alloc(ObjKind::Object(http_map));
         self.globals
-            .insert("http".to_string(), Value::Obj(http_ref));
+            .insert("http".to_string(), Value::obj(http_ref));
 
         // term module
         let mut term_map = IndexMap::new();
@@ -671,11 +671,11 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            term_map.insert(name.to_string(), Value::Obj(nr));
+            term_map.insert(name.to_string(), Value::obj(nr));
         }
         let term_ref = self.gc.alloc(ObjKind::Object(term_map));
         self.globals
-            .insert("term".to_string(), Value::Obj(term_ref));
+            .insert("term".to_string(), Value::obj(term_ref));
 
         // csv module
         let mut csv_map = IndexMap::new();
@@ -684,10 +684,10 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            csv_map.insert(name.to_string(), Value::Obj(nr));
+            csv_map.insert(name.to_string(), Value::obj(nr));
         }
         let csv_ref = self.gc.alloc(ObjKind::Object(csv_map));
-        self.globals.insert("csv".to_string(), Value::Obj(csv_ref));
+        self.globals.insert("csv".to_string(), Value::obj(csv_ref));
 
         // time module
         let mut time_map = IndexMap::new();
@@ -722,16 +722,16 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            time_map.insert(name.to_string(), Value::Obj(nr));
+            time_map.insert(name.to_string(), Value::obj(nr));
         }
         // time() as a function calls the "time" builtin (returns datetime object)
         let time_call = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
             name: "time".to_string(),
         }));
-        time_map.insert("__call__".to_string(), Value::Obj(time_call));
+        time_map.insert("__call__".to_string(), Value::obj(time_call));
         let time_ref = self.gc.alloc(ObjKind::Object(time_map));
         self.globals
-            .insert("time".to_string(), Value::Obj(time_ref));
+            .insert("time".to_string(), Value::obj(time_ref));
 
         // pg module
         #[cfg(feature = "postgres")]
@@ -742,10 +742,10 @@ impl VM {
                 let nr = self
                     .gc
                     .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-                pg_map.insert(name.to_string(), Value::Obj(nr));
+                pg_map.insert(name.to_string(), Value::obj(nr));
             }
             let pg_ref = self.gc.alloc(ObjKind::Object(pg_map));
-            self.globals.insert("pg".to_string(), Value::Obj(pg_ref));
+            self.globals.insert("pg".to_string(), Value::obj(pg_ref));
         }
 
         // jwt module
@@ -755,10 +755,10 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            jwt_map.insert(name.to_string(), Value::Obj(nr));
+            jwt_map.insert(name.to_string(), Value::obj(nr));
         }
         let jwt_ref = self.gc.alloc(ObjKind::Object(jwt_map));
-        self.globals.insert("jwt".to_string(), Value::Obj(jwt_ref));
+        self.globals.insert("jwt".to_string(), Value::obj(jwt_ref));
 
         // mysql module
         #[cfg(feature = "mysql")]
@@ -769,11 +769,11 @@ impl VM {
                 let nr = self
                     .gc
                     .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-                mysql_map.insert(name.to_string(), Value::Obj(nr));
+                mysql_map.insert(name.to_string(), Value::obj(nr));
             }
             let mysql_ref = self.gc.alloc(ObjKind::Object(mysql_map));
             self.globals
-                .insert("mysql".to_string(), Value::Obj(mysql_ref));
+                .insert("mysql".to_string(), Value::obj(mysql_ref));
         }
 
         // os module
@@ -783,10 +783,10 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            os_map.insert(name.to_string(), Value::Obj(nr));
+            os_map.insert(name.to_string(), Value::obj(nr));
         }
         let os_ref = self.gc.alloc(ObjKind::Object(os_map));
-        self.globals.insert("os".to_string(), Value::Obj(os_ref));
+        self.globals.insert("os".to_string(), Value::obj(os_ref));
 
         // path module
         let mut path_map = IndexMap::new();
@@ -803,7 +803,7 @@ impl VM {
             let nr = self
                 .gc
                 .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            path_map.insert(name.to_string(), Value::Obj(nr));
+            path_map.insert(name.to_string(), Value::obj(nr));
         }
         path_map.insert(
             "separator".to_string(),
@@ -811,7 +811,7 @@ impl VM {
         );
         let path_ref = self.gc.alloc(ObjKind::Object(path_map));
         self.globals
-            .insert("path".to_string(), Value::Obj(path_ref));
+            .insert("path".to_string(), Value::obj(path_ref));
 
         // Option prelude
         let mut none_obj = IndexMap::new();
@@ -819,36 +819,36 @@ impl VM {
         none_obj.insert("__variant__".to_string(), self.alloc_string("None"));
         let none_ref = self.gc.alloc(ObjKind::Object(none_obj));
         self.globals
-            .insert("None".to_string(), Value::Obj(none_ref));
+            .insert("None".to_string(), Value::obj(none_ref));
 
         let some_native = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
             name: "Some".to_string(),
         }));
         self.globals
-            .insert("Some".to_string(), Value::Obj(some_native));
+            .insert("Some".to_string(), Value::obj(some_native));
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
         let r = self.gc.alloc_string(s.to_string());
-        Value::Obj(r)
+        Value::obj(r)
     }
 
     pub(super) fn alloc_builtin(&mut self, name: &str) -> Value {
         let native = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
             name: name.to_string(),
         }));
-        Value::Obj(native)
+        Value::obj(native)
     }
 
     fn constant_to_value(&mut self, constant: &Constant) -> Value {
         match constant {
-            Constant::Int(n) => Value::Int(*n),
-            Constant::Float(n) => Value::Float(*n),
-            Constant::Bool(b) => Value::Bool(*b),
-            Constant::Null => Value::Null,
+            Constant::Int(n) => Value::int(*n, &mut self.gc),
+            Constant::Float(n) => Value::float(*n),
+            Constant::Bool(b) => Value::bool_val(*b),
+            Constant::Null => Value::null(),
             Constant::Str(s) => {
                 let r = self.gc.alloc_string(s.clone());
-                Value::Obj(r)
+                Value::obj(r)
             }
         }
     }
@@ -950,7 +950,7 @@ impl VM {
                             _ => None,
                         })
                         .cloned()
-                        .unwrap_or(Value::Null);
+                        .unwrap_or(Value::null());
                     let shared = value_to_shared(&self.gc, &uv_val);
                     let child_val = shared_to_value(&mut child.gc, &shared);
                     let child_uv = child
@@ -963,7 +963,7 @@ impl VM {
                     upvalues: child_upvalues,
                 };
                 let r = child.gc.alloc(ObjKind::Closure(closure));
-                Value::Obj(r)
+                Value::obj(r)
             }
             ObjKind::Function(f) => {
                 let function = ObjFunction {
@@ -971,9 +971,9 @@ impl VM {
                     chunk: std::sync::Arc::clone(&f.chunk),
                 };
                 let r = child.gc.alloc(ObjKind::Function(function));
-                Value::Obj(r)
+                Value::obj(r)
             }
-            _ => Value::Null,
+            _ => Value::null(),
         }
     }
 
@@ -1018,7 +1018,7 @@ impl VM {
 
     fn ensure_registers(&mut self, needed: usize) {
         if needed > self.registers.len() {
-            self.registers.resize(needed, Value::Null);
+            self.registers.resize(needed, Value::null());
         }
     }
 
@@ -1091,7 +1091,7 @@ impl VM {
 
         loop {
             if self.frames.is_empty() {
-                return Ok(Value::Null);
+                return Ok(Value::null());
             }
 
             let frame_idx = self.frames.len() - 1;
@@ -1154,13 +1154,13 @@ impl VM {
                         self.registers[base + a as usize] = val;
                     }
                     OpCode::LoadNull => {
-                        self.registers[base + a as usize] = Value::Null;
+                        self.registers[base + a as usize] = Value::null();
                     }
                     OpCode::LoadTrue => {
-                        self.registers[base + a as usize] = Value::Bool(true);
+                        self.registers[base + a as usize] = Value::bool_val(true);
                     }
                     OpCode::LoadFalse => {
-                        self.registers[base + a as usize] = Value::Bool(false);
+                        self.registers[base + a as usize] = Value::bool_val(false);
                     }
                     OpCode::Move => {
                         self.registers[base + a as usize] = self.registers[base + b as usize];
@@ -1198,8 +1198,8 @@ impl VM {
                     OpCode::Neg => {
                         let src = &self.registers[base + b as usize];
                         self.registers[base + a as usize] = match src {
-                            Value::Int(n) => Value::Int(-n),
-                            Value::Float(n) => Value::Float(-n),
+                            Value::Int(n) => Value::small_int(-n),
+                            Value::Float(n) => Value::float(-n),
                             _ => return Err(VMError::new("cannot negate non-number")),
                         };
                     }
@@ -1207,13 +1207,13 @@ impl VM {
                         let left = &self.registers[base + b as usize];
                         let right = &self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            Value::Bool(left.equals(right, &self.gc));
+                            Value::bool_val(left.equals(right, &self.gc));
                     }
                     OpCode::NotEq => {
                         let left = &self.registers[base + b as usize];
                         let right = &self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            Value::Bool(!left.equals(right, &self.gc));
+                            Value::bool_val(!left.equals(right, &self.gc));
                     }
                     OpCode::Lt => {
                         let left = &self.registers[base + b as usize];
@@ -1242,16 +1242,16 @@ impl VM {
                     OpCode::And => {
                         let left = self.registers[base + b as usize].is_truthy(&self.gc);
                         let right = self.registers[base + c as usize].is_truthy(&self.gc);
-                        self.registers[base + a as usize] = Value::Bool(left && right);
+                        self.registers[base + a as usize] = Value::bool_val(left && right);
                     }
                     OpCode::Or => {
                         let left = self.registers[base + b as usize].is_truthy(&self.gc);
                         let right = self.registers[base + c as usize].is_truthy(&self.gc);
-                        self.registers[base + a as usize] = Value::Bool(left || right);
+                        self.registers[base + a as usize] = Value::bool_val(left || right);
                     }
                     OpCode::Not => {
                         let val = self.registers[base + b as usize].is_truthy(&self.gc);
-                        self.registers[base + a as usize] = Value::Bool(!val);
+                        self.registers[base + a as usize] = Value::bool_val(!val);
                     }
                     OpCode::GetGlobal => {
                         let name_const = &chunk.constants[bx as usize];
@@ -1347,7 +1347,7 @@ impl VM {
                     OpCode::ReturnNull => {
                         self.profiler.exit_function();
                         self.frames.pop();
-                        return Ok(Some(Value::Null));
+                        return Ok(Some(Value::null()));
                     }
                     OpCode::Closure => {
                         let proto = chunk.prototypes[bx as usize].clone();
@@ -1400,7 +1400,7 @@ impl VM {
                             upvalues: upvalue_refs,
                         };
                         let r = self.gc.alloc(ObjKind::Closure(closure));
-                        self.registers[base + a as usize] = Value::Obj(r);
+                        self.registers[base + a as usize] = Value::obj(r);
                     }
                     OpCode::GetUpvalue => {
                         let uv_idx = b as usize;
@@ -1446,7 +1446,7 @@ impl VM {
                             items.push(self.registers[start + i]);
                         }
                         let r = self.gc.alloc(ObjKind::Array(items));
-                        self.registers[base + a as usize] = Value::Obj(r);
+                        self.registers[base + a as usize] = Value::obj(r);
                     }
                     OpCode::NewObject => {
                         let start = base + b as usize;
@@ -1460,7 +1460,7 @@ impl VM {
                             }
                         }
                         let r = self.gc.alloc(ObjKind::Object(map));
-                        self.registers[base + a as usize] = Value::Obj(r);
+                        self.registers[base + a as usize] = Value::obj(r);
                     }
                     OpCode::GetField => {
                         let obj_val = &self.registers[base + b as usize];
@@ -1527,7 +1527,7 @@ impl VM {
                                     ObjKind::String(s) => match field.as_str() {
                                         "len" => {
                                             direct_result =
-                                                Some(Value::Int(s.chars().count() as i64));
+                                                Some(Value::small_int(s.chars().count() as i64));
                                             needs_alloc = None;
                                         }
                                         "upper" => {
@@ -1551,7 +1551,8 @@ impl VM {
                                     },
                                     ObjKind::Array(items) => match field.as_str() {
                                         "len" => {
-                                            direct_result = Some(Value::Int(items.len() as i64));
+                                            direct_result =
+                                                Some(Value::small_int(items.len() as i64));
                                             needs_alloc = None;
                                         }
                                         _ => {
@@ -1619,7 +1620,7 @@ impl VM {
                                         return Err(VMError::new("cannot index non-array"));
                                     }
                                 } else {
-                                    Value::Null
+                                    Value::null()
                                 }
                             }
                             (Value::Obj(r), Value::Obj(_key_ref)) => {
@@ -1628,12 +1629,12 @@ impl VM {
                                 })?;
                                 if let Some(o) = self.gc.get(*r) {
                                     if let ObjKind::Object(map) = &o.kind {
-                                        map.get(&key).cloned().unwrap_or(Value::Null)
+                                        map.get(&key).cloned().unwrap_or(Value::null())
                                     } else {
-                                        Value::Null
+                                        Value::null()
                                     }
                                 } else {
-                                    Value::Null
+                                    Value::null()
                                 }
                             }
                             _ => return Err(VMError::new("invalid index operation")),
@@ -1681,13 +1682,13 @@ impl VM {
                             }
                             _ => 0,
                         };
-                        self.registers[base + a as usize] = Value::Int(len);
+                        self.registers[base + a as usize] = Value::small_int(len);
                     }
                     OpCode::Concat => {
                         let left = self.registers[base + b as usize].display(&self.gc);
                         let right = self.registers[base + c as usize].display(&self.gc);
                         let r = self.gc.alloc_string(format!("{}{}", left, right));
-                        self.registers[base + a as usize] = Value::Obj(r);
+                        self.registers[base + a as usize] = Value::obj(r);
                     }
                     OpCode::Interpolate => {
                         let start = base + b as usize;
@@ -1697,7 +1698,7 @@ impl VM {
                             result.push_str(&self.registers[start + i].display(&self.gc));
                         }
                         let r = self.gc.alloc_string(result);
-                        self.registers[base + a as usize] = Value::Obj(r);
+                        self.registers[base + a as usize] = Value::obj(r);
                     }
                     OpCode::ExtractField => {
                         let obj = &self.registers[base + b as usize];
@@ -1706,7 +1707,7 @@ impl VM {
                             if let Some(o) = self.gc.get(*r) {
                                 if let ObjKind::Object(map) = &o.kind {
                                     self.registers[base + a as usize] =
-                                        map.get(&field_name).cloned().unwrap_or(Value::Null);
+                                        map.get(&field_name).cloned().unwrap_or(Value::null());
                                 }
                             }
                         }
@@ -1745,13 +1746,13 @@ impl VM {
                         let child_closure = if let Value::Obj(r) = &closure_val {
                             self.transfer_closure(*r, &mut sendable.0)
                         } else {
-                            Value::Null
+                            Value::null()
                         };
 
                         spawn_thread(sendable, child_closure, slot_clone);
 
                         let handle = self.gc.alloc(ObjKind::TaskHandle(result_slot));
-                        self.registers[base + a as usize] = Value::Obj(handle);
+                        self.registers[base + a as usize] = Value::obj(handle);
                     }
                     OpCode::Await => {
                         let src = self.registers[base + b as usize];
@@ -1857,7 +1858,7 @@ impl VM {
                         let child_closure = if let Value::Obj(r) = &closure_val {
                             self.transfer_closure(*r, &mut sendable.0)
                         } else {
-                            Value::Null
+                            Value::null()
                         };
 
                         spawn_schedule_thread(sendable, child_closure, Duration::from_secs(secs));
@@ -1880,7 +1881,7 @@ impl VM {
                         let child_closure = if let Value::Obj(r) = &closure_val {
                             self.transfer_closure(*r, &mut sendable.0)
                         } else {
-                            Value::Null
+                            Value::null()
                         };
 
                         spawn_watch_thread(sendable, child_closure, path);
@@ -1982,11 +1983,11 @@ impl VM {
                                 if let Some(text) = content {
                                     self.registers[base + a as usize] = self.alloc_string(&text);
                                 } else {
-                                    self.registers[base + a as usize] = Value::Null;
+                                    self.registers[base + a as usize] = Value::null();
                                 }
                             }
                             Ok(_) => {
-                                self.registers[base + a as usize] = Value::Null;
+                                self.registers[base + a as usize] = Value::null();
                             }
                             Err(e) => {
                                 return Err(VMError::new(&format!("ask error: {}", e)));
@@ -1996,7 +1997,7 @@ impl VM {
                     OpCode::Freeze => {
                         let src = self.registers[base + b as usize];
                         let frozen_ref = self.gc.alloc(ObjKind::Frozen(src));
-                        self.registers[base + a as usize] = Value::Obj(frozen_ref);
+                        self.registers[base + a as usize] = Value::obj(frozen_ref);
                     }
                     _ => {
                         return Err(VMError::new(&format!("unknown opcode: {}", op)));
@@ -2163,9 +2164,9 @@ impl VM {
                                         && result >= i64::MIN as f64
                                         && result <= i64::MAX as f64
                                     {
-                                        Value::Int(result as i64)
+                                        Value::small_int(result as i64)
                                     } else {
-                                        Value::Float(result)
+                                        Value::float(result)
                                     }
                                 } else {
                                     let mut raw_args: Vec<i64> = Vec::new();
@@ -2190,9 +2191,9 @@ impl VM {
                                     let result: i64 =
                                         unsafe { jit_call_i64(entry.ptr, &raw_args)? };
                                     if entry.returns_string {
-                                        Value::Obj(GcRef(result as usize))
+                                        Value::obj(GcRef(result as usize))
                                     } else {
-                                        Value::Int(result)
+                                        Value::small_int(result)
                                     }
                                 };
                                 self.profiler.exit_function();
@@ -2214,7 +2215,7 @@ impl VM {
                             }
                         }
                         for i in args.len()..arity {
-                            self.registers[new_base + i] = Value::Null;
+                            self.registers[new_base + i] = Value::null();
                         }
 
                         self.frames.push(CallFrame::new(*r, new_base, frame_size));
@@ -2307,7 +2308,7 @@ impl VM {
             self.alloc_string(Self::classify_error_type(&err.message)),
         );
         let err_ref = self.gc.alloc(ObjKind::Object(err_obj));
-        Value::Obj(err_ref)
+        Value::obj(err_ref)
     }
 
     fn handle_runtime_error(&mut self, err: VMError) -> Result<usize, VMError> {
@@ -2383,16 +2384,16 @@ impl VM {
 
     pub(super) fn convert_interp_value(&mut self, v: &crate::interpreter::Value) -> Value {
         match v {
-            crate::interpreter::Value::Int(n) => Value::Int(*n),
-            crate::interpreter::Value::Float(n) => Value::Float(*n),
-            crate::interpreter::Value::Bool(b) => Value::Bool(*b),
-            crate::interpreter::Value::Null => Value::Null,
+            crate::interpreter::Value::Int(n) => Value::int(*n, &mut self.gc),
+            crate::interpreter::Value::Float(n) => Value::float(*n),
+            crate::interpreter::Value::Bool(b) => Value::bool_val(*b),
+            crate::interpreter::Value::Null => Value::null(),
             crate::interpreter::Value::String(s) => self.alloc_string(s),
             crate::interpreter::Value::Array(items) => {
                 let vm_items: Vec<Value> =
                     items.iter().map(|i| self.convert_interp_value(i)).collect();
                 let r = self.gc.alloc(ObjKind::Array(vm_items));
-                Value::Obj(r)
+                Value::obj(r)
             }
             crate::interpreter::Value::Object(map) => {
                 let mut vm_map = IndexMap::new();
@@ -2400,9 +2401,9 @@ impl VM {
                     vm_map.insert(k.clone(), self.convert_interp_value(val));
                 }
                 let r = self.gc.alloc(ObjKind::Object(vm_map));
-                Value::Obj(r)
+                Value::obj(r)
             }
-            _ => Value::Null,
+            _ => Value::null(),
         }
     }
 
@@ -2410,47 +2411,47 @@ impl VM {
         match (left, right) {
             (Value::Int(a), Value::Int(b)) => match op {
                 OpCode::Add => match a.checked_add(*b) {
-                    Some(r) => Ok(Value::Int(r)),
-                    None => Ok(Value::Float(*a as f64 + *b as f64)),
+                    Some(r) => Ok(Value::int(r, &mut self.gc)),
+                    None => Ok(Value::float(*a as f64 + *b as f64)),
                 },
                 OpCode::Sub => match a.checked_sub(*b) {
-                    Some(r) => Ok(Value::Int(r)),
-                    None => Ok(Value::Float(*a as f64 - *b as f64)),
+                    Some(r) => Ok(Value::int(r, &mut self.gc)),
+                    None => Ok(Value::float(*a as f64 - *b as f64)),
                 },
                 OpCode::Mul => match a.checked_mul(*b) {
-                    Some(r) => Ok(Value::Int(r)),
-                    None => Ok(Value::Float(*a as f64 * *b as f64)),
+                    Some(r) => Ok(Value::int(r, &mut self.gc)),
+                    None => Ok(Value::float(*a as f64 * *b as f64)),
                 },
                 OpCode::Div => {
                     if *b == 0 {
                         return Err(VMError::new("division by zero"));
                     }
-                    Ok(Value::Int(a / b))
+                    Ok(Value::int(a / b, &mut self.gc))
                 }
                 OpCode::Mod => {
                     if *b == 0 {
                         return Err(VMError::new("modulo by zero"));
                     }
-                    Ok(Value::Int(a % b))
+                    Ok(Value::int(a % b, &mut self.gc))
                 }
                 _ => Err(VMError::new("invalid operation")),
             },
             (Value::Float(a), Value::Float(b)) => match op {
-                OpCode::Add => Ok(Value::Float(a + b)),
-                OpCode::Sub => Ok(Value::Float(a - b)),
-                OpCode::Mul => Ok(Value::Float(a * b)),
-                OpCode::Div => Ok(Value::Float(a / b)),
-                OpCode::Mod => Ok(Value::Float(a % b)),
+                OpCode::Add => Ok(Value::float(a + b)),
+                OpCode::Sub => Ok(Value::float(a - b)),
+                OpCode::Mul => Ok(Value::float(a * b)),
+                OpCode::Div => Ok(Value::float(a / b)),
+                OpCode::Mod => Ok(Value::float(a % b)),
                 _ => Err(VMError::new("invalid operation")),
             },
-            (Value::Int(a), Value::Float(_b)) => self.arith_op(&Value::Float(*a as f64), right, op),
-            (Value::Float(_a), Value::Int(b)) => self.arith_op(left, &Value::Float(*b as f64), op),
+            (Value::Int(a), Value::Float(_b)) => self.arith_op(&Value::float(*a as f64), right, op),
+            (Value::Float(_a), Value::Int(b)) => self.arith_op(left, &Value::float(*b as f64), op),
             // String concatenation
             (Value::Obj(_), _) | (_, Value::Obj(_)) if op == OpCode::Add => {
                 let ls = left.display(&self.gc);
                 let rs = right.display(&self.gc);
                 let r = self.gc.alloc_string(format!("{}{}", ls, rs));
-                Ok(Value::Obj(r))
+                Ok(Value::obj(r))
             }
             _ => Err(VMError::new(&format!(
                 "cannot apply {:?} to {} and {}",
@@ -2471,7 +2472,7 @@ impl VM {
                     OpCode::GtEq => a >= b,
                     _ => false,
                 };
-                Ok(Value::Bool(result))
+                Ok(Value::bool_val(result))
             }
             (Value::Float(a), Value::Float(b)) => {
                 let result = match op {
@@ -2481,13 +2482,13 @@ impl VM {
                     OpCode::GtEq => a >= b,
                     _ => false,
                 };
-                Ok(Value::Bool(result))
+                Ok(Value::bool_val(result))
             }
             (Value::Int(a), Value::Float(_b)) => {
-                self.compare_op(&Value::Float(*a as f64), right, op)
+                self.compare_op(&Value::float(*a as f64), right, op)
             }
             (Value::Float(_a), Value::Int(b)) => {
-                self.compare_op(left, &Value::Float(*b as f64), op)
+                self.compare_op(left, &Value::float(*b as f64), op)
             }
             _ => Err(VMError::new("cannot compare non-numbers")),
         }
