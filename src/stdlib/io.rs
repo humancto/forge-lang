@@ -112,15 +112,15 @@ pub fn call_vm(
             std::io::stdin()
                 .read_line(&mut input)
                 .map_err(|e| format!("{}", e))?;
-            Ok(V::Null) // VM needs GC to alloc string; caller handles
+            Ok(V::null()) // VM needs GC to alloc string; caller handles
         }
         "io.print" => {
             let text: Vec<String> = args.iter().map(|v| v.display(gc)).collect();
             print!("{}", text.join(" "));
-            Ok(V::Null)
+            Ok(V::null())
         }
         "io.args" => {
-            Ok(V::Null) // Would need GC to alloc array
+            Ok(V::null()) // Would need GC to alloc array
         }
         _ => Err(format!("unknown io function: {}", name)),
     }

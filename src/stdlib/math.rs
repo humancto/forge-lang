@@ -171,122 +171,183 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 pub fn call_vm(
     name: &str,
     args: &[crate::vm::value::Value],
-    _gc: &crate::vm::gc::Gc,
+    gc: &crate::vm::gc::Gc,
 ) -> Result<crate::vm::value::Value, String> {
-    use crate::vm::value::Value as V;
+    use crate::vm::value::{Value as V, ValueKind as VK};
+
+    // Helper to extract a number from a VM value
+    let as_num = |v: &V| -> Option<(Option<i64>, Option<f64>)> {
+        match v.classify(gc) {
+            VK::Int(n) => Some((Some(n), None)),
+            VK::Float(f) => Some((None, Some(f))),
+            _ => None,
+        }
+    };
+
+    let as_f64 = |v: &V| -> Option<f64> {
+        match v.classify(gc) {
+            VK::Int(n) => Some(n as f64),
+            VK::Float(f) => Some(f),
+            _ => None,
+        }
+    };
+
     match name {
-        "math.sqrt" => match args.first() {
-            Some(V::Float(n)) => Ok(V::Float(n.sqrt())),
-            Some(V::Int(n)) => Ok(V::Float((*n as f64).sqrt())),
-            _ => Err("math.sqrt() requires a number".to_string()),
-        },
-        "math.pow" => match (args.first(), args.get(1)) {
-            (Some(V::Int(b)), Some(V::Int(e))) => {
-                if *e < 0 {
-                    Ok(V::Float((*b as f64).powf(*e as f64)))
-                } else {
-                    match (*e).try_into() {
-                        Ok(exp) => Ok(V::Int(b.pow(exp))),
-                        Err(_) => Ok(V::Float((*b as f64).powf(*e as f64))),
+        "math.sqrt" => {
+            let f = as_f64(args.first().ok_or("math.sqrt() requires a number")?)
+                .ok_or("math.sqrt() requires a number".to_string())?;
+            Ok(V::float(f.sqrt()))
+        }
+        "math.pow" => {
+            let (b, e) = (args.first(), args.get(1));
+            let (Some(b), Some(e)) = (b, e) else {
+                return Err("math.pow() requires two numbers".to_string());
+            };
+            let (bn, en) = (as_num(b), as_num(e));
+            match (bn, en) {
+                (Some((Some(bi), _)), Some((Some(ei), _))) => {
+                    if ei < 0 {
+                        Ok(V::float((bi as f64).powf(ei as f64)))
+                    } else {
+                        match ei.try_into() {
+                            Ok(exp) => Ok(V::small_int(bi.pow(exp))),
+                            Err(_) => Ok(V::float((bi as f64).powf(ei as f64))),
+                        }
                     }
                 }
+                _ => {
+                    let bf = as_f64(b).ok_or("math.pow() requires two numbers".to_string())?;
+                    let ef = as_f64(e).ok_or("math.pow() requires two numbers".to_string())?;
+                    Ok(V::float(bf.powf(ef)))
+                }
             }
-            (Some(V::Float(b)), Some(V::Float(e))) => Ok(V::Float(b.powf(*e))),
-            (Some(V::Int(b)), Some(V::Float(e))) => Ok(V::Float((*b as f64).powf(*e))),
-            (Some(V::Float(b)), Some(V::Int(e))) => Ok(V::Float(b.powf(*e as f64))),
-            _ => Err("math.pow() requires two numbers".to_string()),
-        },
-        "math.abs" => match args.first() {
-            Some(V::Int(n)) => Ok(V::Int(n.abs())),
-            Some(V::Float(n)) => Ok(V::Float(n.abs())),
-            _ => Err("math.abs() requires a number".to_string()),
-        },
-        "math.max" => match (args.first(), args.get(1)) {
-            (Some(V::Int(a)), Some(V::Int(b))) => Ok(V::Int(*a.max(b))),
-            (Some(V::Float(a)), Some(V::Float(b))) => Ok(V::Float(a.max(*b))),
-            _ => Err("math.max() requires two numbers".to_string()),
-        },
-        "math.min" => match (args.first(), args.get(1)) {
-            (Some(V::Int(a)), Some(V::Int(b))) => Ok(V::Int(*a.min(b))),
-            (Some(V::Float(a)), Some(V::Float(b))) => Ok(V::Float(a.min(*b))),
-            _ => Err("math.min() requires two numbers".to_string()),
-        },
-        "math.floor" => match args.first() {
-            Some(V::Float(n)) => Ok(V::Int(n.floor() as i64)),
-            Some(V::Int(n)) => Ok(V::Int(*n)),
-            _ => Err("math.floor() requires a number".to_string()),
-        },
-        "math.ceil" => match args.first() {
-            Some(V::Float(n)) => Ok(V::Int(n.ceil() as i64)),
-            Some(V::Int(n)) => Ok(V::Int(*n)),
-            _ => Err("math.ceil() requires a number".to_string()),
-        },
-        "math.round" => match args.first() {
-            Some(V::Float(n)) => Ok(V::Int(n.round() as i64)),
-            Some(V::Int(n)) => Ok(V::Int(*n)),
-            _ => Err("math.round() requires a number".to_string()),
-        },
+        }
+        "math.abs" => {
+            let v = args.first().ok_or("math.abs() requires a number")?;
+            match v.classify(gc) {
+                VK::Int(n) => Ok(V::small_int(n.abs())),
+                VK::Float(f) => Ok(V::float(f.abs())),
+                _ => Err("math.abs() requires a number".to_string()),
+            }
+        }
+        "math.max" => {
+            let (Some(a), Some(b)) = (args.first(), args.get(1)) else {
+                return Err("math.max() requires two numbers".to_string());
+            };
+            match (a.classify(gc), b.classify(gc)) {
+                (VK::Int(a), VK::Int(b)) => Ok(V::small_int(a.max(b))),
+                _ => {
+                    let af = as_f64(a).ok_or("math.max() requires two numbers".to_string())?;
+                    let bf = as_f64(b).ok_or("math.max() requires two numbers".to_string())?;
+                    Ok(V::float(af.max(bf)))
+                }
+            }
+        }
+        "math.min" => {
+            let (Some(a), Some(b)) = (args.first(), args.get(1)) else {
+                return Err("math.min() requires two numbers".to_string());
+            };
+            match (a.classify(gc), b.classify(gc)) {
+                (VK::Int(a), VK::Int(b)) => Ok(V::small_int(a.min(b))),
+                _ => {
+                    let af = as_f64(a).ok_or("math.min() requires two numbers".to_string())?;
+                    let bf = as_f64(b).ok_or("math.min() requires two numbers".to_string())?;
+                    Ok(V::float(af.min(bf)))
+                }
+            }
+        }
+        "math.floor" => {
+            let v = args.first().ok_or("math.floor() requires a number")?;
+            match v.classify(gc) {
+                VK::Float(n) => Ok(V::small_int(n.floor() as i64)),
+                VK::Int(n) => Ok(V::small_int(n)),
+                _ => Err("math.floor() requires a number".to_string()),
+            }
+        }
+        "math.ceil" => {
+            let v = args.first().ok_or("math.ceil() requires a number")?;
+            match v.classify(gc) {
+                VK::Float(n) => Ok(V::small_int(n.ceil() as i64)),
+                VK::Int(n) => Ok(V::small_int(n)),
+                _ => Err("math.ceil() requires a number".to_string()),
+            }
+        }
+        "math.round" => {
+            let v = args.first().ok_or("math.round() requires a number")?;
+            match v.classify(gc) {
+                VK::Float(n) => Ok(V::small_int(n.round() as i64)),
+                VK::Int(n) => Ok(V::small_int(n)),
+                _ => Err("math.round() requires a number".to_string()),
+            }
+        }
         "math.random" => {
             let r = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_nanos() as f64
                 / 1_000_000_000.0;
-            Ok(V::Float(r))
+            Ok(V::float(r))
         }
-        "math.sin" => match args.first() {
-            Some(V::Float(n)) => Ok(V::Float(n.sin())),
-            Some(V::Int(n)) => Ok(V::Float((*n as f64).sin())),
-            _ => Err("math.sin() requires a number".to_string()),
-        },
-        "math.cos" => match args.first() {
-            Some(V::Float(n)) => Ok(V::Float(n.cos())),
-            Some(V::Int(n)) => Ok(V::Float((*n as f64).cos())),
-            _ => Err("math.cos() requires a number".to_string()),
-        },
-        "math.tan" => match args.first() {
-            Some(V::Float(n)) => Ok(V::Float(n.tan())),
-            Some(V::Int(n)) => Ok(V::Float((*n as f64).tan())),
-            _ => Err("math.tan() requires a number".to_string()),
-        },
-        "math.log" => match args.first() {
-            Some(V::Float(n)) => Ok(V::Float(n.ln())),
-            Some(V::Int(n)) => Ok(V::Float((*n as f64).ln())),
-            _ => Err("math.log() requires a number".to_string()),
-        },
-        "math.random_int" => match (args.first(), args.get(1)) {
-            (Some(V::Int(min)), Some(V::Int(max))) => {
-                if min > max {
-                    return Err(format!(
-                        "math.random_int() requires min <= max, got {} > {}",
-                        min, max
-                    ));
+        "math.sin" => {
+            let f = as_f64(args.first().ok_or("math.sin() requires a number")?)
+                .ok_or("math.sin() requires a number".to_string())?;
+            Ok(V::float(f.sin()))
+        }
+        "math.cos" => {
+            let f = as_f64(args.first().ok_or("math.cos() requires a number")?)
+                .ok_or("math.cos() requires a number".to_string())?;
+            Ok(V::float(f.cos()))
+        }
+        "math.tan" => {
+            let f = as_f64(args.first().ok_or("math.tan() requires a number")?)
+                .ok_or("math.tan() requires a number".to_string())?;
+            Ok(V::float(f.tan()))
+        }
+        "math.log" => {
+            let f = as_f64(args.first().ok_or("math.log() requires a number")?)
+                .ok_or("math.log() requires a number".to_string())?;
+            Ok(V::float(f.ln()))
+        }
+        "math.random_int" => {
+            let (Some(a), Some(b)) = (args.first(), args.get(1)) else {
+                return Err("math.random_int() requires two integers (min, max)".to_string());
+            };
+            let (Some(min), Some(max)) = (a.as_int(gc), b.as_int(gc)) else {
+                return Err("math.random_int() requires two integers (min, max)".to_string());
+            };
+            if min > max {
+                return Err(format!(
+                    "math.random_int() requires min <= max, got {} > {}",
+                    min, max
+                ));
+            }
+            use std::time::SystemTime;
+            let nanos = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as i64;
+            let range = max - min + 1;
+            Ok(V::small_int(min + (nanos.abs() % range)))
+        }
+        "math.clamp" => {
+            let (Some(v), Some(lo), Some(hi)) = (args.first(), args.get(1), args.get(2)) else {
+                return Err("math.clamp() requires (value, min, max) numbers".to_string());
+            };
+            match (v.classify(gc), lo.classify(gc), hi.classify(gc)) {
+                (VK::Int(val), VK::Int(min), VK::Int(max)) => {
+                    Ok(V::small_int(val.max(min).min(max)))
                 }
-                use std::time::SystemTime;
-                let nanos = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos() as i64;
-                let range = max - min + 1;
-                Ok(V::Int(min + (nanos.abs() % range)))
+                _ => {
+                    let vf = as_f64(v)
+                        .ok_or("math.clamp() requires (value, min, max) numbers".to_string())?;
+                    let lf = as_f64(lo)
+                        .ok_or("math.clamp() requires (value, min, max) numbers".to_string())?;
+                    let hf = as_f64(hi)
+                        .ok_or("math.clamp() requires (value, min, max) numbers".to_string())?;
+                    Ok(V::float(vf.max(lf).min(hf)))
+                }
             }
-            _ => Err("math.random_int() requires two integers (min, max)".to_string()),
-        },
-        "math.clamp" => match (args.first(), args.get(1), args.get(2)) {
-            (Some(V::Int(val)), Some(V::Int(min)), Some(V::Int(max))) => {
-                Ok(V::Int((*val).max(*min).min(*max)))
-            }
-            (Some(V::Float(val)), Some(V::Float(min)), Some(V::Float(max))) => {
-                Ok(V::Float(val.max(*min).min(*max)))
-            }
-            (Some(V::Int(val)), Some(V::Float(min)), Some(V::Float(max))) => {
-                Ok(V::Float((*val as f64).max(*min).min(*max)))
-            }
-            (Some(V::Float(val)), Some(V::Int(min)), Some(V::Int(max))) => {
-                Ok(V::Float(val.max(*min as f64).min(*max as f64)))
-            }
-            _ => Err("math.clamp() requires (value, min, max) numbers".to_string()),
-        },
+        }
         _ => Err(format!("unknown math function: {}", name)),
     }
 }

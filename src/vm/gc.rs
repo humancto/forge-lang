@@ -128,16 +128,7 @@ impl Gc {
     /// Collect all GcRefs from a set of values.
     #[allow(dead_code)]
     pub fn roots_from_values(values: &[Value]) -> Vec<GcRef> {
-        values
-            .iter()
-            .filter_map(|v| {
-                if let Value::Obj(r) = v {
-                    Some(*r)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        values.iter().filter_map(|v| v.as_obj()).collect()
     }
 
     /// Number of entries in the intern table (for testing).
