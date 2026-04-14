@@ -96,8 +96,8 @@ impl VM {
                 }
                 let type_name = self.get_string_arg(&args, 0)?;
                 let method_name = self.get_string_arg(&args, 1)?;
-                let has_receiver = match args[2] {
-                    Value::Bool(flag) => flag,
+                let has_receiver = match args[2].as_bool() {
+                    Some(flag) => flag,
                     _ => {
                         return Err(VMError::new(
                             "__forge_register_method() third argument must be Bool",
@@ -182,19 +182,20 @@ impl VM {
                 if args.len() != 1 {
                     return Err(VMError::new("__forge_retry_count() requires (count)"));
                 }
-                match args[0] {
-                    Value::Int(n) => Ok(Value::small_int(n.max(0))),
-                    _ => Ok(Value::small_int(3)),
+                if let Some(n) = args[0].as_int(&self.gc) {
+                    Ok(Value::small_int(n.max(0)))
+                } else {
+                    Ok(Value::small_int(3))
                 }
             }
             "__forge_retry_wait" => {
                 if args.len() != 1 {
                     return Err(VMError::new("__forge_retry_wait() requires (attempt)"));
                 }
-                let attempt = match args[0] {
-                    Value::Int(n) => n.max(0) as u64,
-                    _ => 0,
-                };
+                let attempt = args[0]
+                    .as_int(&self.gc)
+                    .map(|n| n.max(0) as u64)
+                    .unwrap_or(0);
                 if attempt > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
                 }
@@ -206,21 +207,21 @@ impl VM {
                         "__forge_retry_failed() requires (count, last_error)",
                     ));
                 }
-                let count = match args[0] {
-                    Value::Int(n) => n.max(0),
+                let count = match args[0].classify(&self.gc) {
+                    ValueKind::Int(n) => n.max(0),
                     _ => 0,
                 };
-                let last_error = match &args[1] {
-                    Value::Obj(r) => self
+                let last_error = match args[1].classify(&self.gc) {
+                    ValueKind::Obj(r) => self
                         .gc
-                        .get(*r)
+                        .get(r)
                         .and_then(|obj| match &obj.kind {
                             ObjKind::Object(map) => map.get("message").cloned(),
                             _ => None,
                         })
                         .map(|value| value.display(&self.gc))
                         .unwrap_or_default(),
-                    value => value.display(&self.gc),
+                    _ => args[1].display(&self.gc),
                 };
                 Err(VMError::new(&format!(
                     "retry failed after {} attempts: {}",
@@ -278,9 +279,9 @@ impl VM {
                 }
                 let items =
                     self.array_items(&args[0], "__forge_pipe_take() first arg must be array")?;
-                let count = match args[1] {
-                    Value::Int(n) => n.max(0) as usize,
-                    Value::Float(n) => n.max(0.0) as usize,
+                let count = match args[1].classify(&self.gc) {
+                    ValueKind::Int(n) => n.max(0) as usize,
+                    ValueKind::Float(n) => n.max(0.0) as usize,
                     _ => 10,
                 };
                 let r = self
@@ -292,17 +293,17 @@ impl VM {
                 if args.len() != 1 {
                     return Err(VMError::new("__forge_raise_error() requires (error)"));
                 }
-                let message = match &args[0] {
-                    Value::Obj(r) => self
+                let message = match args[0].classify(&self.gc) {
+                    ValueKind::Obj(r) => self
                         .gc
-                        .get(*r)
+                        .get(r)
                         .and_then(|obj| match &obj.kind {
                             ObjKind::Object(map) => map.get("message").cloned(),
                             _ => None,
                         })
                         .map(|value| value.display(&self.gc))
                         .unwrap_or_else(|| args[0].display(&self.gc)),
-                    value => value.display(&self.gc),
+                    _ => args[0].display(&self.gc),
                 };
                 Err(VMError::new(&message))
             }
@@ -313,10 +314,10 @@ impl VM {
                     ));
                 }
 
-                let requested_names = match args.get(1) {
-                    Some(Value::Obj(r)) => self
+                let requested_names = match args.get(1).map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Obj(r)) => self
                         .gc
-                        .get(*r)
+                        .get(r)
                         .and_then(|obj| match &obj.kind {
                             ObjKind::Array(items) => Some(
                                 items.iter()
@@ -330,7 +331,7 @@ impl VM {
                                 "__forge_import_module() second argument must be an array of strings",
                             )
                         })?,
-                    Some(Value::Null) | None => Vec::new(),
+                    Some(ValueKind::Null) | None => Vec::new(),
                     Some(_) => {
                         return Err(VMError::new(
                             "__forge_import_module() second argument must be an array of strings",
@@ -412,14 +413,15 @@ impl VM {
             }
             "len" => match args.first() {
                 Some(v) => {
-                    let len = match v {
-                        Value::Obj(r) => self.gc.get(*r).map_or(0, |o| match &o.kind {
+                    let len = if let Some(r) = v.as_obj() {
+                        self.gc.get(r).map_or(0, |o| match &o.kind {
                             ObjKind::String(s) => s.chars().count() as i64,
                             ObjKind::Array(a) => a.len() as i64,
                             ObjKind::Object(o) => o.len() as i64,
                             _ => 0,
-                        }),
-                        _ => 0,
+                        })
+                    } else {
+                        0
                     };
                     Ok(Value::small_int(len))
                 }
@@ -439,13 +441,13 @@ impl VM {
                     .unwrap_or_default();
                 Ok(self.alloc_string(&s))
             }
-            "int" => match args.first() {
-                Some(Value::Int(n)) => Ok(Value::int(*n, &mut self.gc)),
-                Some(Value::Float(n)) => Ok(Value::int(*n as i64, &mut self.gc)),
+            "int" => match args.first().map(|v| v.classify(&self.gc)) {
+                Some(ValueKind::Int(n)) => Ok(Value::int(n, &mut self.gc)),
+                Some(ValueKind::Float(n)) => Ok(Value::int(n as i64, &mut self.gc)),
                 // Parity with interpreter: bool → 0/1
-                Some(Value::Bool(b)) => Ok(Value::small_int(if *b { 1 } else { 0 })),
-                Some(Value::Obj(r)) => {
-                    let s_owned = self.gc.get(*r).and_then(|obj| match &obj.kind {
+                Some(ValueKind::Bool(b)) => Ok(Value::small_int(if b { 1 } else { 0 })),
+                Some(ValueKind::Obj(r)) => {
+                    let s_owned = self.gc.get(r).and_then(|obj| match &obj.kind {
                         ObjKind::String(s) => Some(s.clone()),
                         _ => None,
                     });
@@ -459,12 +461,12 @@ impl VM {
                 }
                 _ => Err(VMError::new("int() requires number, bool, or string")),
             },
-            "float" => match args.first() {
-                Some(Value::Int(n)) => Ok(Value::float(*n as f64)),
-                Some(Value::Float(n)) => Ok(Value::float(*n)),
+            "float" => match args.first().map(|v| v.classify(&self.gc)) {
+                Some(ValueKind::Int(n)) => Ok(Value::float(n as f64)),
+                Some(ValueKind::Float(n)) => Ok(Value::float(n)),
                 // Parity with interpreter: parse string to float
-                Some(Value::Obj(r)) => {
-                    if let Some(obj) = self.gc.get(*r) {
+                Some(ValueKind::Obj(r)) => {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::String(s) = &obj.kind {
                             return s.parse::<f64>().map(Value::float).map_err(|_| {
                                 VMError::new(&format!("cannot convert '{}' to Float", s))
@@ -475,14 +477,17 @@ impl VM {
                 }
                 _ => Err(VMError::new("float() requires a number or numeric string")),
             },
-            "range" => match (args.first(), args.get(1)) {
-                (Some(Value::Int(start)), Some(Value::Int(end))) => {
-                    let items: Vec<Value> = (*start..*end).map(Value::Int).collect();
+            "range" => match (
+                args.first().and_then(|v| v.as_int(&self.gc)),
+                args.get(1).and_then(|v| v.as_int(&self.gc)),
+            ) {
+                (Some(start), Some(end)) => {
+                    let items: Vec<Value> = (start..end).map(Value::small_int).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
-                (Some(Value::Int(end_val)), None) => {
-                    let items: Vec<Value> = (0..*end_val).map(Value::Int).collect();
+                (Some(end_val), None) => {
+                    let items: Vec<Value> = (0..end_val).map(Value::small_int).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
@@ -492,8 +497,8 @@ impl VM {
                 if args.len() != 2 {
                     return Err(VMError::new("push() requires array and value"));
                 }
-                if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(items) = &obj.kind {
                             let mut new_items = items.clone();
                             new_items.push(args[1].clone());
@@ -505,8 +510,8 @@ impl VM {
                 Err(VMError::new("push() requires an array"))
             }
             "pop" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(items) = &obj.kind {
                             let mut new_items = items.clone();
                             new_items.pop();
@@ -555,24 +560,24 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "is_ok" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultOk(_))));
                     }
                 }
                 Ok(Value::bool_val(false))
             }
             "is_err" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultErr(_))));
                     }
                 }
                 Ok(Value::bool_val(false))
             }
             "unwrap" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::ResultOk(v) = &obj.kind {
                             return Ok(v.clone());
                         }
@@ -590,8 +595,8 @@ impl VM {
                 if args.len() < 2 {
                     return Err(VMError::new("unwrap_or() requires 2 args"));
                 }
-                if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::ResultOk(v) = &obj.kind {
                             return Ok(v.clone());
                         }
@@ -644,8 +649,8 @@ impl VM {
                 if args.len() < 2 {
                     return Err(VMError::new("any() requires (array, function)"));
                 }
-                let items = if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                let items = if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -672,8 +677,8 @@ impl VM {
                 if args.len() < 2 {
                     return Err(VMError::new("all() requires (array, function)"));
                 }
-                let items = if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                let items = if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -697,8 +702,8 @@ impl VM {
                 Ok(Value::bool_val(true))
             }
             "unique" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    let items = if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    let items = if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -722,8 +727,8 @@ impl VM {
                 Err(VMError::new("unique() requires an array"))
             }
             "sum" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    let items = if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    let items = if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -736,12 +741,12 @@ impl VM {
                     let mut total_float: f64 = 0.0;
                     let mut is_float = false;
                     for item in &items {
-                        match item {
-                            Value::Int(n) => {
+                        match item.classify(&self.gc) {
+                            ValueKind::Int(n) => {
                                 total_int += n;
-                                total_float += *n as f64;
+                                total_float += n as f64;
                             }
-                            Value::Float(n) => {
+                            ValueKind::Float(n) => {
                                 total_float += n;
                                 is_float = true;
                             }
@@ -757,8 +762,8 @@ impl VM {
                 Err(VMError::new("sum() requires an array"))
             }
             "min_of" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    let items = if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    let items = if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -772,11 +777,11 @@ impl VM {
                     }
                     let mut min = items[0].clone();
                     for item in &items[1..] {
-                        let less = match (&min, item) {
-                            (Value::Int(a), Value::Int(b)) => b < a,
-                            (Value::Float(a), Value::Float(b)) => b < a,
-                            (Value::Int(a), Value::Float(b)) => b < &(*a as f64),
-                            (Value::Float(a), Value::Int(b)) => (*b as f64) < *a,
+                        let less = match (min.classify(&self.gc), item.classify(&self.gc)) {
+                            (ValueKind::Int(a), ValueKind::Int(b)) => b < a,
+                            (ValueKind::Float(a), ValueKind::Float(b)) => b < a,
+                            (ValueKind::Int(a), ValueKind::Float(b)) => b < (a as f64),
+                            (ValueKind::Float(a), ValueKind::Int(b)) => (b as f64) < a,
                             _ => false,
                         };
                         if less {
@@ -788,8 +793,8 @@ impl VM {
                 Err(VMError::new("min_of() requires an array"))
             }
             "max_of" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    let items = if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    let items = if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -803,11 +808,11 @@ impl VM {
                     }
                     let mut max = items[0].clone();
                     for item in &items[1..] {
-                        let greater = match (&max, item) {
-                            (Value::Int(a), Value::Int(b)) => b > a,
-                            (Value::Float(a), Value::Float(b)) => b > a,
-                            (Value::Int(a), Value::Float(b)) => b > &(*a as f64),
-                            (Value::Float(a), Value::Int(b)) => (*b as f64) > *a,
+                        let greater = match (max.classify(&self.gc), item.classify(&self.gc)) {
+                            (ValueKind::Int(a), ValueKind::Int(b)) => b > a,
+                            (ValueKind::Float(a), ValueKind::Float(b)) => b > a,
+                            (ValueKind::Int(a), ValueKind::Float(b)) => b > (a as f64),
+                            (ValueKind::Float(a), ValueKind::Int(b)) => (b as f64) > a,
                             _ => false,
                         };
                         if greater {
@@ -822,8 +827,8 @@ impl VM {
                 if args.len() != 2 {
                     return Err(VMError::new("map() requires (array, function)"));
                 }
-                let items = if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                let items = if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -847,8 +852,8 @@ impl VM {
                 if args.len() != 2 {
                     return Err(VMError::new("filter() requires (array, function)"));
                 }
-                let items = if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                let items = if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -875,8 +880,8 @@ impl VM {
                 if args.len() != 3 {
                     return Err(VMError::new("reduce() requires (array, initial, function)"));
                 }
-                let items = if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                let items = if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -896,8 +901,8 @@ impl VM {
                 Ok(acc)
             }
             "sort" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    let items_clone = if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    let items_clone = if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             Some(a.clone())
                         } else {
@@ -916,16 +921,18 @@ impl VM {
                                     return std::cmp::Ordering::Equal;
                                 }
                                 match self.call_value(func.clone(), vec![a.clone(), b.clone()]) {
-                                    Ok(Value::Int(n)) => {
-                                        if n < 0 {
-                                            std::cmp::Ordering::Less
-                                        } else if n > 0 {
-                                            std::cmp::Ordering::Greater
-                                        } else {
-                                            std::cmp::Ordering::Equal
+                                    Ok(ref v) => match v.as_int(&self.gc) {
+                                        Some(n) => {
+                                            if n < 0 {
+                                                std::cmp::Ordering::Less
+                                            } else if n > 0 {
+                                                std::cmp::Ordering::Greater
+                                            } else {
+                                                std::cmp::Ordering::Equal
+                                            }
                                         }
-                                    }
-                                    Ok(_) => std::cmp::Ordering::Equal,
+                                        None => std::cmp::Ordering::Equal,
+                                    },
                                     Err(e) => {
                                         err = Some(e);
                                         std::cmp::Ordering::Equal
@@ -940,14 +947,14 @@ impl VM {
                         }
                         // Default sort: ints, floats, strings
                         let mut sorted = items;
-                        sorted.sort_by(|a, b| match (a, b) {
-                            (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                            (Value::Float(x), Value::Float(y)) => {
-                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                        sorted.sort_by(|a, b| match (a.classify(&self.gc), b.classify(&self.gc)) {
+                            (ValueKind::Int(x), ValueKind::Int(y)) => x.cmp(&y),
+                            (ValueKind::Float(x), ValueKind::Float(y)) => {
+                                x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
                             }
-                            (Value::Obj(rx), Value::Obj(ry)) => {
-                                let sx = self.get_string(&Value::obj(*rx)).unwrap_or_default();
-                                let sy = self.get_string(&Value::obj(*ry)).unwrap_or_default();
+                            (ValueKind::Obj(rx), ValueKind::Obj(ry)) => {
+                                let sx = self.get_string(&Value::obj(rx)).unwrap_or_default();
+                                let sy = self.get_string(&Value::obj(ry)).unwrap_or_default();
                                 sx.cmp(&sy)
                             }
                             _ => std::cmp::Ordering::Equal,
@@ -959,8 +966,8 @@ impl VM {
                 Err(VMError::new("sort() requires an array"))
             }
             "reverse" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(items) = &obj.kind {
                             let mut rev = items.clone();
                             rev.reverse();
@@ -971,9 +978,9 @@ impl VM {
                 }
                 Err(VMError::new("reverse() requires an array"))
             }
-            "contains" => match (args.first(), args.get(1)) {
-                (Some(Value::Obj(r)), Some(val)) => {
-                    if let Some(obj) = self.gc.get(*r) {
+            "contains" => match (args.first().and_then(|v| v.as_obj()), args.get(1)) {
+                (Some(r), Some(val)) => {
+                    if let Some(obj) = self.gc.get(r) {
                         match &obj.kind {
                             ObjKind::String(s) => {
                                 let sub = val.display(&self.gc);
@@ -993,8 +1000,8 @@ impl VM {
                 _ => Err(VMError::new("contains() requires (collection, value)")),
             },
             "keys" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
                             // Collect keys as owned Strings first to release gc borrow
                             let key_strings: Vec<String> = map.keys().cloned().collect();
@@ -1009,8 +1016,8 @@ impl VM {
                 Err(VMError::new("keys() requires an object"))
             }
             "values" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
                             let vals: Vec<Value> = map.values().cloned().collect();
                             let nr = self.gc.alloc(ObjKind::Array(vals));
@@ -1021,8 +1028,8 @@ impl VM {
                 Err(VMError::new("values() requires an object"))
             }
             "enumerate" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    let items_clone: Option<Vec<Value>> = if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    let items_clone: Option<Vec<Value>> = if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(items) = &obj.kind {
                             Some(items.clone())
                         } else {
@@ -1047,9 +1054,12 @@ impl VM {
                 Err(VMError::new("enumerate() requires an array"))
             }
             "split" => {
-                if let (Some(Value::Obj(r1)), Some(Value::Obj(r2))) = (args.first(), args.get(1)) {
-                    let s = self.get_string(&Value::obj(*r1)).unwrap_or_default();
-                    let delim = self.get_string(&Value::obj(*r2)).unwrap_or_default();
+                if let (Some(r1), Some(r2)) = (
+                    args.first().and_then(|v| v.as_obj()),
+                    args.get(1).and_then(|v| v.as_obj()),
+                ) {
+                    let s = self.get_string(&Value::obj(r1)).unwrap_or_default();
+                    let delim = self.get_string(&Value::obj(r2)).unwrap_or_default();
                     // Parity with interpreter: empty delimiter splits into individual chars
                     let parts: Vec<Value> = if delim.is_empty() {
                         s.chars()
@@ -1064,8 +1074,8 @@ impl VM {
                 Err(VMError::new("split() requires (string, delimiter)"))
             }
             "join" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(items) = &obj.kind {
                             let sep = args.get(1).map(|v| v.display(&self.gc)).unwrap_or_default();
                             let parts: Vec<String> =
@@ -1101,14 +1111,14 @@ impl VM {
                 }
                 Err(VMError::new("ends_with() requires (string, suffix)"))
             }
-            "wait" => match args.first() {
-                Some(Value::Int(secs)) => {
+            "wait" => match args.first().map(|v| v.classify(&self.gc)) {
+                Some(ValueKind::Int(secs)) => {
                     self.sleep_with_timeout_checks(std::time::Duration::from_secs(
-                        (*secs).max(0) as u64
+                        secs.max(0) as u64
                     ))?;
                     Ok(Value::null())
                 }
-                Some(Value::Float(secs)) => {
+                Some(ValueKind::Float(secs)) => {
                     self.sleep_with_timeout_checks(std::time::Duration::from_secs_f64(
                         secs.max(0.0),
                     ))?;
@@ -1129,10 +1139,10 @@ impl VM {
                 }
             }
             "is_some" => {
-                match args.first() {
+                match args.first().map(|v| v.classify(&self.gc)) {
                     // Native Option encoding via ADT object
-                    Some(Value::Obj(r)) => {
-                        if let Some(obj) = self.gc.get(*r) {
+                    Some(ValueKind::Obj(r)) => {
+                        if let Some(obj) = self.gc.get(r) {
                             if let ObjKind::Object(map) = &obj.kind {
                                 // Check __type__ == "Option" and __variant__ == "Some"
                                 let is_option = map
@@ -1153,15 +1163,15 @@ impl VM {
                         }
                         Ok(Value::bool_val(true)) // non-null Obj is Some
                     }
-                    Some(Value::Null) => Ok(Value::bool_val(false)),
+                    Some(ValueKind::Null) => Ok(Value::bool_val(false)),
                     Some(_) => Ok(Value::bool_val(true)),
                     None => Err(VMError::new("is_some() requires an argument")),
                 }
             }
             "is_none" => {
-                match args.first() {
-                    Some(Value::Obj(r)) => {
-                        if let Some(obj) = self.gc.get(*r) {
+                match args.first().map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Obj(r)) => {
+                        if let Some(obj) = self.gc.get(r) {
                             if let ObjKind::Object(map) = &obj.kind {
                                 let is_option = map
                                     .get("__type__")
@@ -1180,7 +1190,7 @@ impl VM {
                         }
                         Ok(Value::bool_val(false)) // non-null Obj is Some
                     }
-                    Some(Value::Null) => Ok(Value::bool_val(true)),
+                    Some(ValueKind::Null) => Ok(Value::bool_val(true)),
                     Some(_) => Ok(Value::bool_val(false)),
                     None => Err(VMError::new("is_none() requires an argument")),
                 }
@@ -1239,16 +1249,16 @@ impl VM {
             n if n.starts_with("crypto.") => {
                 let str_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(obj) = self.gc.get(*r) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(obj) = self.gc.get(r) {
                                 if let ObjKind::String(s) = &obj.kind {
                                     return crate::interpreter::Value::String(s.clone());
                                 }
                             }
                             crate::interpreter::Value::Null
                         }
-                        Value::Int(n) => crate::interpreter::Value::Int(*n),
+                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
@@ -1262,16 +1272,16 @@ impl VM {
             n if n.starts_with("db.") => {
                 let str_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(obj) = self.gc.get(*r) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(obj) = self.gc.get(r) {
                                 if let ObjKind::String(s) = &obj.kind {
                                     return crate::interpreter::Value::String(s.clone());
                                 }
                             }
                             crate::interpreter::Value::Null
                         }
-                        Value::Int(n) => crate::interpreter::Value::Int(*n),
+                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
@@ -1340,9 +1350,9 @@ impl VM {
                     Err(VMError::new(&format!("invalid ADT constructor: {}", n)))
                 }
             }
-            "fetch" => match args.first() {
-                Some(Value::Obj(r)) => {
-                    let url = self.get_string(&Value::obj(*r)).unwrap_or_default();
+            "fetch" => match args.first().map(|v| v.classify(&self.gc)) {
+                Some(ValueKind::Obj(r)) => {
+                    let url = self.get_string(&Value::obj(r)).unwrap_or_default();
                     let method = "GET".to_string();
                     match crate::runtime::client::fetch_blocking(
                         &url, &method, None, None, None, None, None,
@@ -1354,8 +1364,8 @@ impl VM {
                 _ => Err(VMError::new("fetch() requires a URL string")),
             },
             "exit" => {
-                let code = match args.first() {
-                    Some(Value::Int(n)) => *n as i32,
+                let code = match args.first().map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(n)) => n as i32,
                     _ => 0,
                 };
                 std::process::exit(code);
@@ -1364,15 +1374,15 @@ impl VM {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
                             }
                         }
-                        Value::Int(n) => crate::interpreter::Value::Int(*n),
+                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
@@ -1383,9 +1393,9 @@ impl VM {
             n if n.starts_with("os.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1401,17 +1411,17 @@ impl VM {
             n if n.starts_with("path.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
                             }
                         }
-                        Value::Int(n) => crate::interpreter::Value::Int(*n),
-                        Value::Float(n) => crate::interpreter::Value::Float(*n),
-                        Value::Bool(b) => crate::interpreter::Value::Bool(*b),
+                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
+                        ValueKind::Float(n) => crate::interpreter::Value::Float(n),
+                        ValueKind::Bool(b) => crate::interpreter::Value::Bool(b),
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
@@ -1422,9 +1432,9 @@ impl VM {
             n if n.starts_with("env.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1440,17 +1450,17 @@ impl VM {
             n if n.starts_with("json.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
                             }
                         }
-                        Value::Int(n) => crate::interpreter::Value::Int(*n),
-                        Value::Float(n) => crate::interpreter::Value::Float(*n),
-                        Value::Bool(b) => crate::interpreter::Value::Bool(*b),
+                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
+                        ValueKind::Float(n) => crate::interpreter::Value::Float(n),
+                        ValueKind::Bool(b) => crate::interpreter::Value::Bool(b),
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
@@ -1461,9 +1471,9 @@ impl VM {
             n if n.starts_with("regex.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
@@ -1479,15 +1489,15 @@ impl VM {
             n if n.starts_with("log.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
                             }
                         }
-                        Value::Int(n) => crate::interpreter::Value::Int(*n),
+                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
@@ -1497,11 +1507,11 @@ impl VM {
             n if n.starts_with("http.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
-                            } else if let Some(obj) = self.gc.get(*r) {
+                            } else if let Some(obj) = self.gc.get(r) {
                                 if let ObjKind::Object(map) = &obj.kind {
                                     let mut im = indexmap::IndexMap::new();
                                     for (k, val) in map {
@@ -1515,9 +1525,9 @@ impl VM {
                                 crate::interpreter::Value::Null
                             }
                         }
-                        Value::Int(n) => crate::interpreter::Value::Int(*n),
-                        Value::Float(n) => crate::interpreter::Value::Float(*n),
-                        Value::Bool(b) => crate::interpreter::Value::Bool(*b),
+                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
+                        ValueKind::Float(n) => crate::interpreter::Value::Float(n),
+                        ValueKind::Bool(b) => crate::interpreter::Value::Bool(b),
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
@@ -1528,15 +1538,15 @@ impl VM {
             n if n.starts_with("term.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(*r)) {
+                    .map(|v| match v.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(s) = self.get_string(&Value::obj(r)) {
                                 crate::interpreter::Value::String(s)
                             } else {
                                 crate::interpreter::Value::Null
                             }
                         }
-                        Value::Int(n) => crate::interpreter::Value::Int(*n),
+                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
@@ -1755,9 +1765,11 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "has_key" => {
-                if let (Some(Value::Obj(r)), Some(key_val)) = (args.first(), args.get(1)) {
+                if let (Some(r), Some(key_val)) =
+                    (args.first().and_then(|v| v.as_obj()), args.get(1))
+                {
                     let key = self.get_string(key_val).unwrap_or_default();
-                    if let Some(obj) = self.gc.get(*r) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
                             return Ok(Value::bool_val(map.contains_key(&key)));
                         }
@@ -1766,10 +1778,12 @@ impl VM {
                 Ok(Value::bool_val(false))
             }
             "get" => {
-                if let (Some(Value::Obj(r)), Some(key_val)) = (args.first(), args.get(1)) {
+                if let (Some(r), Some(key_val)) =
+                    (args.first().and_then(|v| v.as_obj()), args.get(1))
+                {
                     let key = self.get_string(key_val).unwrap_or_default();
                     let default = args.get(2).cloned().unwrap_or(Value::null());
-                    if let Some(obj) = self.gc.get(*r) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
                             if key.contains('.') {
                                 let parts: Vec<&str> = key.split('.').collect();
@@ -1779,8 +1793,8 @@ impl VM {
                                         if i == parts.len() - 1 {
                                             return Ok(val.clone());
                                         }
-                                        if let Value::Obj(inner_r) = val {
-                                            if let Some(inner_obj) = self.gc.get(*inner_r) {
+                                        if let Some(inner_r) = val.as_obj() {
+                                            if let Some(inner_obj) = self.gc.get(inner_r) {
                                                 if let ObjKind::Object(inner_map) = &inner_obj.kind
                                                 {
                                                     current_map = inner_map.clone();
@@ -1803,10 +1817,12 @@ impl VM {
                 }
             }
             "pick" => {
-                if let (Some(Value::Obj(r)), Some(Value::Obj(keys_r))) = (args.first(), args.get(1))
-                {
+                if let (Some(r), Some(keys_r)) = (
+                    args.first().and_then(|v| v.as_obj()),
+                    args.get(1).and_then(|v| v.as_obj()),
+                ) {
                     let mut result = IndexMap::new();
-                    let field_names: Vec<String> = if let Some(obj) = self.gc.get(*keys_r) {
+                    let field_names: Vec<String> = if let Some(obj) = self.gc.get(keys_r) {
                         if let ObjKind::Array(items) = &obj.kind {
                             items.iter().filter_map(|v| self.get_string(v)).collect()
                         } else {
@@ -1815,7 +1831,7 @@ impl VM {
                     } else {
                         vec![]
                     };
-                    if let Some(obj) = self.gc.get(*r) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
                             for name in &field_names {
                                 if let Some(val) = map.get(name) {
@@ -1831,9 +1847,11 @@ impl VM {
                 }
             }
             "omit" => {
-                if let (Some(Value::Obj(r)), Some(Value::Obj(keys_r))) = (args.first(), args.get(1))
-                {
-                    let omit_names: Vec<String> = if let Some(obj) = self.gc.get(*keys_r) {
+                if let (Some(r), Some(keys_r)) = (
+                    args.first().and_then(|v| v.as_obj()),
+                    args.get(1).and_then(|v| v.as_obj()),
+                ) {
+                    let omit_names: Vec<String> = if let Some(obj) = self.gc.get(keys_r) {
                         if let ObjKind::Array(items) = &obj.kind {
                             items.iter().filter_map(|v| self.get_string(v)).collect()
                         } else {
@@ -1843,7 +1861,7 @@ impl VM {
                         vec![]
                     };
                     let mut result = IndexMap::new();
-                    if let Some(obj) = self.gc.get(*r) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
                             for (k, v) in map {
                                 if !omit_names.contains(k) {
@@ -1861,8 +1879,8 @@ impl VM {
             "merge" => {
                 let mut result = IndexMap::new();
                 for arg in &args {
-                    if let Value::Obj(r) = arg {
-                        if let Some(obj) = self.gc.get(*r) {
+                    if let Some(r) = arg.as_obj() {
+                        if let Some(obj) = self.gc.get(r) {
                             if let ObjKind::Object(map) = &obj.kind {
                                 for (k, v) in map {
                                     result.insert(k.clone(), v.clone());
@@ -1875,8 +1893,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "entries" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    let kv_pairs: Vec<(String, Value)> = if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    let kv_pairs: Vec<(String, Value)> = if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
                             map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                         } else {
@@ -1898,14 +1916,14 @@ impl VM {
                 Err(VMError::new("entries() requires an object"))
             }
             "from_entries" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(pairs) = &obj.kind {
                             let mut result = IndexMap::new();
                             let pairs_clone = pairs.clone();
                             for pair in &pairs_clone {
-                                if let Value::Obj(pr) = pair {
-                                    if let Some(pobj) = self.gc.get(*pr) {
+                                if let Some(pr) = pair.as_obj() {
+                                    if let Some(pobj) = self.gc.get(pr) {
                                         if let ObjKind::Array(kv) = &pobj.kind {
                                             if let (Some(k), Some(v)) = (kv.first(), kv.get(1)) {
                                                 if let Some(key) = self.get_string(k) {
@@ -1928,8 +1946,8 @@ impl VM {
                 if args.len() < 2 {
                     return Err(VMError::new("find() requires (array, function)"));
                 }
-                let items = if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                let items = if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -1955,8 +1973,8 @@ impl VM {
                 if args.len() < 2 {
                     return Err(VMError::new("flat_map() requires (array, function)"));
                 }
-                let items = if let Value::Obj(r) = &args[0] {
-                    if let Some(obj) = self.gc.get(*r) {
+                let items = if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(a) = &obj.kind {
                             a.clone()
                         } else {
@@ -1972,8 +1990,8 @@ impl VM {
                 let mut out = Vec::new();
                 for item in items {
                     let result = self.call_value(func.clone(), vec![item])?;
-                    match result {
-                        Value::Obj(r) => {
+                    match result.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
                             if let Some(obj) = self.gc.get(r) {
                                 if let ObjKind::Array(sub) = &obj.kind {
                                     out.extend(sub.clone());
@@ -1982,7 +2000,7 @@ impl VM {
                             }
                             out.push(Value::obj(r));
                         }
-                        other => out.push(other),
+                        _ => out.push(result),
                     }
                 }
                 let r = self.gc.alloc(ObjKind::Array(out));
@@ -2039,9 +2057,9 @@ impl VM {
                 )?;
                 let mut result = Vec::new();
                 for item in items {
-                    match &item {
-                        Value::Obj(r) => {
-                            if let Some(obj) = self.gc.get(*r) {
+                    match item.classify(&self.gc) {
+                        ValueKind::Obj(r) => {
+                            if let Some(obj) = self.gc.get(r) {
                                 if let ObjKind::Array(inner) = &obj.kind {
                                     result.extend(inner.clone());
                                     continue;
@@ -2049,7 +2067,7 @@ impl VM {
                             }
                             result.push(item);
                         }
-                        other => result.push(other.clone()),
+                        _ => result.push(item),
                     }
                 }
                 let r = self.gc.alloc(ObjKind::Array(result));
@@ -2060,8 +2078,8 @@ impl VM {
                     return Err(VMError::new("chunk() requires (array, size)"));
                 }
                 let items = self.array_items(&args[0], "chunk() first arg must be array")?;
-                let size = match args[1] {
-                    Value::Int(n) if n > 0 => n as usize,
+                let size = match args[1].classify(&self.gc) {
+                    ValueKind::Int(n) if n > 0 => n as usize,
                     _ => return Err(VMError::new("chunk() size must be positive")),
                 };
                 let chunks: Vec<Value> = items
@@ -2082,22 +2100,22 @@ impl VM {
                 if let Some(s) = self.get_string(first) {
                     let chars: Vec<char> = s.chars().collect();
                     let len = chars.len() as i64;
-                    let start = match args.get(1) {
-                        Some(Value::Int(n)) => {
-                            if *n < 0 {
-                                (len + *n).max(0) as usize
+                    let start = match args.get(1).map(|v| v.classify(&self.gc)) {
+                        Some(ValueKind::Int(n)) => {
+                            if n < 0 {
+                                (len + n).max(0) as usize
                             } else {
-                                *n as usize
+                                n as usize
                             }
                         }
                         _ => 0,
                     };
-                    let end = match args.get(2) {
-                        Some(Value::Int(n)) => {
-                            if *n < 0 {
-                                (len + *n).max(0) as usize
+                    let end = match args.get(2).map(|v| v.classify(&self.gc)) {
+                        Some(ValueKind::Int(n)) => {
+                            if n < 0 {
+                                (len + n).max(0) as usize
                             } else {
-                                (*n as usize).min(chars.len())
+                                (n as usize).min(chars.len())
                             }
                         }
                         _ => chars.len(),
@@ -2110,22 +2128,22 @@ impl VM {
                 // Array
                 let items = self.array_items(first, "slice() requires an array or string")?;
                 let len = items.len() as i64;
-                let start = match args.get(1) {
-                    Some(Value::Int(n)) => {
-                        if *n < 0 {
-                            (len + *n).max(0) as usize
+                let start = match args.get(1).map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(n)) => {
+                        if n < 0 {
+                            (len + n).max(0) as usize
                         } else {
-                            *n as usize
+                            n as usize
                         }
                     }
                     _ => 0,
                 };
-                let end = match args.get(2) {
-                    Some(Value::Int(n)) => {
-                        if *n < 0 {
-                            (len + *n).max(0) as usize
+                let end = match args.get(2).map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(n)) => {
+                        if n < 0 {
+                            (len + n).max(0) as usize
                         } else {
-                            (*n as usize).min(items.len())
+                            (n as usize).min(items.len())
                         }
                     }
                     _ => items.len(),
@@ -2145,7 +2163,7 @@ impl VM {
                 )?;
                 let filtered: Vec<Value> = items
                     .into_iter()
-                    .filter(|v| !matches!(v, Value::Null | Value::Bool(false)))
+                    .filter(|v| !v.is_null() && v.as_bool() != Some(false))
                     .collect();
                 let r = self.gc.alloc(ObjKind::Array(filtered));
                 Ok(Value::obj(r))
@@ -2206,21 +2224,23 @@ impl VM {
                     let key = self.call_value(key_fn.clone(), vec![item.clone()])?;
                     pairs.push((key, item));
                 }
-                pairs.sort_by(|(ka, _), (kb, _)| match (ka, kb) {
-                    (Value::Int(a), Value::Int(b)) => a.cmp(b),
-                    (Value::Float(a), Value::Float(b)) => {
-                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                    }
-                    (Value::Int(a), Value::Float(b)) => (*a as f64)
-                        .partial_cmp(b)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                    (Value::Float(a), Value::Int(b)) => a
-                        .partial_cmp(&(*b as f64))
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                    _ => {
-                        let sa = ka.display(&self.gc);
-                        let sb = kb.display(&self.gc);
-                        sa.cmp(&sb)
+                pairs.sort_by(|(ka, _), (kb, _)| {
+                    match (ka.classify(&self.gc), kb.classify(&self.gc)) {
+                        (ValueKind::Int(a), ValueKind::Int(b)) => a.cmp(&b),
+                        (ValueKind::Float(a), ValueKind::Float(b)) => {
+                            a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+                        }
+                        (ValueKind::Int(a), ValueKind::Float(b)) => (a as f64)
+                            .partial_cmp(&b)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                        (ValueKind::Float(a), ValueKind::Int(b)) => a
+                            .partial_cmp(&(b as f64))
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                        _ => {
+                            let sa = ka.display(&self.gc);
+                            let sb = kb.display(&self.gc);
+                            sa.cmp(&sb)
+                        }
                     }
                 });
                 let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
@@ -2243,8 +2263,8 @@ impl VM {
                     return Err(VMError::new("take_n() requires (array, count)"));
                 }
                 let items = self.array_items(&args[0], "take_n() first arg must be array")?;
-                let n = match args[1] {
-                    Value::Int(n) => (n.max(0) as usize).min(items.len()),
+                let n = match args[1].classify(&self.gc) {
+                    ValueKind::Int(n) => (n.max(0) as usize).min(items.len()),
                     _ => return Err(VMError::new("take_n() second arg must be int")),
                 };
                 let r = self.gc.alloc(ObjKind::Array(items[..n].to_vec()));
@@ -2255,8 +2275,8 @@ impl VM {
                     return Err(VMError::new("skip() requires (array, count)"));
                 }
                 let items = self.array_items(&args[0], "skip() first arg must be array")?;
-                let n = match args[1] {
-                    Value::Int(n) => (n.max(0) as usize).min(items.len()),
+                let n = match args[1].classify(&self.gc) {
+                    ValueKind::Int(n) => (n.max(0) as usize).min(items.len()),
                     _ => return Err(VMError::new("skip() second arg must be int")),
                 };
                 let r = self.gc.alloc(ObjKind::Array(items[n..].to_vec()));
@@ -2274,8 +2294,8 @@ impl VM {
                     let count = counts
                         .get(&key)
                         .and_then(|v| {
-                            if let Value::Int(n) = v {
-                                Some(*n)
+                            if let Some(n) = v.as_int(&self.gc) {
+                                Some(n)
                             } else {
                                 None
                             }
@@ -2290,13 +2310,13 @@ impl VM {
             // ===== String builtins =====
             "substring" => {
                 let s = self.get_string_arg(&args, 0)?;
-                let start = match args.get(1) {
-                    Some(Value::Int(n)) => *n as usize,
+                let start = match args.get(1).map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(n)) => n as usize,
                     _ => return Err(VMError::new("substring() requires (string, start, end?)")),
                 };
                 let chars: Vec<char> = s.chars().collect();
-                let end = match args.get(2) {
-                    Some(Value::Int(n)) => (*n as usize).min(chars.len()),
+                let end = match args.get(2).map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(n)) => (n as usize).min(chars.len()),
                     _ => chars.len(),
                 };
                 if start > chars.len() {
@@ -2379,8 +2399,8 @@ impl VM {
                     return Err(VMError::new("pad_start() requires (string, length)"));
                 }
                 let s = self.get_string_arg(&args, 0)?;
-                let target = match args[1] {
-                    Value::Int(n) => n as usize,
+                let target = match args[1].classify(&self.gc) {
+                    ValueKind::Int(n) => n as usize,
                     _ => return Err(VMError::new("pad_start() second arg must be int")),
                 };
                 let pad_char = match args.get(2) {
@@ -2405,8 +2425,8 @@ impl VM {
                     return Err(VMError::new("pad_end() requires (string, length)"));
                 }
                 let s = self.get_string_arg(&args, 0)?;
-                let target = match args[1] {
-                    Value::Int(n) => n as usize,
+                let target = match args[1].classify(&self.gc) {
+                    ValueKind::Int(n) => n as usize,
                     _ => return Err(VMError::new("pad_end() second arg must be int")),
                 };
                 let pad_char = match args.get(2) {
@@ -2431,9 +2451,9 @@ impl VM {
                     return Err(VMError::new("repeat_str() requires (string, count)"));
                 }
                 let s = self.get_string_arg(&args, 0)?;
-                let n = match args[1] {
-                    Value::Int(n) if n >= 0 => n as usize,
-                    Value::Int(_) => {
+                let n = match args[1].classify(&self.gc) {
+                    ValueKind::Int(n) if n >= 0 => n as usize,
+                    ValueKind::Int(_) => {
                         return Err(VMError::new("repeat_str() count must be non-negative"))
                     }
                     _ => return Err(VMError::new("repeat_str() second arg must be int")),
@@ -2519,8 +2539,8 @@ impl VM {
                         .ok_or_else(|| VMError::new("sample() requires an array"))?,
                     "sample() requires an array",
                 )?;
-                let n = match args.get(1) {
-                    Some(Value::Int(n)) => *n as usize,
+                let n = match args.get(1).map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(n)) => n as usize,
                     _ => 1,
                 };
                 if items.is_empty() {
@@ -2576,8 +2596,8 @@ impl VM {
                 Ok(self.alloc_string(buffer.trim_end()))
             }
             "unwrap_err" => {
-                if let Some(Value::Obj(r)) = args.first() {
-                    if let Some(obj) = self.gc.get(*r) {
+                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
+                    if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::ResultErr(v) = &obj.kind {
                             return Ok(self.alloc_string(&v.display(&self.gc)));
                         }
@@ -2700,8 +2720,8 @@ impl VM {
                 Err(VMError::new(&format!("BRUH: {}", msg)))
             }
             "bet" => {
-                let condition = match args.first() {
-                    Some(Value::Bool(b)) => *b,
+                let condition = match args.first().map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Bool(b)) => b,
                     Some(_) => true,
                     None => return Err(VMError::new("bet() needs a condition, no cap")),
                 };
@@ -2728,8 +2748,8 @@ impl VM {
                 }
             }
             "ick" => {
-                let condition = match args.first() {
-                    Some(Value::Bool(b)) => *b,
+                let condition = match args.first().map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Bool(b)) => b,
                     Some(_) => true,
                     None => return Err(VMError::new("ick() needs a condition to reject")),
                 };
@@ -2793,8 +2813,8 @@ impl VM {
                     return Err(VMError::new("slay() needs a function to benchmark"));
                 }
                 let func = args[0].clone();
-                let n = match args.get(1) {
-                    Some(Value::Int(n)) => *n as usize,
+                let n = match args.get(1).map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(n)) => n as usize,
                     _ => 100,
                 };
                 let mut times: Vec<f64> = Vec::with_capacity(n);
@@ -2830,9 +2850,9 @@ impl VM {
 
             // ----- Channel builtins -----
             "channel" => {
-                let (sender, receiver) = match args.first() {
-                    Some(Value::Int(cap)) => {
-                        let cap = (*cap).max(0) as usize;
+                let (sender, receiver) = match args.first().map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(cap)) => {
+                        let cap = cap.max(0) as usize;
                         let (tx, rx) = std::sync::mpsc::sync_channel(cap);
                         (VmChannelSender::Bounded(tx), rx)
                     }
@@ -2931,8 +2951,8 @@ impl VM {
                     return Err(VMError::new("select() requires an array of channels"));
                 }
                 // Extract channels from the array argument
-                let channels: Vec<Arc<VmChannelInner>> = match &args[0] {
-                    Value::Obj(r) => match self.gc.get(*r) {
+                let channels: Vec<Arc<VmChannelInner>> = match args[0].classify(&self.gc) {
+                    ValueKind::Obj(r) => match self.gc.get(r) {
                         Some(obj) => match &obj.kind {
                             ObjKind::Array(items) => {
                                 let mut chs = Vec::with_capacity(items.len());
@@ -2952,9 +2972,9 @@ impl VM {
                 if channels.is_empty() {
                     return Ok(Value::null());
                 }
-                let timeout_ms: Option<u128> = match args.get(1) {
-                    Some(Value::Int(ms)) => Some((*ms).max(0) as u128),
-                    Some(Value::Float(ms)) => Some(ms.max(0.0) as u128),
+                let timeout_ms: Option<u128> = match args.get(1).map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Int(ms)) => Some((ms).max(0) as u128),
+                    Some(ValueKind::Float(ms)) => Some(ms.max(0.0) as u128),
                     _ => None,
                 };
                 let start = std::time::Instant::now();
@@ -3039,8 +3059,8 @@ impl VM {
                     ));
                 }
                 // Extract array items, releasing the GC borrow
-                let items: Vec<Value> = match &args[0] {
-                    Value::Obj(r) => match self.gc.get(*r) {
+                let items: Vec<Value> = match args[0].classify(&self.gc) {
+                    ValueKind::Obj(r) => match self.gc.get(r) {
                         Some(obj) => match &obj.kind {
                             ObjKind::Array(arr) => arr.clone(),
                             _ => {
@@ -3073,9 +3093,9 @@ impl VM {
                         let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
                         let val = shared_to_value(&mut self.gc, &shared);
                         // Fail-fast: propagate ResultErr immediately
-                        match &val {
-                            Value::Obj(r) => {
-                                if let Some(obj) = self.gc.get(*r) {
+                        match val.classify(&self.gc) {
+                            ValueKind::Obj(r) => {
+                                if let Some(obj) = self.gc.get(r) {
                                     if let ObjKind::ResultErr(e) = &obj.kind {
                                         let msg = e.display(&self.gc);
                                         return Err(VMError::new(&format!("task error: {}", msg)));
@@ -3104,9 +3124,9 @@ impl VM {
                         "await_timeout() requires (handle, timeout_ms)",
                     ));
                 }
-                let timeout_ms = match &args[1] {
-                    Value::Int(ms) => (*ms).max(0) as u64,
-                    Value::Float(ms) => ms.max(0.0) as u64,
+                let timeout_ms = match args[1].classify(&self.gc) {
+                    ValueKind::Int(ms) => (ms).max(0) as u64,
+                    ValueKind::Float(ms) => ms.max(0.0) as u64,
                     _ => {
                         return Err(VMError::new(
                             "await_timeout() second argument must be a number (ms)",
@@ -3141,9 +3161,9 @@ impl VM {
                         let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
                         let val = shared_to_value(&mut self.gc, &shared);
                         // Unwrap ResultOk, propagate ResultErr
-                        match &val {
-                            Value::Obj(r) => {
-                                if let Some(obj) = self.gc.get(*r) {
+                        match val.classify(&self.gc) {
+                            ValueKind::Obj(r) => {
+                                if let Some(obj) = self.gc.get(r) {
                                     if let ObjKind::ResultOk(v) = &obj.kind {
                                         return Ok(*v);
                                     }
@@ -3175,8 +3195,8 @@ impl VM {
         &self,
         val: &Value,
     ) -> Option<Arc<(std::sync::Mutex<Option<SharedValue>>, std::sync::Condvar)>> {
-        match val {
-            Value::Obj(r) => self.gc.get(*r).and_then(|obj| {
+        match val.classify(&self.gc) {
+            ValueKind::Obj(r) => self.gc.get(r).and_then(|obj| {
                 if let ObjKind::TaskHandle(slot) = &obj.kind {
                     Some(slot.clone())
                 } else {
@@ -3196,8 +3216,8 @@ impl VM {
     }
 
     fn extract_channel(&self, val: &Value) -> Result<Arc<VmChannelInner>, VMError> {
-        match val {
-            Value::Obj(r) => match self.gc.get(*r) {
+        match val.classify(&self.gc) {
+            ValueKind::Obj(r) => match self.gc.get(r) {
                 Some(obj) => match &obj.kind {
                     ObjKind::Channel(ch) => Ok(ch.clone()),
                     _ => Err(VMError::new("expected channel")),
@@ -3209,22 +3229,22 @@ impl VM {
     }
 
     fn parse_object_fields(&self, value: &Value) -> Result<IndexMap<String, Value>, VMError> {
-        match value {
-            Value::Obj(r) => match self.gc.get(*r) {
+        match value.classify(&self.gc) {
+            ValueKind::Obj(r) => match self.gc.get(r) {
                 Some(obj) => match &obj.kind {
                     ObjKind::Object(map) => Ok(map.clone()),
                     _ => Err(VMError::new("expected object value")),
                 },
                 None => Err(VMError::new("dangling object reference")),
             },
-            Value::Null => Ok(IndexMap::new()),
+            ValueKind::Null => Ok(IndexMap::new()),
             _ => Err(VMError::new("expected object value")),
         }
     }
 
     fn get_object_fields(&self, value: &Value) -> Option<IndexMap<String, Value>> {
-        match value {
-            Value::Obj(r) => self.gc.get(*r).and_then(|obj| match &obj.kind {
+        match value.classify(&self.gc) {
+            ValueKind::Obj(r) => self.gc.get(r).and_then(|obj| match &obj.kind {
                 ObjKind::Object(map) => Some(map.clone()),
                 _ => None,
             }),
@@ -3233,8 +3253,8 @@ impl VM {
     }
 
     fn array_items(&self, value: &Value, message: &str) -> Result<Vec<Value>, VMError> {
-        match value {
-            Value::Obj(r) => match self.gc.get(*r) {
+        match value.classify(&self.gc) {
+            ValueKind::Obj(r) => match self.gc.get(r) {
                 Some(obj) => match &obj.kind {
                     ObjKind::Array(items) => Ok(items.clone()),
                     _ => Err(VMError::new(message)),
@@ -3264,24 +3284,24 @@ impl VM {
     }
 
     fn query_value_cmp(&self, left: &Value, right: &Value) -> std::cmp::Ordering {
-        match (left, right) {
-            (Value::Int(a), Value::Int(b)) => a.cmp(b),
-            (Value::Float(a), Value::Float(b)) => {
-                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        match (left.classify(&self.gc), right.classify(&self.gc)) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => a.cmp(&b),
+            (ValueKind::Float(a), ValueKind::Float(b)) => {
+                a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
             }
-            (Value::Int(a), Value::Float(b)) => (*a as f64)
-                .partial_cmp(b)
+            (ValueKind::Int(a), ValueKind::Float(b)) => (a as f64)
+                .partial_cmp(&b)
                 .unwrap_or(std::cmp::Ordering::Equal),
-            (Value::Float(a), Value::Int(b)) => a
-                .partial_cmp(&(*b as f64))
+            (ValueKind::Float(a), ValueKind::Int(b)) => a
+                .partial_cmp(&(b as f64))
                 .unwrap_or(std::cmp::Ordering::Equal),
             _ => left.display(&self.gc).cmp(&right.display(&self.gc)),
         }
     }
 
     fn parse_embedded_fields(&self, value: &Value) -> Result<Vec<(String, String)>, VMError> {
-        match value {
-            Value::Obj(r) => match self.gc.get(*r) {
+        match value.classify(&self.gc) {
+            ValueKind::Obj(r) => match self.gc.get(r) {
                 Some(obj) => match &obj.kind {
                     ObjKind::Array(items) => {
                         let mut embeds = Vec::new();
@@ -3307,7 +3327,7 @@ impl VM {
                 },
                 None => Err(VMError::new("dangling embedded field metadata")),
             },
-            Value::Null => Ok(Vec::new()),
+            ValueKind::Null => Ok(Vec::new()),
             _ => Err(VMError::new("expected embedded field metadata array")),
         }
     }
@@ -3316,10 +3336,10 @@ impl VM {
         let Some(fields) = self.get_object_fields(iface) else {
             return Vec::new();
         };
-        let Some(Value::Obj(method_ref)) = fields.get("methods") else {
+        let Some(method_ref) = fields.get("methods").and_then(|v| v.as_obj()) else {
             return Vec::new();
         };
-        let Some(method_obj) = self.gc.get(*method_ref) else {
+        let Some(method_obj) = self.gc.get(method_ref) else {
             return Vec::new();
         };
         let ObjKind::Array(methods) = &method_obj.kind else {
@@ -3363,8 +3383,8 @@ impl VM {
     }
 
     fn is_callable_value(&self, value: &Value) -> bool {
-        match value {
-            Value::Obj(r) => self.gc.get(*r).is_some_and(|obj| {
+        match value.classify(&self.gc) {
+            ValueKind::Obj(r) => self.gc.get(r).is_some_and(|obj| {
                 matches!(
                     obj.kind,
                     ObjKind::Function(_) | ObjKind::Closure(_) | ObjKind::NativeFunction(_)

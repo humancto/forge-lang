@@ -25,16 +25,16 @@ const TAG_OBJ: u64 = 4;
 const TAG_SHIFT: u64 = 60;
 const PAYLOAD_MASK: u64 = (1u64 << 60) - 1;
 
-pub fn encode_value(v: &Value) -> u64 {
-    match v {
-        Value::Int(n) => (TAG_INT << TAG_SHIFT) | (*n as u64 & PAYLOAD_MASK),
-        Value::Float(f) => {
+pub fn encode_value(v: &Value, gc: &crate::vm::gc::Gc) -> u64 {
+    match v.classify(gc) {
+        crate::vm::value::ValueKind::Int(n) => (TAG_INT << TAG_SHIFT) | (n as u64 & PAYLOAD_MASK),
+        crate::vm::value::ValueKind::Float(f) => {
             let bits = f.to_bits();
             (TAG_FLOAT << TAG_SHIFT) | (bits & PAYLOAD_MASK)
         }
-        Value::Bool(b) => (TAG_BOOL << TAG_SHIFT) | (*b as u64),
-        Value::Null => TAG_NULL << TAG_SHIFT,
-        Value::Obj(GcRef(idx)) => (TAG_OBJ << TAG_SHIFT) | (*idx as u64 & PAYLOAD_MASK),
+        crate::vm::value::ValueKind::Bool(b) => (TAG_BOOL << TAG_SHIFT) | (b as u64),
+        crate::vm::value::ValueKind::Null => TAG_NULL << TAG_SHIFT,
+        crate::vm::value::ValueKind::Obj(r) => (TAG_OBJ << TAG_SHIFT) | (r.0 as u64 & PAYLOAD_MASK),
     }
 }
 
@@ -114,7 +114,7 @@ pub extern "C" fn rt_call_native(
         .map(|i| decode_value(unsafe { *args_ptr.add(i) }))
         .collect();
     match vm.call_value(func, args) {
-        Ok(result) => encode_value(&result),
+        Ok(result) => encode_value(&result, &vm.gc),
         Err(_) => encode_null(),
     }
 }

@@ -1,5 +1,6 @@
 use super::bytecode::Chunk;
 use super::gc::Gc;
+use super::nanbox::NanBoxedValue;
 use indexmap::IndexMap;
 use std::fmt;
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
@@ -58,12 +59,12 @@ pub enum SharedValue {
 /// Convert a VM Value to a SharedValue (owns all data, no GcRefs).
 /// Functions/closures/natives/upvalues/task handles map to Null.
 pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
-    match val {
-        Value::Int(n) => SharedValue::Int(*n),
-        Value::Float(n) => SharedValue::Float(*n),
-        Value::Bool(b) => SharedValue::Bool(*b),
-        Value::Null => SharedValue::Null,
-        Value::Obj(r) => match gc.get(*r) {
+    match val.classify(gc) {
+        ValueKind::Int(n) => SharedValue::Int(n),
+        ValueKind::Float(n) => SharedValue::Float(n),
+        ValueKind::Bool(b) => SharedValue::Bool(b),
+        ValueKind::Null => SharedValue::Null,
+        ValueKind::Obj(r) => match gc.get(r) {
             Some(obj) => match &obj.kind {
                 ObjKind::String(s) => SharedValue::String(s.clone()),
                 ObjKind::Array(items) => {
@@ -143,65 +144,52 @@ pub enum ValueKind {
     Obj(GcRef),
 }
 
-/// Runtime value. Primitives inline; heap objects via GcRef.
+/// Runtime value. NaN-boxed into 8 bytes.
 #[derive(Clone, Copy)]
-pub enum Value {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Null,
-    Obj(GcRef),
-}
+#[repr(transparent)]
+pub struct Value(pub(crate) NanBoxedValue);
 
 impl Value {
-    // ---- Constructors (method-based API for future NaN-box migration) ----
+    // ---- Constructors ----
 
     /// Create an integer value. For values known to be small, prefer `small_int`.
     /// This allocates a BoxedInt on the GC heap if the value exceeds 48-bit range.
     #[inline]
     pub fn int(n: i64, gc: &mut Gc) -> Value {
-        // 48-bit signed range: -(2^47) to (2^47 - 1)
-        const INT48_MAX: i64 = (1_i64 << 47) - 1;
-        const INT48_MIN: i64 = -(1_i64 << 47);
-        if n >= INT48_MIN && n <= INT48_MAX {
-            Value::Int(n)
-        } else {
-            let r = gc.alloc(ObjKind::BoxedInt(n));
-            Value::Obj(r)
+        match NanBoxedValue::try_from_int(n) {
+            Some(nb) => Value(nb),
+            None => {
+                let r = gc.alloc(ObjKind::BoxedInt(n));
+                Value(NanBoxedValue::from_obj(r))
+            }
         }
     }
 
     /// Create an integer value that is known to fit in 48 bits.
-    /// Panics in debug mode if the value is out of range. Use for literals,
-    /// len, index, bool-to-int, and other known-small values.
+    /// Panics in debug mode if the value is out of range.
     #[inline]
     pub fn small_int(n: i64) -> Value {
-        debug_assert!(
-            n >= -(1_i64 << 47) && n <= (1_i64 << 47) - 1,
-            "BUG: small_int({}) exceeds 48-bit range",
-            n
-        );
-        Value::Int(n)
+        Value(NanBoxedValue::from_small_int(n))
     }
 
     #[inline]
     pub fn float(f: f64) -> Value {
-        Value::Float(f)
+        Value(NanBoxedValue::from_float(f))
     }
 
     #[inline]
     pub fn bool_val(b: bool) -> Value {
-        Value::Bool(b)
+        Value(NanBoxedValue::from_bool(b))
     }
 
     #[inline]
     pub fn null() -> Value {
-        Value::Null
+        Value(NanBoxedValue::null())
     }
 
     #[inline]
     pub fn obj(r: GcRef) -> Value {
-        Value::Obj(r)
+        Value(NanBoxedValue::from_obj(r))
     }
 
     // ---- Extractors (BoxedInt-aware) ----
@@ -209,49 +197,39 @@ impl Value {
     /// Extract an integer, checking both inline Int and heap BoxedInt.
     #[inline]
     pub fn as_int(&self, gc: &Gc) -> Option<i64> {
-        match self {
-            Value::Int(n) => Some(*n),
-            Value::Obj(r) => {
-                if let Some(obj) = gc.get(*r) {
-                    if let ObjKind::BoxedInt(n) = &obj.kind {
-                        return Some(*n);
-                    }
-                }
-                None
-            }
-            _ => None,
+        if let Some(n) = self.0.as_int() {
+            return Some(n);
         }
+        if let Some(r) = self.0.as_obj() {
+            if let Some(obj) = gc.get(r) {
+                if let ObjKind::BoxedInt(n) = &obj.kind {
+                    return Some(*n);
+                }
+            }
+        }
+        None
     }
 
     /// Extract an inline integer only (no GC lookup). Use in hot paths
     /// where BoxedInt is impossible (e.g., loop counters, small constants).
     #[inline]
     pub fn as_inline_int(&self) -> Option<i64> {
-        match self {
-            Value::Int(n) => Some(*n),
-            _ => None,
-        }
+        self.0.as_int()
     }
 
     #[inline]
     pub fn as_float(&self) -> Option<f64> {
-        match self {
-            Value::Float(f) => Some(*f),
-            _ => None,
-        }
+        self.0.as_float()
     }
 
     #[inline]
     pub fn as_bool(&self) -> Option<bool> {
-        match self {
-            Value::Bool(b) => Some(*b),
-            _ => None,
-        }
+        self.0.as_bool()
     }
 
     #[inline]
     pub fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
+        self.0.is_null()
     }
 
     #[inline]
@@ -261,84 +239,54 @@ impl Value {
 
     #[inline]
     pub fn as_obj(&self) -> Option<GcRef> {
-        match self {
-            Value::Obj(r) => Some(*r),
-            _ => None,
-        }
+        self.0.as_obj()
     }
 
     /// Deconstruct into a matchable enum for exhaustive pattern matching.
     /// BoxedInt is transparently unwrapped to `ValueKind::Int`.
     pub fn classify(&self, gc: &Gc) -> ValueKind {
-        match self {
-            Value::Int(n) => ValueKind::Int(*n),
-            Value::Float(f) => ValueKind::Float(*f),
-            Value::Bool(b) => ValueKind::Bool(*b),
-            Value::Null => ValueKind::Null,
-            Value::Obj(r) => {
-                if let Some(obj) = gc.get(*r) {
-                    if let ObjKind::BoxedInt(n) = &obj.kind {
-                        return ValueKind::Int(*n);
-                    }
-                }
-                ValueKind::Obj(*r)
-            }
+        if let Some(n) = self.0.as_int() {
+            return ValueKind::Int(n);
         }
+        if let Some(f) = self.0.as_float() {
+            return ValueKind::Float(f);
+        }
+        if let Some(b) = self.0.as_bool() {
+            return ValueKind::Bool(b);
+        }
+        if self.0.is_null() {
+            return ValueKind::Null;
+        }
+        if let Some(r) = self.0.as_obj() {
+            if let Some(obj) = gc.get(r) {
+                if let ObjKind::BoxedInt(n) = &obj.kind {
+                    return ValueKind::Int(*n);
+                }
+            }
+            return ValueKind::Obj(r);
+        }
+        ValueKind::Null
     }
 
     // ---- Existing methods ----
 
-    pub fn is_truthy(&self, gc: &super::gc::Gc) -> bool {
-        match self {
-            Value::Bool(b) => *b,
-            Value::Int(n) => *n != 0,
-            Value::Float(n) => *n != 0.0,
-            Value::Null => false,
-            Value::Obj(r) => gc.get(*r).is_some_and(|obj| match &obj.kind {
-                ObjKind::String(s) => !s.is_empty(),
-                ObjKind::Array(a) => !a.is_empty(),
-                ObjKind::Object(o) => !o.is_empty(),
-                ObjKind::ResultOk(_) => true,
-                ObjKind::ResultErr(_) => false,
-                ObjKind::BoxedInt(n) => *n != 0,
-                _ => true,
-            }),
-        }
+    pub fn is_truthy(&self, gc: &Gc) -> bool {
+        self.0.is_truthy(gc)
     }
 
-    pub fn type_name(&self, gc: &super::gc::Gc) -> &'static str {
-        match self {
-            Value::Int(_) => "Int",
-            Value::Float(_) => "Float",
-            Value::Bool(_) => "Bool",
-            Value::Null => "Null",
-            Value::Obj(r) => gc.get(*r).map_or("Null", |o| o.type_name()),
-        }
+    pub fn type_name(&self, gc: &Gc) -> &'static str {
+        self.0.type_name(gc)
     }
 
-    pub fn display(&self, gc: &super::gc::Gc) -> String {
-        match self {
-            Value::Int(n) => n.to_string(),
-            Value::Float(n) => format!("{}", n),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".to_string(),
-            Value::Obj(r) => gc.get(*r).map_or("<freed>".to_string(), |o| o.display(gc)),
-        }
+    pub fn display(&self, gc: &Gc) -> String {
+        self.0.display(gc)
     }
 
-    pub fn to_json_string(&self, gc: &super::gc::Gc) -> String {
-        match self {
-            Value::Int(n) => n.to_string(),
-            Value::Float(n) => format!("{}", n),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".to_string(),
-            Value::Obj(r) => gc
-                .get(*r)
-                .map_or("null".to_string(), |o| o.to_json_string(gc)),
-        }
+    pub fn to_json_string(&self, gc: &Gc) -> String {
+        self.0.to_json_string(gc)
     }
 
-    pub fn equals(&self, other: &Value, gc: &super::gc::Gc) -> bool {
+    pub fn equals(&self, other: &Value, gc: &Gc) -> bool {
         // Use classify to handle BoxedInt transparently
         match (self.classify(gc), other.classify(gc)) {
             (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
@@ -363,25 +311,13 @@ impl Value {
     /// Check structural identity for constant dedup (no GC needed).
     #[allow(dead_code)]
     pub fn identical(&self, other: &Value) -> bool {
-        match (self, other) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Null, Value::Null) => true,
-            _ => false,
-        }
+        self.0.identical(&other.0)
     }
 }
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Int(n) => write!(f, "{}", n),
-            Value::Float(n) => write!(f, "{}", n),
-            Value::Bool(b) => write!(f, "{}", b),
-            Value::Null => write!(f, "null"),
-            Value::Obj(r) => write!(f, "Obj({})", r.0),
-        }
+        self.0.fmt(f)
     }
 }
 
@@ -398,7 +334,7 @@ impl GcObject {
         }
     }
 
-    pub fn display(&self, gc: &super::gc::Gc) -> String {
+    pub fn display(&self, gc: &Gc) -> String {
         match &self.kind {
             ObjKind::String(s) => s.clone(),
             ObjKind::Array(items) => {
@@ -425,7 +361,7 @@ impl GcObject {
         }
     }
 
-    pub fn to_json_string(&self, gc: &super::gc::Gc) -> String {
+    pub fn to_json_string(&self, gc: &Gc) -> String {
         match &self.kind {
             ObjKind::String(s) => escape_json_string(s),
             ObjKind::Array(items) => {
@@ -463,7 +399,7 @@ impl GcObject {
         }
     }
 
-    pub fn equals(&self, other: &GcObject, gc: &super::gc::Gc) -> bool {
+    pub fn equals(&self, other: &GcObject, gc: &Gc) -> bool {
         match (&self.kind, &other.kind) {
             (ObjKind::String(a), ObjKind::String(b)) => a == b,
             (ObjKind::Array(a), ObjKind::Array(b)) => {
@@ -483,15 +419,15 @@ impl GcObject {
         match &self.kind {
             ObjKind::Array(items) => {
                 for item in items {
-                    if let Value::Obj(r) = item {
-                        worklist.push(*r);
+                    if let Some(r) = item.as_obj() {
+                        worklist.push(r);
                     }
                 }
             }
             ObjKind::Object(map) => {
                 for v in map.values() {
-                    if let Value::Obj(r) = v {
-                        worklist.push(*r);
+                    if let Some(r) = v.as_obj() {
+                        worklist.push(r);
                     }
                 }
             }
@@ -501,13 +437,13 @@ impl GcObject {
                 }
             }
             ObjKind::Upvalue(uv) => {
-                if let Value::Obj(r) = &uv.value {
-                    worklist.push(*r);
+                if let Some(r) = uv.value.as_obj() {
+                    worklist.push(r);
                 }
             }
             ObjKind::ResultOk(v) | ObjKind::ResultErr(v) | ObjKind::Frozen(v) => {
-                if let Value::Obj(r) = v {
-                    worklist.push(*r);
+                if let Some(r) = v.as_obj() {
+                    worklist.push(r);
                 }
             }
             _ => {}
@@ -551,4 +487,14 @@ pub struct ObjUpvalue {
 
 pub struct NativeFn {
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_is_8_bytes() {
+        assert_eq!(std::mem::size_of::<Value>(), 8);
+    }
 }

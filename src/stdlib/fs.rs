@@ -351,8 +351,8 @@ pub fn call_vm(
     gc: &crate::vm::gc::Gc,
 ) -> Result<FsResult, String> {
     let get_str = |v: &crate::vm::value::Value| -> Option<String> {
-        if let crate::vm::value::Value::Obj(r) = v {
-            if let Some(obj) = gc.get(*r) {
+        if let Some(r) = v.as_obj() {
+            if let Some(obj) = gc.get(r) {
                 if let crate::vm::value::ObjKind::String(s) = &obj.kind {
                     return Some(s.clone());
                 }
