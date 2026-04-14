@@ -282,6 +282,12 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         has_unsupported = true;
     }
 
+    // Functions returning Unknown type are unsupported — the JIT dispatch
+    // can't determine whether the result is an int or obj at runtime
+    if return_type == RegType::Unknown {
+        has_unsupported = true;
+    }
+
     TypeInfo {
         reg_types: types,
         has_unsupported_ops: has_unsupported,
@@ -431,6 +437,8 @@ mod tests {
 
     #[test]
     fn analyze_get_field_produces_unknown() {
+        // Returning an Unknown register is unsupported (dispatch can't
+        // determine int vs obj), but GetField itself is tracked.
         let mut chunk = Chunk::new("get_field");
         chunk.arity = 0;
         chunk.max_registers = 3;
@@ -439,7 +447,7 @@ mod tests {
         chunk.emit(encode_abc(OpCode::Return, 1, 0, 0), 3);
 
         let info = analyze(&chunk);
-        assert!(!info.has_unsupported_ops);
+        assert!(info.has_unsupported_ops); // Unknown return type
         assert!(info.has_collection_ops);
         assert_eq!(info.reg_types[1], RegType::Unknown);
     }

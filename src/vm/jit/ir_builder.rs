@@ -38,7 +38,9 @@ fn emit_tag_encode(
             b.ins().bor(tag, val)
         }
         RegType::Unknown => {
-            // Unknown type — encode as int (best guess for integer-mode functions)
+            // Unknown type — decode as int (best effort for integer-mode functions).
+            // ObjRef values stored in collections will be mis-tagged; such functions
+            // should be rejected by type_analysis once per-value tagging is added.
             let tag = b.ins().iconst(I64, (TAG_INT << TAG_SHIFT) as i64);
             let masked = b.ins().band_imm(val, 0x0FFF_FFFF_FFFF_FFFF_i64);
             b.ins().bor(tag, masked)
