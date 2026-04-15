@@ -582,7 +582,7 @@ m5-016: ci: release workflow for libforge.a per target
 - [x] Tuple type with `(a, b)` syntax, indexing, destructuring, and type annotations
 - [x] Set type with `set()` constructor, `.add()`, `.has()`, `.remove()`, union/intersection/difference
 - [x] Map type with `map()` constructor, any-key support, `.get()`, `.set()`, `.keys()`, `.values()`
-- [ ] Iterator protocol with `.stream()`, lazy `.filter()`, `.map()`, `.take()`, `.skip()`, `.collect()`
+- [x] Iterator protocol with `.stream()`, lazy `.filter()`, `.map()`, `.take()`, `.skip()`, `.collect()`
 - [ ] Enum methods via `impl` blocks on algebraic `type` definitions
 - [ ] Default method implementations in `ability` blocks
 - [ ] Enforced generics with type erasure and runtime validation
