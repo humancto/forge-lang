@@ -305,14 +305,12 @@ impl Value {
     }
 
     pub fn equals(&self, other: &Value, gc: &Gc) -> bool {
-        // Use classify to handle BoxedInt transparently.
-        // NaN is treated as equal to itself here so that sets containing
-        // NaN behave sensibly (membership, dedup). This is a deliberate
-        // departure from IEEE-754 `==` but matches the interpreter's
-        // container_eq semantics.
+        // Scalar equality — follows IEEE-754 (NaN != NaN). Set-specific
+        // equality (dedup, .has(), set operations) uses `Value::set_eq`
+        // below which NaN-equates for container-membership purposes.
         match (self.classify(gc), other.classify(gc)) {
             (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
-            (ValueKind::Float(a), ValueKind::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
+            (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
             (ValueKind::Int(a), ValueKind::Float(b)) => (a as f64) == b,
             (ValueKind::Float(a), ValueKind::Int(b)) => a == (b as f64),
             (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
@@ -327,6 +325,17 @@ impl Value {
                 }
             }
             _ => false,
+        }
+    }
+
+    /// Equality for set membership / dedup. Like `equals`, but NaN is
+    /// considered equal to itself so that `set([nan]).has(nan)` works
+    /// and NaN isn't duplicated in a set. Language-level `==` still
+    /// uses `equals` (IEEE-754 compliant).
+    pub fn set_eq(&self, other: &Value, gc: &Gc) -> bool {
+        match (self.classify(gc), other.classify(gc)) {
+            (ValueKind::Float(a), ValueKind::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
+            _ => self.equals(other, gc),
         }
     }
 
@@ -450,8 +459,9 @@ impl GcObject {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.equals(y, gc))
             }
             (ObjKind::Set(a), ObjKind::Set(b)) => {
-                // Order-independent: same length + every element in A is in B
-                a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| x.equals(y, gc)))
+                // Order-independent: same length + every element in A is in B.
+                // Uses set_eq so NaN elements match themselves.
+                a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| x.set_eq(y, gc)))
             }
             (ObjKind::BoxedInt(a), ObjKind::BoxedInt(b)) => a == b,
             _ => false,

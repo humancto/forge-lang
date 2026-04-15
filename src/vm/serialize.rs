@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
-const VERSION_MINOR: u8 = 0;
+const VERSION_MINOR: u8 = 1;
 
 #[derive(Debug)]
 pub struct SerializeError {

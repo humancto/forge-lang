@@ -240,7 +240,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                     constants[a] = None;
                 }
             }
-            OpCode::GetField | OpCode::GetIndex | OpCode::ExtractField => {
+            OpCode::GetField | OpCode::GetIndex | OpCode::IterGet | OpCode::ExtractField => {
                 has_collection_ops = true;
                 if a < types.len() {
                     types[a] = RegType::Unknown;
@@ -433,7 +433,11 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                         constants[a] = None;
                     }
                 }
-                OpCode::GetField | OpCode::GetIndex | OpCode::ExtractField | OpCode::GetGlobal => {
+                OpCode::GetField
+                | OpCode::GetIndex
+                | OpCode::IterGet
+                | OpCode::ExtractField
+                | OpCode::GetGlobal => {
                     if a < types.len() {
                         types[a] = RegType::Unknown;
                         constants[a] = None;

@@ -341,7 +341,7 @@ pub extern "C" fn rt_array_get(vm_ptr: *mut VM, arr_ref: i64, idx: i64) -> i64 {
     let vm = unsafe { &mut *vm_ptr };
     let r = GcRef(arr_ref as usize);
     if let Some(obj) = vm.gc.get(r) {
-        if let ObjKind::Array(items) = &obj.kind {
+        if let ObjKind::Array(items) | ObjKind::Tuple(items) | ObjKind::Set(items) = &obj.kind {
             if let Some(val) = items.get(idx as usize) {
                 return encode_value(val, &vm.gc) as i64;
             }

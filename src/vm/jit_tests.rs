@@ -209,6 +209,16 @@ fn jit_compiles_array_function() {
     assert!(result.is_ok());
 }
 
+#[test]
+fn jit_for_loop_over_array() {
+    // Pins the IterGet opcode path through type analysis and IR lowering —
+    // a silent regression here would produce 0 instead of 60.
+    let out = run_jit_function(
+        "fn sum_arr() { let a = [10, 20, 30]\nlet mut t = 0\nfor x in a { t = t + x }\nreturn t }\nprintln(sum_arr())",
+    );
+    assert_eq!(out, vec!["60"]);
+}
+
 // ----- And/Or logical semantics -----
 
 #[test]

@@ -741,7 +741,7 @@ pub fn build_function<M: Module>(
                     b.def_var(regs[a], result);
                     b.ins().jump(next, &[]);
                 }
-                OpCode::GetIndex => {
+                OpCode::GetIndex | OpCode::IterGet => {
                     let vm_val = b.use_var(vm_ptr_var.expect("BUG: GetIndex without vm_ptr"));
                     let coll_ref = coll
                         .as_ref()
