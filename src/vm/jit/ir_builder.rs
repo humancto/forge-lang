@@ -1,6 +1,7 @@
 /// Translates Forge bytecode to Cranelift IR.
-/// Type-aware: uses I64 for integers, F64 for floats, I8 (0/1) for bools.
-/// Functions with string/collection ops use I64 registers and call runtime bridges.
+/// I64-everywhere ABI: all registers, params, and returns use I64.
+/// Float values are stored as IEEE 754 bit patterns via bitcast I64↔F64.
+/// Functions with string/collection/global ops call runtime bridges.
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, StackSlotData, StackSlotKind, UserFuncName};
@@ -46,9 +47,11 @@ fn emit_tag_encode(
             b.ins().bor(tag, masked)
         }
         RegType::Float => {
-            // Should not happen in collection-mode (float+collection is rejected),
-            // but handle defensively
-            val
+            // Float values are stored as IEEE 754 bits in I64 registers.
+            // Tag with TAG_FLOAT (1) for bridge calls.
+            let tag = b.ins().iconst(I64, (1_u64 << TAG_SHIFT) as i64);
+            let masked = b.ins().band_imm(val, 0x0FFF_FFFF_FFFF_FFFF_i64);
+            b.ins().bor(tag, masked)
         }
     }
 }
@@ -111,18 +114,17 @@ pub fn build_function<M: Module>(
     let needs_vm_ptr =
         type_info.has_string_ops || type_info.has_collection_ops || type_info.has_global_ops;
 
-    // String/collection functions cannot use floats (rejected by type_analysis).
-    let ret_type = if type_info.has_float { F64 } else { I64 };
-    let param_type = if type_info.has_float { F64 } else { I64 };
-
+    // I64-everywhere ABI: all params and returns are I64.
+    // Float values are stored as their IEEE 754 bit pattern (via bitcast).
+    // This allows mixing float ops with string/collection/global bridges.
     let mut sig = module.make_signature();
     if needs_vm_ptr {
         sig.params.push(AbiParam::new(I64)); // vm_ptr
     }
     for _ in 0..chunk.arity {
-        sig.params.push(AbiParam::new(param_type));
+        sig.params.push(AbiParam::new(I64));
     }
-    sig.returns.push(AbiParam::new(ret_type));
+    sig.returns.push(AbiParam::new(I64));
 
     let func_id = module
         .declare_function(func_name, cranelift_module::Linkage::Local, &sig)
@@ -276,10 +278,9 @@ pub fn build_function<M: Module>(
         };
 
         let num_regs = (chunk.max_registers.max(chunk.arity) as usize) + 1;
-        let var_type = if type_info.has_float { F64 } else { I64 };
         let mut regs: Vec<Variable> = Vec::with_capacity(num_regs);
         for _ in 0..num_regs {
-            regs.push(b.declare_var(var_type));
+            regs.push(b.declare_var(I64));
         }
 
         // For string/collection functions, first param is vm_ptr
@@ -297,11 +298,7 @@ pub fn build_function<M: Module>(
             let param = b.block_params(entry)[i + param_offset];
             b.def_var(regs[i], param);
         }
-        let zero_val = if type_info.has_float {
-            b.ins().f64const(0.0)
-        } else {
-            b.ins().iconst(I64, 0)
-        };
+        let zero_val = b.ins().iconst(I64, 0);
         for i in chunk.arity as usize..num_regs {
             b.def_var(regs[i], zero_val);
         }
@@ -313,7 +310,16 @@ pub fn build_function<M: Module>(
         }
         b.ins().jump(blocks[0], &[]);
 
-        let use_float = type_info.has_float;
+        // Helper closures for float bitcast in I64-everywhere mode.
+        // Float values live as their IEEE 754 bit pattern in I64 registers.
+        // reg_type lookup helper
+        let reg_type = |idx: usize| -> RegType {
+            type_info
+                .reg_types
+                .get(idx)
+                .copied()
+                .unwrap_or(RegType::Int)
+        };
 
         for (ip, &inst) in chunk.code.iter().enumerate() {
             b.switch_to_block(blocks[ip]);
@@ -328,58 +334,41 @@ pub fn build_function<M: Module>(
                 b.ins().jump(next, &[]);
                 continue;
             };
-
             match opcode {
                 OpCode::LoadNull => {
-                    let v = if use_float {
-                        b.ins().f64const(0.0)
-                    } else {
-                        b.ins().iconst(I64, 0)
-                    };
+                    let v = b.ins().iconst(I64, 0);
                     b.def_var(regs[a], v);
                     b.ins().jump(next, &[]);
                 }
                 OpCode::LoadTrue => {
-                    let v = if use_float {
-                        b.ins().f64const(1.0)
-                    } else {
-                        b.ins().iconst(I64, 1)
-                    };
+                    let v = b.ins().iconst(I64, 1);
                     b.def_var(regs[a], v);
                     b.ins().jump(next, &[]);
                 }
                 OpCode::LoadFalse => {
-                    let v = if use_float {
-                        b.ins().f64const(0.0)
-                    } else {
-                        b.ins().iconst(I64, 0)
-                    };
+                    let v = b.ins().iconst(I64, 0);
                     b.def_var(regs[a], v);
                     b.ins().jump(next, &[]);
                 }
                 OpCode::LoadConst => {
-                    let v = if use_float {
-                        match &chunk.constants[bx as usize] {
-                            Constant::Int(n) => b.ins().f64const(*n as f64),
-                            Constant::Float(f) => b.ins().f64const(*f),
-                            Constant::Bool(v) => b.ins().f64const(if *v { 1.0 } else { 0.0 }),
-                            _ => b.ins().f64const(0.0),
+                    let v = match &chunk.constants[bx as usize] {
+                        Constant::Int(n) => b.ins().iconst(I64, *n),
+                        Constant::Float(f) => {
+                            // Store IEEE 754 bits in I64 register via bitcast
+                            let fval = b.ins().f64const(*f);
+                            b.ins()
+                                .bitcast(I64, cranelift_codegen::ir::MemFlags::new(), fval)
                         }
-                    } else {
-                        match &chunk.constants[bx as usize] {
-                            Constant::Int(n) => b.ins().iconst(I64, *n),
-                            Constant::Float(f) => b.ins().iconst(I64, *f as i64),
-                            Constant::Bool(v) => b.ins().iconst(I64, if *v { 1 } else { 0 }),
-                            Constant::Str(_) => {
-                                // Load pre-allocated GcRef index for this string constant
-                                let gc_idx = string_refs
-                                    .and_then(|refs| refs.get(bx as usize))
-                                    .and_then(|r| *r)
-                                    .unwrap_or(0);
-                                b.ins().iconst(I64, gc_idx)
-                            }
-                            _ => b.ins().iconst(I64, 0),
+                        Constant::Bool(v) => b.ins().iconst(I64, if *v { 1 } else { 0 }),
+                        Constant::Str(_) => {
+                            // Load pre-allocated GcRef index for this string constant
+                            let gc_idx = string_refs
+                                .and_then(|refs| refs.get(bx as usize))
+                                .and_then(|r| *r)
+                                .unwrap_or(0);
+                            b.ins().iconst(I64, gc_idx)
                         }
+                        _ => b.ins().iconst(I64, 0),
                     };
                     b.def_var(regs[a], v);
                     b.ins().jump(next, &[]);
@@ -389,69 +378,59 @@ pub fn build_function<M: Module>(
                     b.def_var(regs[a], v);
                     b.ins().jump(next, &[]);
                 }
-                OpCode::Add => {
-                    let l = b.use_var(regs[bb]);
-                    let r = b.use_var(regs[cc]);
-                    let result = if use_float {
-                        b.ins().fadd(l, r)
+                OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Mod => {
+                    let l_raw = b.use_var(regs[bb]);
+                    let r_raw = b.use_var(regs[cc]);
+                    let l_is_float = reg_type(bb) == RegType::Float;
+                    let r_is_float = reg_type(cc) == RegType::Float;
+                    let mf = cranelift_codegen::ir::MemFlags::new();
+                    let result = if l_is_float || r_is_float {
+                        // Bitcast I64 → F64 for float operands, convert int operands
+                        let l = if l_is_float {
+                            b.ins().bitcast(F64, mf, l_raw)
+                        } else {
+                            b.ins().fcvt_from_sint(F64, l_raw)
+                        };
+                        let r = if r_is_float {
+                            b.ins().bitcast(F64, mf, r_raw)
+                        } else {
+                            b.ins().fcvt_from_sint(F64, r_raw)
+                        };
+                        let fres = match opcode {
+                            OpCode::Add => b.ins().fadd(l, r),
+                            OpCode::Sub => b.ins().fsub(l, r),
+                            OpCode::Mul => b.ins().fmul(l, r),
+                            OpCode::Div => b.ins().fdiv(l, r),
+                            OpCode::Mod => {
+                                let div = b.ins().fdiv(l, r);
+                                let trunc = b.ins().trunc(div);
+                                let prod = b.ins().fmul(trunc, r);
+                                b.ins().fsub(l, prod)
+                            }
+                            _ => unreachable!(),
+                        };
+                        // Bitcast F64 → I64 to store in I64 register
+                        b.ins().bitcast(I64, mf, fres)
                     } else {
-                        b.ins().iadd(l, r)
-                    };
-                    b.def_var(regs[a], result);
-                    b.ins().jump(next, &[]);
-                }
-                OpCode::Sub => {
-                    let l = b.use_var(regs[bb]);
-                    let r = b.use_var(regs[cc]);
-                    let result = if use_float {
-                        b.ins().fsub(l, r)
-                    } else {
-                        b.ins().isub(l, r)
-                    };
-                    b.def_var(regs[a], result);
-                    b.ins().jump(next, &[]);
-                }
-                OpCode::Mul => {
-                    let l = b.use_var(regs[bb]);
-                    let r = b.use_var(regs[cc]);
-                    let result = if use_float {
-                        b.ins().fmul(l, r)
-                    } else {
-                        b.ins().imul(l, r)
-                    };
-                    b.def_var(regs[a], result);
-                    b.ins().jump(next, &[]);
-                }
-                OpCode::Div => {
-                    let l = b.use_var(regs[bb]);
-                    let r = b.use_var(regs[cc]);
-                    let result = if use_float {
-                        b.ins().fdiv(l, r)
-                    } else {
-                        b.ins().sdiv(l, r)
-                    };
-                    b.def_var(regs[a], result);
-                    b.ins().jump(next, &[]);
-                }
-                OpCode::Mod => {
-                    let l = b.use_var(regs[bb]);
-                    let r = b.use_var(regs[cc]);
-                    let result = if use_float {
-                        // fmod: a - trunc(a/b) * b
-                        let div = b.ins().fdiv(l, r);
-                        let trunc = b.ins().trunc(div);
-                        let prod = b.ins().fmul(trunc, r);
-                        b.ins().fsub(l, prod)
-                    } else {
-                        b.ins().srem(l, r)
+                        match opcode {
+                            OpCode::Add => b.ins().iadd(l_raw, r_raw),
+                            OpCode::Sub => b.ins().isub(l_raw, r_raw),
+                            OpCode::Mul => b.ins().imul(l_raw, r_raw),
+                            OpCode::Div => b.ins().sdiv(l_raw, r_raw),
+                            OpCode::Mod => b.ins().srem(l_raw, r_raw),
+                            _ => unreachable!(),
+                        }
                     };
                     b.def_var(regs[a], result);
                     b.ins().jump(next, &[]);
                 }
                 OpCode::Neg => {
                     let v = b.use_var(regs[bb]);
-                    let result = if use_float {
-                        b.ins().fneg(v)
+                    let mf = cranelift_codegen::ir::MemFlags::new();
+                    let result = if reg_type(bb) == RegType::Float {
+                        let fv = b.ins().bitcast(F64, mf, v);
+                        let neg = b.ins().fneg(fv);
+                        b.ins().bitcast(I64, mf, neg)
                     } else {
                         b.ins().ineg(v)
                     };
@@ -472,19 +451,31 @@ pub fn build_function<M: Module>(
                         && type_info.reg_types[bb] == RegType::StringRef
                         && type_info.reg_types[cc] == RegType::StringRef
                         && matches!(opcode, OpCode::Eq | OpCode::NotEq);
+                    let l_is_float = reg_type(bb) == RegType::Float;
+                    let r_is_float = reg_type(cc) == RegType::Float;
+                    let mf = cranelift_codegen::ir::MemFlags::new();
                     let cmp_val = if is_string_cmp {
                         let vm_val = b.use_var(vm_ptr_var.expect("BUG: string op without vm_ptr"));
                         let eq_ref = bridge_eq.expect("BUG: string op without bridge_eq");
                         let call_inst = b.ins().call(eq_ref, &[vm_val, l, r]);
                         let eq_result = b.inst_results(call_inst)[0];
                         if matches!(opcode, OpCode::NotEq) {
-                            // Flip: eq returns 1 for equal, we want 1 for not-equal
                             let one = b.ins().iconst(I64, 1);
                             b.ins().isub(one, eq_result)
                         } else {
                             eq_result
                         }
-                    } else if use_float {
+                    } else if l_is_float || r_is_float {
+                        let lf = if l_is_float {
+                            b.ins().bitcast(F64, mf, l)
+                        } else {
+                            b.ins().fcvt_from_sint(F64, l)
+                        };
+                        let rf = if r_is_float {
+                            b.ins().bitcast(F64, mf, r)
+                        } else {
+                            b.ins().fcvt_from_sint(F64, r)
+                        };
                         let fcc = match opcode {
                             OpCode::Eq => FloatCC::Equal,
                             OpCode::NotEq => FloatCC::NotEqual,
@@ -494,9 +485,8 @@ pub fn build_function<M: Module>(
                             OpCode::GtEq => FloatCC::GreaterThanOrEqual,
                             _ => unreachable!(),
                         };
-                        let cmp = b.ins().fcmp(fcc, l, r);
-                        let extended = b.ins().uextend(I64, cmp);
-                        b.ins().fcvt_from_uint(F64, extended)
+                        let cmp = b.ins().fcmp(fcc, lf, rf);
+                        b.ins().uextend(I64, cmp)
                     } else {
                         let icc = match opcode {
                             OpCode::Eq => IntCC::Equal,
@@ -515,56 +505,32 @@ pub fn build_function<M: Module>(
                 }
                 OpCode::Not => {
                     let v = b.use_var(regs[bb]);
-                    let result = if use_float {
-                        let zero = b.ins().f64const(0.0);
-                        let is_zero = b.ins().fcmp(FloatCC::Equal, v, zero);
-                        let extended = b.ins().uextend(I64, is_zero);
-                        b.ins().fcvt_from_uint(F64, extended)
-                    } else {
-                        let zero = b.ins().iconst(I64, 0);
-                        let is_zero = b.ins().icmp(IntCC::Equal, v, zero);
-                        b.ins().uextend(I64, is_zero)
-                    };
+                    // All bools are I64 (0/1). Result is always I64.
+                    let zero = b.ins().iconst(I64, 0);
+                    let is_zero = b.ins().icmp(IntCC::Equal, v, zero);
+                    let result = b.ins().uextend(I64, is_zero);
                     b.def_var(regs[a], result);
                     b.ins().jump(next, &[]);
                 }
                 OpCode::And => {
                     let l = b.use_var(regs[bb]);
                     let r = b.use_var(regs[cc]);
-                    let result = if use_float {
-                        let zero = b.ins().f64const(0.0);
-                        let l_truthy = b.ins().fcmp(FloatCC::NotEqual, l, zero);
-                        let r_truthy = b.ins().fcmp(FloatCC::NotEqual, r, zero);
-                        let both = b.ins().band(l_truthy, r_truthy);
-                        let extended = b.ins().uextend(I64, both);
-                        b.ins().fcvt_from_uint(F64, extended)
-                    } else {
-                        let zero = b.ins().iconst(I64, 0);
-                        let l_truthy = b.ins().icmp(IntCC::NotEqual, l, zero);
-                        let r_truthy = b.ins().icmp(IntCC::NotEqual, r, zero);
-                        let both = b.ins().band(l_truthy, r_truthy);
-                        b.ins().uextend(I64, both)
-                    };
+                    let zero = b.ins().iconst(I64, 0);
+                    let l_truthy = b.ins().icmp(IntCC::NotEqual, l, zero);
+                    let r_truthy = b.ins().icmp(IntCC::NotEqual, r, zero);
+                    let both = b.ins().band(l_truthy, r_truthy);
+                    let result = b.ins().uextend(I64, both);
                     b.def_var(regs[a], result);
                     b.ins().jump(next, &[]);
                 }
                 OpCode::Or => {
                     let l = b.use_var(regs[bb]);
                     let r = b.use_var(regs[cc]);
-                    let result = if use_float {
-                        let zero = b.ins().f64const(0.0);
-                        let l_truthy = b.ins().fcmp(FloatCC::NotEqual, l, zero);
-                        let r_truthy = b.ins().fcmp(FloatCC::NotEqual, r, zero);
-                        let either = b.ins().bor(l_truthy, r_truthy);
-                        let extended = b.ins().uextend(I64, either);
-                        b.ins().fcvt_from_uint(F64, extended)
-                    } else {
-                        let zero = b.ins().iconst(I64, 0);
-                        let l_truthy = b.ins().icmp(IntCC::NotEqual, l, zero);
-                        let r_truthy = b.ins().icmp(IntCC::NotEqual, r, zero);
-                        let either = b.ins().bor(l_truthy, r_truthy);
-                        b.ins().uextend(I64, either)
-                    };
+                    let zero = b.ins().iconst(I64, 0);
+                    let l_truthy = b.ins().icmp(IntCC::NotEqual, l, zero);
+                    let r_truthy = b.ins().icmp(IntCC::NotEqual, r, zero);
+                    let either = b.ins().bor(l_truthy, r_truthy);
+                    let result = b.ins().uextend(I64, either);
                     b.def_var(regs[a], result);
                     b.ins().jump(next, &[]);
                 }
@@ -585,15 +551,10 @@ pub fn build_function<M: Module>(
                     } else {
                         next
                     };
-                    if use_float {
-                        let zero = b.ins().f64const(0.0);
-                        let is_false = b.ins().fcmp(FloatCC::Equal, cond, zero);
-                        b.ins().brif(is_false, t, &[], next, &[]);
-                    } else {
-                        let zero = b.ins().iconst(I64, 0);
-                        let is_false = b.ins().icmp(IntCC::Equal, cond, zero);
-                        b.ins().brif(is_false, t, &[], next, &[]);
-                    }
+                    // All condition registers are I64 (bools = 0/1)
+                    let zero = b.ins().iconst(I64, 0);
+                    let is_false = b.ins().icmp(IntCC::Equal, cond, zero);
+                    b.ins().brif(is_false, t, &[], next, &[]);
                 }
                 OpCode::JumpIfTrue => {
                     let cond = b.use_var(regs[a]);
@@ -603,15 +564,9 @@ pub fn build_function<M: Module>(
                     } else {
                         next
                     };
-                    if use_float {
-                        let zero = b.ins().f64const(0.0);
-                        let is_true = b.ins().fcmp(FloatCC::NotEqual, cond, zero);
-                        b.ins().brif(is_true, t, &[], next, &[]);
-                    } else {
-                        let zero = b.ins().iconst(I64, 0);
-                        let is_true = b.ins().icmp(IntCC::NotEqual, cond, zero);
-                        b.ins().brif(is_true, t, &[], next, &[]);
-                    }
+                    let zero = b.ins().iconst(I64, 0);
+                    let is_true = b.ins().icmp(IntCC::NotEqual, cond, zero);
+                    b.ins().brif(is_true, t, &[], next, &[]);
                 }
                 OpCode::GetGlobal => {
                     let vm_val = b.use_var(vm_ptr_var.expect("BUG: GetGlobal without vm_ptr"));
@@ -727,11 +682,7 @@ pub fn build_function<M: Module>(
                     b.ins().return_(&[val]);
                 }
                 OpCode::ReturnNull => {
-                    let zero = if use_float {
-                        b.ins().f64const(0.0)
-                    } else {
-                        b.ins().iconst(I64, 0)
-                    };
+                    let zero = b.ins().iconst(I64, 0);
                     b.ins().return_(&[zero]);
                 }
                 OpCode::Concat => {
@@ -994,11 +945,7 @@ pub fn build_function<M: Module>(
         }
 
         b.switch_to_block(blocks[code_len]);
-        let final_zero = if use_float {
-            b.ins().f64const(0.0)
-        } else {
-            b.ins().iconst(I64, 0)
-        };
+        let final_zero = b.ins().iconst(I64, 0);
         b.ins().return_(&[final_zero]);
 
         for block in &blocks {

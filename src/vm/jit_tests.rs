@@ -66,6 +66,7 @@ fn run_jit_function(source: &str) -> Vec<String> {
                         type_info.return_type,
                         type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
                     ),
+                    returns_float: matches!(type_info.return_type, type_analysis::RegType::Float),
                 },
             );
         }
@@ -320,6 +321,24 @@ fn jit_mixed_int_float_args() {
     // When function has float constants, all args are promoted to f64
     let out = run_jit_function("fn scale(x) { return x * 2.5 }\nprintln(scale(4))");
     assert_eq!(out, vec!["10"]);
+}
+
+// ----- Mixed type functions (float + string/collection) -----
+
+#[test]
+fn jit_float_with_int_conversion() {
+    // Function with float ops that returns a whole number (should auto-convert to int display)
+    let out = run_jit_function("fn double(x) { return x * 2.0 }\nprintln(double(5.0))");
+    assert_eq!(out, vec!["10"]);
+}
+
+#[test]
+fn jit_float_multi_op_chain() {
+    // Chain of float operations: (a + b) * c - d
+    let out = run_jit_function(
+        "fn calc(a, b, c, d) { return (a + b) * c - d + 0.0 }\nprintln(calc(1.5, 2.5, 3.0, 1.0))",
+    );
+    assert_eq!(out, vec!["11"]);
 }
 
 // ----- Recursive + complex -----
