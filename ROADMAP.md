@@ -323,7 +323,7 @@ m2-021: test(tiered): promotion correctness tests
 - [x] Type inference for local variables and function signatures
 - [x] `Option<T>` with `Some`/`None` (no more raw null)
 - [x] Interface satisfaction checking
-- [ ] Basic generics with monomorphization
+- [x] Basic generics with monomorphization
 - [ ] Type errors reported at compile time with source locations
 
 ### Commit Breakdown (M3)

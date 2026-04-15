@@ -463,7 +463,11 @@ fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
         }
         FrontendError::Type(warnings) => {
             for warning in warnings {
-                let rendered = format!("[{}] {}", filename, warning.message);
+                let rendered = if warning.line > 0 {
+                    format!("[{}:{}] {}", filename, warning.line, warning.message)
+                } else {
+                    format!("[{}] {}", filename, warning.message)
+                };
                 if warning.is_error {
                     eprintln!("{}", errors::format_simple_error(&rendered));
                 } else {
@@ -478,7 +482,14 @@ fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
 fn emit_type_warnings(warnings: &[typechecker::TypeWarning]) {
     for warning in warnings {
         if !warning.is_error {
-            eprintln!("{}", errors::format_warning(&warning.message));
+            if warning.line > 0 {
+                eprintln!(
+                    "{}",
+                    errors::format_warning(&format!("line {}: {}", warning.line, warning.message))
+                );
+            } else {
+                eprintln!("{}", errors::format_warning(&warning.message));
+            }
         }
     }
 }
