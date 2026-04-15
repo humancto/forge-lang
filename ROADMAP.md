@@ -319,8 +319,8 @@ m2-021: test(tiered): promotion correctness tests
 
 ### Milestone 3 Deliverables
 
-- [ ] Type annotations enforced (gradual — unannotated code still works)
-- [ ] Type inference for local variables and function signatures
+- [x] Type annotations enforced (gradual — unannotated code still works)
+- [x] Type inference for local variables and function signatures
 - [ ] `Option<T>` with `Some`/`None` (no more raw null)
 - [ ] Interface satisfaction checking
 - [ ] Basic generics with monomorphization
