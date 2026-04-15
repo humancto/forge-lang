@@ -2940,6 +2940,12 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("invalid operator for Option")),
             },
 
+            (Value::Tuple(a), Value::Tuple(b)) => match op {
+                BinOp::Eq => Ok(Value::Bool(a == b)),
+                BinOp::NotEq => Ok(Value::Bool(a != b)),
+                _ => Err(RuntimeError::new("tuples only support == and != operators")),
+            },
+
             _ => Err(RuntimeError::new(&format!(
                 "cannot apply {:?} to {} and {}",
                 op,

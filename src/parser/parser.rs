@@ -2483,4 +2483,81 @@ mod tests {
             other => panic!("expected StructDef, got {:?}", other),
         }
     }
+
+    #[test]
+    fn parses_tuple_literal() {
+        let program = parse_program("let t = (1, 2, 3)");
+        let spanned = program.statements.first().unwrap();
+        match &spanned.stmt {
+            Stmt::Let { value, .. } => match value {
+                Expr::Tuple(items) => assert_eq!(items.len(), 3),
+                other => panic!("expected Tuple, got {:?}", other),
+            },
+            other => panic!("expected Let, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_single_element_tuple_with_trailing_comma() {
+        let program = parse_program("let t = (42,)");
+        let spanned = program.statements.first().unwrap();
+        match &spanned.stmt {
+            Stmt::Let { value, .. } => match value {
+                Expr::Tuple(items) => {
+                    assert_eq!(items.len(), 1);
+                    match &items[0] {
+                        Expr::Int(n) => assert_eq!(*n, 42),
+                        other => panic!("expected Int, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Tuple, got {:?}", other),
+            },
+            other => panic!("expected Let, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_grouping_not_tuple() {
+        let program = parse_program("let x = (42)");
+        let spanned = program.statements.first().unwrap();
+        match &spanned.stmt {
+            Stmt::Let { value, .. } => match value {
+                Expr::Int(n) => assert_eq!(*n, 42),
+                other => panic!("expected Int (grouping), got {:?}", other),
+            },
+            other => panic!("expected Let, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_nested_tuple() {
+        let program = parse_program("let t = ((1, 2), 3)");
+        let spanned = program.statements.first().unwrap();
+        match &spanned.stmt {
+            Stmt::Let { value, .. } => match value {
+                Expr::Tuple(items) => {
+                    assert_eq!(items.len(), 2);
+                    assert!(matches!(&items[0], Expr::Tuple(_)));
+                    assert!(matches!(&items[1], Expr::Int(3)));
+                }
+                other => panic!("expected Tuple, got {:?}", other),
+            },
+            other => panic!("expected Let, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_tuple_destructure_with_let() {
+        let program = parse_program("let (a, b) = expr");
+        let spanned = program.statements.first().unwrap();
+        match &spanned.stmt {
+            Stmt::Destructure { pattern, .. } => match pattern {
+                DestructurePattern::Tuple(names) => {
+                    assert_eq!(names, &["a", "b"]);
+                }
+                other => panic!("expected Tuple pattern, got {:?}", other),
+            },
+            other => panic!("expected Destructure, got {:?}", other),
+        }
+    }
 }
