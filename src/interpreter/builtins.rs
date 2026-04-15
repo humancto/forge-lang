@@ -9,6 +9,46 @@
 /// accessible to the rest of the module where it is called.
 use super::*;
 
+/// Construct a Map from an Array/Tuple of 2-element pairs, from an Array of
+/// 2-element arrays, or by cloning another Map. Used by `map(arg)` and by
+/// the `map()` constructor overload.
+fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
+    match arg {
+        Value::Map(pairs) => Ok(Value::Map(pairs.clone())),
+        Value::Array(items) | Value::Tuple(items) => {
+            let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+            for item in items {
+                let (k, v) = match item {
+                    Value::Tuple(t) if t.len() == 2 => (t[0].clone(), t[1].clone()),
+                    Value::Array(a) if a.len() == 2 => (a[0].clone(), a[1].clone()),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "map() constructor expects an array of (key, value) pairs",
+                        ))
+                    }
+                };
+                // Preserve insertion-order-on-overwrite: if key already
+                // present, update the existing slot in place.
+                let mut replaced = false;
+                for entry in pairs.iter_mut() {
+                    if Value::container_eq(&entry.0, &k) {
+                        entry.1 = v.clone();
+                        replaced = true;
+                        break;
+                    }
+                }
+                if !replaced {
+                    pairs.push((k, v));
+                }
+            }
+            Ok(Value::Map(pairs))
+        }
+        _ => Err(RuntimeError::new(
+            "map() constructor expects an array of pairs or another Map",
+        )),
+    }
+}
+
 impl Interpreter {
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match name {
@@ -30,8 +70,9 @@ impl Interpreter {
                     Ok(Value::Int(a.len() as i64))
                 }
                 Some(Value::Object(o)) => Ok(Value::Int(o.len() as i64)),
+                Some(Value::Map(m)) => Ok(Value::Int(m.len() as i64)),
                 _ => Err(RuntimeError::new(
-                    "len() requires string, array, tuple, set, or object",
+                    "len() requires string, array, tuple, set, map, or object",
                 )),
             },
             "type" | "typeof" => match args.first() {
@@ -83,11 +124,17 @@ impl Interpreter {
                 Some(Value::Object(map)) => Ok(Value::Array(
                     map.keys().map(|k| Value::String(k.clone())).collect(),
                 )),
-                _ => Err(RuntimeError::new("keys() requires object")),
+                Some(Value::Map(pairs)) => {
+                    Ok(Value::Array(pairs.iter().map(|(k, _)| k.clone()).collect()))
+                }
+                _ => Err(RuntimeError::new("keys() requires object or map")),
             },
             "values" => match args.first() {
                 Some(Value::Object(map)) => Ok(Value::Array(map.values().cloned().collect())),
-                _ => Err(RuntimeError::new("values() requires object")),
+                Some(Value::Map(pairs)) => {
+                    Ok(Value::Array(pairs.iter().map(|(_, v)| v.clone()).collect()))
+                }
+                _ => Err(RuntimeError::new("values() requires object or map")),
             },
             "contains" => match (args.first(), args.get(1)) {
                 (Some(Value::String(s)), Some(Value::String(sub))) => {
@@ -102,8 +149,11 @@ impl Interpreter {
                 (Some(Value::Object(map)), Some(Value::String(key))) => {
                     Ok(Value::Bool(map.contains_key(key)))
                 }
+                (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(
+                    pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
+                )),
                 _ => Err(RuntimeError::new(
-                    "contains() requires (string, substring), (array, value), or (object, key)",
+                    "contains() requires (string, substring), (array, value), (object, key), or (map, key)",
                 )),
             },
             "has_key" => match (args.first(), args.get(1)) {
@@ -300,8 +350,20 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("enumerate() requires array")),
             },
             "map" => {
+                // Arity-based overload:
+                //   map()                    → empty Map
+                //   map(arr_of_pairs | Map)  → Map constructor
+                //   map(arr, fn)             → functional map (existing)
+                if args.is_empty() {
+                    return Ok(Value::Map(Vec::new()));
+                }
+                if args.len() == 1 {
+                    return build_map_from(&args[0]);
+                }
                 if args.len() != 2 {
-                    return Err(RuntimeError::new("map() requires (array, function)"));
+                    return Err(RuntimeError::new(
+                        "map() takes 0, 1, or 2 arguments — got more",
+                    ));
                 }
                 let items = match &args[0] {
                     Value::Array(items) => items.clone(),

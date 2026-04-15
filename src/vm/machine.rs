@@ -1634,20 +1634,51 @@ impl VM {
                         let idx = self.registers[base + c as usize];
                         let result = if let Some(r) = obj.as_obj() {
                             if let Some(i) = idx.as_int(&self.gc) {
-                                if let Some(o) = self.gc.get(r) {
-                                    if let ObjKind::Array(items)
-                                    | ObjKind::Tuple(items)
-                                    | ObjKind::Set(items) = &o.kind
-                                    {
-                                        items
+                                // Classify the source; clone out any pair so
+                                // we can drop the gc borrow before allocating.
+                                enum IterSrc {
+                                    Item(Value),
+                                    Pair(Value, Value),
+                                    ObjPair(String, Value),
+                                }
+                                let src = if let Some(o) = self.gc.get(r) {
+                                    match &o.kind {
+                                        ObjKind::Array(items)
+                                        | ObjKind::Tuple(items)
+                                        | ObjKind::Set(items) => {
+                                            items.get(i as usize).copied().map(IterSrc::Item)
+                                        }
+                                        ObjKind::Map(pairs) => pairs
                                             .get(i as usize)
-                                            .cloned()
-                                            .ok_or_else(|| VMError::new("index out of bounds"))?
-                                    } else {
-                                        return Err(VMError::new("cannot iterate non-collection"));
+                                            .map(|(k, v)| IterSrc::Pair(*k, *v)),
+                                        ObjKind::Object(map) => map
+                                            .iter()
+                                            .nth(i as usize)
+                                            .map(|(k, v)| IterSrc::ObjPair(k.clone(), *v)),
+                                        _ => {
+                                            return Err(VMError::new(
+                                                "cannot iterate non-collection",
+                                            ));
+                                        }
                                     }
                                 } else {
-                                    Value::null()
+                                    None
+                                };
+                                match src {
+                                    Some(IterSrc::Item(v)) => v,
+                                    Some(IterSrc::Pair(k, v)) => {
+                                        let tr = self.gc.alloc(ObjKind::Tuple(vec![k, v]));
+                                        Value::obj(tr)
+                                    }
+                                    Some(IterSrc::ObjPair(k, v)) => {
+                                        let ks = self.gc.alloc_string(k);
+                                        let tr =
+                                            self.gc.alloc(ObjKind::Tuple(vec![Value::obj(ks), v]));
+                                        Value::obj(tr)
+                                    }
+                                    None => {
+                                        return Err(VMError::new("index out of bounds"));
+                                    }
                                 }
                             } else {
                                 return Err(VMError::new("iterator index must be int"));
@@ -1700,6 +1731,7 @@ impl VM {
                                         a.len() as i64
                                     }
                                     ObjKind::Object(o) => o.len() as i64,
+                                    ObjKind::Map(p) => p.len() as i64,
                                     _ => 0,
                                 }
                             } else {
@@ -2422,6 +2454,33 @@ impl VM {
                         ObjKind::ResultErr(v) => crate::interpreter::Value::ResultErr(Box::new(
                             self.convert_to_interp_val(v),
                         )),
+                        ObjKind::Tuple(items) => {
+                            let converted: Vec<crate::interpreter::Value> = items
+                                .iter()
+                                .map(|i| self.convert_to_interp_val(i))
+                                .collect();
+                            crate::interpreter::Value::Tuple(converted)
+                        }
+                        ObjKind::Set(items) => {
+                            let converted: Vec<crate::interpreter::Value> = items
+                                .iter()
+                                .map(|i| self.convert_to_interp_val(i))
+                                .collect();
+                            crate::interpreter::Value::Set(converted)
+                        }
+                        ObjKind::Map(pairs) => {
+                            let converted: Vec<(
+                                crate::interpreter::Value,
+                                crate::interpreter::Value,
+                            )> = pairs
+                                .iter()
+                                .map(|(k, v)| {
+                                    (self.convert_to_interp_val(k), self.convert_to_interp_val(v))
+                                })
+                                .collect();
+                            crate::interpreter::Value::Map(converted)
+                        }
+                        ObjKind::Frozen(inner) => self.convert_to_interp_val(inner),
                         _ => crate::interpreter::Value::Null,
                     }
                 } else {
@@ -2450,6 +2509,26 @@ impl VM {
                     vm_map.insert(k.clone(), self.convert_interp_value(val));
                 }
                 let r = self.gc.alloc(ObjKind::Object(vm_map));
+                Value::obj(r)
+            }
+            crate::interpreter::Value::Tuple(items) => {
+                let vm_items: Vec<Value> =
+                    items.iter().map(|i| self.convert_interp_value(i)).collect();
+                let r = self.gc.alloc(ObjKind::Tuple(vm_items));
+                Value::obj(r)
+            }
+            crate::interpreter::Value::Set(items) => {
+                let vm_items: Vec<Value> =
+                    items.iter().map(|i| self.convert_interp_value(i)).collect();
+                let r = self.gc.alloc(ObjKind::Set(vm_items));
+                Value::obj(r)
+            }
+            crate::interpreter::Value::Map(pairs) => {
+                let vm_pairs: Vec<(Value, Value)> = pairs
+                    .iter()
+                    .map(|(k, v)| (self.convert_interp_value(k), self.convert_interp_value(v)))
+                    .collect();
+                let r = self.gc.alloc(ObjKind::Map(vm_pairs));
                 Value::obj(r)
             }
             _ => Value::null(),

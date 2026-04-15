@@ -780,6 +780,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::For {
             var,
+            var2,
             iterable,
             body,
             ..
@@ -806,8 +807,32 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             c.free_to(len_reg); // free len and cond temps
 
             c.begin_scope();
-            let var_reg = c.add_local(var, false)?;
-            c.emit(encode_abc(OpCode::IterGet, var_reg, arr_reg, idx_reg), 0);
+            if let Some(var2_name) = var2 {
+                // `for k, v in ...` — IterGet yields a 2-tuple (k, v); extract
+                // each component into its own local. Works for Map, Object,
+                // and any sequence whose elements are 2-tuples.
+                let pair_reg = c.alloc_reg()?;
+                c.emit(encode_abc(OpCode::IterGet, pair_reg, arr_reg, idx_reg), 0);
+                let var_reg = c.add_local(var, false)?;
+                let var2_reg = c.add_local(var2_name, false)?;
+                let k_idx_reg = c.alloc_reg()?;
+                let k_const = c.const_int(0);
+                c.emit(encode_abx(OpCode::LoadConst, k_idx_reg, k_const), 0);
+                c.emit(
+                    encode_abc(OpCode::GetIndex, var_reg, pair_reg, k_idx_reg),
+                    0,
+                );
+                let v_const = c.const_int(1);
+                c.emit(encode_abx(OpCode::LoadConst, k_idx_reg, v_const), 0);
+                c.emit(
+                    encode_abc(OpCode::GetIndex, var2_reg, pair_reg, k_idx_reg),
+                    0,
+                );
+                c.free_to(k_idx_reg);
+            } else {
+                let var_reg = c.add_local(var, false)?;
+                c.emit(encode_abc(OpCode::IterGet, var_reg, arr_reg, idx_reg), 0);
+            }
 
             for s in body {
                 c.current_line = s.line;

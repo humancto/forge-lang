@@ -56,6 +56,7 @@ pub enum SharedValue {
     Channel(Arc<VmChannelInner>),
     Tuple(Vec<SharedValue>),
     Set(Vec<SharedValue>),
+    Map(Vec<(SharedValue, SharedValue)>),
 }
 
 /// Convert a VM Value to a SharedValue (owns all data, no GcRefs).
@@ -89,6 +90,12 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
                 ObjKind::Set(items) => {
                     SharedValue::Set(items.iter().map(|v| value_to_shared(gc, v)).collect())
                 }
+                ObjKind::Map(pairs) => SharedValue::Map(
+                    pairs
+                        .iter()
+                        .map(|(k, v)| (value_to_shared(gc, k), value_to_shared(gc, v)))
+                        .collect(),
+                ),
                 ObjKind::BoxedInt(n) => SharedValue::Int(*n),
                 // Functions, closures, natives, upvalues, task handles are not transferable
                 _ => SharedValue::Null,
@@ -144,6 +151,14 @@ pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
         SharedValue::Set(items) => {
             let vals: Vec<Value> = items.iter().map(|sv| shared_to_value(gc, sv)).collect();
             let r = gc.alloc(ObjKind::Set(vals));
+            Value::obj(r)
+        }
+        SharedValue::Map(pairs) => {
+            let vals: Vec<(Value, Value)> = pairs
+                .iter()
+                .map(|(k, v)| (shared_to_value(gc, k), shared_to_value(gc, v)))
+                .collect();
+            let r = gc.alloc(ObjKind::Map(vals));
             Value::obj(r)
         }
     }
@@ -396,6 +411,13 @@ impl GcObject {
                 let strs: Vec<String> = items.iter().map(|v| v.display(gc)).collect();
                 format!("set({})", strs.join(", "))
             }
+            ObjKind::Map(pairs) => {
+                let strs: Vec<String> = pairs
+                    .iter()
+                    .map(|(k, v)| format!("{} => {}", k.display(gc), v.display(gc)))
+                    .collect();
+                format!("Map({})", strs.join(", "))
+            }
             ObjKind::BoxedInt(n) => n.to_string(),
         }
     }
@@ -420,6 +442,15 @@ impl GcObject {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string(gc)).collect();
                 format!("[{}]", entries.join(", "))
             }
+            ObjKind::Map(pairs) => {
+                // Display-only lossy form; `json.stringify(m)` errors on
+                // non-string keys in stdlib/json_module.rs.
+                let entries: Vec<String> = pairs
+                    .iter()
+                    .map(|(k, v)| format!("[{}, {}]", k.to_json_string(gc), v.to_json_string(gc)))
+                    .collect();
+                format!("[{}]", entries.join(", "))
+            }
             ObjKind::BoxedInt(n) => n.to_string(),
             _ => format!("\"<{}>\"", self.type_name()),
         }
@@ -440,6 +471,7 @@ impl GcObject {
             ObjKind::Frozen(_) => "Frozen",
             ObjKind::Tuple(_) => "Tuple",
             ObjKind::Set(_) => "Set",
+            ObjKind::Map(_) => "Map",
             ObjKind::BoxedInt(_) => "Int",
         }
     }
@@ -463,6 +495,15 @@ impl GcObject {
                 // Uses set_eq so NaN elements match themselves.
                 a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| x.set_eq(y, gc)))
             }
+            (ObjKind::Map(a), ObjKind::Map(b)) => {
+                // Order-independent on entries. Keys compared with set_eq
+                // (NaN self-match, Int/Float promote). Values with equals.
+                a.len() == b.len()
+                    && a.iter().all(|(ak, av)| {
+                        b.iter()
+                            .any(|(bk, bv)| ak.set_eq(bk, gc) && av.equals(bv, gc))
+                    })
+            }
             (ObjKind::BoxedInt(a), ObjKind::BoxedInt(b)) => a == b,
             _ => false,
         }
@@ -479,6 +520,16 @@ impl GcObject {
             }
             ObjKind::Object(map) => {
                 for v in map.values() {
+                    if let Some(r) = v.as_obj() {
+                        worklist.push(r);
+                    }
+                }
+            }
+            ObjKind::Map(pairs) => {
+                for (k, v) in pairs {
+                    if let Some(r) = k.as_obj() {
+                        worklist.push(r);
+                    }
                     if let Some(r) = v.as_obj() {
                         worklist.push(r);
                     }
@@ -522,6 +573,10 @@ pub enum ObjKind {
     Tuple(Vec<Value>),
     /// Unordered collection of unique elements.
     Set(Vec<Value>),
+    /// First-class Map with any-value keys. Ordered vec preserves insertion
+    /// order; keys compared via `Value::set_eq` so NaN self-matches and
+    /// Int/Float promote (e.g. `1` and `1.0` collide).
+    Map(Vec<(Value, Value)>),
     /// Heap-boxed i64 for values exceeding 48-bit NaN-box inline range.
     /// Used when NaN-boxed Value is active; transparent to user code.
     BoxedInt(i64),

@@ -1,0 +1,8 @@
+// expect: 60
+
+let m = map([("a", 10), ("b", 20), ("c", 30)])
+let mut total = 0
+for k, v in m {
+    total = total + v
+}
+total
