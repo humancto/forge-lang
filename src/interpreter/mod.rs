@@ -46,6 +46,92 @@ pub struct ChannelInner {
     pub capacity: Option<usize>,
 }
 
+/// Lazy iterator state. Pull-based: each variant's `next()` advances the
+/// cursor and yields one value at a time. Single-use — terminal ops drain
+/// the stream and re-use yields empty.
+#[derive(Debug)]
+pub enum StreamKind {
+    ArrayIter {
+        items: Vec<Value>,
+        idx: usize,
+    },
+    TupleIter {
+        items: Vec<Value>,
+        idx: usize,
+    },
+    SetIter {
+        items: Vec<Value>,
+        idx: usize,
+    },
+    MapIter {
+        pairs: Vec<(Value, Value)>,
+        idx: usize,
+    },
+    StringIter {
+        chars: Vec<char>,
+        idx: usize,
+    },
+    Filter {
+        upstream: Arc<Mutex<StreamCell>>,
+        pred: Value,
+    },
+    Map {
+        upstream: Arc<Mutex<StreamCell>>,
+        fn_val: Value,
+    },
+    Take {
+        upstream: Arc<Mutex<StreamCell>>,
+        remaining: usize,
+    },
+    Skip {
+        upstream: Arc<Mutex<StreamCell>>,
+        skip_n: usize,
+        started: bool,
+    },
+    Chain {
+        first: Arc<Mutex<StreamCell>>,
+        second: Arc<Mutex<StreamCell>>,
+        on_second: bool,
+    },
+    Zip {
+        left: Arc<Mutex<StreamCell>>,
+        right: Arc<Mutex<StreamCell>>,
+    },
+    Enumerate {
+        upstream: Arc<Mutex<StreamCell>>,
+        idx: usize,
+    },
+}
+
+/// Cell wrapping a `StreamKind` plus a poisoning slot. If a user closure
+/// errors mid-pipeline, the error is stored here and every subsequent
+/// `next()` re-yields it. Poisoning matches how most iterator protocols
+/// handle mid-pipeline failures and avoids "half-drained" resumption.
+#[derive(Debug)]
+pub struct StreamCell {
+    pub kind: StreamKind,
+    pub poisoned: Option<String>,
+}
+
+impl StreamKind {
+    fn short_name(&self) -> &'static str {
+        match self {
+            StreamKind::ArrayIter { .. } => "ArrayIter",
+            StreamKind::TupleIter { .. } => "TupleIter",
+            StreamKind::SetIter { .. } => "SetIter",
+            StreamKind::MapIter { .. } => "MapIter",
+            StreamKind::StringIter { .. } => "StringIter",
+            StreamKind::Filter { .. } => "Filter",
+            StreamKind::Map { .. } => "Map",
+            StreamKind::Take { .. } => "Take",
+            StreamKind::Skip { .. } => "Skip",
+            StreamKind::Chain { .. } => "Chain",
+            StreamKind::Zip { .. } => "Zip",
+            StreamKind::Enumerate { .. } => "Enumerate",
+        }
+    }
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -60,6 +146,9 @@ pub enum Value {
     /// order; keys compared via `container_eq` so NaN self-matches and
     /// Int/Float promote (e.g. `1` and `1.0` collide).
     Map(Vec<(Value, Value)>),
+    /// Lazy iterator. Single-use; terminal ops drain it. Rc-shared so
+    /// combinators can wrap upstreams without cloning cursor state.
+    Stream(Arc<Mutex<StreamCell>>),
     Object(IndexMap<String, Value>),
     Function {
         name: String,
@@ -123,6 +212,10 @@ impl PartialEq for Value {
             (Value::None, Value::None) => true,
             (Value::BuiltIn(a), Value::BuiltIn(b)) => a == b,
             (Value::Channel(a), Value::Channel(b)) => Arc::ptr_eq(a, b),
+            // Streams compare by pointer identity (reflexive). Two distinct
+            // Stream values are never equal even over equal sources; makes
+            // `assert_eq` and `==` on a single stream work correctly.
+            (Value::Stream(a), Value::Stream(b)) => Arc::ptr_eq(a, b),
             (Value::Frozen(a), b) => a.as_ref() == b,
             (a, Value::Frozen(b)) => a == b.as_ref(),
             _ => false,
@@ -198,6 +291,7 @@ impl Value {
             Value::Set(_) => "Set",
             Value::Map(_) => "Map",
             Value::Object(_) => "Object",
+            Value::Stream(_) => "Stream",
             Value::Function { .. } => "Function",
             Value::Lambda { .. } => "Lambda",
             Value::ResultOk(_) | Value::ResultErr(_) => "Result",
@@ -302,6 +396,10 @@ impl fmt::Display for Value {
                     .map(|(k, v)| format!("{} => {}", k, v))
                     .collect();
                 write!(f, "Map({})", strs.join(", "))
+            }
+            Value::Stream(s) => {
+                let name = s.lock().map(|cell| cell.kind.short_name()).unwrap_or("?");
+                write!(f, "Stream({})", name)
             }
             Value::Object(_) => write!(f, "{}", self.to_json_string()),
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
