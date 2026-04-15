@@ -1,0 +1,3 @@
+// expect: 42
+
+map([("answer", 42)]).get("answer")

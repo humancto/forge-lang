@@ -1,0 +1,3 @@
+// expect: true
+
+map([("a", 1), ("b", 2)]).has("b")

@@ -5345,3 +5345,210 @@ fn set_mutating_remove_in_place() {
     );
     assert_eq!(val, Value::Int(2));
 }
+
+// ── Map Tests ──────────────────────────────────────────────
+
+#[test]
+fn map_empty() {
+    let val = run_forge("len(map())");
+    assert_eq!(val, Value::Int(0));
+}
+
+#[test]
+fn map_from_pairs() {
+    let val = run_forge(r#"len(map([("a", 1), ("b", 2)]))"#);
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn map_from_array_of_arrays() {
+    let val = run_forge(r#"len(map([["a", 1], ["b", 2]]))"#);
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn map_get_hit() {
+    let val = run_forge(r#"map([("a", 1), ("b", 2)]).get("b")"#);
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn map_get_miss_returns_null() {
+    let val = run_forge(r#"map([("a", 1)]).get("nope")"#);
+    assert_eq!(val, Value::Null);
+}
+
+#[test]
+fn map_has_true() {
+    let val = run_forge(r#"map([("a", 1)]).has("a")"#);
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn map_has_false() {
+    let val = run_forge(r#"map([("a", 1)]).has("z")"#);
+    assert_eq!(val, Value::Bool(false));
+}
+
+#[test]
+fn map_set_new_key() {
+    let val = run_forge(r#"map().set("a", 1).set("b", 2).len()"#);
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn map_set_overwrite_preserves_order() {
+    let val = run_forge(
+        r#"
+        let m = map([("a", 1), ("b", 2), ("c", 3)]).set("a", 99)
+        m.values()
+        "#,
+    );
+    // Insertion order preserved: a stays first with new value 99.
+    match val {
+        Value::Array(items) => {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], Value::Int(99));
+            assert_eq!(items[1], Value::Int(2));
+            assert_eq!(items[2], Value::Int(3));
+        }
+        _ => panic!("expected array"),
+    }
+}
+
+#[test]
+fn map_remove() {
+    let val = run_forge(r#"map([("a", 1), ("b", 2)]).remove("a").len()"#);
+    assert_eq!(val, Value::Int(1));
+}
+
+#[test]
+fn map_remove_missing_is_noop() {
+    let val = run_forge(r#"map([("a", 1)]).remove("z").len()"#);
+    assert_eq!(val, Value::Int(1));
+}
+
+#[test]
+fn map_keys() {
+    let val = run_forge(r#"len(map([("a", 1), ("b", 2)]).keys())"#);
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn map_values_sum() {
+    let val = run_forge(r#"sum(map([("a", 1), ("b", 2), ("c", 3)]).values())"#);
+    assert_eq!(val, Value::Int(6));
+}
+
+#[test]
+fn map_contains_key() {
+    let val = run_forge(r#"contains(map([("a", 1)]), "a")"#);
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn map_to_array_length() {
+    let val = run_forge(r#"len(map([("a", 1), ("b", 2)]).to_array())"#);
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn map_typeof() {
+    let val = run_forge("type(map())");
+    match val {
+        Value::String(s) => assert_eq!(s, "Map"),
+        _ => panic!("expected string, got {:?}", val),
+    }
+}
+
+#[test]
+fn map_display() {
+    let val = run_forge(r#"map([("a", 1), ("b", 2)])"#);
+    assert_eq!(format!("{}", val), "Map(a => 1, b => 2)");
+}
+
+#[test]
+fn map_int_float_key_collision() {
+    // 1 and 1.0 collide for container purposes; second set overwrites.
+    let val = run_forge(r#"map([(1, "a")]).set(1.0, "b").get(1)"#);
+    assert_eq!(val, Value::String("b".to_string()));
+}
+
+#[test]
+fn map_equality_order_independent() {
+    let val = run_forge(r#"map([("a", 1), ("b", 2)]) == map([("b", 2), ("a", 1)])"#);
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn map_inequality() {
+    let val = run_forge(r#"map([("a", 1)]) == map([("a", 2)])"#);
+    assert_eq!(val, Value::Bool(false));
+}
+
+#[test]
+fn map_nested_equality() {
+    let val = run_forge(
+        r#"
+        let a = map([("inner", map([("x", 1)]))])
+        let b = map([("inner", map([("x", 1)]))])
+        a == b
+        "#,
+    );
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn map_for_k_v_iteration() {
+    let val = run_forge(
+        r#"
+        let m = map([("a", 10), ("b", 20), ("c", 30)])
+        let mut total = 0
+        for k, v in m {
+            total = total + v
+        }
+        total
+        "#,
+    );
+    assert_eq!(val, Value::Int(60));
+}
+
+#[test]
+fn map_is_truthy_nonempty() {
+    let val = run_forge(
+        r#"
+        let mut r = "empty"
+        let m = map([("a", 1)])
+        if m { r = "non-empty" }
+        r
+        "#,
+    );
+    match val {
+        Value::String(s) => assert_eq!(s, "non-empty"),
+        _ => panic!("expected string"),
+    }
+}
+
+#[test]
+fn map_in_set_dedups() {
+    let val = run_forge(
+        r#"
+        len(set([map([("a", 1)]), map([("a", 1)]), map([("a", 2)])]))
+        "#,
+    );
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn map_json_stringify_string_keys() {
+    let val = run_forge(r#"json.stringify(map([("name", "alice")]))"#);
+    assert_eq!(val, Value::String(r#"{"name": "alice"}"#.to_string()));
+}
+
+#[test]
+fn map_json_stringify_rejects_non_string_keys() {
+    let result = try_run_forge(r#"json.stringify(map([(1, "one")]))"#);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().message;
+    assert!(msg.contains("non-string key"), "got: {}", msg);
+}

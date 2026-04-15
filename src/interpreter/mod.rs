@@ -3402,6 +3402,12 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("sets only support == and != operators")),
             },
 
+            (Value::Map(_), Value::Map(_)) => match op {
+                BinOp::Eq => Ok(Value::Bool(left == right)),
+                BinOp::NotEq => Ok(Value::Bool(left != right)),
+                _ => Err(RuntimeError::new("maps only support == and != operators")),
+            },
+
             _ => Err(RuntimeError::new(&format!(
                 "cannot apply {:?} to {} and {}",
                 op,

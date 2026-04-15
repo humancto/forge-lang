@@ -44,6 +44,8 @@ mod async_tests;
 #[cfg(all(test, feature = "jit"))]
 mod jit_tests;
 #[cfg(test)]
+mod map_tests;
+#[cfg(test)]
 mod must_ask_freeze_tests;
 #[cfg(test)]
 mod parity_tests;
