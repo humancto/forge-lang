@@ -416,7 +416,7 @@ impl VM {
                     let len = if let Some(r) = v.as_obj() {
                         self.gc.get(r).map_or(0, |o| match &o.kind {
                             ObjKind::String(s) => s.chars().count() as i64,
-                            ObjKind::Array(a) => a.len() as i64,
+                            ObjKind::Array(a) | ObjKind::Tuple(a) => a.len() as i64,
                             ObjKind::Object(o) => o.len() as i64,
                             _ => 0,
                         })
@@ -986,7 +986,7 @@ impl VM {
                                 let sub = val.display(&self.gc);
                                 return Ok(Value::bool_val(s.contains(&sub)));
                             }
-                            ObjKind::Array(items) => {
+                            ObjKind::Array(items) | ObjKind::Tuple(items) => {
                                 let found = items
                                     .iter()
                                     .any(|v| v.display(&self.gc) == val.display(&self.gc));

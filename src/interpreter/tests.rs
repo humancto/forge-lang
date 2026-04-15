@@ -4968,3 +4968,192 @@ fn division_by_zero_error_message() {
     assert!(msg.contains("division by zero"), "got: {}", msg);
     assert!(msg.contains("hint"), "should contain hint: {}", msg);
 }
+
+// ── Tuple Tests ──────────────────────────────────────────────
+
+#[test]
+fn tuple_creation() {
+    let val = run_forge("(1, 2, 3)");
+    assert_eq!(format!("{}", val), "(1, 2, 3)");
+}
+
+#[test]
+fn tuple_single_element() {
+    let val = run_forge("(42,)");
+    assert_eq!(format!("{}", val), "(42)");
+}
+
+#[test]
+fn tuple_mixed_types() {
+    let val = run_forge(r#"(1, "hello", true)"#);
+    assert_eq!(format!("{}", val), "(1, hello, true)");
+}
+
+#[test]
+fn tuple_indexing() {
+    let val = run_forge("let t = (10, 20, 30)\nt[1]");
+    assert_eq!(val, Value::Int(20));
+}
+
+#[test]
+fn tuple_negative_indexing() {
+    let val = run_forge("let t = (10, 20, 30)\nt[-1]");
+    assert_eq!(val, Value::Int(30));
+}
+
+#[test]
+fn tuple_index_out_of_bounds() {
+    let result = try_run_forge("let t = (1, 2)\nt[5]");
+    assert!(result.is_err());
+    let msg = result.unwrap_err().message;
+    assert!(msg.contains("index out of bounds"), "got: {}", msg);
+    assert!(msg.contains("tuple"), "should mention tuple: {}", msg);
+}
+
+#[test]
+fn tuple_immutability_rejected() {
+    let result = try_run_forge("let mut t = (1, 2, 3)\nt[0] = 99");
+    assert!(result.is_err());
+    let msg = result.unwrap_err().message;
+    assert!(msg.contains("cannot mutate a tuple"), "got: {}", msg);
+}
+
+#[test]
+fn tuple_destructuring() {
+    let val = run_forge("let (a, b, c) = (10, 20, 30)\nb");
+    assert_eq!(val, Value::Int(20));
+}
+
+#[test]
+fn tuple_destructuring_first() {
+    let val = run_forge("let (x, y) = (100, 200)\nx");
+    assert_eq!(val, Value::Int(100));
+}
+
+#[test]
+fn tuple_as_function_return() {
+    let val = run_forge(
+        r#"
+        fn swap(a, b) {
+            return (b, a)
+        }
+        let (x, y) = swap(1, 2)
+        x
+        "#,
+    );
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn tuple_equality() {
+    let val = run_forge("(1, 2, 3) == (1, 2, 3)");
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn tuple_inequality() {
+    let val = run_forge("(1, 2, 3) == (1, 2, 4)");
+    assert_eq!(val, Value::Bool(false));
+}
+
+#[test]
+fn tuple_not_equal() {
+    let val = run_forge("(1, 2) != (3, 4)");
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn tuple_len_builtin() {
+    let val = run_forge("len((1, 2, 3))");
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn tuple_len_method() {
+    let val = run_forge("(1, 2, 3, 4).len");
+    assert_eq!(val, Value::Int(4));
+}
+
+#[test]
+fn tuple_type_builtin() {
+    let val = run_forge("type((1, 2))");
+    assert_eq!(val, Value::String("Tuple".to_string()));
+}
+
+#[test]
+fn tuple_contains() {
+    let val = run_forge("contains((1, 2, 3), 2)");
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn tuple_contains_missing() {
+    let val = run_forge("contains((1, 2, 3), 99)");
+    assert_eq!(val, Value::Bool(false));
+}
+
+#[test]
+fn tuple_for_loop_iteration() {
+    let val = run_forge(
+        r#"
+        let mut sum = 0
+        for x in (10, 20, 30) {
+            sum = sum + x
+        }
+        sum
+        "#,
+    );
+    assert_eq!(val, Value::Int(60));
+}
+
+#[test]
+fn tuple_nested() {
+    let val = run_forge("let t = ((1, 2), (3, 4))\nt[0][1]");
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn tuple_in_array() {
+    let val = run_forge("let arr = [(1, 2), (3, 4)]\narr[1][0]");
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn tuple_display() {
+    let val = run_forge(r#"str((1, "hi", true))"#);
+    assert_eq!(val, Value::String("(1, hi, true)".to_string()));
+}
+
+#[test]
+fn tuple_is_truthy() {
+    let val = run_forge(
+        r#"
+        let t = (1, 2)
+        let mut result = false
+        if t {
+            result = true
+        }
+        result
+        "#,
+    );
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn tuple_grouping_still_works() {
+    // (expr) without comma is grouping, not tuple
+    let val = run_forge("(2 + 3) * 4");
+    assert_eq!(val, Value::Int(20));
+}
+
+#[test]
+fn tuple_unpack_syntax() {
+    let val = run_forge(
+        r#"
+        let pair = (10, 20)
+        unpack (a, b) from pair
+        a + b
+        "#,
+    );
+    assert_eq!(val, Value::Int(30));
+}

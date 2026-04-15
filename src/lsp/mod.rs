@@ -1360,6 +1360,14 @@ fn format_type_ann(t: &crate::parser::ast::TypeAnn) -> String {
             format!("fn({}) -> {}", params_str, format_type_ann(ret))
         }
         TypeAnn::Optional(inner) => format!("{}?", format_type_ann(inner)),
+        TypeAnn::Tuple(items) => {
+            let inner = items
+                .iter()
+                .map(format_type_ann)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({})", inner)
+        }
     }
 }
 

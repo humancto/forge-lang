@@ -54,6 +54,7 @@ pub enum SharedValue {
     ResultOk(Box<SharedValue>),
     ResultErr(Box<SharedValue>),
     Channel(Arc<VmChannelInner>),
+    Tuple(Vec<SharedValue>),
 }
 
 /// Convert a VM Value to a SharedValue (owns all data, no GcRefs).
@@ -81,6 +82,9 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
                 ObjKind::ResultErr(v) => SharedValue::ResultErr(Box::new(value_to_shared(gc, v))),
                 ObjKind::Channel(ch) => SharedValue::Channel(ch.clone()),
                 ObjKind::Frozen(v) => value_to_shared(gc, v),
+                ObjKind::Tuple(items) => {
+                    SharedValue::Tuple(items.iter().map(|v| value_to_shared(gc, v)).collect())
+                }
                 ObjKind::BoxedInt(n) => SharedValue::Int(*n),
                 // Functions, closures, natives, upvalues, task handles are not transferable
                 _ => SharedValue::Null,
@@ -126,6 +130,11 @@ pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
         }
         SharedValue::Channel(ch) => {
             let r = gc.alloc(ObjKind::Channel(ch.clone()));
+            Value::obj(r)
+        }
+        SharedValue::Tuple(items) => {
+            let vals: Vec<Value> = items.iter().map(|sv| shared_to_value(gc, sv)).collect();
+            let r = gc.alloc(ObjKind::Tuple(vals));
             Value::obj(r)
         }
     }
@@ -357,6 +366,10 @@ impl GcObject {
             ObjKind::TaskHandle(_) => "<task>".to_string(),
             ObjKind::Channel(_) => "<channel>".to_string(),
             ObjKind::Frozen(v) => v.display(gc),
+            ObjKind::Tuple(items) => {
+                let strs: Vec<String> = items.iter().map(|v| v.display(gc)).collect();
+                format!("({})", strs.join(", "))
+            }
             ObjKind::BoxedInt(n) => n.to_string(),
         }
     }
@@ -377,6 +390,10 @@ impl GcObject {
             }
             ObjKind::ResultOk(v) => format!("{{ \"Ok\": {} }}", v.to_json_string(gc)),
             ObjKind::ResultErr(v) => format!("{{ \"Err\": {} }}", v.to_json_string(gc)),
+            ObjKind::Tuple(items) => {
+                let entries: Vec<String> = items.iter().map(|v| v.to_json_string(gc)).collect();
+                format!("[{}]", entries.join(", "))
+            }
             ObjKind::BoxedInt(n) => n.to_string(),
             _ => format!("\"<{}>\"", self.type_name()),
         }
@@ -395,6 +412,7 @@ impl GcObject {
             ObjKind::TaskHandle(_) => "TaskHandle",
             ObjKind::Channel(_) => "channel",
             ObjKind::Frozen(_) => "Frozen",
+            ObjKind::Tuple(_) => "Tuple",
             ObjKind::BoxedInt(_) => "Int",
         }
     }
@@ -410,6 +428,9 @@ impl GcObject {
                     && a.iter()
                         .all(|(k, v)| b.get(k).map_or(false, |bv| v.equals(bv, gc)))
             }
+            (ObjKind::Tuple(a), ObjKind::Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.equals(y, gc))
+            }
             (ObjKind::BoxedInt(a), ObjKind::BoxedInt(b)) => a == b,
             _ => false,
         }
@@ -417,7 +438,7 @@ impl GcObject {
 
     pub fn trace(&self, worklist: &mut Vec<GcRef>) {
         match &self.kind {
-            ObjKind::Array(items) => {
+            ObjKind::Array(items) | ObjKind::Tuple(items) => {
                 for item in items {
                     if let Some(r) = item.as_obj() {
                         worklist.push(r);
@@ -465,6 +486,8 @@ pub enum ObjKind {
     TaskHandle(Arc<(std::sync::Mutex<Option<SharedValue>>, std::sync::Condvar)>),
     Channel(Arc<VmChannelInner>),
     Frozen(Value),
+    /// Immutable, fixed-length, heterogeneous collection.
+    Tuple(Vec<Value>),
     /// Heap-boxed i64 for values exceeding 48-bit NaN-box inline range.
     /// Used when NaN-boxed Value is active; transparent to user code.
     BoxedInt(i64),

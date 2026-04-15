@@ -26,9 +26,11 @@ impl Interpreter {
             }
             "len" => match args.first() {
                 Some(Value::String(s)) => Ok(Value::Int(s.chars().count() as i64)),
-                Some(Value::Array(a)) => Ok(Value::Int(a.len() as i64)),
+                Some(Value::Array(a) | Value::Tuple(a)) => Ok(Value::Int(a.len() as i64)),
                 Some(Value::Object(o)) => Ok(Value::Int(o.len() as i64)),
-                _ => Err(RuntimeError::new("len() requires string, array, or object")),
+                _ => Err(RuntimeError::new(
+                    "len() requires string, array, tuple, or object",
+                )),
             },
             "type" | "typeof" => match args.first() {
                 Some(v) => Ok(Value::String(v.type_name().to_string())),
@@ -89,7 +91,7 @@ impl Interpreter {
                 (Some(Value::String(s)), Some(Value::String(sub))) => {
                     Ok(Value::Bool(s.contains(sub.as_str())))
                 }
-                (Some(Value::Array(arr)), Some(val)) => Ok(Value::Bool(
+                (Some(Value::Array(arr) | Value::Tuple(arr)), Some(val)) => Ok(Value::Bool(
                     arr.iter().any(|v| format!("{}", v) == format!("{}", val)),
                 )),
                 (Some(Value::Object(map)), Some(Value::String(key))) => {

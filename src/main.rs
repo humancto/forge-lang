@@ -697,6 +697,11 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
                 collect_vm_incompatible_stmt(&s.stmt, issues);
             }
         }
+        Expr::Tuple(items) => {
+            for item in items {
+                collect_vm_incompatible_expr(item, issues);
+            }
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => {}
     }
 }

@@ -194,6 +194,7 @@ pub enum Expr {
     Bool(bool),
     Object(Vec<(String, Expr)>),
     Array(Vec<Expr>),
+    Tuple(Vec<Expr>),
     Ident(String),
     BinOp {
         left: Box<Expr>,
@@ -307,6 +308,7 @@ pub enum TypeAnn {
     Generic(String, Vec<TypeAnn>),
     Function(Vec<TypeAnn>, Box<TypeAnn>),
     Optional(Box<TypeAnn>),
+    Tuple(Vec<TypeAnn>),
 }
 
 #[derive(Debug, Clone)]
@@ -357,6 +359,7 @@ pub enum DestructurePattern {
         items: Vec<String>,
         rest: Option<String>,
     },
+    Tuple(Vec<String>),
 }
 
 #[derive(Debug, Clone)]

@@ -49,3 +49,5 @@ mod must_ask_freeze_tests;
 mod parity_tests;
 #[cfg(test)]
 mod schedule_watch_tests;
+#[cfg(test)]
+mod tuple_tests;

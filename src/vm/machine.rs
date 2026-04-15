@@ -1411,6 +1411,16 @@ impl VM {
                         let r = self.gc.alloc(ObjKind::Array(items));
                         self.registers[base + a as usize] = Value::obj(r);
                     }
+                    OpCode::NewTuple => {
+                        let start = base + b as usize;
+                        let count = c as usize;
+                        let mut items = Vec::with_capacity(count);
+                        for i in 0..count {
+                            items.push(self.registers[start + i]);
+                        }
+                        let r = self.gc.alloc(ObjKind::Tuple(items));
+                        self.registers[base + a as usize] = Value::obj(r);
+                    }
                     OpCode::NewObject => {
                         let start = base + b as usize;
                         let pair_count = c as usize;
@@ -1574,7 +1584,7 @@ impl VM {
                         let result = if let Some(r) = obj.as_obj() {
                             if let Some(i) = idx.as_int(&self.gc) {
                                 if let Some(o) = self.gc.get(r) {
-                                    if let ObjKind::Array(items) = &o.kind {
+                                    if let ObjKind::Array(items) | ObjKind::Tuple(items) = &o.kind {
                                         items
                                             .get(i as usize)
                                             .cloned()
@@ -1610,6 +1620,12 @@ impl VM {
                         let idx = self.registers[base + b as usize];
                         let val = self.registers[base + c as usize];
                         if let Some(r) = self.registers[base + a as usize].as_obj() {
+                            // Check for tuple mutation
+                            if let Some(obj) = self.gc.get(r) {
+                                if matches!(&obj.kind, ObjKind::Tuple(_)) {
+                                    return Err(VMError::new("cannot mutate a tuple"));
+                                }
+                            }
                             let key_str = self.get_string(&idx);
                             let idx_int = idx.as_int(&self.gc);
                             if let Some(obj) = self.gc.get_mut(r) {
@@ -1634,7 +1650,7 @@ impl VM {
                             if let Some(obj) = self.gc.get(r) {
                                 match &obj.kind {
                                     ObjKind::String(s) => s.chars().count() as i64,
-                                    ObjKind::Array(a) => a.len() as i64,
+                                    ObjKind::Array(a) | ObjKind::Tuple(a) => a.len() as i64,
                                     ObjKind::Object(o) => o.len() as i64,
                                     _ => 0,
                                 }
