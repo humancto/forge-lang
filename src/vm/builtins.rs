@@ -3522,6 +3522,38 @@ impl VM {
         method_name: &str,
         extra_args: &[Value],
     ) -> Result<Value, VMError> {
+        // Stream receiver check — combinator and terminal methods on
+        // `ObjKind::Stream` short-circuit all object/method-table lookup.
+        if let Some(r) = receiver.as_obj() {
+            let is_stream = self
+                .gc
+                .get(r)
+                .map(|obj| matches!(&obj.kind, ObjKind::Stream(_)))
+                .unwrap_or(false);
+            if is_stream {
+                return self.dispatch_stream_method_vm(r, method_name, extra_args);
+            }
+        }
+
+        // `.stream()` — wrap a source collection into a fresh Stream.
+        if method_name == "stream" {
+            if !extra_args.is_empty() {
+                return Err(VMError::new("stream() takes no arguments"));
+            }
+            if let Some(kind) = self.make_stream_kind_from(receiver) {
+                let sb = Box::new(StreamBox {
+                    kind,
+                    poisoned: None,
+                });
+                let nr = self.gc.alloc(ObjKind::Stream(sb));
+                return Ok(Value::obj(nr));
+            }
+            return Err(VMError::new(&format!(
+                "stream() not supported on {}",
+                receiver.type_name(&self.gc)
+            )));
+        }
+
         if let Some(fields) = self.get_object_fields(&receiver) {
             if let Some(func) = fields.get(method_name).cloned() {
                 return self.call_value(func, extra_args.to_vec());
@@ -3830,6 +3862,631 @@ impl VM {
             method_name,
             receiver.type_name(&self.gc)
         )))
+    }
+
+    /// Build a `StreamKind` source wrapping a collection value. Peels
+    /// `Frozen(inner)` one level so frozen collections still stream.
+    fn make_stream_kind_from(&self, v: Value) -> Option<StreamKind> {
+        let r = v.as_obj()?;
+        let obj = self.gc.get(r)?;
+        match &obj.kind {
+            ObjKind::Array(items) => Some(StreamKind::ArrayIter {
+                items: items.clone(),
+                idx: 0,
+            }),
+            ObjKind::Tuple(items) => Some(StreamKind::TupleIter {
+                items: items.clone(),
+                idx: 0,
+            }),
+            ObjKind::Set(items) => Some(StreamKind::SetIter {
+                items: items.clone(),
+                idx: 0,
+            }),
+            ObjKind::Map(pairs) => Some(StreamKind::MapIter {
+                pairs: pairs.clone(),
+                idx: 0,
+            }),
+            ObjKind::String(s) => Some(StreamKind::StringIter {
+                chars: s.chars().collect(),
+                idx: 0,
+            }),
+            ObjKind::Frozen(inner) => {
+                let ir = inner.as_obj()?;
+                let iobj = self.gc.get(ir)?;
+                match &iobj.kind {
+                    ObjKind::Array(items) => Some(StreamKind::ArrayIter {
+                        items: items.clone(),
+                        idx: 0,
+                    }),
+                    ObjKind::Tuple(items) => Some(StreamKind::TupleIter {
+                        items: items.clone(),
+                        idx: 0,
+                    }),
+                    ObjKind::Set(items) => Some(StreamKind::SetIter {
+                        items: items.clone(),
+                        idx: 0,
+                    }),
+                    ObjKind::Map(pairs) => Some(StreamKind::MapIter {
+                        pairs: pairs.clone(),
+                        idx: 0,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Allocate a fresh Stream object wrapping the given kind.
+    fn alloc_stream(&mut self, kind: StreamKind) -> Value {
+        let sb = Box::new(StreamBox {
+            kind,
+            poisoned: None,
+        });
+        let nr = self.gc.alloc(ObjKind::Stream(sb));
+        Value::obj(nr)
+    }
+
+    /// Construct `Some(v)` as an Option-tagged Object matching the VM's
+    /// `Some` constructor semantics. Returns a fresh Value.
+    fn alloc_option_some(&mut self, v: Value) -> Value {
+        let mut obj = IndexMap::new();
+        let ty = self.alloc_string("Option");
+        let va = self.alloc_string("Some");
+        obj.insert("__type__".to_string(), ty);
+        obj.insert("__variant__".to_string(), va);
+        obj.insert("_0".to_string(), v);
+        let r = self.gc.alloc(ObjKind::Object(obj));
+        Value::obj(r)
+    }
+
+    /// Fetch the globally-cached `None` Option value. Fresh-constructs
+    /// one if the prelude binding is missing (should never happen).
+    fn alloc_option_none(&mut self) -> Value {
+        if let Some(v) = self.globals.get("None").cloned() {
+            return v;
+        }
+        let mut obj = IndexMap::new();
+        let ty = self.alloc_string("Option");
+        let va = self.alloc_string("None");
+        obj.insert("__type__".to_string(), ty);
+        obj.insert("__variant__".to_string(), va);
+        let r = self.gc.alloc(ObjKind::Object(obj));
+        Value::obj(r)
+    }
+
+    /// Record a poisoning error on a stream so subsequent `next` calls
+    /// re-yield it. No-op if the stream is already poisoned.
+    fn poison_stream_vm(&mut self, r: GcRef, msg: &str) {
+        if let Some(obj) = self.gc.get_mut(r) {
+            if let ObjKind::Stream(sb) = &mut obj.kind {
+                if sb.poisoned.is_none() {
+                    sb.poisoned = Some(msg.to_string());
+                }
+            }
+        }
+    }
+
+    /// Expect `v` to refer to a Stream object; return its GcRef.
+    fn expect_stream_ref_vm(&self, v: Value, ctx: &str) -> Result<GcRef, VMError> {
+        if let Some(r) = v.as_obj() {
+            if let Some(obj) = self.gc.get(r) {
+                if matches!(&obj.kind, ObjKind::Stream(_)) {
+                    return Ok(r);
+                }
+                if let ObjKind::Frozen(inner) = &obj.kind {
+                    if let Some(ir) = inner.as_obj() {
+                        if let Some(iobj) = self.gc.get(ir) {
+                            if matches!(&iobj.kind, ObjKind::Stream(_)) {
+                                return Ok(ir);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(VMError::new(&format!(
+            "{} expects a Stream, got {}",
+            ctx,
+            v.type_name(&self.gc)
+        )))
+    }
+
+    /// Pull-based advance of a Stream cell. Peels cursor state under
+    /// a GC borrow, drops the borrow, then recurses or calls user
+    /// closures iteratively. Mirrors the interpreter's `stream_next`.
+    pub(crate) fn stream_next_vm(&mut self, r: GcRef) -> Result<Option<Value>, VMError> {
+        loop {
+            enum Step {
+                Yield(Value),
+                YieldTuple(Value, Value),
+                YieldChar(char),
+                Done,
+                PullFilter { upstream: GcRef, pred: Value },
+                PullMap { upstream: GcRef, fn_val: Value },
+                PullTake { upstream: GcRef },
+                PullSkipInit { upstream: GcRef, skip_n: usize },
+                PullSkipOne { upstream: GcRef },
+                PullChainFirst { first: GcRef },
+                PullChainSecond { second: GcRef },
+                PullZip { left: GcRef, right: GcRef },
+                PullEnumerate { upstream: GcRef, idx: i64 },
+            }
+
+            let step: Step = {
+                let obj = self
+                    .gc
+                    .get_mut(r)
+                    .ok_or_else(|| VMError::new("null stream reference"))?;
+                let sb = match &mut obj.kind {
+                    ObjKind::Stream(sb) => sb,
+                    _ => return Err(VMError::new("not a stream")),
+                };
+                if let Some(err) = sb.poisoned.clone() {
+                    return Err(VMError::new(&err));
+                }
+                match &mut sb.kind {
+                    StreamKind::ArrayIter { items, idx }
+                    | StreamKind::TupleIter { items, idx }
+                    | StreamKind::SetIter { items, idx } => {
+                        if *idx < items.len() {
+                            let v = items[*idx];
+                            *idx += 1;
+                            Step::Yield(v)
+                        } else {
+                            Step::Done
+                        }
+                    }
+                    StreamKind::MapIter { pairs, idx } => {
+                        if *idx < pairs.len() {
+                            let (k, v) = pairs[*idx];
+                            *idx += 1;
+                            Step::YieldTuple(k, v)
+                        } else {
+                            Step::Done
+                        }
+                    }
+                    StreamKind::StringIter { chars, idx } => {
+                        if *idx < chars.len() {
+                            let c = chars[*idx];
+                            *idx += 1;
+                            Step::YieldChar(c)
+                        } else {
+                            Step::Done
+                        }
+                    }
+                    StreamKind::Filter { upstream, pred } => {
+                        let up_r = upstream
+                            .as_obj()
+                            .ok_or_else(|| VMError::new("filter upstream is not a Stream obj"))?;
+                        Step::PullFilter {
+                            upstream: up_r,
+                            pred: *pred,
+                        }
+                    }
+                    StreamKind::Map { upstream, fn_val } => {
+                        let up_r = upstream
+                            .as_obj()
+                            .ok_or_else(|| VMError::new("map upstream is not a Stream obj"))?;
+                        Step::PullMap {
+                            upstream: up_r,
+                            fn_val: *fn_val,
+                        }
+                    }
+                    StreamKind::Take {
+                        upstream,
+                        remaining,
+                    } => {
+                        if *remaining == 0 {
+                            Step::Done
+                        } else {
+                            *remaining -= 1;
+                            let up_r = upstream
+                                .as_obj()
+                                .ok_or_else(|| VMError::new("take upstream is not a Stream obj"))?;
+                            Step::PullTake { upstream: up_r }
+                        }
+                    }
+                    StreamKind::Skip {
+                        upstream,
+                        skip_n,
+                        started,
+                    } => {
+                        let up_r = upstream
+                            .as_obj()
+                            .ok_or_else(|| VMError::new("skip upstream is not a Stream obj"))?;
+                        if *started {
+                            Step::PullSkipOne { upstream: up_r }
+                        } else {
+                            *started = true;
+                            let n = *skip_n;
+                            Step::PullSkipInit {
+                                upstream: up_r,
+                                skip_n: n,
+                            }
+                        }
+                    }
+                    StreamKind::Chain {
+                        first,
+                        second,
+                        on_second,
+                    } => {
+                        if *on_second {
+                            let sr = second
+                                .as_obj()
+                                .ok_or_else(|| VMError::new("chain second is not a Stream obj"))?;
+                            Step::PullChainSecond { second: sr }
+                        } else {
+                            let fr = first
+                                .as_obj()
+                                .ok_or_else(|| VMError::new("chain first is not a Stream obj"))?;
+                            Step::PullChainFirst { first: fr }
+                        }
+                    }
+                    StreamKind::Zip { left, right } => {
+                        let lr = left
+                            .as_obj()
+                            .ok_or_else(|| VMError::new("zip left is not a Stream obj"))?;
+                        let rr = right
+                            .as_obj()
+                            .ok_or_else(|| VMError::new("zip right is not a Stream obj"))?;
+                        Step::PullZip {
+                            left: lr,
+                            right: rr,
+                        }
+                    }
+                    StreamKind::Enumerate { upstream, idx } => {
+                        let up_r = upstream.as_obj().ok_or_else(|| {
+                            VMError::new("enumerate upstream is not a Stream obj")
+                        })?;
+                        let i = *idx as i64;
+                        *idx += 1;
+                        Step::PullEnumerate {
+                            upstream: up_r,
+                            idx: i,
+                        }
+                    }
+                }
+            }; // borrow dropped
+
+            match step {
+                Step::Yield(v) => return Ok(Some(v)),
+                Step::YieldTuple(k, v) => {
+                    let tr = self.gc.alloc(ObjKind::Tuple(vec![k, v]));
+                    return Ok(Some(Value::obj(tr)));
+                }
+                Step::YieldChar(c) => {
+                    let sr = self.gc.alloc(ObjKind::String(c.to_string()));
+                    return Ok(Some(Value::obj(sr)));
+                }
+                Step::Done => return Ok(None),
+                Step::PullFilter { upstream, pred } => loop {
+                    match self.stream_next_vm(upstream)? {
+                        None => return Ok(None),
+                        Some(v) => match self.call_value(pred, vec![v]) {
+                            Ok(res) => {
+                                if res.is_truthy(&self.gc) {
+                                    return Ok(Some(v));
+                                }
+                            }
+                            Err(e) => {
+                                self.poison_stream_vm(r, &e.message);
+                                return Err(e);
+                            }
+                        },
+                    }
+                },
+                Step::PullMap { upstream, fn_val } => match self.stream_next_vm(upstream)? {
+                    None => return Ok(None),
+                    Some(v) => match self.call_value(fn_val, vec![v]) {
+                        Ok(res) => return Ok(Some(res)),
+                        Err(e) => {
+                            self.poison_stream_vm(r, &e.message);
+                            return Err(e);
+                        }
+                    },
+                },
+                Step::PullTake { upstream } => return self.stream_next_vm(upstream),
+                Step::PullSkipInit { upstream, skip_n } => {
+                    for _ in 0..skip_n {
+                        match self.stream_next_vm(upstream)? {
+                            Some(_) => {}
+                            None => return Ok(None),
+                        }
+                    }
+                    return self.stream_next_vm(upstream);
+                }
+                Step::PullSkipOne { upstream } => return self.stream_next_vm(upstream),
+                Step::PullChainFirst { first } => match self.stream_next_vm(first)? {
+                    Some(v) => return Ok(Some(v)),
+                    None => {
+                        if let Some(obj) = self.gc.get_mut(r) {
+                            if let ObjKind::Stream(sb) = &mut obj.kind {
+                                if let StreamKind::Chain { on_second, .. } = &mut sb.kind {
+                                    *on_second = true;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                },
+                Step::PullChainSecond { second } => return self.stream_next_vm(second),
+                Step::PullZip { left, right } => {
+                    let l = self.stream_next_vm(left)?;
+                    let r2 = self.stream_next_vm(right)?;
+                    match (l, r2) {
+                        (Some(lv), Some(rv)) => {
+                            let tr = self.gc.alloc(ObjKind::Tuple(vec![lv, rv]));
+                            return Ok(Some(Value::obj(tr)));
+                        }
+                        _ => return Ok(None),
+                    }
+                }
+                Step::PullEnumerate { upstream, idx } => match self.stream_next_vm(upstream)? {
+                    Some(v) => {
+                        let i = Value::small_int(idx);
+                        let tr = self.gc.alloc(ObjKind::Tuple(vec![i, v]));
+                        return Ok(Some(Value::obj(tr)));
+                    }
+                    None => return Ok(None),
+                },
+            }
+        }
+    }
+
+    /// Dispatch a method call whose receiver is a Stream.
+    pub(crate) fn dispatch_stream_method_vm(
+        &mut self,
+        cell: GcRef,
+        method_name: &str,
+        args: &[Value],
+    ) -> Result<Value, VMError> {
+        match method_name {
+            // ---- combinator constructors (lazy) ----
+            "filter" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("filter() requires one argument"));
+                }
+                Ok(self.alloc_stream(StreamKind::Filter {
+                    upstream: Value::obj(cell),
+                    pred: args[0],
+                }))
+            }
+            "map" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("map() requires one argument"));
+                }
+                Ok(self.alloc_stream(StreamKind::Map {
+                    upstream: Value::obj(cell),
+                    fn_val: args[0],
+                }))
+            }
+            "take" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("take() requires one argument"));
+                }
+                let n = args[0]
+                    .as_int(&self.gc)
+                    .ok_or_else(|| VMError::new("take() argument must be an integer"))?;
+                if n < 0 {
+                    return Err(VMError::new("take() argument must be non-negative"));
+                }
+                Ok(self.alloc_stream(StreamKind::Take {
+                    upstream: Value::obj(cell),
+                    remaining: n as usize,
+                }))
+            }
+            "skip" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("skip() requires one argument"));
+                }
+                let n = args[0]
+                    .as_int(&self.gc)
+                    .ok_or_else(|| VMError::new("skip() argument must be an integer"))?;
+                if n < 0 {
+                    return Err(VMError::new("skip() argument must be non-negative"));
+                }
+                Ok(self.alloc_stream(StreamKind::Skip {
+                    upstream: Value::obj(cell),
+                    skip_n: n as usize,
+                    started: false,
+                }))
+            }
+            "chain" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("chain() requires one argument"));
+                }
+                let second_r = self.expect_stream_ref_vm(args[0], "chain()")?;
+                Ok(self.alloc_stream(StreamKind::Chain {
+                    first: Value::obj(cell),
+                    second: Value::obj(second_r),
+                    on_second: false,
+                }))
+            }
+            "zip" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("zip() requires one argument"));
+                }
+                let right_r = self.expect_stream_ref_vm(args[0], "zip()")?;
+                Ok(self.alloc_stream(StreamKind::Zip {
+                    left: Value::obj(cell),
+                    right: Value::obj(right_r),
+                }))
+            }
+            "enumerate" => {
+                if !args.is_empty() {
+                    return Err(VMError::new("enumerate() takes no arguments"));
+                }
+                Ok(self.alloc_stream(StreamKind::Enumerate {
+                    upstream: Value::obj(cell),
+                    idx: 0,
+                }))
+            }
+
+            // ---- eager terminals ----
+            "collect" | "to_array" => {
+                if !args.is_empty() {
+                    return Err(VMError::new(&format!(
+                        "{}() takes no arguments",
+                        method_name
+                    )));
+                }
+                let mut out: Vec<Value> = Vec::new();
+                while let Some(v) = self.stream_next_vm(cell)? {
+                    out.push(v);
+                }
+                let nr = self.gc.alloc(ObjKind::Array(out));
+                Ok(Value::obj(nr))
+            }
+            "count" => {
+                if !args.is_empty() {
+                    return Err(VMError::new("count() takes no arguments"));
+                }
+                let mut n: i64 = 0;
+                while self.stream_next_vm(cell)?.is_some() {
+                    n += 1;
+                }
+                Ok(Value::small_int(n))
+            }
+            "for_each" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("for_each() requires one argument"));
+                }
+                let func = args[0];
+                while let Some(v) = self.stream_next_vm(cell)? {
+                    if let Err(e) = self.call_value(func, vec![v]) {
+                        self.poison_stream_vm(cell, &e.message);
+                        return Err(e);
+                    }
+                }
+                Ok(Value::null())
+            }
+            "first" => {
+                if !args.is_empty() {
+                    return Err(VMError::new("first() takes no arguments"));
+                }
+                match self.stream_next_vm(cell)? {
+                    Some(v) => Ok(self.alloc_option_some(v)),
+                    None => Ok(self.alloc_option_none()),
+                }
+            }
+            "reduce" => {
+                if args.len() != 2 {
+                    return Err(VMError::new("reduce() requires (initial, function)"));
+                }
+                let mut acc = args[0];
+                let func = args[1];
+                while let Some(v) = self.stream_next_vm(cell)? {
+                    match self.call_value(func, vec![acc, v]) {
+                        Ok(res) => acc = res,
+                        Err(e) => {
+                            self.poison_stream_vm(cell, &e.message);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(acc)
+            }
+            "sum" => {
+                if !args.is_empty() {
+                    return Err(VMError::new("sum() takes no arguments"));
+                }
+                let mut acc_int: i64 = 0;
+                let mut acc_float: f64 = 0.0;
+                let mut is_float = false;
+                while let Some(v) = self.stream_next_vm(cell)? {
+                    if let Some(n) = v.as_int(&self.gc) {
+                        if is_float {
+                            acc_float += n as f64;
+                        } else {
+                            acc_int += n;
+                        }
+                    } else if let Some(f) = v.as_float() {
+                        if !is_float {
+                            acc_float = acc_int as f64 + f;
+                            is_float = true;
+                        } else {
+                            acc_float += f;
+                        }
+                    } else {
+                        return Err(VMError::new(&format!(
+                            "sum() expects numeric values, got {}",
+                            v.type_name(&self.gc)
+                        )));
+                    }
+                }
+                if is_float {
+                    Ok(Value::float(acc_float))
+                } else {
+                    Ok(Value::small_int(acc_int))
+                }
+            }
+            "find" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("find() requires one argument"));
+                }
+                let pred = args[0];
+                while let Some(v) = self.stream_next_vm(cell)? {
+                    match self.call_value(pred, vec![v]) {
+                        Ok(res) => {
+                            if res.is_truthy(&self.gc) {
+                                return Ok(self.alloc_option_some(v));
+                            }
+                        }
+                        Err(e) => {
+                            self.poison_stream_vm(cell, &e.message);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(self.alloc_option_none())
+            }
+            "any" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("any() requires one argument"));
+                }
+                let pred = args[0];
+                while let Some(v) = self.stream_next_vm(cell)? {
+                    match self.call_value(pred, vec![v]) {
+                        Ok(res) => {
+                            if res.is_truthy(&self.gc) {
+                                return Ok(Value::bool_val(true));
+                            }
+                        }
+                        Err(e) => {
+                            self.poison_stream_vm(cell, &e.message);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Value::bool_val(false))
+            }
+            "all" => {
+                if args.len() != 1 {
+                    return Err(VMError::new("all() requires one argument"));
+                }
+                let pred = args[0];
+                while let Some(v) = self.stream_next_vm(cell)? {
+                    match self.call_value(pred, vec![v]) {
+                        Ok(res) => {
+                            if !res.is_truthy(&self.gc) {
+                                return Ok(Value::bool_val(false));
+                            }
+                        }
+                        Err(e) => {
+                            self.poison_stream_vm(cell, &e.message);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Value::bool_val(true))
+            }
+
+            _ => Err(VMError::new(&format!(
+                "unknown Stream method '{}'",
+                method_name
+            ))),
+        }
     }
 
     fn is_builtin_method_name(name: &str) -> bool {

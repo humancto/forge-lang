@@ -388,6 +388,29 @@ impl GcObject {
                 format!("[{}]", strs.join(", "))
             }
             ObjKind::Object(map) => {
+                // Option-tagged objects display as Some(v) / None for parity
+                // with the interpreter's Value::Some / Value::None display.
+                if let Some(ty) = map.get("__type__").and_then(|v| v.as_obj()) {
+                    if let Some(ObjKind::String(ts)) = gc.get(ty).map(|o| &o.kind) {
+                        if ts == "Option" {
+                            if let Some(variant) = map.get("__variant__").and_then(|v| v.as_obj()) {
+                                if let Some(ObjKind::String(vs)) = gc.get(variant).map(|o| &o.kind)
+                                {
+                                    if vs == "None" {
+                                        return "None".to_string();
+                                    }
+                                    if vs == "Some" {
+                                        let inner = map
+                                            .get("_0")
+                                            .map(|v| v.display(gc))
+                                            .unwrap_or_else(|| "null".to_string());
+                                        return format!("Some({})", inner);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let entries: Vec<String> = map
                     .iter()
                     .map(|(k, v)| format!("{}: {}", escape_json_string(k), v.to_json_string(gc)))
