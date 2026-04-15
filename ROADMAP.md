@@ -382,11 +382,11 @@ m3-012: test(types): generics and interface tests
 
 ### Milestone 4 Deliverables
 
-- [ ] `spawn { }` runs real concurrent tasks on tokio
-- [ ] Channels for inter-task communication
-- [ ] `await` suspends tasks for I/O
-- [ ] Select/multiplex on channels
-- [ ] No data races (values are copied or moved, not shared)
+- [x] `spawn { }` runs real concurrent tasks on tokio
+- [x] Channels for inter-task communication
+- [x] `await` suspends tasks for I/O
+- [x] Select/multiplex on channels
+- [x] No data races (values are copied or moved, not shared)
 
 ---
 
