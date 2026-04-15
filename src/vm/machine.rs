@@ -1593,14 +1593,15 @@ impl VM {
                         let result = if let Some(r) = obj.as_obj() {
                             if let Some(i) = idx.as_int(&self.gc) {
                                 if let Some(o) = self.gc.get(r) {
-                                    if let ObjKind::Array(items)
-                                    | ObjKind::Tuple(items)
-                                    | ObjKind::Set(items) = &o.kind
-                                    {
+                                    if let ObjKind::Array(items) | ObjKind::Tuple(items) = &o.kind {
                                         items
                                             .get(i as usize)
                                             .cloned()
                                             .ok_or_else(|| VMError::new("index out of bounds"))?
+                                    } else if matches!(&o.kind, ObjKind::Set(_)) {
+                                        return Err(VMError::new(
+                                            "cannot index a set; sets are unordered — use .has() or iteration",
+                                        ));
                                     } else {
                                         return Err(VMError::new("cannot index non-array"));
                                     }
@@ -1625,6 +1626,34 @@ impl VM {
                             }
                         } else {
                             return Err(VMError::new("invalid index operation"));
+                        };
+                        self.registers[base + a as usize] = result;
+                    }
+                    OpCode::IterGet => {
+                        let obj = self.registers[base + b as usize];
+                        let idx = self.registers[base + c as usize];
+                        let result = if let Some(r) = obj.as_obj() {
+                            if let Some(i) = idx.as_int(&self.gc) {
+                                if let Some(o) = self.gc.get(r) {
+                                    if let ObjKind::Array(items)
+                                    | ObjKind::Tuple(items)
+                                    | ObjKind::Set(items) = &o.kind
+                                    {
+                                        items
+                                            .get(i as usize)
+                                            .cloned()
+                                            .ok_or_else(|| VMError::new("index out of bounds"))?
+                                    } else {
+                                        return Err(VMError::new("cannot iterate non-collection"));
+                                    }
+                                } else {
+                                    Value::null()
+                                }
+                            } else {
+                                return Err(VMError::new("iterator index must be int"));
+                            }
+                        } else {
+                            return Err(VMError::new("invalid iterator operation"));
                         };
                         self.registers[base + a as usize] = result;
                     }

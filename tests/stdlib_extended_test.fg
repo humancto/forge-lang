@@ -184,7 +184,7 @@ define test_csv_parse_stringify() {
     let data = csv.parse(csv_str)
     assert_eq(len(data), 2)
     assert_eq(data[0].name, "Alice")
-    assert_eq(data[1].age, "25")
+    assert_eq(data[1].age, 25)
     let output = csv.stringify(data)
     assert(contains(output, "Alice"))
     assert(contains(output, "name"))

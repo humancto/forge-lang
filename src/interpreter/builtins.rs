@@ -93,9 +93,12 @@ impl Interpreter {
                 (Some(Value::String(s)), Some(Value::String(sub))) => {
                     Ok(Value::Bool(s.contains(sub.as_str())))
                 }
-                (Some(Value::Array(arr) | Value::Tuple(arr) | Value::Set(arr)), Some(val)) => Ok(
-                    Value::Bool(arr.iter().any(|v| format!("{}", v) == format!("{}", val))),
-                ),
+                (Some(Value::Set(arr)), Some(val)) => {
+                    Ok(Value::Bool(arr.iter().any(|v| Value::container_eq(v, val))))
+                }
+                (Some(Value::Array(arr) | Value::Tuple(arr)), Some(val)) => Ok(Value::Bool(
+                    arr.iter().any(|v| format!("{}", v) == format!("{}", val)),
+                )),
                 (Some(Value::Object(map)), Some(Value::String(key))) => {
                     Ok(Value::Bool(map.contains_key(key)))
                 }
@@ -271,14 +274,15 @@ impl Interpreter {
                 }
                 match &args[0] {
                     Value::Array(items) | Value::Tuple(items) => {
-                        let mut deduped = Vec::new();
+                        let mut deduped: Vec<Value> = Vec::new();
                         for item in items {
-                            if !deduped.contains(item) {
+                            if !deduped.iter().any(|v| Value::container_eq(v, item)) {
                                 deduped.push(item.clone());
                             }
                         }
                         Ok(Value::Set(deduped))
                     }
+                    Value::Set(items) => Ok(Value::Set(items.clone())),
                     _ => Err(RuntimeError::new("set() requires an array or tuple")),
                 }
             }
@@ -850,9 +854,12 @@ impl Interpreter {
                         "assert_eq() requires at least 2 arguments",
                     ));
                 }
-                let left = format!("{}", args[0]);
-                let right = format!("{}", args[1]);
-                if left != right {
+                // Value-level equality so sets / NaN / int↔float agree with the VM.
+                // Fall back to string comparison only when values are of truly unrelated
+                // shapes (Function, Lambda, etc.) — container_eq handles those via `a == b`.
+                if !Value::container_eq(&args[0], &args[1]) {
+                    let left = format!("{}", args[0]);
+                    let right = format!("{}", args[1]);
                     let msg = args.get(2).map(|v| format!("{}", v)).unwrap_or_default();
                     let detail = if msg.is_empty() {
                         format!("expected `{}`, got `{}`", right, left)
@@ -869,9 +876,8 @@ impl Interpreter {
                         "assert_ne() requires at least 2 arguments",
                     ));
                 }
-                let left = format!("{}", args[0]);
-                let right = format!("{}", args[1]);
-                if left == right {
+                if Value::container_eq(&args[0], &args[1]) {
+                    let left = format!("{}", args[0]);
                     let msg = args.get(2).map(|v| format!("{}", v)).unwrap_or_default();
                     let detail = if msg.is_empty() {
                         format!("expected values to differ, both are `{}`", left)
@@ -1809,7 +1815,7 @@ impl Interpreter {
                 }
                 let a = &args[0];
                 let b = &args[1];
-                if a == b {
+                if Value::container_eq(a, b) {
                     Ok(Value::Bool(true))
                 } else {
                     Err(RuntimeError::new(&format!("CAP DETECTED: {} ≠ {}", a, b)))

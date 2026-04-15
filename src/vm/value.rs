@@ -305,10 +305,14 @@ impl Value {
     }
 
     pub fn equals(&self, other: &Value, gc: &Gc) -> bool {
-        // Use classify to handle BoxedInt transparently
+        // Use classify to handle BoxedInt transparently.
+        // NaN is treated as equal to itself here so that sets containing
+        // NaN behave sensibly (membership, dedup). This is a deliberate
+        // departure from IEEE-754 `==` but matches the interpreter's
+        // container_eq semantics.
         match (self.classify(gc), other.classify(gc)) {
             (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
-            (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
+            (ValueKind::Float(a), ValueKind::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
             (ValueKind::Int(a), ValueKind::Float(b)) => (a as f64) == b,
             (ValueKind::Float(a), ValueKind::Int(b)) => a == (b as f64),
             (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
