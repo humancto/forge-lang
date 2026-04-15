@@ -634,3 +634,19 @@ fn jit_string_not_eq() {
     );
     assert_eq!(out, vec!["0", "1"]);
 }
+
+#[test]
+fn jit_global_function_call() {
+    // Tests JIT calling another function via GetGlobal + Call bridge
+    let out = run_jit_function(
+        "fn double(n) { return n * 2 }\nfn apply(x) { return double(x) }\nprintln(apply(21))",
+    );
+    assert_eq!(out, vec!["42"]);
+}
+
+#[test]
+fn jit_global_read() {
+    // Tests JIT reading a global variable via GetGlobal bridge
+    let out = run_jit_function("let x = 10\nfn get_x() { return x }\nprintln(get_x())");
+    assert_eq!(out, vec!["10"]);
+}
