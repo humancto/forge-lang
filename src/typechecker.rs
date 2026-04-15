@@ -1157,12 +1157,9 @@ impl TypeChecker {
                 let rt = self.infer_expr(right);
                 // Warn when Option<T> is used in arithmetic/comparison (not == or !=)
                 if !matches!(op, BinOp::Eq | BinOp::NotEq) {
-                    if matches!(lt, InferredType::Option(_)) {
-                        self.emit(
-                            "Option type used in operation; check with is_some() first".to_string(),
-                        );
-                    }
-                    if matches!(rt, InferredType::Option(_)) {
+                    let left_opt = matches!(lt, InferredType::Option(_));
+                    let right_opt = matches!(rt, InferredType::Option(_));
+                    if left_opt || right_opt {
                         self.emit(
                             "Option type used in operation; check with is_some() first".to_string(),
                         );
@@ -1314,11 +1311,20 @@ impl TypeChecker {
                         "unwrap_or" => {
                             if let Some(arg) = args.first() {
                                 let arg_type = self.infer_expr(arg);
-                                // Infer the fallback arg too
-                                if args.len() > 1 {
-                                    self.infer_expr(&args[1]);
-                                }
+                                let fallback_type = if args.len() > 1 {
+                                    self.infer_expr(&args[1])
+                                } else {
+                                    InferredType::Unknown
+                                };
                                 if let InferredType::Option(inner) = arg_type {
+                                    if fallback_type != InferredType::Unknown
+                                        && !types_compatible(&inner, &fallback_type)
+                                    {
+                                        self.emit(format!(
+                                            "unwrap_or fallback type {} incompatible with Option inner type {}",
+                                            fallback_type, inner
+                                        ));
+                                    }
                                     return *inner;
                                 }
                                 return arg_type;
@@ -2241,6 +2247,16 @@ mod tests {
             "unwrap_or(?Int, 0) should return Int: {:?}",
             w.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn unwrap_or_fallback_type_mismatch_warns() {
+        let w = warnings_for("let x: ?Int = Some(42)\nlet y = unwrap_or(x, \"hello\")");
+        assert!(
+            !w.is_empty(),
+            "unwrap_or(?Int, String) should warn about incompatible fallback"
+        );
+        assert!(w[0].message.contains("incompatible"));
     }
 
     #[test]
