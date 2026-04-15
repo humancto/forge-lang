@@ -1,0 +1,3 @@
+// expect: 3
+
+[10, 20, 30].stream().enumerate().count()

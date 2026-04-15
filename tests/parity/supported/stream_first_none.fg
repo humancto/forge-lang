@@ -1,0 +1,3 @@
+// expect: None
+
+[].stream().first()
