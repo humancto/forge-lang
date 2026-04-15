@@ -2932,6 +2932,50 @@ impl Interpreter {
                             }
                             return Ok(Value::Null);
                         }
+                        // `.stream()` intercept — turn a source collection
+                        // into a Value::Stream. Combinators are chained
+                        // on Stream values by the block below.
+                        _ if method_name == "stream" => {
+                            if !args.is_empty() {
+                                return Err(RuntimeError::new("stream() takes no arguments"));
+                            }
+                            let kind = match obj {
+                                Value::Array(items) => StreamKind::ArrayIter { items, idx: 0 },
+                                Value::Tuple(items) => StreamKind::TupleIter { items, idx: 0 },
+                                Value::Set(items) => StreamKind::SetIter { items, idx: 0 },
+                                Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
+                                Value::String(s) => StreamKind::StringIter {
+                                    chars: s.chars().collect(),
+                                    idx: 0,
+                                },
+                                Value::Frozen(inner) => match *inner {
+                                    Value::Array(items) => StreamKind::ArrayIter { items, idx: 0 },
+                                    Value::Tuple(items) => StreamKind::TupleIter { items, idx: 0 },
+                                    Value::Set(items) => StreamKind::SetIter { items, idx: 0 },
+                                    Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
+                                    other => {
+                                        return Err(RuntimeError::new(&format!(
+                                            "stream() not supported on {}",
+                                            other.type_name()
+                                        )))
+                                    }
+                                },
+                                other => {
+                                    return Err(RuntimeError::new(&format!(
+                                        "stream() not supported on {}",
+                                        other.type_name()
+                                    )))
+                                }
+                            };
+                            return Ok(Self::make_stream(kind));
+                        }
+                        // Stream method dispatch — terminals + combinator
+                        // constructors. Evaluates closure args eagerly but
+                        // does not drain the stream except for terminals.
+                        Value::Stream(ref stream_cell) => {
+                            let cell = stream_cell.clone();
+                            return self.dispatch_stream_method(cell, method_name, args);
+                        }
                         _ if known_methods.contains(&method_name) => {
                             let mut full_args = vec![obj.clone()];
                             for arg in args {
@@ -3511,6 +3555,566 @@ impl Interpreter {
                 op,
                 left.type_name(),
                 right.type_name()
+            ))),
+        }
+    }
+
+    /// Advance a stream by one step. Pull-based: each call returns the
+    /// next yielded value, or `None` when drained.
+    ///
+    /// Borrow discipline: never hold the cell's Mutex guard across a
+    /// recursive `stream_next` or user-closure call. The pattern in each
+    /// arm is:
+    ///   1. Lock, peel cursor state into owned locals, DROP the guard.
+    ///   2. Recurse into upstream / call user closure.
+    ///   3. Re-lock to write back state (if any).
+    ///
+    /// Re-entrancy: if `try_lock` fails (e.g., `zip(a, a)` re-enters the
+    /// same cell), return a RuntimeError rather than deadlocking.
+    ///
+    /// Poisoning: if a user closure errors, the error is stored in
+    /// `StreamCell::poisoned` and re-yielded on every subsequent call.
+    pub(crate) fn stream_next(
+        &mut self,
+        cell: &Arc<Mutex<StreamCell>>,
+    ) -> Result<Option<Value>, RuntimeError> {
+        loop {
+            // Peel one step of cursor state. Each branch must drop the
+            // guard before any recursion or user-closure call.
+            enum Step {
+                Yield(Value),
+                Done,
+                PullFilter {
+                    upstream: Arc<Mutex<StreamCell>>,
+                    pred: Value,
+                },
+                PullMap {
+                    upstream: Arc<Mutex<StreamCell>>,
+                    fn_val: Value,
+                },
+                PullTake {
+                    upstream: Arc<Mutex<StreamCell>>,
+                },
+                PullSkipInit {
+                    upstream: Arc<Mutex<StreamCell>>,
+                    skip_n: usize,
+                },
+                PullSkipOne {
+                    upstream: Arc<Mutex<StreamCell>>,
+                },
+                PullChainFirst {
+                    first: Arc<Mutex<StreamCell>>,
+                },
+                PullChainSecond {
+                    second: Arc<Mutex<StreamCell>>,
+                },
+                PullZip {
+                    left: Arc<Mutex<StreamCell>>,
+                    right: Arc<Mutex<StreamCell>>,
+                },
+                PullEnumerate {
+                    upstream: Arc<Mutex<StreamCell>>,
+                    idx: usize,
+                },
+            }
+
+            let step: Step = {
+                let mut guard = cell
+                    .try_lock()
+                    .map_err(|_| RuntimeError::new("stream already in use (re-entrant advance)"))?;
+                if let Some(err) = &guard.poisoned {
+                    return Err(RuntimeError::new(err));
+                }
+                match &mut guard.kind {
+                    StreamKind::ArrayIter { items, idx }
+                    | StreamKind::TupleIter { items, idx }
+                    | StreamKind::SetIter { items, idx } => {
+                        if *idx < items.len() {
+                            let v = items[*idx].clone();
+                            *idx += 1;
+                            Step::Yield(v)
+                        } else {
+                            Step::Done
+                        }
+                    }
+                    StreamKind::MapIter { pairs, idx } => {
+                        if *idx < pairs.len() {
+                            let (k, v) = pairs[*idx].clone();
+                            *idx += 1;
+                            Step::Yield(Value::Tuple(vec![k, v]))
+                        } else {
+                            Step::Done
+                        }
+                    }
+                    StreamKind::StringIter { chars, idx } => {
+                        if *idx < chars.len() {
+                            let c = chars[*idx];
+                            *idx += 1;
+                            Step::Yield(Value::String(c.to_string()))
+                        } else {
+                            Step::Done
+                        }
+                    }
+                    StreamKind::Filter { upstream, pred } => Step::PullFilter {
+                        upstream: upstream.clone(),
+                        pred: pred.clone(),
+                    },
+                    StreamKind::Map { upstream, fn_val } => Step::PullMap {
+                        upstream: upstream.clone(),
+                        fn_val: fn_val.clone(),
+                    },
+                    StreamKind::Take {
+                        upstream,
+                        remaining,
+                    } => {
+                        if *remaining == 0 {
+                            Step::Done
+                        } else {
+                            *remaining -= 1;
+                            Step::PullTake {
+                                upstream: upstream.clone(),
+                            }
+                        }
+                    }
+                    StreamKind::Skip {
+                        upstream,
+                        skip_n,
+                        started,
+                    } => {
+                        if *started {
+                            Step::PullSkipOne {
+                                upstream: upstream.clone(),
+                            }
+                        } else {
+                            *started = true;
+                            let n = *skip_n;
+                            Step::PullSkipInit {
+                                upstream: upstream.clone(),
+                                skip_n: n,
+                            }
+                        }
+                    }
+                    StreamKind::Chain {
+                        first,
+                        second,
+                        on_second,
+                    } => {
+                        if *on_second {
+                            Step::PullChainSecond {
+                                second: second.clone(),
+                            }
+                        } else {
+                            Step::PullChainFirst {
+                                first: first.clone(),
+                            }
+                        }
+                    }
+                    StreamKind::Zip { left, right } => Step::PullZip {
+                        left: left.clone(),
+                        right: right.clone(),
+                    },
+                    StreamKind::Enumerate { upstream, idx } => {
+                        let i = *idx as i64;
+                        *idx += 1;
+                        Step::PullEnumerate {
+                            upstream: upstream.clone(),
+                            idx: i as usize,
+                        }
+                    }
+                }
+            }; // guard dropped
+
+            match step {
+                Step::Yield(v) => return Ok(Some(v)),
+                Step::Done => return Ok(None),
+
+                Step::PullFilter { upstream, pred } => {
+                    // Iterative filter: pull until pred returns truthy.
+                    loop {
+                        match self.stream_next(&upstream) {
+                            Ok(None) => return Ok(None),
+                            Ok(Some(v)) => {
+                                let args = vec![v.clone()];
+                                match self.call_function(pred.clone(), args) {
+                                    Ok(res) => {
+                                        if res.is_truthy() {
+                                            return Ok(Some(v));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.poison_stream(cell, &e);
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                Step::PullMap { upstream, fn_val } => match self.stream_next(&upstream) {
+                    Ok(None) => return Ok(None),
+                    Ok(Some(v)) => {
+                        let args = vec![v];
+                        match self.call_function(fn_val, args) {
+                            Ok(res) => return Ok(Some(res)),
+                            Err(e) => {
+                                self.poison_stream(cell, &e);
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Err(e) => return Err(e),
+                },
+                Step::PullTake { upstream } => {
+                    return self.stream_next(&upstream);
+                }
+                Step::PullSkipInit { upstream, skip_n } => {
+                    for _ in 0..skip_n {
+                        match self.stream_next(&upstream)? {
+                            Some(_) => {}
+                            None => return Ok(None),
+                        }
+                    }
+                    return self.stream_next(&upstream);
+                }
+                Step::PullSkipOne { upstream } => {
+                    return self.stream_next(&upstream);
+                }
+                Step::PullChainFirst { first } => match self.stream_next(&first)? {
+                    Some(v) => return Ok(Some(v)),
+                    None => {
+                        // First exhausted — flip to second and loop.
+                        let mut guard = cell.try_lock().map_err(|_| {
+                            RuntimeError::new("stream already in use (re-entrant advance)")
+                        })?;
+                        if let StreamKind::Chain { on_second, .. } = &mut guard.kind {
+                            *on_second = true;
+                        }
+                        drop(guard);
+                        continue;
+                    }
+                },
+                Step::PullChainSecond { second } => return self.stream_next(&second),
+                Step::PullZip { left, right } => {
+                    let l = self.stream_next(&left)?;
+                    let r = self.stream_next(&right)?;
+                    match (l, r) {
+                        (Some(lv), Some(rv)) => return Ok(Some(Value::Tuple(vec![lv, rv]))),
+                        _ => return Ok(None),
+                    }
+                }
+                Step::PullEnumerate { upstream, idx } => match self.stream_next(&upstream)? {
+                    Some(v) => {
+                        return Ok(Some(Value::Tuple(vec![Value::Int(idx as i64), v])));
+                    }
+                    None => return Ok(None),
+                },
+            }
+        }
+    }
+
+    /// Store a poisoning error on the cell so future advances surface it.
+    fn poison_stream(&self, cell: &Arc<Mutex<StreamCell>>, err: &RuntimeError) {
+        if let Ok(mut guard) = cell.try_lock() {
+            if guard.poisoned.is_none() {
+                guard.poisoned = Some(err.message.clone());
+            }
+        }
+    }
+
+    /// Wrap a source into a fresh `Value::Stream`.
+    fn make_stream(kind: StreamKind) -> Value {
+        Value::Stream(Arc::new(Mutex::new(StreamCell {
+            kind,
+            poisoned: None,
+        })))
+    }
+
+    /// Peel a value that must be a `Value::Stream`, returning its cell.
+    /// `Frozen(Stream(_))` is transparently unwrapped so stream methods
+    /// work on frozen pipelines.
+    fn expect_stream_cell(v: Value, ctx: &str) -> Result<Arc<Mutex<StreamCell>>, RuntimeError> {
+        match v {
+            Value::Stream(c) => Ok(c),
+            Value::Frozen(inner) => match *inner {
+                Value::Stream(c) => Ok(c),
+                other => Err(RuntimeError::new(&format!(
+                    "{} expects a Stream, got {}",
+                    ctx,
+                    other.type_name()
+                ))),
+            },
+            other => Err(RuntimeError::new(&format!(
+                "{} expects a Stream, got {}",
+                ctx,
+                other.type_name()
+            ))),
+        }
+    }
+
+    /// Dispatch a method call whose receiver is a `Value::Stream`. Combinator
+    /// methods allocate a new downstream `Value::Stream`; terminal methods
+    /// drain via `stream_next` and return a concrete value.
+    pub(crate) fn dispatch_stream_method(
+        &mut self,
+        cell: Arc<Mutex<StreamCell>>,
+        method_name: &str,
+        args: &[Expr],
+    ) -> Result<Value, RuntimeError> {
+        match method_name {
+            // ---- combinator constructors (lazy) ----
+            "filter" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("filter() requires one argument"));
+                }
+                let pred = self.eval_expr(&args[0])?;
+                Ok(Self::make_stream(StreamKind::Filter {
+                    upstream: cell,
+                    pred,
+                }))
+            }
+            "map" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("map() requires one argument"));
+                }
+                let fn_val = self.eval_expr(&args[0])?;
+                Ok(Self::make_stream(StreamKind::Map {
+                    upstream: cell,
+                    fn_val,
+                }))
+            }
+            "take" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("take() requires one argument"));
+                }
+                let n = match self.eval_expr(&args[0])? {
+                    Value::Int(n) if n >= 0 => n as usize,
+                    Value::Int(_) => {
+                        return Err(RuntimeError::new("take() argument must be non-negative"))
+                    }
+                    _ => return Err(RuntimeError::new("take() argument must be an integer")),
+                };
+                Ok(Self::make_stream(StreamKind::Take {
+                    upstream: cell,
+                    remaining: n,
+                }))
+            }
+            "skip" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("skip() requires one argument"));
+                }
+                let n = match self.eval_expr(&args[0])? {
+                    Value::Int(n) if n >= 0 => n as usize,
+                    Value::Int(_) => {
+                        return Err(RuntimeError::new("skip() argument must be non-negative"))
+                    }
+                    _ => return Err(RuntimeError::new("skip() argument must be an integer")),
+                };
+                Ok(Self::make_stream(StreamKind::Skip {
+                    upstream: cell,
+                    skip_n: n,
+                    started: false,
+                }))
+            }
+            "chain" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("chain() requires one argument"));
+                }
+                let other = self.eval_expr(&args[0])?;
+                let second = Self::expect_stream_cell(other, "chain()")?;
+                Ok(Self::make_stream(StreamKind::Chain {
+                    first: cell,
+                    second,
+                    on_second: false,
+                }))
+            }
+            "zip" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("zip() requires one argument"));
+                }
+                let other = self.eval_expr(&args[0])?;
+                let right = Self::expect_stream_cell(other, "zip()")?;
+                Ok(Self::make_stream(StreamKind::Zip { left: cell, right }))
+            }
+            "enumerate" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new("enumerate() takes no arguments"));
+                }
+                Ok(Self::make_stream(StreamKind::Enumerate {
+                    upstream: cell,
+                    idx: 0,
+                }))
+            }
+
+            // ---- eager terminals ----
+            "collect" | "to_array" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(&format!(
+                        "{}() takes no arguments",
+                        method_name
+                    )));
+                }
+                let mut out: Vec<Value> = Vec::new();
+                while let Some(v) = self.stream_next(&cell)? {
+                    out.push(v);
+                }
+                Ok(Value::Array(out))
+            }
+            "count" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new("count() takes no arguments"));
+                }
+                let mut n: i64 = 0;
+                while self.stream_next(&cell)?.is_some() {
+                    n += 1;
+                }
+                Ok(Value::Int(n))
+            }
+            "for_each" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("for_each() requires one argument"));
+                }
+                let func = self.eval_expr(&args[0])?;
+                while let Some(v) = self.stream_next(&cell)? {
+                    match self.call_function(func.clone(), vec![v]) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            self.poison_stream(&cell, &e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "first" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new("first() takes no arguments"));
+                }
+                match self.stream_next(&cell)? {
+                    Some(v) => Ok(Value::Some(Box::new(v))),
+                    None => Ok(Value::None),
+                }
+            }
+            "reduce" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new("reduce() requires (initial, function)"));
+                }
+                let mut acc = self.eval_expr(&args[0])?;
+                let func = self.eval_expr(&args[1])?;
+                while let Some(v) = self.stream_next(&cell)? {
+                    match self.call_function(func.clone(), vec![acc.clone(), v]) {
+                        Ok(res) => acc = res,
+                        Err(e) => {
+                            self.poison_stream(&cell, &e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(acc)
+            }
+            "sum" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new("sum() takes no arguments"));
+                }
+                // Start as Int(0); first Float flips to Float; any non-numeric errors.
+                let mut acc_int: i64 = 0;
+                let mut acc_float: f64 = 0.0;
+                let mut is_float = false;
+                while let Some(v) = self.stream_next(&cell)? {
+                    match v {
+                        Value::Int(n) => {
+                            if is_float {
+                                acc_float += n as f64;
+                            } else {
+                                acc_int += n;
+                            }
+                        }
+                        Value::Float(f) => {
+                            if !is_float {
+                                acc_float = acc_int as f64 + f;
+                                is_float = true;
+                            } else {
+                                acc_float += f;
+                            }
+                        }
+                        other => {
+                            return Err(RuntimeError::new(&format!(
+                                "sum() expects numeric values, got {}",
+                                other.type_name()
+                            )));
+                        }
+                    }
+                }
+                if is_float {
+                    Ok(Value::Float(acc_float))
+                } else {
+                    Ok(Value::Int(acc_int))
+                }
+            }
+            "find" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("find() requires one argument"));
+                }
+                let pred = self.eval_expr(&args[0])?;
+                while let Some(v) = self.stream_next(&cell)? {
+                    match self.call_function(pred.clone(), vec![v.clone()]) {
+                        Ok(res) => {
+                            if res.is_truthy() {
+                                return Ok(Value::Some(Box::new(v)));
+                            }
+                        }
+                        Err(e) => {
+                            self.poison_stream(&cell, &e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Value::None)
+            }
+            "any" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("any() requires one argument"));
+                }
+                let pred = self.eval_expr(&args[0])?;
+                while let Some(v) = self.stream_next(&cell)? {
+                    match self.call_function(pred.clone(), vec![v]) {
+                        Ok(res) => {
+                            if res.is_truthy() {
+                                return Ok(Value::Bool(true));
+                            }
+                        }
+                        Err(e) => {
+                            self.poison_stream(&cell, &e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            "all" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("all() requires one argument"));
+                }
+                let pred = self.eval_expr(&args[0])?;
+                while let Some(v) = self.stream_next(&cell)? {
+                    match self.call_function(pred.clone(), vec![v]) {
+                        Ok(res) => {
+                            if !res.is_truthy() {
+                                return Ok(Value::Bool(false));
+                            }
+                        }
+                        Err(e) => {
+                            self.poison_stream(&cell, &e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+
+            _ => Err(RuntimeError::new(&format!(
+                "unknown Stream method '{}'",
+                method_name
             ))),
         }
     }
