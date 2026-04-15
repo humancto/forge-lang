@@ -701,3 +701,140 @@ println(total)
     // sum of (i+1) for i in 0..101 = sum of 1..102 = 101*102/2 = 5151
     assert_eq!(vm.output, vec!["5151"]);
 }
+
+// ----- Performance benchmark -----
+
+/// Time a single VM execution (no JIT).
+fn time_vm(source: &str) -> (Vec<String>, std::time::Duration) {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program().unwrap();
+    let chunk = compiler::compile(&program).unwrap();
+
+    let start = std::time::Instant::now();
+    let mut vm = VM::new();
+    vm.execute(&chunk).unwrap();
+    (vm.output.clone(), start.elapsed())
+}
+
+/// Time a single JIT execution (compile + run on one VM).
+fn time_jit(source: &str) -> (Vec<String>, std::time::Duration) {
+    let out = run_jit_function(source);
+    // Re-run for timing (first call warms caches)
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program().unwrap();
+    let chunk = compiler::compile(&program).unwrap();
+
+    let mut vm = VM::new();
+    let mut jit = JitCompiler::new().unwrap();
+
+    for (i, proto) in chunk.prototypes.iter().enumerate() {
+        let name = if proto.name.is_empty() {
+            format!("fn_{}", i)
+        } else {
+            proto.name.clone()
+        };
+        let type_info = type_analysis::analyze(proto);
+        let string_refs: Option<StringRefs> =
+            if type_info.has_string_ops || type_info.has_collection_ops || type_info.has_global_ops
+            {
+                Some(
+                    proto
+                        .constants
+                        .iter()
+                        .map(|c| match c {
+                            Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
+        let _ = jit.compile_function(proto, &name, string_refs.as_ref());
+    }
+
+    for (i, proto) in chunk.prototypes.iter().enumerate() {
+        let name = if proto.name.is_empty() {
+            format!("fn_{}", i)
+        } else {
+            proto.name.clone()
+        };
+        if let Some(ptr) = jit.get_compiled(&name) {
+            let type_info = type_analysis::analyze(proto);
+            vm.jit_cache.insert(
+                name,
+                JitEntry {
+                    ptr,
+                    uses_float: type_info.has_float,
+                    has_string_ops: type_info.has_string_ops,
+                    has_collection_ops: type_info.has_collection_ops,
+                    has_global_ops: type_info.has_global_ops,
+                    returns_obj: matches!(
+                        type_info.return_type,
+                        type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
+                    ),
+                    returns_float: matches!(type_info.return_type, type_analysis::RegType::Float),
+                },
+            );
+        }
+    }
+
+    let start = std::time::Instant::now();
+    vm.execute(&chunk).unwrap();
+    let elapsed = start.elapsed();
+    let _ = out; // ensure warmup isn't optimized away
+    (vm.output.clone(), elapsed)
+}
+
+#[test]
+#[ignore] // Manual: cargo test --features jit --release bench_jit_performance -- --nocapture --ignored
+fn bench_jit_performance() {
+    let benchmarks: Vec<(&str, &str)> = vec![
+        (
+            "fib(30)",
+            "fn fib(n) { if n <= 1 { return n } return fib(n - 1) + fib(n - 2) }\nprintln(fib(30))",
+        ),
+        (
+            "sum_to(1000000)",
+            "fn sum_to(n) { let mut s = 0\nlet mut i = 1\nwhile i <= n { s = s + i\ni = i + 1 }\nreturn s }\nprintln(sum_to(1000000))",
+        ),
+        (
+            "fib(35)",
+            "fn fib(n) { if n <= 1 { return n } return fib(n - 1) + fib(n - 2) }\nprintln(fib(35))",
+        ),
+    ];
+
+    eprintln!("\n{:-<70}", "");
+    eprintln!("JIT Performance Benchmark (--release)");
+    eprintln!("{:-<70}", "");
+    eprintln!(
+        "{:<25} {:>10} {:>10} {:>10}",
+        "Benchmark", "VM (ms)", "JIT (ms)", "Speedup"
+    );
+    eprintln!("{:-<70}", "");
+
+    for (name, source) in &benchmarks {
+        let (vm_output, vm_time) = time_vm(source);
+        let (jit_output, jit_time) = time_jit(source);
+
+        assert_eq!(
+            vm_output, jit_output,
+            "Output mismatch for {}: VM={:?} JIT={:?}",
+            name, vm_output, jit_output
+        );
+
+        let vm_ms = vm_time.as_secs_f64() * 1000.0;
+        let jit_ms = jit_time.as_secs_f64() * 1000.0;
+        let speedup = vm_ms / jit_ms;
+
+        eprintln!(
+            "{:<25} {:>10.2} {:>10.2} {:>9.1}x",
+            name, vm_ms, jit_ms, speedup
+        );
+    }
+    eprintln!("{:-<70}\n", "");
+}
