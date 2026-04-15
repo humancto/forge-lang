@@ -1305,6 +1305,34 @@ impl Interpreter {
                             }
                         }
                     }
+                    Value::Map(pairs) => {
+                        for (key, val) in pairs {
+                            self.env.push_scope();
+                            if let Some(v2) = var2 {
+                                self.env.define(var.clone(), key);
+                                self.env.define(v2.clone(), val);
+                            } else {
+                                self.env.define(var.clone(), Value::Tuple(vec![key, val]));
+                            }
+                            match self.exec_block(body)? {
+                                Signal::Break => {
+                                    self.env.pop_scope();
+                                    break;
+                                }
+                                Signal::Continue => {
+                                    self.env.pop_scope();
+                                    continue;
+                                }
+                                Signal::Return(v) => {
+                                    self.env.pop_scope();
+                                    return Ok(Signal::Return(v));
+                                }
+                                Signal::None | Signal::ImplicitReturn(_) => {
+                                    self.env.pop_scope();
+                                }
+                            }
+                        }
+                    }
                     Value::Channel(ch) => loop {
                         let val = {
                             let rx_guard = ch.rx.lock().expect("BUG: channel mutex poisoned");
@@ -2680,6 +2708,127 @@ impl Interpreter {
                                 }
                                 "to_array" => {
                                     return Ok(Value::Array(items));
+                                }
+                                _ => {}
+                            }
+                            return Ok(Value::Null);
+                        }
+                        _ if {
+                            let is_map_receiver = matches!(&obj, Value::Map(_))
+                                || matches!(&obj, Value::Frozen(ref inner) if matches!(inner.as_ref(), Value::Map(_)));
+                            is_map_receiver
+                                && matches!(
+                                    method_name,
+                                    "get"
+                                        | "set"
+                                        | "has"
+                                        | "remove"
+                                        | "keys"
+                                        | "values"
+                                        | "len"
+                                        | "to_array"
+                                )
+                        } =>
+                        {
+                            let is_frozen = matches!(&obj, Value::Frozen(_));
+                            let pairs: Vec<(Value, Value)> = match &obj {
+                                Value::Map(pairs) => pairs.clone(),
+                                Value::Frozen(inner) => match inner.as_ref() {
+                                    Value::Map(pairs) => pairs.clone(),
+                                    _ => unreachable!(),
+                                },
+                                _ => unreachable!(),
+                            };
+                            match method_name {
+                                "get" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "get() requires one argument",
+                                        ));
+                                    }
+                                    let key = self.eval_expr(&args[0])?;
+                                    for (k, v) in &pairs {
+                                        if Value::container_eq(k, &key) {
+                                            return Ok(v.clone());
+                                        }
+                                    }
+                                    return Ok(Value::Null);
+                                }
+                                "has" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "has() requires one argument",
+                                        ));
+                                    }
+                                    let key = self.eval_expr(&args[0])?;
+                                    return Ok(Value::Bool(
+                                        pairs.iter().any(|(k, _)| Value::container_eq(k, &key)),
+                                    ));
+                                }
+                                "set" => {
+                                    if is_frozen {
+                                        return Err(RuntimeError::new(
+                                            "cannot mutate a frozen map",
+                                        ));
+                                    }
+                                    if args.len() != 2 {
+                                        return Err(RuntimeError::new(
+                                            "set() requires (key, value)",
+                                        ));
+                                    }
+                                    let key = self.eval_expr(&args[0])?;
+                                    let val = self.eval_expr(&args[1])?;
+                                    let mut new_pairs = pairs;
+                                    let mut replaced = false;
+                                    for entry in new_pairs.iter_mut() {
+                                        if Value::container_eq(&entry.0, &key) {
+                                            entry.1 = val.clone();
+                                            replaced = true;
+                                            break;
+                                        }
+                                    }
+                                    if !replaced {
+                                        new_pairs.push((key, val));
+                                    }
+                                    return Ok(Value::Map(new_pairs));
+                                }
+                                "remove" => {
+                                    if is_frozen {
+                                        return Err(RuntimeError::new(
+                                            "cannot mutate a frozen map",
+                                        ));
+                                    }
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "remove() requires one argument",
+                                        ));
+                                    }
+                                    let key = self.eval_expr(&args[0])?;
+                                    let new_pairs: Vec<(Value, Value)> = pairs
+                                        .into_iter()
+                                        .filter(|(k, _)| !Value::container_eq(k, &key))
+                                        .collect();
+                                    return Ok(Value::Map(new_pairs));
+                                }
+                                "keys" => {
+                                    let ks: Vec<Value> =
+                                        pairs.into_iter().map(|(k, _)| k).collect();
+                                    return Ok(Value::Array(ks));
+                                }
+                                "values" => {
+                                    let vs: Vec<Value> =
+                                        pairs.into_iter().map(|(_, v)| v).collect();
+                                    return Ok(Value::Array(vs));
+                                }
+                                "len" => {
+                                    return Ok(Value::Int(pairs.len() as i64));
+                                }
+                                "to_array" => {
+                                    let arr: Vec<Value> = pairs
+                                        .into_iter()
+                                        .map(|(k, v)| Value::Tuple(vec![k, v]))
+                                        .collect();
+                                    return Ok(Value::Array(arr));
                                 }
                                 _ => {}
                             }
