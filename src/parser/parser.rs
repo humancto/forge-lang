@@ -102,6 +102,25 @@ impl Parser {
             false
         };
 
+        // Tuple destructuring: let (a, b, c) = expr
+        if self.check(&Token::LParen) {
+            self.advance();
+            let mut names = Vec::new();
+            while !self.check(&Token::RParen) {
+                names.push(self.expect_ident()?);
+                if self.check(&Token::Comma) {
+                    self.advance();
+                }
+            }
+            self.expect(Token::RParen)?;
+            self.expect(Token::Eq)?;
+            let value = self.parse_expr()?;
+            return Ok(Stmt::Destructure {
+                pattern: DestructurePattern::Tuple(names),
+                value,
+            });
+        }
+
         let name = self.expect_ident()?;
 
         let type_ann = if self.check(&Token::Colon) {
@@ -471,8 +490,19 @@ impl Parser {
             }
             self.expect(Token::RBracket)?;
             DestructurePattern::Array { items, rest }
+        } else if self.check(&Token::LParen) {
+            self.advance();
+            let mut names = Vec::new();
+            while !self.check(&Token::RParen) {
+                names.push(self.expect_ident()?);
+                if self.check(&Token::Comma) {
+                    self.advance();
+                }
+            }
+            self.expect(Token::RParen)?;
+            DestructurePattern::Tuple(names)
         } else {
-            return Err(self.error("expected { or [ after 'unpack'"));
+            return Err(self.error("expected {, [, or ( after 'unpack'"));
         };
 
         self.expect(Token::From)?;
@@ -1671,9 +1701,27 @@ impl Parser {
 
             Token::LParen => {
                 self.advance();
-                let expr = self.parse_expr()?;
-                self.expect(Token::RParen)?;
-                Ok(expr)
+                let first = self.parse_expr()?;
+                if self.check(&Token::Comma) {
+                    // Tuple: (e1, e2, ...) or (e1,)
+                    self.advance();
+                    let mut items = vec![first];
+                    self.skip_newlines();
+                    while !self.check(&Token::RParen) {
+                        items.push(self.parse_expr()?);
+                        self.skip_newlines();
+                        if self.check(&Token::Comma) {
+                            self.advance();
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(Token::RParen)?;
+                    Ok(Expr::Tuple(items))
+                } else {
+                    // Grouping: (expr)
+                    self.expect(Token::RParen)?;
+                    Ok(first)
+                }
             }
 
             Token::LBrace => {

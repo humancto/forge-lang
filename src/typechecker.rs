@@ -163,6 +163,7 @@ fn type_ann_to_inferred(ann: &TypeAnn) -> InferredType {
             InferredType::Function(param_types, Box::new(type_ann_to_inferred(ret)))
         }
         TypeAnn::Optional(inner) => InferredType::Option(Box::new(type_ann_to_inferred(inner))),
+        TypeAnn::Tuple(_) => InferredType::Unknown, // Tuple type annotations: treated as Unknown for now
     }
 }
 
@@ -1487,6 +1488,13 @@ impl TypeChecker {
             Expr::PipeChain { source, .. } => {
                 self.infer_expr(source);
                 InferredType::Unknown
+            }
+
+            Expr::Tuple(items) => {
+                for item in items {
+                    self.infer_expr(item);
+                }
+                InferredType::Unknown // Tuple type: treated as Unknown for now
             }
         }
     }

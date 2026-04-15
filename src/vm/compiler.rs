@@ -416,6 +416,14 @@ fn type_ann_name(type_ann: &TypeAnn) -> String {
             format!("fn({}) -> {}", params, type_ann_name(ret))
         }
         TypeAnn::Optional(inner) => format!("{}?", type_ann_name(inner)),
+        TypeAnn::Tuple(items) => {
+            let inner = items
+                .iter()
+                .map(type_ann_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({})", inner)
+        }
     }
 }
 
@@ -1116,6 +1124,24 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         c.free_to(temp_base);
                     }
                 }
+                DestructurePattern::Tuple(names) => {
+                    let item_regs: Vec<u8> = names
+                        .iter()
+                        .map(|name| c.add_local(name, false))
+                        .collect::<Result<_, _>>()?;
+
+                    let temp_base = c.next_register;
+                    for (index, target_reg) in item_regs.iter().copied().enumerate() {
+                        let idx_reg = c.alloc_reg()?;
+                        let const_idx = c.const_int(index as i64);
+                        c.emit(encode_abx(OpCode::LoadConst, idx_reg, const_idx), 0);
+                        c.emit(
+                            encode_abc(OpCode::GetIndex, target_reg, value_reg, idx_reg),
+                            0,
+                        );
+                        c.free_to(temp_base);
+                    }
+                }
             }
             Ok(())
         }
@@ -1709,6 +1735,18 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             }
             c.emit(
                 encode_abc(OpCode::NewArray, dst, start, items.len() as u8),
+                0,
+            );
+            c.free_to(start);
+        }
+        Expr::Tuple(items) => {
+            let start = c.next_register;
+            for item in items {
+                let r = c.alloc_reg()?;
+                compile_expr(c, item, r)?;
+            }
+            c.emit(
+                encode_abc(OpCode::NewTuple, dst, start, items.len() as u8),
                 0,
             );
             c.free_to(start);

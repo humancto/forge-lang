@@ -54,6 +54,7 @@ pub enum Value {
     String(String),
     Bool(bool),
     Array(Vec<Value>),
+    Tuple(Vec<Value>),
     Object(IndexMap<String, Value>),
     Function {
         name: String,
@@ -92,6 +93,7 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => a == b,
             (Value::ResultOk(a), Value::ResultOk(b)) => a == b,
             (Value::ResultErr(a), Value::ResultErr(b)) => a == b,
@@ -114,6 +116,7 @@ impl Value {
             Value::String(_) => "String",
             Value::Bool(_) => "Bool",
             Value::Array(_) => "Array",
+            Value::Tuple(_) => "Tuple",
             Value::Object(_) => "Object",
             Value::Function { .. } => "Function",
             Value::Lambda { .. } => "Lambda",
@@ -134,7 +137,7 @@ impl Value {
             Value::Float(n) => *n != 0.0,
             Value::String(s) => !s.is_empty(),
             Value::Null => false,
-            Value::Array(a) => !a.is_empty(),
+            Value::Array(a) | Value::Tuple(a) => !a.is_empty(),
             Value::Object(o) => !o.is_empty(),
             Value::ResultOk(_) => true,
             Value::ResultErr(_) => false,
@@ -160,6 +163,10 @@ impl Value {
                 format!("{{ {} }}", entries.join(", "))
             }
             Value::Array(items) => {
+                let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
+                format!("[{}]", entries.join(", "))
+            }
+            Value::Tuple(items) => {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
@@ -189,6 +196,10 @@ impl fmt::Display for Value {
             Value::Array(items) => {
                 let strs: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
                 write!(f, "[{}]", strs.join(", "))
+            }
+            Value::Tuple(items) => {
+                let strs: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
+                write!(f, "({})", strs.join(", "))
             }
             Value::Object(_) => write!(f, "{}", self.to_json_string()),
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
@@ -821,6 +832,9 @@ impl Interpreter {
                                 name
                             )));
                         }
+                        if matches!(existing, Value::Tuple(_)) {
+                            return Err(RuntimeError::new("cannot mutate a tuple"));
+                        }
                         let mut arr = existing;
                         if let (Value::Array(ref mut items), Value::Int(i)) = (&mut arr, &idx) {
                             let i = *i as usize;
@@ -1134,7 +1148,7 @@ impl Interpreter {
             } => {
                 let iter_val = self.eval_expr(iterable)?;
                 match iter_val {
-                    Value::Array(items) => {
+                    Value::Array(items) | Value::Tuple(items) => {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
@@ -1461,6 +1475,16 @@ impl Interpreter {
                             }
                         } else {
                             return Err(RuntimeError::new("cannot destructure non-array"));
+                        }
+                    }
+                    DestructurePattern::Tuple(names) => {
+                        if let Value::Tuple(items) = &val {
+                            for (i, name) in names.iter().enumerate() {
+                                let v = items.get(i).cloned().unwrap_or(Value::Null);
+                                self.env.define(name.clone(), v);
+                            }
+                        } else {
+                            return Err(RuntimeError::new("cannot destructure non-tuple"));
                         }
                     }
                 }
@@ -1857,6 +1881,14 @@ impl Interpreter {
                 Ok(Value::Array(result))
             }
 
+            Expr::Tuple(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    result.push(self.eval_expr(item)?);
+                }
+                Ok(Value::Tuple(result))
+            }
+
             Expr::Object(fields) => {
                 let mut map = IndexMap::new();
                 for (key, expr) in fields {
@@ -1997,6 +2029,13 @@ impl Interpreter {
                             field
                         ))),
                     },
+                    Value::Tuple(items) => match field.as_str() {
+                        "len" => Ok(Value::Int(items.len() as i64)),
+                        _ => Err(RuntimeError::new(&format!(
+                            "no method '{}' on Tuple",
+                            field
+                        ))),
+                    },
                     _ => Err(RuntimeError::new(&format!(
                         "cannot access field '{}' on {}",
                         field,
@@ -2014,14 +2053,20 @@ impl Interpreter {
                     other => other,
                 };
                 match (inner, &idx) {
-                    (Value::Array(items), Value::Int(i)) => {
+                    (Value::Array(items) | Value::Tuple(items), Value::Int(i)) => {
                         // Support negative indices (Python-style: -1 = last)
                         let len = items.len() as i64;
                         let actual = if *i < 0 { len + i } else { *i };
                         if actual < 0 || actual >= len {
                             Err(RuntimeError::new(&format!(
-                                "index out of bounds: index {} on array of length {}",
-                                i, len
+                                "index out of bounds: index {} on {} of length {}",
+                                i,
+                                if matches!(inner, Value::Tuple(_)) {
+                                    "tuple"
+                                } else {
+                                    "array"
+                                },
+                                len
                             )))
                         } else {
                             Ok(items[actual as usize].clone())

@@ -60,11 +60,12 @@ pub enum OpCode {
     Must,     // A=dst, B=src (unwrap Ok, crash on Err/null)
     Ask,      // A=dst, B=prompt_reg (call LLM API)
     Freeze,   // A=dst, B=src (wrap value as frozen/immutable)
+    NewTuple, // A=dst, B=start_reg, C=count
 }
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::Freeze as u8 + 1 == 57);
+const _: () = assert!(OpCode::NewTuple as u8 + 1 == 58);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -128,6 +129,7 @@ impl TryFrom<u8> for OpCode {
             54 => Ok(OpCode::Must),
             55 => Ok(OpCode::Ask),
             56 => Ok(OpCode::Freeze),
+            57 => Ok(OpCode::NewTuple),
             _ => Err(value),
         }
     }
@@ -273,11 +275,12 @@ mod tests {
     fn try_from_valid_opcodes() {
         assert_eq!(OpCode::try_from(0u8), Ok(OpCode::LoadConst));
         assert_eq!(OpCode::try_from(56u8), Ok(OpCode::Freeze));
+        assert_eq!(OpCode::try_from(57u8), Ok(OpCode::NewTuple));
     }
 
     #[test]
     fn try_from_invalid_opcode() {
-        assert_eq!(OpCode::try_from(57u8), Err(57));
+        assert_eq!(OpCode::try_from(58u8), Err(58));
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }
