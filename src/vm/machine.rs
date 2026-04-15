@@ -1634,20 +1634,51 @@ impl VM {
                         let idx = self.registers[base + c as usize];
                         let result = if let Some(r) = obj.as_obj() {
                             if let Some(i) = idx.as_int(&self.gc) {
-                                if let Some(o) = self.gc.get(r) {
-                                    if let ObjKind::Array(items)
-                                    | ObjKind::Tuple(items)
-                                    | ObjKind::Set(items) = &o.kind
-                                    {
-                                        items
+                                // Classify the source; clone out any pair so
+                                // we can drop the gc borrow before allocating.
+                                enum IterSrc {
+                                    Item(Value),
+                                    Pair(Value, Value),
+                                    ObjPair(String, Value),
+                                }
+                                let src = if let Some(o) = self.gc.get(r) {
+                                    match &o.kind {
+                                        ObjKind::Array(items)
+                                        | ObjKind::Tuple(items)
+                                        | ObjKind::Set(items) => {
+                                            items.get(i as usize).copied().map(IterSrc::Item)
+                                        }
+                                        ObjKind::Map(pairs) => pairs
                                             .get(i as usize)
-                                            .cloned()
-                                            .ok_or_else(|| VMError::new("index out of bounds"))?
-                                    } else {
-                                        return Err(VMError::new("cannot iterate non-collection"));
+                                            .map(|(k, v)| IterSrc::Pair(*k, *v)),
+                                        ObjKind::Object(map) => map
+                                            .iter()
+                                            .nth(i as usize)
+                                            .map(|(k, v)| IterSrc::ObjPair(k.clone(), *v)),
+                                        _ => {
+                                            return Err(VMError::new(
+                                                "cannot iterate non-collection",
+                                            ));
+                                        }
                                     }
                                 } else {
-                                    Value::null()
+                                    None
+                                };
+                                match src {
+                                    Some(IterSrc::Item(v)) => v,
+                                    Some(IterSrc::Pair(k, v)) => {
+                                        let tr = self.gc.alloc(ObjKind::Tuple(vec![k, v]));
+                                        Value::obj(tr)
+                                    }
+                                    Some(IterSrc::ObjPair(k, v)) => {
+                                        let ks = self.gc.alloc_string(k);
+                                        let tr =
+                                            self.gc.alloc(ObjKind::Tuple(vec![Value::obj(ks), v]));
+                                        Value::obj(tr)
+                                    }
+                                    None => {
+                                        return Err(VMError::new("index out of bounds"));
+                                    }
                                 }
                             } else {
                                 return Err(VMError::new("iterator index must be int"));
@@ -1700,6 +1731,7 @@ impl VM {
                                         a.len() as i64
                                     }
                                     ObjKind::Object(o) => o.len() as i64,
+                                    ObjKind::Map(p) => p.len() as i64,
                                     _ => 0,
                                 }
                             } else {
