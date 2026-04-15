@@ -904,13 +904,20 @@ impl VM {
             child.jit_cache.is_empty() && child.jit_modules.is_empty(),
             "BUG: SendableVM must have empty jit_cache/jit_modules to be safely Send"
         );
-        // Drain the thread-local stream-boundary flag in case a global was a
-        // Stream (same silent-skip behavior we already apply to functions/
-        // closures in the loops above). Explicit boundary crossings via
-        // `convert_to_interp_val` / `convert_interp_value` still error loudly
-        // because those paths check the flag via `check_stream_boundary`.
-        let _ = super::value::take_stream_boundary_error();
         SendableVM(child)
+    }
+
+    /// Silently drain both stream-boundary flags. Used by spawn-family
+    /// opcodes after `fork_for_spawn` + `transfer_closure` have run, so a
+    /// captured-stream upvalue cannot leak the flag into a subsequent
+    /// unrelated builtin call on the parent thread. Spawn already silently
+    /// coerces non-transferable values (functions, closures, channels) so
+    /// silently dropping captured streams is consistent; what we must not
+    /// allow is the flag surviving past the spawn opcode.
+    #[inline]
+    pub(super) fn drain_stream_boundary_flags(&self) {
+        self.stream_boundary_error.set(false);
+        let _ = super::value::take_stream_boundary_error();
     }
 
     /// Re-create a closure from parent GC in a child VM's GC.
@@ -1833,6 +1840,7 @@ impl VM {
                         };
 
                         spawn_thread(sendable, child_closure, slot_clone);
+                        self.drain_stream_boundary_flags();
 
                         let handle = self.gc.alloc(ObjKind::TaskHandle(result_slot));
                         self.registers[base + a as usize] = Value::obj(handle);
@@ -1948,6 +1956,7 @@ impl VM {
                         };
 
                         spawn_schedule_thread(sendable, child_closure, Duration::from_secs(secs));
+                        self.drain_stream_boundary_flags();
                     }
                     OpCode::Watch => {
                         let closure_val = self.registers[base + a as usize];
@@ -1971,6 +1980,7 @@ impl VM {
                         };
 
                         spawn_watch_thread(sendable, child_closure, path);
+                        self.drain_stream_boundary_flags();
                     }
                     OpCode::Must => {
                         let src = self.registers[base + b as usize];
@@ -2584,12 +2594,6 @@ impl VM {
         }
     }
 
-    /// After a conversion call site, check whether any inner `ObjKind::Stream`
-    /// / `interpreter::Value::Stream` was encountered. Clears the flag.
-    /// Callers at the VM↔interpreter boundary must invoke this immediately
-    /// after `convert_to_interp_val` / `convert_interp_value` / `value_to_shared`
-    /// to surface the bug #6 error loudly instead of silently coercing the
-    /// stream to Null.
     /// Convert an interpreter value to a VM value and immediately check
     /// for a boundary error. Use at call sites where the conversion is
     /// paired with returning the result to the VM. See bug #6.
@@ -2603,6 +2607,14 @@ impl VM {
         Ok(out)
     }
 
+    /// After a conversion call site, check whether any inner `ObjKind::Stream`
+    /// / `interpreter::Value::Stream` was encountered. Reads and clears BOTH
+    /// the per-VM `stream_boundary_error` Cell (set by `&self` paths inside
+    /// `convert_*`) and the thread-local `STREAM_BOUNDARY_ERROR` (set by the
+    /// `value_to_shared` free function). Callers at the VM↔interpreter
+    /// boundary must invoke this immediately after `convert_to_interp_val` /
+    /// `convert_interp_value` / `value_to_shared` to surface the bug #6 error
+    /// loudly instead of silently coercing the stream to Null.
     #[inline]
     pub(super) fn check_stream_boundary(&self) -> Result<(), VMError> {
         let cell_hit = self.stream_boundary_error.replace(false);
@@ -2614,6 +2626,28 @@ impl VM {
         } else {
             Ok(())
         }
+    }
+
+    /// Pre-dispatch guard for stdlib module arms in `builtins.rs` that build
+    /// `interp_args` via an inline `match v.classify(...)` instead of calling
+    /// `convert_to_interp_val`. Those inline matches never set the boundary
+    /// flag, so a Stream argument would silently coerce to Null. This helper
+    /// walks args and errors loudly if any is an `ObjKind::Stream`, preserving
+    /// the bug #6 contract without rewriting every inline conversion.
+    #[inline]
+    pub(super) fn reject_stream_args(&self, args: &[Value]) -> Result<(), VMError> {
+        for v in args {
+            if let Some(r) = v.as_obj() {
+                if let Some(obj) = self.gc.get(r) {
+                    if matches!(obj.kind, ObjKind::Stream(_)) {
+                        return Err(VMError::new(
+                            "Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn arith_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {

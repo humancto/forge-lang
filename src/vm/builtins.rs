@@ -1383,6 +1383,7 @@ impl VM {
                 crate::stdlib::io::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))
             }
             n if n.starts_with("crypto.") => {
+                self.reject_stream_args(&args)?;
                 let str_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1406,6 +1407,7 @@ impl VM {
                 }
             }
             n if n.starts_with("db.") => {
+                self.reject_stream_args(&args)?;
                 let str_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1508,6 +1510,7 @@ impl VM {
             }
             "run_command" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                self.reject_stream_args(&args)?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1527,6 +1530,7 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             n if n.starts_with("os.") => {
+                self.reject_stream_args(&args)?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1545,6 +1549,7 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             n if n.starts_with("path.") => {
+                self.reject_stream_args(&args)?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1566,6 +1571,7 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             n if n.starts_with("env.") => {
+                self.reject_stream_args(&args)?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1592,6 +1598,7 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             n if n.starts_with("regex.") => {
+                self.reject_stream_args(&args)?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1610,6 +1617,7 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             n if n.starts_with("log.") => {
+                self.reject_stream_args(&args)?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1628,6 +1636,7 @@ impl VM {
                 Ok(Value::null())
             }
             n if n.starts_with("http.") => {
+                self.reject_stream_args(&args)?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {
@@ -1660,6 +1669,7 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             n if n.starts_with("term.") => {
+                self.reject_stream_args(&args)?;
                 let interp_args: Vec<crate::interpreter::Value> = args
                     .iter()
                     .map(|v| match v.classify(&self.gc) {

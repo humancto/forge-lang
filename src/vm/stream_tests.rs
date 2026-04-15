@@ -513,3 +513,44 @@ fn vm_stream_boundary_rejection_json() {
         err.message
     );
 }
+
+#[test]
+fn vm_stream_boundary_rejection_log() {
+    // Inline-conversion stdlib arms (log/term/os/path/env/regex/run_command/
+    // http/crypto/db) used to silently coerce Stream → Null because they
+    // skipped convert_to_interp_val. reject_stream_args is the guard.
+    let res = vm_run(r#"log.info([1, 2, 3].stream())"#);
+    let err = res.expect_err("expected log.info to reject Stream");
+    assert!(
+        err.message.contains("Stream cannot cross"),
+        "expected boundary message, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn vm_stream_boundary_rejection_term() {
+    let res = vm_run(r#"term.red([1, 2, 3].stream())"#);
+    let err = res.expect_err("expected term.red to reject Stream");
+    assert!(
+        err.message.contains("Stream cannot cross"),
+        "expected boundary message, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn vm_spawn_capturing_stream_does_not_poison_subsequent_calls() {
+    // Regression: transfer_closure copies upvalues via value_to_shared,
+    // which sets the thread-local boundary flag when an upvalue is a
+    // Stream. The spawn opcode must drain both flags after spawning so
+    // the flag doesn't leak into a subsequent unrelated builtin call.
+    let output = vm_output(
+        r#"
+        let s = [1, 2, 3].stream()
+        spawn { let _ = s }
+        say json.stringify({ hello: "world" })
+        "#,
+    );
+    assert_eq!(output, vec![r#"{"hello": "world"}"#]);
+}
