@@ -321,7 +321,7 @@ m2-021: test(tiered): promotion correctness tests
 
 - [x] Type annotations enforced (gradual — unannotated code still works)
 - [x] Type inference for local variables and function signatures
-- [ ] `Option<T>` with `Some`/`None` (no more raw null)
+- [x] `Option<T>` with `Some`/`None` (no more raw null)
 - [ ] Interface satisfaction checking
 - [ ] Basic generics with monomorphization
 - [ ] Type errors reported at compile time with source locations
