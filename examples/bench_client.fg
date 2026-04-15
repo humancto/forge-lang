@@ -1,133 +1,72 @@
 // bench_client.fg — HTTP benchmark client
 // Usage: Start bench_server.fg first, then run this
 //   Terminal 1: forge run examples/bench_server.fg
-//   Terminal 2: forge run examples/bench_client.fg
+//   Terminal 2: FORGE_HTTP_ALLOW_PRIVATE=1 forge run examples/bench_client.fg
 
-let base = "http://127.0.0.1:9090"
-
-fn calc_stats(latencies) {
-    let sorted = sort(latencies)
-    let count = len(sorted)
-    let total = sum(sorted)
-    let avg = float(total) / float(count)
-    let mn = min_of(sorted)
-    let mx = max_of(sorted)
-    let p50 = sorted[int(count * 0.50)]
-    let p95 = sorted[int(count * 0.95)]
-    let p99 = sorted[int(count * 0.99)]
-    return { avg: avg, min: mn, max: mx, p50: p50, p95: p95, p99: p99, count: count }
-}
-
-fn print_results(label, latencies, elapsed_ms) {
-    let s = calc_stats(latencies)
-    let rps = if elapsed_ms > 0 { float(s.count) * 1000.0 / float(elapsed_ms) } else { 0.0 }
-
-    say ""
-    say term.bold("  " + label)
-    say term.dim("  -----------------------------------")
-
-    term.table([
-        { metric: "Requests",   value: str(s.count) },
-        { metric: "Elapsed",    value: str(elapsed_ms) + " ms" },
-        { metric: "Throughput", value: str(int(rps)) + " req/sec" },
-        { metric: "Avg",        value: str(s.avg) + " ms" },
-        { metric: "Min",        value: str(s.min) + " ms" },
-        { metric: "Max",        value: str(s.max) + " ms" },
-        { metric: "P50",        value: str(s.p50) + " ms" },
-        { metric: "P95",        value: str(s.p95) + " ms" },
-        { metric: "P99",        value: str(s.p99) + " ms" }
-    ])
-
-    return rps
-}
+let url_ping = "http://127.0.0.1:9090/ping"
+let url_echo = "http://127.0.0.1:9090/echo"
 
 say ""
-term.banner("Forge HTTP Benchmark")
+say "=== Forge HTTP Benchmark ==="
+say "Target: http://127.0.0.1:9090"
 say ""
-say term.dim("  Target: " + base)
-say term.dim("  Warming up...")
-map(range(0, 10), fn(x) { return http.get(base + "/ping") })
+
+// Warm up
+say "Warming up..."
+repeat 10 times {
+    http.get(url_ping)
+}
 
 // ── Test 1: Sequential GET ──────────────────────────
 
-let seq_count = 200
+let seq_count = 500
 say ""
-say term.yellow("  [1/3] Sequential - " + str(seq_count) + " GET /ping")
+say "[1/2] Sequential - " + str(seq_count) + " GET /ping"
 
-let seq_start = time.elapsed()
-let seq_lat = map(range(0, seq_count), fn(x) {
-    let resp = http.get(base + "/ping")
-    return resp.time
-})
-let seq_elapsed = time.elapsed() - seq_start
-let seq_rps = print_results("Sequential GET /ping", seq_lat, seq_elapsed)
-
-// ── Test 2: Concurrent GET ──────────────────────────
-
-let conc_count = 500
-say ""
-say term.yellow("  [2/3] Concurrent - " + str(conc_count) + " GET /ping (spawned)")
-
-let ch = channel(conc_count + 10)
-let conc_start = time.elapsed()
-
-map(range(0, conc_count), fn(x) {
-    spawn {
-        let resp = http.get(base + "/ping")
-        send(ch, resp.time)
+let t0 = time().unix_ms
+let mut seq_ok = 0
+repeat seq_count times {
+    let resp = http.get(url_ping)
+    if resp.status == 200 {
+        seq_ok = seq_ok + 1
     }
-    return true
-})
+}
+let t1 = time().unix_ms
+let seq_ms = t1 - t0
+say "  " + str(seq_ok) + "/" + str(seq_count) + " ok"
+say "  Elapsed: " + str(seq_ms) + " ms"
+if seq_ms > 0 {
+    say "  Throughput: " + str(seq_count * 1000 / seq_ms) + " req/sec"
+}
 
-let conc_lat = map(range(0, conc_count), fn(x) {
-    return receive(ch)
-})
-let conc_elapsed = time.elapsed() - conc_start
-let conc_rps = print_results("Concurrent GET /ping", conc_lat, conc_elapsed)
+// ── Test 2: Sequential POST ─────────────────────────
 
-// ── Test 3: Concurrent POST ─────────────────────────
-
-let post_count = 200
+let post_count = 500
 say ""
-say term.yellow("  [3/3] Concurrent - " + str(post_count) + " POST /echo (spawned)")
+say "[2/2] Sequential - " + str(post_count) + " POST /echo"
 
-let ch2 = channel(post_count + 10)
-let post_start = time.elapsed()
-
-map(range(0, post_count), fn(x) {
-    spawn {
-        let resp = http.post(base + "/echo", {
-            body: { user: "bench", id: x, payload: "the quick brown fox" }
-        })
-        send(ch2, resp.time)
+let t2 = time().unix_ms
+let mut post_ok = 0
+repeat post_count times {
+    let resp = http.post(url_echo, {
+        body: { user: "bench", data: "hello world" }
+    })
+    if resp.status == 200 {
+        post_ok = post_ok + 1
     }
-    return true
-})
-
-let post_lat = map(range(0, post_count), fn(x) {
-    return receive(ch2)
-})
-let post_elapsed = time.elapsed() - post_start
-let post_rps = print_results("Concurrent POST /echo", post_lat, post_elapsed)
+}
+let t3 = time().unix_ms
+let post_ms = t3 - t2
+say "  " + str(post_ok) + "/" + str(post_count) + " ok"
+say "  Elapsed: " + str(post_ms) + " ms"
+if post_ms > 0 {
+    say "  Throughput: " + str(post_count * 1000 / post_ms) + " req/sec"
+}
 
 // ── Summary ─────────────────────────────────────────
 
 say ""
-term.hr(50, "=")
-say ""
-say term.bold("  Summary")
-say ""
-
-let speedup = if seq_rps > 0.0 { conc_rps / seq_rps } else { 0.0 }
-
-say "  Sequential GET:  " + term.cyan(str(int(seq_rps)) + " req/sec")
-say "  Concurrent GET:  " + term.green(str(int(conc_rps)) + " req/sec")
-say "  Concurrent POST: " + term.cyan(str(int(post_rps)) + " req/sec")
-say ""
-
-let total_reqs = seq_count + conc_count + post_count
-let total_elapsed = seq_elapsed + conc_elapsed + post_elapsed
-say "  Total: " + str(total_reqs) + " requests in " + str(total_elapsed) + " ms"
-say ""
-term.success("Benchmark complete")
+say "=== Summary ==="
+let total = seq_ms + post_ms
+say "  Total: " + str(seq_count + post_count) + " requests in " + str(total) + " ms"
 say ""
