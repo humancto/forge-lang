@@ -416,7 +416,9 @@ impl VM {
                     let len = if let Some(r) = v.as_obj() {
                         self.gc.get(r).map_or(0, |o| match &o.kind {
                             ObjKind::String(s) => s.chars().count() as i64,
-                            ObjKind::Array(a) | ObjKind::Tuple(a) => a.len() as i64,
+                            ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a) => {
+                                a.len() as i64
+                            }
                             ObjKind::Object(o) => o.len() as i64,
                             _ => 0,
                         })
@@ -493,6 +495,38 @@ impl VM {
                 }
                 _ => Err(VMError::new("range() requires integer arguments")),
             },
+            "set" => {
+                if args.is_empty() {
+                    let r = self.gc.alloc(ObjKind::Set(Vec::new()));
+                    return Ok(Value::obj(r));
+                }
+                if args.len() != 1 {
+                    return Err(VMError::new("set() takes 0 or 1 argument"));
+                }
+                if let Some(r) = args[0].as_obj() {
+                    if let Some(obj) = self.gc.get(r) {
+                        match &obj.kind {
+                            ObjKind::Array(items) | ObjKind::Tuple(items) => {
+                                // Clone to drop GC borrow, then dedup
+                                let source = items.clone();
+                                let mut deduped = Vec::new();
+                                for item in source {
+                                    if !deduped
+                                        .iter()
+                                        .any(|existing: &Value| existing.equals(&item, &self.gc))
+                                    {
+                                        deduped.push(item);
+                                    }
+                                }
+                                let nr = self.gc.alloc(ObjKind::Set(deduped));
+                                return Ok(Value::obj(nr));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(VMError::new("set() requires an array or tuple"))
+            }
             "push" => {
                 if args.len() != 2 {
                     return Err(VMError::new("push() requires array and value"));
@@ -986,7 +1020,7 @@ impl VM {
                                 let sub = val.display(&self.gc);
                                 return Ok(Value::bool_val(s.contains(&sub)));
                             }
-                            ObjKind::Array(items) | ObjKind::Tuple(items) => {
+                            ObjKind::Array(items) | ObjKind::Tuple(items) | ObjKind::Set(items) => {
                                 let found = items
                                     .iter()
                                     .any(|v| v.display(&self.gc) == val.display(&self.gc));
@@ -3452,6 +3486,131 @@ impl VM {
                         full_args.push(embed_value);
                         full_args.extend(extra_args.iter().cloned());
                         return self.call_value(func, full_args);
+                    }
+                }
+            }
+        }
+
+        // Set-specific methods
+        if let Some(r) = receiver.as_obj() {
+            if let Some(obj) = self.gc.get(r) {
+                if let ObjKind::Set(items) = &obj.kind {
+                    let items = items.clone(); // clone to drop GC borrow
+                    match method_name {
+                        "has" => {
+                            if extra_args.len() != 1 {
+                                return Err(VMError::new("has() requires one argument"));
+                            }
+                            let found = items.iter().any(|v| v.equals(&extra_args[0], &self.gc));
+                            return Ok(Value::bool_val(found));
+                        }
+                        "add" => {
+                            if extra_args.len() != 1 {
+                                return Err(VMError::new("add() requires one argument"));
+                            }
+                            let mut new_items = items;
+                            if !new_items.iter().any(|v| v.equals(&extra_args[0], &self.gc)) {
+                                new_items.push(extra_args[0]);
+                            }
+                            let nr = self.gc.alloc(ObjKind::Set(new_items));
+                            return Ok(Value::obj(nr));
+                        }
+                        "remove" => {
+                            if extra_args.len() != 1 {
+                                return Err(VMError::new("remove() requires one argument"));
+                            }
+                            let new_items: Vec<Value> = items
+                                .into_iter()
+                                .filter(|v| !v.equals(&extra_args[0], &self.gc))
+                                .collect();
+                            let nr = self.gc.alloc(ObjKind::Set(new_items));
+                            return Ok(Value::obj(nr));
+                        }
+                        "union" => {
+                            if extra_args.len() != 1 {
+                                return Err(VMError::new("union() requires one argument"));
+                            }
+                            let other = if let Some(r2) = extra_args[0].as_obj() {
+                                if let Some(o2) = self.gc.get(r2) {
+                                    if let ObjKind::Set(items2) = &o2.kind {
+                                        items2.clone()
+                                    } else {
+                                        return Err(VMError::new(
+                                            "union() requires a set argument",
+                                        ));
+                                    }
+                                } else {
+                                    return Err(VMError::new("union() requires a set argument"));
+                                }
+                            } else {
+                                return Err(VMError::new("union() requires a set argument"));
+                            };
+                            let mut result = items;
+                            for v in other {
+                                if !result.iter().any(|existing| existing.equals(&v, &self.gc)) {
+                                    result.push(v);
+                                }
+                            }
+                            let nr = self.gc.alloc(ObjKind::Set(result));
+                            return Ok(Value::obj(nr));
+                        }
+                        "intersect" => {
+                            if extra_args.len() != 1 {
+                                return Err(VMError::new("intersect() requires one argument"));
+                            }
+                            let other = if let Some(r2) = extra_args[0].as_obj() {
+                                if let Some(o2) = self.gc.get(r2) {
+                                    if let ObjKind::Set(items2) = &o2.kind {
+                                        items2.clone()
+                                    } else {
+                                        return Err(VMError::new(
+                                            "intersect() requires a set argument",
+                                        ));
+                                    }
+                                } else {
+                                    return Err(VMError::new(
+                                        "intersect() requires a set argument",
+                                    ));
+                                }
+                            } else {
+                                return Err(VMError::new("intersect() requires a set argument"));
+                            };
+                            let result: Vec<Value> = items
+                                .into_iter()
+                                .filter(|v| other.iter().any(|o| o.equals(v, &self.gc)))
+                                .collect();
+                            let nr = self.gc.alloc(ObjKind::Set(result));
+                            return Ok(Value::obj(nr));
+                        }
+                        "diff" => {
+                            if extra_args.len() != 1 {
+                                return Err(VMError::new("diff() requires one argument"));
+                            }
+                            let other = if let Some(r2) = extra_args[0].as_obj() {
+                                if let Some(o2) = self.gc.get(r2) {
+                                    if let ObjKind::Set(items2) = &o2.kind {
+                                        items2.clone()
+                                    } else {
+                                        return Err(VMError::new("diff() requires a set argument"));
+                                    }
+                                } else {
+                                    return Err(VMError::new("diff() requires a set argument"));
+                                }
+                            } else {
+                                return Err(VMError::new("diff() requires a set argument"));
+                            };
+                            let result: Vec<Value> = items
+                                .into_iter()
+                                .filter(|v| !other.iter().any(|o| o.equals(v, &self.gc)))
+                                .collect();
+                            let nr = self.gc.alloc(ObjKind::Set(result));
+                            return Ok(Value::obj(nr));
+                        }
+                        "to_array" => {
+                            let nr = self.gc.alloc(ObjKind::Array(items));
+                            return Ok(Value::obj(nr));
+                        }
+                        _ => {}
                     }
                 }
             }

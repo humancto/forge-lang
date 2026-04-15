@@ -26,10 +26,12 @@ impl Interpreter {
             }
             "len" => match args.first() {
                 Some(Value::String(s)) => Ok(Value::Int(s.chars().count() as i64)),
-                Some(Value::Array(a) | Value::Tuple(a)) => Ok(Value::Int(a.len() as i64)),
+                Some(Value::Array(a) | Value::Tuple(a) | Value::Set(a)) => {
+                    Ok(Value::Int(a.len() as i64))
+                }
                 Some(Value::Object(o)) => Ok(Value::Int(o.len() as i64)),
                 _ => Err(RuntimeError::new(
-                    "len() requires string, array, tuple, or object",
+                    "len() requires string, array, tuple, set, or object",
                 )),
             },
             "type" | "typeof" => match args.first() {
@@ -91,9 +93,9 @@ impl Interpreter {
                 (Some(Value::String(s)), Some(Value::String(sub))) => {
                     Ok(Value::Bool(s.contains(sub.as_str())))
                 }
-                (Some(Value::Array(arr) | Value::Tuple(arr)), Some(val)) => Ok(Value::Bool(
-                    arr.iter().any(|v| format!("{}", v) == format!("{}", val)),
-                )),
+                (Some(Value::Array(arr) | Value::Tuple(arr) | Value::Set(arr)), Some(val)) => Ok(
+                    Value::Bool(arr.iter().any(|v| format!("{}", v) == format!("{}", val))),
+                ),
                 (Some(Value::Object(map)), Some(Value::String(key))) => {
                     Ok(Value::Bool(map.contains_key(key)))
                 }
@@ -260,6 +262,26 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new("range() requires integer arguments")),
             },
+            "set" => {
+                if args.is_empty() {
+                    return Ok(Value::Set(Vec::new()));
+                }
+                if args.len() != 1 {
+                    return Err(RuntimeError::new("set() takes 0 or 1 argument"));
+                }
+                match &args[0] {
+                    Value::Array(items) | Value::Tuple(items) => {
+                        let mut deduped = Vec::new();
+                        for item in items {
+                            if !deduped.contains(item) {
+                                deduped.push(item.clone());
+                            }
+                        }
+                        Ok(Value::Set(deduped))
+                    }
+                    _ => Err(RuntimeError::new("set() requires an array or tuple")),
+                }
+            }
             "enumerate" => match args.first() {
                 Some(Value::Array(items)) => {
                     let mut pairs = Vec::with_capacity(items.len());

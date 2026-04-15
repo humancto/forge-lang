@@ -55,6 +55,7 @@ pub enum Value {
     Bool(bool),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
+    Set(Vec<Value>),
     Object(IndexMap<String, Value>),
     Function {
         name: String,
@@ -94,6 +95,10 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Set(a), Value::Set(b)) => {
+                // Order-independent: same length + every element in A is in B
+                a.len() == b.len() && a.iter().all(|x| b.contains(x))
+            }
             (Value::Object(a), Value::Object(b)) => a == b,
             (Value::ResultOk(a), Value::ResultOk(b)) => a == b,
             (Value::ResultErr(a), Value::ResultErr(b)) => a == b,
@@ -117,6 +122,7 @@ impl Value {
             Value::Bool(_) => "Bool",
             Value::Array(_) => "Array",
             Value::Tuple(_) => "Tuple",
+            Value::Set(_) => "Set",
             Value::Object(_) => "Object",
             Value::Function { .. } => "Function",
             Value::Lambda { .. } => "Lambda",
@@ -137,7 +143,7 @@ impl Value {
             Value::Float(n) => *n != 0.0,
             Value::String(s) => !s.is_empty(),
             Value::Null => false,
-            Value::Array(a) | Value::Tuple(a) => !a.is_empty(),
+            Value::Array(a) | Value::Tuple(a) | Value::Set(a) => !a.is_empty(),
             Value::Object(o) => !o.is_empty(),
             Value::ResultOk(_) => true,
             Value::ResultErr(_) => false,
@@ -166,7 +172,7 @@ impl Value {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
-            Value::Tuple(items) => {
+            Value::Tuple(items) | Value::Set(items) => {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
@@ -200,6 +206,10 @@ impl fmt::Display for Value {
             Value::Tuple(items) => {
                 let strs: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
                 write!(f, "({})", strs.join(", "))
+            }
+            Value::Set(items) => {
+                let strs: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
+                write!(f, "set({})", strs.join(", "))
             }
             Value::Object(_) => write!(f, "{}", self.to_json_string()),
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
@@ -595,6 +605,7 @@ impl Interpreter {
             "entries",
             "from_entries",
             "range",
+            "set",
             "enumerate",
             "map",
             "filter",
@@ -1148,7 +1159,7 @@ impl Interpreter {
             } => {
                 let iter_val = self.eval_expr(iterable)?;
                 match iter_val {
-                    Value::Array(items) | Value::Tuple(items) => {
+                    Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
@@ -2036,6 +2047,10 @@ impl Interpreter {
                             field
                         ))),
                     },
+                    Value::Set(items) => match field.as_str() {
+                        "len" => Ok(Value::Int(items.len() as i64)),
+                        _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
+                    },
                     _ => Err(RuntimeError::new(&format!(
                         "cannot access field '{}' on {}",
                         field,
@@ -2810,6 +2825,145 @@ impl Interpreter {
                             }
                             return Err(RuntimeError::new("pop() requires array"));
                         }
+                        // In-place set mutation
+                        if method == "add" && args.len() == 1 {
+                            let s = self.eval_expr(object)?;
+                            let val = self.eval_expr(&args[0])?;
+                            if let Value::Set(mut items) = s {
+                                if !items.contains(&val) {
+                                    items.push(val);
+                                }
+                                let new_set = Value::Set(items);
+                                self.env.set(var_name, new_set.clone())?;
+                                return Ok(new_set);
+                            }
+                        }
+                        if method == "remove" && args.len() == 1 {
+                            let s = self.eval_expr(object)?;
+                            let val = self.eval_expr(&args[0])?;
+                            if let Value::Set(items) = s {
+                                let filtered: Vec<Value> =
+                                    items.into_iter().filter(|v| v != &val).collect();
+                                let new_set = Value::Set(filtered);
+                                self.env.set(var_name, new_set.clone())?;
+                                return Ok(new_set);
+                            }
+                        }
+                    }
+                }
+                // Set methods (non-mutating / on non-mutable receiver)
+                {
+                    let obj = self.eval_expr(object)?;
+                    let inner = match &obj {
+                        Value::Frozen(v) => v.as_ref().clone(),
+                        other => other.clone(),
+                    };
+                    if let Value::Set(items) = inner {
+                        let is_frozen = matches!(&obj, Value::Frozen(_));
+                        match method.as_str() {
+                            "has" => {
+                                if args.len() != 1 {
+                                    return Err(RuntimeError::new("has() requires one argument"));
+                                }
+                                let val = self.eval_expr(&args[0])?;
+                                return Ok(Value::Bool(items.contains(&val)));
+                            }
+                            "add" => {
+                                if is_frozen {
+                                    return Err(RuntimeError::new("cannot add to a frozen set"));
+                                }
+                                if args.len() != 1 {
+                                    return Err(RuntimeError::new("add() requires one argument"));
+                                }
+                                let val = self.eval_expr(&args[0])?;
+                                let mut new_items = items;
+                                if !new_items.contains(&val) {
+                                    new_items.push(val);
+                                }
+                                return Ok(Value::Set(new_items));
+                            }
+                            "remove" => {
+                                if is_frozen {
+                                    return Err(RuntimeError::new(
+                                        "cannot remove from a frozen set",
+                                    ));
+                                }
+                                if args.len() != 1 {
+                                    return Err(RuntimeError::new(
+                                        "remove() requires one argument",
+                                    ));
+                                }
+                                let val = self.eval_expr(&args[0])?;
+                                let new_items: Vec<Value> =
+                                    items.into_iter().filter(|v| v != &val).collect();
+                                return Ok(Value::Set(new_items));
+                            }
+                            "union" => {
+                                if args.len() != 1 {
+                                    return Err(RuntimeError::new("union() requires one argument"));
+                                }
+                                let other = self.eval_expr(&args[0])?;
+                                let other_items = match other {
+                                    Value::Set(v) => v,
+                                    _ => {
+                                        return Err(RuntimeError::new(
+                                            "union() requires a set argument",
+                                        ))
+                                    }
+                                };
+                                let mut result = items;
+                                for v in other_items {
+                                    if !result.contains(&v) {
+                                        result.push(v);
+                                    }
+                                }
+                                return Ok(Value::Set(result));
+                            }
+                            "intersect" => {
+                                if args.len() != 1 {
+                                    return Err(RuntimeError::new(
+                                        "intersect() requires one argument",
+                                    ));
+                                }
+                                let other = self.eval_expr(&args[0])?;
+                                let other_items = match other {
+                                    Value::Set(v) => v,
+                                    _ => {
+                                        return Err(RuntimeError::new(
+                                            "intersect() requires a set argument",
+                                        ))
+                                    }
+                                };
+                                let result: Vec<Value> = items
+                                    .into_iter()
+                                    .filter(|v| other_items.contains(v))
+                                    .collect();
+                                return Ok(Value::Set(result));
+                            }
+                            "diff" => {
+                                if args.len() != 1 {
+                                    return Err(RuntimeError::new("diff() requires one argument"));
+                                }
+                                let other = self.eval_expr(&args[0])?;
+                                let other_items = match other {
+                                    Value::Set(v) => v,
+                                    _ => {
+                                        return Err(RuntimeError::new(
+                                            "diff() requires a set argument",
+                                        ))
+                                    }
+                                };
+                                let result: Vec<Value> = items
+                                    .into_iter()
+                                    .filter(|v| !other_items.contains(v))
+                                    .collect();
+                                return Ok(Value::Set(result));
+                            }
+                            "to_array" => {
+                                return Ok(Value::Array(items));
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 let obj = self.eval_expr(object)?;
@@ -2944,6 +3098,12 @@ impl Interpreter {
                 BinOp::Eq => Ok(Value::Bool(a == b)),
                 BinOp::NotEq => Ok(Value::Bool(a != b)),
                 _ => Err(RuntimeError::new("tuples only support == and != operators")),
+            },
+
+            (Value::Set(_), Value::Set(_)) => match op {
+                BinOp::Eq => Ok(Value::Bool(left == right)),
+                BinOp::NotEq => Ok(Value::Bool(left != right)),
+                _ => Err(RuntimeError::new("sets only support == and != operators")),
             },
 
             _ => Err(RuntimeError::new(&format!(
