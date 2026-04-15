@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **First-class `Set` type** — `set([1, 2, 3])` or `set((1, 2, 3))` builds a deduplicated set. Methods: `.has(x)`, `.add(x)`, `.remove(x)`, `.union(other)`, `.intersect(other)`, `.diff(other)`, `.to_array()`. Supports `len()`, `contains()`, iteration, order-independent equality, and is truthy when non-empty. Works across interpreter, VM, bytecode round-trip, and JIT.
 - **`select(channels, timeout?)` builtin** — wait on multiple channels, returns `[index, value]` for the first ready channel. Optional timeout in ms. ([#69](https://github.com/humancto/forge-lang/pull/69))
 - **`close(ch)` builtin and channel iteration** — close a channel to signal no more values; `for msg in ch { }` drains until closed. ([#70](https://github.com/humancto/forge-lang/pull/70))
 - **Unbounded channels** — `channel()` with no args creates an unbounded channel; `channel(n)` creates bounded as before. ([#71](https://github.com/humancto/forge-lang/pull/71))

@@ -140,7 +140,7 @@ fn forge_to_json_compact(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
         Value::String(s) => escape_json_string(s),
-        Value::Array(items) => {
+        Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
             let entries: Vec<String> = items.iter().map(forge_to_json_compact).collect();
             format!("[{}]", entries.join(", "))
         }
@@ -151,6 +151,7 @@ fn forge_to_json_compact(v: &Value) -> String {
                 .collect();
             format!("{{{}}}", entries.join(", "))
         }
+        Value::Frozen(inner) => forge_to_json_compact(inner),
         _ => "null".to_string(),
     }
 }
@@ -164,7 +165,7 @@ fn forge_to_json_pretty(v: &Value, depth: usize, indent: usize) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
         Value::String(s) => escape_json_string(s),
-        Value::Array(items) => {
+        Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
             if items.is_empty() {
                 return "[]".to_string();
             }
@@ -180,6 +181,7 @@ fn forge_to_json_pretty(v: &Value, depth: usize, indent: usize) -> String {
                 .collect();
             format!("[\n{}\n{}]", entries.join(",\n"), pad)
         }
+        Value::Frozen(inner) => forge_to_json_pretty(inner, depth, indent),
         Value::Object(map) => {
             if map.is_empty() {
                 return "{}".to_string();

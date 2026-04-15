@@ -55,6 +55,7 @@ pub enum Value {
     Bool(bool),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
+    Set(Vec<Value>),
     Object(IndexMap<String, Value>),
     Function {
         name: String,
@@ -94,6 +95,14 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Set(a), Value::Set(b)) => {
+                // Order-independent with container-aware equality: same length
+                // + every element in A is equivalent to some element in B
+                // (handles NaN==NaN and Int/Float promotion for set semantics).
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|x| b.iter().any(|y| Value::container_eq(x, y)))
+            }
             (Value::Object(a), Value::Object(b)) => a == b,
             (Value::ResultOk(a), Value::ResultOk(b)) => a == b,
             (Value::ResultErr(a), Value::ResultErr(b)) => a == b,
@@ -109,6 +118,54 @@ impl PartialEq for Value {
 }
 
 impl Value {
+    /// Container-aware equality used for set membership, set equality, and
+    /// any other collection where we want NaN==NaN and Int↔Float promotion
+    /// to agree with the VM's `Value::equals` semantics.
+    ///
+    /// Differs from `PartialEq` in three ways:
+    ///   1. `NaN == NaN` is `true` (so `set([f64::NAN])` dedups correctly).
+    ///   2. `Int(n) == Float(n as f64)` is `true` (so the two backends agree
+    ///      on `set([1, 2]) == set([1.0, 2.0])` and `.has(1.0)`).
+    ///   3. Recursively applies itself to nested Array/Tuple/Set/Object so
+    ///      the above two rules propagate through containers.
+    pub fn container_eq(a: &Value, b: &Value) -> bool {
+        // Peel Frozen on either side.
+        if let Value::Frozen(inner) = a {
+            return Value::container_eq(inner, b);
+        }
+        if let Value::Frozen(inner) = b {
+            return Value::container_eq(a, inner);
+        }
+        match (a, b) {
+            (Value::Int(x), Value::Int(y)) => x == y,
+            (Value::Float(x), Value::Float(y)) => (x.is_nan() && y.is_nan()) || x == y,
+            (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => {
+                !y.is_nan() && (*x as f64) == *y
+            }
+            (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .zip(y.iter())
+                        .all(|(a, b)| Value::container_eq(a, b))
+            }
+            (Value::Set(x), Value::Set(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|xv| y.iter().any(|yv| Value::container_eq(xv, yv)))
+            }
+            (Value::Object(x), Value::Object(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|(k, v)| y.get(k).is_some_and(|yv| Value::container_eq(v, yv)))
+            }
+            (Value::ResultOk(x), Value::ResultOk(y))
+            | (Value::ResultErr(x), Value::ResultErr(y)) => Value::container_eq(x, y),
+            (Value::Some(x), Value::Some(y)) => Value::container_eq(x, y),
+            // Everything else: defer to PartialEq (String, Bool, Null, None, BuiltIn, Channel).
+            _ => a == b,
+        }
+    }
+
     pub fn type_name(&self) -> &str {
         match self {
             Value::Int(_) => "Int",
@@ -117,6 +174,7 @@ impl Value {
             Value::Bool(_) => "Bool",
             Value::Array(_) => "Array",
             Value::Tuple(_) => "Tuple",
+            Value::Set(_) => "Set",
             Value::Object(_) => "Object",
             Value::Function { .. } => "Function",
             Value::Lambda { .. } => "Lambda",
@@ -137,7 +195,7 @@ impl Value {
             Value::Float(n) => *n != 0.0,
             Value::String(s) => !s.is_empty(),
             Value::Null => false,
-            Value::Array(a) | Value::Tuple(a) => !a.is_empty(),
+            Value::Array(a) | Value::Tuple(a) | Value::Set(a) => !a.is_empty(),
             Value::Object(o) => !o.is_empty(),
             Value::ResultOk(_) => true,
             Value::ResultErr(_) => false,
@@ -166,7 +224,7 @@ impl Value {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
-            Value::Tuple(items) => {
+            Value::Tuple(items) | Value::Set(items) => {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
@@ -200,6 +258,10 @@ impl fmt::Display for Value {
             Value::Tuple(items) => {
                 let strs: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
                 write!(f, "({})", strs.join(", "))
+            }
+            Value::Set(items) => {
+                let strs: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
+                write!(f, "set({})", strs.join(", "))
             }
             Value::Object(_) => write!(f, "{}", self.to_json_string()),
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
@@ -595,6 +657,7 @@ impl Interpreter {
             "entries",
             "from_entries",
             "range",
+            "set",
             "enumerate",
             "map",
             "filter",
@@ -834,6 +897,11 @@ impl Interpreter {
                         }
                         if matches!(existing, Value::Tuple(_)) {
                             return Err(RuntimeError::new("cannot mutate a tuple"));
+                        }
+                        if matches!(existing, Value::Set(_)) {
+                            return Err(RuntimeError::new(
+                                "cannot index-assign a set; use .add() and .remove()",
+                            ));
                         }
                         let mut arr = existing;
                         if let (Value::Array(ref mut items), Value::Int(i)) = (&mut arr, &idx) {
@@ -1148,7 +1216,7 @@ impl Interpreter {
             } => {
                 let iter_val = self.eval_expr(iterable)?;
                 match iter_val {
-                    Value::Array(items) | Value::Tuple(items) => {
+                    Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
@@ -2036,6 +2104,10 @@ impl Interpreter {
                             field
                         ))),
                     },
+                    Value::Set(items) => match field.as_str() {
+                        "len" => Ok(Value::Int(items.len() as i64)),
+                        _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
+                    },
                     _ => Err(RuntimeError::new(&format!(
                         "cannot access field '{}' on {}",
                         field,
@@ -2107,6 +2179,47 @@ impl Interpreter {
                                     return Ok(popped);
                                 }
                                 return Err(RuntimeError::new("pop() requires array"));
+                            }
+                            // In-place set mutation: s.add(x) / s.remove(x) on a mutable set variable.
+                            // Peel Frozen so we can produce a useful error rather than a silent no-op.
+                            if field == "add" && args.len() == 1 {
+                                let s = self.eval_expr(object)?;
+                                let raw = match s {
+                                    Value::Frozen(_) => {
+                                        return Err(RuntimeError::new("cannot add to a frozen set"))
+                                    }
+                                    other => other,
+                                };
+                                if let Value::Set(mut items) = raw {
+                                    let val = self.eval_expr(&args[0])?;
+                                    if !items.iter().any(|v| Value::container_eq(v, &val)) {
+                                        items.push(val);
+                                    }
+                                    let new_set = Value::Set(items);
+                                    self.env.set(var_name, new_set.clone())?;
+                                    return Ok(new_set);
+                                }
+                            }
+                            if field == "remove" && args.len() == 1 {
+                                let s = self.eval_expr(object)?;
+                                let raw = match s {
+                                    Value::Frozen(_) => {
+                                        return Err(RuntimeError::new(
+                                            "cannot remove from a frozen set",
+                                        ))
+                                    }
+                                    other => other,
+                                };
+                                if let Value::Set(items) = raw {
+                                    let val = self.eval_expr(&args[0])?;
+                                    let filtered: Vec<Value> = items
+                                        .into_iter()
+                                        .filter(|v| !Value::container_eq(v, &val))
+                                        .collect();
+                                    let new_set = Value::Set(filtered);
+                                    self.env.set(var_name, new_set.clone())?;
+                                    return Ok(new_set);
+                                }
                             }
                         }
                     }
@@ -2384,6 +2497,149 @@ impl Interpreter {
                                         }
                                     }
                                     return Ok(Value::String(result));
+                                }
+                                _ => {}
+                            }
+                            return Ok(Value::Null);
+                        }
+                        _ if {
+                            let is_set_receiver = matches!(&obj, Value::Set(_))
+                                || matches!(&obj, Value::Frozen(ref inner) if matches!(inner.as_ref(), Value::Set(_)));
+                            is_set_receiver
+                                && matches!(
+                                    method_name,
+                                    "has"
+                                        | "add"
+                                        | "remove"
+                                        | "union"
+                                        | "intersect"
+                                        | "diff"
+                                        | "to_array"
+                                )
+                        } =>
+                        {
+                            let is_frozen = matches!(&obj, Value::Frozen(_));
+                            let items: Vec<Value> = match &obj {
+                                Value::Set(items) => items.clone(),
+                                Value::Frozen(inner) => match inner.as_ref() {
+                                    Value::Set(items) => items.clone(),
+                                    _ => unreachable!(),
+                                },
+                                _ => unreachable!(),
+                            };
+                            // Extract the "other" argument for set-set operations, peeling Frozen.
+                            let peel_other_set = |v: Value| -> Result<Vec<Value>, RuntimeError> {
+                                match v {
+                                    Value::Set(items) => Ok(items),
+                                    Value::Frozen(inner) => match *inner {
+                                        Value::Set(items) => Ok(items),
+                                        _ => Err(RuntimeError::new(
+                                            "set operation requires a set argument",
+                                        )),
+                                    },
+                                    _ => Err(RuntimeError::new(
+                                        "set operation requires a set argument",
+                                    )),
+                                }
+                            };
+                            match method_name {
+                                "has" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "has() requires one argument",
+                                        ));
+                                    }
+                                    let val = self.eval_expr(&args[0])?;
+                                    return Ok(Value::Bool(
+                                        items.iter().any(|v| Value::container_eq(v, &val)),
+                                    ));
+                                }
+                                "add" => {
+                                    if is_frozen {
+                                        return Err(RuntimeError::new(
+                                            "cannot add to a frozen set",
+                                        ));
+                                    }
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "add() requires one argument",
+                                        ));
+                                    }
+                                    let val = self.eval_expr(&args[0])?;
+                                    let mut new_items = items;
+                                    if !new_items.iter().any(|v| Value::container_eq(v, &val)) {
+                                        new_items.push(val);
+                                    }
+                                    return Ok(Value::Set(new_items));
+                                }
+                                "remove" => {
+                                    if is_frozen {
+                                        return Err(RuntimeError::new(
+                                            "cannot remove from a frozen set",
+                                        ));
+                                    }
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "remove() requires one argument",
+                                        ));
+                                    }
+                                    let val = self.eval_expr(&args[0])?;
+                                    let new_items: Vec<Value> = items
+                                        .into_iter()
+                                        .filter(|v| !Value::container_eq(v, &val))
+                                        .collect();
+                                    return Ok(Value::Set(new_items));
+                                }
+                                "union" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "union() requires one argument",
+                                        ));
+                                    }
+                                    let other = self.eval_expr(&args[0])?;
+                                    let other_items = peel_other_set(other)?;
+                                    let mut result = items;
+                                    for v in other_items {
+                                        if !result.iter().any(|x| Value::container_eq(x, &v)) {
+                                            result.push(v);
+                                        }
+                                    }
+                                    return Ok(Value::Set(result));
+                                }
+                                "intersect" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "intersect() requires one argument",
+                                        ));
+                                    }
+                                    let other = self.eval_expr(&args[0])?;
+                                    let other_items = peel_other_set(other)?;
+                                    let result: Vec<Value> = items
+                                        .into_iter()
+                                        .filter(|v| {
+                                            other_items.iter().any(|x| Value::container_eq(x, v))
+                                        })
+                                        .collect();
+                                    return Ok(Value::Set(result));
+                                }
+                                "diff" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "diff() requires one argument",
+                                        ));
+                                    }
+                                    let other = self.eval_expr(&args[0])?;
+                                    let other_items = peel_other_set(other)?;
+                                    let result: Vec<Value> = items
+                                        .into_iter()
+                                        .filter(|v| {
+                                            !other_items.iter().any(|x| Value::container_eq(x, v))
+                                        })
+                                        .collect();
+                                    return Ok(Value::Set(result));
+                                }
+                                "to_array" => {
+                                    return Ok(Value::Array(items));
                                 }
                                 _ => {}
                             }
@@ -2812,6 +3068,11 @@ impl Interpreter {
                         }
                     }
                 }
+                // NOTE: The parser never constructs `Expr::MethodCall` — `obj.method(args)`
+                // is emitted as `Expr::Call { function: FieldAccess, ... }`. All live
+                // method dispatch (including sets) lives in that arm. This branch is
+                // kept as a fallback for direct AST construction (tests, tools) and
+                // simply forwards to the free-function form `method(obj, ...args)`.
                 let obj = self.eval_expr(object)?;
                 let mut full_args = vec![obj];
                 for arg in args {
@@ -2944,6 +3205,12 @@ impl Interpreter {
                 BinOp::Eq => Ok(Value::Bool(a == b)),
                 BinOp::NotEq => Ok(Value::Bool(a != b)),
                 _ => Err(RuntimeError::new("tuples only support == and != operators")),
+            },
+
+            (Value::Set(_), Value::Set(_)) => match op {
+                BinOp::Eq => Ok(Value::Bool(left == right)),
+                BinOp::NotEq => Ok(Value::Bool(left != right)),
+                _ => Err(RuntimeError::new("sets only support == and != operators")),
             },
 
             _ => Err(RuntimeError::new(&format!(

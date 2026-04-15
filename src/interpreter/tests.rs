@@ -5157,3 +5157,191 @@ fn tuple_unpack_syntax() {
     );
     assert_eq!(val, Value::Int(30));
 }
+
+// ── Set Tests ──────────────────────────────────────────────
+
+#[test]
+fn set_from_array() {
+    let val = run_forge("len(set([1, 2, 3]))");
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn set_from_tuple() {
+    let val = run_forge("len(set((1, 2, 3)))");
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn set_empty() {
+    let val = run_forge("len(set())");
+    assert_eq!(val, Value::Int(0));
+}
+
+#[test]
+fn set_dedup() {
+    let val = run_forge("len(set([1, 1, 2, 2, 3, 3]))");
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn set_has_true() {
+    let val = run_forge("set([1, 2, 3]).has(2)");
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn set_has_false() {
+    let val = run_forge("set([1, 2, 3]).has(99)");
+    assert_eq!(val, Value::Bool(false));
+}
+
+#[test]
+fn set_add() {
+    let val = run_forge("let s = set([1, 2]).add(3)\nlen(s)");
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn set_add_duplicate() {
+    let val = run_forge("let s = set([1, 2]).add(1)\nlen(s)");
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn set_remove() {
+    let val = run_forge("let s = set([1, 2, 3]).remove(2)\nlen(s)");
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn set_remove_missing() {
+    let val = run_forge("let s = set([1, 2]).remove(99)\nlen(s)");
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn set_contains_builtin() {
+    let val = run_forge("contains(set([1, 2, 3]), 2)");
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn set_union() {
+    let val = run_forge("len(set([1, 2, 3]).union(set([3, 4, 5])))");
+    assert_eq!(val, Value::Int(5));
+}
+
+#[test]
+fn set_intersect() {
+    let val = run_forge("len(set([1, 2, 3]).intersect(set([2, 3, 4])))");
+    assert_eq!(val, Value::Int(2));
+}
+
+#[test]
+fn set_diff() {
+    let val = run_forge("len(set([1, 2, 3]).diff(set([2, 3])))");
+    assert_eq!(val, Value::Int(1));
+}
+
+#[test]
+fn set_equality_order_independent() {
+    let val = run_forge("set([1, 2, 3]) == set([3, 2, 1])");
+    assert_eq!(val, Value::Bool(true));
+}
+
+#[test]
+fn set_inequality() {
+    let val = run_forge("set([1, 2]) == set([1, 2, 3])");
+    assert_eq!(val, Value::Bool(false));
+}
+
+#[test]
+fn set_iteration() {
+    let val = run_forge(
+        r#"
+        let s = set([10, 20, 30])
+        let mut total = 0
+        for x in s {
+            total = total + x
+        }
+        total
+        "#,
+    );
+    assert_eq!(val, Value::Int(60));
+}
+
+#[test]
+fn set_display() {
+    let val = run_forge("set([1, 2, 3])");
+    assert_eq!(format!("{}", val), "set(1, 2, 3)");
+}
+
+#[test]
+fn set_to_array() {
+    let val = run_forge("len(set([1, 2, 3]).to_array())");
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn set_typeof() {
+    let val = run_forge("type(set([1, 2]))");
+    match val {
+        Value::String(s) => assert_eq!(s, "Set"),
+        _ => panic!("expected string, got {:?}", val),
+    }
+}
+
+#[test]
+fn set_string_elements() {
+    let val = run_forge(r#"len(set(["a", "b", "a", "c"]))"#);
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn set_index_assign_rejected() {
+    let result = try_run_forge("let mut s = set([1, 2, 3])\ns[0] = 99");
+    assert!(result.is_err());
+    let msg = result.unwrap_err().message;
+    assert!(msg.contains("set"), "got: {}", msg);
+}
+
+#[test]
+fn set_is_truthy_nonempty() {
+    let val = run_forge(
+        r#"
+        let mut r = "empty"
+        let s = set([1])
+        if s { r = "non-empty" }
+        r
+        "#,
+    );
+    match val {
+        Value::String(s) => assert_eq!(s, "non-empty"),
+        _ => panic!("expected string"),
+    }
+}
+
+#[test]
+fn set_mutating_add_in_place() {
+    let val = run_forge(
+        r#"
+        let mut s = set([1, 2])
+        s.add(3)
+        len(s)
+        "#,
+    );
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn set_mutating_remove_in_place() {
+    let val = run_forge(
+        r#"
+        let mut s = set([1, 2, 3])
+        s.remove(2)
+        len(s)
+        "#,
+    );
+    assert_eq!(val, Value::Int(2));
+}

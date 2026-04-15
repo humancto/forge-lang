@@ -326,6 +326,7 @@ impl VM {
             "values",
             "contains",
             "range",
+            "set",
             "enumerate",
             "map",
             "filter",
@@ -1522,19 +1523,27 @@ impl VM {
                                             )))
                                         }
                                     },
-                                    ObjKind::Array(items) => match field.as_str() {
-                                        "len" => {
-                                            direct_result =
-                                                Some(Value::small_int(items.len() as i64));
-                                            needs_alloc = None;
+                                    ObjKind::Array(items) | ObjKind::Set(items) => {
+                                        match field.as_str() {
+                                            "len" => {
+                                                direct_result =
+                                                    Some(Value::small_int(items.len() as i64));
+                                                needs_alloc = None;
+                                            }
+                                            _ => {
+                                                let type_name =
+                                                    if matches!(&obj.kind, ObjKind::Set(_)) {
+                                                        "Set"
+                                                    } else {
+                                                        "Array"
+                                                    };
+                                                return Err(VMError::new(&format!(
+                                                    "no method '{}' on {}",
+                                                    field, type_name
+                                                )));
+                                            }
                                         }
-                                        _ => {
-                                            return Err(VMError::new(&format!(
-                                                "no method '{}' on Array",
-                                                field
-                                            )))
-                                        }
-                                    },
+                                    }
                                     _ => {
                                         return Err(VMError::new(&format!(
                                             "cannot access field '{}' on {}",
@@ -1589,6 +1598,10 @@ impl VM {
                                             .get(i as usize)
                                             .cloned()
                                             .ok_or_else(|| VMError::new("index out of bounds"))?
+                                    } else if matches!(&o.kind, ObjKind::Set(_)) {
+                                        return Err(VMError::new(
+                                            "cannot index a set; sets are unordered — use .has() or iteration",
+                                        ));
                                     } else {
                                         return Err(VMError::new("cannot index non-array"));
                                     }
@@ -1616,6 +1629,34 @@ impl VM {
                         };
                         self.registers[base + a as usize] = result;
                     }
+                    OpCode::IterGet => {
+                        let obj = self.registers[base + b as usize];
+                        let idx = self.registers[base + c as usize];
+                        let result = if let Some(r) = obj.as_obj() {
+                            if let Some(i) = idx.as_int(&self.gc) {
+                                if let Some(o) = self.gc.get(r) {
+                                    if let ObjKind::Array(items)
+                                    | ObjKind::Tuple(items)
+                                    | ObjKind::Set(items) = &o.kind
+                                    {
+                                        items
+                                            .get(i as usize)
+                                            .cloned()
+                                            .ok_or_else(|| VMError::new("index out of bounds"))?
+                                    } else {
+                                        return Err(VMError::new("cannot iterate non-collection"));
+                                    }
+                                } else {
+                                    Value::null()
+                                }
+                            } else {
+                                return Err(VMError::new("iterator index must be int"));
+                            }
+                        } else {
+                            return Err(VMError::new("invalid iterator operation"));
+                        };
+                        self.registers[base + a as usize] = result;
+                    }
                     OpCode::SetIndex => {
                         let idx = self.registers[base + b as usize];
                         let val = self.registers[base + c as usize];
@@ -1624,6 +1665,11 @@ impl VM {
                             if let Some(obj) = self.gc.get(r) {
                                 if matches!(&obj.kind, ObjKind::Tuple(_)) {
                                     return Err(VMError::new("cannot mutate a tuple"));
+                                }
+                                if matches!(&obj.kind, ObjKind::Set(_)) {
+                                    return Err(VMError::new(
+                                        "cannot index-assign a set; use .add() and .remove()",
+                                    ));
                                 }
                             }
                             let key_str = self.get_string(&idx);
@@ -1650,7 +1696,9 @@ impl VM {
                             if let Some(obj) = self.gc.get(r) {
                                 match &obj.kind {
                                     ObjKind::String(s) => s.chars().count() as i64,
-                                    ObjKind::Array(a) | ObjKind::Tuple(a) => a.len() as i64,
+                                    ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a) => {
+                                        a.len() as i64
+                                    }
                                     ObjKind::Object(o) => o.len() as i64,
                                     _ => 0,
                                 }

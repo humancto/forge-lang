@@ -1,0 +1,5 @@
+// expect: 8
+
+let a = set([1, 2, 3])
+let b = set([3, 4, 5])
+len(a.union(b)) + len(a.intersect(b)) + len(a.diff(b))

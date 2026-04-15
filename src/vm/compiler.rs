@@ -807,7 +807,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             let var_reg = c.add_local(var, false)?;
-            c.emit(encode_abc(OpCode::GetIndex, var_reg, arr_reg, idx_reg), 0);
+            c.emit(encode_abc(OpCode::IterGet, var_reg, arr_reg, idx_reg), 0);
 
             for s in body {
                 c.current_line = s.line;
