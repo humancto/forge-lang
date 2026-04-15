@@ -26,21 +26,23 @@ fn run_jit_function(source: &str) -> Vec<String> {
             proto.name.clone()
         };
         let type_info = type_analysis::analyze(proto);
-        // Pre-allocate string constants for string-capable functions
-        let string_refs: Option<StringRefs> = if type_info.has_string_ops {
-            Some(
-                proto
-                    .constants
-                    .iter()
-                    .map(|c| match c {
-                        Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
-                        _ => None,
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        // Pre-allocate string constants for string/collection/global functions
+        let string_refs: Option<StringRefs> =
+            if type_info.has_string_ops || type_info.has_collection_ops || type_info.has_global_ops
+            {
+                Some(
+                    proto
+                        .constants
+                        .iter()
+                        .map(|c| match c {
+                            Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
         let _ = jit.compile_function(proto, &name, string_refs.as_ref());
     }
 
@@ -59,6 +61,7 @@ fn run_jit_function(source: &str) -> Vec<String> {
                     uses_float: type_info.has_float,
                     has_string_ops: type_info.has_string_ops,
                     has_collection_ops: type_info.has_collection_ops,
+                    has_global_ops: type_info.has_global_ops,
                     returns_obj: matches!(
                         type_info.return_type,
                         type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
