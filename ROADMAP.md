@@ -560,6 +560,36 @@ m5-016: ci: release workflow for libforge.a per target
 
 ---
 
+## Milestone 9: v1.1 — Language Evolution
+
+**Goal:** Richer data structures, enforced generics, composable iteration, and structured concurrency. Make Forge a language you can write real algorithms in.
+
+### Tasks
+
+| Task | Description                                                                                 |
+| ---- | ------------------------------------------------------------------------------------------- |
+| 9.1  | Tuples: `(a, b, c)` literal syntax, destructuring, type annotations                         |
+| 9.2  | Set type: `set([1,2,3])`, `.add()`, `.has()`, `.remove()`, set operations                   |
+| 9.3  | Map with any-key: `map({ [key]: value })`, non-string keys, `.get()`, `.set()`              |
+| 9.4  | Iterator protocol: `.stream()` on collections, lazy `.filter()/.map()/.take()/.collect()`   |
+| 9.5  | Enum methods: `impl` blocks on `type` algebraic variants                                    |
+| 9.6  | Default ability implementations: `ability Printable { fn display(it) -> string { ... } }`   |
+| 9.7  | Enforced generics: type-checked `<T>` with erasure-based runtime validation                 |
+| 9.8  | Structured concurrency: `squad { spawn { ... } spawn { ... } }` with automatic cancellation |
+
+### Checklist
+
+- [ ] Tuple type with `(a, b)` syntax, indexing, destructuring, and type annotations
+- [ ] Set type with `set()` constructor, `.add()`, `.has()`, `.remove()`, union/intersection/difference
+- [ ] Map type with `map()` constructor, any-key support, `.get()`, `.set()`, `.keys()`, `.values()`
+- [ ] Iterator protocol with `.stream()`, lazy `.filter()`, `.map()`, `.take()`, `.skip()`, `.collect()`
+- [ ] Enum methods via `impl` blocks on algebraic `type` definitions
+- [ ] Default method implementations in `ability` blocks
+- [ ] Enforced generics with type erasure and runtime validation
+- [ ] Structured concurrency with `squad` blocks, automatic join, cancellation on failure
+
+---
+
 ## Milestone Dependency Graph
 
 ```
