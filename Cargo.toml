@@ -12,6 +12,11 @@ categories = ["compilers", "command-line-utilities"]
 readme = "README.md"
 exclude = ["docs/book/programming-forge.pdf", "docs/cover.jpeg", "docs/spec/**", "docs/PROGRAMMING_FORGE.md", "docs/part*.md", "benchmarks/**", "spec/**"]
 
+[lib]
+name = "forge_lang"
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
+
 [[bin]]
 name = "forge"
 path = "src/main.rs"

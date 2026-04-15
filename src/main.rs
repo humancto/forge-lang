@@ -1010,11 +1010,18 @@ fn compile_to_native_aot(source: &str, filename: &str, file_path: &PathBuf, stri
 
     match native::build_native_aot(&bytecode, file_path) {
         Ok(output_path) => {
+            let standalone = native::find_libforge_dir().is_some();
+            let runtime_msg = if standalone {
+                "standalone (libforge linked)"
+            } else {
+                "Forge VM required at execution time"
+            };
             println!(
-                "Built AOT binary {} -> {}\n  bytecode embedded ({} bytes, no source exposure)\n  runtime: Forge VM required at execution time",
+                "Built AOT binary {} -> {}\n  bytecode embedded ({} bytes, no source exposure)\n  runtime: {}",
                 filename,
                 output_path.display(),
-                bytecode.len()
+                bytecode.len(),
+                runtime_msg
             );
         }
         Err(message) => {

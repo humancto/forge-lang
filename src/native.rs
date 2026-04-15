@@ -10,8 +10,123 @@ pub fn build_native_launcher(source: &str, source_path: &Path) -> Result<PathBuf
 }
 
 pub fn build_native_aot(bytecode: &[u8], source_path: &Path) -> Result<PathBuf, String> {
+    // Try standalone build first (links against libforge.a — no forge needed at runtime)
+    if let Some(lib_dir) = find_libforge_dir() {
+        return build_standalone_aot(bytecode, source_path, &lib_dir);
+    }
+    // Fall back to launcher mode (requires forge at runtime)
     let c_source_fn = |forge_bin: &str| aot_launcher_c_source(bytecode, forge_bin);
     compile_launcher(source_path, "aot", c_source_fn)
+}
+
+/// Find the directory containing libforge_lang.a
+pub fn find_libforge_dir() -> Option<PathBuf> {
+    // Check FORGE_LIB_DIR env var first
+    if let Ok(dir) = env::var("FORGE_LIB_DIR") {
+        let path = PathBuf::from(&dir).join("libforge_lang.a");
+        if path.exists() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    // Check next to the forge binary
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let path = dir.join("libforge_lang.a");
+            if path.exists() {
+                return Some(dir.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
+/// Build a standalone AOT binary that links against libforge.a
+#[cfg(unix)]
+fn build_standalone_aot(
+    bytecode: &[u8],
+    source_path: &Path,
+    lib_dir: &Path,
+) -> Result<PathBuf, String> {
+    let output_path = native_output_path(source_path);
+    let byte_list = bytecode
+        .iter()
+        .map(|byte| byte.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let c_source = format!(
+        r#"#include <stddef.h>
+#include <stdint.h>
+
+extern int32_t forge_execute_bytecode(const uint8_t *bytecode, size_t len);
+
+static const unsigned char FORGE_BYTECODE[] = {{ {byte_list} }};
+static const size_t FORGE_BYTECODE_LEN = sizeof(FORGE_BYTECODE);
+
+int main(void) {{
+    return (int)forge_execute_bytecode(FORGE_BYTECODE, FORGE_BYTECODE_LEN);
+}}
+"#,
+        byte_list = byte_list,
+    );
+
+    let build_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("failed to create timestamp: {e}"))?
+        .as_nanos();
+    let c_path = env::temp_dir().join(format!("forge-aot-{}-{}.c", std::process::id(), build_id));
+    fs::write(&c_path, c_source).map_err(|e| format!("failed to write AOT source: {e}"))?;
+
+    let mut cmd = Command::new("cc");
+    cmd.arg("-O2")
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&output_path)
+        .arg(format!("-L{}", lib_dir.display()))
+        .arg("-lforge_lang")
+        .arg("-lm")
+        .arg("-lpthread")
+        .arg("-lresolv");
+
+    // macOS requires additional frameworks for system dependencies
+    #[cfg(target_os = "macos")]
+    {
+        cmd.arg("-framework").arg("CoreFoundation");
+        cmd.arg("-framework").arg("Security");
+        cmd.arg("-framework").arg("SystemConfiguration");
+        cmd.arg("-framework").arg("IOKit");
+        cmd.arg("-liconv");
+    }
+
+    // Linux requires libdl
+    #[cfg(target_os = "linux")]
+    {
+        cmd.arg("-ldl");
+    }
+
+    let status = cmd.status().map_err(|e| {
+        let _ = fs::remove_file(&c_path);
+        format!("failed to invoke C compiler for standalone AOT: {e}")
+    })?;
+    let _ = fs::remove_file(&c_path);
+
+    if !status.success() {
+        return Err(format!(
+            "standalone AOT compilation failed for '{}' (try without FORGE_LIB_DIR for launcher mode)",
+            output_path.display()
+        ));
+    }
+
+    Ok(output_path)
+}
+
+#[cfg(not(unix))]
+fn build_standalone_aot(
+    _bytecode: &[u8],
+    _source_path: &Path,
+    _lib_dir: &Path,
+) -> Result<PathBuf, String> {
+    Err("standalone AOT is currently supported on Unix-like systems only".to_string())
 }
 
 fn compile_launcher<F>(source_path: &Path, mode: &str, make_c_source: F) -> Result<PathBuf, String>
