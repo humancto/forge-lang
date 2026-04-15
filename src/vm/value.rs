@@ -59,8 +59,26 @@ pub enum SharedValue {
     Map(Vec<(SharedValue, SharedValue)>),
 }
 
+thread_local! {
+    /// Set by `value_to_shared` / `shared_to_value` when an `ObjKind::Stream`
+    /// is encountered while crossing the thread/boundary marshal path.
+    /// Consumed by `take_stream_boundary_error` at the caller (spawn globals
+    /// copy, channel send, task handle result). Streams are single-use and
+    /// cannot cross engine boundaries — this is bug #6 from the M9.4 plan.
+    static STREAM_BOUNDARY_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Clear and return any pending stream-boundary error flag. Returns `true`
+/// if the flag was set (meaning a prior `value_to_shared` / `shared_to_value`
+/// hit a Stream). Callers should translate this into a `VMError`.
+pub fn take_stream_boundary_error() -> bool {
+    STREAM_BOUNDARY_ERROR.with(|c| c.replace(false))
+}
+
 /// Convert a VM Value to a SharedValue (owns all data, no GcRefs).
 /// Functions/closures/natives/upvalues/task handles map to Null.
+/// Streams also map to Null but set the thread-local boundary flag —
+/// callers must check via `take_stream_boundary_error`.
 pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
     match val.classify(gc) {
         ValueKind::Int(n) => SharedValue::Int(n),
@@ -97,6 +115,13 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
                         .collect(),
                 ),
                 ObjKind::BoxedInt(n) => SharedValue::Int(*n),
+                ObjKind::Stream(_) => {
+                    // Streams cannot cross the VM↔interpreter / thread
+                    // boundary. Set the thread-local flag so callers can
+                    // surface a VMError via `take_stream_boundary_error`.
+                    STREAM_BOUNDARY_ERROR.with(|c| c.set(true));
+                    SharedValue::Null
+                }
                 // Functions, closures, natives, upvalues, task handles are not transferable
                 _ => SharedValue::Null,
             },

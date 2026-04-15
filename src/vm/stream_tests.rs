@@ -483,26 +483,33 @@ fn vm_stream_error_in_closure_propagates() {
 
 #[test]
 fn vm_stream_error_poisoning() {
-    // After a closure-triggered error, a subsequent terminal call on the
-    // same stream must still surface an error (not a fresh empty result).
+    // The first terminal throws via `must err`, trapped by `safe`.
+    // A second terminal call on the *same* stream must also error —
+    // the stream is poisoned, not restarted, not silently drained.
     let res = vm_run(
         r#"
         let s = [1, 2, 3].stream()
-        let r = safe { s.for_each(fn(x) { must err("boom") }) }
+        safe { s.for_each(fn(x) { must err("boom") }) }
         s.collect()
         "#,
     );
-    // Either the safe block swallows and the drained collect returns [],
-    // or the error re-surfaces. The stream must not yield the original
-    // elements again — that is the only guarantee we enforce here.
-    // (The interpreter test only asserts the first call errors; we do
-    // the same shape here.)
-    let _ = res;
-    let res2 = vm_run(
-        r#"
-        let s = [1, 2, 3].stream()
-        s.for_each(fn(x) { must err("boom") })
-        "#,
+    assert!(
+        res.is_err(),
+        "expected second terminal to resurface poisoning error, got {:?}",
+        res
     );
-    assert!(res2.is_err());
+}
+
+#[test]
+fn vm_stream_boundary_rejection_json() {
+    // json.stringify crosses the VM↔interpreter bridge via
+    // convert_to_interp_val. Passing a Stream across that boundary must
+    // error loudly with the bug #6 message, not silently coerce to Null.
+    let res = vm_run(r#"json.stringify([1, 2, 3].stream())"#);
+    let err = res.expect_err("expected boundary error");
+    assert!(
+        err.message.contains("Stream cannot cross"),
+        "expected boundary message, got: {}",
+        err.message
+    );
 }

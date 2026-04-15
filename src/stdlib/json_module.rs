@@ -167,6 +167,10 @@ fn validate_json_value(v: &Value) -> Result<(), String> {
             Ok(())
         }
         Value::Frozen(inner) => validate_json_value(inner),
+        Value::Stream(_) => Err(
+            "Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize"
+                .to_string(),
+        ),
         _ => Ok(()),
     }
 }

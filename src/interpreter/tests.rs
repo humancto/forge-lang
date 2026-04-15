@@ -5893,14 +5893,34 @@ fn stream_single_use_redrain_empty() {
 
 #[test]
 fn stream_error_poisoning() {
-    // First call errors, second call on same stream should also error.
-    let res1 = try_run_forge(
+    // The first terminal throws via `must err`, trapped by `safe`.
+    // A second terminal call on the *same* stream must also error —
+    // the stream is poisoned, not restarted, not silently drained.
+    let res = try_run_forge(
         r#"
         let s = [1, 2, 3].stream()
-        s.for_each(fn(x) { must err("boom") })
+        safe { s.for_each(fn(x) { must err("boom") }) }
+        s.collect()
         "#,
     );
-    assert!(res1.is_err());
+    assert!(
+        res.is_err(),
+        "expected second terminal to resurface poisoning error, got {:?}",
+        res
+    );
+}
+
+#[test]
+fn stream_boundary_rejection_json() {
+    // json.stringify crosses the VM↔interpreter bridge. Passing a Stream
+    // across it must error loudly, not silently coerce to Null.
+    // (Interpreter side also refuses: stdlib json handles Stream Value.)
+    let res = try_run_forge(r#"json.stringify([1, 2, 3].stream())"#);
+    assert!(
+        res.is_err(),
+        "expected boundary / stringify error for Stream, got {:?}",
+        res
+    );
 }
 
 #[test]

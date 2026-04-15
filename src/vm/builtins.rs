@@ -1493,7 +1493,7 @@ impl VM {
                     match crate::runtime::client::fetch_blocking(
                         &url, &method, None, None, None, None, None,
                     ) {
-                        Ok(interp_val) => Ok(self.convert_interp_value(&interp_val)),
+                        Ok(interp_val) => self.from_interp_checked(&interp_val),
                         Err(e) => Err(VMError::new(&format!("fetch error: {}", e))),
                     }
                 }
@@ -1524,7 +1524,7 @@ impl VM {
                     .collect();
                 let result =
                     crate::stdlib::exec_module::call(interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("os.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
@@ -1542,7 +1542,7 @@ impl VM {
                     .collect();
                 let result =
                     crate::stdlib::os_module::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("path.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
@@ -1563,7 +1563,7 @@ impl VM {
                     .collect();
                 let result = crate::stdlib::path_module::call(n, interp_args)
                     .map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("env.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
@@ -1581,14 +1581,15 @@ impl VM {
                     .collect();
                 let result =
                     crate::stdlib::env::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("json.") => {
                 let interp_args: Vec<crate::interpreter::Value> =
                     args.iter().map(|v| self.convert_to_interp_val(v)).collect();
+                self.check_stream_boundary()?;
                 let result = crate::stdlib::json_module::call(n, interp_args)
                     .map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("regex.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
@@ -1606,7 +1607,7 @@ impl VM {
                     .collect();
                 let result = crate::stdlib::regex_module::call(n, interp_args)
                     .map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("log.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
@@ -1653,9 +1654,10 @@ impl VM {
                         _ => crate::interpreter::Value::Null,
                     })
                     .collect();
+                self.check_stream_boundary()?;
                 let result =
                     crate::stdlib::http::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("term.") => {
                 let interp_args: Vec<crate::interpreter::Value> = args
@@ -1674,63 +1676,63 @@ impl VM {
                     .collect();
                 let result =
                     crate::stdlib::term::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("csv.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::csv::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("time.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::time::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             #[cfg(feature = "postgres")]
             n if n.starts_with("pg.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::pg::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("jwt.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::jwt::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             #[cfg(feature = "mysql")]
             n if n.starts_with("mysql.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::mysql::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("npc.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::npc::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("url.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result = crate::stdlib::url_module::call(n, interp_args)
                     .map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("toml.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result = crate::stdlib::toml_module::call(n, interp_args)
                     .map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("ws.") => {
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::ws::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             "shell" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
@@ -1800,7 +1802,7 @@ impl VM {
                 let json: serde_json::Value = serde_json::from_str(stdout.trim())
                     .map_err(|e| VMError::new(&format!("sh_json parse error: {}", e)))?;
                 let interp_val = crate::runtime::server::json_to_forge(json);
-                Ok(self.convert_interp_value(&interp_val))
+                self.from_interp_checked(&interp_val)
             }
             "sh_ok" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
@@ -2735,7 +2737,7 @@ impl VM {
                 if args.len() < 2 {
                     return Err(VMError::new("diff() requires two values to compare"));
                 }
-                let interp_args = self.args_to_interp(&args);
+                let interp_args = self.args_to_interp(&args)?;
                 // Perform diff using interpreter values directly
                 fn diff_interp(
                     a: &crate::interpreter::Value,
@@ -2805,7 +2807,7 @@ impl VM {
                     }
                 }
                 let result = diff_interp(&interp_args[0], &interp_args[1]);
-                Ok(self.convert_interp_value(&result))
+                self.from_interp_checked(&result)
             }
             "assert_throws" => {
                 if args.is_empty() {
@@ -2996,6 +2998,7 @@ impl VM {
                 }
                 let ch_arc = self.extract_channel(&args[0])?;
                 let shared = value_to_shared(&self.gc, &args[1]);
+                self.check_stream_boundary()?;
                 let guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
                 match &*guard {
                     Some(VmChannelSender::Bounded(tx)) => {
@@ -3041,6 +3044,7 @@ impl VM {
                 }
                 let ch_arc = self.extract_channel(&args[0])?;
                 let shared = value_to_shared(&self.gc, &args[1]);
+                self.check_stream_boundary()?;
                 let guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
                 let ok = match &*guard {
                     Some(VmChannelSender::Bounded(tx)) => tx.try_send(shared).is_ok(),
