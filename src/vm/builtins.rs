@@ -1584,22 +1584,8 @@ impl VM {
                 Ok(self.convert_interp_value(&result))
             }
             n if n.starts_with("json.") => {
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        ValueKind::Float(n) => crate::interpreter::Value::Float(n),
-                        ValueKind::Bool(b) => crate::interpreter::Value::Bool(b),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
+                let interp_args: Vec<crate::interpreter::Value> =
+                    args.iter().map(|v| self.convert_to_interp_val(v)).collect();
                 let result = crate::stdlib::json_module::call(n, interp_args)
                     .map_err(|e| VMError::new(&e))?;
                 Ok(self.convert_interp_value(&result))

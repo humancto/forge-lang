@@ -36,11 +36,15 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             _ => Err("json.parse() requires a string".to_string()),
         },
         "json.stringify" => match args.first() {
-            Some(v) => Ok(Value::String(forge_to_json_compact(v))),
+            Some(v) => {
+                validate_json_value(v)?;
+                Ok(Value::String(forge_to_json_compact(v)))
+            }
             None => Err("json.stringify() requires a value".to_string()),
         },
         "json.pretty" => match args.first() {
             Some(v) => {
+                validate_json_value(v)?;
                 let indent = args
                     .get(1)
                     .and_then(|v| {
@@ -133,6 +137,40 @@ fn escape_json_string(s: &str) -> String {
     out
 }
 
+/// Recursively validate that a value is JSON-serializable. Fails if any
+/// Map contains a non-string key — JSON objects require string keys and
+/// we refuse to silently coerce.
+fn validate_json_value(v: &Value) -> Result<(), String> {
+    match v {
+        Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
+            for item in items {
+                validate_json_value(item)?;
+            }
+            Ok(())
+        }
+        Value::Object(map) => {
+            for v in map.values() {
+                validate_json_value(v)?;
+            }
+            Ok(())
+        }
+        Value::Map(pairs) => {
+            for (k, v) in pairs {
+                if !matches!(k, Value::String(_)) {
+                    return Err(format!(
+                        "json: cannot serialize map with non-string key ({})",
+                        k.type_name()
+                    ));
+                }
+                validate_json_value(v)?;
+            }
+            Ok(())
+        }
+        Value::Frozen(inner) => validate_json_value(inner),
+        _ => Ok(()),
+    }
+}
+
 fn forge_to_json_compact(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
@@ -148,6 +186,21 @@ fn forge_to_json_compact(v: &Value) -> String {
             let entries: Vec<String> = map
                 .iter()
                 .map(|(k, v)| format!("{}: {}", escape_json_string(k), forge_to_json_compact(v)))
+                .collect();
+            format!("{{{}}}", entries.join(", "))
+        }
+        Value::Map(pairs) => {
+            // Validation guarantees all keys are strings at this point.
+            let entries: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    let ks = if let Value::String(s) = k {
+                        escape_json_string(s)
+                    } else {
+                        escape_json_string("")
+                    };
+                    format!("{}: {}", ks, forge_to_json_compact(v))
+                })
                 .collect();
             format!("{{{}}}", entries.join(", "))
         }
@@ -193,6 +246,28 @@ fn forge_to_json_pretty(v: &Value, depth: usize, indent: usize) -> String {
                         "{}{}: {}",
                         inner_pad,
                         escape_json_string(k),
+                        forge_to_json_pretty(v, depth + 1, indent)
+                    )
+                })
+                .collect();
+            format!("{{\n{}\n{}}}", entries.join(",\n"), pad)
+        }
+        Value::Map(pairs) => {
+            if pairs.is_empty() {
+                return "{}".to_string();
+            }
+            let entries: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    let ks = if let Value::String(s) = k {
+                        escape_json_string(s)
+                    } else {
+                        escape_json_string("")
+                    };
+                    format!(
+                        "{}{}: {}",
+                        inner_pad,
+                        ks,
                         forge_to_json_pretty(v, depth + 1, indent)
                     )
                 })

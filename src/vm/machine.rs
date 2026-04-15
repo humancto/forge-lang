@@ -2454,6 +2454,33 @@ impl VM {
                         ObjKind::ResultErr(v) => crate::interpreter::Value::ResultErr(Box::new(
                             self.convert_to_interp_val(v),
                         )),
+                        ObjKind::Tuple(items) => {
+                            let converted: Vec<crate::interpreter::Value> = items
+                                .iter()
+                                .map(|i| self.convert_to_interp_val(i))
+                                .collect();
+                            crate::interpreter::Value::Tuple(converted)
+                        }
+                        ObjKind::Set(items) => {
+                            let converted: Vec<crate::interpreter::Value> = items
+                                .iter()
+                                .map(|i| self.convert_to_interp_val(i))
+                                .collect();
+                            crate::interpreter::Value::Set(converted)
+                        }
+                        ObjKind::Map(pairs) => {
+                            let converted: Vec<(
+                                crate::interpreter::Value,
+                                crate::interpreter::Value,
+                            )> = pairs
+                                .iter()
+                                .map(|(k, v)| {
+                                    (self.convert_to_interp_val(k), self.convert_to_interp_val(v))
+                                })
+                                .collect();
+                            crate::interpreter::Value::Map(converted)
+                        }
+                        ObjKind::Frozen(inner) => self.convert_to_interp_val(inner),
                         _ => crate::interpreter::Value::Null,
                     }
                 } else {
@@ -2482,6 +2509,26 @@ impl VM {
                     vm_map.insert(k.clone(), self.convert_interp_value(val));
                 }
                 let r = self.gc.alloc(ObjKind::Object(vm_map));
+                Value::obj(r)
+            }
+            crate::interpreter::Value::Tuple(items) => {
+                let vm_items: Vec<Value> =
+                    items.iter().map(|i| self.convert_interp_value(i)).collect();
+                let r = self.gc.alloc(ObjKind::Tuple(vm_items));
+                Value::obj(r)
+            }
+            crate::interpreter::Value::Set(items) => {
+                let vm_items: Vec<Value> =
+                    items.iter().map(|i| self.convert_interp_value(i)).collect();
+                let r = self.gc.alloc(ObjKind::Set(vm_items));
+                Value::obj(r)
+            }
+            crate::interpreter::Value::Map(pairs) => {
+                let vm_pairs: Vec<(Value, Value)> = pairs
+                    .iter()
+                    .map(|(k, v)| (self.convert_interp_value(k), self.convert_interp_value(v)))
+                    .collect();
+                let r = self.gc.alloc(ObjKind::Map(vm_pairs));
                 Value::obj(r)
             }
             _ => Value::null(),
