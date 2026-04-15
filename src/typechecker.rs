@@ -1155,6 +1155,19 @@ impl TypeChecker {
             Expr::BinOp { left, op, right } => {
                 let lt = self.infer_expr(left);
                 let rt = self.infer_expr(right);
+                // Warn when Option<T> is used in arithmetic/comparison (not == or !=)
+                if !matches!(op, BinOp::Eq | BinOp::NotEq) {
+                    if matches!(lt, InferredType::Option(_)) {
+                        self.emit(
+                            "Option type used in operation; check with is_some() first".to_string(),
+                        );
+                    }
+                    if matches!(rt, InferredType::Option(_)) {
+                        self.emit(
+                            "Option type used in operation; check with is_some() first".to_string(),
+                        );
+                    }
+                }
                 match op {
                     BinOp::Eq
                     | BinOp::NotEq
@@ -1287,6 +1300,30 @@ impl TypeChecker {
                                 .map(|a| self.infer_expr(a))
                                 .unwrap_or(InferredType::Unknown);
                             return InferredType::Option(Box::new(inner));
+                        }
+                        "unwrap" => {
+                            if let Some(arg) = args.first() {
+                                let arg_type = self.infer_expr(arg);
+                                if let InferredType::Option(inner) = arg_type {
+                                    return *inner;
+                                }
+                                return arg_type;
+                            }
+                            return InferredType::Unknown;
+                        }
+                        "unwrap_or" => {
+                            if let Some(arg) = args.first() {
+                                let arg_type = self.infer_expr(arg);
+                                // Infer the fallback arg too
+                                if args.len() > 1 {
+                                    self.infer_expr(&args[1]);
+                                }
+                                if let InferredType::Option(inner) = arg_type {
+                                    return *inner;
+                                }
+                                return arg_type;
+                            }
+                            return InferredType::Unknown;
                         }
                         "is_ok" | "is_err" | "is_some" | "is_none" | "contains" | "starts_with"
                         | "ends_with" | "sh_ok" | "satisfies" => return InferredType::Bool,
@@ -2174,6 +2211,97 @@ mod tests {
         assert!(
             w.is_empty(),
             "empty array should be compatible with any typed array: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    // ========== Option<T> Enforcement ==========
+
+    #[test]
+    fn unwrap_returns_inner_type() {
+        let w = warnings_for("let x: ?Int = Some(42)\nlet y: Int = unwrap(x)");
+        assert!(
+            w.is_empty(),
+            "unwrap(?Int) should return Int: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unwrap_mismatch_warns() {
+        let w = warnings_for("let x: ?Int = Some(42)\nlet y: String = unwrap(x)");
+        assert!(!w.is_empty(), "unwrap(?Int) assigned to String should warn");
+    }
+
+    #[test]
+    fn unwrap_or_returns_inner_type() {
+        let w = warnings_for("let x: ?Int = Some(42)\nlet y: Int = unwrap_or(x, 0)");
+        assert!(
+            w.is_empty(),
+            "unwrap_or(?Int, 0) should return Int: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn option_in_arithmetic_warns() {
+        let w = warnings_for("let x: ?Int = Some(42)\nlet y = x + 1");
+        assert!(!w.is_empty(), "Option in arithmetic should warn");
+        assert!(w[0].message.contains("Option"));
+    }
+
+    #[test]
+    fn option_in_equality_no_warn() {
+        let w = warnings_for("let x: ?Int = Some(42)\nlet y = x == null");
+        assert!(
+            w.is_empty(),
+            "Option in == should not warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn option_in_not_equal_no_warn() {
+        let w = warnings_for("let x: ?Int = Some(42)\nlet y = x != None");
+        assert!(
+            w.is_empty(),
+            "Option in != should not warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reassign_none_to_non_option_warns() {
+        let w = warnings_for("let mut x: Int = 5\nx = None");
+        assert!(!w.is_empty(), "assigning None to Int variable should warn");
+    }
+
+    #[test]
+    fn reassign_none_to_option_ok() {
+        let w = warnings_for("let mut x: ?Int = Some(5)\nx = None");
+        assert!(
+            w.is_empty(),
+            "assigning None to ?Int should be fine: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn option_generic_syntax_parses() {
+        let w = warnings_for("let x: Option<Int> = Some(42)");
+        assert!(
+            w.is_empty(),
+            "Option<Int> syntax should work: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn narrowed_option_no_arithmetic_warn() {
+        let w = warnings_for("fn f(x: ?Int) {\n  if is_some(x) {\n    let y = x + 1\n  }\n}");
+        assert!(
+            w.is_empty(),
+            "narrowed Option should not warn in arithmetic: {:?}",
             w.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
     }
