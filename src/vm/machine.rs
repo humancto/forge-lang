@@ -243,6 +243,11 @@ pub struct VM {
     /// Keeps JIT-compiled code pages alive. Must never be shrunk while
     /// `jit_cache` holds pointers into these modules.
     jit_modules: Vec<super::jit::jit_module::JitCompiler>,
+    #[cfg(feature = "jit")]
+    /// GcRef roots for string constants baked into JIT native code.
+    /// These must survive GC so that bridge calls using the baked indices
+    /// continue to resolve valid objects.
+    pub jit_roots: Vec<GcRef>,
     pub profiler: Profiler,
     skip_timeout_check_once: bool,
 }
@@ -325,6 +330,8 @@ impl VM {
             jit_cache: HashMap::new(),
             #[cfg(feature = "jit")]
             jit_modules: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_roots: Vec::new(),
             profiler: Profiler::new(false),
             skip_timeout_check_once: false,
         };
@@ -347,6 +354,8 @@ impl VM {
             jit_cache: HashMap::new(),
             #[cfg(feature = "jit")]
             jit_modules: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_roots: Vec::new(),
             profiler: Profiler::new(true),
             skip_timeout_check_once: false,
         };
@@ -2076,6 +2085,9 @@ impl VM {
                         }
                     }
                 }
+                // Keep string constants baked into JIT native code alive.
+                #[cfg(feature = "jit")]
+                roots.extend_from_slice(&self.jit_roots);
                 self.gc.collect(&roots);
             }
         }
@@ -2118,6 +2130,7 @@ impl VM {
                                         .map(|c| match c {
                                             Constant::Str(s) => {
                                                 let r = self.gc.alloc_string(s.clone());
+                                                self.jit_roots.push(r);
                                                 Some(r.0 as i64)
                                             }
                                             _ => None,

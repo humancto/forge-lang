@@ -842,6 +842,7 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
                 .map(|c| match c {
                     vm::bytecode::Constant::Str(s) => {
                         let r = vm.gc.alloc_string(s.clone());
+                        vm.jit_roots.push(r);
                         Some(r.0 as i64)
                     }
                     _ => None,
