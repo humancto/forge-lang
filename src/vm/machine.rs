@@ -110,6 +110,7 @@ pub struct JitEntry {
     pub uses_float: bool,
     pub has_string_ops: bool,
     pub has_collection_ops: bool,
+    pub has_global_ops: bool,
     /// True when the function returns a GcRef (string, array, or object).
     pub returns_obj: bool,
 }
@@ -2103,29 +2104,29 @@ impl VM {
                             && self.profiler.is_hot(&func_name)
                         {
                             let type_info = super::jit::type_analysis::analyze(&chunk);
-                            let needs_vm_ptr =
-                                type_info.has_string_ops || type_info.has_collection_ops;
+                            let needs_vm_ptr = type_info.has_string_ops
+                                || type_info.has_collection_ops
+                                || type_info.has_global_ops;
                             let max_arity: u8 = if needs_vm_ptr { 7 } else { 8 };
                             if !type_info.has_unsupported_ops && chunk.arity <= max_arity {
                                 // Pre-allocate string constants into GC so their
                                 // GcRef indices can be baked into JIT code.
-                                let string_refs =
-                                    if type_info.has_string_ops || type_info.has_collection_ops {
-                                        let refs: Vec<Option<i64>> = chunk
-                                            .constants
-                                            .iter()
-                                            .map(|c| match c {
-                                                Constant::Str(s) => {
-                                                    let r = self.gc.alloc_string(s.clone());
-                                                    Some(r.0 as i64)
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect();
-                                        Some(refs)
-                                    } else {
-                                        None
-                                    };
+                                let string_refs = if needs_vm_ptr {
+                                    let refs: Vec<Option<i64>> = chunk
+                                        .constants
+                                        .iter()
+                                        .map(|c| match c {
+                                            Constant::Str(s) => {
+                                                let r = self.gc.alloc_string(s.clone());
+                                                Some(r.0 as i64)
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    Some(refs)
+                                } else {
+                                    None
+                                };
                                 if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
                                     if let Ok(ptr) = jit.compile_function(
                                         &chunk,
@@ -2144,6 +2145,7 @@ impl VM {
                                                 uses_float: type_info.has_float,
                                                 has_string_ops: type_info.has_string_ops,
                                                 has_collection_ops: type_info.has_collection_ops,
+                                                has_global_ops: type_info.has_global_ops,
                                                 returns_obj: ret_is_obj,
                                             },
                                         );
@@ -2188,8 +2190,11 @@ impl VM {
                                     }
                                 } else {
                                     let mut raw_args: Vec<i64> = Vec::new();
-                                    // String/collection functions take vm_ptr as first arg
-                                    if entry.has_string_ops || entry.has_collection_ops {
+                                    // String/collection/global functions take vm_ptr as first arg
+                                    if entry.has_string_ops
+                                        || entry.has_collection_ops
+                                        || entry.has_global_ops
+                                    {
                                         raw_args.push(self as *mut VM as *mut () as i64);
                                     }
                                     for v in &args {
