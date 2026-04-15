@@ -1,6 +1,7 @@
 /// Translates Forge bytecode to Cranelift IR.
-/// Type-aware: uses I64 for integers, F64 for floats, I8 (0/1) for bools.
-/// Functions with string/collection ops use I64 registers and call runtime bridges.
+/// I64-everywhere ABI: all registers, params, and returns use I64.
+/// Float values are stored as IEEE 754 bit patterns via bitcast I64↔F64.
+/// Functions with string/collection/global ops call runtime bridges.
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, StackSlotData, StackSlotKind, UserFuncName};

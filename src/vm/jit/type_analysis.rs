@@ -415,6 +415,41 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                         return_type = types[a];
                     }
                 }
+                OpCode::Concat | OpCode::Interpolate => {
+                    if a < types.len() {
+                        types[a] = RegType::StringRef;
+                        constants[a] = None;
+                    }
+                }
+                OpCode::Len => {
+                    if a < types.len() {
+                        types[a] = RegType::Int;
+                        constants[a] = None;
+                    }
+                }
+                OpCode::NewArray | OpCode::NewObject => {
+                    if a < types.len() {
+                        types[a] = RegType::ObjRef;
+                        constants[a] = None;
+                    }
+                }
+                OpCode::GetField | OpCode::GetIndex | OpCode::ExtractField | OpCode::GetGlobal => {
+                    if a < types.len() {
+                        types[a] = RegType::Unknown;
+                        constants[a] = None;
+                    }
+                }
+                OpCode::Call => {
+                    let dst = cc;
+                    if dst < types.len() {
+                        types[dst] = if has_global_ops {
+                            RegType::Unknown
+                        } else {
+                            RegType::Int
+                        };
+                        constants[dst] = None;
+                    }
+                }
                 _ => {}
             }
         }

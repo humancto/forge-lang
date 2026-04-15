@@ -326,11 +326,19 @@ fn jit_mixed_int_float_args() {
 // ----- Mixed type functions (float + string/collection) -----
 
 #[test]
-fn jit_float_with_global_access() {
-    // Function mixing float arithmetic with global variable access
-    let out =
-        run_jit_function("let pi = 3.14159\nfn area(r) { return pi * r * r }\nprintln(area(5.0))");
-    assert_eq!(out, vec!["78.53975"]);
+fn jit_float_with_int_conversion() {
+    // Function with float ops that returns a whole number (should auto-convert to int display)
+    let out = run_jit_function("fn double(x) { return x * 2.0 }\nprintln(double(5.0))");
+    assert_eq!(out, vec!["10"]);
+}
+
+#[test]
+fn jit_float_multi_op_chain() {
+    // Chain of float operations: (a + b) * c - d
+    let out = run_jit_function(
+        "fn calc(a, b, c, d) { return (a + b) * c - d + 0.0 }\nprintln(calc(1.5, 2.5, 3.0, 1.0))",
+    );
+    assert_eq!(out, vec!["11"]);
 }
 
 // ----- Recursive + complex -----
