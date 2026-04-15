@@ -630,16 +630,53 @@ impl TypeChecker {
                 .fields
                 .iter()
                 .any(|(name, _)| *name == method.name);
-            let has_fn = self
+
+            // Look up the function: try impl block (::), legacy (_), or bare name
+            let fn_sig = self
                 .functions
-                .get(&format!("{}_{}", struct_name, method.name))
-                .is_some()
-                || self.functions.get(&method.name).is_some();
-            if !has_field && !has_fn {
+                .get(&format!("{}::{}", struct_name, method.name))
+                .or_else(|| {
+                    self.functions
+                        .get(&format!("{}_{}", struct_name, method.name))
+                })
+                .or_else(|| self.functions.get(&method.name))
+                .cloned();
+
+            if !has_field && fn_sig.is_none() {
                 self.emit(format!(
                     "struct '{}' does not satisfy interface '{}': missing '{}'",
                     struct_name, interface_name, method.name
                 ));
+                continue;
+            }
+
+            // Validate signature if we found a function (not just a field)
+            if let Some(ref sig) = fn_sig {
+                // Check param count (interface methods don't include `self`,
+                // but impl methods may have `self` as first param)
+                let impl_params = if sig.params.first().map(|(n, _)| n.as_str()) == Some("self") {
+                    sig.param_count.saturating_sub(1)
+                } else {
+                    sig.param_count
+                };
+                if impl_params != method.param_count {
+                    self.emit(format!(
+                        "method '{}' on '{}' has {} parameter(s) but interface '{}' requires {}",
+                        method.name, struct_name, impl_params, interface_name, method.param_count
+                    ));
+                }
+
+                // Check return type compatibility
+                if let (Some(expected_ret), Some(actual_ret)) =
+                    (&method.return_type, &sig.return_type)
+                {
+                    if !types_compatible(expected_ret, actual_ret) {
+                        self.emit(format!(
+                            "method '{}' on '{}' returns {} but interface '{}' expects {}",
+                            method.name, struct_name, actual_ret, interface_name, expected_ret
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1655,6 +1692,68 @@ mod tests {
             w.iter().filter(|w| w.message.contains("satisfy")).collect();
         assert!(!interface_warnings.is_empty());
         assert!(interface_warnings[0].message.contains("serialize"));
+    }
+
+    #[test]
+    fn interface_impl_block_satisfaction() {
+        let w = warnings_for(
+            "interface Printable { fn display() -> String }\nstruct User { name: String }\nimpl User { fn display() -> String { return \"User\" } }\nfn show(p: Printable) { println(p) }\nlet u = User { name: \"Alice\" }\nshow(u)",
+        );
+        let interface_warnings: Vec<_> = w
+            .iter()
+            .filter(|w| {
+                w.message.contains("satisfy")
+                    || w.message.contains("parameter")
+                    || w.message.contains("returns")
+            })
+            .collect();
+        assert!(
+            interface_warnings.is_empty(),
+            "impl block method should satisfy interface: {:?}",
+            interface_warnings
+        );
+    }
+
+    #[test]
+    fn interface_wrong_param_count() {
+        let w = warnings_for(
+            "interface Hasher { fn hash(data: String) -> Int }\nstruct MyHash { x: Int }\nimpl MyHash { fn hash() -> Int { return 0 } }\nfn do_hash(h: Hasher) { println(h) }\nlet m = MyHash { x: 1 }\ndo_hash(m)",
+        );
+        let param_warnings: Vec<_> = w
+            .iter()
+            .filter(|w| w.message.contains("parameter"))
+            .collect();
+        assert!(
+            !param_warnings.is_empty(),
+            "wrong param count should warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn interface_wrong_return_type() {
+        let w = warnings_for(
+            "interface Stringer { fn to_str() -> String }\nstruct Num { val: Int }\nimpl Num { fn to_str() -> Int { return 0 } }\nfn stringify(s: Stringer) { println(s) }\nlet n = Num { val: 1 }\nstringify(n)",
+        );
+        let ret_warnings: Vec<_> = w.iter().filter(|w| w.message.contains("returns")).collect();
+        assert!(
+            !ret_warnings.is_empty(),
+            "wrong return type should warn: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn interface_multi_method() {
+        let w = warnings_for(
+            "interface ReadWrite { fn read() -> String\nfn write(data: String) }\nstruct File { path: String }\nfn process(rw: ReadWrite) { println(rw) }\nlet f = File { path: \"test\" }\nprocess(f)",
+        );
+        let missing_warnings: Vec<_> = w.iter().filter(|w| w.message.contains("missing")).collect();
+        assert!(
+            missing_warnings.len() >= 2,
+            "should warn about both missing methods: {:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
     }
 
     // ========== M3.3: Option<T> Type Checking ==========
