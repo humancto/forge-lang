@@ -27,6 +27,8 @@ pub struct TypeInfo {
     pub has_string_ops: bool,
     /// True when the function uses array/object/interpolate/extract opcodes.
     pub has_collection_ops: bool,
+    /// True when the function uses GetGlobal or SetGlobal opcodes.
+    pub has_global_ops: bool,
     /// The type of the value returned by the function (from the last Return opcode).
     pub return_type: RegType,
 }
@@ -59,6 +61,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
     let mut has_float = false;
     let mut has_string_ops = false;
     let mut has_collection_ops = false;
+    let mut has_global_ops = false;
     let mut return_type = RegType::Int;
 
     for i in 0..chunk.arity as usize {
@@ -190,7 +193,14 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
             OpCode::Call => {
                 let dst = cc;
                 if dst < types.len() {
-                    types[dst] = RegType::Int;
+                    // When globals are used, calls go through rt_call_native bridge
+                    // which returns tagged values decoded as int. Mark as Unknown so
+                    // functions returning bridge results directly are rejected.
+                    types[dst] = if has_global_ops {
+                        RegType::Unknown
+                    } else {
+                        RegType::Int
+                    };
                     constants[dst] = None;
                 }
             }
@@ -261,11 +271,18 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                 }
             }
 
-            OpCode::Closure
-            | OpCode::GetGlobal
-            | OpCode::SetGlobal
-            | OpCode::GetUpvalue
-            | OpCode::SetUpvalue => {
+            OpCode::GetGlobal => {
+                has_global_ops = true;
+                if a < types.len() {
+                    types[a] = RegType::Unknown;
+                    constants[a] = None;
+                }
+            }
+            OpCode::SetGlobal => {
+                has_global_ops = true;
+            }
+
+            OpCode::Closure | OpCode::GetUpvalue | OpCode::SetUpvalue => {
                 has_unsupported = true;
                 if a < constants.len() {
                     constants[a] = None;
@@ -294,6 +311,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         has_float,
         has_string_ops,
         has_collection_ops,
+        has_global_ops,
         return_type,
     }
 }
