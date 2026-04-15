@@ -56,6 +56,10 @@ pub enum Value {
     Array(Vec<Value>),
     Tuple(Vec<Value>),
     Set(Vec<Value>),
+    /// First-class Map with any-value keys. Ordered vec preserves insertion
+    /// order; keys compared via `container_eq` so NaN self-matches and
+    /// Int/Float promote (e.g. `1` and `1.0` collide).
+    Map(Vec<(Value, Value)>),
     Object(IndexMap<String, Value>),
     Function {
         name: String,
@@ -102,6 +106,15 @@ impl PartialEq for Value {
                 a.len() == b.len()
                     && a.iter()
                         .all(|x| b.iter().any(|y| Value::container_eq(x, y)))
+            }
+            (Value::Map(a), Value::Map(b)) => {
+                // Order-independent on entries. Keys use container_eq
+                // (NaN self-match, Int/Float promote). Values use full ==.
+                a.len() == b.len()
+                    && a.iter().all(|(ak, av)| {
+                        b.iter()
+                            .any(|(bk, bv)| Value::container_eq(ak, bk) && av == bv)
+                    })
             }
             (Value::Object(a), Value::Object(b)) => a == b,
             (Value::ResultOk(a), Value::ResultOk(b)) => a == b,
@@ -153,6 +166,14 @@ impl Value {
                     && x.iter()
                         .all(|xv| y.iter().any(|yv| Value::container_eq(xv, yv)))
             }
+            (Value::Map(x), Value::Map(y)) => {
+                x.len() == y.len()
+                    && x.iter().all(|(xk, xv)| {
+                        y.iter().any(|(yk, yv)| {
+                            Value::container_eq(xk, yk) && Value::container_eq(xv, yv)
+                        })
+                    })
+            }
             (Value::Object(x), Value::Object(y)) => {
                 x.len() == y.len()
                     && x.iter()
@@ -175,6 +196,7 @@ impl Value {
             Value::Array(_) => "Array",
             Value::Tuple(_) => "Tuple",
             Value::Set(_) => "Set",
+            Value::Map(_) => "Map",
             Value::Object(_) => "Object",
             Value::Function { .. } => "Function",
             Value::Lambda { .. } => "Lambda",
@@ -196,6 +218,7 @@ impl Value {
             Value::String(s) => !s.is_empty(),
             Value::Null => false,
             Value::Array(a) | Value::Tuple(a) | Value::Set(a) => !a.is_empty(),
+            Value::Map(m) => !m.is_empty(),
             Value::Object(o) => !o.is_empty(),
             Value::ResultOk(_) => true,
             Value::ResultErr(_) => false,
@@ -226,6 +249,16 @@ impl Value {
             }
             Value::Tuple(items) | Value::Set(items) => {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
+                format!("[{}]", entries.join(", "))
+            }
+            Value::Map(pairs) => {
+                // Display-only lossy form: array of [key, value] pairs.
+                // `json.stringify(m)` errors on non-string keys; this path
+                // is for Display/debug only.
+                let entries: Vec<String> = pairs
+                    .iter()
+                    .map(|(k, v)| format!("[{}, {}]", k.to_json_string(), v.to_json_string()))
+                    .collect();
                 format!("[{}]", entries.join(", "))
             }
             Value::String(s) => escape_json_string(s),
@@ -262,6 +295,13 @@ impl fmt::Display for Value {
             Value::Set(items) => {
                 let strs: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
                 write!(f, "set({})", strs.join(", "))
+            }
+            Value::Map(pairs) => {
+                let strs: Vec<String> = pairs
+                    .iter()
+                    .map(|(k, v)| format!("{} => {}", k, v))
+                    .collect();
+                write!(f, "Map({})", strs.join(", "))
             }
             Value::Object(_) => write!(f, "{}", self.to_json_string()),
             Value::Function { name, .. } => write!(f, "<fn {}>", name),

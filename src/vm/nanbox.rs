@@ -236,6 +236,8 @@ impl NanBoxedValue {
                 super::value::ObjKind::String(s) => !s.is_empty(),
                 super::value::ObjKind::Array(a) => !a.is_empty(),
                 super::value::ObjKind::Object(o) => !o.is_empty(),
+                super::value::ObjKind::Tuple(a) | super::value::ObjKind::Set(a) => !a.is_empty(),
+                super::value::ObjKind::Map(pairs) => !pairs.is_empty(),
                 super::value::ObjKind::ResultOk(_) => true,
                 super::value::ObjKind::ResultErr(_) => false,
                 _ => true,
