@@ -516,10 +516,10 @@ m5-016: ci: release workflow for libforge.a per target
 
 ### Milestone 6 Deliverables
 
-- [ ] `forge.toml` dependency management
-- [ ] Package registry (forge-packages.dev)
-- [ ] `forge install`, `forge publish`, `forge update`
-- [ ] Module resolution with cycle detection
+- [x] `forge.toml` dependency management
+- [x] Package registry (forge-packages.dev)
+- [x] `forge install`, `forge publish`, `forge update`
+- [x] Module resolution with cycle detection
 
 ---
 
