@@ -67,7 +67,7 @@ fn run_on_jit_value(source: &str) -> String {
         let info = type_analysis::analyze(proto);
         if !info.has_unsupported_ops {
             let string_refs: Option<Vec<Option<i64>>> =
-                if info.has_string_ops || info.has_collection_ops {
+                if info.has_string_ops || info.has_collection_ops || info.has_global_ops {
                     Some(
                         proto
                             .constants
@@ -102,6 +102,7 @@ fn run_on_jit_value(source: &str) -> String {
                         uses_float: info.has_float,
                         has_string_ops: info.has_string_ops,
                         has_collection_ops: info.has_collection_ops,
+                        has_global_ops: info.has_global_ops,
                         returns_obj: matches!(
                             info.return_type,
                             type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
@@ -185,6 +186,7 @@ fn assert_cross_backend_error_contains(source: &str, expected: &str) {
                             uses_float: info.has_float,
                             has_string_ops: info.has_string_ops,
                             has_collection_ops: info.has_collection_ops,
+                            has_global_ops: info.has_global_ops,
                             returns_obj: matches!(
                                 info.return_type,
                                 type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef

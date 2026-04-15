@@ -35,6 +35,10 @@ impl JitCompiler {
         builder.symbol("rt_extract_field", runtime::rt_extract_field as *const u8);
         builder.symbol("rt_interpolate", runtime::rt_interpolate as *const u8);
         builder.symbol("rt_empty_string", runtime::rt_empty_string as *const u8);
+        // Global and function call bridges
+        builder.symbol("rt_get_global", runtime::rt_get_global as *const u8);
+        builder.symbol("rt_set_global", runtime::rt_set_global as *const u8);
+        builder.symbol("rt_call_native", runtime::rt_call_native as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,

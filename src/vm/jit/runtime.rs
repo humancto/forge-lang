@@ -104,14 +104,61 @@ pub extern "C" fn rt_print(vm_ptr: *mut VM, encoded: u64) {
     println!("{}", text);
 }
 
-/// Bridge: get a global variable by constant index
-pub extern "C" fn rt_get_global(vm_ptr: *mut VM, name_idx: u64) -> u64 {
-    let _vm = unsafe { &mut *vm_ptr };
-    let _ = name_idx;
-    encode_null()
+/// Bridge: get a global variable by name.
+/// `name_ref` is a GcRef index pointing to an interned string (from string_refs).
+///
+/// # Safety
+/// Creates `&mut VM` from raw pointer. The caller (JIT-compiled code) was itself
+/// invoked through `call_value` which holds `&mut self`. This aliasing is technically
+/// UB but safe in practice: the FFI boundary is opaque to the optimizer, and the
+/// outer frame's register state is fully stored before this call.
+pub extern "C" fn rt_get_global(vm_ptr: *mut VM, name_ref: i64) -> u64 {
+    let vm = unsafe { &mut *vm_ptr };
+    let r = GcRef(name_ref as usize);
+    let name = if let Some(obj) = vm.gc.get(r) {
+        if let ObjKind::String(s) = &obj.kind {
+            s.clone()
+        } else {
+            return encode_null();
+        }
+    } else {
+        return encode_null();
+    };
+    match vm.globals.get(&name) {
+        Some(val) => encode_value(val, &vm.gc),
+        None => encode_null(),
+    }
 }
 
-/// Bridge: call a native/builtin function
+/// Bridge: set a global variable by name.
+/// `name_ref` is a GcRef index, `val` is a tagged value.
+///
+/// # Safety
+/// Same aliasing caveat as `rt_get_global`.
+pub extern "C" fn rt_set_global(vm_ptr: *mut VM, name_ref: i64, val: i64) {
+    let vm = unsafe { &mut *vm_ptr };
+    let r = GcRef(name_ref as usize);
+    let name = if let Some(obj) = vm.gc.get(r) {
+        if let ObjKind::String(s) = &obj.kind {
+            s.clone()
+        } else {
+            return;
+        }
+    } else {
+        return;
+    };
+    let decoded = decode_value(val as u64);
+    vm.globals.insert(name, decoded);
+}
+
+/// Bridge: call a function value with arguments.
+/// `func_encoded` and all elements of `args_ptr` are tagged values.
+/// Returns a tagged value (encode_value of the result), or encode_null on error.
+///
+/// # Safety
+/// Same aliasing caveat as `rt_get_global`. Additionally, this re-enters the VM
+/// via `call_value`, which may trigger GC. GcRef values held in JIT registers
+/// across this call are invisible to the GC root scanner.
 pub extern "C" fn rt_call_native(
     vm_ptr: *mut VM,
     func_encoded: u64,

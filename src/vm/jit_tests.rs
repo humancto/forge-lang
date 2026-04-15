@@ -26,21 +26,23 @@ fn run_jit_function(source: &str) -> Vec<String> {
             proto.name.clone()
         };
         let type_info = type_analysis::analyze(proto);
-        // Pre-allocate string constants for string-capable functions
-        let string_refs: Option<StringRefs> = if type_info.has_string_ops {
-            Some(
-                proto
-                    .constants
-                    .iter()
-                    .map(|c| match c {
-                        Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
-                        _ => None,
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        // Pre-allocate string constants for string/collection/global functions
+        let string_refs: Option<StringRefs> =
+            if type_info.has_string_ops || type_info.has_collection_ops || type_info.has_global_ops
+            {
+                Some(
+                    proto
+                        .constants
+                        .iter()
+                        .map(|c| match c {
+                            Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
         let _ = jit.compile_function(proto, &name, string_refs.as_ref());
     }
 
@@ -59,6 +61,7 @@ fn run_jit_function(source: &str) -> Vec<String> {
                     uses_float: type_info.has_float,
                     has_string_ops: type_info.has_string_ops,
                     has_collection_ops: type_info.has_collection_ops,
+                    has_global_ops: type_info.has_global_ops,
                     returns_obj: matches!(
                         type_info.return_type,
                         type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
@@ -630,4 +633,20 @@ fn jit_string_not_eq() {
         "fn strneq(a, b) { return a != b }\nprintln(strneq(\"hi\", \"hi\"))\nprintln(strneq(\"hi\", \"bye\"))",
     );
     assert_eq!(out, vec!["0", "1"]);
+}
+
+#[test]
+fn jit_global_function_call() {
+    // Tests JIT calling another function via GetGlobal + Call bridge
+    let out = run_jit_function(
+        "fn double(n) { return n * 2 }\nfn apply(x) { return double(x) }\nprintln(apply(21))",
+    );
+    assert_eq!(out, vec!["42"]);
+}
+
+#[test]
+fn jit_global_read() {
+    // Tests JIT reading a global variable via GetGlobal bridge
+    let out = run_jit_function("let x = 10\nfn get_x() { return x }\nprintln(get_x())");
+    assert_eq!(out, vec!["10"]);
 }

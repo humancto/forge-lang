@@ -27,6 +27,8 @@ pub struct TypeInfo {
     pub has_string_ops: bool,
     /// True when the function uses array/object/interpolate/extract opcodes.
     pub has_collection_ops: bool,
+    /// True when the function uses GetGlobal or SetGlobal opcodes.
+    pub has_global_ops: bool,
     /// The type of the value returned by the function (from the last Return opcode).
     pub return_type: RegType,
 }
@@ -59,6 +61,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
     let mut has_float = false;
     let mut has_string_ops = false;
     let mut has_collection_ops = false;
+    let mut has_global_ops = false;
     let mut return_type = RegType::Int;
 
     for i in 0..chunk.arity as usize {
@@ -190,7 +193,14 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
             OpCode::Call => {
                 let dst = cc;
                 if dst < types.len() {
-                    types[dst] = RegType::Int;
+                    // When globals are used, calls go through rt_call_native bridge
+                    // which returns tagged values decoded as int. Mark as Unknown so
+                    // functions returning bridge results directly are rejected.
+                    types[dst] = if has_global_ops {
+                        RegType::Unknown
+                    } else {
+                        RegType::Int
+                    };
                     constants[dst] = None;
                 }
             }
@@ -261,11 +271,18 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
                 }
             }
 
-            OpCode::Closure
-            | OpCode::GetGlobal
-            | OpCode::SetGlobal
-            | OpCode::GetUpvalue
-            | OpCode::SetUpvalue => {
+            OpCode::GetGlobal => {
+                has_global_ops = true;
+                if a < types.len() {
+                    types[a] = RegType::Unknown;
+                    constants[a] = None;
+                }
+            }
+            OpCode::SetGlobal => {
+                has_global_ops = true;
+            }
+
+            OpCode::Closure | OpCode::GetUpvalue | OpCode::SetUpvalue => {
                 has_unsupported = true;
                 if a < constants.len() {
                     constants[a] = None;
@@ -294,6 +311,7 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         has_float,
         has_string_ops,
         has_collection_ops,
+        has_global_ops,
         return_type,
     }
 }
@@ -529,5 +547,68 @@ mod tests {
 
         let info = analyze(&chunk);
         assert!(info.has_unsupported_ops);
+    }
+
+    #[test]
+    fn analyze_get_global_sets_flag() {
+        let mut chunk = Chunk::new("read_global");
+        chunk.arity = 1;
+        chunk.max_registers = 2;
+        let name_idx = chunk.add_constant(Constant::Str("my_var".to_string()));
+        // Load global into reg 1, but return arg reg 0 (Int) to avoid Unknown return
+        chunk.emit(encode_abx(OpCode::GetGlobal, 1, name_idx), 1);
+        chunk.emit(encode_abc(OpCode::Return, 0, 0, 0), 2);
+
+        let info = analyze(&chunk);
+        assert!(info.has_global_ops);
+        assert!(!info.has_unsupported_ops);
+        assert_eq!(info.reg_types[1], RegType::Unknown);
+    }
+
+    #[test]
+    fn analyze_set_global_sets_flag() {
+        let mut chunk = Chunk::new("write_global");
+        chunk.arity = 1;
+        chunk.max_registers = 2;
+        let name_idx = chunk.add_constant(Constant::Str("my_var".to_string()));
+        chunk.emit(encode_abx(OpCode::SetGlobal, 0, name_idx), 1);
+        chunk.emit(encode_abc(OpCode::Return, 0, 0, 0), 2);
+
+        let info = analyze(&chunk);
+        assert!(info.has_global_ops);
+        assert!(!info.has_unsupported_ops);
+    }
+
+    #[test]
+    fn analyze_call_dest_unknown_with_global_ops() {
+        // When has_global_ops is true, Call destination becomes Unknown.
+        // Function is unsupported (returns Unknown), but we verify the flag and type.
+        let mut chunk = Chunk::new("caller");
+        chunk.arity = 1;
+        chunk.max_registers = 3;
+        let name_idx = chunk.add_constant(Constant::Str("callee".to_string()));
+        chunk.emit(encode_abx(OpCode::GetGlobal, 0, name_idx), 1);
+        chunk.emit(encode_abc(OpCode::Call, 0, 1, 2), 2);
+        chunk.emit(encode_abc(OpCode::Return, 2, 0, 0), 3);
+
+        let info = analyze(&chunk);
+        assert!(info.has_global_ops);
+        assert_eq!(info.reg_types[2], RegType::Unknown);
+        // Returning Unknown makes function unsupported for JIT
+        assert!(info.has_unsupported_ops);
+    }
+
+    #[test]
+    fn analyze_call_dest_int_without_global_ops() {
+        // Without global ops, Call destination is Int (self-recursive path)
+        let mut chunk = Chunk::new("self_rec");
+        chunk.arity = 1;
+        chunk.max_registers = 3;
+        chunk.emit(encode_abc(OpCode::Call, 0, 1, 2), 1);
+        chunk.emit(encode_abc(OpCode::Return, 2, 0, 0), 2);
+
+        let info = analyze(&chunk);
+        assert!(!info.has_global_ops);
+        assert_eq!(info.reg_types[2], RegType::Int);
     }
 }

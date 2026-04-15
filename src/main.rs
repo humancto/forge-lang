@@ -818,51 +818,67 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
         }
     };
 
+    // Create the VM first so we can pre-allocate string constants into GC
+    // for functions that need runtime bridges (string/collection/global ops).
+    let mut vm = vm::machine::VM::new();
+
     for (i, proto) in chunk.prototypes.iter().enumerate() {
         let name = if proto.name.is_empty() {
             format!("fn_{}", i)
         } else {
             proto.name.clone()
         };
-        match jit.compile_function(proto, &name, None) {
-            Ok(_ptr) => {
+        let type_info = vm::jit::type_analysis::analyze(proto);
+        let needs_vm_ptr = type_info.has_string_ops
+            || type_info.has_collection_ops
+            || type_info.has_global_ops;
+
+        // Pre-allocate string constants into GC so their GcRef indices
+        // can be baked into JIT code for runtime bridge calls.
+        let string_refs = if needs_vm_ptr {
+            let refs: Vec<Option<i64>> = proto
+                .constants
+                .iter()
+                .map(|c| match c {
+                    vm::bytecode::Constant::Str(s) => {
+                        let r = vm.gc.alloc_string(s.clone());
+                        vm.jit_roots.push(r);
+                        Some(r.0 as i64)
+                    }
+                    _ => None,
+                })
+                .collect();
+            Some(refs)
+        } else {
+            None
+        };
+
+        match jit.compile_function(proto, &name, string_refs.as_ref()) {
+            Ok(ptr) => {
                 eprintln!(
                     "  JIT compiled: {} ({} instructions -> native)",
                     name,
                     proto.code.len()
                 );
+                vm.jit_cache.insert(
+                    name,
+                    vm::machine::JitEntry {
+                        ptr,
+                        uses_float: type_info.has_float,
+                        has_string_ops: type_info.has_string_ops,
+                        has_collection_ops: type_info.has_collection_ops,
+                        has_global_ops: type_info.has_global_ops,
+                        returns_obj: matches!(
+                            type_info.return_type,
+                            vm::jit::type_analysis::RegType::StringRef
+                                | vm::jit::type_analysis::RegType::ObjRef
+                        ),
+                    },
+                );
             }
             Err(e) => {
                 eprintln!("  JIT skip: {} ({})", name, e);
             }
-        }
-    }
-
-    let mut vm = vm::machine::VM::new();
-
-    // Populate JIT cache so VM dispatches to native code
-    for (i, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() {
-            format!("fn_{}", i)
-        } else {
-            proto.name.clone()
-        };
-        if let Some(ptr) = jit.get_compiled(&name) {
-            let type_info = vm::jit::type_analysis::analyze(proto);
-            vm.jit_cache.insert(
-                name,
-                vm::machine::JitEntry {
-                    ptr,
-                    uses_float: type_info.has_float,
-                    has_string_ops: type_info.has_string_ops,
-                    has_collection_ops: type_info.has_collection_ops,
-                    returns_obj: matches!(
-                        type_info.return_type,
-                        vm::jit::type_analysis::RegType::StringRef
-                            | vm::jit::type_analysis::RegType::ObjRef
-                    ),
-                },
-            );
         }
     }
 

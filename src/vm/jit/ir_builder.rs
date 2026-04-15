@@ -107,8 +107,9 @@ pub fn build_function<M: Module>(
         return Err("function uses unsupported operations (strings/arrays/objects)".to_string());
     }
 
-    // Unified condition: need vm_ptr for string ops OR collection ops
-    let needs_vm_ptr = type_info.has_string_ops || type_info.has_collection_ops;
+    // Unified condition: need vm_ptr for string ops, collection ops, or global access
+    let needs_vm_ptr =
+        type_info.has_string_ops || type_info.has_collection_ops || type_info.has_global_ops;
 
     // String/collection functions cannot use floats (rejected by type_analysis).
     let ret_type = if type_info.has_float { F64 } else { I64 };
@@ -243,6 +244,32 @@ pub fn build_function<M: Module>(
                     &[I64],
                 )?,
                 empty_string: import_bridge(module, &mut b, "rt_empty_string", &[I64], &[I64])?,
+            })
+        } else {
+            None
+        };
+
+        // Import global access and general call bridges (when has_global_ops)
+        struct GlobalBridges {
+            get_global: cranelift_codegen::ir::FuncRef,
+            set_global: cranelift_codegen::ir::FuncRef,
+            call_native: cranelift_codegen::ir::FuncRef,
+        }
+
+        let glob = if type_info.has_global_ops {
+            Some(GlobalBridges {
+                // rt_get_global(vm_ptr, name_ref) -> tagged_val
+                get_global: import_bridge(module, &mut b, "rt_get_global", &[I64, I64], &[I64])?,
+                // rt_set_global(vm_ptr, name_ref, tagged_val)
+                set_global: import_bridge(module, &mut b, "rt_set_global", &[I64, I64, I64], &[])?,
+                // rt_call_native(vm_ptr, func_tagged, args_ptr, argc) -> tagged_val
+                call_native: import_bridge(
+                    module,
+                    &mut b,
+                    "rt_call_native",
+                    &[I64, I64, I64, I64],
+                    &[I64],
+                )?,
             })
         } else {
             None
@@ -586,27 +613,113 @@ pub fn build_function<M: Module>(
                         b.ins().brif(is_true, t, &[], next, &[]);
                     }
                 }
-                OpCode::GetGlobal
-                | OpCode::SetGlobal
-                | OpCode::Closure
-                | OpCode::GetUpvalue
-                | OpCode::SetUpvalue => {
+                OpCode::GetGlobal => {
+                    let vm_val = b.use_var(vm_ptr_var.expect("BUG: GetGlobal without vm_ptr"));
+                    let glob_ref = glob
+                        .as_ref()
+                        .expect("BUG: GetGlobal without global bridges");
+                    // bx is the constant pool index for the global name string.
+                    // Load the pre-interned GcRef index from string_refs.
+                    let name_gc_idx = string_refs
+                        .and_then(|refs| refs.get(bx as usize))
+                        .and_then(|r| *r)
+                        .unwrap_or(0);
+                    let name_ref = b.ins().iconst(I64, name_gc_idx);
+                    let call_inst = b.ins().call(glob_ref.get_global, &[vm_val, name_ref]);
+                    let tagged_result = b.inst_results(call_inst)[0];
+                    // Result is tagged; decode as int (Unknown registers).
+                    let decoded = emit_tag_decode_int(&mut b, tagged_result);
+                    b.def_var(regs[a], decoded);
+                    b.ins().jump(next, &[]);
+                }
+                OpCode::SetGlobal => {
+                    let vm_val = b.use_var(vm_ptr_var.expect("BUG: SetGlobal without vm_ptr"));
+                    let glob_ref = glob
+                        .as_ref()
+                        .expect("BUG: SetGlobal without global bridges");
+                    let name_gc_idx = string_refs
+                        .and_then(|refs| refs.get(bx as usize))
+                        .and_then(|r| *r)
+                        .unwrap_or(0);
+                    let name_ref = b.ins().iconst(I64, name_gc_idx);
+                    let val = b.use_var(regs[a]);
+                    let reg_type = type_info
+                        .reg_types
+                        .get(a)
+                        .copied()
+                        .unwrap_or(RegType::Unknown);
+                    let tagged_val = emit_tag_encode(&mut b, val, reg_type);
+                    b.ins()
+                        .call(glob_ref.set_global, &[vm_val, name_ref, tagged_val]);
+                    b.ins().jump(next, &[]);
+                }
+                OpCode::Closure | OpCode::GetUpvalue | OpCode::SetUpvalue => {
                     b.ins().jump(next, &[]);
                 }
                 OpCode::Call => {
                     let arg_count = bb;
                     let dst = cc;
-                    let mut call_args = Vec::with_capacity(arg_count + 1);
-                    // Pass vm_ptr as first arg when in string/collection mode
-                    if let Some(vp) = vm_ptr_var {
-                        call_args.push(b.use_var(vp));
+                    if type_info.has_global_ops {
+                        // General call via rt_call_native bridge.
+                        // Function register may hold a value from GetGlobal.
+                        let vm_val =
+                            b.use_var(vm_ptr_var.expect("BUG: bridge Call without vm_ptr"));
+                        let glob_ref = glob
+                            .as_ref()
+                            .expect("BUG: bridge Call without global bridges");
+                        // Tag-encode the function value as TAG_OBJ (functions
+                        // are always object references in the VM).
+                        let func_val = b.use_var(regs[a]);
+                        let func_tagged = emit_tag_encode(&mut b, func_val, RegType::ObjRef);
+                        if arg_count == 0 {
+                            // No args — pass null pointer and 0 count
+                            let null_ptr = b.ins().iconst(I64, 0);
+                            let zero = b.ins().iconst(I64, 0);
+                            let call_inst = b
+                                .ins()
+                                .call(glob_ref.call_native, &[vm_val, func_tagged, null_ptr, zero]);
+                            let tagged_result = b.inst_results(call_inst)[0];
+                            let decoded = emit_tag_decode_int(&mut b, tagged_result);
+                            b.def_var(regs[dst], decoded);
+                        } else {
+                            // Stack-allocate buffer for tagged arguments
+                            let slot = b.create_sized_stack_slot(StackSlotData::new(
+                                StackSlotKind::ExplicitSlot,
+                                (arg_count * 8) as u32,
+                                8,
+                            ));
+                            for i in 0..arg_count {
+                                let arg_val = b.use_var(regs[a + 1 + i]);
+                                let arg_type = type_info
+                                    .reg_types
+                                    .get(a + 1 + i)
+                                    .copied()
+                                    .unwrap_or(RegType::Unknown);
+                                let tagged_arg = emit_tag_encode(&mut b, arg_val, arg_type);
+                                b.ins().stack_store(tagged_arg, slot, (i * 8) as i32);
+                            }
+                            let args_ptr = b.ins().stack_addr(I64, slot, 0);
+                            let argc = b.ins().iconst(I64, arg_count as i64);
+                            let call_inst = b
+                                .ins()
+                                .call(glob_ref.call_native, &[vm_val, func_tagged, args_ptr, argc]);
+                            let tagged_result = b.inst_results(call_inst)[0];
+                            let decoded = emit_tag_decode_int(&mut b, tagged_result);
+                            b.def_var(regs[dst], decoded);
+                        }
+                    } else {
+                        // Self-recursive call via direct Cranelift call
+                        let mut call_args = Vec::with_capacity(arg_count + 1);
+                        if let Some(vp) = vm_ptr_var {
+                            call_args.push(b.use_var(vp));
+                        }
+                        for i in 0..arg_count {
+                            call_args.push(b.use_var(regs[a + 1 + i]));
+                        }
+                        let call_inst = b.ins().call(self_ref, &call_args);
+                        let result = b.inst_results(call_inst)[0];
+                        b.def_var(regs[dst], result);
                     }
-                    for i in 0..arg_count {
-                        call_args.push(b.use_var(regs[a + 1 + i]));
-                    }
-                    let call_inst = b.ins().call(self_ref, &call_args);
-                    let result = b.inst_results(call_inst)[0];
-                    b.def_var(regs[dst], result);
                     b.ins().jump(next, &[]);
                 }
                 OpCode::Return => {
