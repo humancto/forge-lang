@@ -104,9 +104,10 @@ int main(void) {{
         cmd.arg("-ldl");
     }
 
-    let status = cmd
-        .status()
-        .map_err(|e| format!("failed to invoke C compiler for standalone AOT: {e}"))?;
+    let status = cmd.status().map_err(|e| {
+        let _ = fs::remove_file(&c_path);
+        format!("failed to invoke C compiler for standalone AOT: {e}")
+    })?;
     let _ = fs::remove_file(&c_path);
 
     if !status.success() {
