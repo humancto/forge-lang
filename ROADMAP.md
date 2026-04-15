@@ -241,7 +241,7 @@ m1-017: feat(vm): auto-JIT for hot integer functions
 - [x] NaN-boxed value representation (uniform 64-bit)
 - [x] JIT handles strings, arrays, objects, floats
 - [x] JIT handles all function calls (not just self-recursion)
-- [ ] Tiered compilation: interpret → profile → JIT
+- [x] Tiered compilation: interpret → profile → JIT
 - [ ] Auto-JIT for any function type, not just integer-only
 - [ ] Performance target: 10-20x over tree-walk for JIT-compiled code
 
