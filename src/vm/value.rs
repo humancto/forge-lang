@@ -59,8 +59,26 @@ pub enum SharedValue {
     Map(Vec<(SharedValue, SharedValue)>),
 }
 
+thread_local! {
+    /// Set by `value_to_shared` / `shared_to_value` when an `ObjKind::Stream`
+    /// is encountered while crossing the thread/boundary marshal path.
+    /// Consumed by `take_stream_boundary_error` at the caller (spawn globals
+    /// copy, channel send, task handle result). Streams are single-use and
+    /// cannot cross engine boundaries — this is bug #6 from the M9.4 plan.
+    static STREAM_BOUNDARY_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Clear and return any pending stream-boundary error flag. Returns `true`
+/// if the flag was set (meaning a prior `value_to_shared` / `shared_to_value`
+/// hit a Stream). Callers should translate this into a `VMError`.
+pub fn take_stream_boundary_error() -> bool {
+    STREAM_BOUNDARY_ERROR.with(|c| c.replace(false))
+}
+
 /// Convert a VM Value to a SharedValue (owns all data, no GcRefs).
 /// Functions/closures/natives/upvalues/task handles map to Null.
+/// Streams also map to Null but set the thread-local boundary flag —
+/// callers must check via `take_stream_boundary_error`.
 pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
     match val.classify(gc) {
         ValueKind::Int(n) => SharedValue::Int(n),
@@ -97,6 +115,13 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
                         .collect(),
                 ),
                 ObjKind::BoxedInt(n) => SharedValue::Int(*n),
+                ObjKind::Stream(_) => {
+                    // Streams cannot cross the VM↔interpreter / thread
+                    // boundary. Set the thread-local flag so callers can
+                    // surface a VMError via `take_stream_boundary_error`.
+                    STREAM_BOUNDARY_ERROR.with(|c| c.set(true));
+                    SharedValue::Null
+                }
                 // Functions, closures, natives, upvalues, task handles are not transferable
                 _ => SharedValue::Null,
             },
@@ -388,6 +413,29 @@ impl GcObject {
                 format!("[{}]", strs.join(", "))
             }
             ObjKind::Object(map) => {
+                // Option-tagged objects display as Some(v) / None for parity
+                // with the interpreter's Value::Some / Value::None display.
+                if let Some(ty) = map.get("__type__").and_then(|v| v.as_obj()) {
+                    if let Some(ObjKind::String(ts)) = gc.get(ty).map(|o| &o.kind) {
+                        if ts == "Option" {
+                            if let Some(variant) = map.get("__variant__").and_then(|v| v.as_obj()) {
+                                if let Some(ObjKind::String(vs)) = gc.get(variant).map(|o| &o.kind)
+                                {
+                                    if vs == "None" {
+                                        return "None".to_string();
+                                    }
+                                    if vs == "Some" {
+                                        let inner = map
+                                            .get("_0")
+                                            .map(|v| v.display(gc))
+                                            .unwrap_or_else(|| "null".to_string());
+                                        return format!("Some({})", inner);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let entries: Vec<String> = map
                     .iter()
                     .map(|(k, v)| format!("{}: {}", escape_json_string(k), v.to_json_string(gc)))
@@ -418,6 +466,7 @@ impl GcObject {
                     .collect();
                 format!("Map({})", strs.join(", "))
             }
+            ObjKind::Stream(sb) => format!("Stream({})", sb.kind.short_name()),
             ObjKind::BoxedInt(n) => n.to_string(),
         }
     }
@@ -472,6 +521,7 @@ impl GcObject {
             ObjKind::Tuple(_) => "Tuple",
             ObjKind::Set(_) => "Set",
             ObjKind::Map(_) => "Map",
+            ObjKind::Stream(_) => "Stream",
             ObjKind::BoxedInt(_) => "Int",
         }
     }
@@ -550,6 +600,53 @@ impl GcObject {
                     worklist.push(r);
                 }
             }
+            ObjKind::Stream(sb) => {
+                // Visit every Value field in the StreamKind. Missing one
+                // would let the GC reclaim a closure/upstream out from
+                // under a live stream.
+                let push = |v: &Value, wl: &mut Vec<GcRef>| {
+                    if let Some(r) = v.as_obj() {
+                        wl.push(r);
+                    }
+                };
+                match &sb.kind {
+                    StreamKind::ArrayIter { items, .. }
+                    | StreamKind::TupleIter { items, .. }
+                    | StreamKind::SetIter { items, .. } => {
+                        for v in items {
+                            push(v, worklist);
+                        }
+                    }
+                    StreamKind::MapIter { pairs, .. } => {
+                        for (k, v) in pairs {
+                            push(k, worklist);
+                            push(v, worklist);
+                        }
+                    }
+                    StreamKind::StringIter { .. } => {}
+                    StreamKind::Filter { upstream, pred } => {
+                        push(upstream, worklist);
+                        push(pred, worklist);
+                    }
+                    StreamKind::Map { upstream, fn_val } => {
+                        push(upstream, worklist);
+                        push(fn_val, worklist);
+                    }
+                    StreamKind::Take { upstream, .. }
+                    | StreamKind::Skip { upstream, .. }
+                    | StreamKind::Enumerate { upstream, .. } => {
+                        push(upstream, worklist);
+                    }
+                    StreamKind::Chain { first, second, .. } => {
+                        push(first, worklist);
+                        push(second, worklist);
+                    }
+                    StreamKind::Zip { left, right } => {
+                        push(left, worklist);
+                        push(right, worklist);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -577,9 +674,97 @@ pub enum ObjKind {
     /// order; keys compared via `Value::set_eq` so NaN self-matches and
     /// Int/Float promote (e.g. `1` and `1.0` collide).
     Map(Vec<(Value, Value)>),
+    /// Lazy iterator. Single-use; terminal ops drain it. Upstream links are
+    /// stored as `Value::obj(gc_ref)` pointing at another `ObjKind::Stream`.
+    Stream(Box<StreamBox>),
     /// Heap-boxed i64 for values exceeding 48-bit NaN-box inline range.
     /// Used when NaN-boxed Value is active; transparent to user code.
     BoxedInt(i64),
+}
+
+/// VM-side stream state. Mirrors the interpreter's `StreamKind` with
+/// `Value` (NaN-boxed, Copy) instead of recursive `Arc<Mutex<...>>`.
+/// Combinator upstreams are stored as `Value::obj(gc_ref)` pointing at
+/// another `ObjKind::Stream`.
+#[allow(dead_code)]
+pub enum StreamKind {
+    ArrayIter {
+        items: Vec<Value>,
+        idx: usize,
+    },
+    TupleIter {
+        items: Vec<Value>,
+        idx: usize,
+    },
+    SetIter {
+        items: Vec<Value>,
+        idx: usize,
+    },
+    MapIter {
+        pairs: Vec<(Value, Value)>,
+        idx: usize,
+    },
+    StringIter {
+        chars: Vec<char>,
+        idx: usize,
+    },
+    Filter {
+        upstream: Value,
+        pred: Value,
+    },
+    Map {
+        upstream: Value,
+        fn_val: Value,
+    },
+    Take {
+        upstream: Value,
+        remaining: usize,
+    },
+    Skip {
+        upstream: Value,
+        skip_n: usize,
+        started: bool,
+    },
+    Chain {
+        first: Value,
+        second: Value,
+        on_second: bool,
+    },
+    Zip {
+        left: Value,
+        right: Value,
+    },
+    Enumerate {
+        upstream: Value,
+        idx: usize,
+    },
+}
+
+/// Wrapper around `StreamKind` carrying a poisoning slot. If a user
+/// closure errors mid-pipeline the error is recorded here and every
+/// subsequent `next()` re-yields it.
+pub struct StreamBox {
+    pub kind: StreamKind,
+    pub poisoned: Option<String>,
+}
+
+impl StreamKind {
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            StreamKind::ArrayIter { .. } => "ArrayIter",
+            StreamKind::TupleIter { .. } => "TupleIter",
+            StreamKind::SetIter { .. } => "SetIter",
+            StreamKind::MapIter { .. } => "MapIter",
+            StreamKind::StringIter { .. } => "StringIter",
+            StreamKind::Filter { .. } => "Filter",
+            StreamKind::Map { .. } => "Map",
+            StreamKind::Take { .. } => "Take",
+            StreamKind::Skip { .. } => "Skip",
+            StreamKind::Chain { .. } => "Chain",
+            StreamKind::Zip { .. } => "Zip",
+            StreamKind::Enumerate { .. } => "Enumerate",
+        }
+    }
 }
 
 #[derive(Clone)]

@@ -5552,3 +5552,383 @@ fn map_json_stringify_rejects_non_string_keys() {
     let msg = result.unwrap_err().message;
     assert!(msg.contains("non-string key"), "got: {}", msg);
 }
+
+// ---------------------------------------------------------------------------
+// Stream Tests (M9.4 iterator protocol)
+// ---------------------------------------------------------------------------
+
+fn stream_display(source: &str) -> String {
+    format!("{}", run_forge(source))
+}
+
+#[test]
+fn stream_array_collect() {
+    assert_eq!(stream_display("[1, 2, 3].stream().collect()"), "[1, 2, 3]");
+}
+
+#[test]
+fn stream_tuple_collect() {
+    assert_eq!(stream_display("(1, 2, 3).stream().collect()"), "[1, 2, 3]");
+}
+
+#[test]
+fn stream_set_collect_count() {
+    assert_eq!(stream_display("set([1, 2, 3]).stream().count()"), "3");
+}
+
+#[test]
+fn stream_map_collect_count() {
+    assert_eq!(
+        stream_display(r#"map([("a", 1), ("b", 2)]).stream().count()"#),
+        "2"
+    );
+}
+
+#[test]
+fn stream_string_collect() {
+    assert_eq!(stream_display(r#""abc".stream().collect()"#), "[a, b, c]");
+}
+
+#[test]
+fn stream_empty_collect() {
+    assert_eq!(stream_display("[].stream().collect()"), "[]");
+}
+
+#[test]
+fn stream_filter() {
+    assert_eq!(
+        stream_display("[1,2,3,4,5].stream().filter(fn(x) { return x > 2 }).collect()"),
+        "[3, 4, 5]"
+    );
+}
+
+#[test]
+fn stream_filter_all_out() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().filter(fn(x) { return x > 100 }).collect()"),
+        "[]"
+    );
+}
+
+#[test]
+fn stream_map_doubled() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().map(fn(x) { return x * 2 }).collect()"),
+        "[2, 4, 6]"
+    );
+}
+
+#[test]
+fn stream_map_to_null() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().map(fn(x) { return null }).collect()"),
+        "[null, null, null]"
+    );
+}
+
+#[test]
+fn stream_filter_map_pipeline() {
+    assert_eq!(
+        stream_display(
+            "[1,2,3,4,5].stream().filter(fn(x) { return x > 2 }).map(fn(x) { return x * 10 }).collect()"
+        ),
+        "[30, 40, 50]"
+    );
+}
+
+#[test]
+fn stream_take() {
+    assert_eq!(
+        stream_display("[1,2,3,4,5].stream().take(2).collect()"),
+        "[1, 2]"
+    );
+}
+
+#[test]
+fn stream_take_zero() {
+    assert_eq!(stream_display("[1,2,3].stream().take(0).collect()"), "[]");
+}
+
+#[test]
+fn stream_take_more_than_len() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().take(99).collect()"),
+        "[1, 2, 3]"
+    );
+}
+
+#[test]
+fn stream_skip() {
+    assert_eq!(
+        stream_display("[1,2,3,4,5].stream().skip(2).collect()"),
+        "[3, 4, 5]"
+    );
+}
+
+#[test]
+fn stream_skip_more_than_len() {
+    assert_eq!(stream_display("[1,2,3].stream().skip(99).collect()"), "[]");
+}
+
+#[test]
+fn stream_skip_then_take() {
+    assert_eq!(
+        stream_display("[1,2,3,4,5,6].stream().skip(2).take(2).collect()"),
+        "[3, 4]"
+    );
+}
+
+#[test]
+fn stream_chain_basic() {
+    assert_eq!(
+        stream_display("[1,2].stream().chain([3,4].stream()).collect()"),
+        "[1, 2, 3, 4]"
+    );
+}
+
+#[test]
+fn stream_chain_empty_first() {
+    assert_eq!(
+        stream_display("[].stream().chain([1,2].stream()).collect()"),
+        "[1, 2]"
+    );
+}
+
+#[test]
+fn stream_chain_empty_second() {
+    assert_eq!(
+        stream_display("[1,2].stream().chain([].stream()).collect()"),
+        "[1, 2]"
+    );
+}
+
+#[test]
+fn stream_zip_basic() {
+    assert_eq!(
+        stream_display(r#"[1,2,3].stream().zip(["a","b","c"].stream()).collect()"#),
+        "[(1, a), (2, b), (3, c)]"
+    );
+}
+
+#[test]
+fn stream_zip_unequal_shorter_left() {
+    assert_eq!(
+        stream_display(r#"[1,2].stream().zip(["a","b","c"].stream()).collect()"#),
+        "[(1, a), (2, b)]"
+    );
+}
+
+#[test]
+fn stream_zip_unequal_shorter_right() {
+    assert_eq!(
+        stream_display(r#"[1,2,3].stream().zip(["a","b"].stream()).collect()"#),
+        "[(1, a), (2, b)]"
+    );
+}
+
+#[test]
+fn stream_enumerate() {
+    assert_eq!(
+        stream_display("[10, 20, 30].stream().enumerate().collect()"),
+        "[(0, 10), (1, 20), (2, 30)]"
+    );
+}
+
+#[test]
+fn stream_count() {
+    assert_eq!(stream_display("[1,2,3,4].stream().count()"), "4");
+}
+
+#[test]
+fn stream_count_empty() {
+    assert_eq!(stream_display("[].stream().count()"), "0");
+}
+
+#[test]
+fn stream_sum_int() {
+    assert_eq!(stream_display("[1,2,3,4].stream().sum()"), "10");
+}
+
+#[test]
+fn stream_sum_float_promotion() {
+    assert_eq!(stream_display("[1, 2.5, 3].stream().sum()"), "6.5");
+}
+
+#[test]
+fn stream_sum_empty() {
+    assert_eq!(stream_display("[].stream().sum()"), "0");
+}
+
+#[test]
+fn stream_reduce() {
+    assert_eq!(
+        stream_display("[1,2,3,4].stream().reduce(100, fn(a, b) { return a + b })"),
+        "110"
+    );
+}
+
+#[test]
+fn stream_reduce_empty() {
+    assert_eq!(
+        stream_display("[].stream().reduce(42, fn(a, b) { return a + b })"),
+        "42"
+    );
+}
+
+#[test]
+fn stream_first_some() {
+    assert_eq!(stream_display("[1,2,3].stream().first()"), "Some(1)");
+}
+
+#[test]
+fn stream_first_none() {
+    assert_eq!(stream_display("[].stream().first()"), "None");
+}
+
+#[test]
+fn stream_find_some() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().find(fn(x) { return x > 1 })"),
+        "Some(2)"
+    );
+}
+
+#[test]
+fn stream_find_none() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().find(fn(x) { return x > 99 })"),
+        "None"
+    );
+}
+
+#[test]
+fn stream_any_true() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().any(fn(x) { return x > 2 })"),
+        "true"
+    );
+}
+
+#[test]
+fn stream_any_false() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().any(fn(x) { return x > 99 })"),
+        "false"
+    );
+}
+
+#[test]
+fn stream_all_true() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().all(fn(x) { return x > 0 })"),
+        "true"
+    );
+}
+
+#[test]
+fn stream_all_false() {
+    assert_eq!(
+        stream_display("[1,2,3].stream().all(fn(x) { return x > 1 })"),
+        "false"
+    );
+}
+
+#[test]
+fn stream_any_short_circuits() {
+    // `any` must stop on the first truthy. The side-effect counter
+    // should only reach the element that matched. Bind the call to a
+    // `let` so run_repl does not double-evaluate the expression stmt.
+    let val = run_forge(
+        r#"
+        let mut seen = 0
+        let _ = [1, 2, 3, 4, 5].stream().any(fn(x) {
+            seen = seen + 1
+            return x >= 3
+        })
+        seen
+        "#,
+    );
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn stream_all_short_circuits() {
+    // `all` must stop on the first falsy. With fail at 3, we see 1, 2, 3.
+    let val = run_forge(
+        r#"
+        let mut seen = 0
+        let _ = [1, 2, 3, 4, 5].stream().all(fn(x) {
+            seen = seen + 1
+            return x < 3
+        })
+        seen
+        "#,
+    );
+    assert_eq!(val, Value::Int(3));
+}
+
+#[test]
+fn stream_for_each_executes() {
+    let val = run_forge(
+        r#"
+        let mut sum = 0
+        let _ = [1,2,3,4].stream().for_each(fn(x) { sum = sum + x })
+        sum
+        "#,
+    );
+    assert_eq!(val, Value::Int(10));
+}
+
+#[test]
+fn stream_single_use_redrain_empty() {
+    let val = run_forge(
+        r#"
+        let s = [1, 2, 3].stream()
+        s.collect()
+        s.collect()
+        "#,
+    );
+    assert_eq!(format!("{}", val), "[]");
+}
+
+#[test]
+fn stream_error_poisoning() {
+    // The first terminal throws via `must err`, trapped by `safe`.
+    // A second terminal call on the *same* stream must also error —
+    // the stream is poisoned, not restarted, not silently drained.
+    let res = try_run_forge(
+        r#"
+        let s = [1, 2, 3].stream()
+        safe { s.for_each(fn(x) { must err("boom") }) }
+        s.collect()
+        "#,
+    );
+    assert!(
+        res.is_err(),
+        "expected second terminal to resurface poisoning error, got {:?}",
+        res
+    );
+}
+
+#[test]
+fn stream_boundary_rejection_json() {
+    // json.stringify crosses the VM↔interpreter bridge. Passing a Stream
+    // across it must error loudly, not silently coerce to Null.
+    // (Interpreter side also refuses: stdlib json handles Stream Value.)
+    let res = try_run_forge(r#"json.stringify([1, 2, 3].stream())"#);
+    assert!(
+        res.is_err(),
+        "expected boundary / stringify error for Stream, got {:?}",
+        res
+    );
+}
+
+#[test]
+fn stream_long_pipeline() {
+    assert_eq!(
+        stream_display(
+            "[1,2,3,4,5,6,7,8,9,10].stream().filter(fn(x) { return x > 2 }).map(fn(x) { return x * 2 }).skip(2).take(3).collect()"
+        ),
+        "[10, 12, 14]"
+    );
+}

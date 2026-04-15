@@ -94,6 +94,7 @@ run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, ch
 - Types: str, int, float, type, typeof
 - Collections: len, push, pop, keys, values, contains, range, enumerate, sum, min_of, max_of, unique, zip, flatten, group_by, chunk, slice, partition
 - Functional: map, filter, reduce, sort (with custom comparator), reverse, find, flat_map, any, all, sample, shuffle
+- Streams: `.stream()` on arrays/tuples/sets/maps/strings → lazy pull-based iterator. Combinators: filter, map, take, skip, chain, zip, enumerate. Terminals: collect/to_array, count, for_each, first, reduce, sum, find, any, all. Single-use (drained streams yield empty terminals), iterative (no recursion depth limit), poisons on closure error.
 - Objects: has_key, get (with dot-paths), pick, omit, merge, entries, from_entries, diff
 - Strings: split, join, replace, starts_with, ends_with, lines, substring, index_of, last_index_of, pad_start, pad_end, capitalize, title, repeat_str, count, slugify, snake_case, camel_case
 - Results: Ok, Err, is_ok, is_err, unwrap, unwrap_or

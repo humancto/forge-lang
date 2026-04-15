@@ -1,0 +1,3 @@
+// expect: true
+
+[1, 2, 3].stream().any(fn(x) { return x > 2 })

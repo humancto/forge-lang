@@ -1,0 +1,3 @@
+// expect: None
+
+[1, 2, 3].stream().find(fn(x) { return x > 10 })

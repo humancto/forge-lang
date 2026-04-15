@@ -45,7 +45,17 @@ impl SendableVM {
     fn run(mut self, closure: Value, slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>) {
         let vm = &mut self.0;
         let val = match vm.call_value(closure, vec![]) {
-            Ok(v) => value_to_shared(&vm.gc, &v),
+            Ok(v) => {
+                let sv = value_to_shared(&vm.gc, &v);
+                if vm.check_stream_boundary().is_err() {
+                    eprintln!(
+                        "spawn error: Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize"
+                    );
+                    SharedValue::Null
+                } else {
+                    sv
+                }
+            }
             Err(e) => {
                 eprintln!("spawn error: {}", e.message);
                 SharedValue::Null
@@ -198,6 +208,13 @@ pub struct VM {
     pub jit_roots: Vec<GcRef>,
     pub profiler: Profiler,
     skip_timeout_check_once: bool,
+    /// Set by the Stream arms of `convert_to_interp_val` / `convert_interp_value`
+    /// / `value_to_shared` when a Stream is encountered at the VM↔interpreter
+    /// boundary. Callers of those conversions must check this flag after each
+    /// call and surface a `VMError` via `check_stream_boundary`. Streams are
+    /// single-use and cannot cross engine boundaries — callers must
+    /// `.collect()` first to materialize. (M9.4 bug #6.)
+    pub(super) stream_boundary_error: std::cell::Cell<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +299,7 @@ impl VM {
             jit_roots: Vec::new(),
             profiler: Profiler::new(false),
             skip_timeout_check_once: false,
+            stream_boundary_error: std::cell::Cell::new(false),
         };
         vm.register_builtins();
         vm
@@ -306,6 +324,7 @@ impl VM {
             jit_roots: Vec::new(),
             profiler: Profiler::new(true),
             skip_timeout_check_once: false,
+            stream_boundary_error: std::cell::Cell::new(false),
         };
         vm.register_builtins();
         vm
@@ -886,6 +905,19 @@ impl VM {
             "BUG: SendableVM must have empty jit_cache/jit_modules to be safely Send"
         );
         SendableVM(child)
+    }
+
+    /// Silently drain both stream-boundary flags. Used by spawn-family
+    /// opcodes after `fork_for_spawn` + `transfer_closure` have run, so a
+    /// captured-stream upvalue cannot leak the flag into a subsequent
+    /// unrelated builtin call on the parent thread. Spawn already silently
+    /// coerces non-transferable values (functions, closures, channels) so
+    /// silently dropping captured streams is consistent; what we must not
+    /// allow is the flag surviving past the spawn opcode.
+    #[inline]
+    pub(super) fn drain_stream_boundary_flags(&self) {
+        self.stream_boundary_error.set(false);
+        let _ = super::value::take_stream_boundary_error();
     }
 
     /// Re-create a closure from parent GC in a child VM's GC.
@@ -1808,6 +1840,7 @@ impl VM {
                         };
 
                         spawn_thread(sendable, child_closure, slot_clone);
+                        self.drain_stream_boundary_flags();
 
                         let handle = self.gc.alloc(ObjKind::TaskHandle(result_slot));
                         self.registers[base + a as usize] = Value::obj(handle);
@@ -1923,6 +1956,7 @@ impl VM {
                         };
 
                         spawn_schedule_thread(sendable, child_closure, Duration::from_secs(secs));
+                        self.drain_stream_boundary_flags();
                     }
                     OpCode::Watch => {
                         let closure_val = self.registers[base + a as usize];
@@ -1946,6 +1980,7 @@ impl VM {
                         };
 
                         spawn_watch_thread(sendable, child_closure, path);
+                        self.drain_stream_boundary_flags();
                     }
                     OpCode::Must => {
                         let src = self.registers[base + b as usize];
@@ -2158,14 +2193,18 @@ impl VM {
                         #[cfg(not(feature = "jit"))]
                         let already_jit = false;
 
-                        if !func_name.is_empty() && !already_jit {
+                        // Anonymous lambdas all share the name "<lambda>", so
+                        // JIT cache keyed by name would collide across distinct
+                        // lambdas. Exclude them from auto-JIT and hotness
+                        // tracking until a stable per-prototype key exists.
+                        let jit_eligible = !func_name.is_empty() && func_name != "<lambda>";
+                        if jit_eligible && !already_jit {
                             self.profiler.enter_function(&func_name);
                         }
 
                         // Auto-JIT: compile hot functions on the fly
                         #[cfg(feature = "jit")]
-                        if !func_name.is_empty() && !already_jit && self.profiler.is_hot(&func_name)
-                        {
+                        if jit_eligible && !already_jit && self.profiler.is_hot(&func_name) {
                             let type_info = super::jit::type_analysis::analyze(&chunk);
                             let needs_vm_ptr = type_info.has_string_ops
                                 || type_info.has_collection_ops
@@ -2226,7 +2265,7 @@ impl VM {
                         // JIT dispatch — unified I64 ABI
                         // Float values are passed/returned as IEEE 754 bits in i64.
                         #[cfg(feature = "jit")]
-                        if !func_name.is_empty() {
+                        if jit_eligible {
                             if let Some(&entry) = self.jit_cache.get(&func_name) {
                                 let mut raw_args: Vec<i64> = Vec::new();
                                 if entry.has_string_ops
@@ -2333,8 +2372,14 @@ impl VM {
         }
     }
 
-    pub(super) fn args_to_interp(&self, args: &[Value]) -> Vec<crate::interpreter::Value> {
-        args.iter().map(|v| self.convert_to_interp_val(v)).collect()
+    pub(super) fn args_to_interp(
+        &self,
+        args: &[Value],
+    ) -> Result<Vec<crate::interpreter::Value>, VMError> {
+        let out: Vec<crate::interpreter::Value> =
+            args.iter().map(|v| self.convert_to_interp_val(v)).collect();
+        self.check_stream_boundary()?;
+        Ok(out)
     }
 
     #[allow(dead_code)]
@@ -2481,6 +2526,14 @@ impl VM {
                             crate::interpreter::Value::Map(converted)
                         }
                         ObjKind::Frozen(inner) => self.convert_to_interp_val(inner),
+                        ObjKind::Stream(_) => {
+                            // Streams cannot cross the VM/interpreter boundary.
+                            // Set the flag so callers can surface a VMError.
+                            // Return Null as a placeholder; caller must check
+                            // via `check_stream_boundary()?` after each call.
+                            self.stream_boundary_error.set(true);
+                            crate::interpreter::Value::Null
+                        }
                         _ => crate::interpreter::Value::Null,
                     }
                 } else {
@@ -2531,8 +2584,70 @@ impl VM {
                 let r = self.gc.alloc(ObjKind::Map(vm_pairs));
                 Value::obj(r)
             }
+            crate::interpreter::Value::Stream(_) => {
+                // Streams cannot cross the interpreter/VM boundary.
+                // See `stream_boundary_error` docs on the VM struct.
+                self.stream_boundary_error.set(true);
+                Value::null()
+            }
             _ => Value::null(),
         }
+    }
+
+    /// Convert an interpreter value to a VM value and immediately check
+    /// for a boundary error. Use at call sites where the conversion is
+    /// paired with returning the result to the VM. See bug #6.
+    #[inline]
+    pub(super) fn from_interp_checked(
+        &mut self,
+        v: &crate::interpreter::Value,
+    ) -> Result<Value, VMError> {
+        let out = self.convert_interp_value(v);
+        self.check_stream_boundary()?;
+        Ok(out)
+    }
+
+    /// After a conversion call site, check whether any inner `ObjKind::Stream`
+    /// / `interpreter::Value::Stream` was encountered. Reads and clears BOTH
+    /// the per-VM `stream_boundary_error` Cell (set by `&self` paths inside
+    /// `convert_*`) and the thread-local `STREAM_BOUNDARY_ERROR` (set by the
+    /// `value_to_shared` free function). Callers at the VM↔interpreter
+    /// boundary must invoke this immediately after `convert_to_interp_val` /
+    /// `convert_interp_value` / `value_to_shared` to surface the bug #6 error
+    /// loudly instead of silently coercing the stream to Null.
+    #[inline]
+    pub(super) fn check_stream_boundary(&self) -> Result<(), VMError> {
+        let cell_hit = self.stream_boundary_error.replace(false);
+        let tls_hit = super::value::take_stream_boundary_error();
+        if cell_hit || tls_hit {
+            Err(VMError::new(
+                "Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Pre-dispatch guard for stdlib module arms in `builtins.rs` that build
+    /// `interp_args` via an inline `match v.classify(...)` instead of calling
+    /// `convert_to_interp_val`. Those inline matches never set the boundary
+    /// flag, so a Stream argument would silently coerce to Null. This helper
+    /// walks args and errors loudly if any is an `ObjKind::Stream`, preserving
+    /// the bug #6 contract without rewriting every inline conversion.
+    #[inline]
+    pub(super) fn reject_stream_args(&self, args: &[Value]) -> Result<(), VMError> {
+        for v in args {
+            if let Some(r) = v.as_obj() {
+                if let Some(obj) = self.gc.get(r) {
+                    if matches!(obj.kind, ObjKind::Stream(_)) {
+                        return Err(VMError::new(
+                            "Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn arith_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
