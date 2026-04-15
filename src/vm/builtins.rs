@@ -420,6 +420,7 @@ impl VM {
                                 a.len() as i64
                             }
                             ObjKind::Object(o) => o.len() as i64,
+                            ObjKind::Map(pairs) => pairs.len() as i64,
                             _ => 0,
                         })
                     } else {
@@ -858,8 +859,77 @@ impl VM {
                 Err(VMError::new("max_of() requires an array"))
             }
             "map" => {
+                // Arity-based overload:
+                //   map()                    → empty Map
+                //   map(arr_of_pairs | Map)  → Map constructor
+                //   map(arr, fn)             → functional map (existing)
+                if args.is_empty() {
+                    let r = self.gc.alloc(ObjKind::Map(Vec::new()));
+                    return Ok(Value::obj(r));
+                }
+                if args.len() == 1 {
+                    // Classify the source and clone-then-drop to release gc borrow.
+                    enum Src {
+                        Pairs(Vec<(Value, Value)>),
+                        Items(Vec<Value>),
+                    }
+                    let src: Option<Src> =
+                        args[0]
+                            .as_obj()
+                            .and_then(|r| self.gc.get(r))
+                            .and_then(|obj| match &obj.kind {
+                                ObjKind::Map(pairs) => Some(Src::Pairs(pairs.clone())),
+                                ObjKind::Array(items) | ObjKind::Tuple(items) => {
+                                    Some(Src::Items(items.clone()))
+                                }
+                                _ => None,
+                            });
+                    let pairs = match src {
+                        Some(Src::Pairs(p)) => p,
+                        Some(Src::Items(items)) => {
+                            let mut out: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+                            for item in items {
+                                // Each item must be a 2-tuple or 2-element array.
+                                let pair =
+                                    item.as_obj().and_then(|r| self.gc.get(r)).and_then(|obj| {
+                                        match &obj.kind {
+                                            ObjKind::Tuple(t) if t.len() == 2 => Some((t[0], t[1])),
+                                            ObjKind::Array(a) if a.len() == 2 => Some((a[0], a[1])),
+                                            _ => None,
+                                        }
+                                    });
+                                let (k, v) = match pair {
+                                    Some(p) => p,
+                                    None => return Err(VMError::new(
+                                        "map() constructor expects an array of (key, value) pairs",
+                                    )),
+                                };
+                                // Insertion-order preservation on overwrite.
+                                let mut replaced = false;
+                                for entry in out.iter_mut() {
+                                    if entry.0.set_eq(&k, &self.gc) {
+                                        entry.1 = v;
+                                        replaced = true;
+                                        break;
+                                    }
+                                }
+                                if !replaced {
+                                    out.push((k, v));
+                                }
+                            }
+                            out
+                        }
+                        None => {
+                            return Err(VMError::new(
+                                "map() constructor expects an array of pairs or another Map",
+                            ))
+                        }
+                    };
+                    let r = self.gc.alloc(ObjKind::Map(pairs));
+                    return Ok(Value::obj(r));
+                }
                 if args.len() != 2 {
-                    return Err(VMError::new("map() requires (array, function)"));
+                    return Err(VMError::new("map() takes 0, 1, or 2 arguments"));
                 }
                 let items = if let Some(r) = args[0].as_obj() {
                     if let Some(obj) = self.gc.get(r) {
@@ -1027,6 +1097,12 @@ impl VM {
                                 let found = items.iter().any(|v| v.set_eq(val, &self.gc));
                                 return Ok(Value::bool_val(found));
                             }
+                            ObjKind::Map(pairs) => {
+                                // Maps: `contains(m, k)` matches `m.has(k)`.
+                                let pairs = pairs.clone();
+                                let found = pairs.iter().any(|(k, _)| k.set_eq(val, &self.gc));
+                                return Ok(Value::bool_val(found));
+                            }
                             ObjKind::Array(items) | ObjKind::Tuple(items) => {
                                 let found = items
                                     .iter()
@@ -1042,31 +1118,50 @@ impl VM {
             },
             "keys" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Object(map) = &obj.kind {
-                            // Collect keys as owned Strings first to release gc borrow
-                            let key_strings: Vec<String> = map.keys().cloned().collect();
-                            let _ = obj; // release gc borrow before alloc_string calls
+                    // Classify first + clone to release gc borrow before alloc.
+                    enum KeysKind {
+                        ObjectStrings(Vec<String>),
+                        MapKeys(Vec<Value>),
+                    }
+                    let kind = self.gc.get(r).and_then(|obj| match &obj.kind {
+                        ObjKind::Object(map) => {
+                            Some(KeysKind::ObjectStrings(map.keys().cloned().collect()))
+                        }
+                        ObjKind::Map(pairs) => {
+                            Some(KeysKind::MapKeys(pairs.iter().map(|(k, _)| *k).collect()))
+                        }
+                        _ => None,
+                    });
+                    match kind {
+                        Some(KeysKind::ObjectStrings(key_strings)) => {
                             let keys: Vec<Value> =
                                 key_strings.iter().map(|k| self.alloc_string(k)).collect();
                             let nr = self.gc.alloc(ObjKind::Array(keys));
                             return Ok(Value::obj(nr));
                         }
+                        Some(KeysKind::MapKeys(ks)) => {
+                            let nr = self.gc.alloc(ObjKind::Array(ks));
+                            return Ok(Value::obj(nr));
+                        }
+                        None => {}
                     }
                 }
-                Err(VMError::new("keys() requires an object"))
+                Err(VMError::new("keys() requires an object or map"))
             }
             "values" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Object(map) = &obj.kind {
-                            let vals: Vec<Value> = map.values().cloned().collect();
-                            let nr = self.gc.alloc(ObjKind::Array(vals));
-                            return Ok(Value::obj(nr));
-                        }
+                    let vals_opt: Option<Vec<Value>> =
+                        self.gc.get(r).and_then(|obj| match &obj.kind {
+                            ObjKind::Object(map) => Some(map.values().cloned().collect()),
+                            ObjKind::Map(pairs) => Some(pairs.iter().map(|(_, v)| *v).collect()),
+                            _ => None,
+                        });
+                    if let Some(vals) = vals_opt {
+                        let nr = self.gc.alloc(ObjKind::Array(vals));
+                        return Ok(Value::obj(nr));
                     }
                 }
-                Err(VMError::new("values() requires an object"))
+                Err(VMError::new("values() requires an object or map"))
             }
             "enumerate" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
@@ -3620,6 +3715,115 @@ impl VM {
                 }
                 "to_array" => {
                     let nr = self.gc.alloc(ObjKind::Array(items));
+                    return Ok(Value::obj(nr));
+                }
+                _ => {}
+            }
+        }
+
+        // Map-specific methods. Peel `Frozen(Map)` so frozen maps still
+        // support read-only methods; mutating methods are rejected on
+        // frozen receivers. Clones the pairs Vec to drop the GC borrow
+        // before any further allocation.
+        let map_receiver: Option<(Vec<(Value, Value)>, bool)> = {
+            receiver.as_obj().and_then(|r| {
+                let obj = self.gc.get(r)?;
+                match &obj.kind {
+                    ObjKind::Map(pairs) => Some((pairs.clone(), false)),
+                    ObjKind::Frozen(inner) => {
+                        let inner_r = inner.as_obj()?;
+                        let inner_obj = self.gc.get(inner_r)?;
+                        if let ObjKind::Map(pairs) = &inner_obj.kind {
+                            Some((pairs.clone(), true))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+        };
+
+        if let Some((pairs, is_frozen)) = map_receiver {
+            match method_name {
+                "get" => {
+                    if extra_args.len() != 1 {
+                        return Err(VMError::new("get() requires one argument"));
+                    }
+                    for (k, v) in &pairs {
+                        if k.set_eq(&extra_args[0], &self.gc) {
+                            return Ok(*v);
+                        }
+                    }
+                    return Ok(Value::null());
+                }
+                "has" => {
+                    if extra_args.len() != 1 {
+                        return Err(VMError::new("has() requires one argument"));
+                    }
+                    let found = pairs
+                        .iter()
+                        .any(|(k, _)| k.set_eq(&extra_args[0], &self.gc));
+                    return Ok(Value::bool_val(found));
+                }
+                "set" => {
+                    if is_frozen {
+                        return Err(VMError::new("cannot mutate a frozen map"));
+                    }
+                    if extra_args.len() != 2 {
+                        return Err(VMError::new("set() requires two arguments"));
+                    }
+                    let mut new_pairs = pairs;
+                    let mut replaced = false;
+                    for entry in new_pairs.iter_mut() {
+                        if entry.0.set_eq(&extra_args[0], &self.gc) {
+                            entry.1 = extra_args[1];
+                            replaced = true;
+                            break;
+                        }
+                    }
+                    if !replaced {
+                        new_pairs.push((extra_args[0], extra_args[1]));
+                    }
+                    let nr = self.gc.alloc(ObjKind::Map(new_pairs));
+                    return Ok(Value::obj(nr));
+                }
+                "remove" => {
+                    if is_frozen {
+                        return Err(VMError::new("cannot mutate a frozen map"));
+                    }
+                    if extra_args.len() != 1 {
+                        return Err(VMError::new("remove() requires one argument"));
+                    }
+                    let new_pairs: Vec<(Value, Value)> = pairs
+                        .into_iter()
+                        .filter(|(k, _)| !k.set_eq(&extra_args[0], &self.gc))
+                        .collect();
+                    let nr = self.gc.alloc(ObjKind::Map(new_pairs));
+                    return Ok(Value::obj(nr));
+                }
+                "keys" => {
+                    let keys: Vec<Value> = pairs.into_iter().map(|(k, _)| k).collect();
+                    let nr = self.gc.alloc(ObjKind::Array(keys));
+                    return Ok(Value::obj(nr));
+                }
+                "values" => {
+                    let vals: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
+                    let nr = self.gc.alloc(ObjKind::Array(vals));
+                    return Ok(Value::obj(nr));
+                }
+                "len" => {
+                    return Ok(Value::small_int(pairs.len() as i64));
+                }
+                "to_array" => {
+                    let tuples: Vec<Value> = pairs
+                        .into_iter()
+                        .map(|(k, v)| {
+                            let tr = self.gc.alloc(ObjKind::Tuple(vec![k, v]));
+                            Value::obj(tr)
+                        })
+                        .collect();
+                    let nr = self.gc.alloc(ObjKind::Array(tuples));
                     return Ok(Value::obj(nr));
                 }
                 _ => {}
