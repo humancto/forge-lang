@@ -2105,15 +2105,22 @@ impl VM {
                         let chunk = closure.function.chunk.clone();
                         let func_name = closure.function.name.clone();
 
-                        if !func_name.is_empty() {
+                        // Count calls for profiling and JIT hotness detection.
+                        // Skip for functions already JIT-compiled to avoid
+                        // per-call string allocation overhead on hot paths.
+                        #[cfg(feature = "jit")]
+                        let already_jit =
+                            !func_name.is_empty() && self.jit_cache.contains_key(&func_name);
+                        #[cfg(not(feature = "jit"))]
+                        let already_jit = false;
+
+                        if !func_name.is_empty() && !already_jit {
                             self.profiler.enter_function(&func_name);
                         }
 
                         // Auto-JIT: compile hot functions on the fly
                         #[cfg(feature = "jit")]
-                        if !func_name.is_empty()
-                            && !self.jit_cache.contains_key(&func_name)
-                            && self.profiler.is_hot(&func_name)
+                        if !func_name.is_empty() && !already_jit && self.profiler.is_hot(&func_name)
                         {
                             let type_info = super::jit::type_analysis::analyze(&chunk);
                             let needs_vm_ptr = type_info.has_string_ops
