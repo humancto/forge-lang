@@ -240,6 +240,7 @@ fn run_on_jit_value(program: &Program) -> String {
                             info.return_type,
                             type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
                         ),
+                        returns_float: matches!(info.return_type, type_analysis::RegType::Float),
                     },
                 );
             }

@@ -113,6 +113,8 @@ pub struct JitEntry {
     pub has_global_ops: bool,
     /// True when the function returns a GcRef (string, array, or object).
     pub returns_obj: bool,
+    /// True when the function's return type is Float (decode result as f64 bits).
+    pub returns_float: bool,
 }
 
 #[cfg(feature = "jit")]
@@ -172,60 +174,6 @@ pub(super) unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> Result<i64, V
 }
 
 #[cfg(feature = "jit")]
-/// Call a JIT-compiled function with arbitrary f64 arguments.
-/// Supports 0–8 args; returns Err beyond that.
-unsafe fn jit_call_f64(ptr: *const u8, args: &[f64]) -> Result<f64, VMError> {
-    Ok(match args.len() {
-        0 => {
-            let f: extern "C" fn() -> f64 = std::mem::transmute(ptr);
-            f()
-        }
-        1 => {
-            let f: extern "C" fn(f64) -> f64 = std::mem::transmute(ptr);
-            f(args[0])
-        }
-        2 => {
-            let f: extern "C" fn(f64, f64) -> f64 = std::mem::transmute(ptr);
-            f(args[0], args[1])
-        }
-        3 => {
-            let f: extern "C" fn(f64, f64, f64) -> f64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2])
-        }
-        4 => {
-            let f: extern "C" fn(f64, f64, f64, f64) -> f64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3])
-        }
-        5 => {
-            let f: extern "C" fn(f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3], args[4])
-        }
-        6 => {
-            let f: extern "C" fn(f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3], args[4], args[5])
-        }
-        7 => {
-            let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64) -> f64 =
-                std::mem::transmute(ptr);
-            f(
-                args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-            )
-        }
-        8 => {
-            let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64 =
-                std::mem::transmute(ptr);
-            f(
-                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-            )
-        }
-        n => {
-            return Err(VMError::new(&format!(
-                "JIT dispatch supports up to 8 arguments, got {}",
-                n
-            )))
-        }
-    })
-}
 
 pub struct VM {
     pub registers: Vec<Value>,
@@ -2167,6 +2115,10 @@ impl VM {
                                                 has_collection_ops: type_info.has_collection_ops,
                                                 has_global_ops: type_info.has_global_ops,
                                                 returns_obj: ret_is_obj,
+                                                returns_float: matches!(
+                                                    type_info.return_type,
+                                                    super::jit::type_analysis::RegType::Float
+                                                ),
                                             },
                                         );
                                         self.jit_modules.push(jit);
@@ -2175,72 +2127,58 @@ impl VM {
                             }
                         }
 
-                        // JIT dispatch
+                        // JIT dispatch — unified I64 ABI
+                        // Float values are passed/returned as IEEE 754 bits in i64.
                         #[cfg(feature = "jit")]
                         if !func_name.is_empty() {
                             if let Some(&entry) = self.jit_cache.get(&func_name) {
-                                let result_val = if entry.uses_float {
-                                    let raw_args: Vec<f64> = args
-                                        .iter()
-                                        .map(|v| {
-                                            if let Some(n) = v.as_inline_int() {
-                                                n as f64
-                                            } else if let Some(f) = v.as_float() {
-                                                f
-                                            } else if let Some(b) = v.as_bool() {
-                                                if b {
-                                                    1.0
-                                                } else {
-                                                    0.0
-                                                }
-                                            } else {
-                                                0.0
-                                            }
-                                        })
-                                        .collect();
-                                    let result: f64 =
-                                        unsafe { jit_call_f64(entry.ptr, &raw_args)? };
-                                    if result.fract() == 0.0
-                                        && result >= i64::MIN as f64
-                                        && result <= i64::MAX as f64
-                                    {
-                                        Value::int(result as i64, &mut self.gc)
-                                    } else {
-                                        Value::float(result)
-                                    }
-                                } else {
-                                    let mut raw_args: Vec<i64> = Vec::new();
-                                    // String/collection/global functions take vm_ptr as first arg
-                                    if entry.has_string_ops
-                                        || entry.has_collection_ops
-                                        || entry.has_global_ops
-                                    {
-                                        raw_args.push(self as *mut VM as *mut () as i64);
-                                    }
-                                    for v in &args {
-                                        raw_args.push(if let Some(n) = v.as_inline_int() {
+                                let mut raw_args: Vec<i64> = Vec::new();
+                                if entry.has_string_ops
+                                    || entry.has_collection_ops
+                                    || entry.has_global_ops
+                                {
+                                    raw_args.push(self as *mut VM as *mut () as i64);
+                                }
+                                for v in &args {
+                                    raw_args.push(if let Some(n) = v.as_inline_int() {
+                                        if entry.uses_float {
+                                            // Float functions expect all args as f64 bits
+                                            (n as f64).to_bits() as i64
+                                        } else {
                                             n
-                                        } else if let Some(f) = v.as_float() {
-                                            f as i64
-                                        } else if let Some(b) = v.as_bool() {
-                                            if b {
-                                                1
-                                            } else {
-                                                0
-                                            }
-                                        } else if let Some(r) = v.as_obj() {
-                                            r.0 as i64
+                                        }
+                                    } else if let Some(f) = v.as_float() {
+                                        // Float values: pass IEEE 754 bits in i64
+                                        f.to_bits() as i64
+                                    } else if let Some(b) = v.as_bool() {
+                                        if entry.uses_float {
+                                            (if b { 1.0_f64 } else { 0.0_f64 }).to_bits() as i64
+                                        } else if b {
+                                            1
                                         } else {
                                             0
-                                        });
-                                    }
-                                    let result: i64 =
-                                        unsafe { jit_call_i64(entry.ptr, &raw_args)? };
-                                    if entry.returns_obj {
-                                        Value::obj(GcRef(result as usize))
+                                        }
+                                    } else if let Some(r) = v.as_obj() {
+                                        r.0 as i64
                                     } else {
-                                        Value::int(result, &mut self.gc)
+                                        0
+                                    });
+                                }
+                                let result: i64 = unsafe { jit_call_i64(entry.ptr, &raw_args)? };
+                                let result_val = if entry.returns_obj {
+                                    Value::obj(GcRef(result as usize))
+                                } else if entry.returns_float {
+                                    let f = f64::from_bits(result as u64);
+                                    if f.fract() == 0.0
+                                        && f >= i64::MIN as f64
+                                        && f <= i64::MAX as f64
+                                    {
+                                        Value::int(f as i64, &mut self.gc)
+                                    } else {
+                                        Value::float(f)
                                     }
+                                } else {
+                                    Value::int(result, &mut self.gc)
                                 };
                                 self.profiler.exit_function();
                                 return Ok(result_val);

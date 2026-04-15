@@ -293,10 +293,131 @@ pub fn analyze(chunk: &Chunk) -> TypeInfo {
         }
     }
 
-    // Functions mixing strings/collections with floats are unsupported
-    // (would need per-register Cranelift types)
-    if (has_string_ops || has_collection_ops) && has_float {
-        has_unsupported = true;
+    // I64-everywhere ABI allows mixing floats with string/collection/global ops.
+    // Float values are stored as IEEE 754 bit patterns via bitcast.
+
+    // When the function uses float operations, promote all params to Float and
+    // re-run the full type propagation. The first pass determines has_float;
+    // the second pass ensures all registers derived from params (via
+    // Move/GetLocal/arithmetic) see Float, while comparisons/logic still
+    // produce Bool correctly.
+    if has_float {
+        // Reset and re-run with Float params
+        types = vec![RegType::Unknown; num_regs];
+        constants = vec![None; num_regs];
+        for i in 0..chunk.arity as usize {
+            types[i] = RegType::Float;
+        }
+        return_type = RegType::Int;
+        for &inst in &chunk.code {
+            let op = decode_op(inst);
+            let a = decode_a(inst) as usize;
+            let bb = decode_b(inst) as usize;
+            let cc = decode_c(inst) as usize;
+            let bx = decode_bx(inst);
+            let Ok(opcode) = OpCode::try_from(op) else {
+                continue;
+            };
+            match opcode {
+                OpCode::LoadConst => {
+                    if (bx as usize) < chunk.constants.len() {
+                        match &chunk.constants[bx as usize] {
+                            Constant::Int(_) => {
+                                if a < types.len() {
+                                    types[a] = RegType::Int;
+                                    constants[a] = match &chunk.constants[bx as usize] {
+                                        Constant::Int(n) => Some(ConstValue::Int(*n)),
+                                        _ => None,
+                                    };
+                                }
+                            }
+                            Constant::Float(_) => {
+                                if a < types.len() {
+                                    types[a] = RegType::Float;
+                                    constants[a] = None;
+                                }
+                            }
+                            Constant::Bool(v) => {
+                                if a < types.len() {
+                                    types[a] = RegType::Bool;
+                                    constants[a] = Some(ConstValue::Bool(*v));
+                                }
+                            }
+                            Constant::Str(_) => {
+                                if a < types.len() {
+                                    types[a] = RegType::StringRef;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                OpCode::LoadNull => {
+                    if a < types.len() {
+                        types[a] = RegType::Int;
+                        constants[a] = Some(ConstValue::Int(0));
+                    }
+                }
+                OpCode::LoadTrue | OpCode::LoadFalse => {
+                    if a < types.len() {
+                        types[a] = RegType::Bool;
+                        constants[a] = Some(ConstValue::Bool(matches!(opcode, OpCode::LoadTrue)));
+                    }
+                }
+                OpCode::Add | OpCode::Sub | OpCode::Mul => {
+                    if a < types.len() && bb < types.len() && cc < types.len() {
+                        if types[bb] == RegType::Float || types[cc] == RegType::Float {
+                            types[a] = RegType::Float;
+                        } else {
+                            types[a] = RegType::Int;
+                        }
+                        constants[a] = None;
+                    }
+                }
+                OpCode::Div | OpCode::Mod => {
+                    if a < types.len() && bb < types.len() && cc < types.len() {
+                        if types[bb] == RegType::Float || types[cc] == RegType::Float {
+                            types[a] = RegType::Float;
+                        } else {
+                            types[a] = RegType::Int;
+                        }
+                        constants[a] = None;
+                    }
+                }
+                OpCode::Neg => {
+                    if a < types.len() && bb < types.len() {
+                        types[a] = types[bb];
+                        constants[a] = None;
+                    }
+                }
+                OpCode::Eq
+                | OpCode::NotEq
+                | OpCode::Lt
+                | OpCode::Gt
+                | OpCode::LtEq
+                | OpCode::GtEq
+                | OpCode::Not
+                | OpCode::And
+                | OpCode::Or => {
+                    if a < types.len() {
+                        types[a] = RegType::Bool;
+                        constants[a] = None;
+                    }
+                }
+                OpCode::Move | OpCode::GetLocal | OpCode::SetLocal => {
+                    if a < types.len() && bb < types.len() {
+                        types[a] = types[bb];
+                        constants[a] = constants[bb];
+                    }
+                }
+                OpCode::Return => {
+                    if a < types.len() {
+                        return_type = types[a];
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     // Functions returning Unknown type are unsupported — the JIT dispatch
@@ -370,7 +491,8 @@ mod tests {
     }
 
     #[test]
-    fn analyze_string_with_float_unsupported() {
+    fn analyze_string_with_float_supported() {
+        // I64-everywhere ABI allows mixing floats with string ops
         let mut chunk = Chunk::new("mixed");
         chunk.arity = 0;
         chunk.max_registers = 3;
@@ -382,9 +504,11 @@ mod tests {
 
         let info = analyze(&chunk);
         assert!(
-            info.has_unsupported_ops,
-            "string+float mix should be unsupported"
+            !info.has_unsupported_ops,
+            "string+float mix should be supported with I64-everywhere ABI"
         );
+        assert!(info.has_string_ops);
+        assert!(info.has_float);
     }
 
     #[test]
@@ -471,7 +595,8 @@ mod tests {
     }
 
     #[test]
-    fn analyze_collection_with_float_unsupported() {
+    fn analyze_collection_with_float_supported() {
+        // I64-everywhere ABI allows mixing floats with collections
         let mut chunk = Chunk::new("mixed");
         chunk.arity = 0;
         chunk.max_registers = 3;
@@ -482,8 +607,8 @@ mod tests {
 
         let info = analyze(&chunk);
         assert!(
-            info.has_unsupported_ops,
-            "collection+float mix should be unsupported"
+            !info.has_unsupported_ops,
+            "collection+float mix should be supported with I64-everywhere ABI"
         );
     }
 

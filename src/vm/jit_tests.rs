@@ -66,6 +66,7 @@ fn run_jit_function(source: &str) -> Vec<String> {
                         type_info.return_type,
                         type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
                     ),
+                    returns_float: matches!(type_info.return_type, type_analysis::RegType::Float),
                 },
             );
         }
@@ -320,6 +321,16 @@ fn jit_mixed_int_float_args() {
     // When function has float constants, all args are promoted to f64
     let out = run_jit_function("fn scale(x) { return x * 2.5 }\nprintln(scale(4))");
     assert_eq!(out, vec!["10"]);
+}
+
+// ----- Mixed type functions (float + string/collection) -----
+
+#[test]
+fn jit_float_with_global_access() {
+    // Function mixing float arithmetic with global variable access
+    let out =
+        run_jit_function("let pi = 3.14159\nfn area(r) { return pi * r * r }\nprintln(area(5.0))");
+    assert_eq!(out, vec!["78.53975"]);
 }
 
 // ----- Recursive + complex -----

@@ -873,6 +873,10 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
                             vm::jit::type_analysis::RegType::StringRef
                                 | vm::jit::type_analysis::RegType::ObjRef
                         ),
+                        returns_float: matches!(
+                            type_info.return_type,
+                            vm::jit::type_analysis::RegType::Float
+                        ),
                     },
                 );
             }

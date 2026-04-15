@@ -107,6 +107,7 @@ fn run_on_jit_value(source: &str) -> String {
                             info.return_type,
                             type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
                         ),
+                        returns_float: matches!(info.return_type, type_analysis::RegType::Float),
                     },
                 );
             }
@@ -190,6 +191,10 @@ fn assert_cross_backend_error_contains(source: &str, expected: &str) {
                             returns_obj: matches!(
                                 info.return_type,
                                 type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
+                            ),
+                            returns_float: matches!(
+                                info.return_type,
+                                type_analysis::RegType::Float
                             ),
                         },
                     );
