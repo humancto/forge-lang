@@ -846,6 +846,11 @@ impl Interpreter {
                         if matches!(existing, Value::Tuple(_)) {
                             return Err(RuntimeError::new("cannot mutate a tuple"));
                         }
+                        if matches!(existing, Value::Set(_)) {
+                            return Err(RuntimeError::new(
+                                "cannot index-assign a set; use .add() and .remove()",
+                            ));
+                        }
                         let mut arr = existing;
                         if let (Value::Array(ref mut items), Value::Int(i)) = (&mut arr, &idx) {
                             let i = *i as usize;
@@ -2123,6 +2128,30 @@ impl Interpreter {
                                 }
                                 return Err(RuntimeError::new("pop() requires array"));
                             }
+                            // In-place set mutation: s.add(x) / s.remove(x) on a mutable set variable
+                            if field == "add" && args.len() == 1 {
+                                let s = self.eval_expr(object)?;
+                                if let Value::Set(mut items) = s {
+                                    let val = self.eval_expr(&args[0])?;
+                                    if !items.contains(&val) {
+                                        items.push(val);
+                                    }
+                                    let new_set = Value::Set(items);
+                                    self.env.set(var_name, new_set.clone())?;
+                                    return Ok(new_set);
+                                }
+                            }
+                            if field == "remove" && args.len() == 1 {
+                                let s = self.eval_expr(object)?;
+                                if let Value::Set(items) = s {
+                                    let val = self.eval_expr(&args[0])?;
+                                    let filtered: Vec<Value> =
+                                        items.into_iter().filter(|v| v != &val).collect();
+                                    let new_set = Value::Set(filtered);
+                                    self.env.set(var_name, new_set.clone())?;
+                                    return Ok(new_set);
+                                }
+                            }
                         }
                     }
                     let obj = self.eval_expr(object)?;
@@ -2399,6 +2428,126 @@ impl Interpreter {
                                         }
                                     }
                                     return Ok(Value::String(result));
+                                }
+                                _ => {}
+                            }
+                            return Ok(Value::Null);
+                        }
+                        Value::Set(ref items)
+                            if matches!(
+                                method_name,
+                                "has"
+                                    | "add"
+                                    | "remove"
+                                    | "union"
+                                    | "intersect"
+                                    | "diff"
+                                    | "to_array"
+                            ) =>
+                        {
+                            match method_name {
+                                "has" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "has() requires one argument",
+                                        ));
+                                    }
+                                    let val = self.eval_expr(&args[0])?;
+                                    return Ok(Value::Bool(items.contains(&val)));
+                                }
+                                "add" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "add() requires one argument",
+                                        ));
+                                    }
+                                    let val = self.eval_expr(&args[0])?;
+                                    let mut new_items = items.clone();
+                                    if !new_items.contains(&val) {
+                                        new_items.push(val);
+                                    }
+                                    return Ok(Value::Set(new_items));
+                                }
+                                "remove" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "remove() requires one argument",
+                                        ));
+                                    }
+                                    let val = self.eval_expr(&args[0])?;
+                                    let new_items: Vec<Value> =
+                                        items.iter().filter(|v| *v != &val).cloned().collect();
+                                    return Ok(Value::Set(new_items));
+                                }
+                                "union" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "union() requires one argument",
+                                        ));
+                                    }
+                                    let other = self.eval_expr(&args[0])?;
+                                    let other_items = match other {
+                                        Value::Set(v) => v,
+                                        _ => {
+                                            return Err(RuntimeError::new(
+                                                "union() requires a set argument",
+                                            ))
+                                        }
+                                    };
+                                    let mut result = items.clone();
+                                    for v in other_items {
+                                        if !result.contains(&v) {
+                                            result.push(v);
+                                        }
+                                    }
+                                    return Ok(Value::Set(result));
+                                }
+                                "intersect" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "intersect() requires one argument",
+                                        ));
+                                    }
+                                    let other = self.eval_expr(&args[0])?;
+                                    let other_items = match other {
+                                        Value::Set(v) => v,
+                                        _ => {
+                                            return Err(RuntimeError::new(
+                                                "intersect() requires a set argument",
+                                            ))
+                                        }
+                                    };
+                                    let result: Vec<Value> = items
+                                        .iter()
+                                        .filter(|v| other_items.contains(v))
+                                        .cloned()
+                                        .collect();
+                                    return Ok(Value::Set(result));
+                                }
+                                "diff" => {
+                                    if args.len() != 1 {
+                                        return Err(RuntimeError::new(
+                                            "diff() requires one argument",
+                                        ));
+                                    }
+                                    let other = self.eval_expr(&args[0])?;
+                                    let other_items = match other {
+                                        Value::Set(v) => v,
+                                        _ => {
+                                            return Err(RuntimeError::new(
+                                                "diff() requires a set argument",
+                                            ))
+                                        }
+                                    };
+                                    let result: Vec<Value> = items
+                                        .iter()
+                                        .filter(|v| !other_items.contains(v))
+                                        .cloned()
+                                        .collect();
+                                    return Ok(Value::Set(result));
+                                }
+                                "to_array" => {
+                                    return Ok(Value::Array(items.clone()));
                                 }
                                 _ => {}
                             }

@@ -1,0 +1,8 @@
+// expect: 60
+
+let s = set([10, 20, 30])
+let mut total = 0
+for x in s {
+    total = total + x
+}
+total

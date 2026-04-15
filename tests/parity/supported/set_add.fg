@@ -1,0 +1,3 @@
+// expect: 3
+
+len(set([1, 2]).add(3))

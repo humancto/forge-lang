@@ -50,4 +50,6 @@ mod parity_tests;
 #[cfg(test)]
 mod schedule_watch_tests;
 #[cfg(test)]
+mod set_tests;
+#[cfg(test)]
 mod tuple_tests;

@@ -45,6 +45,12 @@ impl Parser {
 
         match self.current_token() {
             Token::Let => self.parse_let(),
+            // `set` is context-sensitive: `set(...)` is the set() constructor call,
+            // while `set name to value` / `set mut name to value` is the natural-language
+            // assignment statement. Peek ahead to disambiguate.
+            Token::Set if matches!(self.peek_token(1), Token::LParen) => {
+                self.parse_expr_or_assign()
+            }
             Token::Set => self.parse_set(),
             Token::Change => self.parse_change(),
             Token::Fn | Token::Define => self.parse_fn_def(Vec::new()),
@@ -1646,6 +1652,14 @@ impl Parser {
             Token::Any => {
                 self.advance();
                 Ok(Expr::Ident("any".to_string()))
+            }
+
+            // Allow `set` keyword as identifier in expression context so that
+            // `set(...)` parses as a call to the set() constructor. Statement-level
+            // `set name to ...` is handled earlier in parse_statement.
+            Token::Set => {
+                self.advance();
+                Ok(Expr::Ident("set".to_string()))
             }
 
             // craft Person { name: "Alice", age: 30 }
