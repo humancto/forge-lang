@@ -2158,14 +2158,18 @@ impl VM {
                         #[cfg(not(feature = "jit"))]
                         let already_jit = false;
 
-                        if !func_name.is_empty() && !already_jit {
+                        // Anonymous lambdas all share the name "<lambda>", so
+                        // JIT cache keyed by name would collide across distinct
+                        // lambdas. Exclude them from auto-JIT and hotness
+                        // tracking until a stable per-prototype key exists.
+                        let jit_eligible = !func_name.is_empty() && func_name != "<lambda>";
+                        if jit_eligible && !already_jit {
                             self.profiler.enter_function(&func_name);
                         }
 
                         // Auto-JIT: compile hot functions on the fly
                         #[cfg(feature = "jit")]
-                        if !func_name.is_empty() && !already_jit && self.profiler.is_hot(&func_name)
-                        {
+                        if jit_eligible && !already_jit && self.profiler.is_hot(&func_name) {
                             let type_info = super::jit::type_analysis::analyze(&chunk);
                             let needs_vm_ptr = type_info.has_string_ops
                                 || type_info.has_collection_ops
@@ -2226,7 +2230,7 @@ impl VM {
                         // JIT dispatch — unified I64 ABI
                         // Float values are passed/returned as IEEE 754 bits in i64.
                         #[cfg(feature = "jit")]
-                        if !func_name.is_empty() {
+                        if jit_eligible {
                             if let Some(&entry) = self.jit_cache.get(&func_name) {
                                 let mut raw_args: Vec<i64> = Vec::new();
                                 if entry.has_string_ops
