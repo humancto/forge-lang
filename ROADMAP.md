@@ -579,7 +579,7 @@ m5-016: ci: release workflow for libforge.a per target
 
 ### Checklist
 
-- [ ] Tuple type with `(a, b)` syntax, indexing, destructuring, and type annotations
+- [x] Tuple type with `(a, b)` syntax, indexing, destructuring, and type annotations
 - [ ] Set type with `set()` constructor, `.add()`, `.has()`, `.remove()`, union/intersection/difference
 - [ ] Map type with `map()` constructor, any-key support, `.get()`, `.set()`, `.keys()`, `.values()`
 - [ ] Iterator protocol with `.stream()`, lazy `.filter()`, `.map()`, `.take()`, `.skip()`, `.collect()`
