@@ -650,3 +650,35 @@ fn jit_global_read() {
     let out = run_jit_function("let x = 10\nfn get_x() { return x }\nprintln(get_x())");
     assert_eq!(out, vec!["10"]);
 }
+
+#[test]
+fn jit_auto_tiered_compilation() {
+    // Verify that VM::new() (profiler disabled) auto-JIT compiles hot functions.
+    // A function called 101 times should be JIT-compiled and produce correct results.
+    let source = r#"
+fn add(a, b) { return a + b }
+let mut total = 0
+let mut i = 0
+while i < 101 {
+    total = total + add(i, 1)
+    i = i + 1
+}
+println(total)
+"#;
+    let mut lexer = crate::lexer::Lexer::new(source);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = crate::parser::Parser::new(tokens);
+    let program = parser.parse_program().unwrap();
+    let chunk = crate::vm::compiler::compile(&program).unwrap();
+
+    let mut vm = VM::new();
+    vm.execute(&chunk).unwrap();
+
+    // After 101 calls, add() should be in the JIT cache
+    assert!(
+        vm.jit_cache.contains_key("add"),
+        "Expected 'add' to be auto-JIT compiled after 101 calls"
+    );
+    // sum of (i+1) for i in 0..101 = sum of 1..102 = 101*102/2 = 5151
+    assert_eq!(vm.output, vec!["5151"]);
+}

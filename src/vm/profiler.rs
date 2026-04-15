@@ -38,16 +38,21 @@ impl Profiler {
         self.enabled
     }
 
+    /// Record a function call. Always increments the call counter (for JIT
+    /// hotness detection). Only tracks timing when the profiler is fully
+    /// enabled (`--profile`).
+    ///
+    /// Note: `exit_function` still early-returns when disabled because there
+    /// is no timing data to record (we don't push to `call_stack`).
     pub fn enter_function(&mut self, name: &str) {
-        if !self.enabled {
-            return;
-        }
         let entry = self
             .stats
             .entry(name.to_string())
             .or_insert_with(FunctionStats::new);
         entry.call_count = entry.call_count.saturating_add(1);
-        self.call_stack.push((name.to_string(), Instant::now()));
+        if self.enabled {
+            self.call_stack.push((name.to_string(), Instant::now()));
+        }
     }
 
     pub fn exit_function(&mut self) {
@@ -139,12 +144,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn profiler_disabled_does_nothing() {
+    fn profiler_disabled_still_counts_calls() {
         let mut p = Profiler::new(false);
         p.enter_function("foo");
         p.exit_function();
-        assert_eq!(p.call_count("foo"), 0);
+        // Call counting always works (for JIT hotness detection).
+        // Only timing is disabled.
+        assert_eq!(p.call_count("foo"), 1);
         assert!(!p.is_hot("foo"));
+        let stats = p.stats.get("foo").unwrap();
+        assert_eq!(stats.total_time, std::time::Duration::ZERO);
     }
 
     #[test]
@@ -231,5 +240,17 @@ mod tests {
         p.enter_function("overflow");
         p.exit_function();
         assert_eq!(p.call_count("overflow"), u32::MAX);
+    }
+
+    #[test]
+    fn profiler_disabled_detects_hot() {
+        let mut p = Profiler::new(false);
+        for _ in 0..100 {
+            p.enter_function("hot_fn");
+        }
+        assert!(p.is_hot("hot_fn"));
+        // No timing recorded when disabled
+        let stats = p.stats.get("hot_fn").unwrap();
+        assert_eq!(stats.total_time, Duration::ZERO);
     }
 }
