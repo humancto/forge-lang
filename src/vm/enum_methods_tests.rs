@@ -661,12 +661,13 @@ fn vm_enum_method_pin_missing_self_return_type() {
 
 #[test]
 fn vm_enum_pin_spawn_child_vm_missing_type_registry() {
-    // Per Risks: `fork_for_spawn` does NOT propagate type definitions
-    // or method_tables to the child VM. The spawned closure can't
-    // resolve the `Wrap` constructor (undefined variable), and even
-    // if the ADT value is captured as an upvalue, `.peek()` fails
-    // with "no method 'peek' on Object" because the child has no
-    // method table. Pinned here so a future fix is a visible diff.
+    // Per Risks: `fork_for_spawn` propagates method_tables but NOT
+    // variant constructor functions (e.g. `Wrap`) — `value_to_shared`
+    // drops closure/function values, so the child VM can't construct
+    // ADTs. The spawned closure fails with "undefined variable: Wrap".
+    // Even if the ADT value were captured as an upvalue, dispatch
+    // would work (method_tables are copied), but construction would
+    // not. Pinned here so a future fix is a visible diff.
     let res = vm_run(
         r#"
         type Box = Wrap(int)
