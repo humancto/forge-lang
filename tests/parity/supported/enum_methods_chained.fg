@@ -1,0 +1,7 @@
+// expect: 13
+type Box = Wrap(int)
+impl Box {
+    fn inc(it) { return Wrap(it._0 + 1) }
+    fn get(it) { return it._0 }
+}
+Wrap(10).inc().inc().inc().get()

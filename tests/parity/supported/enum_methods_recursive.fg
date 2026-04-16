@@ -1,0 +1,11 @@
+// expect: 3
+type Tree = Leaf(int) | Node(Tree, Tree)
+impl Tree {
+    fn sum(it) {
+        match it {
+            Leaf(n) => return n
+            Node(l, r) => return l.sum() + r.sum()
+        }
+    }
+}
+Node(Leaf(1), Leaf(2)).sum()

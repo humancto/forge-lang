@@ -1,0 +1,6 @@
+// expect: 15
+type Box = Wrap(int)
+impl Box {
+    fn add(it, n) { return it._0 + n }
+}
+Wrap(10).add(5)

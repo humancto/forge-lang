@@ -1,0 +1,11 @@
+// expect: 78.5
+type Shape = Circle(float) | Square(float)
+impl Shape {
+    fn area(it) {
+        match it {
+            Circle(r) => return 3.14 * r * r
+            Square(s) => return s * s
+        }
+    }
+}
+Circle(5.0).area()

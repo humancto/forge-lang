@@ -1,0 +1,11 @@
+// expect: [0, 9]
+type Status = Idle | Active(int)
+impl Status {
+    fn level(it) {
+        match it {
+            Idle => return 0
+            Active(n) => return n
+        }
+    }
+}
+[Idle.level(), Active(9).level()]

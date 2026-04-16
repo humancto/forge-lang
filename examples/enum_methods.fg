@@ -1,0 +1,47 @@
+// Enum methods via impl blocks on algebraic types.
+//
+// Forge lets you attach instance methods to algebraic `type`
+// definitions. The first parameter is named `it`, and method
+// dispatch walks through the ADT's `__type__` field into the
+// registered method table. Match expressions inside method bodies
+// destructure variants the usual way.
+
+type Shape = Circle(float) | Square(float)
+
+impl Shape {
+    fn area(it) {
+        match it {
+            Circle(r) => return 3.14 * r * r
+            Square(s) => return s * s
+        }
+    }
+
+    fn scale(it, factor) {
+        match it {
+            Circle(r) => return Circle(r * factor)
+            Square(s) => return Square(s * factor)
+        }
+    }
+
+    fn is_circle(it) {
+        match it {
+            Circle(_) => return true
+            _ => return false
+        }
+    }
+}
+
+say "Circle(5.0).area() = "
+say Circle(5.0).area()
+
+say "Square(4.0).area() = "
+say Square(4.0).area()
+
+// Chained: scale first, then measure.
+say "Circle(2.0).scale(3.0).area() = "
+say Circle(2.0).scale(3.0).area()
+
+// Predicate dispatch via collection builtin.
+let shapes = [Circle(1.0), Square(2.0), Circle(3.0)]
+say "circles only: "
+say shapes.filter(fn(s) { return s.is_circle() }).len()

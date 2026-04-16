@@ -1,0 +1,17 @@
+// expect: 36
+type Shape = Circle(float) | Square(float)
+impl Shape {
+    fn scale(it, f) {
+        match it {
+            Circle(radius) => return Circle(radius * f)
+            Square(side) => return Square(side * f)
+        }
+    }
+    fn area_squared(it) {
+        match it {
+            Circle(radius) => return radius * radius
+            Square(side) => return side * side
+        }
+    }
+}
+Circle(2.0).scale(3.0).area_squared()

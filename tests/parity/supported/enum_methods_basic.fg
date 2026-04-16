@@ -1,0 +1,6 @@
+// expect: 42
+type Box = Wrap(int)
+impl Box {
+    fn peek(it) { return it._0 }
+}
+Wrap(42).peek()
