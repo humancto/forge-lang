@@ -5932,3 +5932,712 @@ fn stream_long_pipeline() {
         "[10, 12, 14]"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Enum-method tests (M9.5 impl blocks on algebraic types)
+//
+// Locks in the existing — but previously untested — behavior that
+// `impl MyEnum { fn foo(it, ...) { ... } }` registers methods in
+// `method_tables` and that `instance.foo(args)` dispatches through
+// the __type__ field on the ADT object. Every test uses variant names
+// that do NOT collide with the built-in Option/Result variants
+// (Some/None/Ok/Err) to avoid the Value::None special-case at
+// match_pattern line ~4314. Those collisions are tracked separately.
+// ---------------------------------------------------------------------------
+
+fn enum_display(source: &str) -> String {
+    format!("{}", run_forge(source))
+}
+
+// ----- Core dispatch ------------------------------------------------------
+
+#[test]
+fn enum_method_single_variant_returns_primitive() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn peek(it) { return it._0 }
+            }
+            Wrap(42).peek()
+            "#
+        ),
+        "42"
+    );
+}
+
+#[test]
+fn enum_method_two_variant_dispatch() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float)
+            impl Shape {
+                fn area(it) {
+                    match it {
+                        Circle(r) => return 3.14 * r * r
+                        Square(s) => return s * s
+                    }
+                }
+            }
+            Circle(5.0).area()
+            "#
+        ),
+        "78.5"
+    );
+}
+
+#[test]
+fn enum_method_with_one_extra_arg() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn add(it, n) { return it._0 + n }
+            }
+            Wrap(10).add(5)
+            "#
+        ),
+        "15"
+    );
+}
+
+#[test]
+fn enum_method_with_multiple_extra_args() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn compute(it, a, b, c) { return it._0 + a * b - c }
+            }
+            Wrap(100).compute(2, 3, 4)
+            "#
+        ),
+        "102"
+    );
+}
+
+#[test]
+fn enum_method_returns_same_type_instance() {
+    // Uses integer-friendly math to avoid float precision noise.
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float)
+            impl Shape {
+                fn scale(it, f) {
+                    match it {
+                        Circle(radius) => return Circle(radius * f)
+                        Square(side) => return Square(side * f)
+                    }
+                }
+                fn area_squared(it) {
+                    match it {
+                        Circle(radius) => return radius * radius
+                        Square(side) => return side * side
+                    }
+                }
+            }
+            Circle(2.0).scale(3.0).area_squared()
+            "#
+        ),
+        "36"
+    );
+}
+
+#[test]
+fn enum_method_variant_converting() {
+    // Per B1: method reads Circle's field and returns a Square.
+    // Exercises _0 projection + different-variant constructor in one body.
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float)
+            impl Shape {
+                fn to_square(it) {
+                    match it {
+                        Circle(r) => return Square(r * 2.0)
+                        Square(s) => return Square(s)
+                    }
+                }
+                fn side(it) {
+                    match it {
+                        Circle(r) => return r
+                        Square(s) => return s
+                    }
+                }
+            }
+            Circle(3.0).to_square().side()
+            "#
+        ),
+        "6"
+    );
+}
+
+#[test]
+fn enum_method_chained_calls() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn inc(it) { return Wrap(it._0 + 1) }
+                fn get(it) { return it._0 }
+            }
+            Wrap(10).inc().inc().inc().get()
+            "#
+        ),
+        "13"
+    );
+}
+
+#[test]
+fn enum_method_field_destructuring_in_match() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Pair = Both(int, int)
+            impl Pair {
+                fn mul(it) {
+                    match it {
+                        Both(a, b) => return a * b
+                    }
+                }
+            }
+            Both(6, 7).mul()
+            "#
+        ),
+        "42"
+    );
+}
+
+#[test]
+fn enum_method_calls_another_method_on_it() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn doubled(it) { return it._0 * 2 }
+                fn quadrupled(it) { return it.doubled() * 2 }
+            }
+            Wrap(5).quadrupled()
+            "#
+        ),
+        "20"
+    );
+}
+
+#[test]
+fn enum_method_calls_free_function() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            fn triple(n) { return n * 3 }
+            impl Box {
+                fn triple_field(it) { return triple(it._0) }
+            }
+            Wrap(7).triple_field()
+            "#
+        ),
+        "21"
+    );
+}
+
+#[test]
+fn enum_method_let_bindings_and_early_return() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn classify(it) {
+                    let n = it._0
+                    if n < 0 {
+                        return "negative"
+                    }
+                    if n == 0 {
+                        return "zero"
+                    }
+                    return "positive"
+                }
+            }
+            Wrap(5).classify()
+            "#
+        ),
+        "positive"
+    );
+}
+
+#[test]
+fn enum_method_zero_field_plus_data_variant() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Maybe = Yes(int) | No
+            impl Maybe {
+                fn or_zero(it) {
+                    match it {
+                        Yes(v) => return v
+                        _ => return 0
+                    }
+                }
+            }
+            No.or_zero()
+            "#
+        ),
+        "0"
+    );
+}
+
+#[test]
+fn enum_method_predicate_returns_bool() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float)
+            impl Shape {
+                fn is_circle(it) {
+                    match it {
+                        Circle(_) => return true
+                        Square(_) => return false
+                    }
+                }
+            }
+            Circle(1.0).is_circle()
+            "#
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn enum_method_reads_field_via_underscore_zero() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn raw(it) { return it._0 }
+            }
+            Wrap(99).raw()
+            "#
+        ),
+        "99"
+    );
+}
+
+#[test]
+fn enum_method_match_wildcard_fallthrough() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float) | Triangle(float, float, float)
+            impl Shape {
+                fn kind(it) {
+                    match it {
+                        Circle(_) => return "circle"
+                        _ => return "other"
+                    }
+                }
+            }
+            Triangle(3.0, 4.0, 5.0).kind()
+            "#
+        ),
+        "other"
+    );
+}
+
+#[test]
+fn enum_method_three_variant_type() {
+    assert_eq!(
+        enum_display(
+            r##"
+            type Color = Red | Green | Blue
+            impl Color {
+                fn hex(it) {
+                    match it {
+                        Red => return "#f00"
+                        Green => return "#0f0"
+                        Blue => return "#00f"
+                    }
+                }
+            }
+            Green.hex()
+            "##
+        ),
+        "#0f0"
+    );
+}
+
+#[test]
+fn enum_method_taking_closure() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn apply(it, f) { return f(it._0) }
+            }
+            Wrap(10).apply(fn(x) { return x + 5 })
+            "#
+        ),
+        "15"
+    );
+}
+
+#[test]
+fn enum_method_closure_captures_it() {
+    // Per R1: inner closure body closes over `it`. Exercises upvalue
+    // capture of the ADT value through the method's frame.
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn scale_each(it) {
+                    return [1, 2, 3].map(fn(x) { return x * it._0 })
+                }
+            }
+            Wrap(10).scale_each()
+            "#
+        ),
+        "[10, 20, 30]"
+    );
+}
+
+#[test]
+fn enum_method_recursive_on_nested_adt() {
+    // Per M1: constructor-recursive fields, not flat self-recursion.
+    // NOTE: This tests only 2-level (flat) recursion. Deeper recursion
+    // hits a preexisting interpreter bug where match_pattern's
+    // Binding(name) peeks at env and treats field captures as type
+    // checks — when l/r are bound in an outer frame, the inner match
+    // compares variants of outer-l vs inner-l and rejects. Fix is
+    // orthogonal to M9.5. See enum_method_pin_deep_recursion_quirk
+    // below for a pin of the broken case.
+    assert_eq!(
+        enum_display(
+            r#"
+            type Tree = Leaf(int) | Node(Tree, Tree)
+            impl Tree {
+                fn sum(it) {
+                    match it {
+                        Leaf(n) => return n
+                        Node(l, r) => return l.sum() + r.sum()
+                    }
+                }
+            }
+            Node(Leaf(1), Leaf(2)).sum()
+            "#
+        ),
+        "3"
+    );
+}
+
+#[test]
+fn enum_method_pin_deep_recursion_quirk() {
+    // Pin: 3+ level recursion through ADT methods errors with
+    // non-exhaustive match because match_pattern's Binding(name)
+    // smart-check incorrectly uses outer-scope bindings. Once that
+    // interpreter bug is fixed, this test will start passing, which is
+    // the signal to flip it to a success assertion.
+    let res = try_run_forge(
+        r#"
+        type Tree = Leaf(int) | Node(Tree, Tree)
+        impl Tree {
+            fn sum(it) {
+                match it {
+                    Leaf(n) => return n
+                    Node(l, r) => return l.sum() + r.sum()
+                }
+            }
+        }
+        Node(Leaf(1), Node(Leaf(2), Leaf(3))).sum()
+        "#,
+    );
+    assert!(
+        res.is_err(),
+        "deep recursion was expected to fail (pin) but returned {:?}",
+        res
+    );
+}
+
+#[test]
+fn enum_method_throws_via_must_err() {
+    let res = try_run_forge(
+        r#"
+        type Box = Wrap(int)
+        impl Box {
+            fn bomb(it) {
+                must err("kaboom")
+            }
+        }
+        Wrap(0).bomb()
+        "#,
+    );
+    assert!(
+        res.is_err(),
+        "expected must-err to propagate, got {:?}",
+        res
+    );
+}
+
+#[test]
+fn enum_method_nested_dispatch_across_methods() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn a(it) { return it.b() + 1 }
+                fn b(it) { return it.c() + 2 }
+                fn c(it) { return it._0 + 4 }
+            }
+            Wrap(10).a()
+            "#
+        ),
+        "17"
+    );
+}
+
+#[test]
+fn enum_method_type_annotation_on_arg() {
+    // Forge has gradual types; annotations are accepted and ignored in
+    // non-strict mode. This test just pins that the parser/runtime
+    // don't choke on `multiplier: float`.
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn scaled(it, multiplier: float) { return it._0 * multiplier }
+            }
+            Wrap(10).scaled(2.5)
+            "#
+        ),
+        "25"
+    );
+}
+
+// ----- Collection-builtin integration (per M2) ----------------------------
+
+#[test]
+fn enum_method_via_map() {
+    // Field binding names `radius`/`side` are chosen so they don't
+    // collide with the lambda parameter `shape` (preexisting
+    // match_pattern Binding-smart-check bug shadows on collision).
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float)
+            impl Shape {
+                fn area_squared(it) {
+                    match it {
+                        Circle(radius) => return radius * radius
+                        Square(side) => return side * side
+                    }
+                }
+            }
+            let shapes = [Circle(1.0), Square(2.0), Circle(3.0)]
+            shapes.map(fn(shape) { return shape.area_squared() })
+            "#
+        ),
+        "[1, 4, 9]"
+    );
+}
+
+#[test]
+fn enum_method_via_filter() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float)
+            impl Shape {
+                fn is_circle(it) {
+                    match it {
+                        Circle(_) => return true
+                        _ => return false
+                    }
+                }
+            }
+            let shapes = [Circle(1.0), Square(2.0), Circle(3.0)]
+            shapes.filter(fn(s) { return s.is_circle() }).len()
+            "#
+        ),
+        "2"
+    );
+}
+
+#[test]
+fn enum_method_via_reduce() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float)
+            impl Shape {
+                fn area_squared(it) {
+                    match it {
+                        Circle(radius) => return radius * radius
+                        Square(side) => return side * side
+                    }
+                }
+            }
+            let shapes = [Square(2.0), Square(3.0), Square(4.0)]
+            shapes.reduce(0.0, fn(acc, shape) { return acc + shape.area_squared() })
+            "#
+        ),
+        "29"
+    );
+}
+
+#[test]
+fn enum_method_via_sort_by_area() {
+    assert_eq!(
+        enum_display(
+            r#"
+            type Shape = Circle(float) | Square(float)
+            impl Shape {
+                fn area_squared(it) {
+                    match it {
+                        Circle(radius) => return radius * radius
+                        Square(side) => return side * side
+                    }
+                }
+                fn extent(it) {
+                    match it {
+                        Circle(radius) => return radius
+                        Square(side) => return side
+                    }
+                }
+            }
+            let shapes = [Square(5.0), Square(2.0), Square(4.0)]
+            let sorted = shapes.sort(fn(x, y) {
+                if x.area_squared() < y.area_squared() { return -1 }
+                if x.area_squared() > y.area_squared() { return 1 }
+                return 0
+            })
+            sorted.map(fn(shape) { return shape.extent() })
+            "#
+        ),
+        "[2, 4, 5]"
+    );
+}
+
+// ----- Static methods on algebraic types (per B3) ------------------------
+// Pinning tests: static method dispatch via `TypeName.method()` works for
+// `struct` types but NOT for algebraic `type` definitions in the
+// interpreter today — the type name never becomes a bindable value so
+// `Shape.unit_circle()` errors with "undefined variable: 'Shape'". The
+// impl block DOES still register the function in static_methods; only
+// the call site lookup is missing. Pinned here so a future fix (making
+// algebraic type names resolve as static-method receivers) shows up as
+// a visible diff.
+
+#[test]
+fn enum_pin_static_method_zero_arg_not_resolvable_on_algebraic() {
+    let res = try_run_forge(
+        r#"
+        type Shape = Circle(float) | Square(float)
+        impl Shape {
+            fn unit_circle() { return Circle(1.0) }
+        }
+        Shape.unit_circle()
+        "#,
+    );
+    assert!(
+        res.is_err(),
+        "pin: expected 'undefined variable Shape' today, got {:?}",
+        res
+    );
+}
+
+#[test]
+fn enum_pin_static_method_with_arg_not_resolvable_on_algebraic() {
+    let res = try_run_forge(
+        r#"
+        type Shape = Circle(float) | Square(float)
+        impl Shape {
+            fn from_radius(r) { return Circle(r) }
+        }
+        Shape.from_radius(7.5)
+        "#,
+    );
+    assert!(
+        res.is_err(),
+        "pin: expected 'undefined variable Shape' today, got {:?}",
+        res
+    );
+}
+
+// ----- Error-path tests (per M3) ------------------------------------------
+
+#[test]
+fn enum_method_error_no_such_method() {
+    let res = try_run_forge(
+        r#"
+        type Box = Wrap(int)
+        impl Box {
+            fn peek(it) { return it._0 }
+        }
+        Wrap(1).nonexistent()
+        "#,
+    );
+    assert!(
+        res.is_err(),
+        "expected error for missing method, got {:?}",
+        res
+    );
+}
+
+#[test]
+fn enum_method_pin_missing_self_return_type() {
+    // Per B2: `Self` is not implemented as a real type. Pin whatever
+    // current behavior is (parses as string ident, erased in non-strict
+    // mode) so a future `Self` implementation shows up as a diff.
+    // Currently `Self` parses but is never bound, so it behaves as a
+    // type-erased annotation — the body still works.
+    assert_eq!(
+        enum_display(
+            r#"
+            type Box = Wrap(int)
+            impl Box {
+                fn inc(it) -> Self { return Wrap(it._0 + 1) }
+                fn get(it) { return it._0 }
+            }
+            Wrap(5).inc().get()
+            "#
+        ),
+        "6"
+    );
+}
+
+#[test]
+fn enum_pin_when_is_constructor_does_not_parse() {
+    // Per M5: `when it { is Circle(r) -> r }` should fail to parse today.
+    // Pin this so a future `when`-pattern extension is a visible diff.
+    let mut lexer = Lexer::new(
+        r#"
+        type Shape = Circle(float) | Square(float)
+        impl Shape {
+            fn radius(it) {
+                return when it {
+                    is Circle(r) -> r
+                    else -> 0.0
+                }
+            }
+        }
+        "#,
+    );
+    let tokens = lexer.tokenize().expect("lex should succeed");
+    let mut parser = Parser::new(tokens);
+    let res = parser.parse_program();
+    assert!(
+        res.is_err(),
+        "expected parse error for `when is Constructor(..)`, got Ok"
+    );
+}

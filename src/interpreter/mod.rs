@@ -1190,8 +1190,6 @@ impl Interpreter {
                 ability,
                 methods,
             } => {
-                // Phase 4 will fully implement method tables + dispatch
-                // For now, register each method function in the environment
                 for method_spanned in methods {
                     if let Stmt::FnDef {
                         name: method_name,

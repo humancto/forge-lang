@@ -1,0 +1,10 @@
+// expect: 42
+type Pair = Tuple2(int, int)
+impl Pair {
+    fn sum(it) {
+        match it {
+            Tuple2(a, b) => return a + b
+        }
+    }
+}
+Tuple2(7, 35).sum()

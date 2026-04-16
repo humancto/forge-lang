@@ -41,6 +41,8 @@ pub fn run_repl(vm: &mut VM, program: &Program) -> Result<value::Value, VMError>
 
 #[cfg(test)]
 mod async_tests;
+#[cfg(test)]
+mod enum_methods_tests;
 #[cfg(all(test, feature = "jit"))]
 mod jit_tests;
 #[cfg(test)]

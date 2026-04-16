@@ -1,0 +1,11 @@
+// expect: true
+type Shape = Circle(float) | Square(float)
+impl Shape {
+    fn is_circle(it) {
+        match it {
+            Circle(_) => return true
+            _ => return false
+        }
+    }
+}
+Circle(1.0).is_circle()

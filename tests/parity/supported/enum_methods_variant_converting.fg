@@ -1,0 +1,17 @@
+// expect: 6
+type Shape = Circle(float) | Square(float)
+impl Shape {
+    fn to_square(it) {
+        match it {
+            Circle(r) => return Square(r * 2.0)
+            Square(s) => return Square(s)
+        }
+    }
+    fn side(it) {
+        match it {
+            Circle(r) => return r
+            Square(s) => return s
+        }
+    }
+}
+Circle(3.0).to_square().side()
