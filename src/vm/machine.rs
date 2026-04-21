@@ -212,11 +212,12 @@ pub struct VM {
     /// `.collect()` first to materialize. (M9.4 bug #6.)
     pub(super) stream_boundary_error: std::cell::Cell<bool>,
     /// Squad handle collector stack: when non-empty, Spawn registers handles here.
-    /// Each entry is (dst_register, cancellation_flag, collected_handles).
+    /// Each entry is (dst_register, cancel_flag, handles, saved_outer_cancelled).
     squad_stack: Vec<(
         u8,
         Arc<std::sync::atomic::AtomicBool>,
         Vec<Arc<(Mutex<Option<SharedValue>>, Condvar)>>,
+        Arc<std::sync::atomic::AtomicBool>,
     )>,
     /// Cooperative cancellation flag — shared with squad parent, checked at safe points.
     cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -1872,17 +1873,18 @@ impl VM {
                     }
                     OpCode::SquadBegin => {
                         let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        self.squad_stack.push((a, cancel_flag, Vec::new()));
+                        let saved = self.cancelled.clone();
+                        self.cancelled = cancel_flag.clone();
+                        self.squad_stack.push((a, cancel_flag, Vec::new(), saved));
                     }
                     OpCode::SquadEnd => {
-                        let (dst_reg, cancel_flag, handles) =
+                        let (dst_reg, cancel_flag, handles, saved_cancelled) =
                             self.squad_stack.pop().unwrap_or_else(|| {
-                                (
-                                    a,
-                                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                                    Vec::new(),
-                                )
+                                let dummy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                (a, dummy.clone(), Vec::new(), dummy)
                             });
+                        // Restore outer cancellation flag
+                        self.cancelled = saved_cancelled;
 
                         let mut results = Vec::with_capacity(handles.len());
                         let mut first_error: Option<String> = None;

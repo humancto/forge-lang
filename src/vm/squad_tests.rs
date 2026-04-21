@@ -192,3 +192,28 @@ fn vm_squad_with_return_in_spawn() {
     );
     assert_eq!(out, vec!["[99, 100]"]);
 }
+
+#[test]
+fn vm_squad_cancellation_stops_loop() {
+    // A long-running loop task should be cancelled when a sibling errors.
+    // If cancellation doesn't work, this test will hang (timeout).
+    let msg = run_on_vm_err(
+        r#"
+        squad {
+            spawn {
+                let mut i = 0
+                while i < 10000000 {
+                    i = i + 1
+                }
+                i
+            }
+            spawn { must null }
+        }
+    "#,
+    );
+    assert!(
+        msg.contains("squad task error"),
+        "expected squad error, got: {}",
+        msg
+    );
+}
