@@ -1,0 +1,63 @@
+// Squad — Structured Concurrency in Forge
+//
+// `squad { spawn { } spawn { } }` runs tasks concurrently with:
+//   - Automatic join: all tasks complete before the block exits
+//   - Error propagation: first error cancels remaining tasks
+//   - Cooperative cancellation: tasks check at safe points (loops, calls)
+//
+// IMPORTANT: Blocking builtins (HTTP, DB, FS) are NOT cancellable —
+// they run to completion on OS threads. Use await_timeout for those.
+
+say "=== Basic Squad ==="
+
+let results = squad {
+    spawn { 1 + 1 }
+    spawn { 2 + 2 }
+    spawn { 3 + 3 }
+}
+say results   // [2, 4, 6]
+
+say "\n=== Squad with Setup ==="
+
+let results = squad {
+    let base = 100
+    spawn { base + 1 }
+    spawn { base + 2 }
+    spawn { base + 3 }
+}
+say results   // [101, 102, 103]
+
+say "\n=== Squad as Expression ==="
+
+let total = sum(squad {
+    spawn { 10 }
+    spawn { 20 }
+    spawn { 30 }
+})
+say "Total: {total}"  // Total: 60
+
+say "\n=== Many Tasks ==="
+
+let results = squad {
+    spawn { 1 }
+    spawn { 2 }
+    spawn { 3 }
+    spawn { 4 }
+    spawn { 5 }
+}
+say "Sum of 5 tasks: {sum(results)}"  // 15
+
+say "\n=== Error Propagation ==="
+
+try {
+    let results = squad {
+        spawn { 42 }
+        spawn { must null }  // This will fail
+    }
+    say results
+} catch err {
+    say "Caught: {err.message}"
+    // Output: Caught: squad task error: must failed: got null
+}
+
+say "\nDone!"

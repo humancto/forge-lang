@@ -48,18 +48,14 @@ impl SendableVM {
             Ok(v) => {
                 let sv = value_to_shared(&vm.gc, &v);
                 if vm.check_stream_boundary().is_err() {
-                    eprintln!(
-                        "spawn error: Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize"
-                    );
-                    SharedValue::Null
+                    SharedValue::ResultErr(Box::new(SharedValue::String(
+                        "Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize".to_string(),
+                    )))
                 } else {
-                    sv
+                    SharedValue::ResultOk(Box::new(sv))
                 }
             }
-            Err(e) => {
-                eprintln!("spawn error: {}", e.message);
-                SharedValue::Null
-            }
+            Err(e) => SharedValue::ResultErr(Box::new(SharedValue::String(e.message.clone()))),
         };
         if let Ok(mut guard) = slot.0.lock() {
             *guard = Some(val);
@@ -215,6 +211,16 @@ pub struct VM {
     /// single-use and cannot cross engine boundaries — callers must
     /// `.collect()` first to materialize. (M9.4 bug #6.)
     pub(super) stream_boundary_error: std::cell::Cell<bool>,
+    /// Squad handle collector stack: when non-empty, Spawn registers handles here.
+    /// Each entry is (dst_register, cancel_flag, handles, saved_outer_cancelled).
+    squad_stack: Vec<(
+        u8,
+        Arc<std::sync::atomic::AtomicBool>,
+        Vec<Arc<(Mutex<Option<SharedValue>>, Condvar)>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
+    /// Cooperative cancellation flag — shared with squad parent, checked at safe points.
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +306,8 @@ impl VM {
             profiler: Profiler::new(false),
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
+            squad_stack: Vec::new(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         vm.register_builtins();
         vm
@@ -325,6 +333,8 @@ impl VM {
             profiler: Profiler::new(true),
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
+            squad_stack: Vec::new(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         vm.register_builtins();
         vm
@@ -899,6 +909,9 @@ impl VM {
             child.struct_defaults.insert(name.clone(), child_defaults);
         }
 
+        // Propagate cancellation flag so squad can cancel spawned tasks
+        child.cancelled = self.cancelled.clone();
+
         #[cfg(feature = "jit")]
         assert!(
             child.jit_cache.is_empty() && child.jit_modules.is_empty(),
@@ -1318,10 +1331,18 @@ impl VM {
                         }
                     }
                     OpCode::Loop => {
+                        // Cooperative cancellation check at backward jump
+                        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err(VMError::new("task cancelled"));
+                        }
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
                     }
                     OpCode::Call => {
+                        // Cooperative cancellation check at function call
+                        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err(VMError::new("task cancelled"));
+                        }
                         let func_val = self.registers[base + a as usize];
                         let arg_count = b as usize;
                         let dst_reg = base + c as usize;
@@ -1842,8 +1863,69 @@ impl VM {
                         spawn_thread(sendable, child_closure, slot_clone);
                         self.drain_stream_boundary_flags();
 
+                        // Register handle with squad if active
+                        if let Some(squad) = self.squad_stack.last_mut() {
+                            squad.2.push(result_slot.clone());
+                        }
+
                         let handle = self.gc.alloc(ObjKind::TaskHandle(result_slot));
                         self.registers[base + a as usize] = Value::obj(handle);
+                    }
+                    OpCode::SquadBegin => {
+                        let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let saved = self.cancelled.clone();
+                        self.cancelled = cancel_flag.clone();
+                        self.squad_stack.push((a, cancel_flag, Vec::new(), saved));
+                    }
+                    OpCode::SquadEnd => {
+                        let (dst_reg, cancel_flag, handles, saved_cancelled) =
+                            self.squad_stack.pop().unwrap_or_else(|| {
+                                let dummy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                (a, dummy.clone(), Vec::new(), dummy)
+                            });
+                        // Restore outer cancellation flag
+                        self.cancelled = saved_cancelled;
+
+                        let mut results = Vec::with_capacity(handles.len());
+                        let mut first_error: Option<String> = None;
+
+                        for slot in &handles {
+                            let (lock, cvar) = &**slot;
+                            let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                            while guard.is_none() {
+                                guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
+                            }
+                            if let Some(ref shared) = *guard {
+                                match shared {
+                                    SharedValue::ResultOk(inner) => {
+                                        results.push(shared_to_value(&mut self.gc, inner));
+                                    }
+                                    SharedValue::ResultErr(inner) => {
+                                        if first_error.is_none() {
+                                            let msg = match inner.as_ref() {
+                                                SharedValue::String(s) => s.clone(),
+                                                _ => "task error".to_string(),
+                                            };
+                                            first_error = Some(msg);
+                                            cancel_flag
+                                                .store(true, std::sync::atomic::Ordering::Release);
+                                        }
+                                    }
+                                    other => {
+                                        results.push(shared_to_value(&mut self.gc, other));
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(msg) = first_error {
+                            return Err(VMError::new(&format!("squad task error: {}", msg)));
+                        }
+
+                        // Build result array
+                        let arr_items: Vec<Value> = results;
+                        let arr = self.gc.alloc(ObjKind::Array(arr_items));
+                        self.registers[base + dst_reg as usize] = Value::obj(arr);
                     }
                     OpCode::Await => {
                         let src = self.registers[base + b as usize];
@@ -1871,7 +1953,28 @@ impl VM {
                                     .map_err(|_| VMError::new("await: wait interrupted"))?;
                             }
                             let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
-                            shared_to_value(&mut self.gc, &shared)
+                            let val = shared_to_value(&mut self.gc, &shared);
+                            // Unwrap ResultOk, propagate ResultErr
+                            match val.classify(&self.gc) {
+                                ValueKind::Obj(r) => {
+                                    if let Some(obj) = self.gc.get(r) {
+                                        if let ObjKind::ResultOk(v) = &obj.kind {
+                                            *v
+                                        } else if let ObjKind::ResultErr(e) = &obj.kind {
+                                            let msg = e.display(&self.gc);
+                                            return Err(VMError::new(&format!(
+                                                "task error: {}",
+                                                msg
+                                            )));
+                                        } else {
+                                            val
+                                        }
+                                    } else {
+                                        val
+                                    }
+                                }
+                                _ => val,
+                            }
                         } else {
                             src
                         };

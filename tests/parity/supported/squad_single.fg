@@ -1,0 +1,5 @@
+// expect: [42]
+let results = squad {
+    spawn { 42 }
+}
+results

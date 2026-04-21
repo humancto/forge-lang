@@ -74,6 +74,7 @@ impl Parser {
                 Ok(Stmt::Continue)
             }
             Token::Spawn => self.parse_spawn(),
+            Token::Squad => self.parse_squad(),
             Token::At => self.parse_decorator_or_fn(),
             Token::Say | Token::Yell | Token::Whisper => self.parse_say_yell_whisper(),
             Token::Grab => self.parse_grab(),
@@ -1161,6 +1162,12 @@ impl Parser {
         Ok(Stmt::Spawn { body })
     }
 
+    fn parse_squad(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(Token::Squad)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::Squad { body })
+    }
+
     fn parse_decorator_or_fn(&mut self) -> Result<Stmt, ParseError> {
         let decorator = self.parse_decorator()?;
         self.skip_newlines();
@@ -1630,6 +1637,12 @@ impl Parser {
                 self.advance();
                 let body = self.parse_block()?;
                 Ok(Expr::Spawn(body))
+            }
+
+            Token::Squad => {
+                self.advance();
+                let body = self.parse_block()?;
+                Ok(Expr::Squad(body))
             }
 
             Token::StringLit(ref s) => {

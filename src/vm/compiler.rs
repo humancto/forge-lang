@@ -544,6 +544,41 @@ fn variant_object_expr(type_name: &str, variant_name: &str, field_params: &[Stri
     Expr::Object(fields)
 }
 
+/// Compile a spawn/squad body: if the last statement is an expression,
+/// compile it as a return so the task returns its value (not null).
+fn compile_spawn_body(sc: &mut Compiler, body: &[SpannedStmt]) -> Result<(), CompileError> {
+    if body.is_empty() {
+        sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+        return Ok(());
+    }
+    let (init, last) = body.split_at(body.len() - 1);
+    for s in init {
+        sc.current_line = s.line;
+        compile_stmt(sc, &s.stmt)?;
+    }
+    let last_stmt = &last[0];
+    sc.current_line = last_stmt.line;
+    match &last_stmt.stmt {
+        Stmt::Expression(expr) => {
+            let dst = sc.alloc_reg()?;
+            compile_expr(sc, expr, dst)?;
+            sc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
+            sc.free_to(dst);
+        }
+        Stmt::Return(Some(expr)) => {
+            let dst = sc.alloc_reg()?;
+            compile_expr(sc, expr, dst)?;
+            sc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
+            sc.free_to(dst);
+        }
+        other => {
+            compile_stmt(sc, other)?;
+            sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+        }
+    }
+    Ok(())
+}
+
 fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
     match stmt {
         Stmt::Let {
@@ -1600,11 +1635,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             sc.parent_upvalues = parent_upvalues;
             sc.current_line = c.current_line;
             sc.begin_scope();
-            for s in body {
-                sc.current_line = s.line;
-                compile_stmt(&mut sc, &s.stmt)?;
-            }
-            sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+            compile_spawn_body(&mut sc, body)?;
             sc.chunk.upvalue_count = sc.upvalues.len() as u8;
             sc.chunk.max_registers = sc.max_register;
             let upvalue_sources: Vec<UpvalueSource> =
@@ -1617,6 +1648,18 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             c.emit(encode_abx(OpCode::Closure, cr, proto), 0);
             c.emit(encode_abc(OpCode::Spawn, cr, 0, 0), 0);
             c.free_to(cr);
+            Ok(())
+        }
+
+        Stmt::Squad { body } => {
+            let dst = c.alloc_reg()?;
+            c.emit(encode_abc(OpCode::SquadBegin, dst, 0, 0), c.current_line);
+            for s in body {
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
+            }
+            c.emit(encode_abc(OpCode::SquadEnd, dst, 0, 0), c.current_line);
+            c.free_to(dst);
             Ok(())
         }
     }
@@ -1895,11 +1938,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             sc.parent_upvalues = parent_upvalues;
             sc.current_line = c.current_line;
             sc.begin_scope();
-            for s in body {
-                sc.current_line = s.line;
-                compile_stmt(&mut sc, &s.stmt)?;
-            }
-            sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
+            compile_spawn_body(&mut sc, body)?;
             sc.chunk.upvalue_count = sc.upvalues.len() as u8;
             sc.chunk.max_registers = sc.max_register;
             let upvalue_sources: Vec<UpvalueSource> =
@@ -1910,6 +1949,14 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             c.chunk.prototypes.push(proto_chunk);
             c.emit(encode_abx(OpCode::Closure, dst, proto), 0);
             c.emit(encode_abc(OpCode::Spawn, dst, 0, 0), 0);
+        }
+        Expr::Squad(body) => {
+            c.emit(encode_abc(OpCode::SquadBegin, dst, 0, 0), c.current_line);
+            for s in body {
+                c.current_line = s.line;
+                compile_stmt(c, &s.stmt)?;
+            }
+            c.emit(encode_abc(OpCode::SquadEnd, dst, 0, 0), c.current_line);
         }
         Expr::Spread(inner) => {
             compile_expr(c, inner, dst)?;

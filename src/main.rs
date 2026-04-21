@@ -587,7 +587,8 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         Stmt::For { body, .. }
         | Stmt::While { body, .. }
         | Stmt::Loop { body }
-        | Stmt::Spawn { body } => {
+        | Stmt::Spawn { body }
+        | Stmt::Squad { body } => {
             for s in body {
                 collect_vm_incompatible_stmt(&s.stmt, issues);
             }
@@ -692,7 +693,7 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
             collect_vm_incompatible_expr(expr, issues);
         }
         Expr::Spread(expr) => collect_vm_incompatible_expr(expr, issues),
-        Expr::Spawn(body) => {
+        Expr::Spawn(body) | Expr::Squad(body) => {
             for s in body {
                 collect_vm_incompatible_stmt(&s.stmt, issues);
             }
