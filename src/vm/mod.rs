@@ -59,3 +59,5 @@ mod set_tests;
 mod stream_tests;
 #[cfg(test)]
 mod tuple_tests;
+#[cfg(test)]
+mod squad_tests;

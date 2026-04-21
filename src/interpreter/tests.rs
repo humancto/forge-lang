@@ -6641,3 +6641,197 @@ fn enum_pin_when_is_constructor_does_not_parse() {
         "expected parse error for `when is Constructor(..)`, got Ok"
     );
 }
+
+// ==================== Squad (structured concurrency) ====================
+
+#[test]
+fn squad_basic_two_spawns() {
+    let value = run_forge(
+        r#"
+        let results = squad {
+            spawn { 1 + 1 }
+            spawn { 2 + 2 }
+        }
+        results
+    "#,
+    );
+    assert_eq!(value, Value::Array(vec![Value::Int(2), Value::Int(4)]));
+}
+
+#[test]
+fn squad_single_spawn() {
+    let value = run_forge(
+        r#"
+        let results = squad {
+            spawn { 42 }
+        }
+        results
+    "#,
+    );
+    assert_eq!(value, Value::Array(vec![Value::Int(42)]));
+}
+
+#[test]
+fn squad_empty_body() {
+    let value = run_forge(
+        r#"
+        let results = squad { }
+        results
+    "#,
+    );
+    assert_eq!(value, Value::Array(vec![]));
+}
+
+#[test]
+fn squad_preserves_spawn_order() {
+    let value = run_forge(
+        r#"
+        let results = squad {
+            spawn { "first" }
+            spawn { "second" }
+            spawn { "third" }
+        }
+        results
+    "#,
+    );
+    assert_eq!(
+        value,
+        Value::Array(vec![
+            Value::String("first".into()),
+            Value::String("second".into()),
+            Value::String("third".into()),
+        ])
+    );
+}
+
+#[test]
+fn squad_error_propagation() {
+    let result = try_run_forge(
+        r#"
+        let results = squad {
+            spawn { 1 + 1 }
+            spawn { must null }
+        }
+        results
+    "#,
+    );
+    assert!(result.is_err(), "squad should propagate task errors");
+    let msg = result.unwrap_err().message;
+    assert!(
+        msg.contains("squad task error"),
+        "error should mention squad: {}",
+        msg
+    );
+}
+
+#[test]
+fn squad_string_results() {
+    let value = run_forge(
+        r#"
+        let results = squad {
+            spawn { "hello" }
+            spawn { "world" }
+        }
+        join(results, " ")
+    "#,
+    );
+    assert_eq!(value, Value::String("hello world".into()));
+}
+
+#[test]
+fn squad_as_expression() {
+    let value = run_forge(
+        r#"
+        let count = len(squad {
+            spawn { 10 }
+            spawn { 20 }
+            spawn { 30 }
+        })
+        count
+    "#,
+    );
+    assert_eq!(value, Value::Int(3));
+}
+
+#[test]
+fn squad_non_spawn_stmts_ignored_in_results() {
+    let value = run_forge(
+        r#"
+        let results = squad {
+            let x = 10
+            spawn { x + 1 }
+            spawn { x + 2 }
+        }
+        results
+    "#,
+    );
+    // Only spawn results are collected; `let x = 10` is sequential setup
+    assert_eq!(value, Value::Array(vec![Value::Int(11), Value::Int(12)]));
+}
+
+#[test]
+fn squad_statement_form() {
+    // squad as statement (results discarded)
+    let result = try_run_forge(
+        r#"
+        let mut done = false
+        squad {
+            spawn { 1 + 1 }
+        }
+        done = true
+        assert(done)
+    "#,
+    );
+    assert!(result.is_ok(), "squad statement: {:?}", result.err());
+}
+
+#[test]
+fn squad_nested() {
+    let value = run_forge(
+        r#"
+        let outer = squad {
+            spawn {
+                let inner = squad {
+                    spawn { 1 }
+                    spawn { 2 }
+                }
+                sum(inner)
+            }
+            spawn { 10 }
+        }
+        outer
+    "#,
+    );
+    assert_eq!(value, Value::Array(vec![Value::Int(3), Value::Int(10)]));
+}
+
+#[test]
+fn squad_with_return_in_spawn() {
+    let value = run_forge(
+        r#"
+        let results = squad {
+            spawn { return 99 }
+            spawn { return 100 }
+        }
+        results
+    "#,
+    );
+    assert_eq!(value, Value::Array(vec![Value::Int(99), Value::Int(100)]));
+}
+
+#[test]
+fn squad_many_spawns() {
+    let value = run_forge(
+        r#"
+        let results = squad {
+            spawn { 1 }
+            spawn { 2 }
+            spawn { 3 }
+            spawn { 4 }
+            spawn { 5 }
+        }
+        sum(results)
+    "#,
+    );
+    assert_eq!(value, Value::Int(15));
+}
