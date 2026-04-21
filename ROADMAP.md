@@ -586,7 +586,7 @@ m5-016: ci: release workflow for libforge.a per target
 - [x] Enum methods via `impl` blocks on algebraic `type` definitions
 - [ ] Default method implementations in `ability` blocks
 - [ ] Enforced generics with type erasure and runtime validation
-- [ ] Structured concurrency with `squad` blocks, automatic join, cancellation on failure
+- [x] Structured concurrency with `squad` blocks, automatic join, cancellation on failure
 
 ---
 
