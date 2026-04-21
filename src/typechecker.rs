@@ -1478,6 +1478,14 @@ impl TypeChecker {
                 InferredType::Unknown // TaskHandle type
             }
 
+            Expr::Squad(body) => {
+                for s in body {
+                    self.current_line = s.line;
+                    self.check_stmt(&s.stmt);
+                }
+                InferredType::Array(Box::new(InferredType::Unknown))
+            }
+
             Expr::Spread(inner) => self.infer_expr(inner),
 
             Expr::WhereFilter { source, .. } => {

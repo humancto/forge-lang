@@ -88,6 +88,9 @@ pub enum Stmt {
     Spawn {
         body: Vec<SpannedStmt>,
     },
+    Squad {
+        body: Vec<SpannedStmt>,
+    },
     DecoratorStmt(Decorator),
     TypeDef {
         name: String,
@@ -228,6 +231,7 @@ pub enum Expr {
     },
     Await(Box<Expr>),
     Spawn(Vec<SpannedStmt>),
+    Squad(Vec<SpannedStmt>),
     Spread(Box<Expr>),
     Must(Box<Expr>),
     Freeze(Box<Expr>),

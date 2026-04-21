@@ -54,19 +54,21 @@ pub enum OpCode {
     PopHandler,
     PushTimeout, // A=duration/error reg, sBx=catch_target
     PopTimeout,
-    Await,    // A=dst, B=src (if TaskHandle: block + deserialize; else: pass through)
-    Schedule, // A=closure_reg, B=interval_reg, C=unit_reg
-    Watch,    // A=closure_reg, B=path_reg
-    Must,     // A=dst, B=src (unwrap Ok, crash on Err/null)
-    Ask,      // A=dst, B=prompt_reg (call LLM API)
-    Freeze,   // A=dst, B=src (wrap value as frozen/immutable)
-    NewTuple, // A=dst, B=start_reg, C=count
-    IterGet,  // A=dst, B=obj_reg, C=idx_reg — like GetIndex but allows Set (for for-loop iteration)
+    Await,      // A=dst, B=src (if TaskHandle: block + deserialize; else: pass through)
+    Schedule,   // A=closure_reg, B=interval_reg, C=unit_reg
+    Watch,      // A=closure_reg, B=path_reg
+    Must,       // A=dst, B=src (unwrap Ok, crash on Err/null)
+    Ask,        // A=dst, B=prompt_reg (call LLM API)
+    Freeze,     // A=dst, B=src (wrap value as frozen/immutable)
+    NewTuple,   // A=dst, B=start_reg, C=count
+    IterGet, // A=dst, B=obj_reg, C=idx_reg — like GetIndex but allows Set (for for-loop iteration)
+    SquadBegin, // A=dst (push squad context for collecting spawn handles)
+    SquadEnd, // A=dst (join all collected handles, produce result array)
 }
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::IterGet as u8 + 1 == 59);
+const _: () = assert!(OpCode::SquadEnd as u8 + 1 == 61);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -132,6 +134,8 @@ impl TryFrom<u8> for OpCode {
             56 => Ok(OpCode::Freeze),
             57 => Ok(OpCode::NewTuple),
             58 => Ok(OpCode::IterGet),
+            59 => Ok(OpCode::SquadBegin),
+            60 => Ok(OpCode::SquadEnd),
             _ => Err(value),
         }
     }
@@ -283,7 +287,7 @@ mod tests {
 
     #[test]
     fn try_from_invalid_opcode() {
-        assert_eq!(OpCode::try_from(59u8), Err(59));
+        assert_eq!(OpCode::try_from(61u8), Err(61));
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }

@@ -651,6 +651,8 @@ pub struct Interpreter {
     pub output_sink: Option<Arc<Mutex<Vec<String>>>>,
     /// Call stack frames for debugger stack traces
     pub call_stack: Vec<DebugFrame>,
+    /// Squad handle collector: when Some, spawn_task pushes handles here
+    squad_handles: Option<Vec<Value>>,
 }
 
 impl Interpreter {
@@ -671,6 +673,7 @@ impl Interpreter {
             debug_state: None,
             output_sink: None,
             call_stack: Vec::new(),
+            squad_handles: None,
         };
         interp.register_builtins();
         interp
@@ -1503,6 +1506,11 @@ impl Interpreter {
             Stmt::Spawn { body } => {
                 // Fire-and-forget spawn (backward compat — result is discarded)
                 let _ = self.spawn_task(body)?;
+                Ok(Signal::None)
+            }
+
+            Stmt::Squad { body } => {
+                self.exec_squad(body)?;
                 Ok(Signal::None)
             }
 
@@ -3150,6 +3158,8 @@ impl Interpreter {
 
             Expr::Spawn(body) => self.spawn_task(body),
 
+            Expr::Squad(body) => self.exec_squad(body),
+
             Expr::Await(inner) => {
                 let val = self.eval_expr(inner)?;
                 match val {
@@ -4280,6 +4290,8 @@ impl Interpreter {
         let slot_clone = result_slot.clone();
         let mut spawn_interp = Interpreter::new();
         spawn_interp.env = self.env.deep_clone();
+        // Propagate cancellation token so squad can cancel spawned tasks
+        spawn_interp.cancelled = self.cancelled.clone();
 
         // Always use std::thread — simpler, avoids tokio dependency issues
         std::thread::spawn(move || {
@@ -4297,7 +4309,91 @@ impl Interpreter {
                 cvar.notify_all();
             }
         });
-        Ok(Value::TaskHandle(result_slot))
+        let handle = Value::TaskHandle(result_slot);
+        // If inside a squad block, register the handle for automatic join
+        if let Some(ref mut handles) = self.squad_handles {
+            handles.push(handle.clone());
+        }
+        Ok(handle)
+    }
+
+    /// Execute a squad block: run body sequentially (collecting spawn handles),
+    /// then join all tasks. On first error, cancel remaining tasks and propagate.
+    fn exec_squad(&mut self, body: &[SpannedStmt]) -> Result<Value, RuntimeError> {
+        // Save and replace the squad handle collector
+        let outer_handles = self.squad_handles.take();
+        self.squad_handles = Some(Vec::new());
+
+        // Create a fresh cancellation token for this squad's tasks
+        let outer_cancelled = self.cancelled.clone();
+        let squad_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.cancelled = squad_cancel.clone();
+
+        // Execute the body — spawns will register handles via squad_handles
+        let body_result = self.exec_block(body);
+
+        // Collect the handles
+        let handles = self.squad_handles.take().unwrap_or_default();
+
+        // Restore outer state
+        self.squad_handles = outer_handles;
+        self.cancelled = outer_cancelled;
+
+        // If the body itself errored (not a spawn error), cancel all tasks and join
+        if let Err(ref e) = body_result {
+            if e.message != "cancelled" {
+                squad_cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+            // Join all handles to ensure cleanup
+            for handle in &handles {
+                if let Value::TaskHandle(slot) = handle {
+                    let (lock, cvar) = &**slot;
+                    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    while guard.is_none() {
+                        guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
+                    }
+                }
+            }
+            return body_result.map(|_| Value::Null);
+        }
+
+        // Join all handles and collect results
+        let mut results = Vec::with_capacity(handles.len());
+        let mut first_error: Option<String> = None;
+
+        for handle in &handles {
+            if let Value::TaskHandle(slot) = handle {
+                let (lock, cvar) = &**slot;
+                let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                while guard.is_none() {
+                    guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
+                }
+                if let Some(ref val) = *guard {
+                    match val {
+                        Value::ResultOk(v) => results.push(*v.clone()),
+                        Value::ResultErr(e) => {
+                            if first_error.is_none() {
+                                first_error = Some(match e.as_ref() {
+                                    Value::String(s) => s.clone(),
+                                    other => format!("{:?}", other),
+                                });
+                                // Cancel remaining tasks
+                                squad_cancel.store(true, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                        other => results.push(other.clone()),
+                    }
+                }
+            }
+        }
+
+        // If there was an error, join remaining handles (they should finish quickly
+        // after cancellation) — already joined above in the loop, so just propagate
+        if let Some(msg) = first_error {
+            return Err(RuntimeError::new(&format!("squad task error: {}", msg)));
+        }
+
+        Ok(Value::Array(results))
     }
 
     // call_builtin() is in src/interpreter/builtins.rs (extracted for readability)
