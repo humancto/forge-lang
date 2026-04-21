@@ -48,18 +48,14 @@ impl SendableVM {
             Ok(v) => {
                 let sv = value_to_shared(&vm.gc, &v);
                 if vm.check_stream_boundary().is_err() {
-                    eprintln!(
-                        "spawn error: Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize"
-                    );
-                    SharedValue::Null
+                    SharedValue::ResultErr(Box::new(SharedValue::String(
+                        "Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize".to_string(),
+                    )))
                 } else {
-                    sv
+                    SharedValue::ResultOk(Box::new(sv))
                 }
             }
-            Err(e) => {
-                eprintln!("spawn error: {}", e.message);
-                SharedValue::Null
-            }
+            Err(e) => SharedValue::ResultErr(Box::new(SharedValue::String(e.message.clone()))),
         };
         if let Ok(mut guard) = slot.0.lock() {
             *guard = Some(val);
@@ -1871,7 +1867,28 @@ impl VM {
                                     .map_err(|_| VMError::new("await: wait interrupted"))?;
                             }
                             let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
-                            shared_to_value(&mut self.gc, &shared)
+                            let val = shared_to_value(&mut self.gc, &shared);
+                            // Unwrap ResultOk, propagate ResultErr
+                            match val.classify(&self.gc) {
+                                ValueKind::Obj(r) => {
+                                    if let Some(obj) = self.gc.get(r) {
+                                        if let ObjKind::ResultOk(v) = &obj.kind {
+                                            *v
+                                        } else if let ObjKind::ResultErr(e) = &obj.kind {
+                                            let msg = e.display(&self.gc);
+                                            return Err(VMError::new(&format!(
+                                                "task error: {}",
+                                                msg
+                                            )));
+                                        } else {
+                                            val
+                                        }
+                                    } else {
+                                        val
+                                    }
+                                }
+                                _ => val,
+                            }
                         } else {
                             src
                         };
