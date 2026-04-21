@@ -1,4 +1,3 @@
-mod cancellation;
 mod chat;
 mod dap;
 mod doc;

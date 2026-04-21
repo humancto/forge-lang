@@ -218,6 +218,8 @@ pub struct VM {
         Arc<std::sync::atomic::AtomicBool>,
         Vec<Arc<(Mutex<Option<SharedValue>>, Condvar)>>,
     )>,
+    /// Cooperative cancellation flag — shared with squad parent, checked at safe points.
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +306,7 @@ impl VM {
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         vm.register_builtins();
         vm
@@ -330,6 +333,7 @@ impl VM {
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         vm.register_builtins();
         vm
@@ -904,6 +908,9 @@ impl VM {
             child.struct_defaults.insert(name.clone(), child_defaults);
         }
 
+        // Propagate cancellation flag so squad can cancel spawned tasks
+        child.cancelled = self.cancelled.clone();
+
         #[cfg(feature = "jit")]
         assert!(
             child.jit_cache.is_empty() && child.jit_modules.is_empty(),
@@ -1323,10 +1330,18 @@ impl VM {
                         }
                     }
                     OpCode::Loop => {
+                        // Cooperative cancellation check at backward jump
+                        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err(VMError::new("task cancelled"));
+                        }
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
                     }
                     OpCode::Call => {
+                        // Cooperative cancellation check at function call
+                        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err(VMError::new("task cancelled"));
+                        }
                         let func_val = self.registers[base + a as usize];
                         let arg_count = b as usize;
                         let dst_reg = base + c as usize;

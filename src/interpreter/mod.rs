@@ -978,7 +978,7 @@ impl Interpreter {
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Signal, RuntimeError> {
         // Cooperative cancellation check (used by timeout blocks)
-        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return Err(RuntimeError::new("cancelled"));
         }
         match stmt {
@@ -2036,7 +2036,7 @@ impl Interpreter {
                     .wait_timeout(resumed, std::time::Duration::from_millis(50))
                     .unwrap_or_else(|e| e.into_inner());
                 resumed = result.0;
-                if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
                     return;
                 }
             }
@@ -4339,11 +4339,9 @@ impl Interpreter {
         self.squad_handles = outer_handles;
         self.cancelled = outer_cancelled;
 
-        // If the body itself errored (not a spawn error), cancel all tasks and join
-        if let Err(ref e) = body_result {
-            if e.message != "cancelled" {
-                squad_cancel.store(true, std::sync::atomic::Ordering::Release);
-            }
+        // If the body itself errored, cancel all tasks and join
+        if body_result.is_err() {
+            squad_cancel.store(true, std::sync::atomic::Ordering::Release);
             // Join all handles to ensure cleanup
             for handle in &handles {
                 if let Value::TaskHandle(slot) = handle {
