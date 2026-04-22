@@ -685,7 +685,14 @@ impl Interpreter {
 
     pub(crate) fn fork_for_background_runtime(&self) -> Self {
         let mut interp = Interpreter::new();
-        interp.env = self.env.clone();
+        // CRITICAL: env.deep_clone(), not env.clone(). Environment is
+        // Vec<Arc<Mutex<HashMap>>>, so a derived Clone shares the scope
+        // storage by Arc. Two background tasks (or a background task +
+        // an HTTP handler post-fork) would then serialize on the same
+        // per-scope Mutex, silently re-introducing the global lock we
+        // are trying to escape. The spawn_task path at the bottom of
+        // this file already uses deep_clone for exactly this reason.
+        interp.env = self.env.deep_clone();
         interp.method_tables = self.method_tables.clone();
         interp.static_methods = self.static_methods.clone();
         interp.embedded_fields = self.embedded_fields.clone();
