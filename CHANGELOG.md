@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`fork_for_background_runtime` shared scope storage by Arc** — the existing fork primitive used `env.clone()` (shallow over `Vec<Arc<Mutex<HashMap>>>`), so `schedule`/`watch` blocks shared scope locks with the parent interpreter. Latent because background tasks did not run concurrently with the foreground or each other. Switched to `env.deep_clone()`, the same primitive `spawn_task` already uses for squad blocks.
 
+### Changed
+
+- **Public library surface expanded** — `forge_lang::interpreter`, `forge_lang::lexer`, `forge_lang::parser`, and `forge_lang::runtime` are now `pub` (previously private modules behind the C ABI entry point). Embedders can now drive the language end-to-end from Rust. Required by the new `tests/server_concurrency.rs` integration test; also matches the AOT-binary embedding story.
+- **New direct dependency: `parking_lot = "0.12"`** — used by the WS handler for per-connection state (no poisoning, no Send-across-await hazard with the way the lock is held). Already a transitive dep via `tokio-postgres`, now promoted to direct.
+
 ## [0.8.0] - 2026-04-12
 
 ### Added

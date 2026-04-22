@@ -16,8 +16,14 @@
 //   forge run examples/bench_server_concurrent.fg
 //   ab -n 100 -c 16 http://127.0.0.1:9090/cpu
 //
-// Pre-fix expectation:  ~10 req/sec, p99 ≈ 1.7s
-// Post-fix expectation: ~150 req/sec on a 16-core box, p99 ≈ 100ms
+// Pre-fix:  throughput is flat at ~10 req/sec across all concurrency
+//           levels; p99 latency at C=100 is ~18s.
+// Post-fix: throughput scales up to the interpreter-overhead ceiling
+//           (~35 req/sec at C=16 on a 16-core ARM64 in initial
+//           measurement); p99 at C=100 drops by ~6.5x. Exact numbers
+//           depend on hardware -- the source of truth for "did the
+//           bottleneck regress?" is the ratio assertion in
+//           tests/server_concurrency.rs.
 
 @server(port: 9090)
 
