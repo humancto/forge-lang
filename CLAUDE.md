@@ -289,6 +289,39 @@ Stable target names:
 - `forge.user` — user-emitted events from the Forge `log` stdlib module.
 - `tower_http::trace::*` — per-request HTTP span and response event from `TraceLayer`.
 
+Per-request `X-Request-Id`:
+- `tower_http::request_id::SetRequestIdLayer` assigns a UUID v4 to
+  every request that doesn't already carry `X-Request-Id`, or
+  passes through the inbound value if present.
+- `PropagateRequestIdLayer` echoes the resolved id back in the
+  response `X-Request-Id` header.
+- The id is recorded as the `request_id` field on the outer
+  `tower_http` `request` span (so `on_response` carries it) and the
+  inner `forge.handler` span (belt-and-suspenders for handler-body
+  events including user `log.info` via the propagated `Span::current()`).
+- Inbound `X-Request-Id` is capped at 64 chars and `to_str()` failures
+  are warned-then-substituted-with-`"unknown"` (`extract_request_id`
+  helper in `runtime/server.rs`).
+- WS per-message events do NOT carry `request_id` (the on_upgrade
+  closure runs detached from the trace span); the upgrade request
+  itself does. Documented limitation.
+
+Layer order in `start_server` (axum's `Router::layer` makes the LAST
+`.layer()` call the OUTERMOST → runs FIRST on the request path):
+
+```
+.layer(cors_layer)                                       // innermost
+.layer(trace_layer)                                      // middle (uses make_span_with)
+.layer(PropagateRequestIdLayer::x_request_id())          // 3rd
+.layer(SetRequestIdLayer::x_request_id(MakeRequestUuid)) // outermost (runs first)
+```
+
+Critical: `Set` must run before `Propagate` on the request path so
+`Propagate` can capture the populated header into its response future.
+This ordering is fragile under cargo incremental compilation -- a
+`cargo clean -p forge-lang` is sometimes needed when changing
+middleware to see the effect.
+
 Per-request span context (`method`, `uri`, `version`, `handler`) is
 propagated across the `spawn_blocking` boundary via `Span::current()`,
 so a user `log.info` from inside a handler inherits the HTTP request

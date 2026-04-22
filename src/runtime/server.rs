@@ -38,20 +38,58 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Json, Path, Query, State},
+    http,
     http::StatusCode,
     response::{IntoResponse, Json as JsonResponse, Response},
     routing::{delete, get, post, put},
-    Router,
+    Extension, Router,
 };
 use serde_json::Value as JsonValue;
 use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::request_id::{
+    MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
+};
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
 use crate::interpreter::{Interpreter, RuntimeError, Value};
 use crate::runtime::metadata::{CorsMode, ServerPlan};
 use crate::runtime::tracing_init;
+
+/// Cap on the recorded `request_id` length.
+///
+/// `SetRequestIdLayer` accepts whatever `X-Request-Id` the client sends
+/// (subject to the underlying `http::HeaderValue` size limit, which is
+/// generous). A 1 KB header in every log line is a log-amplification
+/// vector. UUIDs are 36 chars; 64 gives slack for client trace IDs but
+/// rejects pathological lengths. Applied at extraction time before the
+/// id reaches `tracing::Span::record`.
+const REQUEST_ID_MAX_LEN: usize = 64;
+
+/// Convert the `RequestId` from the `tower-http` layer into the string
+/// we record on the span. Defends against:
+///   * non-ASCII bytes that pass `HeaderValue` parsing but fail `to_str`
+///     (returns `"unknown"` plus a `tracing::warn!` so operators notice)
+///   * pathologically long inbound headers (capped at `REQUEST_ID_MAX_LEN`)
+fn extract_request_id(rid: &RequestId) -> String {
+    match rid.header_value().to_str() {
+        Ok(s) => {
+            if s.len() > REQUEST_ID_MAX_LEN {
+                s[..REQUEST_ID_MAX_LEN].to_string()
+            } else {
+                s.to_string()
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "forge.server",
+                "X-Request-Id header is not valid UTF-8; using \"unknown\""
+            );
+            "unknown".to_string()
+        }
+    }
+}
 
 /// Default cap on concurrent in-flight handler invocations.
 ///
@@ -197,15 +235,25 @@ fn call_handler(
     name = "forge.handler",
     level = "info",
     skip(state, path_params, query_params, body),
-    fields(handler = %handler_name)
+    fields(handler = %handler_name, request_id = tracing::field::Empty),
 )]
 async fn run_handler(
     state: AppState,
     handler_name: String,
+    request_id: String,
     path_params: HashMap<String, String>,
     query_params: HashMap<String, String>,
     body: Option<JsonValue>,
 ) -> Response {
+    // Belt-and-suspenders: also record on the inner forge.handler span
+    // so events emitted from this function (and via Span::current()
+    // propagated into spawn_blocking) explicitly include the field.
+    // The OUTER `request` span (set by TraceLayer::make_span_with in
+    // start_server) is the load-bearing place because Span::record only
+    // affects the receiver -- the on_response event lives in the outer
+    // span. This inner record is for handler-body events.
+    tracing::Span::current().record("request_id", request_id.as_str());
+
     let permit = match state.permits.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -318,10 +366,12 @@ pub async fn start_server(
                 app = app.route(
                     &axum_path,
                     get(move |State(state): State<AppState>,
+                              Extension(rid): Extension<RequestId>,
                               path: Option<Path<HashMap<String, String>>>,
                               Query(query): Query<HashMap<String, String>>| async move {
+                        let request_id = extract_request_id(&rid);
                         let params = path.map(|Path(p)| p).unwrap_or_default();
-                        run_handler(state, hn, params, query, None).await
+                        run_handler(state, hn, request_id, params, query, None).await
                     }),
                 );
             }
@@ -329,11 +379,13 @@ pub async fn start_server(
                 let hn = hn.clone();
                 let method = route.method.clone();
                 let handler = move |State(state): State<AppState>,
+                                    Extension(rid): Extension<RequestId>,
                                     path: Option<Path<HashMap<String, String>>>,
                                     Query(query): Query<HashMap<String, String>>,
                                     Json(body): Json<JsonValue>| async move {
+                    let request_id = extract_request_id(&rid);
                     let params = path.map(|Path(p)| p).unwrap_or_default();
-                    run_handler(state, hn, params, query, Some(body)).await
+                    run_handler(state, hn, request_id, params, query, Some(body)).await
                 };
                 if method == "POST" {
                     app = app.route(&axum_path, post(handler));
@@ -346,10 +398,12 @@ pub async fn start_server(
                 app = app.route(
                     &axum_path,
                     delete(move |State(state): State<AppState>,
+                                 Extension(rid): Extension<RequestId>,
                                  path: Option<Path<HashMap<String, String>>>,
                                  Query(query): Query<HashMap<String, String>>| async move {
+                        let request_id = extract_request_id(&rid);
                         let params = path.map(|Path(p)| p).unwrap_or_default();
-                        run_handler(state, hn, params, query, None).await
+                        run_handler(state, hn, request_id, params, query, None).await
                     }),
                 );
             }
@@ -413,15 +467,68 @@ pub async fn start_server(
     };
 
     // TraceLayer wraps every request in a tracing span carrying method,
-    // uri, version, and emits an INFO event on response with status +
-    // latency. Configured to INFO level explicitly because tower-http's
-    // defaults are DEBUG, which the default filter (forge_lang=info,
-    // tower_http=info) would silently drop.
+    // uri, version, AND request_id, then emits an INFO event on response
+    // with status + latency. Configured to INFO level explicitly because
+    // tower-http's defaults are DEBUG, which the default filter
+    // (forge_lang=info,tower_http=info) would silently drop.
+    //
+    // The custom make_span_with reads the RequestId that
+    // SetRequestIdLayer (stacked below) inserts into request extensions
+    // and includes it as a span field. Span::record can't propagate to
+    // parent spans, so the field MUST be added at outer-span creation
+    // for the on_response event to carry it.
     let trace_layer = TraceLayer::new_for_http()
-        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+        .make_span_with(|req: &http::Request<_>| {
+            let request_id = req
+                .extensions()
+                .get::<RequestId>()
+                .and_then(|id| id.header_value().to_str().ok())
+                .map(|s| {
+                    if s.len() > REQUEST_ID_MAX_LEN {
+                        &s[..REQUEST_ID_MAX_LEN]
+                    } else {
+                        s
+                    }
+                })
+                .unwrap_or("unknown");
+            tracing::info_span!(
+                "request",
+                method = %req.method(),
+                uri = %req.uri(),
+                version = ?req.version(),
+                request_id = request_id,
+            )
+        })
         .on_response(DefaultOnResponse::new().level(Level::INFO));
 
-    let app = app.layer(cors_layer).layer(trace_layer).with_state(state);
+    // Layer order. Axum's Router::layer is INVERTED from
+    // tower::ServiceBuilder::layer: the LAST .layer() call here is the
+    // OUTERMOST in the resulting tower stack (it wraps everything
+    // before it).
+    //
+    // We need (outside-in on the request path):
+    //   Set -> Propagate -> Trace -> Cors -> handler
+    //
+    // Why this order:
+    //   * Set runs first so it can populate the X-Request-Id header
+    //     from MakeRequestUuid (or pass through an inbound value).
+    //   * Propagate captures the (now-populated) request header into
+    //     its response future so it can copy the id back onto the
+    //     response when it returns.
+    //   * Trace's make_span_with reads the id from request extensions
+    //     (which Set also populated).
+    //
+    // To get that outside-in order in axum, we add layers innermost-first:
+    //   .layer(cors_layer)            -- innermost
+    //   .layer(trace_layer)
+    //   .layer(PropagateRequestIdLayer::...)
+    //   .layer(SetRequestIdLayer::...) -- outermost
+    let app = app
+        .layer(cors_layer)
+        .layer(trace_layer)
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
