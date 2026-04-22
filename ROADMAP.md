@@ -15,8 +15,8 @@
 | Bytecode VM           | Partial              | Fast backend for a supported subset; unsupported constructs are blocked |
 | JIT (Cranelift)       | Partial              | Integer-heavy functions on the same supported subset as the VM          |
 | Standard library      | 18 modules           | 238+ functions across math, fs, crypto, db, http, jwt, mysql, etc.      |
-| HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket                              |
-| HTTP client           | Complete             | reqwest, JSON, all methods, benchmarked at 28k req/sec                  |
+| HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket, per-request interpreter fork (~32k req/sec on trivial handlers, scales linearly with cores on CPU-bound handlers) |
+| HTTP client           | Complete             | reqwest, JSON, all methods, SSRF guard with DNS pinning                 |
 | Type checker          | Gradual              | Arity + type warnings, `--strict` turns them into hard errors           |
 | Tests                 | 644 Rust + 631 Forge | Verified locally; one Forge test is intentionally skipped               |
 | Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases                    |

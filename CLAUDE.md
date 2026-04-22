@@ -222,8 +222,55 @@ Zero output = clean release. Any remaining hits are stale references to fix.
 
 Categories in order: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 
+### Server Concurrency Model
+
+The HTTP server uses **per-request fork**, not a shared interpreter.
+
+When `forge run app.fg` boots a server (`@server` decorator), the
+program's `Interpreter` is wrapped in a read-only
+`Arc<InterpreterTemplate>`. Each incoming request:
+
+1. Acquires a backpressure permit (default 512 in-flight; excess → 503).
+2. Calls `template.fork()` (~0.06ms) to get a fresh `Interpreter` with
+   a deep-cloned environment.
+3. Runs the handler synchronously on `tokio::task::spawn_blocking` so
+   it cannot block an async worker.
+4. A `Drop` guard on the response future flips a per-request cancel flag
+   when axum drops it (client disconnect, server shutdown). The
+   interpreter polls the flag at every safe point.
+
+**Implications for handler authors:**
+
+- Handlers must be **pure functions of `(request) → response`**.
+  Top-level mutations made during a request do not persist to the
+  template or other requests.
+- A handler that reads a top-level variable mutated by a
+  `schedule`/`watch` block will read the **template snapshot value**,
+  not the schedule's writes. Future `shared { }` blocks will provide
+  explicit cross-request state.
+- A handler that captures outer state through a closure (`fn outer() {
+  let mut count = 0; @get fn ... }` style) **shares** that captured
+  state across concurrent requests via `Arc<Mutex>`. Writes race.
+  Don't do this; use a `shared {}` block when it lands.
+- WebSocket handlers fork **once per connection**, not per message.
+  Connection-scoped state is held in a `parking_lot::Mutex`. Different
+  WS connections are fully isolated.
+- Large top-level state (`let huge = read_file("100mb.json")`) is
+  copied on every request fork. `Value::String` is `String`, not
+  `Arc<str>`. Keep top-level data small or load it lazily inside the
+  handler.
+
+**Authoring fork primitives:**
+
+- Always use `env.deep_clone()`, never `env.clone()`. `Environment` is
+  `Vec<Arc<Mutex<HashMap>>>` — derived `Clone` is shallow and shares
+  scope storage. Concurrent forks that share scope `Arc`s would
+  silently serialize on the per-scope `Mutex`, defeating the whole
+  goal of per-request isolation.
+
 ### Learnings (Append Here)
 
+- **`fork_*` env must `deep_clone`, never plain `.clone()`.** `Environment` is `Vec<Arc<std::sync::Mutex<HashMap<String, Value>>>>`, so a derived `Clone` bumps `Arc` refcounts but shares scope storage. Two concurrently-forked interpreters would then serialize on per-scope mutexes — invisible until you actually call the fork concurrently. The HTTP server's per-request fork (`fork_for_serving`) and the schedule/watch fork (`fork_for_background_runtime`) both depend on this. `spawn_task` got it right from day one; the other two were latent until the server fix.
 - **JIT jump offsets:** The VM pre-increments IP before applying jump offsets. JIT target = `ip + 1 + sbx`, not `ip + sbx`. This caused fib(30) to return wrong values.
 - **Builtin shadowing:** Registering a `BuiltIn("time")` after a `time` module object shadows the module. Register modules last, or remove the simple builtin.
 - **Value PartialEq:** The interpreter's `Value` enum needs a manual `PartialEq` impl because `Function`/`Lambda` variants contain non-comparable closures. Never derive it.
