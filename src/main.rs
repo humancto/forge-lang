@@ -200,6 +200,13 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    // OTel must initialize on the main tokio runtime (not from a
+    // nested runtime created by a stdlib helper). Calling here ensures
+    // CLI scripts that emit `tracing` events (via the `log` stdlib)
+    // export them to the configured collector. No-op when the otel
+    // feature is off or OTEL_EXPORTER_OTLP_ENDPOINT is unset.
+    forge_lang::runtime::tracing_init::init_otel();
+
     let cli = Cli::parse();
     let use_jit = cli.use_jit;
     #[cfg(not(feature = "jit"))]
@@ -422,6 +429,15 @@ async fn main() {
             repl::run_repl();
         }
     }
+
+    // Flush pending OpenTelemetry spans on normal exit so CLI scripts
+    // that emit `tracing` events (e.g. via the `log` stdlib module)
+    // don't drop their last batch. No-op when the otel feature is off
+    // or init_otel was never called. spawn_blocking because
+    // provider.shutdown() is synchronous.
+    tokio::task::spawn_blocking(forge_lang::runtime::tracing_init::flush_otel)
+        .await
+        .ok();
 }
 
 fn prepare_program(

@@ -289,6 +289,33 @@ Stable target names:
 - `forge.user` — user-emitted events from the Forge `log` stdlib module.
 - `tower_http::trace::*` — per-request HTTP span and response event from `TraceLayer`.
 
+OpenTelemetry/OTLP export (behind `otel` Cargo feature, off by default):
+- Build with `cargo build --features otel` (or set in `Cargo.toml` for
+  service projects). Adds ~30 transitive crates (tonic, prost, hyper).
+- Activate at runtime by setting `OTEL_EXPORTER_OTLP_ENDPOINT`
+  (e.g. `http://localhost:4317`).
+- Honors standard OTel env vars via `Resource::builder()`:
+  - `OTEL_SERVICE_NAME` (default `"forge"`)
+  - `OTEL_RESOURCE_ATTRIBUTES` (parsed by `EnvResourceDetector`)
+- Inbound W3C `traceparent` is extracted in `TraceLayer::make_span_with`
+  and set as the parent context on the request span. Distributed
+  traces connect end-to-end across services.
+- Spans flush on graceful shutdown (after `axum::serve` returns) and
+  on CLI script exit, wrapped in `spawn_blocking`.
+- `init_otel()` MUST be called from the main tokio runtime (not from
+  a nested runtime created by a stdlib helper). The valid call sites
+  are `start_server` and `main` — both use `#[tokio::main]`.
+- `init_subscriber()` consults `OTEL_PROVIDER` and attaches the OTel
+  layer at the Registry level (innermost). Layers can't be added
+  after `try_init`, so `init_otel` MUST run before `init_subscriber`.
+- Default sampling is "send everything." For production high-RPS
+  services, configure your collector to sample. `OTEL_TRACES_SAMPLER`
+  support is a follow-up.
+- Only gRPC is wired (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`). Other
+  protocols are silently ignored.
+- Outbound `traceparent` injection in the HTTP client is not yet
+  wired (separate follow-up).
+
 Per-request `X-Request-Id`:
 - `tower_http::request_id::SetRequestIdLayer` assigns a UUID v4 to
   every request that doesn't already carry `X-Request-Id`, or
