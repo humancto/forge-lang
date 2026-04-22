@@ -12,8 +12,8 @@ mod lsp;
 mod manifest;
 mod native;
 mod package;
-mod permissions;
 mod parser;
+mod permissions;
 mod publish;
 mod registry;
 mod repl;
@@ -212,8 +212,8 @@ async fn main() {
     let strict = cli.strict;
     // REPL and -e are user-invoked contexts — always allow shell execution.
     // For file execution (forge run), require explicit --allow-run.
-    let is_interactive = cli.eval_code.is_some()
-        || matches!(cli.command, Some(Command::Repl) | None);
+    let is_interactive =
+        cli.eval_code.is_some() || matches!(cli.command, Some(Command::Repl) | None);
     permissions::set_allow_run(cli.allow_run || is_interactive);
 
     if let Some(code) = cli.eval_code {
@@ -335,33 +335,30 @@ async fn main() {
         Some(Command::Install { source }) => {
             package::install(&source);
         }
-        Some(Command::Add { package: pkg }) => {
-            match manifest::parse_package_spec(&pkg) {
-                Ok((name, version)) => {
-                    let mut m = manifest::load_manifest().unwrap_or_default();
-                    let action = if m.dependencies.contains_key(&name) {
-                        "Updated"
-                    } else {
-                        "Added"
-                    };
-                    m.dependencies
-                        .insert(name.clone(), manifest::DependencySpec::Version(version.clone()));
-                    if let Err(e) = manifest::save_manifest(&m) {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    }
-                    println!(
-                        "  {} {} = \"{}\" to forge.toml",
-                        action, name, version
-                    );
-                    package::install_from_manifest();
-                }
-                Err(e) => {
+        Some(Command::Add { package: pkg }) => match manifest::parse_package_spec(&pkg) {
+            Ok((name, version)) => {
+                let mut m = manifest::load_manifest().unwrap_or_default();
+                let action = if m.dependencies.contains_key(&name) {
+                    "Updated"
+                } else {
+                    "Added"
+                };
+                m.dependencies.insert(
+                    name.clone(),
+                    manifest::DependencySpec::Version(version.clone()),
+                );
+                if let Err(e) = manifest::save_manifest(&m) {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
+                println!("  {} {} = \"{}\" to forge.toml", action, name, version);
+                package::install_from_manifest();
             }
-        }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        },
         Some(Command::Update) => {
             package::update();
         }
@@ -380,16 +377,17 @@ async fn main() {
                             println!("No packages found matching '{}'.", q);
                         }
                     } else {
-                        println!(
-                            "{:<20} {:<10} {}",
-                            "NAME", "VERSION", "DESCRIPTION"
-                        );
+                        println!("{:<20} {:<10} {}", "NAME", "VERSION", "DESCRIPTION");
                         println!("{}", "-".repeat(60));
                         for pkg in &results {
                             println!(
                                 "{:<20} {:<10} {}",
                                 pkg.name,
-                                if pkg.latest.is_empty() { "-" } else { &pkg.latest },
+                                if pkg.latest.is_empty() {
+                                    "-"
+                                } else {
+                                    &pkg.latest
+                                },
                                 pkg.description
                             );
                         }
@@ -846,9 +844,8 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
             proto.name.clone()
         };
         let type_info = vm::jit::type_analysis::analyze(proto);
-        let needs_vm_ptr = type_info.has_string_ops
-            || type_info.has_collection_ops
-            || type_info.has_global_ops;
+        let needs_vm_ptr =
+            type_info.has_string_ops || type_info.has_collection_ops || type_info.has_global_ops;
 
         // Pre-allocate string constants into GC so their GcRef indices
         // can be baked into JIT code for runtime bridge calls.

@@ -56,8 +56,8 @@ mod schedule_watch_tests;
 #[cfg(test)]
 mod set_tests;
 #[cfg(test)]
+mod squad_tests;
+#[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
 mod tuple_tests;
-#[cfg(test)]
-mod squad_tests;
