@@ -42,7 +42,17 @@ parking_lot = "0.12"
 # tracing is the structured-logging substrate; tower-http's TraceLayer
 # (already enabled above) emits per-request spans into it.
 tracing = "0.1"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "fmt"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json", "fmt"] }
+
+# === OpenTelemetry / OTLP (opt-in via `otel` feature) ===
+# Pinned to 0.31 stack. The OTel Rust ecosystem has historically had
+# breaking releases every 1-2 months; this pin keeps the build stable.
+# CI runs `cargo build --features otel` so a future incompatible upgrade
+# fails fast.
+opentelemetry = { version = "0.31", features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"], optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
 
 # === HTTP Client (production-grade) ===
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
@@ -109,6 +119,15 @@ default = ["jit", "postgres", "mysql"]
 jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
 postgres = ["tokio-postgres", "tokio-postgres-rustls", "rustls", "webpki-roots"]
 mysql = ["mysql_async"]
+# Opt-in OpenTelemetry/OTLP export. Off by default (~30 transitive crates
+# including tonic, prost, hyper, h2). Activate at runtime via
+# OTEL_EXPORTER_OTLP_ENDPOINT.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 
 [profile.dev]
 opt-level = 1
