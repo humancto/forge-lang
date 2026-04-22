@@ -1,0 +1,38 @@
+// bench_server_concurrent.fg — Server fixture for the concurrency regression test.
+//
+// This server intentionally has two handlers with very different cost profiles
+// so concurrency tests can distinguish two failure modes:
+//
+//   /ping  -> trivial JSON. With or without the per-request mutex, throughput
+//             is high here because the lock (if any) is held for microseconds.
+//             A passing benchmark on /ping alone proves nothing.
+//
+//   /cpu   -> ~96ms of integer work in the interpreter. This is the canary:
+//             if the server serializes through a global lock, throughput at
+//             any concurrency stays at 1/0.096 ≈ 10 req/sec and p99 latency
+//             explodes linearly with concurrency.
+//
+// Reproducer for the bottleneck:
+//   forge run examples/bench_server_concurrent.fg
+//   ab -n 100 -c 16 http://127.0.0.1:9090/cpu
+//
+// Pre-fix expectation:  ~10 req/sec, p99 ≈ 1.7s
+// Post-fix expectation: ~150 req/sec on a 16-core box, p99 ≈ 100ms
+
+@server(port: 9090)
+
+@get("/ping")
+fn ping() -> Json {
+    return { ok: true }
+}
+
+@get("/cpu")
+fn cpu() -> Json {
+    let mut total = 0
+    repeat 200000 times {
+        total = total + 1
+    }
+    return { ok: true, work: total }
+}
+
+say "Concurrent benchmark server ready on :9090"
