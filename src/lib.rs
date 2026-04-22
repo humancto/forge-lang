@@ -4,14 +4,14 @@
 // to run embedded bytecode without needing the `forge` CLI.
 
 mod errors;
-mod interpreter;
-mod lexer;
+pub mod interpreter;
+pub mod lexer;
 mod manifest;
 mod package;
-mod parser;
+pub mod parser;
 mod permissions;
 mod registry;
-mod runtime;
+pub mod runtime;
 mod stdlib;
 mod typechecker;
 pub mod vm;

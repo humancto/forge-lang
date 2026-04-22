@@ -27,12 +27,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # === Async Runtime ===
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "net", "time", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "net", "time", "io-util", "signal"] }
 
 # === HTTP Server (production-grade) ===
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+# Used by the server's WS handler for per-connection state. parking_lot's
+# Mutex doesn't poison and has no Send-across-await hazard with the way
+# we hold it (lock guard never crosses an .await).
+parking_lot = "0.12"
 
 # === HTTP Client (production-grade) ===
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }

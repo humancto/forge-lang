@@ -6835,3 +6835,139 @@ fn squad_many_spawns() {
     );
     assert_eq!(value, Value::Int(15));
 }
+
+// ── fork_for_serving — per-request isolation contract ──────────────────────
+
+/// `fork_for_serving` must produce an interpreter whose env is
+/// independent of the template's env. Mutations on one side must not
+/// leak to the other. This is the core correctness invariant for the
+/// HTTP server's per-request fork model.
+#[test]
+fn fork_for_serving_isolates_env_mutations() {
+    let mut template = Interpreter::new();
+    template.env.define("counter".to_string(), Value::Int(0));
+
+    let mut req_a = template.fork_for_serving();
+    let mut req_b = template.fork_for_serving();
+
+    req_a.env.define("counter".to_string(), Value::Int(100));
+    req_b.env.define("counter".to_string(), Value::Int(200));
+
+    assert_eq!(req_a.env.get("counter"), Some(Value::Int(100)));
+    assert_eq!(req_b.env.get("counter"), Some(Value::Int(200)));
+    assert_eq!(template.env.get("counter"), Some(Value::Int(0)));
+}
+
+/// Forks must see template definitions made before the fork.
+#[test]
+fn fork_for_serving_inherits_template_definitions() {
+    let mut template = Interpreter::new();
+    template
+        .env
+        .define("greeting".to_string(), Value::String("hi".to_string()));
+    template.env.define("answer".to_string(), Value::Int(42));
+
+    let req = template.fork_for_serving();
+    assert_eq!(
+        req.env.get("greeting"),
+        Some(Value::String("hi".to_string()))
+    );
+    assert_eq!(req.env.get("answer"), Some(Value::Int(42)));
+}
+
+/// Each fork must get its own cancellation token. A cancel on one
+/// request must not affect any other request or the template.
+#[test]
+fn fork_for_serving_gives_independent_cancel_tokens() {
+    use std::sync::atomic::Ordering;
+
+    let template = Interpreter::new();
+    let req_a = template.fork_for_serving();
+    let req_b = template.fork_for_serving();
+
+    req_a.cancelled.store(true, Ordering::Release);
+
+    assert!(req_a.cancelled.load(Ordering::Acquire));
+    assert!(!req_b.cancelled.load(Ordering::Acquire));
+    assert!(!template.cancelled.load(Ordering::Acquire));
+}
+
+/// Per-request transient state must reset on fork.
+#[test]
+fn fork_for_serving_resets_per_request_state() {
+    let mut template = Interpreter::new();
+    template.current_line = 999;
+    template.call_stack.push(DebugFrame {
+        name: "outer".to_string(),
+        line: 1,
+        col: 1,
+    });
+
+    let req = template.fork_for_serving();
+    assert_eq!(req.current_line, 0);
+    assert!(req.call_stack.is_empty());
+    assert!(req.coverage.is_none());
+    assert!(req.output_sink.is_none());
+}
+
+/// Concurrent forks must not deadlock or race on env access. We spawn N
+/// threads, each forks the template and mutates its own env. After
+/// joining, the template must still hold its original value and each
+/// thread must see only its own mutation.
+#[test]
+fn fork_for_serving_supports_concurrent_use() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let mut template = Interpreter::new();
+    template.env.define("base".to_string(), Value::Int(1));
+    let template = Arc::new(template);
+
+    let handles: Vec<_> = (0..16)
+        .map(|i| {
+            let t = template.clone();
+            thread::spawn(move || {
+                let mut req = t.fork_for_serving();
+                req.env.define("rid".to_string(), Value::Int(i));
+                let base = req.env.get("base");
+                let rid = req.env.get("rid");
+                (base, rid)
+            })
+        })
+        .collect();
+
+    for (i, h) in handles.into_iter().enumerate() {
+        let (base, rid) = h.join().expect("thread should not panic");
+        assert_eq!(base, Some(Value::Int(1)));
+        assert_eq!(rid, Some(Value::Int(i as i64)));
+    }
+
+    // Template untouched.
+    assert_eq!(template.env.get("base"), Some(Value::Int(1)));
+    assert_eq!(template.env.get("rid"), None);
+}
+
+/// Diagnostic benchmark — not a hard gate. Prints fork cost so we can
+/// see if it dominates request latency. Threshold-style assertion only:
+/// fork must be <50ms; the throughput-improvement story falls apart
+/// well before that.
+#[test]
+fn fork_for_serving_is_under_50ms() {
+    let interp = Interpreter::new();
+    let n = 100;
+    let t0 = std::time::Instant::now();
+    for _ in 0..n {
+        let _ = interp.fork_for_serving();
+    }
+    let elapsed = t0.elapsed();
+    let mean_ms = elapsed.as_secs_f64() * 1000.0 / n as f64;
+    eprintln!(
+        "fork_for_serving: {} forks in {:?}, mean {:.3}ms",
+        n, elapsed, mean_ms
+    );
+    assert!(
+        mean_ms < 50.0,
+        "fork cost regressed: {:.3}ms per fork",
+        mean_ms
+    );
+}
