@@ -103,11 +103,14 @@ struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
-        // Visible under FORGE_LOG=forge.server=debug. Useful when
-        // diagnosing why a long-running handler exited early.
+        // This fires on EVERY response-future drop, not just abnormal
+        // ones — happy-path completion drops the guard too. Useful at
+        // debug level for diagnosing why a long-running handler exited
+        // early; under FORGE_LOG=forge.server=debug you'll see one of
+        // these per request.
         tracing::debug!(
             target: "forge.server",
-            "client disconnected; cancel signaled"
+            "response future dropped; cancel flag set"
         );
     }
 }
@@ -192,6 +195,7 @@ fn call_handler(
 /// `log.info` — is correlated to its request.
 #[tracing::instrument(
     name = "forge.handler",
+    level = "info",
     skip(state, path_params, query_params, body),
     fields(handler = %handler_name)
 )]

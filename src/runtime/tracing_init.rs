@@ -12,8 +12,8 @@
 //! - `FORGE_LOG_FORMAT` = `json` | `pretty` | `compact`
 //!   - default: `pretty` when stderr is a TTY, `compact` otherwise.
 //! - `FORGE_LOG`        = `tracing_subscriber::EnvFilter` directive
-//!   - falls back to `RUST_LOG` if unset, then to
-//!     `forge_lang=info,tower_http=info,axum=warn`.
+//!   - precedence: `FORGE_LOG` > `RUST_LOG` > default
+//!     `forge_lang=info,tower_http=info,axum=warn,forge.user=info`.
 //!
 //! ANSI escape codes are emitted only when stderr is a terminal.
 //! Piped or redirected stderr (CI, log aggregators, `forge run | tee`)
