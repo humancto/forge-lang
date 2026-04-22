@@ -162,3 +162,74 @@ fn http_handlers_run_in_parallel_not_serialized() {
         parallel.as_secs_f64() / single.as_secs_f64()
     );
 }
+
+#[test]
+fn closure_capturing_handlers_run_in_parallel_not_serialized() {
+    // Captured-closure handler pattern. A top-level Lambda holds the
+    // CPU loop; the @get fn invokes it. Different from the global-fn
+    // case in http_handlers_run_in_parallel_not_serialized: that path
+    // takes the is_global_fn fast path in call_function_inner and
+    // ignores the closure entirely. *This* path actually exercises
+    // Value::Lambda::closure -- which under the pre-PR-#110 model
+    // shares Arc<Mutex<Environment>> across forks, so concurrent
+    // requests serialize on the closure mutex.
+    //
+    // After PR #110, deep_clone_isolated walks closures so each fork
+    // has its own closure Arc and the ratio assertion holds for
+    // closure-capturing handlers too.
+    let port = spawn_test_server(
+        r#"
+        @server(port: __PORT__)
+
+        let config = { multiplier: 200 }
+
+        fn make_compute() {
+            return fn(n) {
+                let mut total = 0
+                repeat n * config.multiplier times {
+                    total = total + 1
+                }
+                return total
+            }
+        }
+
+        let compute = make_compute()
+
+        @get("/ping")
+        fn ping() -> Json {
+            return { ok: true }
+        }
+
+        @get("/cpu")
+        fn cpu() -> Json {
+            let result = compute(1000)
+            return { ok: true, work: result }
+        }
+        "#,
+    );
+
+    let url = format!("http://127.0.0.1:{}/cpu", port);
+
+    // Warm-up.
+    let _ = concurrent_get_wall_time(&url, 1);
+
+    let single = concurrent_get_wall_time(&url, 1);
+    let parallel = concurrent_get_wall_time(&url, 8);
+
+    eprintln!(
+        "closure-handler scaling: C=1 wall = {:?}, C=8 wall = {:?}, ratio = {:.2}x",
+        single,
+        parallel,
+        parallel.as_secs_f64() / single.as_secs_f64()
+    );
+
+    assert!(
+        parallel < single * 4,
+        "closure-capturing handlers serialized: C=8 wall {:?} should be < 4x C=1 wall {:?} \
+         (ratio {:.2}x). The per-request closure isolation has regressed -- \
+         check Environment::deep_clone_isolated and fork_for_serving.",
+        parallel,
+        single,
+        parallel.as_secs_f64() / single.as_secs_f64()
+    );
+}
