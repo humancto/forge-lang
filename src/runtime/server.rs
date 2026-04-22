@@ -290,8 +290,9 @@ pub async fn start_server(
 ) -> Result<(), RuntimeError> {
     // Install the global tracing subscriber on first server boot;
     // idempotent across multiple starts in the same process (test
-    // harness, embedder).
-    tracing_init::init_for_server();
+    // harness, embedder). The log stdlib module also calls this
+    // lazily so CLI-invoked scripts get the same setup.
+    tracing_init::init_subscriber();
 
     let config = &server.config;
     let routes = &server.routes;

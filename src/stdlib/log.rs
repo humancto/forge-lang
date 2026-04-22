@@ -34,6 +34,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
     let message = text.join(" ");
 
+    // Ensure a tracing subscriber is installed. Idempotent -- the server
+    // path also calls this on boot. Without this call, log.info from a
+    // CLI-invoked script (where start_server never ran) would silently
+    // drop because no subscriber is registered.
+    crate::runtime::tracing_init::init_subscriber();
+
     // 1. Always emit the structured tracing event. This is what log
     //    aggregators consume. If called from inside an HTTP handler,
     //    the per-request span context (method, uri, handler) is

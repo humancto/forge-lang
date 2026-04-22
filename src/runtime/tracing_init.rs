@@ -1,9 +1,11 @@
-//! Tracing subscriber initialization for the HTTP server.
+//! Tracing subscriber initialization.
 //!
 //! This is the one place that installs a global `tracing` subscriber.
-//! Server boot calls [`init_for_server`] once via the `OnceLock` guard;
-//! subsequent calls (test harness, embedder code) are no-ops thanks to
-//! [`tracing_subscriber::registry::Registry::try_init`].
+//! [`init_subscriber`] is idempotent (`OnceLock` + `try_init`); it is
+//! called from any path that wants its `tracing` events to reach a
+//! user — currently `start_server` (so per-request HTTP spans show up)
+//! and the `log` stdlib module (so `log.info` from a CLI-invoked
+//! script reaches the user without depending on the server path).
 //!
 //! # Environment
 //!
@@ -47,18 +49,31 @@ fn detect_format() -> Format {
 }
 
 fn build_filter() -> EnvFilter {
+    // Default filter:
+    //   forge_lang=info  -- runtime / server lifecycle events
+    //   tower_http=info  -- per-request TraceLayer span + response event
+    //   axum=warn        -- quiet by default; user can flip on
+    //   forge.user=info  -- user log.info from Forge code, on by default
+    //                       so a CLI script that calls log.info("hi")
+    //                       actually shows "hi" without env tuning
     EnvFilter::try_from_env("FORGE_LOG")
         .or_else(|_| EnvFilter::try_from_env("RUST_LOG"))
-        .unwrap_or_else(|_| EnvFilter::new("forge_lang=info,tower_http=info,axum=warn"))
+        .unwrap_or_else(|_| {
+            EnvFilter::new("forge_lang=info,tower_http=info,axum=warn,forge.user=info")
+        })
 }
 
 /// Install the global subscriber. Idempotent and panic-safe.
 ///
-/// Called from the top of `start_server`. If a subscriber is already
-/// installed (test harness or embedder), `try_init` returns `Err` and
-/// we silently move on — the existing subscriber wins, which is the
-/// right behavior.
-pub fn init_for_server() {
+/// Called from any path that wants its `tracing` events to be visible:
+/// `start_server` (so per-request HTTP spans surface) and the `log`
+/// stdlib module (so `log.info` from a CLI-invoked script reaches the
+/// user without depending on the server path having run).
+///
+/// If a subscriber is already installed (test harness, embedder),
+/// `try_init` returns `Err` and we silently move on — the existing
+/// subscriber wins.
+pub fn init_subscriber() {
     INIT.get_or_init(|| {
         let filter = build_filter();
         let ansi = std::io::stderr().is_terminal();
@@ -100,13 +115,13 @@ mod tests {
     use super::*;
 
     /// Calling init twice must not panic. This is the integration-test
-    /// scenario: each `start_server` call goes through `init_for_server`,
+    /// scenario: each `start_server` call goes through `init_subscriber`,
     /// and a single test binary may boot the server many times.
     #[test]
     fn init_is_idempotent() {
-        init_for_server();
-        init_for_server();
-        init_for_server();
+        init_subscriber();
+        init_subscriber();
+        init_subscriber();
     }
 
     /// Filter resolution order: FORGE_LOG > RUST_LOG > default.
