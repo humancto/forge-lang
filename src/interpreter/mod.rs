@@ -683,6 +683,54 @@ impl Interpreter {
         self.defer_host_runtime = defer;
     }
 
+    /// Fork this interpreter for serving a single HTTP request.
+    ///
+    /// The receiver acts as a read-only template. The returned interpreter
+    /// owns deep-cloned scope storage and per-request mutable state, so
+    /// concurrent calls to `fork_for_serving` produce independent
+    /// interpreters that do not share any locks on the hot path.
+    ///
+    /// # Concurrency contract
+    ///
+    /// `env.deep_clone()` copies every scope's `HashMap` into a fresh
+    /// `Arc<Mutex<...>>`, so `define`/`set` from one request cannot affect
+    /// another. **However**, `Value::Function`/`Value::Lambda` carry a
+    /// `closure: Environment` field that is *shallow*-cloned by
+    /// `deep_clone` (the closure shares scope `Arc`s with the place it
+    /// was defined). If a handler mutates state through a captured outer
+    /// variable, behavior is racy across concurrent requests. Handlers
+    /// must therefore be pure functions of `(args) -> response`. See
+    /// `CLAUDE.md` § Server Concurrency Model.
+    ///
+    /// The caller is expected to install a per-request `cancelled` token
+    /// after forking so client disconnects can short-circuit the handler
+    /// at the next safe point (loop, call, statement).
+    pub fn fork_for_serving(&self) -> Self {
+        let mut interp = Interpreter::new();
+        // CRITICAL: deep_clone, not clone. See fork_for_background_runtime
+        // for the same justification.
+        interp.env = self.env.deep_clone();
+        interp.method_tables = self.method_tables.clone();
+        interp.static_methods = self.static_methods.clone();
+        interp.embedded_fields = self.embedded_fields.clone();
+        interp.struct_defaults = self.struct_defaults.clone();
+        interp.source = self.source.clone();
+        interp.source_file = self.source_file.clone();
+        // Per-request fresh state. The cancel flag is created per-request
+        // and replaced by the caller with one wired to a Drop guard on the
+        // response future, so client disconnect can stop the handler.
+        interp.cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        interp.current_line = 0;
+        interp.call_stack = Vec::new();
+        // Coverage and output_sink are CLI-mode concerns; sharing them
+        // across requests would interleave or double-count.
+        interp.coverage = None;
+        interp.output_sink = None;
+        // DAP can attach across requests; keep the shared state.
+        interp.debug_state = self.debug_state.clone();
+        interp
+    }
+
     pub(crate) fn fork_for_background_runtime(&self) -> Self {
         let mut interp = Interpreter::new();
         // CRITICAL: env.deep_clone(), not env.clone(). Environment is
