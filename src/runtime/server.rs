@@ -501,18 +501,33 @@ pub async fn start_server(
         })
         .on_response(DefaultOnResponse::new().level(Level::INFO));
 
-    // Layer order (axum applies outside-in: last .layer() = outermost):
-    //   request:  Propagate -> Set -> Trace -> Cors -> handler
-    //   response: handler -> Cors -> Trace -> Set -> Propagate
-    // Set must run BEFORE Trace on the request path so make_span_with
-    // can read the id from extensions. Propagate is outermost so it
-    // sees the response and copies the id from extensions to the
-    // X-Request-Id header. This composition is documented by tower-http.
+    // Layer order. Axum's Router::layer is INVERTED from
+    // tower::ServiceBuilder::layer: the LAST .layer() call here is the
+    // OUTERMOST in the resulting tower stack (it wraps everything
+    // before it).
+    //
+    // We need (outside-in on the request path):
+    //   Set -> Propagate -> Trace -> Cors -> handler
+    //
+    // Why this order:
+    //   * Set runs first so it can populate the X-Request-Id header
+    //     from MakeRequestUuid (or pass through an inbound value).
+    //   * Propagate captures the (now-populated) request header into
+    //     its response future so it can copy the id back onto the
+    //     response when it returns.
+    //   * Trace's make_span_with reads the id from request extensions
+    //     (which Set also populated).
+    //
+    // To get that outside-in order in axum, we add layers innermost-first:
+    //   .layer(cors_layer)            -- innermost
+    //   .layer(trace_layer)
+    //   .layer(PropagateRequestIdLayer::...)
+    //   .layer(SetRequestIdLayer::...) -- outermost
     let app = app
         .layer(cors_layer)
         .layer(trace_layer)
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)

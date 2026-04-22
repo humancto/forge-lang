@@ -268,7 +268,9 @@ fn request_id_is_generated_and_propagated() {
     let generated_id = resp_generated
         .headers()
         .get("x-request-id")
-        .expect("response missing x-request-id; SetRequestIdLayer or PropagateRequestIdLayer is broken")
+        .expect(
+            "response missing x-request-id; SetRequestIdLayer or PropagateRequestIdLayer is broken",
+        )
         .to_str()
         .expect("response x-request-id is not UTF-8")
         .to_string();
