@@ -206,7 +206,13 @@ async fn run_handler(
         // Drop guard owns. Now client disconnect short-circuits the
         // handler at the next loop/call/statement safe point.
         interp.cancelled = cancel_for_blocking;
-        call_handler(&mut interp, &handler_name, &path_params, &query_params, body)
+        call_handler(
+            &mut interp,
+            &handler_name,
+            &path_params,
+            &query_params,
+            body,
+        )
     });
 
     let (status, json) = match join.await {

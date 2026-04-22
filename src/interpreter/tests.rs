@@ -6868,7 +6868,10 @@ fn fork_for_serving_inherits_template_definitions() {
     template.env.define("answer".to_string(), Value::Int(42));
 
     let req = template.fork_for_serving();
-    assert_eq!(req.env.get("greeting"), Some(Value::String("hi".to_string())));
+    assert_eq!(
+        req.env.get("greeting"),
+        Some(Value::String("hi".to_string()))
+    );
     assert_eq!(req.env.get("answer"), Some(Value::Int(42)));
 }
 

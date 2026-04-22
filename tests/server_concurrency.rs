@@ -69,7 +69,12 @@ fn spawn_test_server(source: &str) -> u16 {
         .expect("client");
     let url = format!("http://127.0.0.1:{}/ping", port);
     for _ in 0..50 {
-        if client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
+        if client
+            .get(&url)
+            .send()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+        {
             return port;
         }
         std::thread::sleep(Duration::from_millis(100));
