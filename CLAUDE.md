@@ -274,6 +274,30 @@ program's `Interpreter` is wrapped in a read-only
 | `spawn_task` (squad `spawn` blocks) | No (shallow on closures) | Squad is opt-in concurrency. `let counter = make_counter(); squad { spawn { counter() } spawn { counter() } }` legitimately wants accumulation. |
 | `fork_for_background_runtime` (schedule/watch) | No (shallow on closures) | Schedule blocks want state continuity across iterations. |
 
+**Observability:**
+
+The HTTP server and the Forge `log` stdlib emit structured events
+through `tracing` (see `src/runtime/tracing_init.rs`).
+
+| Env var | Values | Default |
+|---|---|---|
+| `FORGE_LOG_FORMAT` | `pretty` / `compact` / `json` | `pretty` on TTY, `compact` when piped |
+| `FORGE_LOG` | any `tracing_subscriber::EnvFilter` directive | falls back to `RUST_LOG`, then to `forge_lang=info,tower_http=info,axum=warn,forge.user=info` |
+
+Stable target names:
+- `forge.server` — server lifecycle (startup, panic, shutdown, cancel-on-drop).
+- `forge.user` — user-emitted events from the Forge `log` stdlib module.
+- `tower_http::trace::*` — per-request HTTP span and response event from `TraceLayer`.
+
+Per-request span context (`method`, `uri`, `version`, `handler`) is
+propagated across the `spawn_blocking` boundary via `Span::current()`,
+so a user `log.info` from inside a handler inherits the HTTP request
+fields automatically. JSON output is parseable by any log aggregator;
+ANSI escape codes are emitted only when stderr is a TTY.
+
+Init is idempotent and lazy: `start_server` and the `log` stdlib both
+call `tracing_init::init_subscriber()` on first use.
+
 **Authoring fork primitives:**
 
 - Always use `env.deep_clone()`, never `env.clone()`. `Environment` is
