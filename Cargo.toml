@@ -38,6 +38,12 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 # we hold it (lock guard never crosses an .await).
 parking_lot = "0.12"
 
+# === Observability ===
+# tracing is the structured-logging substrate; tower-http's TraceLayer
+# (already enabled above) emits per-request spans into it.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "fmt"] }
+
 # === HTTP Client (production-grade) ===
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
 
