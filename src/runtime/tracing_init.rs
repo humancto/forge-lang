@@ -201,7 +201,6 @@ pub fn init_subscriber() {
 /// added; the OTel layer must be present from the start.
 #[cfg(feature = "otel")]
 pub fn init_otel() {
-    use opentelemetry::trace::TracerProvider;
     use opentelemetry::KeyValue;
     use opentelemetry_otlp::{SpanExporter, WithExportConfig};
     use opentelemetry_sdk::Resource;
@@ -239,11 +238,29 @@ pub fn init_otel() {
         //   - SdkProvidedResourceDetector (honors OTEL_SERVICE_NAME)
         //   - EnvResourceDetector (parses OTEL_RESOURCE_ATTRIBUTES per spec)
         //   - TelemetryResourceDetector (telemetry.sdk.* attributes)
-        // We add a fallback service.name in case the user didn't set
-        // OTEL_SERVICE_NAME; the env detector takes precedence per spec.
-        let resource = Resource::builder()
-            .with_attribute(KeyValue::new("service.name", "forge"))
-            .build();
+        //
+        // We add a fallback service.name = "forge" ONLY when neither
+        // OTEL_SERVICE_NAME nor `service.name=` in OTEL_RESOURCE_ATTRIBUTES
+        // is set. The reason: Resource::with_attribute internally calls
+        // Resource::merge, which gives the new attribute priority over
+        // the existing resource. If we always added "forge" we would
+        // overwrite the operator's OTEL_SERVICE_NAME -- the OPPOSITE
+        // of the spec-mandated precedence. Setting it conditionally
+        // preserves the spec contract: env > fallback.
+        let user_set_service = std::env::var("OTEL_SERVICE_NAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some()
+            || std::env::var("OTEL_RESOURCE_ATTRIBUTES")
+                .ok()
+                .is_some_and(|s| s.contains("service.name="));
+
+        let mut resource_builder = Resource::builder();
+        if !user_set_service {
+            resource_builder =
+                resource_builder.with_attribute(KeyValue::new("service.name", "forge"));
+        }
+        let resource = resource_builder.build();
 
         let provider = SdkTracerProvider::builder()
             .with_batch_exporter(exporter)

@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json", "fm
 # CI runs `cargo build --features otel` so a future incompatible upgrade
 # fails fast.
 opentelemetry = { version = "0.31", features = ["trace"], optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace"], optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["trace"], optional = true }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 

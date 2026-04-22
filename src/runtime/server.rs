@@ -526,7 +526,10 @@ pub async fn start_server(
                 let parent_cx = opentelemetry::global::get_text_map_propagator(|propagator| {
                     propagator.extract(&HeaderMapExtractor(req.headers()))
                 });
-                span.set_parent(parent_cx);
+                // set_parent returns a Result that's safe to ignore --
+                // it only errors when no OTel layer is installed, which
+                // is the expected case when init_otel was a no-op.
+                let _ = span.set_parent(parent_cx);
             }
 
             span
