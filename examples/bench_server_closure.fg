@@ -1,0 +1,51 @@
+// bench_server_closure.fg -- Server fixture for the closure-isolation
+// regression test. Different from bench_server_concurrent.fg in one
+// crucial way: the /cpu handler invokes a Lambda captured at module
+// top level, not a global fn. Under the pre-PR-#110 model, the captured
+// Lambda's `Arc<Mutex<Environment>>` would have been shared across
+// concurrent requests -- writes from one request would lock-contend
+// with another, and the lambda's writeback path could race.
+//
+// This fixture exercises the path that PR #110 actually fixes (the
+// global-fn fixture in bench_server_concurrent.fg already escapes the
+// shared-closure problem via the is_global_fn fast path in
+// call_function_inner, so it can't tell the difference between the
+// PR-#108 model and the PR-#110 model).
+//
+// Reproducer:
+//   forge run examples/bench_server_closure.fg
+//   ab -n 100 -c 16 http://127.0.0.1:9091/cpu
+//
+// What "passing" looks like is the same as for bench_server_concurrent:
+// the regression test in tests/server_concurrency.rs asserts C=8 wall
+// time stays under 4x C=1 wall time. That's the source of truth for
+// "closure isolation has not regressed."
+
+@server(port: 9091)
+
+let config = { multiplier: 200 }
+
+fn make_compute() {
+    return fn(n) {
+        let mut total = 0
+        repeat n * config.multiplier times {
+            total = total + 1
+        }
+        return total
+    }
+}
+
+let compute = make_compute()
+
+@get("/ping")
+fn ping() -> Json {
+    return { ok: true }
+}
+
+@get("/cpu")
+fn cpu() -> Json {
+    let result = compute(1000)
+    return { ok: true, work: result }
+}
+
+say "Closure-handler benchmark server ready on :9091"

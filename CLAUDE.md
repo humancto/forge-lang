@@ -241,17 +241,19 @@ program's `Interpreter` is wrapped in a read-only
 
 **Implications for handler authors:**
 
-- Handlers must be **pure functions of `(request) → response`**.
-  Top-level mutations made during a request do not persist to the
-  template or other requests.
+- Handlers may **read** any top-level binding. Mutations made during a
+  request do not persist to the template or other requests — each
+  fork starts from the template snapshot.
 - A handler that reads a top-level variable mutated by a
   `schedule`/`watch` block will read the **template snapshot value**,
   not the schedule's writes. Future `shared { }` blocks will provide
   explicit cross-request state.
-- A handler that captures outer state through a closure (`fn outer() {
-  let mut count = 0; @get fn ... }` style) **shares** that captured
-  state across concurrent requests via `Arc<Mutex>`. Writes race.
-  Don't do this; use a `shared {}` block when it lands.
+- **Captured closures are now isolated per request.** A captured-counter
+  helper (`fn make_counter() { return fn() { count = count + 1 } }`)
+  returns a Lambda whose closure is fully isolated per fork — two
+  concurrent requests get independent counter state. This is the
+  invariant `Environment::deep_clone_isolated` provides; cycle handling
+  for recursive functions is built in.
 - WebSocket handlers fork **once per connection**, not per message.
   Connection-scoped state is held in a `parking_lot::Mutex`. Different
   WS connections are fully isolated.
@@ -259,6 +261,18 @@ program's `Interpreter` is wrapped in a read-only
   copied on every request fork. `Value::String` is `String`, not
   `Arc<str>`. Keep top-level data small or load it lazily inside the
   handler.
+- `Value::Stream` in the template env is **forbidden** (debug builds
+  panic at first fork). Streams are single-use; sharing across forks
+  silently breaks. Construct streams inside handlers, not at module
+  top level.
+
+**Spawn vs serve — different fork semantics:**
+
+| Caller | Closure isolation? | Why |
+|---|---|---|
+| `fork_for_serving` (HTTP requests) | Yes (full deep walk) | Implicit fork; user did not opt in. Must be sound by default. |
+| `spawn_task` (squad `spawn` blocks) | No (shallow on closures) | Squad is opt-in concurrency. `let counter = make_counter(); squad { spawn { counter() } spawn { counter() } }` legitimately wants accumulation. |
+| `fork_for_background_runtime` (schedule/watch) | No (shallow on closures) | Schedule blocks want state continuity across iterations. |
 
 **Authoring fork primitives:**
 
@@ -267,9 +281,16 @@ program's `Interpreter` is wrapped in a read-only
   scope storage. Concurrent forks that share scope `Arc`s would
   silently serialize on the per-scope `Mutex`, defeating the whole
   goal of per-request isolation.
+- For HTTP serving (where forks happen per-request, implicitly), use
+  `env.deep_clone_isolated()` instead. This walks `Value`s and gives
+  every captured closure its own scope graph, with Arc-pointer-keyed
+  cycle handling for the recursive-function case. The plain
+  `deep_clone` would still leave `Value::Function::closure` and
+  `Value::Lambda::closure` sharing scope `Arc`s with the template.
 
 ### Learnings (Append Here)
 
+- **HTTP per-request fork needs `deep_clone_isolated`, not just `deep_clone`.** `deep_clone` duplicates scope `Arc`s but the `Value`s inside the scopes are cloned by `Value::clone`, which is shallow on `Value::Function::closure: Environment` and `Value::Lambda::closure: Arc<Mutex<Environment>>`. Concurrent HTTP requests calling a captured-closure helper would lock-contend on the shared closure scope mutex. The isolated variant walks values, with Arc-identity memoization for the recursive-function cycle case. `spawn_task` and `fork_for_background_runtime` deliberately stay on the shallow `deep_clone` so spawn/schedule callers get closure-state continuity (their semantics opt into sharing).
 - **`fork_*` env must `deep_clone`, never plain `.clone()`.** `Environment` is `Vec<Arc<std::sync::Mutex<HashMap<String, Value>>>>`, so a derived `Clone` bumps `Arc` refcounts but shares scope storage. Two concurrently-forked interpreters would then serialize on per-scope mutexes — invisible until you actually call the fork concurrently. The HTTP server's per-request fork (`fork_for_serving`) and the schedule/watch fork (`fork_for_background_runtime`) both depend on this. `spawn_task` got it right from day one; the other two were latent until the server fix.
 - **JIT jump offsets:** The VM pre-increments IP before applying jump offsets. JIT target = `ip + 1 + sbx`, not `ip + sbx`. This caused fib(30) to return wrong values.
 - **Builtin shadowing:** Registering a `BuiltIn("time")` after a `time` module object shadows the module. Register modules last, or remove the simple builtin.

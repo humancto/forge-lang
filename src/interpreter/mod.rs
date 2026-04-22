@@ -423,6 +423,15 @@ pub struct Environment {
     mutability: Vec<Arc<std::sync::Mutex<HashMap<String, bool>>>>,
 }
 
+/// Map from old scope `Arc` pointer to its newly allocated counterpart.
+/// Used by [`Environment::deep_clone_isolated`] to memoize Arc identity
+/// during the recursive value-walk so cycles (recursive functions whose
+/// closure captures the env that holds them) terminate.
+type ScopeMap = HashMap<
+    *const std::sync::Mutex<HashMap<String, Value>>,
+    Arc<std::sync::Mutex<HashMap<String, Value>>>,
+>;
+
 impl Environment {
     pub fn new() -> Self {
         Self {
@@ -512,7 +521,19 @@ impl Environment {
         names
     }
 
-    /// Deep clone for spawn — breaks sharing so thread gets independent copy
+    /// Deep clone for spawn — breaks sharing so thread gets independent copy.
+    ///
+    /// "Deep" only at the scope-storage layer: scope `Arc<Mutex<HashMap>>`s
+    /// are duplicated, but the `Value`s inside are cloned by `Value::clone`,
+    /// which is shallow on `Value::Function::closure: Environment` and
+    /// `Value::Lambda::closure: Arc<Mutex<Environment>>`. That is the
+    /// intended semantics for `spawn_task` and `fork_for_background_runtime`:
+    /// their callers want spawned/scheduled tasks to share captured closure
+    /// state with the parent (so a counter captured by a Lambda accumulates
+    /// across spawns).
+    ///
+    /// The HTTP server uses [`deep_clone_isolated`](Self::deep_clone_isolated)
+    /// instead — it requires per-request closure isolation as well.
     pub fn deep_clone(&self) -> Self {
         Self {
             scopes: self
@@ -533,6 +554,164 @@ impl Environment {
                     ))
                 })
                 .collect(),
+        }
+    }
+
+    /// Deep clone with **closure isolation** — used by `fork_for_serving`
+    /// to give each HTTP request a fully independent interpreter graph.
+    ///
+    /// Walks every reachable `Value` and rewrites
+    /// `Value::Function::closure` and `Value::Lambda::closure` so the
+    /// returned `Environment` shares **no** scope `Arc<Mutex<...>>` with
+    /// the original. After this call, mutations made by code running
+    /// against the cloned env (including writes through captured
+    /// closures and the Lambda writeback path at
+    /// `call_function_inner` line ~4317) are invisible to the original
+    /// or any other isolated clone.
+    ///
+    /// # Cycle handling
+    ///
+    /// Forge's `Stmt::FnDef` (lines 1130–1153) installs a function whose
+    /// closure scope vec contains the same `Arc` as the env that holds
+    /// the function — a cycle. We tie the knot via Arc-pointer-keyed
+    /// memoization (`ScopeMap`): the first time we see a scope `Arc`,
+    /// we install an empty placeholder in the map and recurse; any
+    /// re-entry resolves to the placeholder and returns immediately.
+    /// After the recursion, we fill the placeholder with the populated
+    /// `HashMap`. Topological identity is preserved: every reference
+    /// to the original scope resolves to a single new `Arc`.
+    ///
+    /// # Performance
+    ///
+    /// O(N) in the number of reachable `Value`s. For Forge's stdlib
+    /// (~25 modules of `Value::BuiltIn` entries, no Function/Lambda)
+    /// the extra cost over `deep_clone` is ~20µs. Programs with N
+    /// captured closures pay O(N) extra allocations. The
+    /// `fork_for_serving_is_under_1ms` test gates this.
+    pub fn deep_clone_isolated(&self) -> Self {
+        let mut scope_map = ScopeMap::new();
+        Self::deep_clone_env(self, &mut scope_map)
+    }
+
+    fn deep_clone_env(env: &Environment, scope_map: &mut ScopeMap) -> Self {
+        let scopes = env
+            .scopes
+            .iter()
+            .map(|s| Self::dup_scope(s, scope_map))
+            .collect();
+        // mutability table is just String -> bool; no Values to walk.
+        let mutability = env
+            .mutability
+            .iter()
+            .map(|m| {
+                Arc::new(std::sync::Mutex::new(
+                    m.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+                ))
+            })
+            .collect();
+        Self { scopes, mutability }
+    }
+
+    fn dup_scope(
+        s: &Arc<std::sync::Mutex<HashMap<String, Value>>>,
+        scope_map: &mut ScopeMap,
+    ) -> Arc<std::sync::Mutex<HashMap<String, Value>>> {
+        let key = Arc::as_ptr(s);
+        if let Some(existing) = scope_map.get(&key) {
+            // Cycle: this scope is already being cloned. Return the
+            // (possibly still-empty) placeholder. By the time anyone
+            // reads through it, dup_scope above us in the call stack
+            // will have populated it.
+            return existing.clone();
+        }
+        // Tie the knot: install the placeholder before we recurse so
+        // any self-reference resolves to it.
+        let new_arc = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        scope_map.insert(key, new_arc.clone());
+
+        let original = s.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let mut new_map = HashMap::with_capacity(original.len());
+        for (k, v) in original {
+            new_map.insert(k, Self::dup_value(v, scope_map));
+        }
+        *new_arc.lock().unwrap_or_else(|p| p.into_inner()) = new_map;
+        new_arc
+    }
+
+    fn dup_value(v: Value, scope_map: &mut ScopeMap) -> Value {
+        match v {
+            Value::Function {
+                name,
+                params,
+                body,
+                closure,
+                decorators,
+            } => Value::Function {
+                name,
+                params,
+                body,
+                decorators,
+                closure: Self::deep_clone_env(&closure, scope_map),
+            },
+            Value::Lambda {
+                params,
+                body,
+                closure,
+            } => {
+                let captured = closure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                let new_env = Self::deep_clone_env(&captured, scope_map);
+                Value::Lambda {
+                    params,
+                    body,
+                    closure: Arc::new(std::sync::Mutex::new(new_env)),
+                }
+            }
+            // Containers: recurse so a Function/Lambda nested inside
+            // (e.g. an array of handlers, an object of helpers) is
+            // also isolated.
+            Value::Array(arr) => Value::Array(
+                arr.into_iter()
+                    .map(|x| Self::dup_value(x, scope_map))
+                    .collect(),
+            ),
+            Value::Tuple(arr) => Value::Tuple(
+                arr.into_iter()
+                    .map(|x| Self::dup_value(x, scope_map))
+                    .collect(),
+            ),
+            Value::Set(arr) => Value::Set(
+                arr.into_iter()
+                    .map(|x| Self::dup_value(x, scope_map))
+                    .collect(),
+            ),
+            Value::Map(pairs) => Value::Map(
+                pairs
+                    .into_iter()
+                    .map(|(k, val)| {
+                        (
+                            Self::dup_value(k, scope_map),
+                            Self::dup_value(val, scope_map),
+                        )
+                    })
+                    .collect(),
+            ),
+            Value::Object(o) => Value::Object(
+                o.into_iter()
+                    .map(|(k, val)| (k, Self::dup_value(val, scope_map)))
+                    .collect(),
+            ),
+            Value::ResultOk(b) => Value::ResultOk(Box::new(Self::dup_value(*b, scope_map))),
+            Value::ResultErr(b) => Value::ResultErr(Box::new(Self::dup_value(*b, scope_map))),
+            Value::Some(b) => Value::Some(Box::new(Self::dup_value(*b, scope_map))),
+            Value::Frozen(b) => Value::Frozen(Box::new(Self::dup_value(*b, scope_map))),
+            // Stream is forbidden in template env (see
+            // Interpreter::assert_no_streams_in_env). Channel and
+            // TaskHandle are intentionally shared across forks:
+            //  - Channel: cross-request coordination is a legitimate
+            //    use case (e.g. a top-level work queue).
+            //  - TaskHandle: holding one across requests is rare and
+            //    ambiguous; left shared rather than forbidden.
+            other => other,
         }
     }
 
@@ -688,33 +867,94 @@ impl Interpreter {
         self.defer_host_runtime = defer;
     }
 
+    /// Debug-only safety check: walk the env and panic if any reachable
+    /// `Value::Stream` is found. Called from `fork_for_serving` because
+    /// streams are single-use and silently break under sharing across
+    /// per-request forks. Cheap (~20µs for the stdlib env) and runs at
+    /// most once per request; release builds skip the check entirely.
+    #[cfg(debug_assertions)]
+    fn assert_no_streams_in_env(env: &Environment) {
+        fn walk(v: &Value) {
+            match v {
+                Value::Stream(_) => panic!(
+                    "Value::Stream found in template env; streams are single-use and \
+                     cannot be safely shared across per-request forks. Construct \
+                     streams inside handlers, not at the top level."
+                ),
+                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => a.iter().for_each(walk),
+                Value::Map(pairs) => pairs.iter().for_each(|(k, v)| {
+                    walk(k);
+                    walk(v);
+                }),
+                Value::Object(o) => o.values().for_each(walk),
+                Value::ResultOk(b) | Value::ResultErr(b) | Value::Some(b) | Value::Frozen(b) => {
+                    walk(b)
+                }
+                // Closure scopes are walked separately by deep_clone_isolated.
+                // Don't recurse into them here — that would re-walk the env.
+                _ => {}
+            }
+        }
+        for scope in &env.scopes {
+            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
+            for v in guard.values() {
+                walk(v);
+            }
+        }
+    }
+
     /// Fork this interpreter for serving a single HTTP request.
     ///
     /// The receiver acts as a read-only template. The returned interpreter
-    /// owns deep-cloned scope storage and per-request mutable state, so
-    /// concurrent calls to `fork_for_serving` produce independent
-    /// interpreters that do not share any locks on the hot path.
+    /// owns a fully-isolated environment (via
+    /// [`Environment::deep_clone_isolated`]) and per-request mutable
+    /// state, so concurrent calls to `fork_for_serving` produce
+    /// interpreters that share **zero** scope `Arc`s — including through
+    /// `Value::Function::closure` and `Value::Lambda::closure`. Handlers
+    /// can capture and mutate outer state safely; mutations are
+    /// per-request.
     ///
     /// # Concurrency contract
     ///
-    /// `env.deep_clone()` copies every scope's `HashMap` into a fresh
-    /// `Arc<Mutex<...>>`, so `define`/`set` from one request cannot affect
-    /// another. **However**, `Value::Function`/`Value::Lambda` carry a
-    /// `closure: Environment` field that is *shallow*-cloned by
-    /// `deep_clone` (the closure shares scope `Arc`s with the place it
-    /// was defined). If a handler mutates state through a captured outer
-    /// variable, behavior is racy across concurrent requests. Handlers
-    /// must therefore be pure functions of `(args) -> response`. See
-    /// `CLAUDE.md` § Server Concurrency Model.
+    /// - Mutations made by code running against the forked interpreter
+    ///   (including writes through captured closures and the Lambda
+    ///   writeback path) are invisible to the template and to other
+    ///   forks.
+    /// - Within one fork, repeated calls to the same Lambda still see
+    ///   each other's writes (closure `Arc` is stable across calls).
+    /// - `Value::Stream` is forbidden in the template env. Debug builds
+    ///   panic at fork time if found; release builds skip the check.
+    ///   Construct streams inside handlers, not at the top level.
+    /// - `Value::Channel` and `Value::TaskHandle` are intentionally
+    ///   shared across forks; a top-level channel can be used for
+    ///   cross-request coordination.
+    ///
+    /// See `CLAUDE.md` § Server Concurrency Model for the full
+    /// user-facing contract and the "Spawn vs serve" comparison with
+    /// `fork_for_background_runtime` and `spawn_task`.
     ///
     /// The caller is expected to install a per-request `cancelled` token
     /// after forking so client disconnects can short-circuit the handler
     /// at the next safe point (loop, call, statement).
     pub fn fork_for_serving(&self) -> Self {
+        // Debug builds only: walk the template env once and panic if it
+        // contains a Value::Stream. Streams are single-use (terminal
+        // ops drain them) so sharing one across forks silently breaks
+        // (whichever request drains first wins). Catching this at fork
+        // time gives an attributable failure pointing at the offending
+        // top-level statement.
+        #[cfg(debug_assertions)]
+        Self::assert_no_streams_in_env(&self.env);
+
         let mut interp = Interpreter::new();
-        // CRITICAL: deep_clone, not clone. See fork_for_background_runtime
-        // for the same justification.
-        interp.env = self.env.deep_clone();
+        // CRITICAL: deep_clone_isolated, not deep_clone. The latter
+        // duplicates scope storage but leaves Function/Lambda closures
+        // sharing scope Arcs with the template — which would let
+        // concurrent handlers race on shared closure scope mutexes.
+        // The isolated variant walks values and gives every closure
+        // its own scope graph, with cycle handling for the recursive
+        // function pattern. See Environment::deep_clone_isolated.
+        interp.env = self.env.deep_clone_isolated();
         interp.method_tables = self.method_tables.clone();
         interp.static_methods = self.static_methods.clone();
         interp.embedded_fields = self.embedded_fields.clone();
