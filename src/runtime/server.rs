@@ -340,6 +340,10 @@ pub async fn start_server(
     interpreter: Interpreter,
     server: &ServerPlan,
 ) -> Result<(), RuntimeError> {
+    // OTel must initialize BEFORE the subscriber so the OTel layer is
+    // present when init_subscriber composes the registry. No-op when
+    // the otel feature is off or OTEL_EXPORTER_OTLP_ENDPOINT is unset.
+    tracing_init::init_otel();
     // Install the global tracing subscriber on first server boot;
     // idempotent across multiple starts in the same process (test
     // harness, embedder). The log stdlib module also calls this
@@ -491,13 +495,41 @@ pub async fn start_server(
                     }
                 })
                 .unwrap_or("unknown");
-            tracing::info_span!(
+            let span = tracing::info_span!(
                 "request",
                 method = %req.method(),
                 uri = %req.uri(),
                 version = ?req.version(),
                 request_id = request_id,
-            )
+            );
+
+            // When OTel is wired, extract the upstream W3C traceparent
+            // header (if present) and set it as the parent context on
+            // the request span. Without this, every Forge span is a
+            // new root span -- distributed traces don't connect across
+            // services. The propagator was installed by init_otel().
+            #[cfg(feature = "otel")]
+            {
+                use opentelemetry::propagation::Extractor;
+                use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+                struct HeaderMapExtractor<'a>(&'a http::HeaderMap);
+                impl Extractor for HeaderMapExtractor<'_> {
+                    fn get(&self, key: &str) -> Option<&str> {
+                        self.0.get(key).and_then(|v| v.to_str().ok())
+                    }
+                    fn keys(&self) -> Vec<&str> {
+                        self.0.keys().map(|k| k.as_str()).collect()
+                    }
+                }
+
+                let parent_cx = opentelemetry::global::get_text_map_propagator(
+                    |propagator| propagator.extract(&HeaderMapExtractor(req.headers())),
+                );
+                span.set_parent(parent_cx);
+            }
+
+            span
         })
         .on_response(DefaultOnResponse::new().level(Level::INFO));
 
@@ -583,6 +615,17 @@ pub async fn start_server(
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| RuntimeError::new(&format!("server error: {}", e)))?;
+
+    // Flush pending OpenTelemetry spans AFTER axum has finished
+    // draining in-flight requests. Calling this from inside
+    // shutdown_signal() would delay the start of axum's drain by up
+    // to 5s (the batch processor's flush window). Wrapped in
+    // spawn_blocking because provider.shutdown() is synchronous and
+    // we don't want to pin a tokio worker on it. No-op when the otel
+    // feature is off or init_otel was never called.
+    tokio::task::spawn_blocking(tracing_init::flush_otel)
+        .await
+        .ok();
 
     Ok(())
 }
