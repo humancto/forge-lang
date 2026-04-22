@@ -906,21 +906,32 @@ impl Interpreter {
     /// Fork this interpreter for serving a single HTTP request.
     ///
     /// The receiver acts as a read-only template. The returned interpreter
-    /// owns deep-cloned scope storage and per-request mutable state, so
-    /// concurrent calls to `fork_for_serving` produce independent
-    /// interpreters that do not share any locks on the hot path.
+    /// owns a fully-isolated environment (via
+    /// [`Environment::deep_clone_isolated`]) and per-request mutable
+    /// state, so concurrent calls to `fork_for_serving` produce
+    /// interpreters that share **zero** scope `Arc`s — including through
+    /// `Value::Function::closure` and `Value::Lambda::closure`. Handlers
+    /// can capture and mutate outer state safely; mutations are
+    /// per-request.
     ///
     /// # Concurrency contract
     ///
-    /// `env.deep_clone()` copies every scope's `HashMap` into a fresh
-    /// `Arc<Mutex<...>>`, so `define`/`set` from one request cannot affect
-    /// another. **However**, `Value::Function`/`Value::Lambda` carry a
-    /// `closure: Environment` field that is *shallow*-cloned by
-    /// `deep_clone` (the closure shares scope `Arc`s with the place it
-    /// was defined). If a handler mutates state through a captured outer
-    /// variable, behavior is racy across concurrent requests. Handlers
-    /// must therefore be pure functions of `(args) -> response`. See
-    /// `CLAUDE.md` § Server Concurrency Model.
+    /// - Mutations made by code running against the forked interpreter
+    ///   (including writes through captured closures and the Lambda
+    ///   writeback path) are invisible to the template and to other
+    ///   forks.
+    /// - Within one fork, repeated calls to the same Lambda still see
+    ///   each other's writes (closure `Arc` is stable across calls).
+    /// - `Value::Stream` is forbidden in the template env. Debug builds
+    ///   panic at fork time if found; release builds skip the check.
+    ///   Construct streams inside handlers, not at the top level.
+    /// - `Value::Channel` and `Value::TaskHandle` are intentionally
+    ///   shared across forks; a top-level channel can be used for
+    ///   cross-request coordination.
+    ///
+    /// See `CLAUDE.md` § Server Concurrency Model for the full
+    /// user-facing contract and the "Spawn vs serve" comparison with
+    /// `fork_for_background_runtime` and `spawn_task`.
     ///
     /// The caller is expected to install a per-request `cancelled` token
     /// after forking so client disconnects can short-circuit the handler

@@ -276,8 +276,6 @@ program's `Interpreter` is wrapped in a read-only
 
 **Authoring fork primitives:**
 
-**Authoring fork primitives:**
-
 - Always use `env.deep_clone()`, never `env.clone()`. `Environment` is
   `Vec<Arc<Mutex<HashMap>>>` — derived `Clone` is shallow and shares
   scope storage. Concurrent forks that share scope `Arc`s would
