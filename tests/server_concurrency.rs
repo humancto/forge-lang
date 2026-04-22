@@ -233,3 +233,89 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
         parallel.as_secs_f64() / single.as_secs_f64()
     );
 }
+
+#[test]
+fn request_id_is_generated_and_propagated() {
+    // Two scenarios to verify:
+    //   (a) request without X-Request-Id -> response carries a new UUID
+    //   (b) request with X-Request-Id    -> response echoes the inbound value
+    //
+    // The structured-log path (the load-bearing claim of PR #123) is
+    // verified by stderr inspection in the smoke tests documented in
+    // the PR body; CI just needs to see the response-header path
+    // working since the layer order is the only thing that could
+    // break.
+    let port = spawn_test_server(
+        r#"
+        @server(port: __PORT__)
+
+        @get("/ping")
+        fn ping() -> Json {
+            return { ok: true }
+        }
+        "#,
+    );
+
+    let url = format!("http://127.0.0.1:{}/ping", port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("client");
+
+    // Scenario A: no inbound X-Request-Id -- server generates a UUID.
+    let resp_generated = client.get(&url).send().expect("send");
+    assert!(resp_generated.status().is_success());
+    let generated_id = resp_generated
+        .headers()
+        .get("x-request-id")
+        .expect("response missing x-request-id; SetRequestIdLayer or PropagateRequestIdLayer is broken")
+        .to_str()
+        .expect("response x-request-id is not UTF-8")
+        .to_string();
+    // UUID v4 string: 36 chars, hyphens at the canonical positions.
+    assert_eq!(
+        generated_id.len(),
+        36,
+        "generated request_id should be a 36-char UUID; got {:?}",
+        generated_id
+    );
+    assert_eq!(
+        generated_id.matches('-').count(),
+        4,
+        "generated request_id should be a UUID with 4 hyphens; got {:?}",
+        generated_id
+    );
+
+    // Scenario B: inbound X-Request-Id -- server echoes it.
+    let inbound = "test-trace-deadbeef-123";
+    let resp_echoed = client
+        .get(&url)
+        .header("X-Request-Id", inbound)
+        .send()
+        .expect("send");
+    assert!(resp_echoed.status().is_success());
+    let echoed = resp_echoed
+        .headers()
+        .get("x-request-id")
+        .expect("response missing x-request-id on echo path")
+        .to_str()
+        .expect("echoed x-request-id not UTF-8");
+    assert_eq!(
+        echoed, inbound,
+        "PropagateRequestIdLayer should echo the inbound value verbatim"
+    );
+
+    // Sanity: two no-header requests produce different UUIDs.
+    let resp_2 = client.get(&url).send().expect("send");
+    let id_2 = resp_2
+        .headers()
+        .get("x-request-id")
+        .expect("missing")
+        .to_str()
+        .expect("not UTF-8")
+        .to_string();
+    assert_ne!(
+        generated_id, id_2,
+        "two server-generated request_ids should differ"
+    );
+}
