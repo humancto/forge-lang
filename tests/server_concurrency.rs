@@ -139,23 +139,29 @@ fn http_handlers_run_in_parallel_not_serialized() {
     let _ = concurrent_get_wall_time(&url, 1);
 
     let single = concurrent_get_wall_time(&url, 1);
-    let parallel = concurrent_get_wall_time(&url, 8);
+    // C=4 not C=8: typical CI runners have 4 cores, and we want the
+    // ratio gate to be meaningful (i.e. parallelism, not OS scheduling
+    // overhead). On a 16-core dev box this still proves the absence
+    // of a global lock; on a 4-core CI runner it doesn't pay the
+    // oversubscription tax.
+    let parallel = concurrent_get_wall_time(&url, 4);
 
     eprintln!(
-        "concurrency-scaling: C=1 wall = {:?}, C=8 wall = {:?}, ratio = {:.2}x",
+        "concurrency-scaling: C=1 wall = {:?}, C=4 wall = {:?}, ratio = {:.2}x",
         single,
         parallel,
         parallel.as_secs_f64() / single.as_secs_f64()
     );
 
     // On a fully serialized server (the pre-fix Arc<Mutex<Interpreter>>
-    // model), C=8 would take ~8x longer than C=1. We allow 4x to
-    // accommodate small machines (CI), tokio overhead, and noise.
-    // A failure here means concurrency has regressed -- check
-    // src/runtime/server.rs for a re-introduced global lock.
+    // model), C=4 would take ~4x longer than C=1. We allow 2.5x to
+    // accommodate CI noise, tokio overhead, and the per-request
+    // tower_http overhead from middleware. A failure here means
+    // concurrency has regressed -- check src/runtime/server.rs for a
+    // re-introduced global lock.
     assert!(
-        parallel < single * 4,
-        "handlers serialized: C=8 wall {:?} should be < 4x C=1 wall {:?} \
+        parallel < single.mul_f64(2.5),
+        "handlers serialized: C=4 wall {:?} should be < 2.5x C=1 wall {:?} \
          (ratio {:.2}x). The per-request fork model has regressed.",
         parallel,
         single,
@@ -214,18 +220,18 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
     let _ = concurrent_get_wall_time(&url, 1);
 
     let single = concurrent_get_wall_time(&url, 1);
-    let parallel = concurrent_get_wall_time(&url, 8);
+    let parallel = concurrent_get_wall_time(&url, 4);
 
     eprintln!(
-        "closure-handler scaling: C=1 wall = {:?}, C=8 wall = {:?}, ratio = {:.2}x",
+        "closure-handler scaling: C=1 wall = {:?}, C=4 wall = {:?}, ratio = {:.2}x",
         single,
         parallel,
         parallel.as_secs_f64() / single.as_secs_f64()
     );
 
     assert!(
-        parallel < single * 4,
-        "closure-capturing handlers serialized: C=8 wall {:?} should be < 4x C=1 wall {:?} \
+        parallel < single.mul_f64(2.5),
+        "closure-capturing handlers serialized: C=4 wall {:?} should be < 2.5x C=1 wall {:?} \
          (ratio {:.2}x). The per-request closure isolation has regressed -- \
          check Environment::deep_clone_isolated and fork_for_serving.",
         parallel,
