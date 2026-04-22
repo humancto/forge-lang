@@ -6965,9 +6965,203 @@ fn fork_for_serving_is_under_50ms() {
         "fork_for_serving: {} forks in {:?}, mean {:.3}ms",
         n, elapsed, mean_ms
     );
+    // Tightened from 50ms in the previous PR. Today's baseline after
+    // the closure-walk fix is ~0.1ms; 1ms gives 10x headroom while still
+    // catching real regressions.
     assert!(
-        mean_ms < 50.0,
-        "fork cost regressed: {:.3}ms per fork",
+        mean_ms < 1.0,
+        "fork cost regressed: {:.3}ms per fork (gate: 1ms)",
         mean_ms
     );
+}
+
+// ── Closure isolation across forks (PR #110) ─────────────────────────────
+
+/// Helper: define a top-level mutable variable plus a Lambda that captures
+/// and increments it. Returns the live template ready to be forked.
+fn template_with_mutable_closure() -> Interpreter {
+    let mut interp = Interpreter::new();
+    interp.run_repl(
+        &crate::parser::Parser::new(
+            crate::lexer::Lexer::new(
+                "let mut count = 0\n\
+                 let bump = fn() {\n\
+                 count = count + 1\n\
+                 return count\n\
+                 }\n",
+            )
+            .tokenize()
+            .expect("lex"),
+        )
+        .parse_program()
+        .expect("parse"),
+    )
+    .expect("run setup");
+    interp
+}
+
+/// Two forks, each repeatedly invoking a captured-counter Lambda. Each
+/// fork's count must be independent. This is the core regression test
+/// for the closure-Arc isolation: under the pre-PR-#110 model, both
+/// forks' Lambda values share the same `Arc<Mutex<Environment>>` for
+/// `closure`, so increments interleave and the asserts fail.
+#[test]
+fn fork_for_serving_isolates_lambda_closure_mutations() {
+    let template = template_with_mutable_closure();
+
+    let mut a = template.fork_for_serving();
+    let mut b = template.fork_for_serving();
+
+    // Drive each fork independently.
+    let bump_a = a.env.get("bump").expect("bump in fork a");
+    let bump_b = b.env.get("bump").expect("bump in fork b");
+
+    for _ in 0..5 {
+        a.call_function(bump_a.clone(), vec![]).expect("call a");
+    }
+    for _ in 0..3 {
+        b.call_function(bump_b.clone(), vec![]).expect("call b");
+    }
+
+    // Each fork sees only its own writes.
+    assert_eq!(a.env.get("count"), Some(Value::Int(5)));
+    assert_eq!(b.env.get("count"), Some(Value::Int(3)));
+    // Template is untouched.
+    assert_eq!(template.env.get("count"), Some(Value::Int(0)));
+}
+
+/// The two forks' Lambda values must hold *distinct* closure `Arc`s.
+/// This is a stronger statement than the behavioral test above — it
+/// verifies the Arc identity that the closure-deep-clone is supposed
+/// to guarantee, so a future regression to shallow cloning fails here
+/// even before the lambda is ever called.
+#[test]
+fn fork_for_serving_gives_distinct_lambda_closure_arcs() {
+    let template = template_with_mutable_closure();
+
+    let a = template.fork_for_serving();
+    let b = template.fork_for_serving();
+
+    let bump_template = template.env.get("bump").expect("bump in template");
+    let bump_a = a.env.get("bump").expect("bump in fork a");
+    let bump_b = b.env.get("bump").expect("bump in fork b");
+
+    let arc_template = match bump_template {
+        Value::Lambda { closure, .. } => closure,
+        _ => panic!("bump should be a Lambda"),
+    };
+    let arc_a = match bump_a {
+        Value::Lambda { closure, .. } => closure,
+        _ => panic!("bump_a should be a Lambda"),
+    };
+    let arc_b = match bump_b {
+        Value::Lambda { closure, .. } => closure,
+        _ => panic!("bump_b should be a Lambda"),
+    };
+
+    assert!(
+        !Arc::ptr_eq(&arc_template, &arc_a),
+        "fork A's Lambda closure Arc must differ from template's"
+    );
+    assert!(
+        !Arc::ptr_eq(&arc_template, &arc_b),
+        "fork B's Lambda closure Arc must differ from template's"
+    );
+    assert!(
+        !Arc::ptr_eq(&arc_a, &arc_b),
+        "fork A's and fork B's Lambda closure Arcs must differ from each other"
+    );
+}
+
+/// Recursive function defined in the template (the FnDef cycle case at
+/// mod.rs:1130-1153) must still work after fork_for_serving. The cycle
+/// is: top scope X contains `fib`, and `fib.closure.scopes[-1]` is the
+/// same Arc as X. The placeholder pattern in deep_clone_isolated is
+/// what makes this terminate; if it's wrong, this either infinite-loops
+/// or panics on Arc identity confusion.
+#[test]
+fn fork_for_serving_handles_recursive_function_cycle() {
+    let mut template = Interpreter::new();
+    template
+        .run_repl(
+            &crate::parser::Parser::new(
+                crate::lexer::Lexer::new(
+                    "fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) }\n",
+                )
+                .tokenize()
+                .expect("lex"),
+            )
+            .parse_program()
+            .expect("parse"),
+        )
+        .expect("run setup");
+
+    let mut req = template.fork_for_serving();
+    let fib = req.env.get("fib").expect("fib in fork");
+    let result = req.call_function(fib, vec![Value::Int(10)]).expect("call");
+    assert_eq!(result, Value::Int(55));
+}
+
+/// `spawn_task` semantics MUST be unchanged by PR #110: a captured
+/// Lambda mutated inside a spawned task must still be visible from
+/// the parent, because squad blocks intentionally share closure state
+/// (that is the whole point of opting into concurrency with `spawn`).
+/// This is the regression gate for the explicit non-change documented
+/// in the plan's "Why two flavors" table.
+#[test]
+fn spawn_task_still_shares_lambda_closure_with_parent() {
+    let mut interp = Interpreter::new();
+    interp
+        .run_repl(
+            &crate::parser::Parser::new(
+                crate::lexer::Lexer::new(
+                    "let mut count = 0\n\
+                     let bump = fn() {\n\
+                     count = count + 1\n\
+                     return count\n\
+                     }\n\
+                     squad {\n\
+                     spawn { bump() }\n\
+                     spawn { bump() }\n\
+                     spawn { bump() }\n\
+                     }\n",
+                )
+                .tokenize()
+                .expect("lex"),
+            )
+            .parse_program()
+            .expect("parse"),
+        )
+        .expect("run setup");
+
+    // After the squad block joins, the three spawned bumps must have
+    // accumulated into the parent's `count`. Under the pre-PR-#108 model
+    // (shallow env clone in spawn_task) this would have been silently
+    // broken; today spawn_task uses env.deep_clone() which preserves
+    // closure-Arc sharing. PR #110 must NOT change that.
+    assert_eq!(interp.env.get("count"), Some(Value::Int(3)));
+}
+
+/// Debug-only: a Stream in the template env must trip the assert when
+/// fork_for_serving is called. Verifies the Stream-sharing footgun
+/// catches at fork time rather than silently corrupting requests.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "Value::Stream found in template env")]
+fn fork_for_serving_panics_if_template_env_holds_a_stream() {
+    use crate::interpreter::StreamCell;
+    use std::sync::Mutex;
+    let mut template = Interpreter::new();
+    let cell = StreamCell {
+        kind: crate::interpreter::StreamKind::ArrayIter {
+            items: vec![],
+            idx: 0,
+        },
+        poisoned: None,
+    };
+    template
+        .env
+        .define("s".to_string(), Value::Stream(Arc::new(Mutex::new(cell))));
+
+    let _ = template.fork_for_serving();
 }
