@@ -658,10 +658,7 @@ impl Environment {
                 body,
                 closure,
             } => {
-                let captured = closure
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone();
+                let captured = closure.lock().unwrap_or_else(|p| p.into_inner()).clone();
                 let new_env = Self::deep_clone_env(&captured, scope_map);
                 Value::Lambda {
                     params,
@@ -884,9 +881,7 @@ impl Interpreter {
                      cannot be safely shared across per-request forks. Construct \
                      streams inside handlers, not at the top level."
                 ),
-                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => {
-                    a.iter().for_each(walk)
-                }
+                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => a.iter().for_each(walk),
                 Value::Map(pairs) => pairs.iter().for_each(|(k, v)| {
                     walk(k);
                     walk(v);
