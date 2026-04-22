@@ -870,6 +870,44 @@ impl Interpreter {
         self.defer_host_runtime = defer;
     }
 
+    /// Debug-only safety check: walk the env and panic if any reachable
+    /// `Value::Stream` is found. Called from `fork_for_serving` because
+    /// streams are single-use and silently break under sharing across
+    /// per-request forks. Cheap (~20µs for the stdlib env) and runs at
+    /// most once per request; release builds skip the check entirely.
+    #[cfg(debug_assertions)]
+    fn assert_no_streams_in_env(env: &Environment) {
+        fn walk(v: &Value) {
+            match v {
+                Value::Stream(_) => panic!(
+                    "Value::Stream found in template env; streams are single-use and \
+                     cannot be safely shared across per-request forks. Construct \
+                     streams inside handlers, not at the top level."
+                ),
+                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => {
+                    a.iter().for_each(walk)
+                }
+                Value::Map(pairs) => pairs.iter().for_each(|(k, v)| {
+                    walk(k);
+                    walk(v);
+                }),
+                Value::Object(o) => o.values().for_each(walk),
+                Value::ResultOk(b) | Value::ResultErr(b) | Value::Some(b) | Value::Frozen(b) => {
+                    walk(b)
+                }
+                // Closure scopes are walked separately by deep_clone_isolated.
+                // Don't recurse into them here — that would re-walk the env.
+                _ => {}
+            }
+        }
+        for scope in &env.scopes {
+            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
+            for v in guard.values() {
+                walk(v);
+            }
+        }
+    }
+
     /// Fork this interpreter for serving a single HTTP request.
     ///
     /// The receiver acts as a read-only template. The returned interpreter
@@ -893,10 +931,24 @@ impl Interpreter {
     /// after forking so client disconnects can short-circuit the handler
     /// at the next safe point (loop, call, statement).
     pub fn fork_for_serving(&self) -> Self {
+        // Debug builds only: walk the template env once and panic if it
+        // contains a Value::Stream. Streams are single-use (terminal
+        // ops drain them) so sharing one across forks silently breaks
+        // (whichever request drains first wins). Catching this at fork
+        // time gives an attributable failure pointing at the offending
+        // top-level statement.
+        #[cfg(debug_assertions)]
+        Self::assert_no_streams_in_env(&self.env);
+
         let mut interp = Interpreter::new();
-        // CRITICAL: deep_clone, not clone. See fork_for_background_runtime
-        // for the same justification.
-        interp.env = self.env.deep_clone();
+        // CRITICAL: deep_clone_isolated, not deep_clone. The latter
+        // duplicates scope storage but leaves Function/Lambda closures
+        // sharing scope Arcs with the template — which would let
+        // concurrent handlers race on shared closure scope mutexes.
+        // The isolated variant walks values and gives every closure
+        // its own scope graph, with cycle handling for the recursive
+        // function pattern. See Environment::deep_clone_isolated.
+        interp.env = self.env.deep_clone_isolated();
         interp.method_tables = self.method_tables.clone();
         interp.static_methods = self.static_methods.clone();
         interp.embedded_fields = self.embedded_fields.clone();
