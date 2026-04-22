@@ -523,9 +523,9 @@ pub async fn start_server(
                     }
                 }
 
-                let parent_cx = opentelemetry::global::get_text_map_propagator(
-                    |propagator| propagator.extract(&HeaderMapExtractor(req.headers())),
-                );
+                let parent_cx = opentelemetry::global::get_text_map_propagator(|propagator| {
+                    propagator.extract(&HeaderMapExtractor(req.headers()))
+                });
                 span.set_parent(parent_cx);
             }
 
