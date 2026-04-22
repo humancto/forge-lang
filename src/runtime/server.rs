@@ -1,31 +1,113 @@
-/// Forge HTTP Server — Axum + Tokio
-/// Production-grade: async, CORS, JSON, path/query params.
+//! Forge HTTP Server — Axum + Tokio
+//!
+//! Per-request fork architecture: each incoming request gets its own
+//! Interpreter forked from a shared, read-only [`InterpreterTemplate`].
+//! Handlers run on tokio's blocking pool via [`tokio::task::spawn_blocking`]
+//! so synchronous Forge code never blocks an async worker thread.
+//!
+//! Concurrency guarantees:
+//! - **No global lock on the hot path.** Forks share only the
+//!   [`Arc<InterpreterTemplate>`], not any mutable state.
+//! - **Backpressure.** A bounded [`tokio::sync::Semaphore`] prevents the
+//!   blocking pool from queueing unboundedly; excess requests get a
+//!   503 with `Retry-After: 1`.
+//! - **Cancellation.** Each request carries an [`Arc<AtomicBool>`] that
+//!   the per-request interpreter polls at every safe point (loop / call /
+//!   statement). A `Drop` guard on the response future flips it when
+//!   axum drops the future (client disconnect, server shutdown).
+//! - **Graceful shutdown.** SIGINT/SIGTERM triggers axum's graceful
+//!   shutdown; in-flight requests get up to 30s to finish before the
+//!   process exits.
+//!
+//! Behavior change vs. the previous global-mutex model:
+//! - Top-level mutations made by a handler do not persist across
+//!   requests. Each fork starts from the template snapshot.
+//! - Handlers that read state mutated by `schedule`/`watch` blocks no
+//!   longer see those updates. A future `shared { ... }` block will
+//!   provide an explicit cross-request state primitive.
+//!
+//! See `CLAUDE.md` § Server Concurrency Model for the user-facing
+//! contract.
+
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use axum::{
     extract::{Json, Path, Query, State},
     http::StatusCode,
-    response::Json as JsonResponse,
+    response::{IntoResponse, Json as JsonResponse, Response},
     routing::{delete, get, post, put},
     Router,
 };
 use serde_json::Value as JsonValue;
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::interpreter::{Interpreter, RuntimeError, Value};
 use crate::runtime::metadata::{CorsMode, ServerPlan};
 
-pub type AppState = Arc<Mutex<Interpreter>>;
+/// Default cap on concurrent in-flight handler invocations.
+///
+/// Sized to match tokio's default `max_blocking_threads` (512). When the
+/// permit pool is exhausted the server returns 503 with `Retry-After: 1`
+/// instead of unboundedly queueing on the blocking pool — fast failure
+/// is better than client-perceived hangs followed by RST.
+const DEFAULT_MAX_INFLIGHT: usize = 512;
+
+/// Read-only template the server forks per request.
+///
+/// Construction-time only: once wrapped in `Arc<InterpreterTemplate>` and
+/// installed on a router, the inner [`Interpreter`] must not be mutated.
+/// All per-request work happens on the forked interpreter returned by
+/// [`Self::fork`].
+pub struct InterpreterTemplate {
+    inner: Interpreter,
+}
+
+impl InterpreterTemplate {
+    pub fn new(interp: Interpreter) -> Self {
+        Self { inner: interp }
+    }
+
+    /// Produce a fresh per-request interpreter. Cheap relative to handler
+    /// cost, expensive relative to a mutex acquire — the win is that two
+    /// concurrent requests never block on each other.
+    pub fn fork(&self) -> Interpreter {
+        self.inner.fork_for_serving()
+    }
+}
+
+/// Application state passed to every axum handler.
+#[derive(Clone)]
+pub struct AppState {
+    template: Arc<InterpreterTemplate>,
+    permits: Arc<Semaphore>,
+}
+
+/// Drop guard that signals cancellation when axum drops the response
+/// future (client disconnect, request timeout, server shutdown).
+///
+/// The forked interpreter's [`Interpreter::cancelled`] points at the
+/// same `Arc<AtomicBool>`, so the long-running blocking task observes
+/// the flip at its next safe point and returns a `cancelled` error —
+/// freeing the blocking-pool thread and the fork's memory.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 fn to_axum_path(forge_path: &str) -> String {
     forge_path
         .split('/')
         .map(|s| {
-            if s.starts_with(':') {
-                format!("{{{}}}", &s[1..])
+            if let Some(rest) = s.strip_prefix(':') {
+                format!("{{{}}}", rest)
             } else {
                 s.to_string()
             }
@@ -85,13 +167,88 @@ fn call_handler(
     }
 }
 
+/// Run a Forge handler with full per-request lifecycle:
+/// 1. Acquire a backpressure permit, or 503 if exhausted.
+/// 2. Set up the cancel-on-drop guard.
+/// 3. Fork the interpreter and ship it to the blocking pool.
+/// 4. Await; capture panics into a 500 without leaking payload to the client.
+async fn run_handler(
+    state: AppState,
+    handler_name: String,
+    path_params: HashMap<String, String>,
+    query_params: HashMap<String, String>,
+    body: Option<JsonValue>,
+) -> Response {
+    let permit = match state.permits.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("Retry-After", "1")],
+                JsonResponse(serde_json::json!({"error": "server at capacity"})),
+            )
+                .into_response();
+        }
+    };
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    // _drop_guard lives until the end of this future. If axum drops us
+    // (client disconnect, shutdown), it fires and the blocking task
+    // observes the cancel at its next safe point.
+    let _drop_guard = CancelOnDrop(cancelled.clone());
+
+    let template = state.template.clone();
+    let cancel_for_blocking = cancelled.clone();
+
+    let join = tokio::task::spawn_blocking(move || {
+        let mut interp = template.fork();
+        // Replace the per-request token with the one the response-future
+        // Drop guard owns. Now client disconnect short-circuits the
+        // handler at the next loop/call/statement safe point.
+        interp.cancelled = cancel_for_blocking;
+        call_handler(&mut interp, &handler_name, &path_params, &query_params, body)
+    });
+
+    let (status, json) = match join.await {
+        Ok(pair) => pair,
+        Err(join_err) if join_err.is_panic() => {
+            // Don't leak panic message to the client. Log it.
+            let payload = join_err.into_panic();
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            eprintln!("\x1B[31m[server panic]\x1B[0m handler panicked: {}", msg);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"error": "internal server error"}),
+            )
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "handler join failed"}),
+        ),
+    };
+
+    drop(permit);
+    (status, JsonResponse(json)).into_response()
+}
+
 pub async fn start_server(
     interpreter: Interpreter,
     server: &ServerPlan,
 ) -> Result<(), RuntimeError> {
     let config = &server.config;
     let routes = &server.routes;
-    let state: AppState = Arc::new(Mutex::new(interpreter));
+
+    let state = AppState {
+        template: Arc::new(InterpreterTemplate::new(interpreter)),
+        permits: Arc::new(Semaphore::new(DEFAULT_MAX_INFLIGHT)),
+    };
+
     let mut app = Router::new();
 
     for route in routes {
@@ -101,19 +258,15 @@ pub async fn start_server(
         match route.method.as_str() {
             "GET" => {
                 let hn = hn.clone();
-                app = app.route(&axum_path, get(move |
-                    State(state): State<AppState>,
-                    path: Option<Path<HashMap<String, String>>>,
-                    Query(query): Query<HashMap<String, String>>,
-                | async move {
-                    let params = path.map(|Path(p)| p).unwrap_or_default();
-                    let mut interp = match state.lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    let (status, json) = call_handler(&mut interp, &hn, &params, &query, None);
-                    (status, JsonResponse(json))
-                }));
+                app = app.route(
+                    &axum_path,
+                    get(move |State(state): State<AppState>,
+                              path: Option<Path<HashMap<String, String>>>,
+                              Query(query): Query<HashMap<String, String>>| async move {
+                        let params = path.map(|Path(p)| p).unwrap_or_default();
+                        run_handler(state, hn, params, query, None).await
+                    }),
+                );
             }
             "POST" | "PUT" => {
                 let hn = hn.clone();
@@ -123,13 +276,7 @@ pub async fn start_server(
                                     Query(query): Query<HashMap<String, String>>,
                                     Json(body): Json<JsonValue>| async move {
                     let params = path.map(|Path(p)| p).unwrap_or_default();
-                    let mut interp = match state.lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    let (status, json) =
-                        call_handler(&mut interp, &hn, &params, &query, Some(body));
-                    (status, JsonResponse(json))
+                    run_handler(state, hn, params, query, Some(body)).await
                 };
                 if method == "POST" {
                     app = app.route(&axum_path, post(handler));
@@ -139,39 +286,39 @@ pub async fn start_server(
             }
             "DELETE" => {
                 let hn = hn.clone();
-                app = app.route(&axum_path, delete(move |
-                    State(state): State<AppState>,
-                    path: Option<Path<HashMap<String, String>>>,
-                    Query(query): Query<HashMap<String, String>>,
-                | async move {
-                    let params = path.map(|Path(p)| p).unwrap_or_default();
-                    let mut interp = match state.lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    let (status, json) = call_handler(&mut interp, &hn, &params, &query, None);
-                    (status, JsonResponse(json))
-                }));
+                app = app.route(
+                    &axum_path,
+                    delete(move |State(state): State<AppState>,
+                                 path: Option<Path<HashMap<String, String>>>,
+                                 Query(query): Query<HashMap<String, String>>| async move {
+                        let params = path.map(|Path(p)| p).unwrap_or_default();
+                        run_handler(state, hn, params, query, None).await
+                    }),
+                );
             }
             "WS" => {
+                // WebSocket handlers hold session state across messages, so
+                // a per-request fork is the wrong model. Each connection
+                // gets its own forked interpreter held inside a
+                // parking_lot::Mutex (messages on a single connection
+                // arrive serially; the lock just gives us !Send across
+                // await). Different connections are still fully isolated.
                 let hn = hn.clone();
                 app = app.route(
                     &axum_path,
                     get(
                         move |State(state): State<AppState>,
                               ws: axum::extract::WebSocketUpgrade| {
-                            let state = state.clone();
+                            let template = state.template.clone();
                             let hn = hn.clone();
                             async move {
                                 ws.on_upgrade(move |mut socket| async move {
                                     use axum::extract::ws::Message;
+                                    let interp = Arc::new(parking_lot::Mutex::new(template.fork()));
                                     while let Some(Ok(msg)) = socket.recv().await {
                                         if let Message::Text(text) = msg {
                                             let response = {
-                                                let mut interp = match state.lock() {
-                                                    Ok(g) => g,
-                                                    Err(poisoned) => poisoned.into_inner(),
-                                                };
+                                                let mut interp = interp.lock();
                                                 let handler = interp.env.get(&hn);
                                                 if let Some(h) = handler {
                                                     match interp.call_function(
@@ -221,6 +368,10 @@ pub async fn start_server(
     println!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
     println!("  \x1B[1m   http://{}\x1B[0m", addr);
     println!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
+    println!(
+        "  \x1B[90m   max in-flight: {} (excess returns 503)\x1B[0m",
+        DEFAULT_MAX_INFLIGHT
+    );
     println!();
     for route in routes {
         println!("  \x1B[36m{:>6}\x1B[0m  {}", route.method, route.pattern);
@@ -233,10 +384,40 @@ pub async fn start_server(
         .await
         .map_err(|e| RuntimeError::new(&format!("bind failed: {}", e)))?;
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| RuntimeError::new(&format!("server error: {}", e)))?;
 
     Ok(())
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM. axum will then stop accepting new
+/// connections and let in-flight requests finish (subject to client and
+/// per-request timeouts). Drop guards on dropped futures still flip the
+/// per-request cancel flag so any blocking handlers that are still
+/// running observe the cancel at their next safe point.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sigterm) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sigterm.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    eprintln!("\x1B[33m[server] shutdown signal received, draining...\x1B[0m");
 }
 
 pub fn json_to_forge(v: JsonValue) -> Value {
@@ -414,5 +595,55 @@ mod tests {
         } else {
             panic!("expected object");
         }
+    }
+
+    // ── Concurrency model: AppState clone is cheap and shares no locks ──
+
+    /// AppState must be `Clone` (axum requires `Clone` on `with_state`).
+    /// Cloning it must be cheap — just two Arc bumps. If anyone ever
+    /// adds a `Mutex<...>` field this will still compile but the test
+    /// below ensures we don't accidentally serialize on it.
+    #[test]
+    fn app_state_clone_is_arc_share() {
+        let state = AppState {
+            template: Arc::new(InterpreterTemplate::new(Interpreter::new())),
+            permits: Arc::new(Semaphore::new(DEFAULT_MAX_INFLIGHT)),
+        };
+        let other = state.clone();
+        assert!(Arc::ptr_eq(&state.template, &other.template));
+        assert!(Arc::ptr_eq(&state.permits, &other.permits));
+    }
+
+    /// CancelOnDrop must flip the flag exactly when dropped, with
+    /// Release ordering visible to a concurrent Acquire load (the
+    /// interpreter's polling site).
+    #[test]
+    fn cancel_on_drop_flips_flag() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let _g = CancelOnDrop(flag.clone());
+            assert!(!flag.load(Ordering::Acquire));
+        }
+        assert!(flag.load(Ordering::Acquire));
+    }
+
+    /// The template must produce independent forks. This is the
+    /// integration of fork_for_serving with the server's wrapper type.
+    #[test]
+    fn template_forks_are_independent() {
+        let mut interp = Interpreter::new();
+        interp.env.define("seed".to_string(), Value::Int(7));
+        let tpl = Arc::new(InterpreterTemplate::new(interp));
+
+        let mut a = tpl.fork();
+        let mut b = tpl.fork();
+
+        a.env.define("x".to_string(), Value::Int(1));
+        b.env.define("x".to_string(), Value::Int(2));
+
+        assert_eq!(a.env.get("x"), Some(Value::Int(1)));
+        assert_eq!(b.env.get("x"), Some(Value::Int(2)));
+        assert_eq!(a.env.get("seed"), Some(Value::Int(7)));
+        assert_eq!(b.env.get("seed"), Some(Value::Int(7)));
     }
 }

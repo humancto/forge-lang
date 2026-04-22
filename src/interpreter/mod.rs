@@ -627,7 +627,12 @@ pub struct DebugState {
 pub struct Interpreter {
     pub env: Environment,
     call_depth: usize,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Cooperative cancellation flag. The interpreter polls this at every
+    /// statement boundary (`exec_stmt`); a `store(true, Release)` from any
+    /// thread short-circuits the running program at the next safe point.
+    /// Public so the HTTP server can swap in a per-request token wired to
+    /// the response-future Drop guard for client-disconnect cancellation.
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     defer_host_runtime: bool,
     /// Instance methods: type_name -> { method_name -> Value::Function }
     pub method_tables: HashMap<String, IndexMap<String, Value>>,
