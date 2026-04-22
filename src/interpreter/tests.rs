@@ -6981,22 +6981,23 @@ fn fork_for_serving_is_under_50ms() {
 /// and increments it. Returns the live template ready to be forked.
 fn template_with_mutable_closure() -> Interpreter {
     let mut interp = Interpreter::new();
-    interp.run_repl(
-        &crate::parser::Parser::new(
-            crate::lexer::Lexer::new(
-                "let mut count = 0\n\
+    interp
+        .run_repl(
+            &crate::parser::Parser::new(
+                crate::lexer::Lexer::new(
+                    "let mut count = 0\n\
                  let bump = fn() {\n\
                  count = count + 1\n\
                  return count\n\
                  }\n",
+                )
+                .tokenize()
+                .expect("lex"),
             )
-            .tokenize()
-            .expect("lex"),
+            .parse_program()
+            .expect("parse"),
         )
-        .parse_program()
-        .expect("parse"),
-    )
-    .expect("run setup");
+        .expect("run setup");
     interp
 }
 
