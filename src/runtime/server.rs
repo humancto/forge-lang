@@ -31,6 +31,7 @@
 
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -45,9 +46,12 @@ use axum::{
 use serde_json::Value as JsonValue;
 use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 use crate::interpreter::{Interpreter, RuntimeError, Value};
 use crate::runtime::metadata::{CorsMode, ServerPlan};
+use crate::runtime::tracing_init;
 
 /// Default cap on concurrent in-flight handler invocations.
 ///
@@ -99,6 +103,12 @@ struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
+        // Visible under FORGE_LOG=forge.server=debug. Useful when
+        // diagnosing why a long-running handler exited early.
+        tracing::debug!(
+            target: "forge.server",
+            "client disconnected; cancel signaled"
+        );
     }
 }
 
@@ -170,8 +180,21 @@ fn call_handler(
 /// Run a Forge handler with full per-request lifecycle:
 /// 1. Acquire a backpressure permit, or 503 if exhausted.
 /// 2. Set up the cancel-on-drop guard.
-/// 3. Fork the interpreter and ship it to the blocking pool.
+/// 3. Fork the interpreter and ship it to the blocking pool, propagating
+///    the tracing span across the boundary so user `log.info` events
+///    inherit the HTTP request fields.
 /// 4. Await; capture panics into a 500 without leaking payload to the client.
+///
+/// The `#[instrument]` attribute opens an info-level span named
+/// `forge.handler` carrying `handler = %handler_name`. Combined with
+/// the outer `TraceLayer` span (which carries `method`, `uri`, `status`,
+/// `latency`), every event from inside the handler — runtime *or* user
+/// `log.info` — is correlated to its request.
+#[tracing::instrument(
+    name = "forge.handler",
+    skip(state, path_params, query_params, body),
+    fields(handler = %handler_name)
+)]
 async fn run_handler(
     state: AppState,
     handler_name: String,
@@ -200,7 +223,20 @@ async fn run_handler(
     let template = state.template.clone();
     let cancel_for_blocking = cancelled.clone();
 
+    // CRITICAL: capture the current tracing span on the async side,
+    // re-enter it on the blocking thread. tokio::task::spawn_blocking
+    // does NOT propagate tracing context (different OS thread, no
+    // automatic instrumentation), so without this, every event from
+    // inside the handler — including user `log.info` calls from Forge
+    // code — would have no span context (no method, no uri, no
+    // handler field).
+    let span = tracing::Span::current();
+
+    // Clone the handler name for the blocking closure; the original
+    // stays available for the panic-log site below.
+    let hn_for_blocking = handler_name.clone();
     let join = tokio::task::spawn_blocking(move || {
+        let _g = span.enter();
         let mut interp = template.fork();
         // Replace the per-request token with the one the response-future
         // Drop guard owns. Now client disconnect short-circuits the
@@ -208,7 +244,7 @@ async fn run_handler(
         interp.cancelled = cancel_for_blocking;
         call_handler(
             &mut interp,
-            &handler_name,
+            &hn_for_blocking,
             &path_params,
             &query_params,
             body,
@@ -227,7 +263,12 @@ async fn run_handler(
             } else {
                 "<non-string panic payload>".to_string()
             };
-            eprintln!("\x1B[31m[server panic]\x1B[0m handler panicked: {}", msg);
+            tracing::error!(
+                target: "forge.server",
+                handler = %handler_name,
+                panic = %msg,
+                "handler panicked",
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::json!({"error": "internal server error"}),
@@ -247,6 +288,11 @@ pub async fn start_server(
     interpreter: Interpreter,
     server: &ServerPlan,
 ) -> Result<(), RuntimeError> {
+    // Install the global tracing subscriber on first server boot;
+    // idempotent across multiple starts in the same process (test
+    // harness, embedder).
+    tracing_init::init_for_server();
+
     let config = &server.config;
     let routes = &server.routes;
 
@@ -360,31 +406,63 @@ pub async fn start_server(
             .allow_headers(Any),
         CorsMode::Restrictive => CorsLayer::new(), // same-origin only
     };
-    let app = app.layer(cors_layer).with_state(state);
+
+    // TraceLayer wraps every request in a tracing span carrying method,
+    // uri, version, and emits an INFO event on response with status +
+    // latency. Configured to INFO level explicitly because tower-http's
+    // defaults are DEBUG, which the default filter (forge_lang=info,
+    // tower_http=info) would silently drop.
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+        .on_response(DefaultOnResponse::new().level(Level::INFO));
+
+    let app = app.layer(cors_layer).layer(trace_layer).with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| RuntimeError::new(&format!("invalid address: {}", e)))?;
 
-    let cors_label = match config.cors {
-        CorsMode::Permissive => "\x1B[33mpermissive (any origin)\x1B[0m",
-        CorsMode::Restrictive => "\x1B[32mrestrictive (same-origin)\x1B[0m",
+    // Always emit the structured startup event so log aggregators see
+    // server boot regardless of TTY / format choice.
+    let cors_str = match config.cors {
+        CorsMode::Permissive => "permissive",
+        CorsMode::Restrictive => "restrictive",
     };
-    println!();
-    println!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
-    println!("  \x1B[1m   http://{}\x1B[0m", addr);
-    println!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
-    println!(
-        "  \x1B[90m   max in-flight: {} (excess returns 503)\x1B[0m",
-        DEFAULT_MAX_INFLIGHT
+    tracing::info!(
+        target: "forge.server",
+        host = %config.host,
+        port = config.port,
+        routes = routes.len(),
+        cors = cors_str,
+        max_inflight = DEFAULT_MAX_INFLIGHT,
+        "Forge server listening",
     );
-    println!();
-    for route in routes {
-        println!("  \x1B[36m{:>6}\x1B[0m  {}", route.method, route.pattern);
+
+    // Additionally, on a TTY, print the original colorful banner. This
+    // is genuinely good UX for `forge run my_server.fg` interactively.
+    // Skipped when stdout is piped (CI, log capture) so escape codes
+    // don't leak into log files.
+    if std::io::stdout().is_terminal() {
+        let cors_label = match config.cors {
+            CorsMode::Permissive => "\x1B[33mpermissive (any origin)\x1B[0m",
+            CorsMode::Restrictive => "\x1B[32mrestrictive (same-origin)\x1B[0m",
+        };
+        println!();
+        println!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
+        println!("  \x1B[1m   http://{}\x1B[0m", addr);
+        println!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
+        println!(
+            "  \x1B[90m   max in-flight: {} (excess returns 503)\x1B[0m",
+            DEFAULT_MAX_INFLIGHT
+        );
+        println!();
+        for route in routes {
+            println!("  \x1B[36m{:>6}\x1B[0m  {}", route.method, route.pattern);
+        }
+        println!();
+        println!("  \x1B[90mPowered by axum + tokio | Ctrl+C to stop\x1B[0m");
+        println!();
     }
-    println!();
-    println!("  \x1B[90mPowered by axum + tokio | Ctrl+C to stop\x1B[0m");
-    println!();
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -423,7 +501,10 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    eprintln!("\x1B[33m[server] shutdown signal received, draining...\x1B[0m");
+    tracing::info!(
+        target: "forge.server",
+        "shutdown signal received, draining"
+    );
 }
 
 pub fn json_to_forge(v: JsonValue) -> Value {
