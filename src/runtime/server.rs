@@ -56,6 +56,7 @@ use tracing::Level;
 use crate::interpreter::{Interpreter, RuntimeError, Value};
 use crate::runtime::metadata::{CorsMode, ServerPlan};
 use crate::runtime::tracing_init;
+use futures_util::{SinkExt, StreamExt};
 
 /// Cap on the recorded `request_id` length.
 ///
@@ -168,7 +169,7 @@ impl Drop for CancelOnDrop {
         // these per request.
         tracing::debug!(
             target: "forge.server",
-            "response future dropped; cancel flag set"
+            "runtime future dropped; cancel flag set"
         );
     }
 }
@@ -235,6 +236,18 @@ fn call_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"error": e.message}),
         ),
+    }
+}
+
+fn call_ws_handler(interp: &mut Interpreter, handler_name: &str, text: String) -> String {
+    let handler = interp.env.get(handler_name);
+    if let Some(h) = handler {
+        match interp.call_function(h, vec![Value::String(text)]) {
+            Ok(v) => format!("{}", v),
+            Err(e) => format!("error: {}", e.message),
+        }
+    } else {
+        "handler not found".to_string()
     }
 }
 
@@ -435,9 +448,10 @@ pub async fn start_server(
                 // WebSocket handlers hold session state across messages, so
                 // a per-request fork is the wrong model. Each connection
                 // gets its own forked interpreter held inside a
-                // parking_lot::Mutex (messages on a single connection
-                // arrive serially; the lock just gives us !Send across
-                // await). Different connections are still fully isolated.
+                // parking_lot::Mutex. The guard is acquired only inside
+                // spawn_blocking so synchronous Forge execution never
+                // blocks the async socket task. Different connections
+                // are still fully isolated.
                 let hn = hn.clone();
                 app = app.route(
                     &axum_path,
@@ -447,30 +461,108 @@ pub async fn start_server(
                             let template = state.template.clone();
                             let hn = hn.clone();
                             async move {
-                                ws.on_upgrade(move |mut socket| async move {
+                                ws.on_upgrade(move |socket| async move {
                                     use axum::extract::ws::Message;
-                                    let interp = Arc::new(parking_lot::Mutex::new(template.fork()));
-                                    while let Some(Ok(msg)) = socket.recv().await {
-                                        if let Message::Text(text) = msg {
-                                            let response = {
-                                                let mut interp = interp.lock();
-                                                let handler = interp.env.get(&hn);
-                                                if let Some(h) = handler {
-                                                    match interp.call_function(
-                                                        h,
-                                                        vec![Value::String(text.to_string())],
-                                                    ) {
-                                                        Ok(v) => format!("{}", v),
-                                                        Err(e) => format!("error: {}", e.message),
+
+                                    let cancelled = Arc::new(AtomicBool::new(false));
+                                    let _drop_guard = CancelOnDrop(cancelled.clone());
+
+                                    let mut conn_interp = template.fork();
+                                    conn_interp.cancelled = cancelled.clone();
+                                    let interp = Arc::new(parking_lot::Mutex::new(conn_interp));
+                                    let (mut sender, mut receiver) = socket.split();
+                                    let (text_tx, mut text_rx) =
+                                        tokio::sync::mpsc::channel::<String>(1);
+
+                                    let cancel_for_receiver = cancelled.clone();
+                                    let receiver_task = tokio::spawn(async move {
+                                        // Axum 0.8/tungstenite handles Pong replies in the
+                                        // codec before yielding messages here. We only need
+                                        // to forward text and treat Close/errors as cancel.
+                                        while let Some(msg) = receiver.next().await {
+                                            match msg {
+                                                Ok(Message::Text(text)) => {
+                                                    if text_tx.try_send(text.to_string()).is_err() {
+                                                        cancel_for_receiver
+                                                            .store(true, Ordering::Release);
+                                                        break;
                                                     }
-                                                } else {
-                                                    "handler not found".to_string()
                                                 }
-                                            };
-                                            let _ =
-                                                socket.send(Message::Text(response.into())).await;
+                                                Ok(Message::Close(_)) | Err(_) => {
+                                                    cancel_for_receiver
+                                                        .store(true, Ordering::Release);
+                                                    break;
+                                                }
+                                                Ok(_) => {}
+                                            }
+                                        }
+                                        cancel_for_receiver.store(true, Ordering::Release);
+                                    });
+
+                                    while let Some(text) = text_rx.recv().await {
+                                        if cancelled.load(Ordering::Acquire) {
+                                            break;
+                                        }
+
+                                        let interp_for_blocking = interp.clone();
+                                        let hn_for_blocking = hn.clone();
+                                        let span = tracing::Span::current();
+                                        let join = tokio::task::spawn_blocking(move || {
+                                            let _g = span.enter();
+                                            let mut interp = interp_for_blocking.lock();
+                                            call_ws_handler(&mut interp, &hn_for_blocking, text)
+                                        });
+
+                                        let response = match join.await {
+                                            Ok(response) => response,
+                                            Err(join_err) if join_err.is_panic() => {
+                                                let payload = join_err.into_panic();
+                                                let msg = if let Some(s) =
+                                                    payload.downcast_ref::<&str>()
+                                                {
+                                                    (*s).to_string()
+                                                } else if let Some(s) =
+                                                    payload.downcast_ref::<String>()
+                                                {
+                                                    s.clone()
+                                                } else {
+                                                    "<non-string panic payload>".to_string()
+                                                };
+                                                tracing::error!(
+                                                    target: "forge.server",
+                                                    handler = %hn,
+                                                    panic = %msg,
+                                                    "websocket handler panicked"
+                                                );
+                                                "error: internal handler panic".to_string()
+                                            }
+                                            Err(join_err) => {
+                                                tracing::error!(
+                                                    target: "forge.server",
+                                                    handler = %hn,
+                                                    error = %join_err,
+                                                    "websocket handler task failed"
+                                                );
+                                                "error: handler task failed".to_string()
+                                            }
+                                        };
+
+                                        if cancelled.load(Ordering::Acquire) {
+                                            break;
+                                        }
+
+                                        if sender
+                                            .send(Message::Text(response.into()))
+                                            .await
+                                            .is_err()
+                                        {
+                                            cancelled.store(true, Ordering::Release);
+                                            break;
                                         }
                                     }
+
+                                    cancelled.store(true, Ordering::Release);
+                                    receiver_task.abort();
                                 })
                             }
                         },
