@@ -26,6 +26,14 @@ fn forge_string_literal_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "\\\\")
 }
 
+fn unique_temp_path(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("forge_{}_{}_{}", name, std::process::id(), nanos))
+}
+
 #[test]
 fn evaluates_interpolated_expression() {
     let value = run_forge(
@@ -801,7 +809,7 @@ fn fs_write_read_remove() {
 
 #[test]
 fn fs_exists() {
-    let path = std::env::temp_dir().join("forge_test_exists.txt");
+    let path = unique_temp_path("test_exists.txt");
     let source = format!(
         r#"
         let p = "{}"
@@ -1465,8 +1473,8 @@ fn method_chaining_map_filter() {
 
 #[test]
 fn fs_copy_and_rename() {
-    let path1 = std::env::temp_dir().join("forge_copy_test.txt");
-    let path2 = std::env::temp_dir().join("forge_copy_test2.txt");
+    let path1 = unique_temp_path("copy_test.txt");
+    let path2 = unique_temp_path("copy_test2.txt");
     let source = format!(
         r#"
         let p1 = "{}"
@@ -1516,7 +1524,7 @@ fn fs_mkdir_list() {
 
 #[test]
 fn csv_read_write() {
-    let path = std::env::temp_dir().join("forge_csv_test.csv");
+    let path = unique_temp_path("csv_test.csv");
     let source = format!(
         r#"
         let p = "{}"
