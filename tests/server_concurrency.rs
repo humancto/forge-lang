@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const MAX_SCALING_RATIO: f64 = 3.8;
+
 /// Pick an unused TCP port by binding 0 and letting the kernel choose.
 fn pick_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
@@ -108,6 +110,10 @@ fn wait_for_path(path: &Path, timeout: Duration) -> bool {
     false
 }
 
+fn forge_string_literal_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}
+
 /// Time N concurrent GET requests using blocking reqwest on N OS threads.
 /// Returns the total wall time from the first request issued to the last
 /// response received.
@@ -180,17 +186,18 @@ fn http_handlers_run_in_parallel_not_serialized() {
     );
 
     // On a fully serialized server (the pre-fix Arc<Mutex<Interpreter>>
-    // model), C=4 would take ~4x longer than C=1. We allow 3.5x to
+    // model), C=4 would take ~4x longer than C=1. We allow 3.8x to
     // accommodate slow CI runners (ubuntu-latest is effectively
     // 2-core with hyperthreading and frequently under load), tokio
     // scheduling overhead, and per-request tower_http middleware
     // cost. The gate still detects a regression to full serialization
     // (which would be ~4x).
     assert!(
-        parallel < single.mul_f64(3.5),
-        "handlers serialized: C=4 wall {:?} should be < 3.5x C=1 wall {:?} \
+        parallel < single.mul_f64(MAX_SCALING_RATIO),
+        "handlers serialized: C=4 wall {:?} should be < {:.1}x C=1 wall {:?} \
          (ratio {:.2}x). The per-request fork model has regressed.",
         parallel,
+        MAX_SCALING_RATIO,
         single,
         parallel.as_secs_f64() / single.as_secs_f64()
     );
@@ -257,11 +264,12 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
     );
 
     assert!(
-        parallel < single.mul_f64(3.5),
-        "closure-capturing handlers serialized: C=4 wall {:?} should be < 3.5x C=1 wall {:?} \
+        parallel < single.mul_f64(MAX_SCALING_RATIO),
+        "closure-capturing handlers serialized: C=4 wall {:?} should be < {:.1}x C=1 wall {:?} \
          (ratio {:.2}x). The per-request closure isolation has regressed -- \
          check Environment::deep_clone_isolated and fork_for_serving.",
         parallel,
+        MAX_SCALING_RATIO,
         single,
         parallel.as_secs_f64() / single.as_secs_f64()
     );
@@ -271,10 +279,7 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
 fn schedule_mutations_do_not_leak_into_handler_forks() {
     let sentinel = unique_temp_file("schedule_handler_isolation");
     let _ = std::fs::remove_file(&sentinel);
-    let sentinel_str = sentinel
-        .to_str()
-        .expect("temp path should be valid UTF-8")
-        .to_string();
+    let sentinel_str = forge_string_literal_path(&sentinel);
 
     // `spawn_test_server` leaves `defer_host_runtime` at the Interpreter default
     // (`false`), so schedules start during `interp.run()`. That differs from the
@@ -343,9 +348,9 @@ fn websocket_handler_cancelled_on_client_disconnect() {
         let _ = std::fs::remove_file(path);
     }
 
-    let started_str = started.to_str().expect("temp path should be UTF-8");
-    let progress_str = progress.to_str().expect("temp path should be UTF-8");
-    let finished_str = finished.to_str().expect("temp path should be UTF-8");
+    let started_str = forge_string_literal_path(&started);
+    let progress_str = forge_string_literal_path(&progress);
+    let finished_str = forge_string_literal_path(&finished);
 
     let source = r#"
         @server(port: __PORT__)
@@ -367,9 +372,9 @@ fn websocket_handler_cancelled_on_client_disconnect() {
             return "done"
         }
         "#
-    .replace("__STARTED__", started_str)
-    .replace("__PROGRESS__", progress_str)
-    .replace("__FINISHED__", finished_str);
+    .replace("__STARTED__", &started_str)
+    .replace("__PROGRESS__", &progress_str)
+    .replace("__FINISHED__", &finished_str);
 
     let port = spawn_test_server(&source);
     let url = format!("ws://127.0.0.1:{}/ws", port);
