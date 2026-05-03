@@ -465,7 +465,7 @@ Standalone Native Binary
 
 - [x] `forge build --native app.fg → app` (standalone binary)
 - [x] Binary includes: compiled user code + libforge runtime
-- [ ] HTTP servers work as standalone binaries
+- [x] HTTP servers work as standalone binaries
 - [ ] Startup time: < 10ms (vs ~100ms for interpreter)
 - [ ] Performance: within 2-5x of equivalent Rust code
 - [ ] Cross-compilation to Linux/macOS (x86_64 + ARM)
