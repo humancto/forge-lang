@@ -453,6 +453,16 @@ fn compile_source(source: &str) -> crate::vm::bytecode::Chunk {
     compiler::compile(&program).expect("compile")
 }
 
+fn compile_source_result(
+    source: &str,
+) -> Result<crate::vm::bytecode::Chunk, compiler::CompileError> {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize().expect("lex");
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program().expect("parse");
+    compiler::compile(&program)
+}
+
 #[test]
 fn vm_error_stack_trace_reports_top_level_line() {
     // Three blank lines so the failing statement is on line 4 — we want
@@ -474,6 +484,7 @@ fn vm_error_stack_trace_reports_top_level_line() {
         "expected top-level frame to report line >= 4, got line {}",
         top.line
     );
+    assert!(top.col > 0, "expected top-level frame to report a column");
 }
 
 #[test]
@@ -507,6 +518,12 @@ let _ = inner()
         "expected `<main>` in trace, got: {:?}",
         function_names
     );
+    let inner = err
+        .stack_trace
+        .iter()
+        .find(|f| f.function == "inner")
+        .expect("inner frame");
+    assert!(inner.col > 0, "expected inner frame to report a column");
 }
 
 #[test]
@@ -528,6 +545,34 @@ fn vm_error_display_includes_trace() {
         rendered.contains("(line "),
         "expected `(line N)` in Display output, got: {}",
         rendered
+    );
+    assert!(
+        rendered.contains(", col "),
+        "expected `(line N, col M)` in Display output, got: {}",
+        rendered
+    );
+}
+
+#[test]
+fn vm_compiler_rejects_standalone_decorator() {
+    let err = compile_source_result("@server(port: 8080)\n")
+        .expect_err("standalone decorators must not silently compile");
+
+    assert!(
+        err.message
+            .contains("VM does not support standalone decorator"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn vm_compiler_accepts_metadata_function_decorator() {
+    let result = compile_source_result("@test\nfn sample() { return 1 }\n");
+    assert!(
+        result.is_ok(),
+        "metadata decorators attached to functions should still compile: {:?}",
+        result.err().map(|e| e.message)
     );
 }
 

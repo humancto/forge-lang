@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
-const VERSION_MINOR: u8 = 1;
+const VERSION_MINOR: u8 = 2;
 
 #[derive(Debug)]
 pub struct SerializeError {
@@ -67,6 +67,11 @@ fn write_chunk_inner(w: &mut Vec<u8>, chunk: &Chunk) -> Result<(), SerializeErro
     write_u32(w, chunk.lines.len() as u32)?;
     for &line in &chunk.lines {
         write_u32(w, line as u32)?;
+    }
+
+    write_u32(w, chunk.cols.len() as u32)?;
+    for &col in &chunk.cols {
+        write_u32(w, col as u32)?;
     }
 
     write_u16(w, chunk.prototypes.len() as u16)?;
@@ -157,17 +162,17 @@ fn read_chunk_root<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
 
     let mut version = [0u8; 2];
     r.read_exact(&mut version)?;
-    if version[0] > VERSION_MAJOR {
+    if version[0] > VERSION_MAJOR || (version[0] == VERSION_MAJOR && version[1] > VERSION_MINOR) {
         return Err(SerializeError::new(&format!(
             "bytecode version {}.{} is newer than supported {}.{}",
             version[0], version[1], VERSION_MAJOR, VERSION_MINOR
         )));
     }
 
-    read_chunk_inner(r)
+    read_chunk_inner(r, version[1])
 }
 
-fn read_chunk_inner<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
+fn read_chunk_inner<R: Read>(r: &mut R, minor_version: u8) -> Result<Chunk, SerializeError> {
     let name = read_string(r)?;
 
     let mut meta = [0u8; 3];
@@ -202,6 +207,34 @@ fn read_chunk_inner<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
     for _ in 0..lines_count {
         lines.push(read_u32(r)? as usize);
     }
+    if lines.len() != code.len() {
+        return Err(SerializeError::new(&format!(
+            "line table length {} does not match code length {}",
+            lines.len(),
+            code.len()
+        )));
+    }
+
+    let cols = if minor_version >= 2 {
+        let cols_count = read_u32(r)? as usize;
+        if cols_count > 1_000_000 {
+            return Err(SerializeError::new("column table too large"));
+        }
+        let mut cols = Vec::with_capacity(cols_count);
+        for _ in 0..cols_count {
+            cols.push(read_u32(r)? as usize);
+        }
+        if cols.len() != code.len() {
+            return Err(SerializeError::new(&format!(
+                "column table length {} does not match code length {}",
+                cols.len(),
+                code.len()
+            )));
+        }
+        cols
+    } else {
+        vec![0; code.len()]
+    };
 
     let proto_count = read_u16(r)? as usize;
     if proto_count > 65536 {
@@ -209,7 +242,7 @@ fn read_chunk_inner<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
     }
     let mut prototypes = Vec::with_capacity(proto_count);
     for _ in 0..proto_count {
-        prototypes.push(read_chunk_inner(r)?);
+        prototypes.push(read_chunk_inner(r, minor_version)?);
     }
 
     let uv_sources_count = read_u16(r)? as usize;
@@ -234,6 +267,7 @@ fn read_chunk_inner<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
         code,
         constants,
         lines,
+        cols,
         name,
         prototypes,
         max_registers,
@@ -332,8 +366,81 @@ mod tests {
         assert_eq!(original.upvalue_count, restored.upvalue_count);
         assert_eq!(original.code, restored.code);
         assert_eq!(original.lines, restored.lines);
+        assert_eq!(original.cols, restored.cols);
         assert_eq!(original.constants.len(), restored.constants.len());
         assert_eq!(original.prototypes.len(), restored.prototypes.len());
+    }
+
+    #[test]
+    fn round_trip_columns() {
+        let mut original = Chunk::new("<columns>");
+        original.max_registers = 1;
+        original.emit_at(encode_abc(OpCode::LoadNull, 0, 0, 0), 7, 13);
+        original.emit_at(encode_abc(OpCode::Return, 0, 0, 0), 8, 5);
+
+        let bytes = serialize_chunk(&original).unwrap();
+        let restored = deserialize_chunk(&bytes).unwrap();
+
+        assert_eq!(original.lines, restored.lines);
+        assert_eq!(original.cols, restored.cols);
+    }
+
+    fn serialize_chunk_v1_1(chunk: &Chunk) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(1);
+        bytes.push(1);
+        write_string(&mut bytes, &chunk.name).unwrap();
+        bytes.push(chunk.arity);
+        bytes.push(chunk.max_registers);
+        bytes.push(chunk.upvalue_count);
+
+        write_u32(&mut bytes, chunk.constants.len() as u32).unwrap();
+        for constant in &chunk.constants {
+            write_constant(&mut bytes, constant).unwrap();
+        }
+
+        write_u32(&mut bytes, chunk.code.len() as u32).unwrap();
+        for &instruction in &chunk.code {
+            write_u32(&mut bytes, instruction).unwrap();
+        }
+
+        write_u32(&mut bytes, chunk.lines.len() as u32).unwrap();
+        for &line in &chunk.lines {
+            write_u32(&mut bytes, line as u32).unwrap();
+        }
+
+        write_u16(&mut bytes, chunk.prototypes.len() as u16).unwrap();
+        for prototype in &chunk.prototypes {
+            bytes.extend_from_slice(&serialize_chunk_v1_1(prototype)[6..]);
+        }
+
+        write_u16(&mut bytes, chunk.upvalue_sources.len() as u16).unwrap();
+        for &src in &chunk.upvalue_sources {
+            match src {
+                UpvalueSource::Local(reg) => {
+                    bytes.push(0x01);
+                    bytes.push(reg);
+                }
+                UpvalueSource::Upvalue(idx) => {
+                    bytes.push(0x02);
+                    bytes.push(idx);
+                }
+            }
+        }
+
+        bytes
+    }
+
+    #[test]
+    fn deserializes_v1_1_without_columns_as_zero_columns() {
+        let original = make_simple_chunk();
+        let bytes = serialize_chunk_v1_1(&original);
+        let restored = deserialize_chunk(&bytes).unwrap();
+
+        assert_eq!(restored.code, original.code);
+        assert_eq!(restored.lines, original.lines);
+        assert_eq!(restored.cols, vec![0; restored.code.len()]);
     }
 
     #[test]
@@ -524,6 +631,17 @@ mod tests {
     }
 
     #[test]
+    fn future_minor_version_rejected() {
+        let mut data = Vec::new();
+        data.extend_from_slice(MAGIC);
+        data.push(VERSION_MAJOR);
+        data.push(VERSION_MINOR + 1);
+        let result = deserialize_chunk(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("newer than supported"));
+    }
+
+    #[test]
     fn truncated_data_rejected() {
         let chunk = make_simple_chunk();
         let bytes = serialize_chunk(&chunk).unwrap();
@@ -606,6 +724,7 @@ println(result)
 
         assert_eq!(chunk.code, restored.code);
         assert_eq!(chunk.lines, restored.lines);
+        assert_eq!(chunk.cols, restored.cols);
         assert_eq!(chunk.name, restored.name);
         assert_eq!(chunk.arity, restored.arity);
         assert_eq!(chunk.max_registers, restored.max_registers);
@@ -617,6 +736,7 @@ println(result)
 
         for (orig, rest) in chunk.prototypes.iter().zip(restored.prototypes.iter()) {
             assert_eq!(orig.code, rest.code);
+            assert_eq!(orig.cols, rest.cols);
             assert_eq!(orig.name, rest.name);
             assert_eq!(orig.arity, rest.arity);
             for (oc, rc) in orig.constants.iter().zip(rest.constants.iter()) {
@@ -658,6 +778,7 @@ println(result)
         let orig_fib = &chunk.prototypes[0];
         let rest_fib = &restored.prototypes[0];
         assert_eq!(orig_fib.code, rest_fib.code);
+        assert_eq!(orig_fib.cols, rest_fib.cols);
         assert_eq!(orig_fib.name, rest_fib.name);
         assert_eq!(orig_fib.arity, rest_fib.arity);
     }
@@ -688,6 +809,7 @@ println(sum)
 
         assert_eq!(chunk.code, restored.code);
         assert_eq!(chunk.lines, restored.lines);
+        assert_eq!(chunk.cols, restored.cols);
     }
 
     #[test]

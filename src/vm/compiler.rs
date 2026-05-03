@@ -43,9 +43,10 @@ pub struct Compiler {
     parent_upvalues: Vec<(String, u8)>,
     module_mode: bool,
     /// Source line currently being compiled. Top-level loops update this
-    /// from `SpannedStmt::line` before each statement so any `emit` that
-    /// passes `0` for the line picks up a real number instead.
+    /// from `SpannedStmt` before each statement so any `emit` that passes
+    /// `0` for the line picks up a real source span instead.
     current_line: usize,
+    current_col: usize,
 }
 
 #[derive(Debug)]
@@ -76,6 +77,7 @@ impl Compiler {
             parent_upvalues: Vec::new(),
             module_mode: false,
             current_line: 0,
+            current_col: 0,
         }
     }
 
@@ -117,8 +119,18 @@ impl Compiler {
         // never got plumbed through. Fall back to `current_line`, which is
         // updated per top-level statement, so runtime stack traces at least
         // point at the right statement instead of always reporting line 0.
-        let actual = if line == 0 { self.current_line } else { line };
-        self.chunk.emit(inst, actual);
+        let actual_line = if line == 0 { self.current_line } else { line };
+        let actual_col = self.current_col;
+        self.chunk.emit_at(inst, actual_line, actual_col);
+    }
+
+    fn set_current_span(&mut self, line: usize, col: usize) {
+        self.current_line = line;
+        self.current_col = col;
+    }
+
+    fn set_span(&mut self, spanned: &SpannedStmt) {
+        self.set_current_span(spanned.line, spanned.col);
     }
 
     fn emit_jump(&mut self, op: OpCode, a: u8, line: usize) -> usize {
@@ -246,7 +258,7 @@ pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
     let mut c = Compiler::new("<main>");
     c.begin_scope();
     for spanned in &program.statements {
-        c.current_line = spanned.line;
+        c.set_span(spanned);
         compile_stmt(&mut c, &spanned.stmt)?;
     }
     c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -259,7 +271,7 @@ pub fn compile_module(program: &Program) -> Result<Chunk, CompileError> {
     c.module_mode = true;
     c.begin_scope();
     for spanned in &program.statements {
-        c.current_line = spanned.line;
+        c.set_span(spanned);
         compile_stmt(&mut c, &spanned.stmt)?;
     }
     c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -275,7 +287,7 @@ pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
     let mut has_result = false;
 
     for spanned in &program.statements {
-        c.current_line = spanned.line;
+        c.set_span(spanned);
         match &spanned.stmt {
             Stmt::Expression(expr) if !is_output_expr(expr) => {
                 compile_expr(&mut c, expr, result_reg)?;
@@ -553,11 +565,11 @@ fn compile_spawn_body(sc: &mut Compiler, body: &[SpannedStmt]) -> Result<(), Com
     }
     let (init, last) = body.split_at(body.len() - 1);
     for s in init {
-        sc.current_line = s.line;
+        sc.set_span(s);
         compile_stmt(sc, &s.stmt)?;
     }
     let last_stmt = &last[0];
-    sc.current_line = last_stmt.line;
+    sc.set_span(last_stmt);
     match &last_stmt.stmt {
         Stmt::Expression(expr) => {
             let dst = sc.alloc_reg()?;
@@ -678,12 +690,13 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             fc.parent_locals = parent_locals;
             fc.parent_upvalues = parent_upvalues;
             fc.current_line = c.current_line;
+            fc.current_col = c.current_col;
             fc.begin_scope();
             for param in params {
                 fc.add_local(&param.name, true)?;
             }
             for s in body {
-                fc.current_line = s.line;
+                fc.set_span(s);
                 compile_stmt(&mut fc, &s.stmt)?;
             }
             fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -733,7 +746,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             for s in then_body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -743,7 +756,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 c.patch_jump(else_jump);
                 c.begin_scope();
                 for s in eb {
-                    c.current_line = s.line;
+                    c.set_span(s);
                     compile_stmt(c, &s.stmt)?;
                 }
                 c.end_scope();
@@ -769,7 +782,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             for s in body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -796,7 +809,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             for s in body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -870,7 +883,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             }
 
             for s in body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -924,7 +937,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     Pattern::Wildcard => {
                         c.begin_scope();
                         for s in &arm.body {
-                            c.current_line = s.line;
+                            c.set_span(s);
                             compile_stmt(c, &s.stmt)?;
                         }
                         c.end_scope();
@@ -952,7 +965,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         let vr = c.add_local(name, false)?;
                         c.emit(encode_abc(OpCode::Move, vr, subj, 0), 0);
                         for s in &arm.body {
-                            c.current_line = s.line;
+                            c.set_span(s);
                             compile_stmt(c, &s.stmt)?;
                         }
                         c.end_scope();
@@ -971,7 +984,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
                         c.begin_scope();
                         for s in &arm.body {
-                            c.current_line = s.line;
+                            c.set_span(s);
                             compile_stmt(c, &s.stmt)?;
                         }
                         c.end_scope();
@@ -1000,7 +1013,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                             }
                         }
                         for s in &arm.body {
-                            c.current_line = s.line;
+                            c.set_span(s);
                             compile_stmt(c, &s.stmt)?;
                         }
                         c.end_scope();
@@ -1067,7 +1080,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             )
         }
 
-        Stmt::DecoratorStmt(_) => Ok(()),
+        Stmt::DecoratorStmt(decorator) => Err(CompileError::new(&format!(
+            "VM does not support standalone decorator '@{}' — use --interpreter for decorator-driven runtime features",
+            decorator.name
+        ))),
 
         Stmt::StructDef { name, fields, .. } => compile_hidden_stmt(
             c,
@@ -1266,7 +1282,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             });
             c.begin_scope();
             for s in body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -1298,7 +1314,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.begin_scope();
             for s in body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -1352,7 +1368,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             });
             c.begin_scope();
             for s in body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -1418,9 +1434,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             sc.parent_locals = parent_locals;
             sc.parent_upvalues = parent_upvalues;
             sc.current_line = c.current_line;
+            sc.current_col = c.current_col;
             sc.begin_scope();
             for s in body {
-                sc.current_line = s.line;
+                sc.set_span(s);
                 compile_stmt(&mut sc, &s.stmt)?;
             }
             sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -1457,9 +1474,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             sc.parent_locals = parent_locals;
             sc.parent_upvalues = parent_upvalues;
             sc.current_line = c.current_line;
+            sc.current_col = c.current_col;
             sc.begin_scope();
             for s in body {
-                sc.current_line = s.line;
+                sc.set_span(s);
                 compile_stmt(&mut sc, &s.stmt)?;
             }
             sc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -1550,7 +1568,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             });
             c.begin_scope();
             for s in try_body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -1567,7 +1585,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 mutable: false,
             });
             for s in catch_body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -1634,6 +1652,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             sc.parent_locals = parent_locals;
             sc.parent_upvalues = parent_upvalues;
             sc.current_line = c.current_line;
+            sc.current_col = c.current_col;
             sc.begin_scope();
             compile_spawn_body(&mut sc, body)?;
             sc.chunk.upvalue_count = sc.upvalues.len() as u8;
@@ -1655,7 +1674,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             let dst = c.alloc_reg()?;
             c.emit(encode_abc(OpCode::SquadBegin, dst, 0, 0), c.current_line);
             for s in body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.emit(encode_abc(OpCode::SquadEnd, dst, 0, 0), c.current_line);
@@ -1867,12 +1886,13 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             lc.parent_locals = parent_locals;
             lc.parent_upvalues = parent_upvalues;
             lc.current_line = c.current_line;
+            lc.current_col = c.current_col;
             lc.begin_scope();
             for p in params {
                 lc.add_local(&p.name, true)?;
             }
             for s in body {
-                lc.current_line = s.line;
+                lc.set_span(s);
                 compile_stmt(&mut lc, &s.stmt)?;
             }
             lc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -1900,7 +1920,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Block(stmts) => {
             c.begin_scope();
             for s in stmts {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.end_scope();
@@ -1937,6 +1957,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             sc.parent_locals = parent_locals;
             sc.parent_upvalues = parent_upvalues;
             sc.current_line = c.current_line;
+            sc.current_col = c.current_col;
             sc.begin_scope();
             compile_spawn_body(&mut sc, body)?;
             sc.chunk.upvalue_count = sc.upvalues.len() as u8;
@@ -1953,7 +1974,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Squad(body) => {
             c.emit(encode_abc(OpCode::SquadBegin, dst, 0, 0), c.current_line);
             for s in body {
-                c.current_line = s.line;
+                c.set_span(s);
                 compile_stmt(c, &s.stmt)?;
             }
             c.emit(encode_abc(OpCode::SquadEnd, dst, 0, 0), c.current_line);
