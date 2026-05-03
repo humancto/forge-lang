@@ -522,7 +522,7 @@ pub async fn start_server(
             // new root span -- distributed traces don't connect across
             // services. The propagator was installed by init_otel().
             #[cfg(feature = "otel")]
-            {
+            if tracing_init::otel_is_active() {
                 use opentelemetry::propagation::Extractor;
                 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
