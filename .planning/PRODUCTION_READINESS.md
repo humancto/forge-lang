@@ -140,10 +140,10 @@ Every item must end with `cargo test` green at 697+ before commit.
 
 - `cargo test` (must remain ≥697)
 - `cargo build --release`
-- `forge test` (integration)
+- `forge --allow-run test` (integration; shell tests require explicit permission)
 - `forge run examples/hello.fg`, `examples/functional.fg`
-- `forge run --vm examples/hello.fg`
-- `forge run --jit examples/hello.fg`
+- `forge --vm run examples/hello.fg`
+- `forge --jit run examples/hello.fg`
 
 ---
 
