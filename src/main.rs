@@ -30,6 +30,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process;
 
+#[cfg(test)]
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 
 use interpreter::Interpreter;
@@ -1103,6 +1105,15 @@ fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jit_help_documents_numeric_limit_and_vm_fallback() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("--jit"));
+        assert!(help.contains("JIT-compile numeric leaf functions"));
+        assert!(help.contains("falls back to the bytecode interpreter automatically"));
+    }
 
     #[test]
     fn parity_corpus_supported_cases() {
