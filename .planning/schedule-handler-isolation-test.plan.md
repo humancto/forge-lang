@@ -18,7 +18,7 @@ Close issue #109 by adding an integration regression test that locks in the docu
 3. Test program:
    - top-level `let mut state = 0`
    - `schedule every 1 seconds { state = state + 1; fs.write("__SENTINEL__", "ran") }`
-   - `@get("/read") fn read() -> Json { return { state } }`
+   - `@get("/read") fn read() -> Json { return { state: state } }`
    - existing `/ping` route for readiness
 4. Generate a unique sentinel path under `std::env::temp_dir()` and replace `__SENTINEL__` in the program source before booting the server.
 5. After readiness, sleep long enough for at least one 1-second schedule tick, then assert the sentinel file exists. This proves the schedule actually ran, avoiding a vacuous pass where handlers see `state == 0` because the schedule never fired.
