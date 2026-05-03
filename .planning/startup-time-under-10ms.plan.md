@@ -32,7 +32,7 @@ Initial modes:
 Short-lived fixture:
 
 ```forge
-42
+println("ok")
 ```
 
 The harness must assert correctness on every run. A child process that exits nonzero, segfaults, times out, or prints unexpected output must fail the measurement instead of looking like a fast startup.

@@ -1,10 +1,11 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const FIXTURE_SOURCE: &str = r#"println("ok")"#;
+const CHILD_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 struct Config {
@@ -261,10 +262,46 @@ fn measure_mode(mode: &Mode, reps: usize, warmups: usize) -> Result<Stats, Strin
 fn run_child(mode: &Mode) -> Result<(), String> {
     let mut command = Command::new(&mode.command);
     command.args(&mode.args);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     for (key, value) in &mode.envs {
         command.env(key, value);
     }
-    let output = checked_command(&mut command, mode.name)?;
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("{}: failed to spawn: {err}", mode.name))?;
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|err| format!("{}: failed to poll child: {err}", mode.name))?
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{}: child timed out after {:.1}s",
+                mode.name,
+                CHILD_TIMEOUT.as_secs_f64()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("{}: failed to collect child output: {err}", mode.name))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{}: failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            mode.name,
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim() != "ok" {
         return Err(format!(
