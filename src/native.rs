@@ -11,7 +11,7 @@ pub fn build_native_launcher(
 ) -> Result<NativeBuildOutput, String> {
     if let Some(lib_dir) = find_libforge_dir() {
         return build_standalone_source(source, source_path, allow_run, &lib_dir)
-            .map(|path| NativeBuildOutput::standalone(path));
+            .map(NativeBuildOutput::standalone);
     }
 
     let c_source_fn = |forge_bin: &str| native_launcher_c_source(source.as_bytes(), forge_bin);

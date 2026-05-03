@@ -1152,6 +1152,14 @@ mod tests {
     }
 
     #[test]
+    fn build_allow_run_is_native_only() {
+        assert!(
+            Cli::try_parse_from(["forge", "build", "--native", "--allow-run", "app.fg"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["forge", "build", "--aot", "--allow-run", "app.fg"]).is_err());
+    }
+
+    #[test]
     fn parity_corpus_supported_cases() {
         let cases = crate::testing::parity::load_supported_cases();
         assert!(!cases.is_empty(), "expected supported parity fixtures");

@@ -63,12 +63,7 @@ fn source_file_label(label: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let path = Path::new(label);
-    Some(if path.exists() {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-    } else {
-        path.to_path_buf()
-    })
+    Some(Path::new(label).to_path_buf())
 }
 
 fn format_runtime_error(
