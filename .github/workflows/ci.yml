@@ -45,6 +45,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench --bench fork_for_serving -- --warm-up-time 3 --measurement-time 5 --sample-size 50
 
+  startup-benchmark:
+    name: Startup benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release forge and static runtime
+        run: cargo build --release --lib --bin forge
+      - name: Build startup measurement harness
+        run: rustc tools/startup_time.rs -O -o target/startup_time
+      - name: Measure startup modes
+        env:
+          FORGE_LIB_DIR: target/release
+        run: ./target/startup_time --forge ./target/release/forge --warmups 2 --reps 20
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
