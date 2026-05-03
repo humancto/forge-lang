@@ -67,28 +67,48 @@ use crate::runtime::tracing_init;
 /// id reaches `tracing::Span::record`.
 const REQUEST_ID_MAX_LEN: usize = 64;
 
-/// Convert the `RequestId` from the `tower-http` layer into the string
-/// we record on the span. Defends against:
-///   * non-ASCII bytes that pass `HeaderValue` parsing but fail `to_str`
-///     (returns `"unknown"` plus a `tracing::warn!` so operators notice)
-///   * pathologically long inbound headers (capped at `REQUEST_ID_MAX_LEN`)
-fn extract_request_id(rid: &RequestId) -> String {
-    match rid.header_value().to_str() {
-        Ok(s) => {
-            if s.len() > REQUEST_ID_MAX_LEN {
-                s[..REQUEST_ID_MAX_LEN].to_string()
-            } else {
-                s.to_string()
-            }
+fn truncate_id_str(s: &str) -> &str {
+    debug_assert!(
+        s.is_ascii(),
+        "request ids come from HeaderValue::to_str and must be ASCII"
+    );
+    if s.len() > REQUEST_ID_MAX_LEN {
+        &s[..REQUEST_ID_MAX_LEN]
+    } else {
+        s
+    }
+}
+
+fn request_id_for_span(value: &http::HeaderValue) -> &str {
+    match value.to_str() {
+        Ok(s) if !s.is_empty() => truncate_id_str(s),
+        Ok(_) => {
+            tracing::warn!(
+                target: "forge.server",
+                request_id_len = value.as_bytes().len(),
+                "X-Request-Id header is empty; using \"unknown\""
+            );
+            "unknown"
         }
         Err(_) => {
             tracing::warn!(
                 target: "forge.server",
+                request_id_len = value.as_bytes().len(),
                 "X-Request-Id header is not valid UTF-8; using \"unknown\""
             );
-            "unknown".to_string()
+            "unknown"
         }
     }
+}
+
+/// Convert the `RequestId` from the `tower-http` layer into the string
+/// we record on the span. Defends against:
+///   * empty inbound headers (returns `"unknown"` plus a `tracing::warn!`)
+///   * non-ASCII bytes that pass `HeaderValue` parsing but fail `to_str`
+///     (returns `"unknown"` plus a `tracing::warn!` so operators notice)
+///   * pathologically long inbound headers (capped at `REQUEST_ID_MAX_LEN`)
+fn extract_request_id(rid: &RequestId) -> String {
+    request_id_for_span(rid.header_value()).to_string()
 }
 
 /// Default cap on concurrent in-flight handler invocations.
@@ -486,14 +506,7 @@ pub async fn start_server(
             let request_id = req
                 .extensions()
                 .get::<RequestId>()
-                .and_then(|id| id.header_value().to_str().ok())
-                .map(|s| {
-                    if s.len() > REQUEST_ID_MAX_LEN {
-                        &s[..REQUEST_ID_MAX_LEN]
-                    } else {
-                        s
-                    }
-                })
+                .map(|id| request_id_for_span(id.header_value()))
                 .unwrap_or("unknown");
             let span = tracing::info_span!(
                 "request",
@@ -870,6 +883,61 @@ mod tests {
             assert!(!flag.load(Ordering::Acquire));
         }
         assert!(flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn truncate_id_str_keeps_exact_boundary_id() {
+        let id = "a".repeat(REQUEST_ID_MAX_LEN);
+
+        assert_eq!(truncate_id_str(&id), id);
+    }
+
+    #[test]
+    fn truncate_id_str_caps_oversized_id() {
+        let id = "a".repeat(REQUEST_ID_MAX_LEN + 1);
+        let truncated = truncate_id_str(&id);
+
+        assert_eq!(truncated.len(), REQUEST_ID_MAX_LEN);
+        assert_eq!(truncated, "a".repeat(REQUEST_ID_MAX_LEN));
+    }
+
+    #[test]
+    fn request_id_for_span_accepts_normal_ascii() {
+        let value = http::HeaderValue::from_static("test-trace-deadbeef-123");
+
+        assert_eq!(request_id_for_span(&value), "test-trace-deadbeef-123");
+    }
+
+    #[test]
+    fn request_id_for_span_empty_header_is_unknown() {
+        let value = http::HeaderValue::from_static("");
+
+        assert_eq!(request_id_for_span(&value), "unknown");
+    }
+
+    #[test]
+    fn request_id_for_span_non_ascii_is_unknown() {
+        let value = http::HeaderValue::from_bytes(&[0xFF]).expect("obs-text header");
+
+        assert_eq!(request_id_for_span(&value), "unknown");
+    }
+
+    #[test]
+    fn request_id_for_span_preserves_whitespace_only_id() {
+        let value = http::HeaderValue::from_static("   ");
+
+        assert_eq!(request_id_for_span(&value), "   ");
+    }
+
+    #[test]
+    fn extract_request_id_returns_owned_truncated_id() {
+        let id = "b".repeat(REQUEST_ID_MAX_LEN + 1);
+        let header = http::HeaderValue::from_str(&id).expect("header");
+        let request_id = RequestId::new(header);
+        let extracted = extract_request_id(&request_id);
+
+        assert_eq!(extracted.len(), REQUEST_ID_MAX_LEN);
+        assert_eq!(extracted, "b".repeat(REQUEST_ID_MAX_LEN));
     }
 
     /// The template must produce independent forks. This is the
