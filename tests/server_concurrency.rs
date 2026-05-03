@@ -20,8 +20,10 @@ use forge_lang::lexer::Lexer;
 use forge_lang::parser::Parser;
 use forge_lang::runtime::metadata::extract_runtime_plan;
 use forge_lang::runtime::server::start_server;
+use futures_util::SinkExt;
 
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -80,6 +82,30 @@ fn spawn_test_server(source: &str) -> u16 {
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("server failed to start on port {} within 5s", port);
+}
+
+fn unique_temp_file(name: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "forge_{}_{}_{}.txt",
+        name,
+        std::process::id(),
+        unique
+    ))
+}
+
+fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
 }
 
 /// Time N concurrent GET requests using blocking reqwest on N OS threads.
@@ -243,15 +269,7 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
 
 #[test]
 fn schedule_mutations_do_not_leak_into_handler_forks() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_nanos();
-    let sentinel = std::env::temp_dir().join(format!(
-        "forge_schedule_handler_isolation_{}_{}.txt",
-        std::process::id(),
-        unique
-    ));
+    let sentinel = unique_temp_file("schedule_handler_isolation");
     let _ = std::fs::remove_file(&sentinel);
     let sentinel_str = sentinel
         .to_str()
@@ -314,6 +332,114 @@ fn schedule_mutations_do_not_leak_into_handler_forks() {
     }
 
     let _ = std::fs::remove_file(&sentinel);
+}
+
+#[test]
+fn websocket_handler_cancelled_on_client_disconnect() {
+    let started = unique_temp_file("ws_cancel_started");
+    let progress = unique_temp_file("ws_cancel_progress");
+    let finished = unique_temp_file("ws_cancel_finished");
+    for path in [&started, &progress, &finished] {
+        let _ = std::fs::remove_file(path);
+    }
+
+    let started_str = started.to_str().expect("temp path should be UTF-8");
+    let progress_str = progress.to_str().expect("temp path should be UTF-8");
+    let finished_str = finished.to_str().expect("temp path should be UTF-8");
+
+    let source = r#"
+        @server(port: __PORT__)
+
+        @get("/ping")
+        fn ping() -> Json {
+            return { ok: true }
+        }
+
+        @ws("/ws")
+        fn socket(msg) {
+            fs.write("__STARTED__", "1")
+            let mut i = 0
+            repeat 1000000 times {
+                i = i + 1
+                fs.write("__PROGRESS__", str(i))
+            }
+            fs.write("__FINISHED__", "done")
+            return "done"
+        }
+        "#
+    .replace("__STARTED__", started_str)
+    .replace("__PROGRESS__", progress_str)
+    .replace("__FINISHED__", finished_str);
+
+    let port = spawn_test_server(&source);
+    let url = format!("ws://127.0.0.1:{}/ws", port);
+
+    let rt = tokio::runtime::Runtime::new().expect("test runtime");
+    rt.block_on(async {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("connect websocket");
+        ws.send(Message::Text("go".into()))
+            .await
+            .expect("send websocket message");
+
+        let started_path = started.clone();
+        tokio::task::spawn_blocking(move || {
+            assert!(
+                wait_for_path(&started_path, Duration::from_secs(5)),
+                "websocket handler never started"
+            );
+        })
+        .await
+        .expect("wait for started sentinel");
+
+        let progress_path = progress.clone();
+        tokio::task::spawn_blocking(move || {
+            assert!(
+                wait_for_path(&progress_path, Duration::from_secs(5)),
+                "websocket handler never entered progress loop"
+            );
+        })
+        .await
+        .expect("wait for progress sentinel");
+
+        let _ = ws.send(Message::Close(None)).await;
+        drop(ws);
+    });
+
+    let mut last_progress =
+        std::fs::read_to_string(&progress).expect("progress sentinel should be readable");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stabilized = false;
+    while Instant::now() < deadline {
+        assert!(
+            !finished.exists(),
+            "websocket handler completed normally instead of being cancelled"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        let current =
+            std::fs::read_to_string(&progress).expect("progress sentinel should remain readable");
+        if current == last_progress {
+            stabilized = true;
+            break;
+        }
+        last_progress = current;
+    }
+
+    assert!(
+        stabilized,
+        "websocket handler progress kept changing after client disconnect"
+    );
+    assert!(
+        !finished.exists(),
+        "websocket handler wrote finished sentinel after disconnect"
+    );
+
+    for path in [&started, &progress, &finished] {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[test]
