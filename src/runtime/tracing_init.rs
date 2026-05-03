@@ -49,12 +49,18 @@ use std::sync::OnceLock;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[cfg(feature = "otel")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "otel")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
 
 static INIT: OnceLock<()> = OnceLock::new();
 
 #[cfg(feature = "otel")]
 static OTEL_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+
+#[cfg(feature = "otel")]
+static OTEL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy)]
 enum Format {
@@ -91,6 +97,21 @@ fn build_filter() -> EnvFilter {
         .unwrap_or_else(|_| {
             EnvFilter::new("forge_lang=info,tower_http=info,axum=warn,forge.user=info")
         })
+}
+
+/// True only when the opt-in OpenTelemetry exporter was initialized
+/// successfully at runtime. Compiling with `--features otel` is not
+/// enough; users must also set `OTEL_EXPORTER_OTLP_ENDPOINT` and the
+/// exporter builder must succeed.
+#[cfg(feature = "otel")]
+pub fn otel_is_active() -> bool {
+    OTEL_ACTIVE.load(Ordering::Acquire)
+}
+
+/// No-op state probe when the `otel` feature is disabled.
+#[cfg(not(feature = "otel"))]
+pub fn otel_is_active() -> bool {
+    false
 }
 
 /// Install the global subscriber. Idempotent and panic-safe.
@@ -280,6 +301,7 @@ pub fn init_otel() {
             opentelemetry_sdk::propagation::TraceContextPropagator::new(),
         );
 
+        OTEL_ACTIVE.store(true, Ordering::Release);
         provider
     });
 }
