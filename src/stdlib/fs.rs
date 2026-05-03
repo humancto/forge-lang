@@ -554,8 +554,9 @@ mod tests {
 
     #[test]
     fn test_fs_is_dir() {
+        let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
         assert_eq!(
-            call("fs.is_dir", vec![Value::String("/tmp".to_string())]).unwrap(),
+            call("fs.is_dir", vec![Value::String(temp_dir)]).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
