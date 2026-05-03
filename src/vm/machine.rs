@@ -1129,7 +1129,11 @@ impl VM {
                 };
                 cached_closure = Some((current_closure, c));
             }
-            let chunk = cached_closure.as_ref().unwrap().1.clone();
+            let chunk = cached_closure
+                .as_ref()
+                .expect("BUG: cached_closure is None after need_fetch guard always fills it")
+                .1
+                .clone();
 
             if self.frames[frame_idx].ip >= chunk.code.len() {
                 self.frames.pop();
