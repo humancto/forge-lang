@@ -4,9 +4,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn build_native_launcher(source: &str, source_path: &Path) -> Result<PathBuf, String> {
+pub fn build_native_launcher(
+    source: &str,
+    source_path: &Path,
+    allow_run: bool,
+) -> Result<NativeBuildOutput, String> {
+    if let Some(lib_dir) = find_libforge_dir() {
+        return build_standalone_source(source, source_path, allow_run, &lib_dir)
+            .map(|path| NativeBuildOutput::standalone(path));
+    }
+
     let c_source_fn = |forge_bin: &str| native_launcher_c_source(source.as_bytes(), forge_bin);
-    compile_launcher(source_path, "native", c_source_fn)
+    compile_launcher(source_path, "native", c_source_fn).map(NativeBuildOutput::launcher)
 }
 
 pub fn build_native_aot(bytecode: &[u8], source_path: &Path) -> Result<PathBuf, String> {
@@ -17,6 +26,34 @@ pub fn build_native_aot(bytecode: &[u8], source_path: &Path) -> Result<PathBuf, 
     // Fall back to launcher mode (requires forge at runtime)
     let c_source_fn = |forge_bin: &str| aot_launcher_c_source(bytecode, forge_bin);
     compile_launcher(source_path, "aot", c_source_fn)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeRuntimeKind {
+    StandaloneSourceRuntime,
+    CliLauncher,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeBuildOutput {
+    pub path: PathBuf,
+    pub runtime: NativeRuntimeKind,
+}
+
+impl NativeBuildOutput {
+    fn standalone(path: PathBuf) -> Self {
+        Self {
+            path,
+            runtime: NativeRuntimeKind::StandaloneSourceRuntime,
+        }
+    }
+
+    fn launcher(path: PathBuf) -> Self {
+        Self {
+            path,
+            runtime: NativeRuntimeKind::CliLauncher,
+        }
+    }
 }
 
 /// Find the directory containing libforge_lang.a
@@ -38,6 +75,80 @@ pub fn find_libforge_dir() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Build a standalone source-runtime binary that links against libforge.a.
+#[cfg(unix)]
+fn build_standalone_source(
+    source: &str,
+    source_path: &Path,
+    allow_run: bool,
+    lib_dir: &Path,
+) -> Result<PathBuf, String> {
+    let output_path = native_output_path(source_path);
+    let c_source = standalone_source_c_source(source.as_bytes(), source_path, allow_run);
+
+    let build_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("failed to create timestamp: {e}"))?
+        .as_nanos();
+    let c_path = env::temp_dir().join(format!(
+        "forge-source-standalone-{}-{}.c",
+        std::process::id(),
+        build_id
+    ));
+    fs::write(&c_path, c_source)
+        .map_err(|e| format!("failed to write standalone source wrapper: {e}"))?;
+
+    let mut cmd = Command::new("cc");
+    cmd.arg("-O2")
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&output_path)
+        .arg(format!("-L{}", lib_dir.display()))
+        .arg("-lforge_lang")
+        .arg("-lm")
+        .arg("-lpthread")
+        .arg("-lresolv");
+
+    #[cfg(target_os = "macos")]
+    {
+        cmd.arg("-framework").arg("CoreFoundation");
+        cmd.arg("-framework").arg("Security");
+        cmd.arg("-framework").arg("SystemConfiguration");
+        cmd.arg("-framework").arg("IOKit");
+        cmd.arg("-liconv");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        cmd.arg("-ldl");
+    }
+
+    let status = cmd.status().map_err(|e| {
+        let _ = fs::remove_file(&c_path);
+        format!("failed to invoke C compiler for standalone source runtime: {e}")
+    })?;
+    let _ = fs::remove_file(&c_path);
+
+    if !status.success() {
+        return Err(format!(
+            "standalone source-runtime compilation failed for '{}'",
+            output_path.display()
+        ));
+    }
+
+    Ok(output_path)
+}
+
+#[cfg(not(unix))]
+fn build_standalone_source(
+    _source: &str,
+    _source_path: &Path,
+    _allow_run: bool,
+    _lib_dir: &Path,
+) -> Result<PathBuf, String> {
+    Err("standalone source runtime is currently supported on Unix-like systems only".to_string())
 }
 
 /// Build a standalone AOT binary that links against libforge.a
@@ -367,6 +478,58 @@ fn aot_launcher_c_source(bytecode: &[u8], default_forge_bin: &str) -> String {
     )
 }
 
+fn standalone_source_c_source(source: &[u8], source_path: &Path, allow_run: bool) -> String {
+    let source_bytes = source
+        .iter()
+        .map(|byte| byte.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let label = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<embedded>");
+    let label_bytes = label
+        .as_bytes()
+        .iter()
+        .map(|byte| byte.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let allow_run = if allow_run { 1 } else { 0 };
+
+    format!(
+        r#"#include <stddef.h>
+#include <stdint.h>
+
+extern int32_t forge_execute_source(
+    const uint8_t *source,
+    size_t source_len,
+    const uint8_t *path,
+    size_t path_len,
+    int32_t allow_run
+);
+
+static const unsigned char FORGE_SOURCE[] = {{ {source_bytes} }};
+static const size_t FORGE_SOURCE_LEN = sizeof(FORGE_SOURCE);
+static const unsigned char FORGE_SOURCE_PATH[] = {{ {label_bytes} }};
+static const size_t FORGE_SOURCE_PATH_LEN = sizeof(FORGE_SOURCE_PATH);
+static const int32_t FORGE_ALLOW_RUN = {allow_run};
+
+int main(void) {{
+    return (int)forge_execute_source(
+        FORGE_SOURCE,
+        FORGE_SOURCE_LEN,
+        FORGE_SOURCE_PATH,
+        FORGE_SOURCE_PATH_LEN,
+        FORGE_ALLOW_RUN
+    );
+}}
+"#,
+        source_bytes = source_bytes,
+        label_bytes = label_bytes,
+        allow_run = allow_run,
+    )
+}
+
 fn c_string_escape(value: &str) -> String {
     value
         .chars()
@@ -422,7 +585,8 @@ mod tests {
         let source_path = temp_root.join("hello.fg");
         std::fs::write(&source_path, "println(\"hi\")").unwrap();
 
-        let output_path = build_native_launcher("println(\"hi\")", &source_path).unwrap();
+        let output = build_native_launcher("println(\"hi\")", &source_path, false).unwrap();
+        let output_path = output.path;
         assert!(output_path.exists());
         let metadata = std::fs::metadata(&output_path).unwrap();
         #[cfg(unix)]
@@ -444,6 +608,22 @@ mod tests {
         assert!(c_source.contains(".fgc"));
         assert!(c_source.contains("forge-aot-"));
         assert!(!c_source.contains("FORGE_PROGRAM[]"));
+    }
+
+    #[test]
+    fn standalone_source_wrapper_calls_embedded_source_entrypoint() {
+        let source_path = Path::new("/private/build/app.fg");
+        let c_source = standalone_source_c_source(
+            b"@server(port: 8080)\n@get(\"/ping\") fn ping() { return { ok: true } }",
+            source_path,
+            true,
+        );
+
+        assert!(c_source.contains("forge_execute_source"));
+        assert!(c_source.contains("static const unsigned char FORGE_SOURCE[]"));
+        assert!(c_source.contains("static const int32_t FORGE_ALLOW_RUN = 1"));
+        assert!(c_source.contains("FORGE_SOURCE_PATH"));
+        assert!(!c_source.contains("/private/build/app.fg"));
     }
 
     #[cfg(unix)]

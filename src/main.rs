@@ -148,6 +148,9 @@ enum Command {
         /// Compile to bytecode and embed in a native binary (no source exposure)
         #[arg(long, conflicts_with = "native")]
         aot: bool,
+        /// Bake shell execution permission into a --native standalone source-runtime binary
+        #[arg(long = "allow-run", requires = "native", conflicts_with = "aot")]
+        allow_run: bool,
         /// Source file to compile
         file: PathBuf,
     },
@@ -318,7 +321,12 @@ async fn main() {
         Some(Command::New { name }) => {
             scaffold::create_project(&name);
         }
-        Some(Command::Build { file, native, aot }) => {
+        Some(Command::Build {
+            file,
+            native,
+            aot,
+            allow_run: build_allow_run,
+        }) => {
             let path_str = file.display().to_string();
             let source = match fs::read_to_string(&file) {
                 Ok(s) => s,
@@ -336,7 +344,13 @@ async fn main() {
             if aot {
                 compile_to_native_aot(&source, &path_str, &file, strict);
             } else if native {
-                compile_to_native_launcher(&source, &path_str, &file, strict);
+                compile_to_native_launcher(
+                    &source,
+                    &path_str,
+                    &file,
+                    strict,
+                    cli.allow_run || build_allow_run,
+                );
             } else {
                 compile_to_bytecode(&source, &path_str, &file, strict);
             }
@@ -979,19 +993,34 @@ fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf, strict
     }
 }
 
-fn compile_to_native_launcher(source: &str, filename: &str, file_path: &PathBuf, strict: bool) {
+fn compile_to_native_launcher(
+    source: &str,
+    filename: &str,
+    file_path: &PathBuf,
+    strict: bool,
+    allow_run: bool,
+) {
     let (_, warnings) = match prepare_program(source, strict) {
         Ok(prepared) => prepared,
         Err(err) => print_frontend_error(source, filename, err),
     };
     emit_type_warnings(&warnings);
 
-    match native::build_native_launcher(source, file_path) {
-        Ok(output_path) => {
+    match native::build_native_launcher(source, file_path, allow_run) {
+        Ok(output) => {
+            let runtime_msg = match output.runtime {
+                native::NativeRuntimeKind::StandaloneSourceRuntime => {
+                    "standalone source runtime (libforge linked; source embedded)"
+                }
+                native::NativeRuntimeKind::CliLauncher => {
+                    "Forge CLI launcher required at execution time"
+                }
+            };
             println!(
-                "Built native launcher {} -> {}\n  runtime: Forge interpreter/VM required at execution time",
+                "Built native binary {} -> {}\n  runtime: {}",
                 filename,
-                output_path.display()
+                output.path.display(),
+                runtime_msg,
             );
         }
         Err(message) => {
@@ -1009,6 +1038,13 @@ fn compile_to_native_aot(source: &str, filename: &str, file_path: &PathBuf, stri
     emit_type_warnings(&warnings);
 
     if let Err(message) = ensure_vm_compatible(&program, "AOT build") {
+        let message = if message.contains("decorator-driven runtime features") {
+            format!(
+                "{message}\n  hint: decorator-driven servers are not bytecode AOT yet; use `forge build --native` for a standalone source-runtime server binary"
+            )
+        } else {
+            message
+        };
         eprintln!("{}", errors::format_simple_error(&message));
         process::exit(1);
     }
