@@ -427,6 +427,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn collect_files_skips_symlinks() {
         let dir = temp_path("symlink");

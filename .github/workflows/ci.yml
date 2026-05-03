@@ -87,7 +87,7 @@ jobs:
       - name: Run Forge test suite
         run: |
           echo "Running all .fg tests in tests/ directory..."
-          ./target/release/forge test tests/ 2>&1 | tee /tmp/forge-test-out.txt
+          ./target/release/forge --allow-run test tests/ 2>&1 | tee /tmp/forge-test-out.txt
           # Check for any failures in the summary line
           if grep -qE "[1-9][0-9]* failed" /tmp/forge-test-out.txt; then
             echo "FAILURE: Some Forge tests failed"
