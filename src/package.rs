@@ -1072,6 +1072,10 @@ toolkit = "1.2.3"
         std::fs::write(dir.join("forge.toml"), content).unwrap();
     }
 
+    fn toml_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "\\\\")
+    }
+
     #[test]
     fn transitive_deps_chain() {
         // A -> B -> C (all path deps)
@@ -1088,7 +1092,7 @@ toolkit = "1.2.3"
             &pkg_b_src,
             &format!(
                 "[project]\nname = \"pkg-b\"\n[dependencies]\npkg-c = {{ path = \"{}\" }}",
-                pkg_c_src.display()
+                toml_path(&pkg_c_src)
             ),
         );
 
@@ -1097,7 +1101,7 @@ toolkit = "1.2.3"
 
         let manifest: Manifest = toml::from_str(&format!(
             "[project]\nname = \"app\"\n[dependencies]\npkg-b = {{ path = \"{}\" }}",
-            pkg_b_src.display()
+            toml_path(&pkg_b_src)
         ))
         .unwrap();
 
@@ -1138,7 +1142,7 @@ toolkit = "1.2.3"
             &pkg_a_src,
             &format!(
                 "[project]\nname = \"pkg-a\"\n[dependencies]\npkg-b = {{ path = \"{}\" }}",
-                pkg_b_src.display()
+                toml_path(&pkg_b_src)
             ),
         );
 
@@ -1149,13 +1153,13 @@ toolkit = "1.2.3"
             &pkg_b_src,
             &format!(
                 "[project]\nname = \"pkg-b\"\n[dependencies]\npkg-a = {{ path = \"{}\" }}",
-                pkg_a_src.display()
+                toml_path(&pkg_a_src)
             ),
         );
 
         let manifest: Manifest = toml::from_str(&format!(
             "[project]\nname = \"app\"\n[dependencies]\npkg-a = {{ path = \"{}\" }}",
-            pkg_a_src.display()
+            toml_path(&pkg_a_src)
         ))
         .unwrap();
 
@@ -1196,14 +1200,14 @@ toolkit = "1.2.3"
             &pkg_b_src,
             &format!(
                 "[project]\nname = \"pkg-b\"\n[dependencies]\npkg-c = {{ path = \"{}\" }}",
-                pkg_c_src.display()
+                toml_path(&pkg_c_src)
             ),
         );
 
         let manifest: Manifest = toml::from_str(&format!(
             "[project]\nname = \"app\"\n[dependencies]\npkg-b = {{ path = \"{}\" }}\npkg-c = {{ path = \"{}\" }}",
-            pkg_b_src.display(),
-            pkg_c_src.display()
+            toml_path(&pkg_b_src),
+            toml_path(&pkg_c_src)
         ))
         .unwrap();
 
@@ -1241,7 +1245,7 @@ toolkit = "1.2.3"
 
         let manifest: Manifest = toml::from_str(&format!(
             "[project]\nname = \"app\"\n[dependencies]\npkg-b = {{ path = \"{}\" }}",
-            pkg_b_src.display()
+            toml_path(&pkg_b_src)
         ))
         .unwrap();
 
@@ -1276,7 +1280,7 @@ toolkit = "1.2.3"
             &pkg_a_src,
             &format!(
                 "[project]\nname = \"pkg-a\"\n[dependencies]\nmy-app = {{ path = \"{}\" }}",
-                app_src.display()
+                toml_path(&app_src)
             ),
         );
 
@@ -1286,7 +1290,7 @@ toolkit = "1.2.3"
 
         let manifest: Manifest = toml::from_str(&format!(
             "[project]\nname = \"my-app\"\n[dependencies]\npkg-a = {{ path = \"{}\" }}",
-            pkg_a_src.display()
+            toml_path(&pkg_a_src)
         ))
         .unwrap();
 

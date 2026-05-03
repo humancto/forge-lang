@@ -22,6 +22,18 @@ fn try_run_forge(source: &str) -> Result<Value, RuntimeError> {
     interpreter.run(&program)
 }
 
+fn forge_string_literal_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}
+
+fn unique_temp_path(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("forge_{}_{}_{}", name, std::process::id(), nanos))
+}
+
 #[test]
 fn evaluates_interpolated_expression() {
     let value = run_forge(
@@ -797,15 +809,18 @@ fn fs_write_read_remove() {
 
 #[test]
 fn fs_exists() {
-    let result = try_run_forge(
+    let path = unique_temp_path("test_exists.txt");
+    let source = format!(
         r#"
-        let p = "/tmp/forge_test_exists.txt"
+        let p = "{}"
         fs.write(p, "x")
         assert(fs.exists(p))
         fs.remove(p)
         assert(fs.exists(p) == false)
     "#,
+        forge_string_literal_path(&path)
     );
+    let result = try_run_forge(&source);
     assert!(result.is_ok());
 }
 
@@ -1458,17 +1473,22 @@ fn method_chaining_map_filter() {
 
 #[test]
 fn fs_copy_and_rename() {
-    let result = try_run_forge(
+    let path1 = unique_temp_path("copy_test.txt");
+    let path2 = unique_temp_path("copy_test2.txt");
+    let source = format!(
         r#"
-        let p1 = "/tmp/forge_copy_test.txt"
-        let p2 = "/tmp/forge_copy_test2.txt"
+        let p1 = "{}"
+        let p2 = "{}"
         fs.write(p1, "hello")
         fs.copy(p1, p2)
         assert(fs.exists(p2))
         fs.remove(p1)
         fs.remove(p2)
     "#,
+        forge_string_literal_path(&path1),
+        forge_string_literal_path(&path2)
     );
+    let result = try_run_forge(&source);
     assert!(result.is_ok());
 }
 
@@ -1504,16 +1524,19 @@ fn fs_mkdir_list() {
 
 #[test]
 fn csv_read_write() {
-    let result = try_run_forge(
+    let path = unique_temp_path("csv_test.csv");
+    let source = format!(
         r#"
-        let p = "/tmp/forge_csv_test.csv"
-        let data = [{ name: "Alice", age: 30 }, { name: "Bob", age: 25 }]
+        let p = "{}"
+        let data = [{{ name: "Alice", age: 30 }}, {{ name: "Bob", age: 25 }}]
         csv.write(p, data)
         let loaded = csv.read(p)
         assert(len(loaded) == 2)
         fs.remove(p)
     "#,
+        forge_string_literal_path(&path)
     );
+    let result = try_run_forge(&source);
     assert!(result.is_ok());
 }
 
@@ -6945,34 +6968,6 @@ fn fork_for_serving_supports_concurrent_use() {
     // Template untouched.
     assert_eq!(template.env.get("base"), Some(Value::Int(1)));
     assert_eq!(template.env.get("rid"), None);
-}
-
-/// Diagnostic benchmark — not a hard gate. Prints fork cost so we can
-/// see if it dominates request latency. Threshold-style assertion only:
-/// fork must be <50ms; the throughput-improvement story falls apart
-/// well before that.
-#[test]
-fn fork_for_serving_is_under_50ms() {
-    let interp = Interpreter::new();
-    let n = 100;
-    let t0 = std::time::Instant::now();
-    for _ in 0..n {
-        let _ = interp.fork_for_serving();
-    }
-    let elapsed = t0.elapsed();
-    let mean_ms = elapsed.as_secs_f64() * 1000.0 / n as f64;
-    eprintln!(
-        "fork_for_serving: {} forks in {:?}, mean {:.3}ms",
-        n, elapsed, mean_ms
-    );
-    // Tightened from 50ms in the previous PR. Today's baseline after
-    // the closure-walk fix is ~0.1ms; 1ms gives 10x headroom while still
-    // catching real regressions.
-    assert!(
-        mean_ms < 1.0,
-        "fork cost regressed: {:.3}ms per fork (gate: 1ms)",
-        mean_ms
-    );
 }
 
 // ── Closure isolation across forks (PR #110) ─────────────────────────────

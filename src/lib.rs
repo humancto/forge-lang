@@ -24,6 +24,7 @@ use std::panic;
 /// `bytecode_ptr` must point to `bytecode_len` valid bytes of serialized
 /// Forge bytecode (produced by `vm::serialize::serialize_chunk`).
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn forge_execute_bytecode(bytecode_ptr: *const u8, bytecode_len: usize) -> i32 {
     if bytecode_ptr.is_null() || bytecode_len == 0 {
         eprintln!("forge: null or empty bytecode");

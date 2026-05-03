@@ -136,3 +136,13 @@ opt-level = 1
 opt-level = 3
 lto = true
 strip = true
+
+[profile.bench]
+opt-level = 3
+
+[dev-dependencies]
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "fork_for_serving"
+harness = false

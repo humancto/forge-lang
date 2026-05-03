@@ -36,6 +36,15 @@ jobs:
       # Broad suppressions (-A dead-code, -A unused-variables, etc.) removed.
       - run: cargo clippy --all-targets -- -A clippy::approx_constant -A clippy::result_large_err -A clippy::only_used_in_recursion -A clippy::len_zero
 
+  fork-benchmark:
+    name: fork_for_serving benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --bench fork_for_serving -- --warm-up-time 3 --measurement-time 5 --sample-size 50
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -78,7 +87,7 @@ jobs:
       - name: Run Forge test suite
         run: |
           echo "Running all .fg tests in tests/ directory..."
-          ./target/release/forge test tests/ 2>&1 | tee /tmp/forge-test-out.txt
+          ./target/release/forge --allow-run test tests/ 2>&1 | tee /tmp/forge-test-out.txt
           # Check for any failures in the summary line
           if grep -qE "[1-9][0-9]* failed" /tmp/forge-test-out.txt; then
             echo "FAILURE: Some Forge tests failed"

@@ -388,7 +388,11 @@ mod tests {
     #[test]
     fn native_output_path_drops_source_extension() {
         let path = Path::new("/tmp/hello.fg");
-        assert_eq!(native_output_path(path), PathBuf::from("/tmp/hello"));
+        let mut expected = PathBuf::from("/tmp/hello");
+        if cfg!(windows) {
+            expected.set_extension("exe");
+        }
+        assert_eq!(native_output_path(path), expected);
     }
 
     #[test]

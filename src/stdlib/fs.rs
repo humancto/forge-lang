@@ -535,6 +535,10 @@ mod tests {
 
     #[test]
     fn test_fs_join_path() {
+        let expected = std::path::Path::new("/home")
+            .join("user")
+            .to_string_lossy()
+            .to_string();
         assert_eq!(
             call(
                 "fs.join_path",
@@ -544,14 +548,15 @@ mod tests {
                 ]
             )
             .unwrap(),
-            Value::String("/home/user".to_string())
+            Value::String(expected)
         );
     }
 
     #[test]
     fn test_fs_is_dir() {
+        let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
         assert_eq!(
-            call("fs.is_dir", vec![Value::String("/tmp".to_string())]).unwrap(),
+            call("fs.is_dir", vec![Value::String(temp_dir)]).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
@@ -643,10 +648,21 @@ mod tests {
     #[test]
     fn confine_path_absolute_outside_is_rejected() {
         let base = unique_temp_dir("absolute");
-        let err = confine_path_with("/etc/passwd", Some(base.to_str().unwrap()))
+        let outside = std::env::temp_dir().join(format!(
+            "forge_confine_outside_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&outside, "outside").unwrap();
+
+        let err = confine_path_with(outside.to_str().unwrap(), Some(base.to_str().unwrap()))
             .expect_err("absolute outside path should be rejected");
         assert!(err.contains("escapes FORGE_FS_BASE"), "got: {}", err);
 
+        std::fs::remove_file(&outside).ok();
         std::fs::remove_dir_all(&base).ok();
     }
 

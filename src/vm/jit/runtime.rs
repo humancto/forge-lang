@@ -1,5 +1,6 @@
 // JIT runtime bridge functions. Many are unused until M2 NaN-boxing JIT is wired up.
 #![allow(dead_code)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 /// Runtime bridge functions for JIT-compiled code.
 ///

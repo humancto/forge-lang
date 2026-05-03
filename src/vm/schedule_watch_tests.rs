@@ -22,6 +22,10 @@ fn run_vm(source: &str) {
     vm.execute(&chunk).expect("vm error");
 }
 
+fn forge_string_literal_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}
+
 #[test]
 fn vm_schedule_compiles() {
     compile_ok("schedule every 1 seconds { let x = 1 }");
@@ -68,7 +72,10 @@ fn vm_watch_fires_on_change() {
     let watched = std::env::temp_dir().join("forge_watch_vm_test.txt");
     std::fs::write(&watched, "initial").expect("write watched file");
 
-    let source = format!(r#"watch "{}" {{ let x = 1 }}"#, watched.display());
+    let source = format!(
+        r#"watch "{}" {{ let x = 1 }}"#,
+        forge_string_literal_path(&watched)
+    );
     run_vm(&source);
     let _ = std::fs::remove_file(&watched);
 }
@@ -79,7 +86,10 @@ fn vm_watch_no_fire_without_change() {
     let watched = std::env::temp_dir().join("forge_watch_vm_nochange.txt");
     std::fs::write(&watched, "stable").expect("write watched file");
 
-    let source = format!(r#"watch "{}" {{ let x = 1 }}"#, watched.display());
+    let source = format!(
+        r#"watch "{}" {{ let x = 1 }}"#,
+        forge_string_literal_path(&watched)
+    );
     run_vm(&source);
     let _ = std::fs::remove_file(&watched);
 }
