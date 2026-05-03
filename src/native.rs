@@ -657,4 +657,81 @@ mod tests {
         let _ = std::fs::remove_file(output_path);
         let _ = std::fs::remove_dir_all(&temp_root);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_source_server_binary_serves_ping_when_lib_available() {
+        if Command::new("cc").arg("--version").output().is_err() {
+            return;
+        }
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let lib_dir = manifest_dir.join("target").join("debug");
+        if !lib_dir.join("libforge_lang.a").exists() {
+            eprintln!(
+                "skipping standalone server smoke: {} not found",
+                lib_dir.join("libforge_lang.a").display()
+            );
+            return;
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "forge-native-server-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let source_path = temp_root.join("server.fg");
+        let source = format!(
+            r#"
+            @server(port: {port})
+
+            @get("/ping")
+            fn ping() -> Json {{
+                return {{ ok: true }}
+            }}
+            "#
+        );
+        std::fs::write(&source_path, &source).unwrap();
+
+        let output_path =
+            build_standalone_source(&source, &source_path, false, &lib_dir).expect("build server");
+        let mut child = Command::new(&output_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start standalone server");
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .expect("client");
+        let url = format!("http://127.0.0.1:{port}/ping");
+        let mut served = false;
+        for _ in 0..50 {
+            if client
+                .get(&url)
+                .send()
+                .map(|response| response.status().is_success())
+                .unwrap_or(false)
+            {
+                served = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&output_path);
+        let _ = std::fs::remove_dir_all(&temp_root);
+
+        assert!(served, "standalone server did not serve /ping on {url}");
+    }
 }
