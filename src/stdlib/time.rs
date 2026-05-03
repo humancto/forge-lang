@@ -736,6 +736,15 @@ mod tests {
                 "is_after",
                 "is_leap_year",
                 "days_in_month",
+                "elapsed",
+                "end_of",
+                "is_weekday",
+                "is_weekend",
+                "day_of_week",
+                "local",
+                "measure",
+                "sleep",
+                "zones",
             ] {
                 assert!(m.contains_key(k), "missing {}", k);
             }
@@ -772,6 +781,17 @@ mod tests {
         let result = call("time.now", vec![s("Mars/Olympus")]);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown timezone"));
+    }
+
+    #[test]
+    fn local_returns_local_timezone_object() {
+        let result = call("time.local", vec![]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("timezone"), Some(&s("Local")));
+            assert!(m.contains_key("unix"));
+        } else {
+            panic!("expected object");
+        }
     }
 
     #[test]
@@ -849,6 +869,19 @@ mod tests {
     }
 
     #[test]
+    fn zone_converts_fixed_timestamp() {
+        let t = call("time.from_unix", vec![Value::Int(1609459200)]).unwrap();
+        let result = call("time.zone", vec![t, s("America/New_York")]).unwrap();
+        if let Value::Object(m) = result {
+            assert_eq!(m.get("timezone"), Some(&s("America/New_York")));
+            assert_eq!(m.get("hour"), Some(&Value::Int(19)));
+            assert_eq!(m.get("day"), Some(&Value::Int(31)));
+        } else {
+            panic!("expected object");
+        }
+    }
+
+    #[test]
     fn diff_between_two_times() {
         let a = call("time.from_unix", vec![Value::Int(1000)]).unwrap();
         let b = call("time.from_unix", vec![Value::Int(100)]).unwrap();
@@ -875,6 +908,26 @@ mod tests {
     }
 
     #[test]
+    fn weekday_weekend_and_day_name_for_fixed_dates() {
+        let friday = call("time.parse", vec![s("2021-01-01")]).unwrap();
+        let saturday = call("time.parse", vec![s("2021-01-02")]).unwrap();
+
+        assert_eq!(
+            call("time.is_weekday", vec![friday.clone()]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("time.is_weekend", vec![friday.clone()]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(call("time.day_of_week", vec![friday]).unwrap(), s("Friday"));
+        assert_eq!(
+            call("time.is_weekend", vec![saturday]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
     fn add_duration_object() {
         let t = call("time.from_unix", vec![Value::Int(0)]).unwrap();
         let mut dur = IndexMap::new();
@@ -896,6 +949,20 @@ mod tests {
             assert_eq!(m.get("unix"), Some(&Value::Int(900)));
         } else {
             panic!("expected object");
+        }
+    }
+
+    #[test]
+    fn sleep_zero_and_epoch_millis_helpers_are_safe() {
+        assert_eq!(
+            call("time.sleep", vec![Value::Int(0)]).unwrap(),
+            Value::Null
+        );
+        for name in ["time.elapsed", "time.measure"] {
+            match call(name, vec![]).unwrap() {
+                Value::Int(n) => assert!(n > 0, "{name} should return epoch millis"),
+                other => panic!("expected int from {name}, got {other:?}"),
+            }
         }
     }
 
@@ -968,6 +1035,14 @@ mod tests {
         let t = call("time.from_unix", vec![Value::Int(0)]).unwrap();
         let result = call("time.start_of", vec![t, s("fortnight")]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn representative_wrong_arg_errors() {
+        assert!(call("time.zone", vec![Value::Int(0), Value::Int(1)]).is_err());
+        assert!(call("time.sleep", vec![s("0")]).is_err());
+        assert!(call("time.is_weekday", vec![s("not time")]).is_err());
+        assert!(call("time.day_of_week", vec![s("not time")]).is_err());
     }
 
     #[test]

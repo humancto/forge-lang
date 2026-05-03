@@ -267,6 +267,9 @@ mod tests {
         assert!(call("crypto.sha256", vec![Value::Int(1)]).is_err());
         assert!(call("crypto.md5", vec![]).is_err());
         assert!(call("crypto.base64_encode", vec![Value::Bool(true)]).is_err());
+        assert!(call("crypto.sha512", vec![Value::Array(vec![])]).is_err());
+        assert!(call("crypto.hex_encode", vec![]).is_err());
+        assert!(call("crypto.hex_decode", vec![Value::Bool(false)]).is_err());
         assert!(call("crypto.random_bytes", vec![s("hi")]).is_err());
     }
 

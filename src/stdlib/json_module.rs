@@ -399,6 +399,16 @@ mod tests {
     }
 
     #[test]
+    fn stringify_rejects_non_string_map_keys() {
+        let result = call(
+            "json.stringify",
+            vec![Value::Map(vec![(Value::Int(1), s("one"))])],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("non-string key"));
+    }
+
+    #[test]
     fn pretty_indents_object() {
         let mut obj = IndexMap::new();
         obj.insert("a".to_string(), Value::Int(1));
@@ -417,6 +427,16 @@ mod tests {
         assert_eq!(result, s("[]"));
         let result = call("json.pretty", vec![Value::Object(IndexMap::new())]).unwrap();
         assert_eq!(result, s("{}"));
+    }
+
+    #[test]
+    fn pretty_rejects_non_string_map_keys() {
+        let result = call(
+            "json.pretty",
+            vec![Value::Map(vec![(Value::Bool(true), Value::Int(1))])],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("non-string key"));
     }
 
     #[test]

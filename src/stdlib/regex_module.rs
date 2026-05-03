@@ -158,6 +158,13 @@ mod tests {
     }
 
     #[test]
+    fn invalid_pattern_errors_from_replace_too() {
+        let result = call("regex.replace", vec![s("anything"), s(r"["), s("x")]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid regex"));
+    }
+
+    #[test]
     fn wrong_arg_types_error() {
         assert!(call("regex.test", vec![s("text")]).is_err());
         assert!(call("regex.find", vec![Value::Int(1), s(r"\d")]).is_err());
