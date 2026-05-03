@@ -1,7 +1,7 @@
 use crate::interpreter::Value;
 use indexmap::IndexMap;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub fn create_module() -> Value {
     let mut m = IndexMap::new();
@@ -21,12 +21,18 @@ pub fn create_module() -> Value {
         "close".to_string(),
         Value::BuiltIn("mysql.close".to_string()),
     );
-    // NOTE: mysql.begin/commit/rollback are intentionally absent. mysql_async's
-    // pool returns a fresh connection on every get_conn(), so issuing BEGIN
-    // on one call and COMMIT on a later call would target different physical
-    // connections — silently broken transactions. For multi-statement work,
-    // use a dedicated transaction API (future) or run all statements inside a
-    // single SQL string via the underlying server's batch execution.
+    m.insert(
+        "begin".to_string(),
+        Value::BuiltIn("mysql.begin".to_string()),
+    );
+    m.insert(
+        "commit".to_string(),
+        Value::BuiltIn("mysql.commit".to_string()),
+    );
+    m.insert(
+        "rollback".to_string(),
+        Value::BuiltIn("mysql.rollback".to_string()),
+    );
     Value::Object(m)
 }
 
@@ -40,12 +46,26 @@ fn mysql_counter() -> &'static std::sync::Mutex<u64> {
     COUNTER.get_or_init(|| std::sync::Mutex::new(0))
 }
 
+#[derive(Clone)]
+struct ActiveMysqlTx {
+    origin_conn_id: String,
+    conn: Arc<tokio::sync::Mutex<mysql_async::Conn>>,
+}
+
+fn mysql_transactions() -> &'static tokio::sync::Mutex<HashMap<String, ActiveMysqlTx>> {
+    static TXS: OnceLock<tokio::sync::Mutex<HashMap<String, ActiveMysqlTx>>> = OnceLock::new();
+    TXS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "mysql.connect" => mysql_connect(args),
         "mysql.query" => mysql_query(args),
         "mysql.execute" => mysql_execute(args),
         "mysql.close" => mysql_close(args),
+        "mysql.begin" => mysql_begin(args),
+        "mysql.commit" => mysql_finish_tx(args, "COMMIT", "mysql.commit"),
+        "mysql.rollback" => mysql_finish_tx(args, "ROLLBACK", "mysql.rollback"),
         _ => Err(format!("unknown mysql function: {}", name)),
     }
 }
@@ -171,7 +191,7 @@ fn mysql_connect(args: Vec<Value>) -> Result<Value, String> {
 }
 
 fn mysql_query(args: Vec<Value>) -> Result<Value, String> {
-    let conn_id = match args.first() {
+    let handle_id = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => return Err("mysql.query() requires a connection ID as first argument".to_string()),
     };
@@ -186,10 +206,15 @@ fn mysql_query(args: Vec<Value>) -> Result<Value, String> {
     };
 
     run_mysql(async move {
+        if let Some(tx_conn) = active_mysql_tx_conn(&handle_id).await {
+            let mut conn = tx_conn.lock().await;
+            return query_on_mysql_conn(&mut conn, &sql, params).await;
+        }
+
         let pool_guard = mysql_pool().lock().await;
         let pool = pool_guard
-            .get(&conn_id)
-            .ok_or_else(|| format!("MySQL connection '{}' not found", conn_id))?;
+            .get(&handle_id)
+            .ok_or_else(|| format!("MySQL connection '{}' not found", handle_id))?;
         let pool_clone = pool.clone();
         drop(pool_guard);
 
@@ -198,38 +223,12 @@ fn mysql_query(args: Vec<Value>) -> Result<Value, String> {
             .await
             .map_err(|e| format!("mysql.query() connection error: {}", e))?;
 
-        use mysql_async::prelude::*;
-
-        let rows: Vec<mysql_async::Row> = if params.is_empty() {
-            conn.query(&sql)
-                .await
-                .map_err(|e| format!("mysql.query() error: {}", e))?
-        } else {
-            conn.exec(&sql, mysql_async::Params::Positional(params))
-                .await
-                .map_err(|e| format!("mysql.query() error: {}", e))?
-        };
-
-        let mut results = Vec::new();
-        for row in rows {
-            let mut map = IndexMap::new();
-            let columns: Vec<String> = row
-                .columns_ref()
-                .iter()
-                .map(|c| c.name_str().to_string())
-                .collect();
-            for (i, col_name) in columns.iter().enumerate() {
-                let val: mysql_async::Value = row.get(i).unwrap_or(mysql_async::Value::NULL);
-                map.insert(col_name.clone(), mysql_val_to_forge(val));
-            }
-            results.push(Value::Object(map));
-        }
-        Ok(Value::Array(results))
+        query_on_mysql_conn(&mut conn, &sql, params).await
     })
 }
 
 fn mysql_execute(args: Vec<Value>) -> Result<Value, String> {
-    let conn_id = match args.first() {
+    let handle_id = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => return Err("mysql.execute() requires a connection ID as first argument".to_string()),
     };
@@ -246,10 +245,15 @@ fn mysql_execute(args: Vec<Value>) -> Result<Value, String> {
     };
 
     run_mysql(async move {
+        if let Some(tx_conn) = active_mysql_tx_conn(&handle_id).await {
+            let mut conn = tx_conn.lock().await;
+            return execute_on_mysql_conn(&mut conn, &sql, params).await;
+        }
+
         let pool_guard = mysql_pool().lock().await;
         let pool = pool_guard
-            .get(&conn_id)
-            .ok_or_else(|| format!("MySQL connection '{}' not found", conn_id))?;
+            .get(&handle_id)
+            .ok_or_else(|| format!("MySQL connection '{}' not found", handle_id))?;
         let pool_clone = pool.clone();
         drop(pool_guard);
 
@@ -258,19 +262,7 @@ fn mysql_execute(args: Vec<Value>) -> Result<Value, String> {
             .await
             .map_err(|e| format!("mysql.execute() connection error: {}", e))?;
 
-        use mysql_async::prelude::*;
-
-        if params.is_empty() {
-            conn.query_drop(&sql)
-                .await
-                .map_err(|e| format!("mysql.execute() error: {}", e))?;
-        } else {
-            conn.exec_drop(&sql, mysql_async::Params::Positional(params))
-                .await
-                .map_err(|e| format!("mysql.execute() error: {}", e))?;
-        }
-
-        Ok(Value::Int(conn.affected_rows() as i64))
+        execute_on_mysql_conn(&mut conn, &sql, params).await
     })
 }
 
@@ -281,6 +273,27 @@ fn mysql_close(args: Vec<Value>) -> Result<Value, String> {
     };
 
     run_mysql(async move {
+        let outstanding: Vec<String> = {
+            let tx_guard = mysql_transactions().lock().await;
+            tx_guard
+                .iter()
+                .filter_map(|(tx_id, tx)| {
+                    if tx.origin_conn_id == conn_id {
+                        Some(tx_id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        if !outstanding.is_empty() {
+            return Err(format!(
+                "mysql.close() refused: active transactions for {}: {}",
+                conn_id,
+                outstanding.join(", ")
+            ));
+        }
+
         let mut pool_guard = mysql_pool().lock().await;
         if let Some(pool) = pool_guard.remove(&conn_id) {
             drop(pool_guard);
@@ -291,6 +304,134 @@ fn mysql_close(args: Vec<Value>) -> Result<Value, String> {
         } else {
             Ok(Value::Bool(false))
         }
+    })
+}
+
+async fn active_mysql_tx_conn(id: &str) -> Option<Arc<tokio::sync::Mutex<mysql_async::Conn>>> {
+    let tx_guard = mysql_transactions().lock().await;
+    tx_guard.get(id).map(|tx| Arc::clone(&tx.conn))
+}
+
+async fn query_on_mysql_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    params: Vec<mysql_async::Value>,
+) -> Result<Value, String> {
+    use mysql_async::prelude::*;
+
+    let rows: Vec<mysql_async::Row> = if params.is_empty() {
+        conn.query(sql)
+            .await
+            .map_err(|e| format!("mysql.query() error: {}", e))?
+    } else {
+        conn.exec(sql, mysql_async::Params::Positional(params))
+            .await
+            .map_err(|e| format!("mysql.query() error: {}", e))?
+    };
+
+    let mut results = Vec::new();
+    for row in rows {
+        let mut map = IndexMap::new();
+        let columns: Vec<String> = row
+            .columns_ref()
+            .iter()
+            .map(|c| c.name_str().to_string())
+            .collect();
+        for (i, col_name) in columns.iter().enumerate() {
+            let val: mysql_async::Value = row.get(i).unwrap_or(mysql_async::Value::NULL);
+            map.insert(col_name.clone(), mysql_val_to_forge(val));
+        }
+        results.push(Value::Object(map));
+    }
+    Ok(Value::Array(results))
+}
+
+async fn execute_on_mysql_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    params: Vec<mysql_async::Value>,
+) -> Result<Value, String> {
+    use mysql_async::prelude::*;
+
+    if params.is_empty() {
+        conn.query_drop(sql)
+            .await
+            .map_err(|e| format!("mysql.execute() error: {}", e))?;
+    } else {
+        conn.exec_drop(sql, mysql_async::Params::Positional(params))
+            .await
+            .map_err(|e| format!("mysql.execute() error: {}", e))?;
+    }
+
+    Ok(Value::Int(conn.affected_rows() as i64))
+}
+
+fn mysql_begin(args: Vec<Value>) -> Result<Value, String> {
+    let conn_id = match args.first() {
+        Some(Value::String(s)) => s.clone(),
+        _ => return Err("mysql.begin() requires a connection ID".to_string()),
+    };
+
+    run_mysql(async move {
+        let pool_guard = mysql_pool().lock().await;
+        let pool = pool_guard
+            .get(&conn_id)
+            .ok_or_else(|| format!("MySQL connection '{}' not found", conn_id))?;
+        let pool_clone = pool.clone();
+        drop(pool_guard);
+
+        let mut conn = pool_clone
+            .get_conn()
+            .await
+            .map_err(|e| format!("mysql.begin() connection error: {}", e))?;
+
+        use mysql_async::prelude::*;
+        conn.query_drop("BEGIN")
+            .await
+            .map_err(|e| format!("mysql.begin() error: {}", e))?;
+
+        let tx_id = format!("mysql_tx_{}", uuid::Uuid::new_v4());
+        mysql_transactions().lock().await.insert(
+            tx_id.clone(),
+            ActiveMysqlTx {
+                origin_conn_id: conn_id,
+                conn: Arc::new(tokio::sync::Mutex::new(conn)),
+            },
+        );
+
+        Ok(Value::String(tx_id))
+    })
+}
+
+fn mysql_finish_tx(
+    args: Vec<Value>,
+    stmt: &'static str,
+    label: &'static str,
+) -> Result<Value, String> {
+    let tx_id = match args.first() {
+        Some(Value::String(s)) => s.clone(),
+        _ => return Err(format!("{}() requires a transaction ID", label)),
+    };
+
+    run_mysql(async move {
+        let tx = {
+            let tx_guard = mysql_transactions().lock().await;
+            tx_guard
+                .get(&tx_id)
+                .cloned()
+                .ok_or_else(|| format!("MySQL transaction '{}' not found", tx_id))?
+        };
+
+        let mut conn = tx.conn.lock().await;
+        use mysql_async::prelude::*;
+        conn.query_drop(stmt)
+            .await
+            .map_err(|e| format!("{}() error: {}", label, e))?;
+        drop(conn);
+
+        mysql_transactions().lock().await.remove(&tx_id);
+
+        Ok(Value::Null)
     })
 }
 
@@ -320,7 +461,10 @@ mod tests {
             assert!(m.contains_key("query"));
             assert!(m.contains_key("execute"));
             assert!(m.contains_key("close"));
-            assert_eq!(m.len(), 4);
+            assert!(m.contains_key("begin"));
+            assert!(m.contains_key("commit"));
+            assert!(m.contains_key("rollback"));
+            assert_eq!(m.len(), 7);
         } else {
             panic!("expected object module");
         }
@@ -438,5 +582,150 @@ mod tests {
         let result = mysql_execute(vec![Value::String("mysql_1".to_string())]);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("SQL string"));
+    }
+
+    #[test]
+    fn test_begin_missing_conn_id() {
+        let result = mysql_begin(vec![]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("connection ID"));
+    }
+
+    #[test]
+    fn test_begin_unknown_conn_id() {
+        let result = mysql_begin(vec![Value::String("mysql_missing".to_string())]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_commit_missing_tx_id() {
+        let result = mysql_finish_tx(vec![], "COMMIT", "mysql.commit");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("transaction ID"));
+    }
+
+    #[test]
+    fn test_commit_unknown_tx_id() {
+        let result = mysql_finish_tx(
+            vec![Value::String("mysql_tx_missing".to_string())],
+            "COMMIT",
+            "mysql.commit",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    #[ignore = "requires FORGE_MYSQL_TEST_URL pointing at a disposable MySQL database"]
+    fn live_transactions_commit_and_rollback() {
+        let url = match std::env::var("FORGE_MYSQL_TEST_URL") {
+            Ok(url) => url,
+            Err(_) => return,
+        };
+        let table = format!("forge_tx_test_{}", std::process::id());
+        let rt = tokio::runtime::Runtime::new().expect("test runtime");
+
+        rt.block_on(async {
+            let conn = call("mysql.connect", vec![Value::String(url)]).expect("connect");
+            let conn_id = match conn {
+                Value::String(id) => id,
+                other => panic!("expected connection id, got {other:?}"),
+            };
+
+            call(
+                "mysql.execute",
+                vec![
+                    Value::String(conn_id.clone()),
+                    Value::String(format!("DROP TABLE IF EXISTS {table}")),
+                ],
+            )
+            .expect("drop table");
+            call(
+                "mysql.execute",
+                vec![
+                    Value::String(conn_id.clone()),
+                    Value::String(format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY)")),
+                ],
+            )
+            .expect("create table");
+
+            let rollback_tx = call("mysql.begin", vec![Value::String(conn_id.clone())])
+                .expect("begin rollback tx");
+            let rollback_tx_id = match rollback_tx {
+                Value::String(id) => id,
+                other => panic!("expected tx id, got {other:?}"),
+            };
+            call(
+                "mysql.execute",
+                vec![
+                    Value::String(rollback_tx_id.clone()),
+                    Value::String(format!("INSERT INTO {table} VALUES (1)")),
+                ],
+            )
+            .expect("insert rollback row");
+            call("mysql.rollback", vec![Value::String(rollback_tx_id)]).expect("rollback");
+            assert_eq!(count_rows(&conn_id, &table), 0);
+
+            let commit_tx =
+                call("mysql.begin", vec![Value::String(conn_id.clone())]).expect("begin commit tx");
+            let commit_tx_id = match commit_tx {
+                Value::String(id) => id,
+                other => panic!("expected tx id, got {other:?}"),
+            };
+            call(
+                "mysql.execute",
+                vec![
+                    Value::String(commit_tx_id.clone()),
+                    Value::String(format!("INSERT INTO {table} VALUES (2)")),
+                ],
+            )
+            .expect("insert commit row");
+            call("mysql.commit", vec![Value::String(commit_tx_id)]).expect("commit");
+            assert_eq!(count_rows(&conn_id, &table), 1);
+
+            let close_guard_tx =
+                call("mysql.begin", vec![Value::String(conn_id.clone())]).expect("begin close tx");
+            let close_guard_tx_id = match close_guard_tx {
+                Value::String(id) => id,
+                other => panic!("expected tx id, got {other:?}"),
+            };
+            let close_result = call("mysql.close", vec![Value::String(conn_id.clone())]);
+            assert!(close_result.is_err());
+            assert!(close_result.unwrap_err().contains("active transactions"));
+            call("mysql.rollback", vec![Value::String(close_guard_tx_id)])
+                .expect("rollback close guard tx");
+
+            call(
+                "mysql.execute",
+                vec![
+                    Value::String(conn_id.clone()),
+                    Value::String(format!("DROP TABLE IF EXISTS {table}")),
+                ],
+            )
+            .expect("cleanup table");
+            call("mysql.close", vec![Value::String(conn_id)]).expect("close");
+        });
+    }
+
+    fn count_rows(conn_id: &str, table: &str) -> i64 {
+        let result = call(
+            "mysql.query",
+            vec![
+                Value::String(conn_id.to_string()),
+                Value::String(format!("SELECT COUNT(*) AS n FROM {table}")),
+            ],
+        )
+        .expect("count rows");
+        match result {
+            Value::Array(rows) => match rows.first() {
+                Some(Value::Object(row)) => match row.get("n") {
+                    Some(Value::Int(n)) => *n,
+                    other => panic!("expected integer count, got {other:?}"),
+                },
+                other => panic!("expected first row, got {other:?}"),
+            },
+            other => panic!("expected rows array, got {other:?}"),
+        }
     }
 }
