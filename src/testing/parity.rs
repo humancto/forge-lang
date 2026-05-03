@@ -41,8 +41,13 @@ pub fn load_supported_cases() -> Vec<SupportedParityCase> {
     load_cases("supported")
         .into_iter()
         .map(|(path, source)| SupportedParityCase {
-            expected: metadata_value(&source, "expect")
-                .unwrap_or_else(|| panic!("missing '// expect:' header in {}", path.display())),
+            expected: if cfg!(windows) {
+                metadata_value(&source, "expect-windows")
+                    .or_else(|| metadata_value(&source, "expect"))
+            } else {
+                metadata_value(&source, "expect")
+            }
+            .unwrap_or_else(|| panic!("missing '// expect:' header in {}", path.display())),
             path,
             source,
         })
