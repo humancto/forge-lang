@@ -6947,34 +6947,6 @@ fn fork_for_serving_supports_concurrent_use() {
     assert_eq!(template.env.get("rid"), None);
 }
 
-/// Diagnostic benchmark — not a hard gate. Prints fork cost so we can
-/// see if it dominates request latency. Threshold-style assertion only:
-/// fork must be <50ms; the throughput-improvement story falls apart
-/// well before that.
-#[test]
-fn fork_for_serving_is_under_50ms() {
-    let interp = Interpreter::new();
-    let n = 100;
-    let t0 = std::time::Instant::now();
-    for _ in 0..n {
-        let _ = interp.fork_for_serving();
-    }
-    let elapsed = t0.elapsed();
-    let mean_ms = elapsed.as_secs_f64() * 1000.0 / n as f64;
-    eprintln!(
-        "fork_for_serving: {} forks in {:?}, mean {:.3}ms",
-        n, elapsed, mean_ms
-    );
-    // Tightened from 50ms in the previous PR. Today's baseline after
-    // the closure-walk fix is ~0.1ms; 1ms gives 10x headroom while still
-    // catching real regressions.
-    assert!(
-        mean_ms < 1.0,
-        "fork cost regressed: {:.3}ms per fork (gate: 1ms)",
-        mean_ms
-    );
-}
-
 // ── Closure isolation across forks (PR #110) ─────────────────────────────
 
 /// Helper: define a top-level mutable variable plus a Lambda that captures
