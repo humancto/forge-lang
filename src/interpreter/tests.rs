@@ -22,6 +22,10 @@ fn try_run_forge(source: &str) -> Result<Value, RuntimeError> {
     interpreter.run(&program)
 }
 
+fn forge_string_literal_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}
+
 #[test]
 fn evaluates_interpolated_expression() {
     let value = run_forge(
@@ -797,15 +801,18 @@ fn fs_write_read_remove() {
 
 #[test]
 fn fs_exists() {
-    let result = try_run_forge(
+    let path = std::env::temp_dir().join("forge_test_exists.txt");
+    let source = format!(
         r#"
-        let p = "/tmp/forge_test_exists.txt"
+        let p = "{}"
         fs.write(p, "x")
         assert(fs.exists(p))
         fs.remove(p)
         assert(fs.exists(p) == false)
     "#,
+        forge_string_literal_path(&path)
     );
+    let result = try_run_forge(&source);
     assert!(result.is_ok());
 }
 
@@ -1458,17 +1465,22 @@ fn method_chaining_map_filter() {
 
 #[test]
 fn fs_copy_and_rename() {
-    let result = try_run_forge(
+    let path1 = std::env::temp_dir().join("forge_copy_test.txt");
+    let path2 = std::env::temp_dir().join("forge_copy_test2.txt");
+    let source = format!(
         r#"
-        let p1 = "/tmp/forge_copy_test.txt"
-        let p2 = "/tmp/forge_copy_test2.txt"
+        let p1 = "{}"
+        let p2 = "{}"
         fs.write(p1, "hello")
         fs.copy(p1, p2)
         assert(fs.exists(p2))
         fs.remove(p1)
         fs.remove(p2)
     "#,
+        forge_string_literal_path(&path1),
+        forge_string_literal_path(&path2)
     );
+    let result = try_run_forge(&source);
     assert!(result.is_ok());
 }
 
@@ -1504,16 +1516,19 @@ fn fs_mkdir_list() {
 
 #[test]
 fn csv_read_write() {
-    let result = try_run_forge(
+    let path = std::env::temp_dir().join("forge_csv_test.csv");
+    let source = format!(
         r#"
-        let p = "/tmp/forge_csv_test.csv"
-        let data = [{ name: "Alice", age: 30 }, { name: "Bob", age: 25 }]
+        let p = "{}"
+        let data = [{{ name: "Alice", age: 30 }}, {{ name: "Bob", age: 25 }}]
         csv.write(p, data)
         let loaded = csv.read(p)
         assert(len(loaded) == 2)
         fs.remove(p)
     "#,
+        forge_string_literal_path(&path)
     );
+    let result = try_run_forge(&source);
     assert!(result.is_ok());
 }
 

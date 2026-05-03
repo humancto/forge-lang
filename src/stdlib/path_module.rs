@@ -157,7 +157,11 @@ mod tests {
             vec![Value::String("a".into()), Value::String("b".into())],
         )
         .unwrap();
-        assert_eq!(result, Value::String("a/b".into()));
+        let expected = std::path::Path::new("a")
+            .join("b")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(result, Value::String(expected));
     }
 
     #[test]
@@ -171,7 +175,12 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(result, Value::String("a/b/c.txt".into()));
+        let expected = std::path::Path::new("a")
+            .join("b")
+            .join("c.txt")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(result, Value::String(expected));
     }
 
     #[test]
@@ -188,7 +197,8 @@ mod tests {
 
     #[test]
     fn is_absolute_detects_absolute() {
-        let result = call("path.is_absolute", vec![Value::String("/usr/bin".into())]).unwrap();
+        let absolute = std::env::temp_dir().to_string_lossy().to_string();
+        let result = call("path.is_absolute", vec![Value::String(absolute)]).unwrap();
         assert_eq!(result, Value::Bool(true));
     }
 
