@@ -414,18 +414,22 @@ fn mysql_finish_tx(
     };
 
     run_mysql(async move {
-        let mut tx_guard = mysql_transactions().lock().await;
-        let tx = tx_guard
-            .get(&tx_id)
-            .cloned()
-            .ok_or_else(|| format!("MySQL transaction '{}' not found", tx_id))?;
+        let tx = {
+            let tx_guard = mysql_transactions().lock().await;
+            tx_guard
+                .get(&tx_id)
+                .cloned()
+                .ok_or_else(|| format!("MySQL transaction '{}' not found", tx_id))?
+        };
 
         let mut conn = tx.conn.lock().await;
         use mysql_async::prelude::*;
         conn.query_drop(stmt)
             .await
             .map_err(|e| format!("{}() error: {}", label, e))?;
-        tx_guard.remove(&tx_id);
+        drop(conn);
+
+        mysql_transactions().lock().await.remove(&tx_id);
 
         Ok(Value::Null)
     })
@@ -679,6 +683,18 @@ mod tests {
             .expect("insert commit row");
             call("mysql.commit", vec![Value::String(commit_tx_id)]).expect("commit");
             assert_eq!(count_rows(&conn_id, &table), 1);
+
+            let close_guard_tx =
+                call("mysql.begin", vec![Value::String(conn_id.clone())]).expect("begin close tx");
+            let close_guard_tx_id = match close_guard_tx {
+                Value::String(id) => id,
+                other => panic!("expected tx id, got {other:?}"),
+            };
+            let close_result = call("mysql.close", vec![Value::String(conn_id.clone())]);
+            assert!(close_result.is_err());
+            assert!(close_result.unwrap_err().contains("active transactions"));
+            call("mysql.rollback", vec![Value::String(close_guard_tx_id)])
+                .expect("rollback close guard tx");
 
             call(
                 "mysql.execute",

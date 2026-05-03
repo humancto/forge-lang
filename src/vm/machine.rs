@@ -763,7 +763,9 @@ impl VM {
         #[cfg(feature = "mysql")]
         {
             let mut mysql_map = IndexMap::new();
-            for name in &["connect", "query", "execute", "close"] {
+            for name in &[
+                "connect", "query", "execute", "close", "begin", "commit", "rollback",
+            ] {
                 let full = format!("mysql.{}", name);
                 let nr = self
                     .gc
