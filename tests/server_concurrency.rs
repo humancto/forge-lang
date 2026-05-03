@@ -23,7 +23,7 @@ use forge_lang::runtime::server::start_server;
 
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Pick an unused TCP port by binding 0 and letting the kernel choose.
 fn pick_port() -> u16 {
@@ -239,6 +239,81 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
         single,
         parallel.as_secs_f64() / single.as_secs_f64()
     );
+}
+
+#[test]
+fn schedule_mutations_do_not_leak_into_handler_forks() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos();
+    let sentinel = std::env::temp_dir().join(format!(
+        "forge_schedule_handler_isolation_{}_{}.txt",
+        std::process::id(),
+        unique
+    ));
+    let _ = std::fs::remove_file(&sentinel);
+    let sentinel_str = sentinel
+        .to_str()
+        .expect("temp path should be valid UTF-8")
+        .to_string();
+
+    // `spawn_test_server` leaves `defer_host_runtime` at the Interpreter default
+    // (`false`), so schedules start during `interp.run()`. That differs from the
+    // CLI orchestration path but exercises the same background-runtime vs
+    // per-request serving-fork isolation contract.
+    let source = r#"
+        @server(port: __PORT__)
+
+        let mut state = 0
+
+        schedule every 1 seconds {
+            state = state + 1
+            fs.write("__SENTINEL__", "ran")
+        }
+
+        @get("/ping")
+        fn ping() -> Json {
+            return { ok: true }
+        }
+
+        @get("/read")
+        fn read() -> Json {
+            return { state: state }
+        }
+        "#
+    .replace("__SENTINEL__", &sentinel_str);
+
+    let port = spawn_test_server(&source);
+    std::thread::sleep(Duration::from_millis(1500));
+
+    assert!(
+        sentinel.exists(),
+        "schedule body never wrote sentinel file at {}; test would be vacuous",
+        sentinel.display()
+    );
+
+    let url = format!("http://127.0.0.1:{}/read", port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("client");
+
+    for attempt in 0..5 {
+        let body: serde_json::Value = client
+            .get(&url)
+            .send()
+            .expect("send")
+            .json()
+            .expect("json response");
+        assert_eq!(
+            body["state"],
+            serde_json::json!(0),
+            "handler fork observed background schedule mutation on attempt {attempt}: {body}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&sentinel);
 }
 
 #[test]
