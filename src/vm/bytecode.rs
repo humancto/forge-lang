@@ -165,6 +165,7 @@ pub struct Chunk {
     pub code: Vec<u32>,
     pub constants: Vec<Constant>,
     pub lines: Vec<usize>,
+    pub cols: Vec<usize>,
     pub name: String,
     pub prototypes: Vec<Chunk>,
     pub max_registers: u8,
@@ -179,6 +180,7 @@ impl Chunk {
             code: Vec::new(),
             constants: Vec::new(),
             lines: Vec::new(),
+            cols: Vec::new(),
             name: name.to_string(),
             prototypes: Vec::new(),
             max_registers: 0,
@@ -188,9 +190,19 @@ impl Chunk {
         }
     }
 
+    /// Emit with column 0. Kept for hand-built test chunks and compatibility
+    /// with callers that do not have parser span metadata.
+    #[allow(dead_code)]
     pub fn emit(&mut self, instruction: u32, line: usize) {
+        self.emit_at(instruction, line, 0);
+    }
+
+    pub fn emit_at(&mut self, instruction: u32, line: usize, col: usize) {
         self.code.push(instruction);
         self.lines.push(line);
+        self.cols.push(col);
+        debug_assert_eq!(self.code.len(), self.lines.len());
+        debug_assert_eq!(self.code.len(), self.cols.len());
     }
 
     pub fn add_constant(&mut self, value: Constant) -> u16 {

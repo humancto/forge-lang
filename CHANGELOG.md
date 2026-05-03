@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **VM error traces now include columns when available** — bytecode chunks carry source columns alongside line tables, old v1.1 bytecode still deserializes with zero columns, and standalone decorator statements now fail VM compilation instead of being silently ignored.
 - **OpenTelemetry feature path is now CI-tested and cheaper when inactive** — CI builds `--features otel`, the OTel export path has a smoke test, and request-span traceparent extraction is skipped unless OTel export was activated at runtime.
 - **Empty request IDs no longer produce blank span fields** — inbound `X-Request-Id: ` now records as `"unknown"` with a warning, and request-id extraction is covered for empty, non-ASCII, and oversized header values.
 

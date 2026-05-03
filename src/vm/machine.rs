@@ -240,6 +240,7 @@ pub struct VMError {
 pub struct StackFrame {
     pub function: String,
     pub line: usize,
+    pub col: usize,
 }
 
 impl VMError {
@@ -278,7 +279,15 @@ impl std::fmt::Display for VMError {
         write!(f, "{}", self.message)?;
         if !self.stack_trace.is_empty() {
             for frame in &self.stack_trace {
-                write!(f, "\n  at {} (line {})", frame.function, frame.line)?;
+                if frame.col > 0 {
+                    write!(
+                        f,
+                        "\n  at {} (line {}, col {})",
+                        frame.function, frame.line, frame.col
+                    )?;
+                } else {
+                    write!(f, "\n  at {} (line {})", frame.function, frame.line)?;
+                }
             }
         }
         Ok(())
@@ -2496,9 +2505,15 @@ impl VM {
                     } else {
                         0
                     };
+                    let col = if frame.ip > 0 && frame.ip - 1 < c.function.chunk.cols.len() {
+                        c.function.chunk.cols[frame.ip - 1]
+                    } else {
+                        0
+                    };
                     trace.push(StackFrame {
                         function: c.function.name.clone(),
                         line,
+                        col,
                     });
                 }
             }
