@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Native/AOT build failures now surface the C compiler's diagnostics** — `forge build --native` / `--aot` previously swallowed `cc` output and reported only a generic "compilation failed" string. Failures now include the compiler's exit status plus its stderr (head and tail, bounded at 8 KiB) so root causes like cross-architecture `libforge_lang.a` mismatches or missing libraries are visible directly in the error.
 - **WebSocket handlers now observe client disconnect cancellation** — WS connections install a connection-scoped cancellation token, run message handlers on the blocking pool, and keep polling the socket for close/error while handlers run so long-running loops exit at the next interpreter safe point. ([#146](https://github.com/humancto/forge-lang/pull/146))
 - **VM error traces now include columns when available** — bytecode chunks carry source columns alongside line tables, old v1.1 bytecode still deserializes with zero columns, and standalone decorator statements now fail VM compilation instead of being silently ignored.
 - **OpenTelemetry feature path is now CI-tested and cheaper when inactive** — CI builds `--features otel`, the OTel export path has a smoke test, and request-span traceparent extraction is skipped unless OTel export was activated at runtime.

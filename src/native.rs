@@ -125,16 +125,17 @@ fn build_standalone_source(
         cmd.arg("-ldl");
     }
 
-    let status = cmd.status().map_err(|e| {
+    let output = cmd.output().map_err(|e| {
         let _ = fs::remove_file(&c_path);
         format!("failed to invoke C compiler for standalone source runtime: {e}")
     })?;
     let _ = fs::remove_file(&c_path);
 
-    if !status.success() {
-        return Err(format!(
-            "standalone source-runtime compilation failed for '{}'",
-            output_path.display()
+    if !output.status.success() {
+        return Err(compiler_failure_message(
+            "standalone source-runtime compilation failed",
+            &output_path,
+            &output,
         ));
     }
 
@@ -215,16 +216,17 @@ int main(void) {{
         cmd.arg("-ldl");
     }
 
-    let status = cmd.status().map_err(|e| {
+    let output = cmd.output().map_err(|e| {
         let _ = fs::remove_file(&c_path);
         format!("failed to invoke C compiler for standalone AOT: {e}")
     })?;
     let _ = fs::remove_file(&c_path);
 
-    if !status.success() {
-        return Err(format!(
-            "standalone AOT compilation failed for '{}' (try without FORGE_LIB_DIR for launcher mode)",
-            output_path.display()
+    if !output.status.success() {
+        return Err(compiler_failure_message(
+            "standalone AOT compilation failed (try without FORGE_LIB_DIR for launcher mode)",
+            &output_path,
+            &output,
         ));
     }
 
@@ -278,24 +280,85 @@ where
         fs::write(&c_path, c_source)
             .map_err(|e| format!("failed to write {mode} launcher source: {e}"))?;
 
-        let status = Command::new("cc")
+        let output = Command::new("cc")
             .arg("-O2")
             .arg(&c_path)
             .arg("-o")
             .arg(&output_path)
-            .status()
+            .output()
             .map_err(|e| format!("failed to invoke C compiler for --{mode}: {e}"))?;
         let _ = fs::remove_file(&c_path);
 
-        if !status.success() {
-            return Err(format!(
-                "{mode} launcher compilation failed for '{}'",
-                output_path.display()
+        if !output.status.success() {
+            return Err(compiler_failure_message(
+                &format!("{mode} launcher compilation failed"),
+                &output_path,
+                &output,
             ));
         }
 
         Ok(output_path)
     }
+}
+
+/// Maximum number of compiler-diagnostic bytes embedded in an error message.
+const COMPILER_STDERR_LIMIT: usize = 8 * 1024;
+
+/// Build an error message that carries the C compiler's own diagnostics
+/// instead of swallowing them behind a generic failure string.
+fn compiler_failure_message(
+    context: &str,
+    output_path: &Path,
+    output: &std::process::Output,
+) -> String {
+    let mut message = format!(
+        "{} for '{}' ({})",
+        context,
+        output_path.display(),
+        output.status
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    // cc occasionally reports on stdout (e.g. some wrapper toolchains); fall back to it.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim();
+    let diagnostics = if !stderr.is_empty() { stderr } else { stdout };
+
+    if diagnostics.is_empty() {
+        message.push_str("; the compiler produced no diagnostics");
+    } else {
+        message.push_str(":\n");
+        message.push_str(&truncate_diagnostics(diagnostics, COMPILER_STDERR_LIMIT));
+    }
+    message
+}
+
+/// Keep diagnostics bounded so a pathological compiler dump cannot flood the
+/// error path. Keeps both the head and the tail of the output — compile errors
+/// appear early, but linker errors (the usual failure here) come after a flood
+/// of warnings at the very end. Cuts on char boundaries and notes the gap.
+fn truncate_diagnostics(diagnostics: &str, limit: usize) -> String {
+    if diagnostics.len() <= limit {
+        return diagnostics.to_string();
+    }
+
+    let half = limit / 2;
+    let mut head_end = half;
+    while !diagnostics.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = diagnostics.len() - half;
+    while !diagnostics.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+
+    format!(
+        "{}\n... ({} bytes of compiler output omitted) ...\n{}",
+        &diagnostics[..head_end],
+        tail_start - head_end,
+        &diagnostics[tail_start..]
+    )
 }
 
 pub fn native_output_path(source_path: &Path) -> PathBuf {
@@ -656,6 +719,104 @@ mod tests {
 
         let _ = std::fs::remove_file(output_path);
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn truncate_diagnostics_passes_short_output_through() {
+        assert_eq!(truncate_diagnostics("ld: error", 64), "ld: error");
+    }
+
+    #[test]
+    fn truncate_diagnostics_keeps_head_and_tail_and_reports_omitted_bytes() {
+        let long = format!("HEAD{}TAIL", "x".repeat(100));
+        let truncated = truncate_diagnostics(&long, 10);
+        assert!(truncated.starts_with("HEAD"));
+        assert!(truncated.ends_with("TAIL"));
+        assert!(truncated.contains("(98 bytes of compiler output omitted)"));
+    }
+
+    #[test]
+    fn truncate_diagnostics_respects_char_boundaries() {
+        // 'é' is 2 bytes in UTF-8; a cut landing mid-char must move off it.
+        let diagnostics = "ééééé";
+        let truncated = truncate_diagnostics(diagnostics, 5);
+        assert!(truncated.starts_with("é"));
+        assert!(truncated.ends_with("é"));
+        assert!(truncated.contains("omitted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_failure_message_includes_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0x100), // exit code 1
+            stdout: Vec::new(),
+            stderr: b"ld: library 'forge_lang' not found".to_vec(),
+        };
+        let message =
+            compiler_failure_message("compilation failed", Path::new("/tmp/app"), &output);
+        assert!(message.contains("compilation failed for '/tmp/app'"));
+        assert!(message.contains("ld: library 'forge_lang' not found"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_failure_message_falls_back_to_stdout_then_notes_silence() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(0x100);
+        let stdout_only = std::process::Output {
+            status,
+            stdout: b"wrapper: bad flag".to_vec(),
+            stderr: Vec::new(),
+        };
+        let message =
+            compiler_failure_message("compilation failed", Path::new("/tmp/app"), &stdout_only);
+        assert!(message.contains("wrapper: bad flag"));
+
+        let silent = std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let message =
+            compiler_failure_message("compilation failed", Path::new("/tmp/app"), &silent);
+        assert!(message.contains("the compiler produced no diagnostics"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_standalone_source_error_carries_compiler_diagnostics() {
+        if Command::new("cc").arg("--version").output().is_err() {
+            return;
+        }
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "forge-native-stderr-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let source_path = temp_root.join("app.fg");
+        std::fs::write(&source_path, "println(\"hi\")").unwrap();
+
+        // Point the linker at a directory that cannot contain libforge_lang.a
+        // so the link step fails and must surface the linker's own message.
+        let error = build_standalone_source("println(\"hi\")", &source_path, false, &temp_root)
+            .expect_err("link against empty lib dir should fail");
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+
+        assert!(
+            error.contains("standalone source-runtime compilation failed"),
+            "missing context in error: {error}"
+        );
+        assert!(
+            error.contains("forge_lang"),
+            "compiler diagnostics not surfaced in error: {error}"
+        );
     }
 
     #[cfg(unix)]
