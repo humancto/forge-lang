@@ -1,3 +1,37 @@
+//! Mark-sweep garbage collector for the bytecode VM.
+//!
+//! # Rooting invariants
+//!
+//! Collection only happens at VM safe points (between bytecode instructions in
+//! `VM::run_until`). At a safe point the roots are: live registers, globals,
+//! call frames, method/static/default tables, JIT string constants, and the
+//! **pin stack** (`Gc::pinned`).
+//!
+//! Native (Rust) builtins can hold `Value`s in Rust locals that the register
+//! scan cannot see. That is only dangerous when the builtin re-enters Forge
+//! code (`call_value`), because that is the only way a safe point can occur
+//! while the builtin is on the Rust stack. The VM makes this safe
+//! structurally rather than per builtin:
+//!
+//! * Every native call runs inside a *native scope* (`VM::call_native` wraps
+//!   the dispatch in `Gc::enter_native` / `Gc::exit_native`). The call's
+//!   arguments are pinned, and while the scope is active **every allocation
+//!   is pinned automatically**, so objects a builtin creates can never be
+//!   reclaimed under it.
+//! * Re-entering bytecode (`VM::call_value`) suspends auto-pinning, so garbage
+//!   produced by Forge callbacks is still collected normally; the value the
+//!   callback returns is pinned into the enclosing native scope.
+//! * When a native scope ends, its pins are released.
+//!
+//! The one thing a builtin must still do by hand: if it copies `Value`s *out
+//! of* a heap object (e.g. snapshots an array's items) and then calls back into
+//! Forge code, the callback could mutate that object and drop the last
+//! reference. Pin such snapshots with `Gc::pin_values` (or `VM::root_values`).
+//!
+//! `FORGE_GC_STRESS=1` (or `Gc::set_stress(true)`) collects at every safe
+//! point that follows an allocation, which turns any missing root into a
+//! deterministic `<freed>` / wrong-value failure in tests.
+
 use std::collections::HashMap;
 
 use super::value::{GcObject, GcRef, ObjKind, Value};
@@ -16,6 +50,22 @@ pub struct Gc {
     next_gc: usize,
     /// Intern table: maps string content → canonical GcRef.
     interned: HashMap<String, GcRef>,
+    /// Pin stack: extra roots owned by active native scopes.
+    pinned: Vec<GcRef>,
+    /// When true, every allocation is pushed onto `pinned` (native code is
+    /// running). Cleared while bytecode runs.
+    pinning: bool,
+    /// Stress mode: collect at every safe point that follows an allocation.
+    stress: bool,
+    /// Allocations since the last collection (drives stress mode).
+    allocs_since_collect: usize,
+}
+
+/// Saved state returned by `Gc::enter_native`; hand it back to `exit_native`.
+#[must_use = "pass the scope to Gc::exit_native, or the pins leak"]
+pub struct NativeScope {
+    mark: usize,
+    prev_pinning: bool,
 }
 
 impl Gc {
@@ -26,21 +76,86 @@ impl Gc {
             alloc_count: 0,
             next_gc: INITIAL_GC_THRESHOLD,
             interned: HashMap::new(),
+            pinned: Vec::new(),
+            pinning: false,
+            stress: std::env::var("FORGE_GC_STRESS")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false),
+            allocs_since_collect: 0,
         }
+    }
+
+    /// Enable/disable stress mode (collect at every safe point after an
+    /// allocation). Also settable with `FORGE_GC_STRESS=1`.
+    #[allow(dead_code)]
+    pub fn set_stress(&mut self, on: bool) {
+        self.stress = on;
+    }
+
+    /// Open a native scope: auto-pin every allocation until `exit_native`.
+    pub fn enter_native(&mut self) -> NativeScope {
+        let scope = NativeScope {
+            mark: self.pinned.len(),
+            prev_pinning: self.pinning,
+        };
+        self.pinning = true;
+        scope
+    }
+
+    /// Close a native scope, releasing its pins and restoring the previous
+    /// pinning mode.
+    pub fn exit_native(&mut self, scope: NativeScope) {
+        self.pinned.truncate(scope.mark);
+        self.pinning = scope.prev_pinning;
+    }
+
+    /// Suspend/resume auto-pinning around bytecode execution. Returns the
+    /// previous mode so the caller can restore it.
+    pub fn set_pinning(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.pinning, on)
+    }
+
+    /// Pin a value (if it is a heap ref) until the current native scope ends.
+    /// Outside a native scope this is a no-op (bytecode values live in
+    /// registers).
+    #[inline]
+    pub fn pin_value(&mut self, v: Value) {
+        if self.pinning {
+            if let Some(r) = v.as_obj() {
+                self.pinned.push(r);
+            }
+        }
+    }
+
+    /// Pin every heap ref in `values` until the current native scope ends.
+    pub fn pin_values(&mut self, values: &[Value]) {
+        if self.pinning {
+            self.pinned.extend(values.iter().filter_map(|v| v.as_obj()));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn pinned_len(&self) -> usize {
+        self.pinned.len()
     }
 
     /// Allocate a new object on the GC heap. Returns a GcRef.
     pub fn alloc(&mut self, kind: ObjKind) -> GcRef {
         self.alloc_count += 1;
+        self.allocs_since_collect += 1;
         let obj = GcObject::new(kind);
-        if let Some(idx) = self.free_list.pop() {
+        let r = if let Some(idx) = self.free_list.pop() {
             self.objects[idx] = Some(obj);
             GcRef(idx)
         } else {
             let idx = self.objects.len();
             self.objects.push(Some(obj));
             GcRef(idx)
+        };
+        if self.pinning {
+            self.pinned.push(r);
         }
+        r
     }
 
     /// Allocate a string, interning short strings for deduplication.
@@ -49,6 +164,11 @@ impl Gc {
     pub fn alloc_string(&mut self, s: String) -> GcRef {
         if s.len() <= INTERN_MAX_LEN {
             if let Some(&existing) = self.interned.get(&s) {
+                // The interned object may be otherwise unreachable; native
+                // code now holds it, so pin it like a fresh allocation.
+                if self.pinning {
+                    self.pinned.push(existing);
+                }
                 return existing;
             }
             let r = self.alloc(ObjKind::String(s.clone()));
@@ -61,7 +181,7 @@ impl Gc {
 
     /// Check if GC should run.
     pub fn should_collect(&self) -> bool {
-        self.alloc_count >= self.next_gc
+        self.alloc_count >= self.next_gc || (self.stress && self.allocs_since_collect > 0)
     }
 
     /// Get an object by ref (immutable).
@@ -77,8 +197,12 @@ impl Gc {
     /// Run a full mark-sweep collection.
     /// `roots` are all GcRefs reachable from the VM (registers, globals, frames, upvalues).
     pub fn collect(&mut self, roots: &[GcRef]) {
+        let pinned = std::mem::take(&mut self.pinned);
         self.mark(roots);
+        self.mark(&pinned);
+        self.pinned = pinned;
         self.sweep();
+        self.allocs_since_collect = 0;
         self.next_gc = self.alloc_count * GC_GROWTH_FACTOR;
         if self.next_gc < INITIAL_GC_THRESHOLD {
             self.next_gc = INITIAL_GC_THRESHOLD;
@@ -221,6 +345,60 @@ mod tests {
         assert!(gc.get(r2).is_some());
         // r1 should be invalid (freed)
         let _ = r1; // just to suppress unused warning
+    }
+
+    #[test]
+    fn native_scope_pins_allocations_until_exit() {
+        let mut gc = Gc::new();
+        let scope = gc.enter_native();
+        let a = gc.alloc_string("pinned-in-native".to_string());
+        let b = gc.alloc(ObjKind::Array(vec![]));
+        gc.collect(&[]);
+        assert!(gc.get(a).is_some(), "native-scope string must survive GC");
+        assert!(gc.get(b).is_some(), "native-scope array must survive GC");
+        gc.exit_native(scope);
+        assert_eq!(gc.pinned_len(), 0);
+        gc.collect(&[]);
+        assert!(gc.get(a).is_none(), "pins are released when the scope ends");
+        assert!(gc.get(b).is_none());
+    }
+
+    #[test]
+    fn bytecode_inside_native_scope_is_not_auto_pinned() {
+        let mut gc = Gc::new();
+        let scope = gc.enter_native();
+        let prev = gc.set_pinning(false);
+        let garbage = gc.alloc(ObjKind::Array(vec![]));
+        let ret = gc.alloc_string("callback-result".to_string());
+        gc.set_pinning(prev);
+        gc.pin_value(Value::obj(ret));
+        gc.collect(&[]);
+        assert!(gc.get(garbage).is_none(), "callback garbage is collectable");
+        assert!(gc.get(ret).is_some(), "callback result is pinned");
+        gc.exit_native(scope);
+    }
+
+    #[test]
+    fn interned_hit_is_pinned_in_native_scope() {
+        let mut gc = Gc::new();
+        let r1 = gc.alloc_string("shared".to_string());
+        let scope = gc.enter_native();
+        let r2 = gc.alloc_string("shared".to_string());
+        assert_eq!(r1, r2);
+        gc.collect(&[]);
+        assert!(gc.get(r2).is_some());
+        gc.exit_native(scope);
+    }
+
+    #[test]
+    fn stress_mode_collects_after_every_allocation() {
+        let mut gc = Gc::new();
+        gc.set_stress(true);
+        assert!(!gc.should_collect());
+        let _ = gc.alloc(ObjKind::Array(vec![]));
+        assert!(gc.should_collect());
+        gc.collect(&[]);
+        assert!(!gc.should_collect());
     }
 
     #[test]

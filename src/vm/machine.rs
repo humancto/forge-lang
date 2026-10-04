@@ -1030,7 +1030,12 @@ impl VM {
         self.frames
             .push(CallFrame::new(closure_ref, new_base, frame_size));
         let boundary = self.frames.len() - 1;
-        self.run_until(boundary)
+        // Module bytecode is ordinary bytecode: don't auto-pin its
+        // allocations even when an `import` builtin is the caller.
+        let was_pinning = self.gc.set_pinning(false);
+        let result = self.run_until(boundary);
+        self.gc.set_pinning(was_pinning);
+        result
     }
 
     fn ensure_registers(&mut self, needed: usize) {
@@ -2290,7 +2295,24 @@ impl VM {
         }
     }
 
+    /// Call any callable value (closure, function, native, `__call__`
+    /// object).
+    ///
+    /// GC rooting (see `vm/gc.rs`): bytecode run by the callee must not be
+    /// auto-pinned, so pinning is suspended for the duration of the call; if
+    /// the caller is a native builtin (pinning was on), the returned value is
+    /// pinned into the caller's native scope so it survives later callbacks.
     pub fn call_value(&mut self, func: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let was_pinning = self.gc.set_pinning(false);
+        let result = self.call_value_inner(func, args);
+        self.gc.set_pinning(was_pinning);
+        if let Ok(v) = &result {
+            self.gc.pin_value(*v);
+        }
+        result
+    }
+
+    fn call_value_inner(&mut self, func: Value, args: Vec<Value>) -> Result<Value, VMError> {
         if let Some(r) = func.as_obj() {
             let obj = self
                 .gc

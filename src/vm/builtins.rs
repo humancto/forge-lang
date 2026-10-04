@@ -10,7 +10,21 @@ use super::machine::{VMError, VM};
 use super::value::*;
 
 impl VM {
+    /// Call a native builtin inside a GC native scope (see the rooting
+    /// invariants in `vm/gc.rs`): the arguments and everything the builtin
+    /// allocates are pinned until it returns, so a GC triggered by a Forge
+    /// callback (map/filter/sort/stream/...) cannot free values the builtin
+    /// still holds in Rust locals. `dispatch_native` is private so every
+    /// native call goes through this wrapper.
     pub(super) fn call_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
+        let scope = self.gc.enter_native();
+        self.gc.pin_values(&args);
+        let result = self.dispatch_native(name, args);
+        self.gc.exit_native(scope);
+        result
+    }
+
+    fn dispatch_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
         match name {
             "__forge_register_struct" => {
                 if args.len() != 3 {
@@ -697,6 +711,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("any() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
                     if self
@@ -725,6 +741,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("all() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
                     if !self
@@ -944,6 +962,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("map() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
@@ -969,6 +989,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("filter() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut out = Vec::new();
                 for item in items {
@@ -997,6 +1019,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("reduce() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let mut acc = args[1].clone();
                 let func = args[2].clone();
                 for item in items {
@@ -1018,6 +1042,8 @@ impl VM {
                     if let Some(items) = items_clone {
                         // Optional custom comparator (second arg)
                         if let Some(func) = args.get(1).cloned() {
+                            // Pin the snapshot: the comparator may mutate the source.
+                            self.gc.pin_values(&items);
                             let mut sorted = items;
                             let mut err: Option<VMError> = None;
                             sorted.sort_by(|a, b| {
@@ -2093,6 +2119,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("find() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
                     let result = self.call_value(func.clone(), vec![item.clone()])?;
@@ -2120,6 +2148,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("flat_map() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut out = Vec::new();
                 for item in items {
@@ -2128,7 +2158,9 @@ impl VM {
                         ValueKind::Obj(r) => {
                             if let Some(obj) = self.gc.get(r) {
                                 if let ObjKind::Array(sub) = &obj.kind {
-                                    out.extend(sub.clone());
+                                    let sub = sub.clone();
+                                    self.gc.pin_values(&sub);
+                                    out.extend(sub);
                                     continue;
                                 }
                             }
@@ -2307,6 +2339,8 @@ impl VM {
                     return Err(VMError::new("partition() requires (array, function)"));
                 }
                 let items = self.array_items(&args[0], "partition() first arg must be array")?;
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut matches = Vec::new();
                 let mut rest = Vec::new();
@@ -2331,6 +2365,8 @@ impl VM {
                     return Err(VMError::new("group_by() requires (array, function)"));
                 }
                 let items = self.array_items(&args[0], "group_by() first arg must be array")?;
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
                 for item in items {
@@ -2351,6 +2387,8 @@ impl VM {
                     return Err(VMError::new("sort_by() requires (array, key_function)"));
                 }
                 let items = self.array_items(&args[0], "sort_by() first arg must be array")?;
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let key_fn = args[1].clone();
                 // Pre-compute keys to avoid calling inside sort closure
                 let mut pairs: Vec<(Value, Value)> = Vec::new();
@@ -2386,6 +2424,8 @@ impl VM {
                     return Err(VMError::new("for_each() requires (array, function)"));
                 }
                 let items = self.array_items(&args[0], "for_each() first arg must be array")?;
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
                     self.call_value(func.clone(), vec![item])?;
