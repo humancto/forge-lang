@@ -294,3 +294,41 @@ fn uncaught_recursion_error_uses_shared_message() {
         err.message
     );
 }
+
+// ---------------------------------------------------------------------------
+// Import cycles
+// ---------------------------------------------------------------------------
+
+#[test]
+fn import_cycle_is_reported_once() {
+    let dir = std::env::temp_dir().join(format!("forge_vm_cycle_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let a = dir.join("a.fg");
+    let b = dir.join("b.fg");
+    std::fs::write(
+        &a,
+        format!("import \"{}\"\nfn fa() {{ return 1 }}\n", b.display()),
+    )
+    .expect("write a");
+    std::fs::write(
+        &b,
+        format!("import \"{}\"\nfn fb() {{ return 2 }}\n", a.display()),
+    )
+    .expect("write b");
+    let err = run_vm(&format!("import \"{}\"\nsay fa()", a.display()), false)
+        .expect_err("cycle must fail");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        err.message.starts_with("circular import: "),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("a.fg -> "), "{}", err.message);
+    assert!(err.message.contains("b.fg -> "), "{}", err.message);
+    assert_eq!(
+        err.message.matches("circular import").count(),
+        1,
+        "{}",
+        err.message
+    );
+}

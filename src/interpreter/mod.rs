@@ -1893,6 +1893,10 @@ impl Interpreter {
                     RuntimeError::new(&format!("import '{}' parse error: {}", path, e.message))
                 })?;
 
+                // Shared cycle detection (runtime/imports.rs); the guard keeps
+                // this module on the import chain while it runs.
+                let _import_guard = crate::runtime::imports::enter_import(&file_path)
+                    .map_err(|msg| RuntimeError::new(&msg))?;
                 let mut import_interp = Interpreter::new();
                 import_interp.source_file = Some(file_path.clone());
                 import_interp.run(&program)?;

@@ -382,11 +382,21 @@ impl VM {
                     requested_names
                 };
 
+                // Shared cycle detection (runtime/imports.rs). Checked before
+                // compiling so a cycle is reported once, not as a nested
+                // chain of compile/runtime errors.
+                let _import_guard = crate::runtime::imports::enter_import(&file_path)
+                    .map_err(|msg| VMError::new(&msg))?;
                 let chunk = crate::vm::compiler::compile_module(&program).map_err(|e| {
                     VMError::new(&format!("import '{}' compile error: {}", path, e.message))
                 })?;
                 self.execute_module(&chunk).map_err(|e| {
-                    VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                    if e.message.starts_with("circular import: ") {
+                        // Propagate the cycle report unwrapped.
+                        VMError::new(&e.message)
+                    } else {
+                        VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                    }
                 })?;
 
                 let mut exports = IndexMap::new();
