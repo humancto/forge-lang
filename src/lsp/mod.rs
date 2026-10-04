@@ -1,8 +1,27 @@
 #![allow(dead_code)]
 
+//! Forge language server.
+//!
+//! Transport, framing and the initialize/shutdown/exit handshake are provided
+//! by `lsp-server` (rust-analyzer's synchronous LSP scaffold). Capabilities
+//! and method names come from `lsp-types`, so adding a new feature is:
+//! advertise it in [`server_capabilities`], add a match arm in
+//! [`handle_request`] (or [`handle_notification`]), and write the handler.
+//!
+//! Provides: diagnostics (lex/parse errors + type-check warnings),
+//! completions, hover, go-to-definition, references, document symbols,
+//! whole-document formatting and signature help.
+
 use crate::parser::ast::Stmt;
+use lsp_server::{Connection, ErrorCode, Message, Notification, ProtocolError, Request, Response};
+use lsp_types::notification::Notification as _;
+use lsp_types::request::Request as _;
+use lsp_types::{
+    notification, request, CompletionOptions, HoverProviderCapability, OneOf, ServerCapabilities,
+    ServerInfo, SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions,
+};
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
 use std::sync::Mutex;
 
 /// In-memory document store: uri -> text content.
@@ -20,206 +39,405 @@ fn get_document(uri: &str) -> Option<String> {
     DOCUMENTS.lock().ok()?.get(uri).cloned()
 }
 
-/// Basic LSP server for Forge.
-/// Implements the Language Server Protocol over stdin/stdout.
-/// Provides: diagnostics (parse errors), completions, hover, definition, document symbols.
-
-pub fn run_lsp() {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-
-    eprintln!("Forge LSP server started");
-
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-
-        if line.starts_with("Content-Length:") {
-            let len: usize = line
-                .trim_start_matches("Content-Length:")
-                .trim()
-                .parse()
-                .unwrap_or(0);
-
-            // Read empty line
-            let mut empty = String::new();
-            io::stdin().read_line(&mut empty).ok();
-
-            // Read content
-            let mut content = vec![0u8; len];
-            io::stdin().lock().read_exact(&mut content).ok();
-            let body = String::from_utf8_lossy(&content).to_string();
-
-            if let Some(response) = handle_message(&body) {
-                let resp_bytes = response.as_bytes();
-                write!(
-                    stdout,
-                    "Content-Length: {}\r\n\r\n{}",
-                    resp_bytes.len(),
-                    response
-                )
-                .ok();
-                stdout.flush().ok();
-            }
-        }
+fn remove_document(uri: &str) {
+    if let Ok(mut docs) = DOCUMENTS.lock() {
+        docs.remove(uri);
     }
 }
 
-fn handle_message(body: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(body).ok()?;
-    let method = json.get("method")?.as_str()?;
-    let id = json.get("id");
+/// Entry point for `forge lsp`: serve the Language Server Protocol over
+/// stdin/stdout until the client sends `exit` or closes stdin.
+///
+/// Exit status follows the LSP spec: 0 when `exit` follows `shutdown`,
+/// 1 otherwise (including stdin EOF without a shutdown handshake).
+pub fn run_lsp() {
+    eprintln!("Forge LSP server started");
+    let (connection, io_threads) = Connection::stdio();
+    let clean = match serve(&connection) {
+        Ok(clean) => clean,
+        Err(e) => {
+            eprintln!("forge lsp: {}", e);
+            false
+        }
+    };
+    // Dropping the connection closes the writer channel so the writer thread
+    // flushes and exits; the reader thread exits on `exit` or stdin EOF.
+    drop(connection);
+    if let Err(e) = io_threads.join() {
+        eprintln!("forge lsp: io error: {}", e);
+    }
+    if !clean {
+        std::process::exit(1);
+    }
+}
 
-    match method {
-        "initialize" => {
-            let result = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "capabilities": {
-                        "textDocumentSync": 1,
-                        "completionProvider": {
-                            "triggerCharacters": ["."]
-                        },
-                        "hoverProvider": true,
-                        "definitionProvider": true,
-                        "referencesProvider": true,
-                        "documentSymbolProvider": true
+/// The capabilities advertised in the `initialize` response.
+pub(crate) fn server_capabilities() -> ServerCapabilities {
+    ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::FULL),
+                ..Default::default()
+            },
+        )),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_string()]),
+            ..Default::default()
+        }),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: None,
+            work_done_progress_options: Default::default(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// The full `InitializeResult` payload.
+fn initialize_result() -> serde_json::Value {
+    serde_json::json!({
+        "capabilities": server_capabilities(),
+        "serverInfo": ServerInfo {
+            name: "forge-lsp".to_string(),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+    })
+}
+
+/// Run the server on an established connection (stdio in production, an
+/// in-memory pair in tests). Returns `Ok(true)` for a clean
+/// `shutdown` + `exit`, `Ok(false)` when the client went away or sent
+/// `exit` without `shutdown`.
+pub(crate) fn serve(connection: &Connection) -> Result<bool, ProtocolError> {
+    let (id, _params) = connection.initialize_start()?;
+    connection.initialize_finish(id, initialize_result())?;
+
+    for msg in &connection.receiver {
+        match msg {
+            Message::Request(req) => {
+                if req.method == request::Shutdown::METHOD {
+                    // Replies to `shutdown`, then waits for `exit`.
+                    return match connection.handle_shutdown(&req) {
+                        Ok(_) => Ok(true),
+                        Err(e) => {
+                            // The shutdown handshake itself succeeded; only
+                            // the trailing `exit` was missing or malformed.
+                            eprintln!("forge lsp: {}", e);
+                            Ok(true)
+                        }
+                    };
+                }
+                let resp = handle_request(&req);
+                if connection.sender.send(resp.into()).is_err() {
+                    return Ok(false);
+                }
+            }
+            Message::Notification(note) => {
+                if note.method == notification::Exit::METHOD {
+                    return Ok(false);
+                }
+                for out in handle_notification(&note) {
+                    if connection.sender.send(out.into()).is_err() {
+                        return Ok(false);
                     }
                 }
-            });
-            Some(result.to_string())
+            }
+            Message::Response(_) => {}
         }
-        "initialized" => None,
-        "textDocument/didOpen" | "textDocument/didChange" => {
-            let params = json.get("params")?;
-            let doc = params.get("textDocument")?;
-            let uri = doc.get("uri")?.as_str()?;
-            let text = if method == "textDocument/didOpen" {
-                doc.get("text")?.as_str()?
-            } else {
-                let changes = params.get("contentChanges")?.as_array()?;
-                changes.first()?.get("text")?.as_str()?
-            };
+    }
+    Ok(false)
+}
 
-            store_document(uri, text);
+fn param_str<'a>(params: &'a serde_json::Value, pointer: &str) -> Option<&'a str> {
+    params.pointer(pointer).and_then(|v| v.as_str())
+}
 
-            let diagnostics = get_diagnostics(text);
-            let notification = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "textDocument/publishDiagnostics",
-                "params": {
-                    "uri": uri,
-                    "diagnostics": diagnostics
-                }
-            });
-            Some(notification.to_string())
-        }
-        "textDocument/completion" => {
-            let params = json.get("params")?;
-            let context = params
-                .pointer("/context/triggerCharacter")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+/// Extract `(uri, line, character)` from a TextDocumentPositionParams.
+fn position_params(params: &serde_json::Value) -> Option<(&str, usize, usize)> {
+    let uri = param_str(params, "/textDocument/uri")?;
+    let line = params.pointer("/position/line")?.as_u64()? as usize;
+    let character = params.pointer("/position/character")?.as_u64()? as usize;
+    Some((uri, line, character))
+}
+
+fn invalid_params(req: &Request) -> Response {
+    Response::new_err(
+        req.id.clone(),
+        ErrorCode::InvalidParams as i32,
+        format!("invalid params for {}", req.method),
+    )
+}
+
+/// Handle one request. Every request gets exactly one response.
+pub(crate) fn handle_request(req: &Request) -> Response {
+    let params = &req.params;
+    let id = req.id.clone();
+    let result: Option<serde_json::Value> = match req.method.as_str() {
+        request::Initialize::METHOD => Some(initialize_result()),
+        request::Shutdown::METHOD => Some(serde_json::Value::Null),
+        request::Completion::METHOD => {
+            let context = param_str(params, "/context/triggerCharacter").unwrap_or("");
             let completions = if context == "." {
                 get_module_completions(params)
             } else {
                 get_completions()
             };
-            let result = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": completions
-            });
-            Some(result.to_string())
+            Some(serde_json::json!(completions))
         }
-        "textDocument/hover" => {
-            let params = json.get("params")?;
-            let doc = params.get("textDocument")?;
-            let uri = doc.get("uri")?.as_str()?;
-            let position = params.get("position")?;
-            let line = position.get("line")?.as_u64()? as usize;
-            let character = position.get("character")?.as_u64()? as usize;
-            let hover = get_hover(uri, line, character);
-            let result = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": hover
-            });
-            Some(result.to_string())
+        request::HoverRequest::METHOD => {
+            position_params(params).map(|(uri, line, ch)| get_hover(uri, line, ch))
         }
-        "textDocument/definition" => {
-            let params = json.get("params")?;
-            let doc = params.get("textDocument")?;
-            let uri = doc.get("uri")?.as_str()?;
-            let position = params.get("position")?;
-            let line = position.get("line")?.as_u64()? as usize;
-            let character = position.get("character")?.as_u64()? as usize;
-            let definition = get_definition(uri, line, character);
-            let result = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": definition
-            });
-            Some(result.to_string())
+        request::GotoDefinition::METHOD => {
+            position_params(params).map(|(uri, line, ch)| get_definition(uri, line, ch))
         }
-        "textDocument/references" => {
-            let params = json.get("params")?;
-            let doc = params.get("textDocument")?;
-            let uri = doc.get("uri")?.as_str()?;
-            let position = params.get("position")?;
-            let line = position.get("line")?.as_u64()? as usize;
-            let character = position.get("character")?.as_u64()? as usize;
-            let references = get_references(uri, line, character);
-            let result = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": references
-            });
-            Some(result.to_string())
+        request::References::METHOD => position_params(params)
+            .map(|(uri, line, ch)| serde_json::json!(get_references(uri, line, ch))),
+        request::DocumentSymbolRequest::METHOD => param_str(params, "/textDocument/uri")
+            .map(|uri| serde_json::json!(get_document_symbols(uri))),
+        request::Formatting::METHOD => {
+            param_str(params, "/textDocument/uri").map(get_formatting_edits)
         }
-        "textDocument/documentSymbol" => {
-            let params = json.get("params")?;
-            let doc = params.get("textDocument")?;
-            let uri = doc.get("uri")?.as_str()?;
-            let symbols = get_document_symbols(uri);
-            let result = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": symbols
-            });
-            Some(result.to_string())
+        request::SignatureHelpRequest::METHOD => {
+            position_params(params).map(|(uri, line, ch)| get_signature_help(uri, line, ch))
         }
-        "shutdown" => {
-            let result = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": null
-            });
-            Some(result.to_string())
-        }
-        // Per LSP spec, requests (messages with an id) for unhandled methods
-        // must return a JSON-RPC MethodNotFound error rather than silently
-        // dropping the request. Notifications (no id) may still be ignored.
+        // Per LSP spec, requests for unhandled methods must return a
+        // JSON-RPC MethodNotFound error rather than being dropped.
         other => {
-            if id.is_some() {
-                let error = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": {
-                        "code": -32601,
-                        "message": format!("method not found: {}", other)
+            return Response::new_err(
+                id,
+                ErrorCode::MethodNotFound as i32,
+                format!("method not found: {}", other),
+            )
+        }
+    };
+    match result {
+        Some(value) => Response::new_ok(id, value),
+        None => invalid_params(req),
+    }
+}
+
+fn publish_diagnostics(uri: &str, diagnostics: Vec<serde_json::Value>) -> Notification {
+    Notification::new(
+        notification::PublishDiagnostics::METHOD.to_string(),
+        serde_json::json!({ "uri": uri, "diagnostics": diagnostics }),
+    )
+}
+
+/// Handle one notification, returning any notifications to send back
+/// (e.g. `textDocument/publishDiagnostics`). Unknown notifications are
+/// ignored, as the spec requires.
+pub(crate) fn handle_notification(note: &Notification) -> Vec<Notification> {
+    let params = &note.params;
+    match note.method.as_str() {
+        notification::DidOpenTextDocument::METHOD => {
+            let (Some(uri), Some(text)) = (
+                param_str(params, "/textDocument/uri"),
+                param_str(params, "/textDocument/text"),
+            ) else {
+                return vec![];
+            };
+            store_document(uri, text);
+            vec![publish_diagnostics(uri, get_diagnostics(text))]
+        }
+        notification::DidChangeTextDocument::METHOD => {
+            let Some(uri) = param_str(params, "/textDocument/uri") else {
+                return vec![];
+            };
+            // Full sync: the last change carries the whole document.
+            let Some(text) = params
+                .get("contentChanges")
+                .and_then(|c| c.as_array())
+                .and_then(|changes| changes.last())
+                .and_then(|change| change.get("text"))
+                .and_then(|t| t.as_str())
+            else {
+                return vec![];
+            };
+            store_document(uri, text);
+            vec![publish_diagnostics(uri, get_diagnostics(text))]
+        }
+        notification::DidCloseTextDocument::METHOD => {
+            let Some(uri) = param_str(params, "/textDocument/uri") else {
+                return vec![];
+            };
+            remove_document(uri);
+            vec![publish_diagnostics(uri, vec![])]
+        }
+        _ => vec![],
+    }
+}
+
+/// Handle a single raw JSON-RPC message and return the first message to
+/// send back, serialized. Convenience wrapper over [`handle_request`] /
+/// [`handle_notification`] used by unit tests.
+fn handle_message(body: &str) -> Option<String> {
+    let msg: Message = serde_json::from_str(body).ok()?;
+    let out: Message = match msg {
+        Message::Request(req) => handle_request(&req).into(),
+        Message::Notification(note) => handle_notification(&note).into_iter().next()?.into(),
+        Message::Response(_) => return None,
+    };
+    serde_json::to_string(&out).ok()
+}
+
+/// Number of UTF-16 code units in `s` (LSP's default position encoding).
+fn utf16_len(s: &str) -> usize {
+    s.chars().map(char::len_utf16).sum()
+}
+
+/// Whole-document formatting via `forge fmt`'s formatter. Returns a single
+/// TextEdit replacing the document, or no edits when already formatted.
+fn get_formatting_edits(uri: &str) -> serde_json::Value {
+    let Some(text) = get_document(uri).or_else(|| read_document(uri)) else {
+        return serde_json::json!([]);
+    };
+    let formatted = crate::formatter::format_source(&text);
+    if formatted == text {
+        return serde_json::json!([]);
+    }
+    let end_line = text.matches('\n').count();
+    let last_line = text.rsplit('\n').next().unwrap_or("");
+    serde_json::json!([{
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": end_line, "character": utf16_len(last_line)}
+        },
+        "newText": formatted
+    }])
+}
+
+/// Locate the innermost unclosed call on the cursor's line.
+/// Returns `(callee_name, active_parameter_index)`.
+fn find_enclosing_call(line_text: &str, character: usize) -> Option<(String, usize)> {
+    let prefix: Vec<char> = line_text.chars().take(character).collect();
+    // Track (open_paren_index, comma_count) for each unclosed '('.
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut in_string: Option<char> = None;
+    let mut i = 0;
+    while i < prefix.len() {
+        let c = prefix[i];
+        if let Some(q) = in_string {
+            if c == '\\' {
+                i += 1;
+            } else if c == q {
+                in_string = None;
+            }
+        } else {
+            match c {
+                '"' | '\'' => in_string = Some(c),
+                '/' if prefix.get(i + 1) == Some(&'/') => break,
+                '(' | '[' | '{' => stack.push((i, 0)),
+                ')' | ']' | '}' => {
+                    stack.pop();
+                }
+                ',' => {
+                    if let Some(top) = stack.last_mut() {
+                        top.1 += 1;
                     }
-                });
-                Some(error.to_string())
-            } else {
-                None
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    let &(open, commas) = stack.last()?;
+    if prefix[open] != '(' {
+        return None;
+    }
+    let mut end = open;
+    while end > 0 && prefix[end - 1] == ' ' {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && (prefix[start - 1].is_alphanumeric() || prefix[start - 1] == '_') {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    Some((prefix[start..end].iter().collect(), commas))
+}
+
+/// Split the parameter list out of a `fn name(a, b) -> T` signature.
+fn signature_params(signature: &str) -> Vec<String> {
+    let (Some(open), Some(close)) = (signature.find('('), signature.rfind(')')) else {
+        return vec![];
+    };
+    if close <= open + 1 {
+        return vec![];
+    }
+    signature[open + 1..close]
+        .split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Signature of a user-defined function. Uses the AST when the document
+/// parses; while the user is mid-edit (the usual case for signature help)
+/// the document often does not parse, so fall back to a textual scan for
+/// `fn name(...)` / `define name(...)`.
+fn user_fn_signature(source: &str, name: &str) -> Option<String> {
+    if let Some(hover) = get_user_symbol_hover(source, name) {
+        let sig = hover.trim_start_matches("```forge\n").lines().next()?;
+        if sig.contains(&format!("fn {}(", name)) {
+            return Some(sig.to_string());
+        }
+    }
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        for kw in ["fn", "async fn", "define", "forge"] {
+            let head = format!("{} {}(", kw, name);
+            if let Some(rest) = trimmed.strip_prefix(&head) {
+                let close = rest.find(')')?;
+                return Some(format!("fn {}({})", name, &rest[..close]));
             }
         }
     }
+    None
+}
+
+fn get_signature_help(uri: &str, line: usize, character: usize) -> serde_json::Value {
+    let Some(text) = get_document(uri).or_else(|| read_document(uri)) else {
+        return serde_json::Value::Null;
+    };
+    let Some(line_text) = text.lines().nth(line) else {
+        return serde_json::Value::Null;
+    };
+    let Some((name, active)) = find_enclosing_call(line_text, character) else {
+        return serde_json::Value::Null;
+    };
+
+    let (label, documentation) = if let Some(doc) = builtin_doc(&name) {
+        let (sig, desc) = doc.split_once(" — ").unwrap_or((doc, ""));
+        (sig.to_string(), desc.to_string())
+    } else if let Some(sig) = user_fn_signature(&text, &name) {
+        (sig, String::new())
+    } else {
+        return serde_json::Value::Null;
+    };
+
+    let params = signature_params(&label);
+    let active = if params.is_empty() {
+        0
+    } else {
+        active.min(params.len() - 1)
+    };
+    serde_json::json!({
+        "signatures": [{
+            "label": label,
+            "documentation": documentation,
+            "parameters": params.iter().map(|p| serde_json::json!({"label": p})).collect::<Vec<_>>()
+        }],
+        "activeSignature": 0,
+        "activeParameter": active
+    })
 }
 
 fn get_diagnostics(source: &str) -> Vec<serde_json::Value> {
@@ -1007,104 +1225,315 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
     }
 }
 
-fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
-    let builtins: std::collections::HashMap<&str, &str> = [
-        ("println", "fn println(...args) — Print values followed by a newline"),
-        ("print", "fn print(...args) — Print values without a newline"),
-        ("say", "fn say(...args) — Print with natural language style"),
-        ("yell", "fn yell(...args) — Print in UPPERCASE"),
-        ("whisper", "fn whisper(...args) — Print in lowercase"),
-        ("len", "fn len(value) -> Int — Get the length of a string, array, or object"),
-        ("type", "fn type(value) -> String — Get the type name of a value"),
-        ("typeof", "fn typeof(value) -> String — Alias for type()"),
-        ("str", "fn str(value) -> String — Convert a value to string"),
-        ("int", "fn int(value) -> Int — Convert a value to integer"),
-        ("float", "fn float(value) -> Float — Convert a value to float"),
-        ("push", "fn push(array, value) — Add an element to the end of an array"),
-        ("pop", "fn pop(array) -> Value — Remove and return the last element"),
-        ("map", "fn map(array, fn) -> Array — Transform each element"),
-        ("filter", "fn filter(array, fn) -> Array — Keep elements matching predicate"),
-        ("reduce", "fn reduce(array, fn, init) -> Value — Fold array to single value"),
-        ("sort", "fn sort(array) -> Array — Sort array in ascending order"),
-        ("reverse", "fn reverse(array) -> Array — Reverse array order"),
-        ("keys", "fn keys(object) -> Array — Get all keys of an object"),
-        ("values", "fn values(object) -> Array — Get all values of an object"),
-        ("contains", "fn contains(collection, value) -> Bool — Check if collection contains value"),
-        ("range", "fn range(start, end) -> Array — Generate integer range [start, end)"),
-        ("enumerate", "fn enumerate(array) -> Array — Pairs of [index, value]"),
-        ("split", "fn split(string, delimiter) -> Array — Split string into parts"),
-        ("join", "fn join(array, separator) -> String — Join array elements into string"),
-        ("replace", "fn replace(string, from, to) -> String — Replace occurrences in string"),
-        ("starts_with", "fn starts_with(string, prefix) -> Bool — Check string prefix"),
-        ("ends_with", "fn ends_with(string, suffix) -> Bool — Check string suffix"),
-        ("fetch", "fn fetch(url) -> Object — HTTP GET request, returns {status, body, headers}"),
-        ("uuid", "fn uuid() -> String — Generate a random UUID v4"),
-        ("assert", "fn assert(condition) — Panic if condition is false"),
-        ("assert_eq", "fn assert_eq(a, b) — Panic if a != b"),
-        ("assert_ne", "fn assert_ne(a, b) — Panic if a == b"),
-        ("assert_throws", "fn assert_throws(fn) — Assert that function throws an error"),
-        ("Ok", "fn Ok(value) -> Result — Wrap value in a success Result"),
-        ("Err", "fn Err(message) -> Result — Wrap message in an error Result"),
-        ("is_ok", "fn is_ok(result) -> Bool — Check if Result is Ok"),
-        ("is_err", "fn is_err(result) -> Bool — Check if Result is Err"),
-        ("unwrap", "fn unwrap(result) -> Value — Extract value from Ok, panic on Err"),
-        ("unwrap_or", "fn unwrap_or(result, default) -> Value — Extract value or use default"),
-        ("Some", "fn Some(value) -> Option — Wrap value in Some"),
-        ("None", "None — The absence of a value"),
-        ("is_some", "fn is_some(option) -> Bool — Check if Option has a value"),
-        ("is_none", "fn is_none(option) -> Bool — Check if Option is None"),
-        ("sh", "fn sh(command) -> String — Run shell command, return stdout"),
-        ("exit", "fn exit(code) — Exit the program with a status code"),
-        ("input", "fn input(prompt) -> String — Read a line from stdin"),
-        ("time", "fn time() -> Int — Current unix timestamp in seconds"),
-        ("sum", "fn sum(array) -> Number — Sum all elements in an array"),
-        ("min_of", "fn min_of(array) -> Value — Find minimum value in array"),
-        ("max_of", "fn max_of(array) -> Value — Find maximum value in array"),
-        ("unique", "fn unique(array) -> Array — Remove duplicates"),
-        ("flatten", "fn flatten(array) -> Array — Flatten nested arrays"),
-        ("zip", "fn zip(a, b) -> Array — Combine two arrays into pairs"),
-        ("chunk", "fn chunk(array, size) -> Array — Split array into chunks"),
-        ("find", "fn find(array, fn) -> Value — Find first matching element"),
-        ("any", "fn any(array, fn) -> Bool — Check if any element matches"),
-        ("all", "fn all(array, fn) -> Bool — Check if all elements match"),
-        ("has_key", "fn has_key(object, key) -> Bool — Check if object has key"),
-        ("merge", "fn merge(obj1, obj2) -> Object — Merge two objects"),
-        ("pick", "fn pick(object, keys) -> Object — Select specific keys"),
-        ("omit", "fn omit(object, keys) -> Object — Exclude specific keys"),
-        ("entries", "fn entries(object) -> Array — Get [key, value] pairs"),
-        ("from_entries", "fn from_entries(array) -> Object — Create object from pairs"),
-        // Module docs
-        ("math", "module math — Math functions: sqrt, pow, abs, sin, cos, random_int, pi, e, ..."),
-        ("fs", "module fs — File system: read, write, append, exists, list, remove, mkdir, ..."),
-        ("io", "module io — Input/output: prompt, print, args, args_parse, args_get, args_has"),
-        ("crypto", "module crypto — Cryptography: sha256, md5, base64_encode/decode, hex_encode/decode"),
-        ("db", "module db — SQLite database: open, query, execute, close, last_insert_rowid"),
-        ("pg", "module pg — PostgreSQL: connect, query, execute, close"),
-        ("mysql", "module mysql — MySQL: connect, query, execute, close"),
-        ("jwt", "module jwt — JSON Web Tokens: sign, verify, decode, valid"),
-        ("env", "module env — Environment variables: get, set, has, keys"),
-        ("json", "module json — JSON: parse, stringify, pretty"),
-        ("regex", "module regex — Regular expressions: test, find, find_all, replace, split"),
-        ("log", "module log — Logging: info, warn, error, debug"),
-        ("http", "module http — HTTP client: get, post, put, delete, patch, head, download, crawl"),
-        ("csv", "module csv — CSV: parse, stringify, read, write"),
-        ("term", "module term — Terminal: red, green, blue, bold, table, hr, sparkline, bar, banner, box"),
-        ("npc", "module npc — Fake data: name, email, username, phone, number, pick, bool, sentence, ..."),
-        ("exec", "module exec — Shell execution: run_command"),
-        // GenZ debug kit
-        ("sus", "fn sus(value) — Inspect a value (GenZ debug: equivalent to dbg!)"),
-        ("bruh", "fn bruh(message) — Panic with a message (GenZ debug)"),
-        ("bet", "fn bet(condition) — Assert condition is true (GenZ debug)"),
-        ("no_cap", "fn no_cap(a, b) — Assert equality (GenZ debug)"),
-        ("ick", "fn ick(condition) — Assert condition is false (GenZ debug)"),
-        ("yolo", "fn yolo(fn) — Fire-and-forget execution"),
-        ("cook", "fn cook(fn) — Profile execution time"),
-        ("slay", "fn slay(fn, iterations) — Benchmark a function"),
-        ("ghost", "fn ghost(fn) — Silent execution (suppresses output)"),
-    ]
-    .into_iter()
-    .collect();
+/// Look up the one-line doc (`fn name(params) -> T — description`) for a
+/// builtin function or module.
+fn builtin_doc(name: &str) -> Option<&'static str> {
+    BUILTIN_DOCS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, doc)| *doc)
+}
 
+const BUILTIN_DOCS: &[(&str, &str)] = &[
+    (
+        "println",
+        "fn println(...args) — Print values followed by a newline",
+    ),
+    (
+        "print",
+        "fn print(...args) — Print values without a newline",
+    ),
+    ("say", "fn say(...args) — Print with natural language style"),
+    ("yell", "fn yell(...args) — Print in UPPERCASE"),
+    ("whisper", "fn whisper(...args) — Print in lowercase"),
+    (
+        "len",
+        "fn len(value) -> Int — Get the length of a string, array, or object",
+    ),
+    (
+        "type",
+        "fn type(value) -> String — Get the type name of a value",
+    ),
+    ("typeof", "fn typeof(value) -> String — Alias for type()"),
+    ("str", "fn str(value) -> String — Convert a value to string"),
+    ("int", "fn int(value) -> Int — Convert a value to integer"),
+    (
+        "float",
+        "fn float(value) -> Float — Convert a value to float",
+    ),
+    (
+        "push",
+        "fn push(array, value) — Add an element to the end of an array",
+    ),
+    (
+        "pop",
+        "fn pop(array) -> Value — Remove and return the last element",
+    ),
+    ("map", "fn map(array, fn) -> Array — Transform each element"),
+    (
+        "filter",
+        "fn filter(array, fn) -> Array — Keep elements matching predicate",
+    ),
+    (
+        "reduce",
+        "fn reduce(array, fn, init) -> Value — Fold array to single value",
+    ),
+    (
+        "sort",
+        "fn sort(array) -> Array — Sort array in ascending order",
+    ),
+    (
+        "reverse",
+        "fn reverse(array) -> Array — Reverse array order",
+    ),
+    (
+        "keys",
+        "fn keys(object) -> Array — Get all keys of an object",
+    ),
+    (
+        "values",
+        "fn values(object) -> Array — Get all values of an object",
+    ),
+    (
+        "contains",
+        "fn contains(collection, value) -> Bool — Check if collection contains value",
+    ),
+    (
+        "range",
+        "fn range(start, end) -> Array — Generate integer range [start, end)",
+    ),
+    (
+        "enumerate",
+        "fn enumerate(array) -> Array — Pairs of [index, value]",
+    ),
+    (
+        "split",
+        "fn split(string, delimiter) -> Array — Split string into parts",
+    ),
+    (
+        "join",
+        "fn join(array, separator) -> String — Join array elements into string",
+    ),
+    (
+        "replace",
+        "fn replace(string, from, to) -> String — Replace occurrences in string",
+    ),
+    (
+        "starts_with",
+        "fn starts_with(string, prefix) -> Bool — Check string prefix",
+    ),
+    (
+        "ends_with",
+        "fn ends_with(string, suffix) -> Bool — Check string suffix",
+    ),
+    (
+        "fetch",
+        "fn fetch(url) -> Object — HTTP GET request, returns {status, body, headers}",
+    ),
+    ("uuid", "fn uuid() -> String — Generate a random UUID v4"),
+    (
+        "assert",
+        "fn assert(condition) — Panic if condition is false",
+    ),
+    ("assert_eq", "fn assert_eq(a, b) — Panic if a != b"),
+    ("assert_ne", "fn assert_ne(a, b) — Panic if a == b"),
+    (
+        "assert_throws",
+        "fn assert_throws(fn) — Assert that function throws an error",
+    ),
+    (
+        "Ok",
+        "fn Ok(value) -> Result — Wrap value in a success Result",
+    ),
+    (
+        "Err",
+        "fn Err(message) -> Result — Wrap message in an error Result",
+    ),
+    ("is_ok", "fn is_ok(result) -> Bool — Check if Result is Ok"),
+    (
+        "is_err",
+        "fn is_err(result) -> Bool — Check if Result is Err",
+    ),
+    (
+        "unwrap",
+        "fn unwrap(result) -> Value — Extract value from Ok, panic on Err",
+    ),
+    (
+        "unwrap_or",
+        "fn unwrap_or(result, default) -> Value — Extract value or use default",
+    ),
+    ("Some", "fn Some(value) -> Option — Wrap value in Some"),
+    ("None", "None — The absence of a value"),
+    (
+        "is_some",
+        "fn is_some(option) -> Bool — Check if Option has a value",
+    ),
+    (
+        "is_none",
+        "fn is_none(option) -> Bool — Check if Option is None",
+    ),
+    (
+        "sh",
+        "fn sh(command) -> String — Run shell command, return stdout",
+    ),
+    (
+        "exit",
+        "fn exit(code) — Exit the program with a status code",
+    ),
+    (
+        "input",
+        "fn input(prompt) -> String — Read a line from stdin",
+    ),
+    (
+        "time",
+        "fn time() -> Int — Current unix timestamp in seconds",
+    ),
+    (
+        "sum",
+        "fn sum(array) -> Number — Sum all elements in an array",
+    ),
+    (
+        "min_of",
+        "fn min_of(array) -> Value — Find minimum value in array",
+    ),
+    (
+        "max_of",
+        "fn max_of(array) -> Value — Find maximum value in array",
+    ),
+    ("unique", "fn unique(array) -> Array — Remove duplicates"),
+    (
+        "flatten",
+        "fn flatten(array) -> Array — Flatten nested arrays",
+    ),
+    (
+        "zip",
+        "fn zip(a, b) -> Array — Combine two arrays into pairs",
+    ),
+    (
+        "chunk",
+        "fn chunk(array, size) -> Array — Split array into chunks",
+    ),
+    (
+        "find",
+        "fn find(array, fn) -> Value — Find first matching element",
+    ),
+    (
+        "any",
+        "fn any(array, fn) -> Bool — Check if any element matches",
+    ),
+    (
+        "all",
+        "fn all(array, fn) -> Bool — Check if all elements match",
+    ),
+    (
+        "has_key",
+        "fn has_key(object, key) -> Bool — Check if object has key",
+    ),
+    (
+        "merge",
+        "fn merge(obj1, obj2) -> Object — Merge two objects",
+    ),
+    (
+        "pick",
+        "fn pick(object, keys) -> Object — Select specific keys",
+    ),
+    (
+        "omit",
+        "fn omit(object, keys) -> Object — Exclude specific keys",
+    ),
+    (
+        "entries",
+        "fn entries(object) -> Array — Get [key, value] pairs",
+    ),
+    (
+        "from_entries",
+        "fn from_entries(array) -> Object — Create object from pairs",
+    ),
+    // Module docs
+    (
+        "math",
+        "module math — Math functions: sqrt, pow, abs, sin, cos, random_int, pi, e, ...",
+    ),
+    (
+        "fs",
+        "module fs — File system: read, write, append, exists, list, remove, mkdir, ...",
+    ),
+    (
+        "io",
+        "module io — Input/output: prompt, print, args, args_parse, args_get, args_has",
+    ),
+    (
+        "crypto",
+        "module crypto — Cryptography: sha256, md5, base64_encode/decode, hex_encode/decode",
+    ),
+    (
+        "db",
+        "module db — SQLite database: open, query, execute, close, last_insert_rowid",
+    ),
+    (
+        "pg",
+        "module pg — PostgreSQL: connect, query, execute, close",
+    ),
+    (
+        "mysql",
+        "module mysql — MySQL: connect, query, execute, close",
+    ),
+    (
+        "jwt",
+        "module jwt — JSON Web Tokens: sign, verify, decode, valid",
+    ),
+    (
+        "env",
+        "module env — Environment variables: get, set, has, keys",
+    ),
+    ("json", "module json — JSON: parse, stringify, pretty"),
+    (
+        "regex",
+        "module regex — Regular expressions: test, find, find_all, replace, split",
+    ),
+    ("log", "module log — Logging: info, warn, error, debug"),
+    (
+        "http",
+        "module http — HTTP client: get, post, put, delete, patch, head, download, crawl",
+    ),
+    ("csv", "module csv — CSV: parse, stringify, read, write"),
+    (
+        "term",
+        "module term — Terminal: red, green, blue, bold, table, hr, sparkline, bar, banner, box",
+    ),
+    (
+        "npc",
+        "module npc — Fake data: name, email, username, phone, number, pick, bool, sentence, ...",
+    ),
+    ("exec", "module exec — Shell execution: run_command"),
+    // GenZ debug kit
+    (
+        "sus",
+        "fn sus(value) — Inspect a value (GenZ debug: equivalent to dbg!)",
+    ),
+    (
+        "bruh",
+        "fn bruh(message) — Panic with a message (GenZ debug)",
+    ),
+    (
+        "bet",
+        "fn bet(condition) — Assert condition is true (GenZ debug)",
+    ),
+    ("no_cap", "fn no_cap(a, b) — Assert equality (GenZ debug)"),
+    (
+        "ick",
+        "fn ick(condition) — Assert condition is false (GenZ debug)",
+    ),
+    ("yolo", "fn yolo(fn) — Fire-and-forget execution"),
+    ("cook", "fn cook(fn) — Profile execution time"),
+    ("slay", "fn slay(fn, iterations) — Benchmark a function"),
+    (
+        "ghost",
+        "fn ghost(fn) — Silent execution (suppresses output)",
+    ),
+];
+
+fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
     let doc_text = get_document(uri).or_else(|| read_document(uri));
     if let Some(text) = doc_text {
         let lines: Vec<&str> = text.lines().collect();
@@ -1112,7 +1541,7 @@ fn get_hover(uri: &str, line: usize, character: usize) -> serde_json::Value {
             let word = extract_word_at(line_text, character);
 
             // Check builtins first
-            if let Some(doc) = builtins.get(word.as_str()) {
+            if let Some(doc) = builtin_doc(&word) {
                 return serde_json::json!({
                     "contents": {
                         "kind": "markdown",
@@ -1490,8 +1919,6 @@ fn collect_exported_symbols(source: &str) -> Vec<DocumentSymbolInfo> {
     symbols
 }
 
-use std::io::Read;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1860,5 +2287,202 @@ mod tests {
         assert!(names.contains(&"foo"));
         assert!(names.contains(&"bar"));
         assert!(names.contains(&"x"));
+    }
+
+    // ---- serve loop (in-memory transport) ----
+
+    fn recv(client: &Connection) -> Message {
+        client
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("server did not respond within 10s")
+    }
+
+    fn request(id: i32, method: &str, params: serde_json::Value) -> Message {
+        Request::new(id.into(), method.to_string(), params).into()
+    }
+
+    fn note(method: &str, params: serde_json::Value) -> Message {
+        Notification::new(method.to_string(), params).into()
+    }
+
+    #[test]
+    fn serve_handles_full_session_and_clean_exit() {
+        let (server, client) = Connection::memory();
+        let handle = std::thread::spawn(move || serve(&server));
+
+        client
+            .sender
+            .send(request(
+                1,
+                "initialize",
+                serde_json::json!({"capabilities": {}}),
+            ))
+            .unwrap();
+        let Message::Response(init) = recv(&client) else {
+            panic!("expected initialize response")
+        };
+        let caps = init.response_result.unwrap();
+        assert_eq!(
+            caps.pointer("/capabilities/documentFormattingProvider"),
+            Some(&serde_json::json!(true))
+        );
+        client
+            .sender
+            .send(note("initialized", serde_json::json!({})))
+            .unwrap();
+
+        let uri = "file:///tmp/forge-lsp-serve-test.fg";
+        client
+            .sender
+            .send(note(
+                "textDocument/didOpen",
+                serde_json::json!({"textDocument": {"uri": uri, "languageId": "forge", "version": 1, "text": "let x = (\n"}}),
+            ))
+            .unwrap();
+        let Message::Notification(diag) = recv(&client) else {
+            panic!("expected publishDiagnostics")
+        };
+        assert_eq!(diag.method, "textDocument/publishDiagnostics");
+        assert!(!diag.params["diagnostics"].as_array().unwrap().is_empty());
+
+        // Unknown request -> MethodNotFound, and the server keeps going.
+        client
+            .sender
+            .send(request(2, "textDocument/codeAction", serde_json::json!({})))
+            .unwrap();
+        let Message::Response(resp) = recv(&client) else {
+            panic!("expected response")
+        };
+        assert_eq!(
+            resp.response_result.unwrap_err().code,
+            ErrorCode::MethodNotFound as i32
+        );
+
+        client
+            .sender
+            .send(request(3, "shutdown", serde_json::Value::Null))
+            .unwrap();
+        let Message::Response(resp) = recv(&client) else {
+            panic!("expected shutdown response")
+        };
+        assert_eq!(resp.id, 3.into());
+        client
+            .sender
+            .send(note("exit", serde_json::Value::Null))
+            .unwrap();
+        assert!(
+            handle.join().unwrap().unwrap(),
+            "shutdown + exit is a clean exit"
+        );
+    }
+
+    #[test]
+    fn serve_reports_unclean_exit_without_shutdown() {
+        let (server, client) = Connection::memory();
+        let handle = std::thread::spawn(move || serve(&server));
+        client
+            .sender
+            .send(request(
+                1,
+                "initialize",
+                serde_json::json!({"capabilities": {}}),
+            ))
+            .unwrap();
+        recv(&client);
+        client
+            .sender
+            .send(note("initialized", serde_json::json!({})))
+            .unwrap();
+        client
+            .sender
+            .send(note("exit", serde_json::Value::Null))
+            .unwrap();
+        assert!(!handle.join().unwrap().unwrap());
+    }
+
+    #[test]
+    fn invalid_params_return_error_not_silence() {
+        let response =
+            handle_message(r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/hover","params":{}}"#)
+                .expect("requests must always get a response");
+        let json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            json.pointer("/error/code").and_then(|v| v.as_i64()),
+            Some(-32602)
+        );
+    }
+
+    #[test]
+    fn did_close_clears_diagnostics() {
+        let uri = "file:///tmp/forge-lsp-close.fg";
+        store_document(uri, "let x = 1\n");
+        let out = handle_notification(&Notification::new(
+            "textDocument/didClose".to_string(),
+            serde_json::json!({"textDocument": {"uri": uri}}),
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].params["diagnostics"], serde_json::json!([]));
+        assert!(get_document(uri).is_none());
+    }
+
+    #[test]
+    fn formatting_returns_whole_document_edit() {
+        let uri = "file:///tmp/forge-lsp-format.fg";
+        store_document(uri, "fn f() {\nsay 1\n}");
+        let edits = get_formatting_edits(uri);
+        let edits = edits.as_array().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0]["newText"], "fn f() {\n    say 1\n}\n");
+        assert_eq!(
+            edits[0]["range"]["end"],
+            serde_json::json!({"line": 2, "character": 1})
+        );
+
+        store_document(uri, "fn f() {\n    say 1\n}\n");
+        assert_eq!(get_formatting_edits(uri), serde_json::json!([]));
+    }
+
+    #[test]
+    fn signature_help_for_builtin_and_user_fn() {
+        let uri = "file:///tmp/forge-lsp-sig.fg";
+        store_document(
+            uri,
+            "fn add(a, b) { return a + b }\nlet r = add(1, \nlet s = replace(\"x\", \"y\", \n",
+        );
+        let help = get_signature_help(uri, 1, 15);
+        assert_eq!(help["signatures"][0]["label"], "fn add(a, b)");
+        assert_eq!(help["activeParameter"], 1);
+
+        let help = get_signature_help(uri, 2, 26);
+        assert!(help["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .starts_with("fn replace(string, from, to)"));
+        assert_eq!(help["activeParameter"], 2);
+        assert_eq!(
+            help["signatures"][0]["parameters"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        // Not inside a call.
+        assert!(get_signature_help(uri, 0, 3).is_null());
+    }
+
+    #[test]
+    fn find_enclosing_call_skips_nested_and_strings() {
+        assert_eq!(
+            find_enclosing_call("foo(a, bar(1, 2), ", 18),
+            Some(("foo".to_string(), 2))
+        );
+        assert_eq!(
+            find_enclosing_call("foo(\"a,(b\", ", 12),
+            Some(("foo".to_string(), 1))
+        );
+        assert_eq!(find_enclosing_call("foo(1)", 6), None);
+        assert_eq!(find_enclosing_call("let a = [1, ", 12), None);
     }
 }

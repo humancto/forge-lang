@@ -1,32 +1,80 @@
 # Forge Language — VS Code Extension
 
-Syntax highlighting and snippets for the [Forge programming language](https://github.com/humancto/forge-lang).
+Language support for the [Forge programming language](https://github.com/humancto/forge-lang): a language server client, a debugger, syntax highlighting and snippets.
 
 ## Features
 
-- **Syntax highlighting** for all Forge keywords, builtins, modules, and operators
-- **24 code snippets** for common patterns (functions, loops, HTTP servers, etc.)
-- **Language configuration** with bracket matching, auto-closing pairs, and indentation rules
+- **Language server** (`forge lsp`): diagnostics for parse errors and type-check warnings, hover, completion (including `module.` members), go to definition, find references, document symbols / outline, **Format Document** (same output as `forge fmt`) and signature help.
+- **Debugger** (`forge dap`): breakpoints, step over / into / out, call stack, variables, stop on entry. Press F5 in an open `.fg` file to debug it without writing a `launch.json`.
+- **Syntax highlighting** for Forge keywords, builtins, modules and operators.
+- **24 code snippets** for common patterns (functions, loops, HTTP servers, …).
+- **Language configuration**: bracket matching, auto-closing pairs, indentation rules.
+
+## Requirements
+
+The extension runs the `forge` binary. Install Forge and make sure `forge` is on your `PATH`, or point the `forge.path` setting at it:
+
+```bash
+forge version   # should print the Forge version
+forge lsp       # language server over stdio (used by the extension)
+forge dap       # debug adapter over stdio (used by the extension)
+```
+
+## Settings
+
+| Setting              | Default   | Description                                                                  |
+| -------------------- | --------- | ---------------------------------------------------------------------------- |
+| `forge.path`         | `"forge"` | Path to the `forge` executable used for `forge lsp` and `forge dap`.         |
+| `forge.lsp.enabled`  | `true`    | Start the language server.                                                   |
+| `forge.trace.server` | `"off"`   | Log LSP traffic (`messages` / `verbose`) to the **Forge** output channel.    |
+
+Changing `forge.path` or `forge.lsp.enabled` restarts the server. You can also run **Forge: Restart Language Server** from the command palette.
+
+## Debugging
+
+F5 on a `.fg` file debugs it directly. To customise, add a configuration to `.vscode/launch.json`:
+
+```json
+{
+  "type": "forge",
+  "request": "launch",
+  "name": "Debug Forge program",
+  "program": "${file}",
+  "stopOnEntry": false
+}
+```
+
+The debugger uses Forge's tree-walking interpreter.
 
 ## Installation
+
+### From a `.vsix`
+
+```bash
+cd editors/vscode
+npm install
+npm run package                       # runs `vsce package`
+code --install-extension forge-lang-0.3.0.vsix
+```
 
 ### From source (development)
 
 ```bash
-# Symlink into your VS Code extensions directory
-ln -s /path/to/forge-lang/editors/vscode ~/.vscode/extensions/forge-lang
+cd editors/vscode
+npm install                           # installs vscode-languageclient
+ln -s "$PWD" ~/.vscode/extensions/forge-lang
 ```
 
-Then reload VS Code (`Cmd+Shift+P` → "Reload Window").
+Then reload VS Code (**Developer: Reload Window**). The extension is plain JavaScript (`extension.js`), so there is no build step. `npm run check` syntax-checks it.
 
-### Package and install
+### Publishing
 
 ```bash
-# Requires vsce: npm install -g @vscode/vsce
-cd editors/vscode
-vsce package
-code --install-extension forge-lang-0.2.0.vsix
+npm run package     # produce forge-lang-<version>.vsix
+npm run publish     # requires a Marketplace PAT for the `forge-lang` publisher (vsce login forge-lang)
 ```
+
+Bump `version` in `package.json` and add a `CHANGELOG.md` entry first.
 
 ## Snippets
 
@@ -56,6 +104,6 @@ Type the prefix and press `Tab`:
 | `schedule`     | Scheduled task             |
 | `check`        | Declarative validation     |
 
-## LSP Support
+## Other editors
 
-Forge includes a built-in language server. To use it, configure your editor to run `forge lsp` as the language server command for `.fg` files. LSP client integration for this extension is planned for a future release.
+Any LSP-capable editor can use the server: configure it to run `forge lsp` (stdio) for `.fg` files. Debug Adapter Protocol clients can launch `forge dap` with a `launch` request containing `program` and optional `stopOnEntry`.

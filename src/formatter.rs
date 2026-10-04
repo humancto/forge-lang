@@ -90,17 +90,42 @@ fn count_leading_closes(line: &str) -> i32 {
 
 /// Count opening/closing delimiters (braces, brackets, parens) in a line,
 /// ignoring those inside strings and comments.
+#[cfg(test)]
 fn count_delimiters(line: &str) -> (i32, i32) {
+    let (opens, closes, _) = scan_line(line);
+    (opens, closes)
+}
+
+/// Scan one line of code (which does NOT start inside a block comment).
+/// Returns `(opens, closes, ends_inside_block_comment)`, ignoring delimiters
+/// inside strings, `//` line comments and `/* ... */` block comments.
+fn scan_line(line: &str) -> (i32, i32, bool) {
     let mut opens = 0i32;
     let mut closes = 0i32;
     let mut in_string = false;
+    let mut in_block = false;
     let mut string_char = '"';
     let mut chars = line.chars().peekable();
 
     while let Some(c) = chars.next() {
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+            continue;
+        }
+
         // Handle line comments — stop counting
         if !in_string && c == '/' && chars.peek() == Some(&'/') {
             break;
+        }
+
+        // Handle block comment start
+        if !in_string && c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block = true;
+            continue;
         }
 
         // Handle string start/end
@@ -129,15 +154,44 @@ fn count_delimiters(line: &str) -> (i32, i32) {
         }
     }
 
-    (opens, closes)
+    (opens, closes, in_block)
 }
 
-fn format_source(source: &str) -> String {
+pub fn format_source(source: &str) -> String {
     let mut output = String::new();
     let mut indent_level: i32 = 0;
     let mut prev_blank = false;
+    let mut in_block_comment = false;
 
     for line in source.lines() {
+        // Inside a multi-line `/* ... */` comment the body is preserved
+        // verbatim (only trailing whitespace is trimmed) so aligned text,
+        // ASCII art and nested indentation survive `forge fmt`.
+        if in_block_comment {
+            prev_blank = false;
+            match line.find("*/") {
+                None => {
+                    output.push_str(line.trim_end());
+                    output.push('\n');
+                }
+                Some(idx) => {
+                    let (comment, rest) = line.split_at(idx + 2);
+                    in_block_comment = false;
+                    output.push_str(comment.trim_end());
+                    let rest = rest.trim();
+                    if !rest.is_empty() {
+                        output.push(' ');
+                        output.push_str(rest);
+                        let (opens, closes, still_in_block) = scan_line(rest);
+                        indent_level = (indent_level + opens - closes).max(0);
+                        in_block_comment = still_in_block;
+                    }
+                    output.push('\n');
+                }
+            }
+            continue;
+        }
+
         let trimmed = line.trim();
 
         // Collapse multiple blank lines into one
@@ -150,7 +204,8 @@ fn format_source(source: &str) -> String {
         }
         prev_blank = false;
 
-        let (opens, closes) = count_delimiters(trimmed);
+        let (opens, closes, ends_in_block) = scan_line(trimmed);
+        in_block_comment = ends_in_block;
         let leading_closes = count_leading_closes(trimmed);
 
         // Decrease indent for leading close braces (before writing the line)
@@ -282,6 +337,53 @@ mod tests {
             result,
             "let result = some_function(\n    arg1,\n    arg2,\n    arg3\n)\n"
         );
+    }
+
+    #[test]
+    fn preserves_block_comment_indentation() {
+        let input = "fn main() {\n/*\n  Usage:\n      forge run x.fg\n  * bullet\n*/\nsay 1\n}\n";
+        let result = format_source(input);
+        assert_eq!(
+            result,
+            "fn main() {\n    /*\n  Usage:\n      forge run x.fg\n  * bullet\n*/\n    say 1\n}\n"
+        );
+    }
+
+    #[test]
+    fn ignores_braces_in_block_comments() {
+        let input = "/* { [ (\n   } */\nlet x = 1 /* { */\nsay x\n";
+        let result = format_source(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn block_comment_keeps_blank_lines_and_code_after_close() {
+        let input = "/*\n\n\n  a\n*/ if true {\nsay 1\n}\n";
+        let result = format_source(input);
+        assert_eq!(result, "/*\n\n\n  a\n*/ if true {\n    say 1\n}\n");
+    }
+
+    #[test]
+    fn block_comment_markers_inside_strings_are_ignored() {
+        let input = "let s = \"/*\"\nif true {\nsay s\n}\n";
+        let result = format_source(input);
+        assert_eq!(result, "let s = \"/*\"\nif true {\n    say s\n}\n");
+    }
+
+    #[test]
+    fn formatting_is_idempotent() {
+        let inputs = [
+            "fn greet(name) {\nprintln(name)\n}\n",
+            "if true {\nsay \"yes\"\n} else {\nsay \"no\"\n}\n",
+            "let a = [\n1,\n2\n]\n\n\n\nlet b = f(\nx\n)\n",
+            "fn f() {\n/*\n   keep   me\n\t tabbed\n*/\nreturn {\na: 1\n}\n}\n",
+            "/* one-line */ let x = 1\n// line { comment\nsay x\n",
+        ];
+        for input in inputs {
+            let once = format_source(input);
+            let twice = format_source(&once);
+            assert_eq!(once, twice, "formatter not idempotent for {:?}", input);
+        }
     }
 
     #[test]
