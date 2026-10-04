@@ -198,8 +198,19 @@ impl VMError {
 impl std::fmt::Display for VMError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)?;
-        if !self.stack_trace.is_empty() {
-            for frame in &self.stack_trace {
+        // Runs of identical frames (deep recursion) are collapsed after
+        // `SHOWN_REPEATS` copies so a depth-limit error stays readable.
+        const SHOWN_REPEATS: usize = 3;
+        let mut i = 0;
+        while i < self.stack_trace.len() {
+            let frame = &self.stack_trace[i];
+            let run = self.stack_trace[i..]
+                .iter()
+                .take_while(|g| {
+                    g.function == frame.function && g.line == frame.line && g.col == frame.col
+                })
+                .count();
+            for _ in 0..run.min(SHOWN_REPEATS) {
                 if frame.col > 0 {
                     write!(
                         f,
@@ -210,6 +221,14 @@ impl std::fmt::Display for VMError {
                     write!(f, "\n  at {} (line {})", frame.function, frame.line)?;
                 }
             }
+            if run > SHOWN_REPEATS {
+                write!(
+                    f,
+                    "\n  ... previous frame repeated {} more times",
+                    run - SHOWN_REPEATS
+                )?;
+            }
+            i += run;
         }
         Ok(())
     }
@@ -219,7 +238,7 @@ impl VM {
     pub fn new() -> Self {
         let mut vm = Self {
             registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(MAX_FRAMES),
+            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
@@ -242,7 +261,7 @@ impl VM {
     pub fn with_profiling() -> Self {
         let mut vm = Self {
             registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(MAX_FRAMES),
+            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
@@ -740,6 +759,65 @@ impl VM {
         }));
         self.globals
             .insert("Some".to_string(), Value::obj(some_native));
+
+        self.backfill_stdlib_from_interpreter();
+    }
+
+    /// The hand-written module tables above drifted from the interpreter's
+    /// (`fs.size`, `term.sparkline`, `math.inf`, ... were missing on the VM).
+    /// The interpreter's `create_module()` is the source of truth for which
+    /// members a module has, so add every member the VM table lacks. Existing
+    /// VM entries are never overwritten.
+    fn backfill_stdlib_from_interpreter(&mut self) {
+        use crate::interpreter::Value as IV;
+        let modules: Vec<(&str, IV)> = vec![
+            ("math", crate::stdlib::math::create_module()),
+            ("fs", crate::stdlib::fs::create_module()),
+            ("io", crate::stdlib::io::create_module()),
+            ("crypto", crate::stdlib::crypto::create_module()),
+            ("db", crate::stdlib::db::create_module()),
+            ("env", crate::stdlib::env::create_module()),
+            ("json", crate::stdlib::json_module::create_module()),
+            ("regex", crate::stdlib::regex_module::create_module()),
+            ("log", crate::stdlib::log::create_module()),
+            ("http", crate::stdlib::http::create_module()),
+            ("term", crate::stdlib::term::create_module()),
+            ("csv", crate::stdlib::csv::create_module()),
+        ];
+        for (module, interp_module) in modules {
+            let IV::Object(members) = interp_module else {
+                continue;
+            };
+            let Some(module_ref) = self.globals.get(module).and_then(|v| v.as_obj()) else {
+                continue;
+            };
+            for (key, member) in members {
+                let already = matches!(
+                    self.gc.get(module_ref).map(|o| &o.kind),
+                    Some(ObjKind::Object(map)) if map.contains_key(&key)
+                );
+                if already {
+                    continue;
+                }
+                let value = match &member {
+                    IV::BuiltIn(name) => {
+                        let r = self
+                            .gc
+                            .alloc(ObjKind::NativeFunction(NativeFn { name: name.clone() }));
+                        Value::obj(r)
+                    }
+                    IV::Int(_) | IV::Float(_) | IV::Bool(_) | IV::String(_) | IV::Null => {
+                        self.convert_interp_value(&member)
+                    }
+                    _ => continue,
+                };
+                if let Some(obj) = self.gc.get_mut(module_ref) {
+                    if let ObjKind::Object(map) = &mut obj.kind {
+                        map.insert(key, value);
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
@@ -940,14 +1018,19 @@ impl VM {
         let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
         let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
         let frame_size = (chunk.max_registers as usize).max(1);
-        if self.frames.len() >= MAX_FRAMES {
-            return Err(VMError::new("stack overflow"));
-        }
+        // Shared depth limit + native stack guard (runtime/recursion.rs).
+        crate::runtime::recursion::check_call_depth(self.frames.len())
+            .map_err(|m| VMError::new(&m))?;
         self.ensure_registers(new_base + frame_size);
         self.frames
             .push(CallFrame::new(closure_ref, new_base, frame_size));
         let boundary = self.frames.len() - 1;
-        self.run_until(boundary)
+        // Module bytecode is ordinary bytecode: don't auto-pin its
+        // allocations even when an `import` builtin is the caller.
+        let was_pinning = self.gc.set_pinning(false);
+        let result = self.run_until(boundary);
+        self.gc.set_pinning(was_pinning);
+        result
     }
 
     fn ensure_registers(&mut self, needed: usize) {
@@ -1485,8 +1568,10 @@ impl VM {
                                     }
                                     ObjKind::String(s) => match field.as_str() {
                                         "len" => {
-                                            direct_result =
-                                                Some(Value::small_int(s.chars().count() as i64));
+                                            direct_result = Some(Value::int(
+                                                s.chars().count() as i64,
+                                                &mut self.gc,
+                                            ));
                                             needs_alloc = None;
                                         }
                                         "upper" => {
@@ -1511,8 +1596,10 @@ impl VM {
                                     ObjKind::Array(items) | ObjKind::Set(items) => {
                                         match field.as_str() {
                                             "len" => {
-                                                direct_result =
-                                                    Some(Value::small_int(items.len() as i64));
+                                                direct_result = Some(Value::int(
+                                                    items.len() as i64,
+                                                    &mut self.gc,
+                                                ));
                                                 needs_alloc = None;
                                             }
                                             _ => {
@@ -1528,6 +1615,24 @@ impl VM {
                                                 )));
                                             }
                                         }
+                                    }
+                                    // Result values expose the same pattern-
+                                    // matching tags as ADT objects, so
+                                    // `match r { Ok(v) => .., Err(e) => .. }`
+                                    // works (the compiler reads `__variant__`).
+                                    ObjKind::ResultOk(_) | ObjKind::ResultErr(_)
+                                        if field == "__variant__" || field == "__type__" =>
+                                    {
+                                        let is_ok = matches!(&obj.kind, ObjKind::ResultOk(_));
+                                        needs_alloc = Some(
+                                            match (field.as_str(), is_ok) {
+                                                ("__type__", _) => "Result",
+                                                (_, true) => "Ok",
+                                                (_, false) => "Err",
+                                            }
+                                            .to_string(),
+                                        );
+                                        direct_result = None;
                                     }
                                     _ => {
                                         return Err(VMError::new(&format!(
@@ -1725,7 +1830,7 @@ impl VM {
                         } else {
                             0
                         };
-                        self.registers[base + a as usize] = Value::small_int(len);
+                        self.registers[base + a as usize] = Value::int(len, &mut self.gc);
                     }
                     OpCode::Concat => {
                         let left = self.registers[base + b as usize].display(&self.gc);
@@ -1748,9 +1853,17 @@ impl VM {
                         let field_name = format!("_{}", c);
                         if let Some(r) = obj.as_obj() {
                             if let Some(o) = self.gc.get(r) {
-                                if let ObjKind::Object(map) = &o.kind {
-                                    self.registers[base + a as usize] =
-                                        map.get(&field_name).cloned().unwrap_or(Value::null());
+                                match &o.kind {
+                                    ObjKind::Object(map) => {
+                                        self.registers[base + a as usize] =
+                                            map.get(&field_name).cloned().unwrap_or(Value::null());
+                                    }
+                                    // `Ok(v)` / `Err(e)` patterns bind the payload.
+                                    ObjKind::ResultOk(v) | ObjKind::ResultErr(v) => {
+                                        self.registers[base + a as usize] =
+                                            if c == 0 { *v } else { Value::null() };
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -2225,7 +2338,8 @@ impl VM {
         // overflow), a `timeout` is active (the VM checks deadlines between
         // instructions; native code does not), or the global the code calls
         // itself through no longer names this function.
-        let guards_ok = self.frames.len() < MAX_FRAMES
+        let depth_limit = crate::runtime::recursion::max_depth();
+        let guards_ok = self.frames.len() < depth_limit
             && self.frames.iter().all(|f| f.timeouts.is_empty())
             && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
         if !guards_ok {
@@ -2239,7 +2353,7 @@ impl VM {
             let kind = super::jit::types::JitType::of_value(v, &self.gc)?;
             raw.push(kind.encode(v, &self.gc)?);
         }
-        let max_depth = (MAX_FRAMES - 1 - self.frames.len()) as i64;
+        let max_depth = (depth_limit - 1 - self.frames.len()) as i64;
         // SAFETY: `sel.entry` was produced by the JIT compiler owned by
         // `self.jit`, which outlives this call; `raw` has exactly the
         // specialization's arity (checked by `select`); `self.cancelled` is
@@ -2274,7 +2388,24 @@ impl VM {
         }
     }
 
+    /// Call any callable value (closure, function, native, `__call__`
+    /// object).
+    ///
+    /// GC rooting (see `vm/gc.rs`): bytecode run by the callee must not be
+    /// auto-pinned, so pinning is suspended for the duration of the call; if
+    /// the caller is a native builtin (pinning was on), the returned value is
+    /// pinned into the caller's native scope so it survives later callbacks.
     pub fn call_value(&mut self, func: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let was_pinning = self.gc.set_pinning(false);
+        let result = self.call_value_inner(func, args);
+        self.gc.set_pinning(was_pinning);
+        if let Ok(v) = &result {
+            self.gc.pin_value(*v);
+        }
+        result
+    }
+
+    fn call_value_inner(&mut self, func: Value, args: Vec<Value>) -> Result<Value, VMError> {
         if let Some(r) = func.as_obj() {
             let obj = self
                 .gc
@@ -2310,9 +2441,11 @@ impl VM {
                         let arity = chunk.arity as usize;
                         let frame_size = (chunk.max_registers as usize).max(1);
                         let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
-                        if self.frames.len() >= MAX_FRAMES {
-                            return Err(VMError::new("stack overflow"));
-                        }
+                        // Shared depth limit + native stack guard
+                        // (runtime/recursion.rs): runaway recursion is a
+                        // catchable error, never a process abort.
+                        crate::runtime::recursion::check_call_depth(self.frames.len())
+                            .map_err(|m| VMError::new(&m))?;
                         self.ensure_registers(new_base + frame_size);
 
                         for (i, arg) in args.iter().enumerate() {

@@ -210,8 +210,12 @@ pub struct Value(pub(crate) NanBoxedValue);
 impl Value {
     // ---- Constructors ----
 
-    /// Create an integer value. For values known to be small, prefer `small_int`.
-    /// This allocates a BoxedInt on the GC heap if the value exceeds 48-bit range.
+    /// Create an integer value. This is THE integer constructor for runtime
+    /// code: values inside the 48-bit inline range are NaN-boxed, larger ones
+    /// are heap-allocated as `ObjKind::BoxedInt`. It can never panic.
+    ///
+    /// Invariant: there is deliberately no public panicking "small int"
+    /// constructor. Use `try_inline_int` when no `Gc` is at hand.
     #[inline]
     pub fn int(n: i64, gc: &mut Gc) -> Value {
         match NanBoxedValue::try_from_int(n) {
@@ -223,11 +227,12 @@ impl Value {
         }
     }
 
-    /// Create an integer value that is known to fit in 48 bits.
-    /// Panics in debug mode if the value is out of range.
+    /// Inline an integer without a GC. Returns `None` when `n` is outside
+    /// the 48-bit NaN-box range; the caller must then pick a fallback
+    /// (usually `Value::int` with a GC, or a float).
     #[inline]
-    pub fn small_int(n: i64) -> Value {
-        Value(NanBoxedValue::from_small_int(n))
+    pub fn try_inline_int(n: i64) -> Option<Value> {
+        NanBoxedValue::try_from_int(n).map(Value)
     }
 
     #[inline]

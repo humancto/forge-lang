@@ -989,10 +989,15 @@ fn jit_recursion_depth_matches_vm_stack_limit() {
     let (out, err) = run_parity(
         "fn count(n) { if n == 0 { return 0 } return 1 + count(n - 1) }\n\
          let mut c = 0\nwhile c < 120 { count(5)\nc = c + 1 }\n\
-         println(count(250))\nprintln(count(300))",
+         println(count(250))\nprintln(count(300))\nprintln(count(20000))",
     );
-    assert_eq!(out, vec!["250"]);
-    assert!(err.unwrap_or_default().contains("stack overflow"));
+    // Native JIT recursion deopts back to the VM before the shared
+    // recursion limit (runtime/recursion.rs, default 10000), so every mode
+    // reports the same catchable error past it.
+    assert_eq!(out, vec!["250", "300"]);
+    assert!(err
+        .unwrap_or_default()
+        .contains("maximum recursion depth exceeded"));
 }
 
 #[test]
@@ -1056,4 +1061,24 @@ fn jit_eager_mode_runs_fib_natively() {
         "fib",
     );
     assert_eq!(out, vec!["75025"]);
+}
+
+#[test]
+fn vm_error_display_collapses_repeated_frames() {
+    use crate::vm::machine::{StackFrame, VMError};
+    let frame = |name: &str, line| StackFrame {
+        function: name.to_string(),
+        line,
+        col: 5,
+    };
+    let mut err = VMError::new("maximum recursion depth exceeded");
+    err.stack_trace = std::iter::repeat_with(|| frame("d", 1))
+        .take(10_000)
+        .chain(std::iter::once(frame("<main>", 3)))
+        .collect();
+    let rendered = err.to_string();
+    assert_eq!(rendered.matches("at d (line 1, col 5)").count(), 3);
+    assert!(rendered.contains("previous frame repeated 9997 more times"));
+    assert!(rendered.ends_with("at <main> (line 3, col 5)"));
+    assert!(rendered.lines().count() < 10);
 }

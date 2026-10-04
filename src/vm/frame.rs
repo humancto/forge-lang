@@ -57,9 +57,7 @@ impl CallFrame {
     }
 }
 
-/// Maximum call stack depth to prevent stack overflow.
-pub const MAX_FRAMES: usize = 256;
-
-/// Maximum register count across all frames.
-#[allow(dead_code)]
-pub const MAX_REGISTERS: usize = MAX_FRAMES * 256;
+/// Initial capacity of the frame stack. This is NOT a depth limit: call depth
+/// is bounded by `runtime::recursion::check_call_depth` (configurable, shared
+/// with the interpreter), which also guards the native stack.
+pub const INITIAL_FRAME_CAPACITY: usize = 256;

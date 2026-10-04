@@ -764,8 +764,6 @@ enum Signal {
     Continue,
 }
 
-const MAX_CALL_DEPTH: usize = 512;
-
 /// Debug action requested by the DAP client
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DebugAction {
@@ -1895,6 +1893,10 @@ impl Interpreter {
                     RuntimeError::new(&format!("import '{}' parse error: {}", path, e.message))
                 })?;
 
+                // Shared cycle detection (runtime/imports.rs); the guard keeps
+                // this module on the import chain while it runs.
+                let _import_guard = crate::runtime::imports::enter_import(&file_path)
+                    .map_err(|msg| RuntimeError::new(&msg))?;
                 let mut import_interp = Interpreter::new();
                 import_interp.source_file = Some(file_path.clone());
                 import_interp.run(&program)?;
@@ -4333,8 +4335,12 @@ impl Interpreter {
                         Value::Int(n) => {
                             if is_float {
                                 acc_float += n as f64;
+                            } else if let Some(next) = acc_int.checked_add(n) {
+                                acc_int = next;
                             } else {
-                                acc_int += n;
+                                // i64 overflow promotes to float, like `+`.
+                                acc_float = acc_int as f64 + n as f64;
+                                is_float = true;
                             }
                         }
                         Value::Float(f) => {
@@ -4428,13 +4434,12 @@ impl Interpreter {
     }
 
     pub fn call_function(&mut self, func: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
-        self.call_depth += 1;
-        if self.call_depth > MAX_CALL_DEPTH {
-            self.call_depth = 0;
-            return Err(RuntimeError::new(
-                "maximum recursion depth exceeded (512 frames)\n  hint: check for infinite recursion, or restructure to use iteration",
-            ));
+        // Shared depth limit + native stack guard (runtime/recursion.rs):
+        // runaway recursion is a catchable error, never a process abort.
+        if let Err(msg) = crate::runtime::recursion::check_call_depth(self.call_depth + 1) {
+            return Err(RuntimeError::new(&msg));
         }
+        self.call_depth += 1;
         let frame_name = match &func {
             Value::Function { name, .. } => {
                 if name.is_empty() {

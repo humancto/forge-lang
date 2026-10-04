@@ -136,7 +136,8 @@ fn build_body<M: Module>(
         let deopt = b.create_block();
         let unwind = b.create_block();
 
-        // Stack budget: the VM refuses a call once it holds MAX_FRAMES frames.
+        // Stack budget: the VM refuses a call beyond the shared recursion limit
+        // (runtime/recursion.rs); native code deopts before exceeding it.
         let max_depth = b.ins().load(I64, flags, ctx_ptr, CTX_MAX_DEPTH_OFFSET);
         let too_deep = b.ins().icmp(IntCC::SignedGreaterThan, depth, max_depth);
         b.ins().brif(too_deep, deopt, &[], blocks[0], &[]);

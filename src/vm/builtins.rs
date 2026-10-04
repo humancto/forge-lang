@@ -10,7 +10,21 @@ use super::machine::{VMError, VM};
 use super::value::*;
 
 impl VM {
+    /// Call a native builtin inside a GC native scope (see the rooting
+    /// invariants in `vm/gc.rs`): the arguments and everything the builtin
+    /// allocates are pinned until it returns, so a GC triggered by a Forge
+    /// callback (map/filter/sort/stream/...) cannot free values the builtin
+    /// still holds in Rust locals. `dispatch_native` is private so every
+    /// native call goes through this wrapper.
     pub(super) fn call_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
+        let scope = self.gc.enter_native();
+        self.gc.pin_values(&args);
+        let result = self.dispatch_native(name, args);
+        self.gc.exit_native(scope);
+        result
+    }
+
+    fn dispatch_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
         match name {
             "__forge_register_struct" => {
                 if args.len() != 3 {
@@ -183,9 +197,9 @@ impl VM {
                     return Err(VMError::new("__forge_retry_count() requires (count)"));
                 }
                 if let Some(n) = args[0].as_int(&self.gc) {
-                    Ok(Value::small_int(n.max(0)))
+                    Ok(Value::int(n.max(0), &mut self.gc))
                 } else {
-                    Ok(Value::small_int(3))
+                    Ok(Value::int(3, &mut self.gc))
                 }
             }
             "__forge_retry_wait" => {
@@ -368,11 +382,21 @@ impl VM {
                     requested_names
                 };
 
+                // Shared cycle detection (runtime/imports.rs). Checked before
+                // compiling so a cycle is reported once, not as a nested
+                // chain of compile/runtime errors.
+                let _import_guard = crate::runtime::imports::enter_import(&file_path)
+                    .map_err(|msg| VMError::new(&msg))?;
                 let chunk = crate::vm::compiler::compile_module(&program).map_err(|e| {
                     VMError::new(&format!("import '{}' compile error: {}", path, e.message))
                 })?;
                 self.execute_module(&chunk).map_err(|e| {
-                    VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                    if e.message.starts_with("circular import: ") {
+                        // Propagate the cycle report unwrapped.
+                        VMError::new(&e.message)
+                    } else {
+                        VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                    }
                 })?;
 
                 let mut exports = IndexMap::new();
@@ -426,7 +450,7 @@ impl VM {
                     } else {
                         0
                     };
-                    Ok(Value::small_int(len))
+                    Ok(Value::int(len, &mut self.gc))
                 }
                 None => Err(VMError::new("len() requires an argument")),
             },
@@ -448,7 +472,7 @@ impl VM {
                 Some(ValueKind::Int(n)) => Ok(Value::int(n, &mut self.gc)),
                 Some(ValueKind::Float(n)) => Ok(Value::int(n as i64, &mut self.gc)),
                 // Parity with interpreter: bool → 0/1
-                Some(ValueKind::Bool(b)) => Ok(Value::small_int(if b { 1 } else { 0 })),
+                Some(ValueKind::Bool(b)) => Ok(Value::int(if b { 1 } else { 0 }, &mut self.gc)),
                 Some(ValueKind::Obj(r)) => {
                     let s_owned = self.gc.get(r).and_then(|obj| match &obj.kind {
                         ObjKind::String(s) => Some(s.clone()),
@@ -485,12 +509,14 @@ impl VM {
                 args.get(1).and_then(|v| v.as_int(&self.gc)),
             ) {
                 (Some(start), Some(end)) => {
-                    let items: Vec<Value> = (start..end).map(Value::small_int).collect();
+                    let items: Vec<Value> =
+                        (start..end).map(|n| Value::int(n, &mut self.gc)).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
                 (Some(end_val), None) => {
-                    let items: Vec<Value> = (0..end_val).map(Value::small_int).collect();
+                    let items: Vec<Value> =
+                        (0..end_val).map(|n| Value::int(n, &mut self.gc)).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
@@ -697,6 +723,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("any() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
                     if self
@@ -725,6 +753,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("all() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
                     if !self
@@ -778,7 +808,11 @@ impl VM {
                     for item in &items {
                         match item.classify(&self.gc) {
                             ValueKind::Int(n) => {
-                                total_int += n;
+                                // i64 overflow promotes the result to float.
+                                match total_int.checked_add(n) {
+                                    Some(t) => total_int = t,
+                                    None => is_float = true,
+                                }
                                 total_float += n as f64;
                             }
                             ValueKind::Float(n) => {
@@ -944,6 +978,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("map() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
@@ -969,6 +1005,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("filter() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut out = Vec::new();
                 for item in items {
@@ -997,6 +1035,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("reduce() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let mut acc = args[1].clone();
                 let func = args[2].clone();
                 for item in items {
@@ -1018,6 +1058,8 @@ impl VM {
                     if let Some(items) = items_clone {
                         // Optional custom comparator (second arg)
                         if let Some(func) = args.get(1).cloned() {
+                            // Pin the snapshot: the comparator may mutate the source.
+                            self.gc.pin_values(&items);
                             let mut sorted = items;
                             let mut err: Option<VMError> = None;
                             sorted.sort_by(|a, b| {
@@ -1178,7 +1220,7 @@ impl VM {
                         let mut pairs = Vec::new();
                         for (idx, item) in items.iter().enumerate() {
                             let mut row = IndexMap::new();
-                            row.insert("index".to_string(), Value::small_int(idx as i64));
+                            row.insert("index".to_string(), Value::int(idx as i64, &mut self.gc));
                             row.insert("value".to_string(), item.clone());
                             let rr = self.gc.alloc(ObjKind::Object(row));
                             pairs.push(Value::obj(rr));
@@ -1363,11 +1405,22 @@ impl VM {
                 Ok(Value::bool_val(false))
             }
             n if n.starts_with("math.") => {
-                crate::stdlib::math::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))
+                crate::stdlib::math::call_vm(n, &args, &mut self.gc).map_err(|e| VMError::new(&e))
             }
             n if n.starts_with("fs.") => {
-                let result =
-                    crate::stdlib::fs::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))?;
+                let result = match crate::stdlib::fs::call_vm(n, &args, &self.gc) {
+                    Ok(r) => r,
+                    // Functions without a VM-native fast path (fs.size,
+                    // fs.copy, fs.read_json, ...) use the shared
+                    // interpreter implementation.
+                    Err(e) if e.starts_with("unknown fs function") => {
+                        let interp_args = self.args_to_interp(&args)?;
+                        let result = crate::stdlib::fs::call(n, interp_args)
+                            .map_err(|e| VMError::new(&e))?;
+                        return self.from_interp_checked(&result);
+                    }
+                    Err(e) => return Err(VMError::new(&e)),
+                };
                 match result {
                     crate::stdlib::fs::FsResult::StringVal(s) => Ok(self.alloc_string(&s)),
                     crate::stdlib::fs::FsResult::BoolVal(b) => Ok(Value::bool_val(b)),
@@ -1407,60 +1460,13 @@ impl VM {
                 }
             }
             n if n.starts_with("db.") => {
-                self.reject_stream_args(&args)?;
-                let str_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(obj) = self.gc.get(r) {
-                                if let ObjKind::String(s) = &obj.kind {
-                                    return crate::interpreter::Value::String(s.clone());
-                                }
-                            }
-                            crate::interpreter::Value::Null
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                let result = crate::stdlib::db::call(n, str_args).map_err(|e| VMError::new(&e))?;
-                match result {
-                    crate::interpreter::Value::Bool(b) => Ok(Value::bool_val(b)),
-                    crate::interpreter::Value::Int(n) => Ok(Value::int(n, &mut self.gc)),
-                    crate::interpreter::Value::String(s) => Ok(self.alloc_string(&s)),
-                    crate::interpreter::Value::Array(items) => {
-                        let vm_items: Vec<Value> = items
-                            .iter()
-                            .map(|v| match v {
-                                crate::interpreter::Value::Object(map) => {
-                                    let mut vm_map = IndexMap::new();
-                                    for (k, v) in map {
-                                        let vm_v = match v {
-                                            crate::interpreter::Value::Int(n) => {
-                                                Value::int(*n, &mut self.gc)
-                                            }
-                                            crate::interpreter::Value::Float(n) => Value::float(*n),
-                                            crate::interpreter::Value::String(s) => {
-                                                self.alloc_string(s)
-                                            }
-                                            crate::interpreter::Value::Bool(b) => {
-                                                Value::bool_val(*b)
-                                            }
-                                            _ => Value::null(),
-                                        };
-                                        vm_map.insert(k.clone(), vm_v);
-                                    }
-                                    let r = self.gc.alloc(ObjKind::Object(vm_map));
-                                    Value::obj(r)
-                                }
-                                _ => Value::null(),
-                            })
-                            .collect();
-                        let r = self.gc.alloc(ObjKind::Array(vm_items));
-                        Ok(Value::obj(r))
-                    }
-                    _ => Ok(Value::null()),
-                }
+                // Full value conversion: query parameters arrive as an array
+                // (and may contain floats/bools/null), which a string-only
+                // conversion silently dropped ("Got 0, needed 1").
+                let interp_args = self.args_to_interp(&args)?;
+                let result =
+                    crate::stdlib::db::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("adt:") => {
                 let parts: Vec<&str> = n.splitn(4, ':').collect();
@@ -1669,21 +1675,9 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             n if n.starts_with("term.") => {
-                self.reject_stream_args(&args)?;
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
+                // Full value conversion: term.table/bar/sparkline take arrays
+                // and objects, which a string-only conversion turned into null.
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::term::call(n, interp_args).map_err(|e| VMError::new(&e))?;
                 self.from_interp_checked(&result)
@@ -1763,7 +1757,7 @@ impl VM {
                 map.insert("stderr".to_string(), self.alloc_string(&stderr));
                 map.insert(
                     "status".to_string(),
-                    Value::small_int(output.status.code().unwrap_or(-1) as i64),
+                    Value::int(output.status.code().unwrap_or(-1) as i64, &mut self.gc),
                 );
                 map.insert("ok".to_string(), Value::bool_val(output.status.success()));
                 let r = self.gc.alloc(ObjKind::Object(map));
@@ -1892,7 +1886,7 @@ impl VM {
                 );
                 map.insert(
                     "status".to_string(),
-                    Value::small_int(output.status.code().unwrap_or(-1) as i64),
+                    Value::int(output.status.code().unwrap_or(-1) as i64, &mut self.gc),
                 );
                 map.insert("ok".to_string(), Value::bool_val(output.status.success()));
                 let r = self.gc.alloc(ObjKind::Object(map));
@@ -2093,6 +2087,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("find() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
                     let result = self.call_value(func.clone(), vec![item.clone()])?;
@@ -2120,6 +2116,8 @@ impl VM {
                 } else {
                     return Err(VMError::new("flat_map() first arg must be array"));
                 };
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut out = Vec::new();
                 for item in items {
@@ -2128,7 +2126,9 @@ impl VM {
                         ValueKind::Obj(r) => {
                             if let Some(obj) = self.gc.get(r) {
                                 if let ObjKind::Array(sub) = &obj.kind {
-                                    out.extend(sub.clone());
+                                    let sub = sub.clone();
+                                    self.gc.pin_values(&sub);
+                                    out.extend(sub);
                                     continue;
                                 }
                             }
@@ -2307,6 +2307,8 @@ impl VM {
                     return Err(VMError::new("partition() requires (array, function)"));
                 }
                 let items = self.array_items(&args[0], "partition() first arg must be array")?;
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut matches = Vec::new();
                 let mut rest = Vec::new();
@@ -2331,6 +2333,8 @@ impl VM {
                     return Err(VMError::new("group_by() requires (array, function)"));
                 }
                 let items = self.array_items(&args[0], "group_by() first arg must be array")?;
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
                 for item in items {
@@ -2351,6 +2355,8 @@ impl VM {
                     return Err(VMError::new("sort_by() requires (array, key_function)"));
                 }
                 let items = self.array_items(&args[0], "sort_by() first arg must be array")?;
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let key_fn = args[1].clone();
                 // Pre-compute keys to avoid calling inside sort closure
                 let mut pairs: Vec<(Value, Value)> = Vec::new();
@@ -2386,6 +2392,8 @@ impl VM {
                     return Err(VMError::new("for_each() requires (array, function)"));
                 }
                 let items = self.array_items(&args[0], "for_each() first arg must be array")?;
+                // Pin the snapshot: the callback may mutate the source array.
+                self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
                     self.call_value(func.clone(), vec![item])?;
@@ -2435,7 +2443,7 @@ impl VM {
                             }
                         })
                         .unwrap_or(0);
-                    counts.insert(key, Value::small_int(count + 1));
+                    counts.insert(key, Value::int(count + 1, &mut self.gc));
                 }
                 let r = self.gc.alloc(ObjKind::Object(counts));
                 Ok(Value::obj(r))
@@ -2465,8 +2473,9 @@ impl VM {
                 // String case
                 if let Some(s) = self.get_string(first) {
                     let substr = self.get_string_arg(&args, 1)?;
-                    return Ok(Value::small_int(
+                    return Ok(Value::int(
                         s.find(&substr).map(|i| i as i64).unwrap_or(-1),
+                        &mut self.gc,
                     ));
                 }
                 // Array case
@@ -2475,13 +2484,17 @@ impl VM {
                     .get(1)
                     .ok_or_else(|| VMError::new("index_of() requires 2 arguments"))?;
                 let idx = items.iter().position(|v| v.equals(needle, &self.gc));
-                Ok(Value::small_int(idx.map(|i| i as i64).unwrap_or(-1)))
+                Ok(Value::int(
+                    idx.map(|i| i as i64).unwrap_or(-1),
+                    &mut self.gc,
+                ))
             }
             "last_index_of" => {
                 let s = self.get_string_arg(&args, 0)?;
                 let substr = self.get_string_arg(&args, 1)?;
-                Ok(Value::small_int(
+                Ok(Value::int(
                     s.rfind(&substr).map(|i| i as i64).unwrap_or(-1),
+                    &mut self.gc,
                 ))
             }
             "capitalize" => {
@@ -2601,9 +2614,9 @@ impl VM {
                 let s = self.get_string_arg(&args, 0)?;
                 let substr = self.get_string_arg(&args, 1)?;
                 if substr.is_empty() {
-                    return Ok(Value::small_int((s.chars().count() + 1) as i64));
+                    return Ok(Value::int((s.chars().count() + 1) as i64, &mut self.gc));
                 }
-                Ok(Value::small_int(s.matches(&*substr).count() as i64))
+                Ok(Value::int(s.matches(&*substr).count() as i64, &mut self.gc))
             }
             "slugify" => {
                 let s = self.get_string_arg(&args, 0)?;
@@ -2972,7 +2985,7 @@ impl VM {
                 stats.insert("min_ms".to_string(), Value::float(min_t));
                 stats.insert("max_ms".to_string(), Value::float(max_t));
                 stats.insert("p99_ms".to_string(), Value::float(p99));
-                stats.insert("runs".to_string(), Value::small_int(n as i64));
+                stats.insert("runs".to_string(), Value::int(n as i64, &mut self.gc));
                 stats.insert("result".to_string(), last_result);
                 eprintln!(
                     "\x1b[35m\u{1f485} SLAYED:\x1b[0m {}x runs \u{2014} avg {:.3}ms, min {:.3}ms, max {:.3}ms, p99 {:.3}ms",
@@ -3128,7 +3141,7 @@ impl VM {
                             match rx.try_recv() {
                                 Ok(shared) => {
                                     let val = shared_to_value(&mut self.gc, &shared);
-                                    let idx_val = Value::small_int(idx as i64);
+                                    let idx_val = Value::int(idx as i64, &mut self.gc);
                                     let arr = self.gc.alloc(ObjKind::Array(vec![idx_val, val]));
                                     return Ok(Value::obj(arr));
                                 }
@@ -3166,12 +3179,30 @@ impl VM {
                     "unix_ms".to_string(),
                     Value::int(now.timestamp_millis(), &mut self.gc),
                 );
-                m.insert("year".to_string(), Value::small_int(now.year() as i64));
-                m.insert("month".to_string(), Value::small_int(now.month() as i64));
-                m.insert("day".to_string(), Value::small_int(now.day() as i64));
-                m.insert("hour".to_string(), Value::small_int(now.hour() as i64));
-                m.insert("minute".to_string(), Value::small_int(now.minute() as i64));
-                m.insert("second".to_string(), Value::small_int(now.second() as i64));
+                m.insert(
+                    "year".to_string(),
+                    Value::int(now.year() as i64, &mut self.gc),
+                );
+                m.insert(
+                    "month".to_string(),
+                    Value::int(now.month() as i64, &mut self.gc),
+                );
+                m.insert(
+                    "day".to_string(),
+                    Value::int(now.day() as i64, &mut self.gc),
+                );
+                m.insert(
+                    "hour".to_string(),
+                    Value::int(now.hour() as i64, &mut self.gc),
+                );
+                m.insert(
+                    "minute".to_string(),
+                    Value::int(now.minute() as i64, &mut self.gc),
+                );
+                m.insert(
+                    "second".to_string(),
+                    Value::int(now.second() as i64, &mut self.gc),
+                );
                 m.insert(
                     "weekday".to_string(),
                     self.alloc_string(&now.format("%A").to_string()),
@@ -3182,7 +3213,7 @@ impl VM {
                 );
                 m.insert(
                     "day_of_year".to_string(),
-                    Value::small_int(now.ordinal() as i64),
+                    Value::int(now.ordinal() as i64, &mut self.gc),
                 );
                 m.insert("timezone".to_string(), self.alloc_string("UTC"));
                 let r = self.gc.alloc(ObjKind::Object(m));
@@ -3845,7 +3876,7 @@ impl VM {
                     return Ok(Value::obj(nr));
                 }
                 "len" => {
-                    return Ok(Value::small_int(pairs.len() as i64));
+                    return Ok(Value::int(pairs.len() as i64, &mut self.gc));
                 }
                 "to_array" => {
                     let tuples: Vec<Value> = pairs
@@ -4238,7 +4269,7 @@ impl VM {
                 }
                 Step::PullEnumerate { upstream, idx } => match self.stream_next_vm(upstream)? {
                     Some(v) => {
-                        let i = Value::small_int(idx);
+                        let i = Value::int(idx, &mut self.gc);
                         let tr = self.gc.alloc(ObjKind::Tuple(vec![i, v]));
                         return Ok(Some(Value::obj(tr)));
                     }
@@ -4360,7 +4391,7 @@ impl VM {
                 while self.stream_next_vm(cell)?.is_some() {
                     n += 1;
                 }
-                Ok(Value::small_int(n))
+                Ok(Value::int(n, &mut self.gc))
             }
             "for_each" => {
                 if args.len() != 1 {
@@ -4412,8 +4443,12 @@ impl VM {
                     if let Some(n) = v.as_int(&self.gc) {
                         if is_float {
                             acc_float += n as f64;
+                        } else if let Some(next) = acc_int.checked_add(n) {
+                            acc_int = next;
                         } else {
-                            acc_int += n;
+                            // i64 overflow promotes to float, like `+`.
+                            acc_float = acc_int as f64 + n as f64;
+                            is_float = true;
                         }
                     } else if let Some(f) = v.as_float() {
                         if !is_float {
@@ -4432,7 +4467,7 @@ impl VM {
                 if is_float {
                     Ok(Value::float(acc_float))
                 } else {
-                    Ok(Value::small_int(acc_int))
+                    Ok(Value::int(acc_int, &mut self.gc))
                 }
             }
             "find" => {
