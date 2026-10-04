@@ -764,8 +764,6 @@ enum Signal {
     Continue,
 }
 
-const MAX_CALL_DEPTH: usize = 512;
-
 /// Debug action requested by the DAP client
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DebugAction {
@@ -4432,13 +4430,12 @@ impl Interpreter {
     }
 
     pub fn call_function(&mut self, func: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
-        self.call_depth += 1;
-        if self.call_depth > MAX_CALL_DEPTH {
-            self.call_depth = 0;
-            return Err(RuntimeError::new(
-                "maximum recursion depth exceeded (512 frames)\n  hint: check for infinite recursion, or restructure to use iteration",
-            ));
+        // Shared depth limit + native stack guard (runtime/recursion.rs):
+        // runaway recursion is a catchable error, never a process abort.
+        if let Err(msg) = crate::runtime::recursion::check_call_depth(self.call_depth + 1) {
+            return Err(RuntimeError::new(&msg));
         }
+        self.call_depth += 1;
         let frame_name = match &func {
             Value::Function { name, .. } => {
                 if name.is_empty() {

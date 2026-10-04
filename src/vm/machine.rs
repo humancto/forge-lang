@@ -298,7 +298,7 @@ impl VM {
     pub fn new() -> Self {
         let mut vm = Self {
             registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(MAX_FRAMES),
+            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
@@ -325,7 +325,7 @@ impl VM {
     pub fn with_profiling() -> Self {
         let mut vm = Self {
             registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(MAX_FRAMES),
+            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
@@ -1023,9 +1023,9 @@ impl VM {
         let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
         let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
         let frame_size = (chunk.max_registers as usize).max(1);
-        if self.frames.len() >= MAX_FRAMES {
-            return Err(VMError::new("stack overflow"));
-        }
+        // Shared depth limit + native stack guard (runtime/recursion.rs).
+        crate::runtime::recursion::check_call_depth(self.frames.len())
+            .map_err(|m| VMError::new(&m))?;
         self.ensure_registers(new_base + frame_size);
         self.frames
             .push(CallFrame::new(closure_ref, new_base, frame_size));
@@ -2467,9 +2467,11 @@ impl VM {
                         let arity = chunk.arity as usize;
                         let frame_size = (chunk.max_registers as usize).max(1);
                         let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
-                        if self.frames.len() >= MAX_FRAMES {
-                            return Err(VMError::new("stack overflow"));
-                        }
+                        // Shared depth limit + native stack guard
+                        // (runtime/recursion.rs): runaway recursion is a
+                        // catchable error, never a process abort.
+                        crate::runtime::recursion::check_call_depth(self.frames.len())
+                            .map_err(|m| VMError::new(&m))?;
                         self.ensure_registers(new_base + frame_size);
 
                         for (i, arg) in args.iter().enumerate() {

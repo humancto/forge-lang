@@ -254,3 +254,43 @@ fn math_overflow_policy_matches_interpreter() {
     );
     assert!(matches!(r, Ok(IV::Int(_))));
 }
+
+// ---------------------------------------------------------------------------
+// Recursion limits
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runaway_recursion_is_a_catchable_error() {
+    // The inner closure keeps the function off the auto-JIT path (JIT'd
+    // self-recursion runs natively and is not depth-checked).
+    let out = run_vm(
+        r#"
+        fn inf(n) { let f = fn() { return n }
+ return "a" + inf(n + 1) }
+        try { inf(0) } catch e { say e.message }
+        say "alive"
+        "#,
+        false,
+    )
+    .expect("vm error");
+    assert!(
+        out[0].starts_with("maximum recursion depth exceeded"),
+        "{:?}",
+        out
+    );
+    assert_eq!(out[1], "alive");
+}
+
+#[test]
+fn uncaught_recursion_error_uses_shared_message() {
+    let err = run_vm(
+        "fn inf(n) { let f = fn() { return n }\n return \"a\" + inf(n + 1) }\ninf(0)",
+        false,
+    )
+    .expect_err("must fail");
+    assert!(
+        err.message.starts_with("maximum recursion depth exceeded"),
+        "{}",
+        err.message
+    );
+}

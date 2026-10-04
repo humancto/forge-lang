@@ -1,0 +1,37 @@
+// runtime_limits_test.fg — recursion limits, big ints, GC-heavy callbacks
+
+fn depth(n) {
+    if n == 0 { return 0 }
+    return 1 + depth(n - 1)
+}
+
+fn runaway(n) {
+    return runaway(n + 1)
+}
+
+@test
+define test_deep_recursion_within_default_limit() {
+    // Previously aborted the process around depth 515 (interpreter).
+    assert_eq(depth(5000), 5000)
+}
+
+@test
+define test_runaway_recursion_is_catchable() {
+    let mut msg = ""
+    try { runaway(0) } catch e { msg = e.message }
+    assert(starts_with(msg, "maximum recursion depth exceeded"))
+}
+
+@test
+define test_big_int_math_does_not_panic() {
+    assert_eq(math.pow(2, 50), 1125899906842624)
+    assert_eq(math.abs(-140737488355329), 140737488355329)
+    assert_eq(typeof(math.pow(2, 63)), "Float")
+}
+
+@test
+define test_map_results_survive_gc() {
+    let r = map(range(0, 20000), fn(x) { return "item-" + str(x) + "-padding-to-make-it-longer" })
+    assert_eq(r[0], "item-0-padding-to-make-it-longer")
+    assert_eq(r[19999], "item-19999-padding-to-make-it-longer")
+}

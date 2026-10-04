@@ -102,6 +102,11 @@ struct Cli {
     /// Without this flag, these builtins return a permission error.
     #[arg(long = "allow-run")]
     allow_run: bool,
+
+    /// Maximum Forge call depth before "maximum recursion depth exceeded"
+    /// (default 10000; also settable with FORGE_MAX_DEPTH).
+    #[arg(long = "max-depth", value_name = "N")]
+    max_depth: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -203,8 +208,30 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() {
+/// Entry point: run the real CLI on a thread with a large stack so deep (but
+/// bounded) Forge recursion works; the recursion guard in
+/// `runtime/recursion.rs` turns anything deeper into a catchable error
+/// instead of a native stack overflow.
+fn main() {
+    let stack = runtime::recursion::MAIN_STACK_SIZE;
+    let worker = std::thread::Builder::new()
+        .name("forge-main".to_string())
+        .stack_size(stack)
+        .spawn(move || {
+            runtime::recursion::register_thread_stack(stack);
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("BUG: failed to build the tokio runtime")
+                .block_on(async_main());
+        })
+        .expect("BUG: failed to spawn the forge main thread");
+    if let Err(panic) = worker.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn async_main() {
     // OTel must initialize on the main tokio runtime (not from a
     // nested runtime created by a stdlib helper). Calling here ensures
     // CLI scripts that emit `tracing` events (via the `log` stdlib)
@@ -213,6 +240,9 @@ async fn main() {
     forge_lang::runtime::tracing_init::init_otel();
 
     let cli = Cli::parse();
+    if let Some(n) = cli.max_depth {
+        runtime::recursion::set_max_depth(n);
+    }
     let use_jit = cli.use_jit;
     #[cfg(not(feature = "jit"))]
     if use_jit {
