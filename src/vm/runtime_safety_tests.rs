@@ -296,6 +296,31 @@ fn uncaught_recursion_error_uses_shared_message() {
 }
 
 // ---------------------------------------------------------------------------
+// Result matching (examples/result_try.fg)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_on_result_values() {
+    let out = run_vm(
+        r#"
+        fn half(n) { if n % 2 != 0 { return Err("odd") }
+ return Ok(n / 2) }
+        match half(42) {
+            Ok(v) => say "ok {v}"
+            Err(e) => say "err {e}"
+        }
+        match half(3) {
+            Ok(v) => say "ok {v}"
+            Err(e) => say "err {e}"
+        }
+        "#,
+        false,
+    )
+    .expect("vm error");
+    assert_eq!(out, vec!["ok 21", "err odd"]);
+}
+
+// ---------------------------------------------------------------------------
 // Import cycles
 // ---------------------------------------------------------------------------
 

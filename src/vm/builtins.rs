@@ -1408,8 +1408,19 @@ impl VM {
                 crate::stdlib::math::call_vm(n, &args, &mut self.gc).map_err(|e| VMError::new(&e))
             }
             n if n.starts_with("fs.") => {
-                let result =
-                    crate::stdlib::fs::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))?;
+                let result = match crate::stdlib::fs::call_vm(n, &args, &self.gc) {
+                    Ok(r) => r,
+                    // Functions without a VM-native fast path (fs.size,
+                    // fs.copy, fs.read_json, ...) use the shared
+                    // interpreter implementation.
+                    Err(e) if e.starts_with("unknown fs function") => {
+                        let interp_args = self.args_to_interp(&args)?;
+                        let result = crate::stdlib::fs::call(n, interp_args)
+                            .map_err(|e| VMError::new(&e))?;
+                        return self.from_interp_checked(&result);
+                    }
+                    Err(e) => return Err(VMError::new(&e)),
+                };
                 match result {
                     crate::stdlib::fs::FsResult::StringVal(s) => Ok(self.alloc_string(&s)),
                     crate::stdlib::fs::FsResult::BoolVal(b) => Ok(Value::bool_val(b)),
@@ -1449,60 +1460,13 @@ impl VM {
                 }
             }
             n if n.starts_with("db.") => {
-                self.reject_stream_args(&args)?;
-                let str_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(obj) = self.gc.get(r) {
-                                if let ObjKind::String(s) = &obj.kind {
-                                    return crate::interpreter::Value::String(s.clone());
-                                }
-                            }
-                            crate::interpreter::Value::Null
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                let result = crate::stdlib::db::call(n, str_args).map_err(|e| VMError::new(&e))?;
-                match result {
-                    crate::interpreter::Value::Bool(b) => Ok(Value::bool_val(b)),
-                    crate::interpreter::Value::Int(n) => Ok(Value::int(n, &mut self.gc)),
-                    crate::interpreter::Value::String(s) => Ok(self.alloc_string(&s)),
-                    crate::interpreter::Value::Array(items) => {
-                        let vm_items: Vec<Value> = items
-                            .iter()
-                            .map(|v| match v {
-                                crate::interpreter::Value::Object(map) => {
-                                    let mut vm_map = IndexMap::new();
-                                    for (k, v) in map {
-                                        let vm_v = match v {
-                                            crate::interpreter::Value::Int(n) => {
-                                                Value::int(*n, &mut self.gc)
-                                            }
-                                            crate::interpreter::Value::Float(n) => Value::float(*n),
-                                            crate::interpreter::Value::String(s) => {
-                                                self.alloc_string(s)
-                                            }
-                                            crate::interpreter::Value::Bool(b) => {
-                                                Value::bool_val(*b)
-                                            }
-                                            _ => Value::null(),
-                                        };
-                                        vm_map.insert(k.clone(), vm_v);
-                                    }
-                                    let r = self.gc.alloc(ObjKind::Object(vm_map));
-                                    Value::obj(r)
-                                }
-                                _ => Value::null(),
-                            })
-                            .collect();
-                        let r = self.gc.alloc(ObjKind::Array(vm_items));
-                        Ok(Value::obj(r))
-                    }
-                    _ => Ok(Value::null()),
-                }
+                // Full value conversion: query parameters arrive as an array
+                // (and may contain floats/bools/null), which a string-only
+                // conversion silently dropped ("Got 0, needed 1").
+                let interp_args = self.args_to_interp(&args)?;
+                let result =
+                    crate::stdlib::db::call(n, interp_args).map_err(|e| VMError::new(&e))?;
+                self.from_interp_checked(&result)
             }
             n if n.starts_with("adt:") => {
                 let parts: Vec<&str> = n.splitn(4, ':').collect();
@@ -1711,21 +1675,9 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             n if n.starts_with("term.") => {
-                self.reject_stream_args(&args)?;
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
+                // Full value conversion: term.table/bar/sparkline take arrays
+                // and objects, which a string-only conversion turned into null.
+                let interp_args = self.args_to_interp(&args)?;
                 let result =
                     crate::stdlib::term::call(n, interp_args).map_err(|e| VMError::new(&e))?;
                 self.from_interp_checked(&result)

@@ -827,6 +827,65 @@ impl VM {
         }));
         self.globals
             .insert("Some".to_string(), Value::obj(some_native));
+
+        self.backfill_stdlib_from_interpreter();
+    }
+
+    /// The hand-written module tables above drifted from the interpreter's
+    /// (`fs.size`, `term.sparkline`, `math.inf`, ... were missing on the VM).
+    /// The interpreter's `create_module()` is the source of truth for which
+    /// members a module has, so add every member the VM table lacks. Existing
+    /// VM entries are never overwritten.
+    fn backfill_stdlib_from_interpreter(&mut self) {
+        use crate::interpreter::Value as IV;
+        let modules: Vec<(&str, IV)> = vec![
+            ("math", crate::stdlib::math::create_module()),
+            ("fs", crate::stdlib::fs::create_module()),
+            ("io", crate::stdlib::io::create_module()),
+            ("crypto", crate::stdlib::crypto::create_module()),
+            ("db", crate::stdlib::db::create_module()),
+            ("env", crate::stdlib::env::create_module()),
+            ("json", crate::stdlib::json_module::create_module()),
+            ("regex", crate::stdlib::regex_module::create_module()),
+            ("log", crate::stdlib::log::create_module()),
+            ("http", crate::stdlib::http::create_module()),
+            ("term", crate::stdlib::term::create_module()),
+            ("csv", crate::stdlib::csv::create_module()),
+        ];
+        for (module, interp_module) in modules {
+            let IV::Object(members) = interp_module else {
+                continue;
+            };
+            let Some(module_ref) = self.globals.get(module).and_then(|v| v.as_obj()) else {
+                continue;
+            };
+            for (key, member) in members {
+                let already = matches!(
+                    self.gc.get(module_ref).map(|o| &o.kind),
+                    Some(ObjKind::Object(map)) if map.contains_key(&key)
+                );
+                if already {
+                    continue;
+                }
+                let value = match &member {
+                    IV::BuiltIn(name) => {
+                        let r = self
+                            .gc
+                            .alloc(ObjKind::NativeFunction(NativeFn { name: name.clone() }));
+                        Value::obj(r)
+                    }
+                    IV::Int(_) | IV::Float(_) | IV::Bool(_) | IV::String(_) | IV::Null => {
+                        self.convert_interp_value(&member)
+                    }
+                    _ => continue,
+                };
+                if let Some(obj) = self.gc.get_mut(module_ref) {
+                    if let ObjKind::Object(map) = &mut obj.kind {
+                        map.insert(key, value);
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
@@ -1621,6 +1680,24 @@ impl VM {
                                             }
                                         }
                                     }
+                                    // Result values expose the same pattern-
+                                    // matching tags as ADT objects, so
+                                    // `match r { Ok(v) => .., Err(e) => .. }`
+                                    // works (the compiler reads `__variant__`).
+                                    ObjKind::ResultOk(_) | ObjKind::ResultErr(_)
+                                        if field == "__variant__" || field == "__type__" =>
+                                    {
+                                        let is_ok = matches!(&obj.kind, ObjKind::ResultOk(_));
+                                        needs_alloc = Some(
+                                            match (field.as_str(), is_ok) {
+                                                ("__type__", _) => "Result",
+                                                (_, true) => "Ok",
+                                                (_, false) => "Err",
+                                            }
+                                            .to_string(),
+                                        );
+                                        direct_result = None;
+                                    }
                                     _ => {
                                         return Err(VMError::new(&format!(
                                             "cannot access field '{}' on {}",
@@ -1840,9 +1917,17 @@ impl VM {
                         let field_name = format!("_{}", c);
                         if let Some(r) = obj.as_obj() {
                             if let Some(o) = self.gc.get(r) {
-                                if let ObjKind::Object(map) = &o.kind {
-                                    self.registers[base + a as usize] =
-                                        map.get(&field_name).cloned().unwrap_or(Value::null());
+                                match &o.kind {
+                                    ObjKind::Object(map) => {
+                                        self.registers[base + a as usize] =
+                                            map.get(&field_name).cloned().unwrap_or(Value::null());
+                                    }
+                                    // `Ok(v)` / `Err(e)` patterns bind the payload.
+                                    ObjKind::ResultOk(v) | ObjKind::ResultErr(v) => {
+                                        self.registers[base + a as usize] =
+                                            if c == 0 { *v } else { Value::null() };
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
