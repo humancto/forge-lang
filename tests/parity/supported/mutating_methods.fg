@@ -1,0 +1,15 @@
+// expect: [[1, 2], 3, set(2), [7, 8], 8, 5]
+// push/pop/add/remove on a mutable variable update it in place, in both
+// method and function form; on anything else they return a new value.
+let mut a = []
+a.push(1)
+a.push(2)
+push(a, 3)
+let popped = a.pop()
+let mut s = set([1])
+s.add(2)
+s.add(2)
+s.remove(1)
+let fixed = [7, 8]
+let last = fixed.pop()
+[a, popped, s, fixed, last, pop([4, 5])]

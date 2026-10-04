@@ -444,6 +444,13 @@ impl VM {
             "__forge_register_agent",
             "__forge_raise_error",
             "__forge_import_module",
+            "__forge_get_field",
+            "__forge_set_field",
+            "__forge_destructure",
+            "__forge_array_spread",
+            "__forge_check",
+            "__forge_when_matches",
+            "__forge_method_mut",
             // Collections
             "first",
             "last",
@@ -1240,28 +1247,28 @@ impl VM {
                             Value::bool_val(!left.equals(right, &self.gc));
                     }
                     OpCode::Lt => {
-                        let left = &self.registers[base + b as usize];
-                        let right = &self.registers[base + c as usize];
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            self.compare_op(left, right, OpCode::Lt)?;
+                            self.compare_op(&left, &right, OpCode::Lt)?;
                     }
                     OpCode::Gt => {
-                        let left = &self.registers[base + b as usize];
-                        let right = &self.registers[base + c as usize];
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            self.compare_op(left, right, OpCode::Gt)?;
+                            self.compare_op(&left, &right, OpCode::Gt)?;
                     }
                     OpCode::LtEq => {
-                        let left = &self.registers[base + b as usize];
-                        let right = &self.registers[base + c as usize];
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            self.compare_op(left, right, OpCode::LtEq)?;
+                            self.compare_op(&left, &right, OpCode::LtEq)?;
                     }
                     OpCode::GtEq => {
-                        let left = &self.registers[base + b as usize];
-                        let right = &self.registers[base + c as usize];
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            self.compare_op(left, right, OpCode::GtEq)?;
+                            self.compare_op(&left, &right, OpCode::GtEq)?;
                     }
                     OpCode::And => {
                         let left = self.registers[base + b as usize].is_truthy(&self.gc);
@@ -1281,7 +1288,7 @@ impl VM {
                         let name_const = &chunk.constants[bx as usize];
                         if let Constant::Str(name) = name_const {
                             let val = self.globals.get(name).cloned().ok_or_else(|| {
-                                VMError::new(&format!("undefined variable: {}", name))
+                                VMError::new(&crate::semantics::undefined_variable(name, None))
                             })?;
                             self.registers[base + a as usize] = val;
                         }
@@ -1505,197 +1512,24 @@ impl VM {
                         self.registers[base + a as usize] = Value::obj(r);
                     }
                     OpCode::GetField => {
-                        let obj_val = &self.registers[base + b as usize];
-                        let field_const = &chunk.constants[c as usize];
-                        if let (Some(r), Constant::Str(field)) = (obj_val.as_obj(), field_const) {
-                            let needs_alloc: Option<String>;
-                            let direct_result: Option<Value>;
-                            if let Some(obj) = self.gc.get(r) {
-                                match &obj.kind {
-                                    ObjKind::Object(map) => {
-                                        if let Some(value) = map.get(field.as_str()).cloned() {
-                                            direct_result = Some(value);
-                                        } else if let Some(type_name) = map
-                                            .get("__type__")
-                                            .and_then(|value| self.get_string(value))
-                                        {
-                                            let mut delegated = None;
-                                            if let Some(embeds) =
-                                                self.embedded_fields.get(&type_name).cloned()
-                                            {
-                                                for (embed_field, _) in embeds {
-                                                    let Some(embed_ref) = map
-                                                        .get(&embed_field)
-                                                        .and_then(|v| v.as_obj())
-                                                    else {
-                                                        continue;
-                                                    };
-                                                    let Some(embed_obj) = self.gc.get(embed_ref)
-                                                    else {
-                                                        continue;
-                                                    };
-                                                    let ObjKind::Object(embed_map) =
-                                                        &embed_obj.kind
-                                                    else {
-                                                        continue;
-                                                    };
-                                                    if let Some(value) =
-                                                        embed_map.get(field.as_str())
-                                                    {
-                                                        delegated = Some(*value);
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            direct_result = Some(delegated.ok_or_else(|| {
-                                                VMError::new(&format!(
-                                                    "no field '{}' on object",
-                                                    field
-                                                ))
-                                            })?);
-                                        } else {
-                                            direct_result =
-                                                Some(map.get(field.as_str()).cloned().ok_or_else(
-                                                    || {
-                                                        VMError::new(&format!(
-                                                            "no field '{}' on object",
-                                                            field
-                                                        ))
-                                                    },
-                                                )?);
-                                        }
-                                        needs_alloc = None;
-                                    }
-                                    ObjKind::String(s) => match field.as_str() {
-                                        "len" => {
-                                            direct_result =
-                                                Some(Value::small_int(s.chars().count() as i64));
-                                            needs_alloc = None;
-                                        }
-                                        "upper" => {
-                                            needs_alloc = Some(s.to_uppercase());
-                                            direct_result = None;
-                                        }
-                                        "lower" => {
-                                            needs_alloc = Some(s.to_lowercase());
-                                            direct_result = None;
-                                        }
-                                        "trim" => {
-                                            needs_alloc = Some(s.trim().to_string());
-                                            direct_result = None;
-                                        }
-                                        _ => {
-                                            return Err(VMError::new(&format!(
-                                                "no method '{}' on String",
-                                                field
-                                            )))
-                                        }
-                                    },
-                                    ObjKind::Array(items) | ObjKind::Set(items) => {
-                                        match field.as_str() {
-                                            "len" => {
-                                                direct_result =
-                                                    Some(Value::small_int(items.len() as i64));
-                                                needs_alloc = None;
-                                            }
-                                            _ => {
-                                                let type_name =
-                                                    if matches!(&obj.kind, ObjKind::Set(_)) {
-                                                        "Set"
-                                                    } else {
-                                                        "Array"
-                                                    };
-                                                return Err(VMError::new(&format!(
-                                                    "no method '{}' on {}",
-                                                    field, type_name
-                                                )));
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        return Err(VMError::new(&format!(
-                                            "cannot access field '{}' on {}",
-                                            field,
-                                            obj.type_name()
-                                        )))
-                                    }
-                                }
-                            } else {
-                                return Err(VMError::new("null reference"));
-                            }
-                            let result = if let Some(s) = needs_alloc {
-                                self.alloc_string(&s)
-                            } else {
-                                direct_result.expect(
-                                    "BUG: direct_result must be Some when needs_alloc is None",
-                                )
-                            };
-                            self.registers[base + a as usize] = result;
-                        }
+                        let obj_val = self.registers[base + b as usize];
+                        let Constant::Str(field) = &chunk.constants[c as usize] else {
+                            return Err(VMError::new("BUG: GetField constant is not a string"));
+                        };
+                        self.registers[base + a as usize] = self.get_field(obj_val, field)?;
                     }
                     OpCode::SetField => {
-                        let field_const = &chunk.constants[b as usize];
+                        let target = self.registers[base + a as usize];
                         let val = self.registers[base + c as usize];
-                        if let Constant::Str(field) = field_const {
-                            let obj_ref =
-                                if let Some(r) = self.registers[base + a as usize].as_obj() {
-                                    r
-                                } else {
-                                    return Err(VMError::new("cannot set field on non-object"));
-                                };
-                            if let Some(obj) = self.gc.get(obj_ref) {
-                                if matches!(&obj.kind, ObjKind::Frozen(_)) {
-                                    return Err(VMError::new("cannot mutate a frozen value"));
-                                }
-                            }
-                            if let Some(obj) = self.gc.get_mut(obj_ref) {
-                                if let ObjKind::Object(map) = &mut obj.kind {
-                                    map.insert(field.clone(), val);
-                                }
-                            }
-                        }
+                        let Constant::Str(field) = &chunk.constants[b as usize] else {
+                            return Err(VMError::new("BUG: SetField constant is not a string"));
+                        };
+                        self.set_field(target, field, val)?;
                     }
                     OpCode::GetIndex => {
                         let obj = self.registers[base + b as usize];
                         let idx = self.registers[base + c as usize];
-                        let result = if let Some(r) = obj.as_obj() {
-                            if let Some(i) = idx.as_int(&self.gc) {
-                                if let Some(o) = self.gc.get(r) {
-                                    if let ObjKind::Array(items) | ObjKind::Tuple(items) = &o.kind {
-                                        items
-                                            .get(i as usize)
-                                            .cloned()
-                                            .ok_or_else(|| VMError::new("index out of bounds"))?
-                                    } else if matches!(&o.kind, ObjKind::Set(_)) {
-                                        return Err(VMError::new(
-                                            "cannot index a set; sets are unordered — use .has() or iteration",
-                                        ));
-                                    } else {
-                                        return Err(VMError::new("cannot index non-array"));
-                                    }
-                                } else {
-                                    Value::null()
-                                }
-                            } else if idx.as_obj().is_some() {
-                                let key = self.get_string(&idx).ok_or_else(|| {
-                                    VMError::new("index must be string for objects")
-                                })?;
-                                if let Some(o) = self.gc.get(r) {
-                                    if let ObjKind::Object(map) = &o.kind {
-                                        map.get(&key).cloned().unwrap_or(Value::null())
-                                    } else {
-                                        Value::null()
-                                    }
-                                } else {
-                                    Value::null()
-                                }
-                            } else {
-                                return Err(VMError::new("invalid index operation"));
-                            }
-                        } else {
-                            return Err(VMError::new("invalid index operation"));
-                        };
-                        self.registers[base + a as usize] = result;
+                        self.registers[base + a as usize] = self.index_get(obj, idx)?;
                     }
                     OpCode::IterGet => {
                         let obj = self.registers[base + b as usize];
@@ -1757,37 +1591,10 @@ impl VM {
                         self.registers[base + a as usize] = result;
                     }
                     OpCode::SetIndex => {
+                        let target = self.registers[base + a as usize];
                         let idx = self.registers[base + b as usize];
                         let val = self.registers[base + c as usize];
-                        if let Some(r) = self.registers[base + a as usize].as_obj() {
-                            // Check for tuple mutation
-                            if let Some(obj) = self.gc.get(r) {
-                                if matches!(&obj.kind, ObjKind::Tuple(_)) {
-                                    return Err(VMError::new("cannot mutate a tuple"));
-                                }
-                                if matches!(&obj.kind, ObjKind::Set(_)) {
-                                    return Err(VMError::new(
-                                        "cannot index-assign a set; use .add() and .remove()",
-                                    ));
-                                }
-                            }
-                            let key_str = self.get_string(&idx);
-                            let idx_int = idx.as_int(&self.gc);
-                            if let Some(obj) = self.gc.get_mut(r) {
-                                if let Some(i) = idx_int {
-                                    if let ObjKind::Array(items) = &mut obj.kind {
-                                        let i = i as usize;
-                                        if i < items.len() {
-                                            items[i] = val;
-                                        }
-                                    }
-                                } else if let ObjKind::Object(map) = &mut obj.kind {
-                                    if let Some(key) = key_str {
-                                        map.insert(key, val);
-                                    }
-                                }
-                            }
-                        }
+                        self.index_set(target, idx, val)?;
                     }
                     OpCode::Len => {
                         let src = self.registers[base + b as usize];
@@ -1829,14 +1636,15 @@ impl VM {
                     OpCode::ExtractField => {
                         let obj = &self.registers[base + b as usize];
                         let field_name = format!("_{}", c);
-                        if let Some(r) = obj.as_obj() {
-                            if let Some(o) = self.gc.get(r) {
-                                if let ObjKind::Object(map) = &o.kind {
-                                    self.registers[base + a as usize] =
-                                        map.get(&field_name).cloned().unwrap_or(Value::null());
+                        let extracted =
+                            match obj.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+                                Some(ObjKind::Object(map)) => {
+                                    map.get(&field_name).cloned().unwrap_or(Value::null())
                                 }
-                            }
-                        }
+                                Some(ObjKind::ResultOk(v) | ObjKind::ResultErr(v)) if c == 0 => *v,
+                                _ => Value::null(),
+                            };
+                        self.registers[base + a as usize] = extracted;
                     }
                     OpCode::Try => {
                         let src = self.registers[base + b as usize];
@@ -1891,6 +1699,14 @@ impl VM {
                         let saved = self.cancelled.clone();
                         self.cancelled = cancel_flag.clone();
                         self.squad_stack.push((a, cancel_flag, Vec::new(), saved));
+                    }
+                    OpCode::CloseUpvalues => {
+                        let frame = &mut self.frames[frame_idx];
+                        if !frame.open_upvalues.is_empty() {
+                            for reg in a..=b {
+                                frame.open_upvalues.remove(&reg);
+                            }
+                        }
                     }
                     OpCode::SquadEnd => {
                         let (dst_reg, cancel_flag, handles, saved_cancelled) =
@@ -2229,13 +2045,8 @@ impl VM {
                     }
                     continue;
                 }
-                Err(err) => match self.handle_runtime_error(err) {
-                    Ok(handler_frame_idx) => {
-                        if handler_frame_idx < boundary_frame_idx {
-                            return Err(VMError::unwound_to_handler());
-                        }
-                        continue;
-                    }
+                Err(err) => match self.handle_runtime_error(err, boundary_frame_idx) {
+                    Ok(_handler_frame_idx) => continue,
                     Err(err) => return Err(err),
                 },
             }
@@ -2561,12 +2372,23 @@ impl VM {
         Value::obj(err_ref)
     }
 
-    fn handle_runtime_error(&mut self, err: VMError) -> Result<usize, VMError> {
+    /// Route a runtime error to the innermost `try`/`safe` handler that
+    /// belongs to this `run_until` invocation (frames at or above
+    /// `boundary_frame_idx`). If there is none, the frames of this
+    /// invocation are discarded and the error is returned to the caller —
+    /// which may be a native builtin (`yolo`, `assert_throws`, `map`, ...)
+    /// that gets to observe it before any outer handler does, exactly like
+    /// the interpreter's `Result` propagation.
+    fn handle_runtime_error(
+        &mut self,
+        err: VMError,
+        boundary_frame_idx: usize,
+    ) -> Result<usize, VMError> {
         if err.is_unwound_to_handler() {
             return Err(err);
         }
 
-        for frame_idx in (0..self.frames.len()).rev() {
+        for frame_idx in (boundary_frame_idx.min(self.frames.len())..self.frames.len()).rev() {
             let handler = {
                 let frame = &mut self.frames[frame_idx];
                 frame.handlers.pop()
@@ -2586,11 +2408,16 @@ impl VM {
             }
         }
 
-        if err.stack_trace.is_empty() {
-            Err(self.error_with_trace(&err.message))
+        let err = if err.stack_trace.is_empty() {
+            self.error_with_trace(&err.message)
         } else {
-            Err(err)
+            err
+        };
+        while self.frames.len() > boundary_frame_idx {
+            self.profiler.exit_function();
+            self.frames.pop();
         }
+        Err(err)
     }
 
     pub(super) fn convert_to_interp_val(&self, v: &Value) -> crate::interpreter::Value {
@@ -2774,94 +2601,338 @@ impl VM {
         Ok(())
     }
 
-    fn arith_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
-        match (left.classify(&self.gc), right.classify(&self.gc)) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => match op {
-                OpCode::Add => match a.checked_add(b) {
-                    Some(r) => Ok(Value::int(r, &mut self.gc)),
-                    None => Ok(Value::float(a as f64 + b as f64)),
-                },
-                OpCode::Sub => match a.checked_sub(b) {
-                    Some(r) => Ok(Value::int(r, &mut self.gc)),
-                    None => Ok(Value::float(a as f64 - b as f64)),
-                },
-                OpCode::Mul => match a.checked_mul(b) {
-                    Some(r) => Ok(Value::int(r, &mut self.gc)),
-                    None => Ok(Value::float(a as f64 * b as f64)),
-                },
-                OpCode::Div => {
-                    if b == 0 {
-                        return Err(VMError::new("division by zero"));
+    /// `object.field` read. Shared by the `GetField` opcode and the
+    /// `__forge_get_field` builtin (used when a constant index does not fit
+    /// in the 8-bit operand).
+    pub(super) fn get_field(&mut self, obj_val: Value, field: &str) -> Result<Value, VMError> {
+        match self.get_field_strict(obj_val, field) {
+            // Compiler-internal fields (`__variant__`, `__type__`, ...) are
+            // probed on arbitrary values by pattern matching; a value that
+            // lacks them simply does not match.
+            Err(_) if field.starts_with("__") => Ok(Value::null()),
+            other => other,
+        }
+    }
+
+    fn get_field_strict(&mut self, obj_val: Value, field: &str) -> Result<Value, VMError> {
+        let Some(r) = obj_val.as_obj() else {
+            return Err(VMError::new(&format!(
+                "cannot access field '{}' on {}",
+                field,
+                obj_val.type_name(&self.gc)
+            )));
+        };
+        let needs_alloc: Option<String>;
+        let direct_result: Option<Value>;
+        let Some(obj) = self.gc.get(r) else {
+            return Err(VMError::new("null reference"));
+        };
+        match &obj.kind {
+            // Results are not ADT objects in the VM; expose the same
+            // pattern-matching view (`Ok(v)` / `Err(e)`) the interpreter has.
+            ObjKind::ResultOk(_) | ObjKind::ResultErr(_) if field.starts_with("__") => {
+                let text = match (field, &obj.kind) {
+                    ("__variant__", ObjKind::ResultOk(_)) => "Ok",
+                    ("__variant__", _) => "Err",
+                    ("__type__", _) => "Result",
+                    _ => return Ok(Value::null()),
+                };
+                return Ok(self.alloc_string(text));
+            }
+            ObjKind::Object(map) => {
+                if let Some(value) = map.get(field).cloned() {
+                    direct_result = Some(value);
+                } else if let Some(type_name) =
+                    map.get("__type__").and_then(|value| self.get_string(value))
+                {
+                    let mut delegated = None;
+                    if let Some(embeds) = self.embedded_fields.get(&type_name).cloned() {
+                        for (embed_field, _) in embeds {
+                            let Some(embed_ref) = map.get(&embed_field).and_then(|v| v.as_obj())
+                            else {
+                                continue;
+                            };
+                            let Some(embed_obj) = self.gc.get(embed_ref) else {
+                                continue;
+                            };
+                            let ObjKind::Object(embed_map) = &embed_obj.kind else {
+                                continue;
+                            };
+                            if let Some(value) = embed_map.get(field) {
+                                delegated = Some(*value);
+                                break;
+                            }
+                        }
                     }
-                    Ok(Value::int(a / b, &mut self.gc))
+                    direct_result =
+                        Some(delegated.ok_or_else(|| {
+                            VMError::new(&format!("no field '{}' on object", field))
+                        })?);
+                } else {
+                    return Err(VMError::new(&format!("no field '{}' on object", field)));
                 }
-                OpCode::Mod => {
-                    if b == 0 {
-                        return Err(VMError::new("modulo by zero"));
-                    }
-                    Ok(Value::int(a % b, &mut self.gc))
+                needs_alloc = None;
+            }
+            ObjKind::String(s) => match field {
+                "len" => {
+                    direct_result = Some(Value::small_int(s.chars().count() as i64));
+                    needs_alloc = None;
                 }
-                _ => Err(VMError::new("invalid operation")),
+                "upper" => {
+                    needs_alloc = Some(s.to_uppercase());
+                    direct_result = None;
+                }
+                "lower" => {
+                    needs_alloc = Some(s.to_lowercase());
+                    direct_result = None;
+                }
+                "trim" => {
+                    needs_alloc = Some(s.trim().to_string());
+                    direct_result = None;
+                }
+                _ => return Err(VMError::new(&format!("no method '{}' on String", field))),
             },
-            (ValueKind::Float(a), ValueKind::Float(b)) => match op {
-                OpCode::Add => Ok(Value::float(a + b)),
-                OpCode::Sub => Ok(Value::float(a - b)),
-                OpCode::Mul => Ok(Value::float(a * b)),
-                OpCode::Div => Ok(Value::float(a / b)),
-                OpCode::Mod => Ok(Value::float(a % b)),
-                _ => Err(VMError::new("invalid operation")),
+            ObjKind::Array(items) | ObjKind::Set(items) => match field {
+                "len" => {
+                    direct_result = Some(Value::small_int(items.len() as i64));
+                    needs_alloc = None;
+                }
+                _ => {
+                    let type_name = if matches!(&obj.kind, ObjKind::Set(_)) {
+                        "Set"
+                    } else {
+                        "Array"
+                    };
+                    return Err(VMError::new(&format!(
+                        "no method '{}' on {}",
+                        field, type_name
+                    )));
+                }
             },
-            (ValueKind::Int(a), ValueKind::Float(_b)) => {
-                self.arith_op(&Value::float(a as f64), right, op)
+            ObjKind::Frozen(inner) => {
+                let inner = *inner;
+                return self.get_field(inner, field);
             }
-            (ValueKind::Float(_a), ValueKind::Int(b)) => {
-                self.arith_op(left, &Value::float(b as f64), op)
+            _ => {
+                return Err(VMError::new(&format!(
+                    "cannot access field '{}' on {}",
+                    field,
+                    obj.type_name()
+                )))
             }
-            // String concatenation
-            (ValueKind::Obj(_), _) | (_, ValueKind::Obj(_)) if op == OpCode::Add => {
-                let ls = left.display(&self.gc);
-                let rs = right.display(&self.gc);
-                let r = self.gc.alloc_string(format!("{}{}", ls, rs));
-                Ok(Value::obj(r))
+        }
+        Ok(match needs_alloc {
+            Some(s) => self.alloc_string(&s),
+            None => {
+                direct_result.expect("BUG: direct_result must be Some when needs_alloc is None")
             }
-            _ => Err(VMError::new(&format!(
-                "cannot apply {:?} to {} and {}",
-                op,
-                left.type_name(&self.gc),
-                right.type_name(&self.gc)
+        })
+    }
+
+    /// `object.field = value`. Shared by `SetField` and `__forge_set_field`.
+    pub(super) fn set_field(
+        &mut self,
+        target: Value,
+        field: &str,
+        val: Value,
+    ) -> Result<(), VMError> {
+        let Some(obj_ref) = target.as_obj() else {
+            return Err(VMError::new("cannot set field on non-object"));
+        };
+        match self.gc.get_mut(obj_ref).map(|obj| &mut obj.kind) {
+            Some(ObjKind::Object(map)) => {
+                map.insert(field.to_string(), val);
+                Ok(())
+            }
+            Some(ObjKind::Frozen(_)) => Err(VMError::new("cannot mutate a frozen value")),
+            _ => Err(VMError::new("cannot set field on non-object")),
+        }
+    }
+
+    /// `container[index]` — shares negative-index and error-message rules
+    /// with the interpreter through `crate::semantics`.
+    pub(super) fn index_get(&self, container: Value, index: Value) -> Result<Value, VMError> {
+        use crate::semantics;
+        let mut current = container;
+        loop {
+            let Some(obj) = current.as_obj().and_then(|r| self.gc.get(r)) else {
+                return Err(VMError::new(&semantics::invalid_index(
+                    current.type_name(&self.gc),
+                    index.type_name(&self.gc),
+                )));
+            };
+            match (&obj.kind, index.classify(&self.gc)) {
+                (ObjKind::Frozen(inner), _) => current = *inner,
+                (ObjKind::Array(items) | ObjKind::Tuple(items), ValueKind::Int(i)) => {
+                    return match semantics::normalize_index(i, items.len()) {
+                        Some(slot) => Ok(items[slot]),
+                        None => Err(VMError::new(&semantics::index_out_of_bounds(
+                            i,
+                            if matches!(obj.kind, ObjKind::Tuple(_)) {
+                                "tuple"
+                            } else {
+                                "array"
+                            },
+                            items.len(),
+                        ))),
+                    };
+                }
+                (ObjKind::Object(map), _) if self.get_str_ref(&index).is_some() => {
+                    let key = self.get_str_ref(&index).unwrap_or_default();
+                    return map
+                        .get(key)
+                        .copied()
+                        .ok_or_else(|| VMError::new(&semantics::missing_key(key)));
+                }
+                _ => {
+                    return Err(VMError::new(&semantics::invalid_index(
+                        current.type_name(&self.gc),
+                        index.type_name(&self.gc),
+                    )))
+                }
+            }
+        }
+    }
+
+    /// `container[index] = value` — same rules as `index_get`.
+    pub(super) fn index_set(
+        &mut self,
+        container: Value,
+        index: Value,
+        value: Value,
+    ) -> Result<(), VMError> {
+        use crate::semantics;
+        let key = self.get_string(&index);
+        let index_int = index.as_int(&self.gc);
+        let index_type = index.type_name(&self.gc);
+        let container_type = container.type_name(&self.gc);
+        let Some(obj) = container.as_obj().and_then(|r| self.gc.get_mut(r)) else {
+            return Err(VMError::new(&semantics::invalid_index_assign(
+                container_type,
+            )));
+        };
+        match (&mut obj.kind, index_int, key) {
+            (ObjKind::Array(items), Some(i), _) => {
+                let len = items.len();
+                let slot = semantics::normalize_index(i, len).ok_or_else(|| {
+                    VMError::new(&semantics::index_out_of_bounds(i, "array", len))
+                })?;
+                items[slot] = value;
+                Ok(())
+            }
+            (ObjKind::Object(map), _, Some(key)) => {
+                map.insert(key, value);
+                Ok(())
+            }
+            (ObjKind::Array(_) | ObjKind::Object(_), _, _) => Err(VMError::new(
+                &semantics::invalid_index(container_type, index_type),
+            )),
+            (ObjKind::Frozen(_), _, _) => {
+                Err(VMError::new("cannot modify frozen value: index assignment"))
+            }
+            _ => Err(VMError::new(&semantics::invalid_index_assign(
+                container_type,
             ))),
         }
     }
 
-    fn compare_op(&self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
-        match (left.classify(&self.gc), right.classify(&self.gc)) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => {
-                let result = match op {
-                    OpCode::Lt => a < b,
-                    OpCode::Gt => a > b,
-                    OpCode::LtEq => a <= b,
-                    OpCode::GtEq => a >= b,
-                    _ => false,
-                };
-                Ok(Value::bool_val(result))
-            }
-            (ValueKind::Float(a), ValueKind::Float(b)) => {
-                let result = match op {
-                    OpCode::Lt => a < b,
-                    OpCode::Gt => a > b,
-                    OpCode::LtEq => a <= b,
-                    OpCode::GtEq => a >= b,
-                    _ => false,
-                };
-                Ok(Value::bool_val(result))
-            }
-            (ValueKind::Int(a), ValueKind::Float(_b)) => {
-                self.compare_op(&Value::float(a as f64), right, op)
-            }
-            (ValueKind::Float(_a), ValueKind::Int(b)) => {
-                self.compare_op(left, &Value::float(b as f64), op)
-            }
-            _ => Err(VMError::new("cannot compare non-numbers")),
+    fn get_str_ref<'a>(&'a self, val: &Value) -> Option<&'a str> {
+        match val.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::String(s)) => Some(s.as_str()),
+            _ => None,
         }
+    }
+
+    /// Project a VM value onto the shared operand view (see `crate::semantics`).
+    pub(super) fn semantic_operand<'g>(gc: &'g Gc, value: &Value) -> crate::semantics::Operand<'g> {
+        use crate::semantics::Operand;
+        match value.classify(gc) {
+            ValueKind::Int(n) => Operand::Int(n),
+            ValueKind::Float(f) => Operand::Float(f),
+            ValueKind::Bool(_) => Operand::Bool,
+            ValueKind::Null => Operand::Null,
+            ValueKind::Obj(r) => match gc.get(r).map(|obj| &obj.kind) {
+                Some(ObjKind::String(s)) => Operand::Str(s.as_str()),
+                Some(ObjKind::Frozen(inner)) => Operand::Other(inner.type_name(gc)),
+                Some(_) => Operand::Other(value.type_name(gc)),
+                None => Operand::Null,
+            },
+        }
+    }
+
+    /// Arithmetic and ordering share their rules with the interpreter via
+    /// `crate::semantics::binary`.
+    fn binary_op(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        op: crate::semantics::BinaryOp,
+    ) -> Result<Value, VMError> {
+        use crate::semantics::Outcome;
+        let outcome = crate::semantics::binary(
+            op,
+            Self::semantic_operand(&self.gc, left),
+            Self::semantic_operand(&self.gc, right),
+        )
+        .map_err(|message| VMError::new(&message))?;
+        Ok(match outcome {
+            Outcome::Int(n) => Value::int(n, &mut self.gc),
+            Outcome::Float(f) => Value::float(f),
+            Outcome::Bool(b) => Value::bool_val(b),
+            Outcome::Concat => {
+                let text = format!("{}{}", left.display(&self.gc), right.display(&self.gc));
+                Value::obj(self.gc.alloc_string(text))
+            }
+        })
+    }
+
+    fn arith_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
+        use crate::semantics::BinaryOp;
+        // Fast path: non-overflowing int arithmetic never needs the shared table.
+        if let (ValueKind::Int(a), ValueKind::Int(b)) =
+            (left.classify(&self.gc), right.classify(&self.gc))
+        {
+            let fast = match op {
+                OpCode::Add => a.checked_add(b),
+                OpCode::Sub => a.checked_sub(b),
+                OpCode::Mul => a.checked_mul(b),
+                _ => None,
+            };
+            if let Some(r) = fast {
+                return Ok(Value::int(r, &mut self.gc));
+            }
+        }
+        let shared = match op {
+            OpCode::Add => BinaryOp::Add,
+            OpCode::Sub => BinaryOp::Sub,
+            OpCode::Mul => BinaryOp::Mul,
+            OpCode::Div => BinaryOp::Div,
+            OpCode::Mod => BinaryOp::Mod,
+            _ => return Err(VMError::new("invalid operation")),
+        };
+        self.binary_op(left, right, shared)
+    }
+
+    fn compare_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
+        use crate::semantics::BinaryOp;
+        if let (ValueKind::Int(a), ValueKind::Int(b)) =
+            (left.classify(&self.gc), right.classify(&self.gc))
+        {
+            return Ok(Value::bool_val(match op {
+                OpCode::Lt => a < b,
+                OpCode::Gt => a > b,
+                OpCode::LtEq => a <= b,
+                OpCode::GtEq => a >= b,
+                _ => false,
+            }));
+        }
+        let shared = match op {
+            OpCode::Lt => BinaryOp::Lt,
+            OpCode::Gt => BinaryOp::Gt,
+            OpCode::LtEq => BinaryOp::LtEq,
+            OpCode::GtEq => BinaryOp::GtEq,
+            _ => return Err(VMError::new("invalid comparison")),
+        };
+        self.binary_op(left, right, shared)
     }
 }

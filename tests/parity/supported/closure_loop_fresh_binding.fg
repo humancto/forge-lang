@@ -1,0 +1,35 @@
+// expect: [[0, 1, 2], [0, 100, 200], [[0, 0], [2, 20], [3, 30]], [0, 1, 2]]
+// Each loop iteration gets a fresh binding, so closures created in
+// different iterations capture different values (for, while, continue/break).
+fn collect(fs) { return map(fs, fn(f) { return f() }) }
+
+let mut by_for = []
+for i in range(0, 3) {
+    by_for = push(by_for, fn() { return i })
+}
+
+let mut by_while = []
+let mut w = 0
+while w < 3 {
+    let c = w * 100
+    by_while = push(by_while, fn() { return c })
+    w = w + 1
+}
+
+let mut skipping = []
+for i in range(0, 6) {
+    if i == 1 { continue }
+    if i == 4 { break }
+    let j = i * 10
+    skipping = push(skipping, fn() { return [i, j] })
+}
+
+fn in_function() {
+    let mut fs = []
+    for i in range(0, 3) {
+        fs = push(fs, fn() { return i })
+    }
+    return collect(fs)
+}
+
+[collect(by_for), collect(by_while), collect(skipping), in_function()]

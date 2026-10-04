@@ -516,7 +516,7 @@ impl GcObject {
             ObjKind::Upvalue(_) => "Upvalue",
             ObjKind::ResultOk(_) | ObjKind::ResultErr(_) => "Result",
             ObjKind::TaskHandle(_) => "TaskHandle",
-            ObjKind::Channel(_) => "channel",
+            ObjKind::Channel(_) => "Channel",
             ObjKind::Frozen(_) => "Frozen",
             ObjKind::Tuple(_) => "Tuple",
             ObjKind::Set(_) => "Set",

@@ -307,41 +307,258 @@ impl VM {
                 };
                 Err(VMError::new(&message))
             }
-            "__forge_import_module" => {
-                if args.is_empty() || args.len() > 2 {
+            "__forge_get_field" => {
+                if args.len() != 2 {
+                    return Err(VMError::new("__forge_get_field() requires (object, name)"));
+                }
+                let field = self.get_string_arg(&args, 1)?;
+                self.get_field(args[0], &field)
+            }
+            "__forge_set_field" => {
+                if args.len() != 3 {
                     return Err(VMError::new(
-                        "__forge_import_module() requires (path, [names])",
+                        "__forge_set_field() requires (object, name, value)",
+                    ));
+                }
+                let field = self.get_string_arg(&args, 1)?;
+                self.set_field(args[0], &field, args[2])?;
+                Ok(Value::null())
+            }
+            "__forge_destructure" => {
+                // (value, kind, names, has_rest) -> [bound values...]
+                if args.len() != 4 {
+                    return Err(VMError::new(
+                        "__forge_destructure() requires (value, kind, names, has_rest)",
+                    ));
+                }
+                let kind = self.get_string_arg(&args, 1)?;
+                let names: Vec<String> = self
+                    .array_items(&args[2], "__forge_destructure() names must be an array")?
+                    .iter()
+                    .filter_map(|v| self.get_string(v))
+                    .collect();
+                let has_rest = args[3].is_truthy(&self.gc);
+                let source = args[0]
+                    .as_obj()
+                    .and_then(|r| self.gc.get(r))
+                    .map(|o| &o.kind);
+                let (mut parts, rest): (Vec<Value>, Option<Vec<Value>>) =
+                    match (kind.as_str(), source) {
+                        ("object", Some(ObjKind::Object(map))) => (
+                            names
+                                .iter()
+                                .map(|name| map.get(name).copied().unwrap_or(Value::null()))
+                                .collect(),
+                            None,
+                        ),
+                        ("object", _) => return Err(VMError::new("cannot destructure non-object")),
+                        ("array", Some(ObjKind::Array(items)))
+                        | ("tuple", Some(ObjKind::Tuple(items))) => (
+                            (0..names.len())
+                                .map(|i| items.get(i).copied().unwrap_or(Value::null()))
+                                .collect(),
+                            has_rest.then(|| items.get(names.len()..).unwrap_or(&[]).to_vec()),
+                        ),
+                        ("array", _) => return Err(VMError::new("cannot destructure non-array")),
+                        _ => return Err(VMError::new("cannot destructure non-tuple")),
+                    };
+                if let Some(rest) = rest {
+                    parts.push(Value::obj(self.gc.alloc(ObjKind::Array(rest))));
+                }
+                Ok(Value::obj(self.gc.alloc(ObjKind::Array(parts))))
+            }
+            "__forge_array_spread" => {
+                // (flags, items...) — flag '1' marks a spread item.
+                let flags = self.get_string_arg(&args, 0)?;
+                let mut out = Vec::new();
+                for (flag, item) in flags.chars().zip(args.iter().skip(1)) {
+                    let spread_items = if flag == '1' {
+                        match item.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+                            Some(ObjKind::Array(items)) => Some(items.clone()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    match spread_items {
+                        Some(items) => out.extend(items),
+                        None => out.push(*item),
+                    }
+                }
+                Ok(Value::obj(self.gc.alloc(ObjKind::Array(out))))
+            }
+            "__forge_check" => {
+                // (kind, value, extra...) — mirrors the interpreter's `check`.
+                let kind = self.get_string_arg(&args, 0)?;
+                let value = args.get(1).copied().unwrap_or(Value::null());
+                let as_str = |vm: &VM, v: &Value| vm.get_string(v);
+                let valid = match kind.as_str() {
+                    "not_empty" => {
+                        match value.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+                            Some(ObjKind::String(s)) => !s.is_empty(),
+                            Some(ObjKind::Array(a)) => !a.is_empty(),
+                            _ => !value.is_null(),
+                        }
+                    }
+                    "contains" => match (
+                        as_str(self, &value),
+                        args.get(2).and_then(|n| as_str(self, n)),
+                    ) {
+                        (Some(s), Some(needle)) => s.contains(needle.as_str()),
+                        _ => false,
+                    },
+                    "between" => {
+                        let lo = args.get(2).copied().unwrap_or(Value::null());
+                        let hi = args.get(3).copied().unwrap_or(Value::null());
+                        match (
+                            value.classify(&self.gc),
+                            lo.classify(&self.gc),
+                            hi.classify(&self.gc),
+                        ) {
+                            (ValueKind::Int(v), ValueKind::Int(l), ValueKind::Int(h)) => {
+                                v >= l && v <= h
+                            }
+                            (ValueKind::Float(v), ValueKind::Float(l), ValueKind::Float(h)) => {
+                                v >= l && v <= h
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => value.is_truthy(&self.gc),
+                };
+                if valid {
+                    Ok(Value::null())
+                } else {
+                    Err(VMError::new(&crate::semantics::check_failed(
+                        &value.display(&self.gc),
+                    )))
+                }
+            }
+            "__forge_when_matches" => {
+                if args.len() != 3 {
+                    return Err(VMError::new(
+                        "__forge_when_matches() requires (op, subject, value)",
+                    ));
+                }
+                let op = self.get_string_arg(&args, 0)?;
+                let displays_equal = args[1].display(&self.gc) == args[2].display(&self.gc);
+                let matched = crate::semantics::when_matches(
+                    &op,
+                    Self::semantic_operand(&self.gc, &args[1]),
+                    Self::semantic_operand(&self.gc, &args[2]),
+                    displays_equal,
+                );
+                Ok(Value::bool_val(matched))
+            }
+            "__forge_method_mut" => {
+                // (receiver, method, args...) -> (new_receiver, result).
+                // In-place forms on a mutable variable: push/pop on arrays,
+                // add/remove on sets. Anything else is an ordinary method
+                // call that leaves the receiver unchanged.
+                if args.len() < 2 {
+                    return Err(VMError::new(
+                        "__forge_method_mut() requires (receiver, method, ...args)",
+                    ));
+                }
+                let receiver = args[0];
+                let method = self.get_string_arg(&args, 1)?;
+                let rest = &args[2..];
+                let kind = receiver
+                    .as_obj()
+                    .and_then(|r| self.gc.get(r))
+                    .map(|o| &o.kind);
+                let is_frozen = matches!(kind, Some(ObjKind::Frozen(_)));
+                let updated: Option<(Vec<Value>, bool, Option<Value>)> =
+                    match (method.as_str(), kind, rest) {
+                        ("push", Some(ObjKind::Array(items)), [value]) => {
+                            let mut items = items.clone();
+                            items.push(*value);
+                            Some((items, false, None))
+                        }
+                        ("pop", Some(ObjKind::Array(items)), []) => {
+                            let mut items = items.clone();
+                            let popped = items.pop().unwrap_or(Value::null());
+                            Some((items, false, Some(popped)))
+                        }
+                        ("add", Some(ObjKind::Set(items)), [value]) => {
+                            let mut items = items.clone();
+                            if !items.iter().any(|v| v.set_eq(value, &self.gc)) {
+                                items.push(*value);
+                            }
+                            Some((items, true, None))
+                        }
+                        ("remove", Some(ObjKind::Set(items)), [value]) => {
+                            let items: Vec<Value> = items
+                                .iter()
+                                .filter(|v| !v.set_eq(value, &self.gc))
+                                .copied()
+                                .collect();
+                            Some((items, true, None))
+                        }
+                        _ => None,
+                    };
+                let (new_receiver, result) = match updated {
+                    Some((items, is_set, explicit_result)) => {
+                        let kind = if is_set {
+                            ObjKind::Set(items)
+                        } else {
+                            ObjKind::Array(items)
+                        };
+                        let new_value = Value::obj(self.gc.alloc(kind));
+                        (new_value, explicit_result.unwrap_or(new_value))
+                    }
+                    None => {
+                        if is_frozen && matches!(method.as_str(), "add" | "remove" | "push" | "pop")
+                        {
+                            return Err(VMError::new(&format!("cannot {} a frozen value", method)));
+                        }
+                        let result = self.call_forge_method(receiver, &method, rest)?;
+                        (receiver, result)
+                    }
+                };
+                let pair = self.gc.alloc(ObjKind::Tuple(vec![new_receiver, result]));
+                Ok(Value::obj(pair))
+            }
+            "__forge_import_module" => {
+                // (resolved_path, names | false, path_as_written)
+                if args.is_empty() || args.len() > 3 {
+                    return Err(VMError::new(
+                        "__forge_import_module() requires (path, names, display_path)",
                     ));
                 }
 
-                let requested_names = match args.get(1).map(|v| v.classify(&self.gc)) {
-                    Some(ValueKind::Obj(r)) => self
-                        .gc
-                        .get(r)
-                        .and_then(|obj| match &obj.kind {
-                            ObjKind::Array(items) => Some(
-                                items.iter()
-                                    .filter_map(|item| self.get_string(item))
-                                    .collect::<Vec<_>>(),
-                            ),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            VMError::new(
-                                "__forge_import_module() second argument must be an array of strings",
-                            )
-                        })?,
-                    Some(ValueKind::Null) | None => Vec::new(),
-                    Some(_) => {
-                        return Err(VMError::new(
-                            "__forge_import_module() second argument must be an array of strings",
-                        ))
-                    }
-                };
+                let requested_names: Option<Vec<String>> =
+                    match args.get(1).map(|v| v.classify(&self.gc)) {
+                        Some(ValueKind::Obj(r)) => Some(
+                            self.gc
+                                .get(r)
+                                .and_then(|obj| match &obj.kind {
+                                    ObjKind::Array(items) => Some(
+                                        items
+                                            .iter()
+                                            .filter_map(|item| self.get_string(item))
+                                            .collect::<Vec<_>>(),
+                                    ),
+                                    _ => None,
+                                })
+                                .ok_or_else(|| {
+                                    VMError::new(
+                                        "__forge_import_module() names must be an array of strings",
+                                    )
+                                })?,
+                        ),
+                        _ => None,
+                    };
 
-                let path = self.get_string_arg(&args, 0)?;
-                let file_path = crate::package::resolve_import(&path)
-                    .unwrap_or_else(|| std::path::PathBuf::from(&path));
+                // The compiler passes the canonical path of the module file
+                // plus the path as the user wrote it (for messages).
+                let resolved = self.get_string_arg(&args, 0)?;
+                let path = match args.get(2) {
+                    Some(_) => self.get_string_arg(&args, 2)?,
+                    None => resolved.clone(),
+                };
+                let file_path = crate::package::resolve_import(&resolved)
+                    .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
                 let source = std::fs::read_to_string(&file_path)
                     .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
 
@@ -354,32 +571,49 @@ impl VM {
                     VMError::new(&format!("import '{}' parse error: {}", path, e.message))
                 })?;
 
-                let export_names = if requested_names.is_empty() {
-                    program
-                        .statements
-                        .iter()
-                        .filter_map(|spanned| match &spanned.stmt {
-                            crate::parser::ast::Stmt::FnDef { name, .. }
-                            | crate::parser::ast::Stmt::Let { name, .. } => Some(name.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    requested_names
-                };
+                let export_names = requested_names
+                    .unwrap_or_else(|| crate::vm::compiler::import_export_names(&program));
 
-                let chunk = crate::vm::compiler::compile_module(&program).map_err(|e| {
+                // The module's top-level names live under a private global
+                // prefix, so only the names imported here become visible to
+                // the importer (no leaking of helpers it did not ask for).
+                let prefix = crate::vm::compiler::module_global_prefix(&resolved);
+                let chunk = crate::vm::compiler::compile_module_with(
+                    &program,
+                    file_path.parent(),
+                    Some(&prefix),
+                )
+                .map_err(|e| {
                     VMError::new(&format!("import '{}' compile error: {}", path, e.message))
                 })?;
                 self.execute_module(&chunk).map_err(|e| {
                     VMError::new(&format!("import '{}' runtime error: {}", path, e))
                 })?;
 
+                let struct_names: std::collections::HashSet<&str> = program
+                    .statements
+                    .iter()
+                    .filter_map(|spanned| match &spanned.stmt {
+                        crate::parser::ast::Stmt::StructDef { name, .. } => Some(name.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 let mut exports = IndexMap::new();
                 for name in export_names {
-                    let value = self.globals.get(&name).cloned().ok_or_else(|| {
-                        VMError::new(&format!("import '{}' does not export '{}'", path, name))
-                    })?;
+                    let value = self
+                        .globals
+                        .get(&format!("{}{}", prefix, name))
+                        .or_else(|| {
+                            // Struct registrations are global by type name.
+                            struct_names
+                                .contains(name.as_str())
+                                .then(|| self.globals.get(&name))
+                                .flatten()
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            VMError::new(&crate::semantics::import_missing_name(&path, &name))
+                        })?;
                     exports.insert(name, value);
                 }
                 let exports_ref = self.gc.alloc(ObjKind::Object(exports));
@@ -432,7 +666,19 @@ impl VM {
             },
             "type" => match args.first() {
                 Some(v) => {
-                    let name = v.type_name(&self.gc);
+                    // VM Options are ADT objects; report them as `Option`
+                    // like the interpreter does.
+                    let is_lambda = matches!(
+                        v.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
+                        Some(ObjKind::Closure(c)) if c.function.name == "<lambda>"
+                    );
+                    let name = if self.option_parts(v).is_some() {
+                        "Option"
+                    } else if is_lambda {
+                        "Lambda"
+                    } else {
+                        v.type_name(&self.gc)
+                    };
                     Ok(self.alloc_string(name))
                 }
                 None => Err(VMError::new("type() requires an argument")),
@@ -545,17 +791,17 @@ impl VM {
                 Err(VMError::new("push() requires an array"))
             }
             "pop" => {
+                // Returns the popped (last) item, like the interpreter. On a
+                // mutable variable the compiler also rebinds the variable to
+                // the shortened array (see `__forge_method_mut`).
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
                     if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Array(items) = &obj.kind {
-                            let mut new_items = items.clone();
-                            new_items.pop();
-                            let nr = self.gc.alloc(ObjKind::Array(new_items));
-                            return Ok(Value::obj(nr));
+                            return Ok(items.last().copied().unwrap_or(Value::null()));
                         }
                     }
                 }
-                Err(VMError::new("pop() requires an array"))
+                Err(VMError::new("pop() requires array"))
             }
             // Lowercase aliases must come BEFORE the capitalized forms
             // so the match arms are not shadowed ("Ok" would match before "ok" | "Ok")
@@ -624,7 +870,11 @@ impl VM {
                         }
                     }
                 }
-                Err(VMError::new("unwrap() requires a Result"))
+                match args.first().and_then(|v| self.option_parts(v)) {
+                    Some(Some(inner)) => Ok(inner),
+                    Some(None) => Err(VMError::new("unwrap() called on None")),
+                    None => Err(VMError::new("unwrap() requires a Result or Option value")),
+                }
             }
             "unwrap_or" => {
                 if args.len() < 2 {
@@ -640,7 +890,10 @@ impl VM {
                         }
                     }
                 }
-                Ok(args[1].clone())
+                match self.option_parts(&args[0]) {
+                    Some(Some(inner)) => Ok(inner),
+                    _ => Ok(args[1].clone()),
+                }
             }
             "assert" => {
                 let cond = args.first().cloned().unwrap_or(Value::bool_val(false));
@@ -1071,16 +1324,22 @@ impl VM {
             }
             "reverse" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Array(items) = &obj.kind {
+                    let reversed = match self.gc.get(r).map(|obj| &obj.kind) {
+                        Some(ObjKind::Array(items)) => {
                             let mut rev = items.clone();
                             rev.reverse();
-                            let nr = self.gc.alloc(ObjKind::Array(rev));
-                            return Ok(Value::obj(nr));
+                            Some(ObjKind::Array(rev))
                         }
+                        Some(ObjKind::String(s)) => {
+                            Some(ObjKind::String(s.chars().rev().collect()))
+                        }
+                        _ => None,
+                    };
+                    if let Some(kind) = reversed {
+                        return Ok(Value::obj(self.gc.alloc(kind)));
                     }
                 }
-                Err(VMError::new("reverse() requires an array"))
+                Err(VMError::new("reverse() requires an array or string"))
             }
             "contains" => match (args.first().and_then(|v| v.as_obj()), args.get(1)) {
                 (Some(r), Some(val)) => {
@@ -2143,7 +2402,19 @@ impl VM {
             // ===== typeof (alias for "type") =====
             "typeof" => match args.first() {
                 Some(v) => {
-                    let name = v.type_name(&self.gc);
+                    // VM Options are ADT objects; report them as `Option`
+                    // like the interpreter does.
+                    let is_lambda = matches!(
+                        v.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
+                        Some(ObjKind::Closure(c)) if c.function.name == "<lambda>"
+                    );
+                    let name = if self.option_parts(v).is_some() {
+                        "Option"
+                    } else if is_lambda {
+                        "Lambda"
+                    } else {
+                        v.type_name(&self.gc)
+                    };
                     Ok(self.alloc_string(name))
                 }
                 None => Err(VMError::new("typeof() requires an argument")),
@@ -2931,7 +3202,8 @@ impl VM {
                 let func = args[0].clone();
                 match self.call_value(func, vec![]) {
                     Ok(val) => Ok(val),
-                    Err(_) => Ok(Value::null()),
+                    // Same as the interpreter: a failed yolo yields None.
+                    Err(_) => Ok(self.alloc_option_none()),
                 }
             }
             "ghost" => {
@@ -3527,6 +3799,32 @@ impl VM {
                 )
             }),
             _ => false,
+        }
+    }
+
+    /// `Some(Some(v))` for `Some(v)`, `Some(None)` for `None`, `None` for a
+    /// value that is not an Option (VM Options are ADT objects).
+    fn option_parts(&self, value: &Value) -> Option<Option<Value>> {
+        let fields = match value.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::Object(map)) => map,
+            _ => return None,
+        };
+        if fields
+            .get("__type__")
+            .and_then(|t| self.get_string(t))
+            .as_deref()
+            != Some("Option")
+        {
+            return None;
+        }
+        match fields
+            .get("__variant__")
+            .and_then(|v| self.get_string(v))
+            .as_deref()
+        {
+            Some("Some") => Some(Some(fields.get("_0").copied().unwrap_or(Value::null()))),
+            Some("None") => Some(None),
+            _ => None,
         }
     }
 
