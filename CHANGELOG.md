@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **VS Code extension: language server and debugger** — `editors/vscode` now starts `forge lsp` via `vscode-languageclient` and contributes a `forge` debug type backed by `forge dap` (F5 on a `.fg` file works without `launch.json`). New settings `forge.path`, `forge.lsp.enabled`, `forge.trace.server` and a **Forge: Restart Language Server** command. The extension is plain JavaScript (no build step) and is ready to publish (`npm run package` produces a `.vsix`; icon, license and extension changelog included).
 - **LSP formatting and signature help** — `forge lsp` now advertises `textDocument/formatting` (whole-document, via the `forge fmt` formatter) and `textDocument/signatureHelp` (builtins and user-defined functions, with active-parameter tracking).
 - **Standalone source-runtime native binaries for Forge servers** — `forge build --native` now links against `libforge_lang.a` when available and emits a single executable that embeds Forge source and starts interpreter-only runtime features like `@server` without shelling out to the `forge` CLI. `--aot` remains bytecode/VM-only and continues to reject decorator-driven servers with guidance to use `--native`.
 - **Startup time measurement harness** — `tools/startup_time.rs` measures source, bytecode, native source-runtime, and bytecode AOT process startup with correctness checks. CI runs it as a report-only signal before the `<10ms` native startup target becomes a hard gate.
