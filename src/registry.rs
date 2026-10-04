@@ -281,7 +281,7 @@ pub fn local_index(roots: &[PathBuf]) -> Vec<(PackageSummary, PathBuf)> {
         };
         let mut names: Vec<_> = packages
             .flatten()
-            .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .collect();
         names.sort_by_key(|e| e.file_name());
         for pkg in names {
@@ -291,7 +291,7 @@ pub fn local_index(roots: &[PathBuf]) -> Vec<(PackageSummary, PathBuf)> {
             };
             let newest = versions
                 .flatten()
-                .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                 .filter_map(|e| {
                     semver::Version::parse(&e.file_name().to_string_lossy())
                         .ok()
@@ -399,8 +399,8 @@ pub fn print_search_report(query: &str, report: &SearchReport, local_roots: &[Pa
     }
 
     println!(
-        "{:<20} {:<10} {:<8} {}",
-        "NAME", "VERSION", "SOURCE", "DESCRIPTION"
+        "{:<20} {:<10} {:<8} DESCRIPTION",
+        "NAME", "VERSION", "SOURCE"
     );
     println!("{}", "-".repeat(68));
     for hit in &report.hits {
@@ -931,7 +931,7 @@ latest = "2.0.0"
         let root = local_registry("offline");
         let report = search_all(
             "router",
-            &[root.clone()],
+            std::slice::from_ref(&root),
             Err("registry returned 404 Not Found".into()),
         );
         assert_eq!(report.hits.len(), 1);
@@ -944,7 +944,7 @@ latest = "2.0.0"
     #[test]
     fn search_merges_local_and_remote_with_local_shadowing() {
         let root = local_registry("merge");
-        let report = search_all("", &[root.clone()], Ok(test_index()));
+        let report = search_all("", std::slice::from_ref(&root), Ok(test_index()));
         let names: Vec<(&str, bool)> = report
             .hits
             .iter()
