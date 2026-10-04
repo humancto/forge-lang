@@ -182,3 +182,75 @@ fn gc_stress_matches_normal_run_on_parity_fixtures() {
     }
     assert!(checked > 10, "only {} fixtures checked", checked);
 }
+
+// ---------------------------------------------------------------------------
+// Big integers never panic
+// ---------------------------------------------------------------------------
+
+#[test]
+fn big_int_results_from_builtins_do_not_panic() {
+    let out = run_vm(
+        r#"
+        say math.pow(2, 50)
+        say math.pow(2, 62)
+        say type(math.pow(2, 63))
+        say math.abs(-140737488355329)
+        say type(math.abs(-9223372036854775807 - 1))
+        say math.max(140737488355328, 1)
+        say math.min(-140737488355328, 1)
+        say math.clamp(140737488355329, 0, 140737488355330)
+        say [140737488355328].stream().sum()
+        say type([9223372036854775807, 1].stream().sum())
+        say type(sum([9223372036854775807, 1]))
+        say range(140737488355328, 140737488355330)[1]
+        say math.floor(140737488355328.5)
+        "#,
+        false,
+    )
+    .expect("vm error");
+    assert_eq!(
+        out,
+        vec![
+            "1125899906842624",
+            "4611686018427387904",
+            "Float",
+            "140737488355329",
+            "Float",
+            "140737488355328",
+            "-140737488355328",
+            "140737488355329",
+            "140737488355328",
+            "Float",
+            "Float",
+            "140737488355329",
+            "140737488355328",
+        ]
+    );
+}
+
+#[test]
+fn math_overflow_policy_matches_interpreter() {
+    use crate::interpreter::Value as IV;
+    use crate::stdlib::math::call;
+    assert_eq!(
+        call("math.pow", vec![IV::Int(2), IV::Int(63)]).expect("pow"),
+        IV::Float(9_223_372_036_854_775_808.0)
+    );
+    assert_eq!(
+        call("math.pow", vec![IV::Int(2), IV::Int(62)]).expect("pow"),
+        IV::Int(1 << 62)
+    );
+    assert!(matches!(
+        call("math.abs", vec![IV::Int(i64::MIN)]).expect("abs"),
+        IV::Float(_)
+    ));
+    assert!(matches!(
+        call("math.floor", vec![IV::Float(1e300)]).expect("floor"),
+        IV::Float(_)
+    ));
+    let r = call(
+        "math.random_int",
+        vec![IV::Int(i64::MIN), IV::Int(i64::MAX)],
+    );
+    assert!(matches!(r, Ok(IV::Int(_))));
+}

@@ -53,13 +53,7 @@ pub fn decode_value(encoded: u64) -> Value {
             };
             // JIT uses 60-bit payload which can exceed NaN-box 48-bit inline range.
             // Fall back to float if we can't inline (no gc available for BoxedInt).
-            const INT48_MAX: i64 = (1_i64 << 47) - 1;
-            const INT48_MIN: i64 = -(1_i64 << 47);
-            if n >= INT48_MIN && n <= INT48_MAX {
-                Value::small_int(n)
-            } else {
-                Value::float(n as f64)
-            }
+            Value::try_inline_int(n).unwrap_or_else(|| Value::float(n as f64))
         }
         TAG_FLOAT => {
             let bits = payload;

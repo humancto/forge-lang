@@ -4333,8 +4333,12 @@ impl Interpreter {
                         Value::Int(n) => {
                             if is_float {
                                 acc_float += n as f64;
+                            } else if let Some(next) = acc_int.checked_add(n) {
+                                acc_int = next;
                             } else {
-                                acc_int += n;
+                                // i64 overflow promotes to float, like `+`.
+                                acc_float = acc_int as f64 + n as f64;
+                                is_float = true;
                             }
                         }
                         Value::Float(f) => {

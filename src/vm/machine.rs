@@ -1573,8 +1573,10 @@ impl VM {
                                     }
                                     ObjKind::String(s) => match field.as_str() {
                                         "len" => {
-                                            direct_result =
-                                                Some(Value::small_int(s.chars().count() as i64));
+                                            direct_result = Some(Value::int(
+                                                s.chars().count() as i64,
+                                                &mut self.gc,
+                                            ));
                                             needs_alloc = None;
                                         }
                                         "upper" => {
@@ -1599,8 +1601,10 @@ impl VM {
                                     ObjKind::Array(items) | ObjKind::Set(items) => {
                                         match field.as_str() {
                                             "len" => {
-                                                direct_result =
-                                                    Some(Value::small_int(items.len() as i64));
+                                                direct_result = Some(Value::int(
+                                                    items.len() as i64,
+                                                    &mut self.gc,
+                                                ));
                                                 needs_alloc = None;
                                             }
                                             _ => {
@@ -1813,7 +1817,7 @@ impl VM {
                         } else {
                             0
                         };
-                        self.registers[base + a as usize] = Value::small_int(len);
+                        self.registers[base + a as usize] = Value::int(len, &mut self.gc);
                     }
                     OpCode::Concat => {
                         let left = self.registers[base + b as usize].display(&self.gc);
