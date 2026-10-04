@@ -135,6 +135,74 @@ pub fn install_from_manifest() {
     }
 }
 
+/// `forge add <name>[@version]`: add or update a dependency, install it, and
+/// only then persist the change to forge.toml. A failed install leaves
+/// forge.toml (and forge.lock) untouched.
+pub fn add(name: &str, version: &str) {
+    let registry_roots = default_registry_roots();
+    match add_dependency_at(
+        Path::new("forge.toml"),
+        Path::new(PACKAGES_DIR),
+        Path::new("forge.lock"),
+        &registry_roots,
+        name,
+        version,
+    ) {
+        Ok((action, summary)) => {
+            println!("  {} {} = \"{}\" to forge.toml", action, name, version);
+            println!("  {} dependencies processed", summary.processed);
+        }
+        Err(message) => {
+            eprintln!("{}", message);
+            eprintln!("  forge.toml was not modified.");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn add_dependency_at(
+    manifest_path: &Path,
+    packages_dir: &Path,
+    lockfile_path: &Path,
+    registry_roots: &[PathBuf],
+    name: &str,
+    version: &str,
+) -> Result<(&'static str, InstallSummary), String> {
+    validate_package_name(name)?;
+    let mut manifest = if manifest_path.exists() {
+        let content = std::fs::read_to_string(manifest_path)
+            .map_err(|e| format!("  Error: failed to read {}: {}", manifest_path.display(), e))?;
+        toml::from_str::<Manifest>(&content)
+            .map_err(|e| format!("  Error: invalid {}: {}", manifest_path.display(), e))?
+    } else {
+        Manifest::default()
+    };
+    let action = if manifest.dependencies.contains_key(name) {
+        "Updated"
+    } else {
+        "Added"
+    };
+    manifest.dependencies.insert(
+        name.to_string(),
+        DependencySpec::Version(version.to_string()),
+    );
+
+    let manifest_root = manifest_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let summary = install_manifest_dependencies(
+        &manifest,
+        manifest_root,
+        packages_dir,
+        lockfile_path,
+        registry_roots,
+    )?;
+
+    manifest::save_manifest_to(&manifest, manifest_path).map_err(|e| format!("  Error: {}", e))?;
+    Ok((action, summary))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InstallSummary {
     processed: usize,
@@ -317,7 +385,7 @@ fn resolve_transitive(
     Ok(results)
 }
 
-fn default_registry_roots() -> Vec<PathBuf> {
+pub(crate) fn default_registry_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(paths) = env::var_os("FORGE_REGISTRY_PATH") {
         roots.extend(env::split_paths(&paths));
@@ -918,6 +986,110 @@ toolkit = "1.2.3"
         assert_eq!(package.version, "1.2.3");
         assert!(package.source.starts_with("registry+"));
 
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn add_writes_manifest_only_after_successful_install() {
+        let workspace = temp_path("add-ok");
+        let registry_root = workspace.join("registry");
+        let registry_pkg = registry_root.join("toolkit").join("1.4.0");
+        std::fs::create_dir_all(&registry_pkg).unwrap();
+        std::fs::write(registry_pkg.join("main.fg"), "println(\"hi\")").unwrap();
+        let manifest_path = workspace.join("forge.toml");
+        std::fs::write(&manifest_path, "[project]\nname = \"app\"\n").unwrap();
+
+        let (action, summary) = add_dependency_at(
+            &manifest_path,
+            &workspace.join(PACKAGES_DIR),
+            &workspace.join("forge.lock"),
+            &[registry_root],
+            "toolkit",
+            "^1.0",
+        )
+        .unwrap();
+        assert_eq!(action, "Added");
+        assert_eq!(summary.processed, 1);
+
+        let manifest = manifest::load_manifest_from(&manifest_path).unwrap();
+        assert!(matches!(
+            manifest.dependencies.get("toolkit"),
+            Some(DependencySpec::Version(v)) if v == "^1.0"
+        ));
+        assert!(workspace.join("forge.lock").exists());
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn add_leaves_manifest_untouched_when_install_fails() {
+        let workspace = temp_path("add-fail");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let manifest_path = workspace.join("forge.toml");
+        let original = "[project]\nname = \"app\"\n";
+        std::fs::write(&manifest_path, original).unwrap();
+
+        // An unparseable constraint fails before any network access.
+        let err = add_dependency_at(
+            &manifest_path,
+            &workspace.join(PACKAGES_DIR),
+            &workspace.join("forge.lock"),
+            &[workspace.join("registry")],
+            "router",
+            "not a version",
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid version constraint"), "{err}");
+        assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), original);
+        assert!(!workspace.join("forge.lock").exists());
+
+        // No forge.toml at all: a failed add must not create one.
+        let fresh = workspace.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let fresh_manifest = fresh.join("forge.toml");
+        assert!(add_dependency_at(
+            &fresh_manifest,
+            &fresh.join(PACKAGES_DIR),
+            &fresh.join("forge.lock"),
+            &[],
+            "router",
+            "not a version",
+        )
+        .is_err());
+        assert!(!fresh_manifest.exists());
+
+        // Invalid names are rejected up front.
+        assert!(add_dependency_at(
+            &fresh_manifest,
+            &fresh.join(PACKAGES_DIR),
+            &fresh.join("forge.lock"),
+            &[],
+            "../evil",
+            "*",
+        )
+        .is_err());
+        assert!(!fresh_manifest.exists());
+
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn add_refuses_to_overwrite_unparseable_manifest() {
+        let workspace = temp_path("add-corrupt");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let manifest_path = workspace.join("forge.toml");
+        let original = "this is = = not toml";
+        std::fs::write(&manifest_path, original).unwrap();
+        let err = add_dependency_at(
+            &manifest_path,
+            &workspace.join(PACKAGES_DIR),
+            &workspace.join("forge.lock"),
+            &[],
+            "router",
+            "*",
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid"), "{err}");
+        assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), original);
         std::fs::remove_dir_all(&workspace).unwrap();
     }
 

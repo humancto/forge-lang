@@ -159,10 +159,6 @@ pub fn load_manifest_from(path: &Path) -> Option<Manifest> {
     toml::from_str(&content).ok()
 }
 
-pub fn save_manifest(manifest: &Manifest) -> Result<(), String> {
-    save_manifest_to(manifest, Path::new("forge.toml"))
-}
-
 pub fn save_manifest_to(manifest: &Manifest, path: &Path) -> Result<(), String> {
     let content = toml::to_string_pretty(manifest)
         .map_err(|e| format!("failed to serialize manifest: {}", e))?;
