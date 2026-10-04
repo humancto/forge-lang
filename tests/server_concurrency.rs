@@ -29,6 +29,27 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_SCALING_RATIO: f64 = 3.8;
 
+/// Held for its whole duration by every test in this file.
+///
+/// libtest runs the tests of one binary concurrently (one thread per CPU).
+/// Here that means the two ratio-based scaling tests measure their C=4 phase
+/// while the *other* scaling test is also running 4 CPU-bound handlers and
+/// the WebSocket test's handler spins in a 1M-iteration file-writing loop.
+/// On ubuntu-latest (4 vCPU = 2 physical cores with SMT) that is ~9 busy
+/// threads on ~2.5 cores of throughput, which pushes the measured ratio past
+/// MAX_SCALING_RATIO even though handlers are fully parallel. The ratio gate
+/// is only meaningful when the measurement owns the machine, so the tests
+/// in this file run one at a time.
+static SERVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn exclusive_server_test() -> std::sync::MutexGuard<'static, ()> {
+    // A panicking (failed) sibling poisons the lock; the guard is still
+    // usable for serialization.
+    SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Pick an unused TCP port by binding 0 and letting the kernel choose.
 fn pick_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
@@ -142,6 +163,7 @@ fn concurrent_get_wall_time(url: &str, concurrency: usize) -> Duration {
 
 #[test]
 fn http_handlers_run_in_parallel_not_serialized() {
+    let _exclusive = exclusive_server_test();
     // CPU-bound handler. ~96ms in the tree-walking interpreter on a
     // modern machine; tuned high enough that scheduler noise can't
     // dominate, low enough that the test stays fast.
@@ -205,6 +227,7 @@ fn http_handlers_run_in_parallel_not_serialized() {
 
 #[test]
 fn closure_capturing_handlers_run_in_parallel_not_serialized() {
+    let _exclusive = exclusive_server_test();
     // Captured-closure handler pattern. A top-level Lambda holds the
     // CPU loop; the @get fn invokes it. Different from the global-fn
     // case in http_handlers_run_in_parallel_not_serialized: that path
@@ -277,6 +300,7 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
 
 #[test]
 fn schedule_mutations_do_not_leak_into_handler_forks() {
+    let _exclusive = exclusive_server_test();
     let sentinel = unique_temp_file("schedule_handler_isolation");
     let _ = std::fs::remove_file(&sentinel);
     let sentinel_str = forge_string_literal_path(&sentinel);
@@ -341,6 +365,7 @@ fn schedule_mutations_do_not_leak_into_handler_forks() {
 
 #[test]
 fn websocket_handler_cancelled_on_client_disconnect() {
+    let _exclusive = exclusive_server_test();
     let started = unique_temp_file("ws_cancel_started");
     let progress = unique_temp_file("ws_cancel_progress");
     let finished = unique_temp_file("ws_cancel_finished");
@@ -449,6 +474,7 @@ fn websocket_handler_cancelled_on_client_disconnect() {
 
 #[test]
 fn request_id_is_generated_and_propagated() {
+    let _exclusive = exclusive_server_test();
     // Two scenarios to verify:
     //   (a) request without X-Request-Id -> response carries a new UUID
     //   (b) request with X-Request-Id    -> response echoes the inbound value
