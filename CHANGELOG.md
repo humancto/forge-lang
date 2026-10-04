@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`forge fmt` preserves `/* block comment */` contents** — the re-indenter no longer strips leading indentation from lines inside multi-line block comments, no longer collapses blank lines inside them, and ignores braces inside block comments when computing indentation. Formatting is covered by an idempotence test.
 - **Native/AOT build failures now surface the C compiler's diagnostics** — `forge build --native` / `--aot` previously swallowed `cc` output and reported only a generic "compilation failed" string. Failures now include the compiler's exit status plus its stderr (head and tail, bounded at 8 KiB) so root causes like cross-architecture `libforge_lang.a` mismatches or missing libraries are visible directly in the error.
 - **WebSocket handlers now observe client disconnect cancellation** — WS connections install a connection-scoped cancellation token, run message handlers on the blocking pool, and keep polling the socket for close/error while handlers run so long-running loops exit at the next interpreter safe point. ([#146](https://github.com/humancto/forge-lang/pull/146))
 - **VM error traces now include columns when available** — bytecode chunks carry source columns alongside line tables, old v1.1 bytecode still deserializes with zero columns, and standalone decorator statements now fail VM compilation instead of being silently ignored.
