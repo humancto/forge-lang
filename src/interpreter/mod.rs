@@ -1217,6 +1217,11 @@ impl Interpreter {
                     cov.insert(spanned.line);
                 }
             }
+            // Top-level statements are debugger stop points too (breakpoints,
+            // stepping, stop-on-entry); `exec_stmts` only covers blocks.
+            if spanned.line > 0 {
+                self.debug_check(spanned.line);
+            }
             match self.exec_stmt(&spanned.stmt) {
                 Ok(signal) => match signal {
                     Signal::Return(v) => return Ok(v),
@@ -2323,13 +2328,18 @@ impl Interpreter {
                 *d = self.call_depth;
             }
 
+            // Clear the resume flag BEFORE notifying the DAP server. Clearing
+            // it afterwards loses a wakeup when the client resumes quickly:
+            // the server's `resumed = true` would be overwritten and this
+            // thread would wait forever.
+            let (lock, cvar) = &ds.resume;
+            *lock.lock().unwrap_or_else(|e| e.into_inner()) = false;
+
             // Notify DAP server we've paused
             let _ = ds.paused_sender.send(line);
 
             // Wait for resume signal
-            let (lock, cvar) = &ds.resume;
             let mut resumed = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *resumed = false;
             while !*resumed {
                 // Use timeout to keep cooperative cancellation alive
                 let result = cvar
