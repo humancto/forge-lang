@@ -131,9 +131,18 @@ enum Command {
         /// Filter tests by name pattern
         #[arg(long)]
         filter: Option<String>,
-        /// Show line coverage report after tests
+        /// Show line coverage report after tests (interpreter only)
         #[arg(long)]
         coverage: bool,
+        /// Engine to run tests on: vm, interp, or both. Defaults to the same
+        /// engine as `forge run` (VM, or interpreter with the global --interp
+        /// flag); files the VM cannot run yet fall back to the interpreter.
+        #[arg(long, value_enum)]
+        engine: Option<testing::Engine>,
+        /// Per-test time limit in seconds; a test that exceeds it aborts the
+        /// run with a failure (0 disables the limit)
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
     },
     /// Create a new Forge project
     New {
@@ -306,6 +315,8 @@ async fn main() {
             dir,
             filter,
             coverage,
+            engine,
+            timeout,
         }) => {
             let test_dir = if dir == "tests" {
                 if let Some(m) = manifest::load_manifest() {
@@ -316,7 +327,22 @@ async fn main() {
             } else {
                 dir
             };
-            testing::run_tests(&test_dir, filter.as_deref(), coverage);
+            let engine = engine.unwrap_or(if cli.use_interp {
+                testing::Engine::Interp
+            } else {
+                testing::Engine::Vm
+            });
+            let vm_compat = |program: &Program| ensure_vm_compatible(program, "VM");
+            testing::run_tests(
+                &test_dir,
+                &testing::TestOptions {
+                    filter: filter.as_deref(),
+                    coverage,
+                    engine,
+                    vm_compat: &vm_compat,
+                    timeout: (timeout > 0).then(|| std::time::Duration::from_secs(timeout)),
+                },
+            );
         }
         Some(Command::New { name }) => {
             scaffold::create_project(&name);

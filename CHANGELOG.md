@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`forge test --engine vm|interp|both`** — Forge tests now run on the same engine as `forge run` by default (the bytecode VM, with the same automatic interpreter fallback for programs the VM cannot run yet; the global `--interp` flag selects the interpreter). `--engine both` runs every file on both engines and reports a summary per engine. `--coverage` is collected from the interpreter.
+- **`forge test --timeout <secs>`** — per-test time limit (default 60s, `0` disables). A test that hangs (for example an engine bug that loops forever) now aborts the run with a failure naming the test instead of stalling CI indefinitely.
 - **Standalone source-runtime native binaries for Forge servers** — `forge build --native` now links against `libforge_lang.a` when available and emits a single executable that embeds Forge source and starts interpreter-only runtime features like `@server` without shelling out to the `forge` CLI. `--aot` remains bytecode/VM-only and continues to reject decorator-driven servers with guidance to use `--native`.
 - **Startup time measurement harness** — `tools/startup_time.rs` measures source, bytecode, native source-runtime, and bytecode AOT process startup with correctness checks. CI runs it as a report-only signal before the `<10ms` native startup target becomes a hard gate.
 - **Structured concurrency with `squad` blocks** — `squad { spawn { } spawn { } }` runs tasks concurrently with automatic join, cooperative cancellation on failure, and error propagation. Returns an array of results in spawn order. Works in both interpreter and VM engines.
