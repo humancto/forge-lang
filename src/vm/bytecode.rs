@@ -172,11 +172,23 @@ pub struct Chunk {
     pub upvalue_count: u8,
     pub arity: u8,
     pub upvalue_sources: Vec<UpvalueSource>,
+    /// Process-unique prototype id, assigned at construction. `Clone`
+    /// preserves it, so every closure instantiated from the same prototype
+    /// shares it. The JIT keys its caches by this id (never by name); see
+    /// `vm::jit::types::FnId`.
+    pub proto_id: u64,
+}
+
+/// Allocate a fresh, process-unique `Chunk::proto_id`.
+pub fn next_proto_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Chunk {
     pub fn new(name: &str) -> Self {
         Self {
+            proto_id: next_proto_id(),
             code: Vec::new(),
             constants: Vec::new(),
             lines: Vec::new(),
