@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Bytecode verifier** — `src/vm/verify.rs` checks every deserialized chunk (`forge run app.fgc`, AOT binaries) before it runs: register, constant, prototype and upvalue indices, string name operands, branch targets (back-edges only via `Loop`, which polls cancellation), arity, line tables, terminal instructions and prototype nesting depth. Malformed bytecode is rejected with `invalid bytecode in '<chunk>' at instruction N: ...` instead of misbehaving. Debug builds also verify every chunk the compiler emits.
+- **Fuzzing** — cargo-fuzz targets in `fuzz/` (`parse`, `compile`, `bytecode`, and a grammar-based `differential` target comparing the interpreter and the VM), a nightly `Fuzz` workflow (plus a Miri job for the C-ABI and JIT bridge code), and `tests/fuzz_smoke.rs`, which runs the same targets on stable in every `cargo test` and replays committed crashers from `fuzz/regressions/`.
+- `VM::cancel_flag()` exposes the VM's cooperative cancellation flag to embedders.
+
+### Changed
+
+- `==` / `!=` are total on both engines: comparing values of different types is `false` instead of an interpreter error, and numbers compare numerically inside collections (`[1] == [1.0]`). `match` literal patterns follow the same rule (`3` matches `3.0`). `Ok(1) == Ok(1)` is now `true` on the VM.
+- A `match` with no matching arm is a runtime error (`non-exhaustive match`) on the VM too (it silently did nothing).
+- `is_ok()` / `is_err()` / `unwrap_or()` on a non-Result value are an error on the VM too.
+- `contains()` on the VM finds object keys (`contains({a: 1}, "a")` was `false`) and rejects unsearchable arguments like the interpreter.
+- Assigning a field on a non-object (`b.a = 1` with `b = false`) is an error on the interpreter too (it was silently ignored).
+- Anonymous functions display as `<lambda>` on both engines (the VM printed `<fn <lambda>>`).
+- Built-in string methods (`chars`, `bytes`, `words`, `char_at`, `is_alpha`, `encode_uri`, ...) are shared by both engines; `"ab".chars()` and friends now work on the VM.
+- `range()`, `sample()` and `slay()` counts above 100,000,000, and `repeat_str()` / `pad_start()` / `pad_end()` results above 1 GiB, are runtime errors instead of a crash.
+
+### Fixed
+
+- Bytecode loading: length prefixes are checked against the remaining input before allocating, prototype nesting is bounded, and trailing bytes are rejected — a crafted `.fgc` can no longer panic, overflow the stack or exhaust memory while loading.
+- The compiler fails cleanly for functions whose jumps exceed the 16-bit branch offset instead of emitting wrong jumps.
+- JIT code memory is freed when a VM is dropped (every VM that tiered a function up leaked its code pages).
+- The parser looped forever on a `prompt` block entry that is not `name: "string"` (found by fuzzing).
+- Panics on extreme inputs: `-(-9223372036854775807 - 1)` on the interpreter, `substring(s, start, end)` with `start > end`, `range()`/`sample()`/`slay()`/`repeat_str()` with huge counts, `wait()`/`time.sleep()` with huge or infinite durations, `timeout` with a huge duration on the VM, and `schedule` intervals that overflow.
+
 ## [0.9.0] - 2026-10-05
 
 Highlights: the default VM is now trustworthy (a guarded, verified JIT tier; GC rooting; full VM/interpreter parity on the test suite), much faster (VM and interpreter performance passes), and Forge gains a capability-based sandbox (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`) plus `forge mcp`, an MCP server that lets AI agents run sandboxed Forge code.
