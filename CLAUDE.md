@@ -74,7 +74,7 @@ Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run` (`--vm
 
 ## Standard Library (22 global modules, 200+ module functions)
 
-Source of truth: `src/stdlib/`. Globals in the interpreter: math, fs, io, crypto, db, pg, mysql, jwt, env, json, regex, log, http, csv, term, os, path, time, url, toml, npc, ws. The VM does not yet expose url, toml, npc, ws (programs using them need `--interp`). `exec` is not a global object — use the `run_command` builtin.
+Source of truth: `src/stdlib/`. Globals on both engines (registered from `src/builtins_registry.rs`): math, fs, io, crypto, db, pg, mysql, jwt, env, json, regex, log, http, csv, term, os, path, time, url, toml, npc, ws. `exec` is not a global object — use the `run_command` builtin.
 
 | Module   | Key Functions                                                                                                                                                    |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -122,13 +122,13 @@ Source of truth: `src/stdlib/`. Globals in the interpreter: math, fs, io, crypto
 ```bash
 cargo build          # 0 errors
 cargo test           # 1,600+ Rust tests pass
-forge --allow-run test # 600+ Forge integration tests (shell tests need --allow-run; CI passes it)
+forge --allow-run test --engine both # 640+ Forge tests on VM and interpreter (shell tests need --allow-run)
 forge test --coverage # with line coverage report
 ```
 
-`examples/` holds 20+ programs. Server examples (`api.fg`, `bench_server*.fg`) block until killed; `devops.fg`/`showcase.fg` need `--allow-run`; `bench_client.fg` needs `FORGE_HTTP_ALLOW_PRIVATE=1` and a running bench server. Some examples still hit VM parity gaps on the default engine (tracked in ROADMAP Phase 0) — run them with both the default engine and `--interp`.
+`examples/` holds 20+ programs. Server examples (`api.fg`, `bench_server*.fg`) block until killed; `devops.fg`/`showcase.fg` need `--allow-run`; `bench_client.fg` needs `FORGE_HTTP_ALLOW_PRIVATE=1` and a running bench server. `tools/run_examples.sh` runs every runnable example on the default engine, and `cargo test --test engine_diff` compares all examples, parity fixtures and `tests/*.fg` across both engines.
 
-## Known Limitations (v0.8.0)
+## Known Limitations (v0.9.0)
 
 - All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
 - The VM is the default engine; programs using decorator-driven HTTP servers (`@server`, `@get`, etc.) auto-fallback to the interpreter
