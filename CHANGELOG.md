@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Single builtin registry** — `src/builtins_registry.rs` lists every global builtin (with its arity) and every stdlib module; both engines register and dispatch from it, so a builtin or module can no longer exist on one engine only (tests fail if it does). Builtin arity errors are identical on both engines (`len() expects 1 argument, got 2`); `upper`/`lower`/`trim` are global functions on both engines.
+- **Default parameters on the VM and call arity checks** — `fn g(a, b = 10)` works on the VM (defaults may use earlier parameters; an explicit `null` is kept). Calling a user function or lambda directly with too few or too many arguments is a catchable runtime error on both engines (`fn add expects 2 arguments, got 1`); callbacks invoked by builtins (`map`, `filter`, ...) stay lenient. Bytecode format is now v1.3.
+
 - **Capability-based permissions** — one policy, checked identically by the VM and the interpreter, covering `fs.read`, `fs.write` (path-scoped; `..` and symlink escapes denied), `net` (host allowlist, redirects re-checked, server listen gated), `env`, `db`, `run`, `ai` and `process` (`exit`/`cd`). Denials read `permission denied: <cap> (<detail>) — run with --allow-<cap> or grant it in the host policy`. Defaults for `forge run`, `-e` and the REPL are unchanged.
 - **`--sandbox` and Deno-style `--allow-read[=paths]`, `--allow-write[=paths]`, `--allow-net[=hosts]`, `--allow-env`, `--allow-db`, `--allow-ai`** — usable before or after the subcommand; `forge run --allow-run` now works too. The same policy can be set in `forge.toml` under `[permissions]` (a malformed table is an error, not ignored).
 - **`--max-time <secs>`** — wall-clock limit for any program on any engine; exits with code 124.
@@ -53,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mysql.begin` / `mysql.commit` / `mysql.rollback`** — MySQL now has explicit transaction handles: `mysql.begin(conn_id)` returns an opaque transaction id, and `mysql.query` / `mysql.execute` accept that id to run statements on the pinned physical connection. Supersedes the earlier v0.5.0 deferral where pooled one-shot calls made raw transaction control unsafe. ([#140](https://github.com/humancto/forge-lang/pull/140))
 
 ### Fixed
+
+- **VM was missing stdlib modules and members** — `npc`, `url`, `toml`, `ws`, `io.args_has` / `args_get` / `args_parse` were undefined on the VM and `io.args()` / `io.prompt()` returned null; VM module calls no longer drop non-string arguments (`regex`, `log`, `crypto`, `os`, ...).
+- **VM collections have value semantics** — `let w = z; z[0] = 9` no longer changes `w`, functions and methods no longer mutate their caller's arrays/objects, and `a[0] = 1` on an immutable binding is a runtime error, as on the interpreter.
+- **`return` inside an if-expression returns from the function on the interpreter** — `let y = if c { return 1 } else { 2 }` used to make `1` the value of the if-expression; it now returns from the enclosing function (as on the VM) and is not caught by `try`.
+- **`check x between lo and hi`** — `check x between 1 && 10` parsed `1 && 10` as the lower bound; mixed int/float bounds now work on both engines.
+- **VM `for v in channel`** — iterates until the channel is closed (it printed nothing).
+- **VM `spawn` can call top-level functions and captured closures** (was "cannot call non-function").
+- **JIT runtime bridges no longer swallow errors** — an error raised inside a bridge call is reported as the call's error instead of a null result.
+- **Type checker accepts calls that omit default parameters** (no more "expects 2 argument(s), got 1" warning for `g(1)`).
 
 - **VM closures created in loops capture a fresh binding per iteration** — `for i in range(0, 3) { fs = push(fs, fn() { return i }) }` now yields `[0, 1, 2]` on the VM (was `[0, 0, 0]`). The compiler closes captured upvalues when a scope ends (new `CloseUpvalues` opcode, also on `break`/`continue` and catch paths), so a local read after being captured is no longer stale, and closures can capture variables from a grandparent function.
 - **VM `continue` inside `for` loops no longer hangs** — it jumped back to the loop test without advancing the index.
