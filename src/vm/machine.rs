@@ -117,6 +117,13 @@ impl SendableVM {
 /// every backward jump and call.
 pub(super) const SAFEPOINT_INTERVAL: u32 = 1024;
 
+/// Backward jumps after which a frame's function is offered to the JIT
+/// (see `VM::try_jit_loop_restart`). Low enough that a loop-heavy function
+/// called once still tiers up early, high enough that short loops never
+/// pay for compilation.
+#[cfg(feature = "jit")]
+pub(super) const LOOP_HOT_THRESHOLD: u32 = 1000;
+
 /// Compiler intrinsics: natives the bytecode compiler emits calls to. They
 /// are not user-visible builtins (those live in `crate::builtins_registry`).
 const COMPILER_INTRINSICS: &[&str] = &[
@@ -927,6 +934,16 @@ impl VM {
                         }
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
+                        frame.back_edges = frame.back_edges.saturating_add(1);
+                        #[cfg(feature = "jit")]
+                        if frame.back_edges == LOOP_HOT_THRESHOLD {
+                            if let Some(value) = self.try_jit_loop_restart(frame_idx, chunk)? {
+                                // Exactly what `Return` does with the value.
+                                self.profiler.exit_function();
+                                self.frames.pop();
+                                return Ok(Some(value));
+                            }
+                        }
                     }
                     OpCode::Call => {
                         // Cooperative cancellation check at function call
@@ -1678,6 +1695,7 @@ impl VM {
                 }
                 for frame in &self.frames {
                     roots.push(frame.closure);
+                    roots.extend(frame.entry_args.iter().filter_map(|v| v.as_obj()));
                     for gr in frame.open_upvalues.values() {
                         roots.push(*gr);
                     }
@@ -1725,9 +1743,61 @@ impl VM {
         chunk: &Arc<Chunk>,
         args: &[Value],
     ) -> Result<Option<Value>, VMError> {
+        self.try_jit_native(chunk, args, self.frames.len(), false)
+    }
+
+    /// Loop tier-up ("restart in native code"). Called when the frame at
+    /// `frame_idx` takes its [`LOOP_HOT_THRESHOLD`]th backward jump: if its
+    /// function has (or can now get) a specialization for the arguments the
+    /// frame was entered with, the *whole call* is re-run natively from the
+    /// start and its result is the frame's result.
+    ///
+    /// This is sound for the same reason deoptimization is: the verifier
+    /// only accepts pure functions (they read only their arguments, write
+    /// only their own registers and call only themselves), so the work the
+    /// VM has done in this frame so far has no observable effect and
+    /// repeating it natively is indistinguishable from finishing it in the
+    /// VM. The repeated work is bounded by the threshold. On a guard
+    /// failure, rejection or deopt the frame simply continues in the VM.
+    ///
+    /// True on-stack replacement (entering native code at the loop header
+    /// with the frame's live registers) is a possible follow-up; restarting
+    /// needs no new entry points or state mapping in the JIT.
+    #[cfg(feature = "jit")]
+    fn try_jit_loop_restart(
+        &mut self,
+        frame_idx: usize,
+        chunk: &Arc<Chunk>,
+    ) -> Result<Option<Value>, VMError> {
+        if self.jit.mode == super::jit::tier::JitMode::Off
+            || chunk.name == "<main>"
+            || chunk.name == "<module>"
+        {
+            return Ok(None);
+        }
+        let frame = &self.frames[frame_idx];
+        if frame.entry_args.len() != chunk.arity as usize {
+            return Ok(None);
+        }
+        let args = frame.entry_args.clone();
+        // The native call replaces this frame, so it starts at its depth.
+        self.try_jit_native(chunk, &args, frame_idx, true)
+    }
+
+    /// Shared native-call path. `depth_below` is the number of VM frames
+    /// beneath the call; `force_hot` skips the call-count threshold (the
+    /// caller has its own hotness evidence).
+    #[cfg(feature = "jit")]
+    fn try_jit_native(
+        &mut self,
+        chunk: &Arc<Chunk>,
+        args: &[Value],
+        depth_below: usize,
+        force_hot: bool,
+    ) -> Result<Option<Value>, VMError> {
         use super::jit::tier::{invoke, Invoke};
 
-        let Some(sel) = self.jit.select(chunk, args, &self.gc) else {
+        let Some(sel) = self.jit.select(chunk, args, &self.gc, force_hot) else {
             return Ok(None);
         };
 
@@ -1736,7 +1806,7 @@ impl VM {
         // instructions; native code does not), or the global the code calls
         // itself through no longer names this function.
         let depth_limit = crate::runtime::recursion::max_depth();
-        let guards_ok = self.frames.len() < depth_limit
+        let guards_ok = depth_below < depth_limit
             && self.frames.iter().all(|f| f.timeouts.is_empty())
             && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
         if !guards_ok {
@@ -1754,7 +1824,7 @@ impl VM {
             };
             raw.push(encoded);
         }
-        let max_depth = (depth_limit - 1 - self.frames.len()) as i64;
+        let max_depth = (depth_limit - 1 - depth_below) as i64;
         // SAFETY: `sel.entry` was produced by the JIT compiler owned by
         // `self.jit`, which outlives this call; `raw` has exactly the
         // specialization's arity (checked by `select`); `self.cancelled` is
@@ -1883,6 +1953,7 @@ impl VM {
 
                         let mut frame = CallFrame::new(r, new_base, frame_size);
                         frame.argc = args.len();
+                        frame.entry_args = args;
                         self.frames.push(frame);
                         let boundary = self.frames.len() - 1;
                         self.run_until(boundary)

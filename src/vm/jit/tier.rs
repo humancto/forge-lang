@@ -270,12 +270,22 @@ impl JitState {
     /// `None` to run in the VM. Covers the guards that depend only on the
     /// function and its arguments: identity/code validation, arity and
     /// argument kinds.
-    pub fn select(&mut self, chunk: &Arc<Chunk>, args: &[Value], gc: &Gc) -> Option<Selected> {
+    ///
+    /// `force_hot` treats the function as hot regardless of its call count
+    /// (a loop in it is hot, see `VM::try_jit_loop_restart`); the attempt is
+    /// not counted as a call.
+    pub fn select(
+        &mut self,
+        chunk: &Arc<Chunk>,
+        args: &[Value],
+        gc: &Gc,
+        force_hot: bool,
+    ) -> Option<Selected> {
         if self.mode == JitMode::Off {
             return None;
         }
         let id = FnId::of(chunk);
-        let threshold = if self.mode == JitMode::Eager {
+        let threshold = if self.mode == JitMode::Eager || force_hot {
             1
         } else {
             HOT_THRESHOLD
@@ -287,8 +297,10 @@ impl JitState {
         if state.disabled {
             return None;
         }
-        state.calls = state.calls.saturating_add(1);
-        if state.calls < threshold {
+        if !force_hot {
+            state.calls = state.calls.saturating_add(1);
+        }
+        if state.calls < threshold && !force_hot {
             return None;
         }
 
