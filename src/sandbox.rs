@@ -403,6 +403,9 @@ impl Sandbox {
         let worker_budget = budget.clone();
         let label = self.source_label.clone();
         let source = source.to_string();
+        let output_budget = self
+            .max_output
+            .map(|limit| (Arc::new(std::sync::atomic::AtomicUsize::new(0)), limit));
         let spawned = std::thread::Builder::new()
             .name("forge-sandbox".to_string())
             .stack_size(WORKER_STACK_SIZE)
@@ -414,6 +417,7 @@ impl Sandbox {
                 interp.source = Some(source);
                 interp.source_file = Some(label.into());
                 interp.output_sink = Some(worker_sink);
+                interp.output_budget = output_budget;
                 interp.cancelled = worker_cancel;
                 interp.set_defer_host_runtime(true);
                 let result = interp.run(&program).map(|_| ());
@@ -780,6 +784,52 @@ mod tests {
             Sandbox::new().run_source_cancellable("say 1", &handle),
             Err(SandboxError::Cancelled { .. })
         ));
+    }
+
+    /// Run `src` on its own interpreter thread, cancel it after a moment,
+    /// and require the thread itself to finish (not just the host to stop
+    /// waiting): a blocked or spinning worker would outlive the sandbox.
+    #[track_caller]
+    fn assert_cancel_unblocks(src: &str) {
+        let program = Parser::new(Lexer::new(src).tokenize().expect("lex"))
+            .parse_program()
+            .expect("parse");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let (tx, rx) = mpsc::channel();
+        crate::runtime::recursion::spawn_worker(move || {
+            let mut interp = Interpreter::new();
+            interp.cancelled = flag;
+            interp.set_defer_host_runtime(true);
+            let _ = tx.send(interp.run(&program).is_err());
+        })
+        .expect("spawn");
+        std::thread::sleep(Duration::from_millis(150));
+        cancel.store(true, Ordering::Release);
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(errored) => assert!(errored, "{src}: finished without error"),
+            Err(_) => panic!("{src}: worker still running 5s after cancel"),
+        }
+    }
+
+    #[test]
+    fn cancellation_reaches_blocked_and_nested_work() {
+        for src in [
+            "let ch = channel()\nreceive(ch)",
+            "let ch = channel()\nfor x in ch { say x }",
+            "let ch = channel()\nselect([ch])",
+            "let ch = channel()\nlet h = spawn { return receive(ch) }\nawait h",
+            "let ch = channel()\nlet h = spawn { receive(ch) }\nawait_all([h])",
+            "squad { spawn { while true { } } }",
+            "squad { while true { } }",
+            "timeout 100000 seconds { while true { } }",
+            "timeout 100000 seconds { let h = spawn { while true { } }\nawait h }",
+            "time.sleep(100000)",
+            "wait(100000)",
+            "while true { }",
+        ] {
+            assert_cancel_unblocks(src);
+        }
     }
 
     #[test]

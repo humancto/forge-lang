@@ -630,9 +630,10 @@ impl VM {
                 };
                 let file_path = crate::package::resolve_import(&resolved)
                     .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
-                crate::permissions::require_import(&file_path)
+                // Read the path that was checked (resolved under a scoped grant).
+                let checked = crate::permissions::require_import(&file_path)
                     .map_err(|e| VMError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&file_path)
+                let source = std::fs::read_to_string(&checked)
                     .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
 
                 let mut lexer = crate::lexer::Lexer::new(&source);
@@ -819,14 +820,20 @@ impl VM {
                 (Some(start), Some(end)) => {
                     self.check_range_len(start, end)?;
                     let items: Vec<Value> =
-                        (start..end).map(|n| Value::int(n, &mut self.gc)).collect();
+                        crate::semantics::alloc::int_range(start, end, "range()", |n| {
+                            Value::int(n, &mut self.gc)
+                        })
+                        .map_err(|e| VMError::new(&e))?;
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
                 (Some(end_val), None) => {
                     self.check_range_len(0, end_val)?;
                     let items: Vec<Value> =
-                        (0..end_val).map(|n| Value::int(n, &mut self.gc)).collect();
+                        crate::semantics::alloc::int_range(0, end_val, "range()", |n| {
+                            Value::int(n, &mut self.gc)
+                        })
+                        .map_err(|e| VMError::new(&e))?;
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
@@ -1837,8 +1844,7 @@ impl VM {
                 let _subprocess =
                     crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("shell error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout)
                     .trim_end()
@@ -1861,8 +1867,7 @@ impl VM {
                 let _subprocess =
                     crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh error: {}", e)))?;
                 Ok(self.alloc_string(
                     &String::from_utf8_lossy(&output.stdout)
@@ -1874,8 +1879,7 @@ impl VM {
                 let _subprocess =
                     crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_lines error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let lines: Vec<Value> = stdout
@@ -1890,8 +1894,7 @@ impl VM {
                 let _subprocess =
                     crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let json: serde_json::Value = serde_json::from_str(stdout.trim())
@@ -1903,23 +1906,19 @@ impl VM {
                 let _subprocess =
                     crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let status = crate::runtime::shell::command(&cmd)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
+                let ok = crate::runtime::shell::succeeds(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_ok error: {}", e)))?;
-                Ok(Value::bool_val(status.success()))
+                Ok(Value::bool_val(ok))
             }
             "which" => {
+                // Reveals the host's PATH/installed tools: needs `run`
+                // (same as the interpreter, SEC-08).
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let result = std::process::Command::new("/usr/bin/which")
-                    .arg(&cmd)
-                    .output();
-                match result {
-                    Ok(output) if output.status.success() => Ok(self
-                        .alloc_string(&String::from_utf8_lossy(&output.stdout).trim().to_string())),
-                    _ => Ok(Value::null()),
-                }
+                Ok(match crate::runtime::shell::which(&cmd) {
+                    Some(path) => self.alloc_string(&path.display().to_string()),
+                    None => Value::null(),
+                })
             }
             "cwd" => {
                 let path = std::env::current_dir()
@@ -1945,18 +1944,7 @@ impl VM {
                     crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let input = self.get_string_arg(&args, 0)?;
                 let cmd = self.get_string_arg(&args, 1)?;
-                use std::io::Write;
-                let mut child = crate::runtime::shell::command(&cmd)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|e| VMError::new(&format!("pipe_to error: {}", e)))?;
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(input.as_bytes());
-                }
-                let output = child
-                    .wait_with_output()
+                let output = crate::runtime::shell::pipe(&cmd, input.as_bytes())
                     .map_err(|e| VMError::new(&format!("pipe_to error: {}", e)))?;
                 let mut map = IndexMap::new();
                 map.insert(
@@ -2650,8 +2638,8 @@ impl VM {
                 }
                 let s = self.get_string_arg(&args, 0)?;
                 let target = match args[1].classify(&self.gc) {
-                    // A negative width pads nothing.
-                    ValueKind::Int(n) => n.max(0) as usize,
+                    // Negative pads nothing (same as the interpreter).
+                    ValueKind::Int(n) => usize::try_from(n).unwrap_or(0),
                     _ => return Err(VMError::new("pad_start() second arg must be int")),
                 };
                 self.caps
@@ -2668,9 +2656,12 @@ impl VM {
                 if char_count >= target {
                     Ok(self.alloc_string(&s))
                 } else {
-                    let padding: String = std::iter::repeat(pad_char)
-                        .take(target - char_count)
-                        .collect();
+                    let padding = crate::semantics::alloc::padding(
+                        pad_char,
+                        target - char_count,
+                        "pad_start()",
+                    )
+                    .map_err(|e| VMError::new(&e))?;
                     Ok(self.alloc_string(&format!("{}{}", padding, s)))
                 }
             }
@@ -2680,8 +2671,8 @@ impl VM {
                 }
                 let s = self.get_string_arg(&args, 0)?;
                 let target = match args[1].classify(&self.gc) {
-                    // A negative width pads nothing.
-                    ValueKind::Int(n) => n.max(0) as usize,
+                    // Negative pads nothing (same as the interpreter).
+                    ValueKind::Int(n) => usize::try_from(n).unwrap_or(0),
                     _ => return Err(VMError::new("pad_end() second arg must be int")),
                 };
                 self.caps
@@ -2698,9 +2689,12 @@ impl VM {
                 if char_count >= target {
                     Ok(self.alloc_string(&s))
                 } else {
-                    let padding: String = std::iter::repeat(pad_char)
-                        .take(target - char_count)
-                        .collect();
+                    let padding = crate::semantics::alloc::padding(
+                        pad_char,
+                        target - char_count,
+                        "pad_end()",
+                    )
+                    .map_err(|e| VMError::new(&e))?;
                     Ok(self.alloc_string(&format!("{}{}", s, padding)))
                 }
             }
@@ -2719,7 +2713,9 @@ impl VM {
                 self.caps
                     .check_string(s.len().saturating_mul(n))
                     .map_err(|m| VMError::new(&m))?;
-                Ok(self.alloc_string(&s.repeat(n)))
+                let out = crate::semantics::alloc::repeat_str(&s, n, "repeat_str()")
+                    .map_err(|e| VMError::new(&e))?;
+                Ok(self.alloc_string(&out))
             }
             "count" => {
                 if args.len() < 2 {
@@ -2813,7 +2809,8 @@ impl VM {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos() as u64;
-                let mut result = Vec::with_capacity(n);
+                let mut result = crate::semantics::alloc::vec_with_capacity(n, "sample()")
+                    .map_err(|e| VMError::new(&e))?;
                 for i in 0..n {
                     let mut x = seed.wrapping_add(i as u64);
                     x ^= x << 13;
@@ -3082,7 +3079,8 @@ impl VM {
                     Some(ValueKind::Int(n)) => n as usize,
                     _ => 100,
                 };
-                let mut times: Vec<f64> = Vec::with_capacity(n);
+                let mut times: Vec<f64> = crate::semantics::alloc::vec_with_capacity(n, "slay()")
+                    .map_err(|e| VMError::new(&e))?;
                 let mut last_result = Value::null();
                 for _ in 0..n {
                     let start = std::time::Instant::now();

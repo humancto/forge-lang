@@ -14,7 +14,7 @@ Forge's type system is built on five pillars:
 
 ## Dynamic Foundation
 
-All Forge values are represented at runtime by the `Value` enum. There is no compile-time type erasure or monomorphization. Type annotations on struct fields and function parameters are documentation and future-proofing; the interpreter does not enforce them at assignment time in the current version.
+All Forge values are represented at runtime by the `Value` enum. There is no compile-time type erasure or monomorphization. Type annotations on variables, struct fields and function signatures are checked statically by the gradual type checker before a program runs (warnings by default, errors under `--strict`); under `--strict`, function argument and return annotations are also enforced at run time. See [Type Checking](./type-system/type-checking.md).
 
 The `typeof` builtin returns a string naming the runtime type:
 

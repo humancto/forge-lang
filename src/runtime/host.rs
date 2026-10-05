@@ -109,9 +109,18 @@ fn schedule_interval_seconds(
 fn watch_path(interpreter: &Interpreter, watch: &WatchPlan) -> Result<String, RuntimeError> {
     let mut eval_interp = interpreter.fork_for_background_runtime();
     match eval_interp.eval_expr(&watch.path)? {
-        Value::String(path) => Ok(path),
+        Value::String(path) => checked_watch_path(&path).map_err(|e| RuntimeError::new(&e)),
         _ => Err(RuntimeError::new("watch requires a string path")),
     }
+}
+
+/// `watch "path"` polls the file's metadata, which reveals whether (and
+/// when) it changes: that is a read, so the path must pass `fs.read`. Both
+/// engines call this before starting the watcher and poll the returned
+/// (resolved, under a scoped grant) path.
+pub(crate) fn checked_watch_path(path: &str) -> Result<String, String> {
+    let checked = crate::permissions::checked_path(crate::permissions::Capability::Read, path)?;
+    Ok(checked.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

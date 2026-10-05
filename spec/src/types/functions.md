@@ -123,7 +123,23 @@ fn format_price(amount: Float) -> String {
 }
 ```
 
-Annotations are optional and serve as documentation. The optional type checker can use them to report errors before execution.
+Annotations are optional. The type checker uses them to report mismatches before execution, and `--strict` also enforces them at run time (see [Type Checking](../type-system/type-checking.md)).
+
+## Function Types
+
+A function-typed parameter, variable or field is annotated `fn(ParamTypes) -> Result`. Without `-> Result`, the result type is unconstrained:
+
+```forge
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+    return f(x)
+}
+
+let twice: fn(Int) -> Int = fn(n) { n * 2 }   // n is inferred as Int
+let callback: fn() = fn() { say "done" }
+apply(twice, 21)                                // 42
+```
+
+Function types are contravariant in their parameters and covariant in their result: a `fn(Float) -> Int` may be passed where a `fn(Int) -> Float` is expected.
 
 ## Return Values
 

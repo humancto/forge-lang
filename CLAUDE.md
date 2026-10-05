@@ -138,6 +138,7 @@ tools/bench.sh [--json]    # wall-clock benchmarks (release build); PRs are gate
 - Use `--interp` for full feature coverage, `--jit` for maximum numeric performance
 - `forge build --native` / `--aot` produce standalone executables when `libforge_lang.a` is found (via `FORGE_LIB_DIR` or next to the `forge` binary); otherwise they fall back to a launcher that shells into an installed `forge`. `--aot` is VM-only and rejects decorator-driven servers — use `--native` for those.
 - Shell builtins (`sh`, `shell`, `run_command`, `pipe_to`, ...) require `--allow-run` for `forge run`; the REPL and `-e` enable it automatically.
+- Shell builtins run through `src/runtime/shell.rs`: `/bin/sh -c` on Unix; on Windows a POSIX `sh` on `PATH`, else `cmd /d /s /c "..."` (command passed verbatim); `FORGE_SHELL` overrides. `which` honors `PATHEXT` on Windows.
 - `regex` functions take `(text, pattern)` order, not `(pattern, text)`
 - Result constructors accept both cases: `Ok(42)`/`ok(42)`, `Err("msg")`/`err("msg")`
 
@@ -329,6 +330,20 @@ the template. Each incoming request:
 | `spawn_task` (squad `spawn` blocks) | No (shallow on closures) | Squad is opt-in concurrency. `let counter = make_counter(); squad { spawn { counter() } spawn { counter() } }` legitimately wants accumulation. |
 | `fork_for_background_runtime` (schedule/watch) | No (shallow on closures) | Schedule blocks want state continuity across iterations. |
 
+Squad-shared state: in the interpreter, `count = count + 1`, `o.n += 1`,
+`a[i] = a[i] + 1` (effect-free right operand and indexes) are atomic per
+operation, so concurrent spawns calling a shared closure do not lose
+updates (#128, `squad_shared_closure_updates_are_atomic`). Other
+read-modify-writes (`x = x + f()`) are not. **Known engine divergence:**
+the VM's `spawn` gives each task *copies* of globals and captured upvalues
+(`fork_for_spawn` / `transfer_closure`; each thread has its own GC heap),
+so writes inside a task are invisible to the parent and to other tasks —
+three `spawn { bump() }` calling `let bump = fn() { count = count + 1 }`
+leave `count` at `3` on `--interp` and `0` on the default VM.
+Portable code returns values from `spawn` (the `squad` result array,
+`await`) or uses channels; it never relies on mutating captured state.
+Making the VM share would need thread-safe shared upvalue cells.
+
 **Observability:**
 
 The HTTP server and the Forge `log` stdlib emit structured events
@@ -337,18 +352,31 @@ through `tracing` (see `src/runtime/tracing_init.rs`).
 | Env var | Values | Default |
 |---|---|---|
 | `FORGE_LOG_FORMAT` | `pretty` / `compact` / `json` | `pretty` on TTY, `compact` when piped |
-| `FORGE_LOG` | any `tracing_subscriber::EnvFilter` directive | falls back to `RUST_LOG`, then to `forge_lang=info,tower_http=info,axum=warn,forge.user=info` |
+| `FORGE_LOG` | any `tracing_subscriber::EnvFilter` directive | falls back to `RUST_LOG`, then to `forge=info,forge_lang=info,tower_http=info,axum=warn,forge.user=info,forge.runtime=info,forge.panic=error` (`forge=info` matters: the CLI binary compiles the runtime itself, so its module-path targets are `forge::...`) |
 
 Stable target names:
 - `forge.server` — server lifecycle (startup, panic, shutdown, cancel-on-drop).
 - `forge.user` — user-emitted events from the Forge `log` stdlib module.
 - `tower_http::trace::*` — per-request HTTP span and response event from `TraceLayer`.
+- `forge.runtime` — CLI runtime notes (e.g. VM-to-interpreter fallback; JSON mode only, text otherwise).
+- `forge.panic` — Rust panics, emitted by the hook `init_subscriber` installs
+  (`install_panic_hook`). If the filter disables this target the previous
+  (default) hook prints the panic instead — a panic is never swallowed.
+- `forge_lang::runtime::client` span `http.client.request` — one per
+  outbound HTTP request (method + host only; never the full URL).
+
+`tests/observability_cli.rs` pins the JSON contract by running the `forge`
+binary (one subscriber per process): every stderr line parses, user events
+carry `timestamp`/`level`/`target`/`fields.message`, and a request produces
+`tower_http::trace::on_response` with `status`/`latency` inside the `request`
+span (`method`/`uri`/`request_id`).
 
 OpenTelemetry/OTLP export (behind `otel` Cargo feature, off by default):
 - Build with `cargo build --features otel` (or set in `Cargo.toml` for
   service projects). Adds ~30 transitive crates (tonic, prost, hyper).
-- Activate at runtime by setting `OTEL_EXPORTER_OTLP_ENDPOINT`
-  (e.g. `http://localhost:4317`).
+- Activate at runtime by setting `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://localhost:4317`); the
+  signal-specific one wins (`tracing_init::traces_endpoint`).
 - Honors standard OTel env vars via `Resource::builder()`:
   - `OTEL_SERVICE_NAME` (default `"forge"`)
   - `OTEL_RESOURCE_ATTRIBUTES` (parsed by `EnvResourceDetector`)
@@ -363,13 +391,19 @@ OpenTelemetry/OTLP export (behind `otel` Cargo feature, off by default):
 - `init_subscriber()` consults `OTEL_PROVIDER` and attaches the OTel
   layer at the Registry level (innermost). Layers can't be added
   after `try_init`, so `init_otel` MUST run before `init_subscriber`.
-- Default sampling is "send everything." For production high-RPS
-  services, configure your collector to sample. `OTEL_TRACES_SAMPLER`
-  support is a follow-up.
+- Sampling follows `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`
+  (`always_on`, `always_off`, `traceidratio`, `parentbased_always_on`
+  (default), `parentbased_always_off`, `parentbased_traceidratio`).
+  Invalid values fall back to the default with a stderr warning
+  (`tracing_init::SamplerConfig`).
 - Only gRPC is wired (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`). Other
   protocols are silently ignored.
-- Outbound `traceparent` injection in the HTTP client is not yet
-  wired (separate follow-up).
+- Outbound requests (`client::fetch`, `http.download`, `http.crawl`)
+  open `client::request_span` and send its W3C `traceparent` via
+  `client::inject_trace_context` (a caller-set `traceparent` header wins).
+  Any new outbound HTTP path must do the same. Compute the span on the
+  calling thread, before any `block_on`, so it parents under the
+  handler's request span. Tested in `tests/otel_propagation.rs`.
 
 Per-request `X-Request-Id`:
 - `tower_http::request_id::SetRequestIdLayer` assigns a UUID v4 to
@@ -458,12 +492,21 @@ call `tracing_init::init_subscriber()` on first use.
 - **Reading a variable copies it.** `Environment::get` deep-clones (strings, arrays, objects are owned). Hot paths must borrow via `Environment::with_value` / `with_value_mut` / `with_binding_mut` (see `src/interpreter/places.rs`). The callback runs under the scope `Mutex`, which is not re-entrant: it must not touch the environment or run Forge code — evaluate operands first, and only reorder evaluation when the operand `is_effect_free`.
 - **Statement bodies don't produce values.** Loop bodies, statement `if` branches, `match` arms and `try`/`catch` run via `exec_body`, which evaluates a trailing expression for effect only (so a trailing `out.push(x)` does not copy `out`). Only `when`/`safe` statement values are consumed by `eval_block_value`; if that changes, `exec_body` callers must change too.
 - **Arc-backed `Value::String`/`Array`/`Object` is blocked on the VM.** `src/vm` constructs and destructures `interpreter::Value::{Array, Object, Set, Map, Tuple, String}` with owned payloads, so moving them to `Arc` (copy-on-write, and hashed Set/Map indexes) needs a coordinated VM change.
+- **One shell implementation.** Every builtin that runs a command string goes through `runtime::shell` (`command`/`output`/`succeeds`/`pipe`, `which`, `resolve_program`). Never call `Command::new("/bin/sh")` or `/usr/bin/which` directly; cmd.exe needs `raw_arg` (MSVCRT `.arg()` escaping is not undone by cmd). Feeding a child's stdin must happen on a separate thread from reading its output (`shell::pipe`), or large I/O deadlocks.
+- **Shared-state atomicity in squads (interpreter).** Spawned tasks share state captured by closures. `x = x op e` / `x op= e` and the field/index forms (`o.f op= e`, `a[i] = a[i] op e`, nested chains) are one read-modify-write under the scope lock *only* when `e` and the indexes are effect-free (`try_update_ident` / `try_update_place` in `places.rs`). Anything else (e.g. `x = x + f()`, `x = g(x)`) reads and writes under separate locks and can lose updates; use channels or the `squad` result array for cross-task aggregation. Never evaluate Forge code while holding a scope lock.
+- **Panics go through `tracing`.** `init_subscriber` installs `install_panic_hook`: an `ERROR` event on `forge.panic`, falling back to the previous hook when that target is filtered out. Keep `forge.panic=error` in `DEFAULT_FILTER`.
+- **Interpreter children inherit containment: use `Interpreter::child_context`.** Imports, `timeout` bodies and spawned tasks must be created through it so they carry the run's cancel tokens (`is_cancelled` also checks `ancestor_cancels`, which `squad`/`timeout` push), output capture + budget and `defer_host_runtime`. A bare `Interpreter::new()` escaped sandbox deadlines and started `schedule` threads (SEC-02). Blocking waits go through `wait_cancellable` / `take_task_result`, never a bare `recv()`/`cvar.wait()`.
+- **Script-sized allocations go through `semantics::alloc`.** Rust aborts the process on a failed infallible allocation, so `s.repeat(n)`, `collect()` of `n` items or `Vec::with_capacity(n)` with a user-chosen `n` is a one-line host kill. Use `alloc::{repeat_str, padding, int_range, vec_with_capacity, string_with_capacity}` (both engines, same error text). Never cast a negative `i64` straight to `usize`.
+- **Open the path the permission check returned.** `stdlib::fs::confine_read/confine_write`, `permissions::checked_path` and `require_import` return the resolved path that was approved under a scoped grant; operate on it, never on the caller's original string (a `cd` from another task or a `file:` URI would otherwise redirect the operation). Native libraries that open files or sockets themselves (SQLite ATTACH/URIs, database drivers, proxies from env) need their own gate — see `docs/SECURITY_AUDIT.md`.
 - **Native plugins (`src/plugins`, RFC 0006): the C ABI is the contract.** `crates/forge-plugin/include/forge_plugin.h` is normative; `src/plugins/abi.rs` (host) and `crates/forge-plugin/src/abi.rs` (SDK) mirror it with layout tests. Any layout change is an ABI break: bump `ABI_VERSION` in all three. Rules: arguments are borrowed for one call (strings point into the caller's `Vec<Value>`, arrays/objects into a per-call arena); results are copied out and then always handed back to the plugin's `free_value` (the host never frees plugin memory); the `ffi` check runs on the canonical path *before* `dlopen`; libraries are never unloaded (function values are `Value::BuiltIn("native:<lib>:<fn>")` and may outlive any scope). Both engines route the `native:` prefix to `plugins::call` before any other dispatch. The SDK is a standalone crate (own `[workspace]`), not a dependency of `forge-lang`, so publishing the language crate is unaffected; `tests/native_plugins.rs` builds the example plugins with cargo/cc and diffs both engines.
 - **Standalone crates carry their own lockfiles.** `bindings/python/Cargo.lock` (and `examples/plugins/hello_rust/Cargo.lock`) pin `forge-lang` by path, and CI builds them with `--locked`. Any change to the main crate's dependencies makes them stale: run `cargo update -p forge-lang` in `bindings/python` (and `cargo metadata --locked` in each standalone crate) in the same commit.
 - **Registry entries are immutable; checksums are mandatory.** A published index line never changes except its `yanked` flag, and the lockfile (`archive_checksum`, `signer`) and the index CI both enforce it. Change the entry format only by bumping `index::INDEX_FORMAT_VERSION` (old clients skip newer lines) and updating `tools/registry-template/scripts/validate_index.py` in the same change (`tests/registry_index.rs` runs it). Never send `GITHUB_TOKEN` outside `client::GITHUB_HOSTS`.
 - **Resource limits live in `runtime/limits.rs`.** A `Budget` (fuel, memory, handle slots, imports, sticky fatal trip) is scoped per thread like the permission policy and carried into forked threads by `permissions::inherit` — never start an engine thread without it. Engines charge fuel only at safe points (`Meter::safepoint`): VM `safepoint_countdown`/`fuel_window` (anything that zeroes the countdown early must first shrink `fuel_window` by the remaining countdown, as `PushTimeout` does), interpreter `tick()` per statement/call/loop iteration. Fuel/memory errors are fatal (`VMError::fatal`, `RuntimeError::fatal`): handlers skip them, and the trip is sticky so a builtin that swallows one cannot resume the run. Size caps (`Caps`) must be checked *before* building a value; new amplifying builtins (anything whose output size is a numeric argument) need a cap check on both engines. Subprocesses start through `permissions::begin_subprocess()` (permission + slot); hold the returned `Slot` until the process exits. While fuel is limited the VM stays out of the JIT. The `forge` binary installs `CountingAllocator`; it only counts on threads whose budget limits memory.
 - **VM serving: freeze once, fork linearly.** `vm::serve::VmTemplate` copies the heap reachable from globals/method tables into a slot-indexed list in post-order (children before parents). Cycles can only pass through upvalue cells (value semantics keep every other graph acyclic), so cells are allocated empty first and filled last; freezing errors out on any other cycle. A fork is then one pass with a dense slot → `GcRef` table. If you add an `ObjKind` variant, extend `FrozenObj`/`thaw`/`freeze_object` (the matches are exhaustive on purpose) and `value_to_json`. The VM keeps no parameter names in chunks, so handler argument binding uses `metadata::top_level_fn_params`.
 - **Threads that run Forge code need a registered stack.** Use `recursion::spawn_worker` (std threads) or `recursion::configure_runtime` (tokio runtimes); an unregistered thread is assumed to have 2 MiB and the guard stops recursion early.
+- **Name positions come from the syntax index, not the AST.** Expressions carry no spans (both engines match on `Expr`), so `Parser::with_index` records every name occurrence (role, exact span, scope, enclosing statement) in `parser::index::SyntaxIndex`. When you add syntax that binds or reads a name, record it there (`note_def` / `note_prev`, and `scoped` for new scopes) or the checker reports it as unknown and the LSP cannot rename it. Name resolution over the index is `typechecker::resolve`; it mirrors run-time scoping (a `let` is visible after its statement, function bodies see later definitions of enclosing scopes).
+- **The type checker only errs against declared types or engine rules.** Inferred types type results and callbacks but never reject a later use (arrays are heterogeneous, unannotated variables change type; mutable bindings get the join of all assignments from a silent first pass). Builtin signatures in `typechecker/builtins.rs` type results only — they do not reject arguments. Run-time-rule diagnostics call the shared rules (`semantics::binary`, `check_call_arity`, `builtins_registry::check_arity`). `typechecker::corpus_tests` fails on any strict-mode error in `tests/`, `examples/` and parity fixtures not listed (with a reason) in `tests/typecheck_allowlist.txt`.
+- **`--strict` runtime checks are AST instrumentation.** `typechecker::enforce::instrument` inserts `__types.check(value, "<canonical type>", "<context>")` calls; `__types` is a hidden stdlib module (registry), so both engines run the same rule (`semantics::types`) with no engine changes. Instrumentation must never change a correct program's result: argument checks go before the body (an empty body gets an explicit `null` tail), and tails are only wrapped where they are the function's value.
 
 ## Module Dependency Map
 

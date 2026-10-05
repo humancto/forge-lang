@@ -105,6 +105,25 @@ fn query_rows(
     Ok(Value::Array(results))
 }
 
+/// Whether the active policy bounds the filesystem. SQLite can open files
+/// by itself (`ATTACH DATABASE '/any/path'`, `VACUUM INTO '/any/path'`,
+/// `file:` URIs), so those features are only available to a script whose
+/// `fs.read` and `fs.write` are both unrestricted.
+fn sqlite_is_confined() -> bool {
+    let caps = crate::permissions::current();
+    !(caps.is_unrestricted(crate::permissions::Capability::Read)
+        && caps.is_unrestricted(crate::permissions::Capability::Write))
+}
+
+/// Disable SQLite's own file access (ATTACH, and VACUUM INTO, which attaches
+/// its target) on a connection opened under a bounded filesystem policy.
+fn confine_sqlite(conn: &Connection) -> rusqlite::Result<()> {
+    if sqlite_is_confined() {
+        conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    }
+    Ok(())
+}
+
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     crate::permissions::require(crate::permissions::Capability::Db, name)?;
     match name {
@@ -117,9 +136,28 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 let conn = if path == ":memory:" {
                     Connection::open_in_memory()
                 } else {
-                    crate::stdlib::fs::confine_write(path)?;
-                    Connection::open(path)
+                    // Opening a database file reads and writes it; open the
+                    // path that was checked, never the original string.
+                    crate::stdlib::fs::confine_read(path)?;
+                    let checked = crate::stdlib::fs::confine_write(path)?;
+                    if sqlite_is_confined() {
+                        // No `file:` URI filenames: SQLite would otherwise
+                        // reinterpret the checked path as a URI and open a
+                        // different file than the one approved.
+                        Connection::open_with_flags(
+                            checked,
+                            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                        )
+                    } else {
+                        Connection::open(checked)
+                    }
                 };
+                let conn = conn.and_then(|c| {
+                    confine_sqlite(&c)?;
+                    Ok(c)
+                });
                 match conn {
                     Ok(c) => {
                         let arc = Arc::new(Mutex::new(c));

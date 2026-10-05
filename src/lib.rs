@@ -32,6 +32,9 @@ pub mod runtime;
 mod sandbox;
 mod semantics;
 mod stdlib;
+// The binary uses the whole checker (CLI, LSP, `--strict`); the library only
+// `analyze` (for `forge_lang::mcp`).
+#[allow(dead_code)]
 mod typechecker;
 pub mod vm;
 

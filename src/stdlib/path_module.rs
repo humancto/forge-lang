@@ -77,6 +77,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         }
         "path.resolve" => {
             let p = require_string(&args, 0, "path.resolve")?;
+            // Canonicalising reads the filesystem (existence, symlink
+            // targets), so it needs fs.read for the path.
+            crate::permissions::require_path(crate::permissions::Capability::Read, &p)?;
             match std::fs::canonicalize(&p) {
                 Ok(abs) => Ok(Value::String(abs.to_string_lossy().into_owned())),
                 Err(e) => Err(format!("path.resolve('{}') failed: {}", p, e)),
@@ -85,6 +88,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         "path.relative" => {
             let from = require_string(&args, 0, "path.relative")?;
             let to = require_string(&args, 1, "path.relative")?;
+            crate::permissions::require_path(crate::permissions::Capability::Read, &from)?;
+            crate::permissions::require_path(crate::permissions::Capability::Read, &to)?;
 
             let from_abs = std::fs::canonicalize(&from)
                 .map_err(|e| format!("path.relative(): cannot resolve '{}': {}", from, e))?;

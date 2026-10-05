@@ -86,6 +86,24 @@ Note: the interpreter binds these parameters correctly. Parameter binding on the
 
 ## Sandboxing and permissions
 
+### Threat model
+
+The sandbox is designed for running Forge source you do not trust — code
+written by an AI agent (`forge mcp`), by users of your application
+(`forge_lang::Sandbox`, the Python package), or downloaded scripts
+(`forge --sandbox run`). The attacker controls the script; the host
+controls the policy. Within the granted capabilities the script must not
+be able to: reach paths, hosts or capabilities it was not granted; run
+processes; read the host's environment, stdin or command line; exit or
+`cd` the host; crash the host (panic, abort, stack overflow) or keep
+running after its time limit; corrupt the MCP protocol stream; or see
+another sandbox's state. Not in scope: scripts granted `run` (a
+subprocess can do anything the host user can), a malicious MCP client
+(the server trusts its client), and other processes that modify files
+inside a granted directory while a script runs. The latest audit, with
+every finding and its regression test, is
+[`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md).
+
 Forge has a capability-based permission model shared by the VM and the interpreter. Every privileged operation asks one central check against the active policy and fails with the same message shape:
 
 ```text
@@ -94,14 +112,14 @@ permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it
 
 | Capability | Covers | CLI flag |
 | --- | --- | --- |
-| `fs.read` | `fs.read`/`list`/`exists`/`size`/`lines`/`read_json`/`is_dir`/`is_file`, `csv.read`, `toml.read`, `env.load`, `import` (see below) | `--allow-read[=PATHS]` |
+| `fs.read` | `fs.read`/`list`/`exists`/`size`/`lines`/`read_json`/`is_dir`/`is_file`, `csv.read`, `toml.read`, `env.load`, `db.open` files, `import` (see below), `watch`, `path.resolve`/`path.relative` | `--allow-read[=PATHS]` |
 | `fs.write` | `fs.write`/`append`/`remove`/`mkdir`/`copy`/`rename`/`write_json`, `csv.write`, `db.open` files, `http.download` destination | `--allow-write[=PATHS]` |
-| `net` | `http.*`, `fetch`, `download`, `crawl`, `ws.connect`, binding an `@server` port | `--allow-net[=HOSTS]` |
+| `net` | `http.*`, `fetch`, `download`, `crawl`, `ws.connect`, binding an `@server` port, the server of `pg.connect`/`mysql.connect` | `--allow-net[=HOSTS]` |
 | `env` | `env.*` | `--allow-env` |
-| `db` | `db.*`, `pg.*`, `mysql.*` | `--allow-db` |
-| `run` | `sh`, `shell`, `sh_lines`, `sh_json`, `sh_ok`, `run_command`, `pipe_to` | `--allow-run` |
+| `db` | `db.*`, `pg.*`, `mysql.*` (file databases also need `fs.read` + `fs.write`; network databases also need `net`) | `--allow-db` |
+| `run` | `sh`, `shell`, `sh_lines`, `sh_json`, `sh_ok`, `run_command`, `pipe_to`, `which` | `--allow-run` |
 | `ai` | `ask` | `--allow-ai` |
-| `process` | `exit()`, `cd()` (mutate the host process) | always granted by the CLI; host policy only |
+| `process` | `exit()`, `cd()`, the host's stdin (`input()`, `io.prompt`, `term.confirm`, `term.menu`) and command line (`io.args*`) | always granted by the CLI; host policy only |
 | `ffi` | `import native` — loading a native plugin. **Full trust**: see "Native plugins are full trust" | `--allow-ffi[=PATHS]` |
 
 ### CLI
@@ -118,6 +136,8 @@ forge run --max-fuel 50000000 job.fg      # deterministic step budget
 forge run --max-memory 256MB job.fg       # memory limit
 ```
 
+- Under a restricted policy SQLite cannot open files by itself: `ATTACH DATABASE`, `VACUUM INTO` and `file:` URI names are refused unless both `fs.read` and `fs.write` are unrestricted.
+- Under a restricted policy (`fs.read`, `fs.write` or `net` not fully granted), `env.set`/`env.load` cannot change Forge's own configuration: the `FORGE_*` variables the runtime reads (`FORGE_HTTP_ALLOW_PRIVATE`, `FORGE_FS_BASE`, `FORGE_AI_URL`, ...), `OPENAI_API_KEY`, `OTEL_*`, `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` and `RUST_LOG` (list: `RESERVED_KEYS` in `src/stdlib/env.rs`).
 - Path scopes are resolved like the OS resolves them: made absolute, every existing component canonicalized (symlinks followed, `..` applied to the real parent), the not-yet-existing tail normalized. A symlink or `..` that leads outside a granted directory is denied; a dangling symlink is always denied. Grants are resolved once, at startup.
 - `fs.exists`, `fs.is_dir` and `fs.is_file` return `false` instead of failing when the path is outside the grant, so they cannot probe for files.
 - Host scopes match `host`, `*.domain` (subdomains and the domain itself) or `host:port`, case-insensitively. When `net` is scoped, every redirect target must also be on the allowlist. The SSRF guard still applies on top: granting `127.0.0.1` does not bypass it (use `FORGE_HTTP_ALLOW_PRIVATE=1`).
@@ -155,7 +175,10 @@ let out = Sandbox::new()
 
 - The policy is installed on the sandbox's worker thread, not process-wide, so concurrent sandboxes and the host itself are independent. Every thread the engines fork (`spawn`, `squad`, `timeout`, `schedule`, `watch`) inherits the policy of the thread that forked it (`permissions::spawn`).
 - `say`/`println`/`print` output is captured in `Output::stdout`. Errors come back as `SandboxError::{Syntax, PermissionDenied, Runtime, Timeout}`.
-- `max_time` returns control to the host by the deadline: the program is cancelled cooperatively, and if it does not stop within a short grace period its worker thread is detached.
+- `max_time` returns control to the host by the deadline: the program is cancelled cooperatively, and if it does not stop within a short grace period its worker thread is detached. Cancellation reaches everything the program started — `spawn`ed and `squad` tasks, `timeout` bodies, imported modules — and every blocking wait (`receive`, `await`, `select`, `wait`, `time.sleep`, iterating a channel).
+- `max_output` is charged on every write, so a print loop stops at the limit instead of growing the capture between checks.
+- `schedule`, `watch` and `@server` are never started inside a sandbox, including from imported modules and tasks.
+- A size that cannot be allocated (`repeat_str("x", 10**14)`, `range(0, 10**14)`) is a runtime error, never a process abort.
 - Resource limits (`max_fuel`, `max_memory`, or a full `forge_lang::Limits` via `.limits(...)`) come back as `SandboxError::{FuelExhausted, MemoryLimit, ResourceLimit}`; see "Resource limits" below. `max_memory` needs `forge_lang::CountingAllocator` as the host's `#[global_allocator]` (the run fails with a clear error otherwise).
 - Lower-level: `forge_lang::Capabilities` (policy builder), `forge_lang::permissions::{set_global, scope, require}`.
 
@@ -193,12 +216,14 @@ Wall-clock time is not enough for multi-tenant use: it depends on machine load a
 
 - **Memory accounting is approximate** (see "Resource limits"); call depth is bounded separately by `--max-depth` / `FORGE_MAX_DEPTH`. Builtins that run long without calling back into Forge code (sorting a huge array, a slow regex) are not charged fuel per element, and `replace`/`join` do not check the string cap before building their result.
 - Fuel limits disable the JIT tier for the run.
-- `--max-time` in the CLI ends the process from a watchdog thread; the embedding API cancels cooperatively. Neither interrupts a single blocking native call (a long HTTP request is bounded by its own timeout).
+- `--max-time` in the CLI ends the process from a watchdog thread; the embedding API cancels cooperatively. Neither interrupts a single blocking native call (an HTTP request, DNS lookup, WebSocket or database connect, or a granted subprocess): the host gets control back on time and the detached worker finishes when the call returns.
 - HTTP server handlers run on tokio's blocking pool and use the process-wide policy (the CLI's). The embedding `Sandbox` does not start servers, `schedule` or `watch` blocks.
-- `db` grants SQLite's own file access (`ATTACH DATABASE`), and `pg`/`mysql` open network connections under `db`, not `net`.
-- `which()`, `input()`/`io.prompt`, `os.*` and `time` are not gated. stdin is shared with the host.
-- Path checks and the subsequent open are not atomic: a process outside the sandbox that swaps a directory for a symlink between the two can win the race.
-- The VM's `ws` module is not registered yet; on the interpreter `ws.connect` is gated by `net`.
+- stderr output (`log.*`, `term.*` drawing, download progress, warnings) is neither captured nor capped; `forge mcp` on Unix sends it to the server's stderr.
+- `os.*` (hostname, home directory, pid, CPU count), `cwd()` and `fs.temp_dir` are not gated; they reveal host identity, not file contents.
+- The `env` capability is process-wide: one sandbox's `env.set` is visible to the host and every other sandbox. Grant it only to trusted single-tenant hosts.
+- MySQL and WebSocket handles are unguessable bearer tokens in process-wide tables; a script that is *given* another sandbox's handle can use it.
+- Path checks and the subsequent open are not atomic: a process outside the sandbox that swaps a directory for a symlink between the two can win the race. (Races inside the sandbox, such as another task calling `cd`, are closed: operations use the resolved path that was checked.)
+- On the VM (CLI only), converting a value nested millions of levels deep (e.g. `json.stringify`) can overflow the native stack and abort the process.
 
 ## Known Limitations
 

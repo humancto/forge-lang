@@ -60,19 +60,25 @@ pub fn confine_path_with(path: &str, base: Option<&str>) -> Result<PathBuf, Stri
 }
 
 /// Confine `path` (FORGE_FS_BASE) and check it against the active
-/// `fs.read` permission. Every read-side fs entry point goes through this.
+/// `fs.read` permission. Every read-side fs entry point goes through this
+/// and must open the returned path (the resolved one under a scoped grant),
+/// never its original argument.
 pub fn confine_read(path: &str) -> Result<PathBuf, String> {
     let p = confine_path(path)?;
-    crate::permissions::require_path(crate::permissions::Capability::Read, &p)?;
-    Ok(p)
+    Ok(crate::permissions::checked_path(
+        crate::permissions::Capability::Read,
+        &p,
+    )?)
 }
 
 /// Confine `path` (FORGE_FS_BASE) and check it against the active
 /// `fs.write` permission. Every write-side fs entry point goes through this.
 pub fn confine_write(path: &str) -> Result<PathBuf, String> {
     let p = confine_path(path)?;
-    crate::permissions::require_path(crate::permissions::Capability::Write, &p)?;
-    Ok(p)
+    Ok(crate::permissions::checked_path(
+        crate::permissions::Capability::Write,
+        &p,
+    )?)
 }
 
 pub fn create_module() -> Value {

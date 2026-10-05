@@ -164,6 +164,47 @@ fn forge_to_pg_param(val: &Value) -> Box<dyn tokio_postgres::types::ToSql + Sync
     }
 }
 
+/// A database connection is network access: every host (and `hostaddr`)
+/// the connection string names must pass the `net` policy, in addition to
+/// the `db` capability. Unix-socket hosts need unrestricted `net`.
+fn check_pg_targets(conn_str: &str) -> Result<(), String> {
+    if crate::permissions::net_unrestricted() {
+        return Ok(());
+    }
+    let config: tokio_postgres::Config = conn_str
+        .parse()
+        .map_err(|e| format!("pg.connect error: {}", e))?;
+    let ports = config.get_ports();
+    let port_at = |i: usize| match ports {
+        [] => 5432,
+        [only] => *only,
+        many => many.get(i).copied().unwrap_or(5432),
+    };
+    let hosts = config.get_hosts();
+    if hosts.is_empty() && config.get_hostaddrs().is_empty() {
+        crate::permissions::require_net_host("localhost", port_at(0))?;
+    }
+    for (i, host) in hosts.iter().enumerate() {
+        match host {
+            tokio_postgres::config::Host::Tcp(h) => {
+                crate::permissions::require_net_host(h, port_at(i))?
+            }
+            #[cfg(unix)]
+            tokio_postgres::config::Host::Unix(p) => {
+                return Err(crate::permissions::PermissionError {
+                    capability: crate::permissions::Capability::Net,
+                    detail: format!("unix socket {}", p.display()),
+                }
+                .to_string())
+            }
+        }
+    }
+    for (i, addr) in config.get_hostaddrs().iter().enumerate() {
+        crate::permissions::require_net_host(&addr.to_string(), port_at(i))?;
+    }
+    Ok(())
+}
+
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     crate::permissions::require(crate::permissions::Capability::Db, name)?;
     match name {
@@ -173,6 +214,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         // ── pg.connect(conn_str, "disable")       → plain TCP, no TLS
         "pg.connect" => match args.first() {
             Some(Value::String(conn_str)) => {
+                check_pg_targets(conn_str)?;
                 let tls_mode = args
                     .get(1)
                     .and_then(|v| {

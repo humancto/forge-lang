@@ -15,6 +15,9 @@
 //! make both engines call it. Never re-implement one of these rules inline in
 //! `interpreter/` or `vm/`.
 
+pub mod alloc;
+pub mod types;
+
 /// Borrowed view of a binary-operator operand.
 #[derive(Clone, Copy, Debug)]
 pub enum Operand<'a> {
@@ -431,7 +434,7 @@ where
 /// the module is always in scope.
 pub const BUILTIN_MODULES: &[&str] = &[
     "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log", "term", "http", "csv",
-    "exec", "time", "url", "toml", "npc", "ws", "jwt", "mysql", "os", "path",
+    "exec", "time", "url", "toml", "npc", "ws", "jwt", "mysql", "os", "path", "__types",
 ];
 
 pub fn import_missing_name(path: &str, name: &str) -> String {
