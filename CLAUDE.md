@@ -66,7 +66,9 @@ forge fmt                    # format code
 
 Source of truth: `forge help` (clap `Command` enum in `src/main.rs`).
 
-run, repl, version, fmt, test, new, build, install, add, update, publish, search, lsp, dap, learn, chat, watch, doc, help, plus `-e` for inline eval.
+run, repl, version, fmt, test, new, build, install, add, update, publish, search, lsp, dap, mcp, learn, chat, watch, doc, help, plus `-e` for inline eval.
+
+`forge mcp` (`src/mcp.rs`, test `tests/mcp_stdio.rs`) is a stdio MCP server for AI agents: tools `run_forge` / `check_forge` / `forge_reference`; scripts run in `Sandbox` under deny-all plus the `--allow-*` / `[permissions]` grants (`build_mcp_policy` in `main.rs`). Both the binary and the lib compile `mcp.rs` and `sandbox.rs`.
 
 Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run` (`--vm` is a backwards-compatible no-op). `forge build` takes `--native` (embeds source) or `--aot` (embeds bytecode).
 
