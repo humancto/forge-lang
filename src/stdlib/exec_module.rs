@@ -19,7 +19,7 @@ pub fn call(args: Vec<Value>) -> Result<Value, String> {
     let program = parts[0];
     let cmd_args = &parts[1..];
 
-    let output = std::process::Command::new(program)
+    let output = std::process::Command::new(crate::runtime::shell::resolve_program(program))
         .args(cmd_args)
         .output()
         .map_err(|e| format!("command error: {}", e))?;
