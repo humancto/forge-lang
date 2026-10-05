@@ -17,11 +17,22 @@ impl VM {
     /// still holds in Rust locals. `dispatch_native` is private so every
     /// native call goes through this wrapper.
     pub(super) fn call_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
+        crate::builtins_registry::check_arity(name, args.len()).map_err(|e| VMError::new(&e))?;
         let scope = self.gc.enter_native();
         self.gc.pin_values(&args);
         let result = self.dispatch_native(name, args);
         self.gc.exit_native(scope);
         result
+    }
+
+    /// Run a stdlib module member through the shared implementation in
+    /// `builtins_registry`, converting values at the boundary.
+    fn call_shared_module(&mut self, name: &str, args: &[Value]) -> Result<Value, VMError> {
+        let interp_args = self.args_to_interp(args)?;
+        let result = crate::builtins_registry::call_module(name, interp_args)
+            .unwrap_or_else(|| Err(format!("unknown module function: {}", name)))
+            .map_err(|e| VMError::new(&e))?;
+        self.from_interp_checked(&result)
     }
 
     fn dispatch_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
@@ -1667,7 +1678,12 @@ impl VM {
                 Ok(Value::bool_val(false))
             }
             n if n.starts_with("math.") => {
-                crate::stdlib::math::call_vm(n, &args, &mut self.gc).map_err(|e| VMError::new(&e))
+                match crate::stdlib::math::call_vm(n, &args, &mut self.gc) {
+                    Err(e) if e.starts_with("unknown math function") => {
+                        self.call_shared_module(n, &args)
+                    }
+                    other => other.map_err(|e| VMError::new(&e)),
+                }
             }
             n if n.starts_with("fs.") => {
                 let result = match crate::stdlib::fs::call_vm(n, &args, &self.gc) {
@@ -1676,10 +1692,7 @@ impl VM {
                     // fs.copy, fs.read_json, ...) use the shared
                     // interpreter implementation.
                     Err(e) if e.starts_with("unknown fs function") => {
-                        let interp_args = self.args_to_interp(&args)?;
-                        let result = crate::stdlib::fs::call(n, interp_args)
-                            .map_err(|e| VMError::new(&e))?;
-                        return self.from_interp_checked(&result);
+                        return self.call_shared_module(n, &args);
                     }
                     Err(e) => return Err(VMError::new(&e)),
                 };
@@ -1694,41 +1707,10 @@ impl VM {
                     crate::stdlib::fs::FsResult::NullVal => Ok(Value::null()),
                 }
             }
-            n if n.starts_with("io.") => {
-                crate::stdlib::io::call_vm(n, &args, &self.gc).map_err(|e| VMError::new(&e))
-            }
-            n if n.starts_with("crypto.") => {
-                self.reject_stream_args(&args)?;
-                let str_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(obj) = self.gc.get(r) {
-                                if let ObjKind::String(s) = &obj.kind {
-                                    return crate::interpreter::Value::String(s.clone());
-                                }
-                            }
-                            crate::interpreter::Value::Null
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                let result =
-                    crate::stdlib::crypto::call(n, str_args).map_err(|e| VMError::new(&e))?;
-                match result {
-                    crate::interpreter::Value::String(s) => Ok(self.alloc_string(&s)),
-                    _ => Ok(Value::null()),
-                }
-            }
-            n if n.starts_with("db.") => {
-                // Full value conversion: query parameters arrive as an array
-                // (and may contain floats/bools/null), which a string-only
-                // conversion silently dropped ("Got 0, needed 1").
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::db::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
+            // Every other stdlib module member runs the shared implementation
+            // from the builtin registry (same code as the interpreter).
+            n if crate::builtins_registry::module_for(n).is_some() => {
+                self.call_shared_module(n, &args)
             }
             n if n.starts_with("adt:") => {
                 let parts: Vec<&str> = n.splitn(4, ':').collect();
@@ -1795,209 +1777,6 @@ impl VM {
                     .collect();
                 let result =
                     crate::stdlib::exec_module::call(interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("os.") => {
-                self.reject_stream_args(&args)?;
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                let result =
-                    crate::stdlib::os_module::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("path.") => {
-                self.reject_stream_args(&args)?;
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        ValueKind::Float(n) => crate::interpreter::Value::Float(n),
-                        ValueKind::Bool(b) => crate::interpreter::Value::Bool(b),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                let result = crate::stdlib::path_module::call(n, interp_args)
-                    .map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("env.") => {
-                self.reject_stream_args(&args)?;
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                let result =
-                    crate::stdlib::env::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("json.") => {
-                let interp_args: Vec<crate::interpreter::Value> =
-                    args.iter().map(|v| self.convert_to_interp_val(v)).collect();
-                self.check_stream_boundary()?;
-                let result = crate::stdlib::json_module::call(n, interp_args)
-                    .map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("regex.") => {
-                self.reject_stream_args(&args)?;
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                let result = crate::stdlib::regex_module::call(n, interp_args)
-                    .map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("log.") => {
-                self.reject_stream_args(&args)?;
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                crate::stdlib::log::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                Ok(Value::null())
-            }
-            n if n.starts_with("http.") => {
-                self.reject_stream_args(&args)?;
-                let interp_args: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|v| match v.classify(&self.gc) {
-                        ValueKind::Obj(r) => {
-                            if let Some(s) = self.get_string(&Value::obj(r)) {
-                                crate::interpreter::Value::String(s)
-                            } else if let Some(obj) = self.gc.get(r) {
-                                if let ObjKind::Object(map) = &obj.kind {
-                                    let mut im = indexmap::IndexMap::new();
-                                    for (k, val) in map {
-                                        im.insert(k.clone(), self.convert_to_interp_val(val));
-                                    }
-                                    crate::interpreter::Value::Object(im)
-                                } else {
-                                    crate::interpreter::Value::Null
-                                }
-                            } else {
-                                crate::interpreter::Value::Null
-                            }
-                        }
-                        ValueKind::Int(n) => crate::interpreter::Value::Int(n),
-                        ValueKind::Float(n) => crate::interpreter::Value::Float(n),
-                        ValueKind::Bool(b) => crate::interpreter::Value::Bool(b),
-                        _ => crate::interpreter::Value::Null,
-                    })
-                    .collect();
-                self.check_stream_boundary()?;
-                let result =
-                    crate::stdlib::http::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("term.") => {
-                // Full value conversion: term.table/bar/sparkline take arrays
-                // and objects, which a string-only conversion turned into null.
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::term::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("csv.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::csv::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("time.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::time::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            #[cfg(feature = "postgres")]
-            n if n.starts_with("pg.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::pg::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("jwt.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::jwt::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            #[cfg(feature = "mysql")]
-            n if n.starts_with("mysql.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::mysql::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("npc.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::npc::call(n, interp_args).map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("url.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result = crate::stdlib::url_module::call(n, interp_args)
-                    .map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("toml.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result = crate::stdlib::toml_module::call(n, interp_args)
-                    .map_err(|e| VMError::new(&e))?;
-                self.from_interp_checked(&result)
-            }
-            n if n.starts_with("ws.") => {
-                let interp_args = self.args_to_interp(&args)?;
-                let result =
-                    crate::stdlib::ws::call(n, interp_args).map_err(|e| VMError::new(&e))?;
                 self.from_interp_checked(&result)
             }
             "shell" => {

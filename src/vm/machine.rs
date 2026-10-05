@@ -109,6 +109,35 @@ impl SendableVM {
     }
 }
 
+/// Compiler intrinsics: natives the bytecode compiler emits calls to. They
+/// are not user-visible builtins (those live in `crate::builtins_registry`).
+const COMPILER_INTRINSICS: &[&str] = &[
+    "__forge_register_struct",
+    "__forge_new_struct",
+    "__forge_register_interface",
+    "__forge_register_method",
+    "__forge_validate_impl",
+    "__forge_call_method",
+    "__forge_binding_matches",
+    "__forge_retry_count",
+    "__forge_retry_wait",
+    "__forge_retry_failed",
+    "__forge_where_filter",
+    "__forge_pipe_sort",
+    "__forge_pipe_take",
+    "__forge_register_prompt",
+    "__forge_register_agent",
+    "__forge_raise_error",
+    "__forge_import_module",
+    "__forge_get_field",
+    "__forge_set_field",
+    "__forge_destructure",
+    "__forge_array_spread",
+    "__forge_check",
+    "__forge_when_matches",
+    "__forge_method_mut",
+];
+
 pub struct VM {
     pub registers: Vec<Value>,
     pub frames: Vec<CallFrame>,
@@ -282,169 +311,10 @@ impl VM {
     }
 
     fn register_builtins(&mut self) {
-        let builtins = [
-            "print",
-            "println",
-            "len",
-            "type",
-            "str",
-            "int",
-            "float",
-            "push",
-            "pop",
-            "keys",
-            "values",
-            "contains",
-            "range",
-            "set",
-            "enumerate",
-            "map",
-            "filter",
-            "reduce",
-            "sort",
-            "reverse",
-            "split",
-            "join",
-            "replace",
-            "starts_with",
-            "ends_with",
-            "Ok",
-            "Err",
-            "is_ok",
-            "is_err",
-            "unwrap",
-            "unwrap_or",
-            "json",
-            "fetch",
-            "uuid",
-            "exit",
-            "run_command",
-            "say",
-            "yell",
-            "whisper",
-            "wait",
-            "is_some",
-            "is_none",
-            "satisfies",
-            "assert",
-            "assert_eq",
-            "shell",
-            "sh",
-            "sh_lines",
-            "sh_json",
-            "sh_ok",
-            "which",
-            "cwd",
-            "cd",
-            "lines",
-            "pipe_to",
-            "has_key",
-            "get",
-            "pick",
-            "omit",
-            "merge",
-            "find",
-            "flat_map",
-            "entries",
-            "from_entries",
-            "ok",
-            "err",
-            "input",
-            "Some",
-            // Added in audit fix — implementations in vm/builtins.rs
-            "assert_ne",
-            "any",
-            "all",
-            "unique",
-            "sum",
-            "min_of",
-            "max_of",
-            "__forge_register_struct",
-            "__forge_new_struct",
-            "__forge_register_interface",
-            "__forge_register_method",
-            "__forge_validate_impl",
-            "__forge_call_method",
-            "__forge_binding_matches",
-            "__forge_retry_count",
-            "__forge_retry_wait",
-            "__forge_retry_failed",
-            "__forge_where_filter",
-            "__forge_pipe_sort",
-            "__forge_pipe_take",
-            "__forge_register_prompt",
-            "__forge_register_agent",
-            "__forge_raise_error",
-            "__forge_import_module",
-            "__forge_get_field",
-            "__forge_set_field",
-            "__forge_destructure",
-            "__forge_array_spread",
-            "__forge_check",
-            "__forge_when_matches",
-            "__forge_method_mut",
-            // Collections
-            "first",
-            "last",
-            "zip",
-            "flatten",
-            "chunk",
-            "slice",
-            "compact",
-            "partition",
-            "group_by",
-            "sort_by",
-            "for_each",
-            "take_n",
-            "skip",
-            "frequencies",
-            "sample",
-            "shuffle",
-            // Strings
-            "typeof",
-            "substring",
-            "index_of",
-            "last_index_of",
-            "capitalize",
-            "title",
-            "upper",
-            "lower",
-            "trim",
-            "pad_start",
-            "pad_end",
-            "repeat_str",
-            "count",
-            "slugify",
-            "snake_case",
-            "camel_case",
-            // Results
-            "unwrap_err",
-            // Misc
-            "diff",
-            "assert_throws",
-            // GenZ debug kit
-            "sus",
-            "bruh",
-            "bet",
-            "no_cap",
-            "ick",
-            // Execution helpers
-            "cook",
-            "yolo",
-            "ghost",
-            "slay",
-            // Channels
-            "channel",
-            "send",
-            "receive",
-            "close",
-            "try_send",
-            "try_receive",
-            "select",
-            "await_all",
-            "await_timeout",
-        ];
-        for name in &builtins {
+        // User-visible globals come from the shared registry, so the VM and
+        // the interpreter expose exactly the same builtins.
+        let globals = crate::builtins_registry::GLOBALS.iter().map(|b| b.name);
+        for name in globals.chain(COMPILER_INTRINSICS.iter().copied()) {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
                 name: name.to_string(),
             }));
@@ -457,301 +327,34 @@ impl VM {
         self.register_stdlib();
     }
 
+    /// Build every stdlib module object from the shared registry. Members
+    /// are `NativeFunction`s named `module.member`; `dispatch_native`
+    /// routes them to the shared implementation (`builtins_registry::
+    /// call_module`), so a module available on the interpreter is available
+    /// here with the same members.
     fn register_stdlib(&mut self) {
-        // math module
-        let mut math_map = IndexMap::new();
-        math_map.insert("pi".to_string(), Value::float(std::f64::consts::PI));
-        math_map.insert("e".to_string(), Value::float(std::f64::consts::E));
-        for name in &[
-            "sqrt", "pow", "abs", "max", "min", "floor", "ceil", "round", "random", "sin", "cos",
-            "tan", "log",
-        ] {
-            let full = format!("math.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            math_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let math_ref = self.gc.alloc(ObjKind::Object(math_map));
-        self.globals
-            .insert("math".to_string(), Value::obj(math_ref));
-
-        // fs module
-        let mut fs_map = IndexMap::new();
-        for name in &[
-            "read", "write", "append", "exists", "list", "remove", "mkdir",
-        ] {
-            let full = format!("fs.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            fs_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let fs_ref = self.gc.alloc(ObjKind::Object(fs_map));
-        self.globals.insert("fs".to_string(), Value::obj(fs_ref));
-
-        // io module
-        let mut io_map = IndexMap::new();
-        for name in &["prompt", "print", "args"] {
-            let full = format!("io.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            io_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let io_ref = self.gc.alloc(ObjKind::Object(io_map));
-        self.globals.insert("io".to_string(), Value::obj(io_ref));
-
-        // crypto module
-        let mut crypto_map = IndexMap::new();
-        for name in &[
-            "sha256",
-            "md5",
-            "base64_encode",
-            "base64_decode",
-            "hex_encode",
-            "hex_decode",
-        ] {
-            let full = format!("crypto.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            crypto_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let crypto_ref = self.gc.alloc(ObjKind::Object(crypto_map));
-        self.globals
-            .insert("crypto".to_string(), Value::obj(crypto_ref));
-
-        // db module
-        let mut db_map = IndexMap::new();
-        for name in &["open", "query", "execute", "close"] {
-            let full = format!("db.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            db_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let db_ref = self.gc.alloc(ObjKind::Object(db_map));
-        self.globals.insert("db".to_string(), Value::obj(db_ref));
-
-        // env module
-        let mut env_map = IndexMap::new();
-        for name in &["get", "set", "keys", "has"] {
-            let full = format!("env.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            env_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let env_ref = self.gc.alloc(ObjKind::Object(env_map));
-        self.globals.insert("env".to_string(), Value::obj(env_ref));
-
-        // json module
-        let mut json_map = IndexMap::new();
-        for name in &["parse", "stringify"] {
-            let full = format!("json.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            json_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let json_ref = self.gc.alloc(ObjKind::Object(json_map));
-        self.globals
-            .insert("json".to_string(), Value::obj(json_ref));
-
-        // regex module
-        let mut regex_map = IndexMap::new();
-        for name in &["test", "find", "find_all", "replace", "split"] {
-            let full = format!("regex.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            regex_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let regex_ref = self.gc.alloc(ObjKind::Object(regex_map));
-        self.globals
-            .insert("regex".to_string(), Value::obj(regex_ref));
-
-        // log module
-        let mut log_map = IndexMap::new();
-        for name in &["info", "warn", "error", "debug"] {
-            let full = format!("log.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            log_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let log_ref = self.gc.alloc(ObjKind::Object(log_map));
-        self.globals.insert("log".to_string(), Value::obj(log_ref));
-
-        // http module
-        let mut http_map = IndexMap::new();
-        for name in &[
-            "get", "post", "put", "delete", "patch", "head", "download", "crawl",
-        ] {
-            let full = format!("http.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            http_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let http_ref = self.gc.alloc(ObjKind::Object(http_map));
-        self.globals
-            .insert("http".to_string(), Value::obj(http_ref));
-
-        // term module
-        let mut term_map = IndexMap::new();
-        for name in &[
-            "red", "green", "blue", "yellow", "cyan", "magenta", "bold", "dim", "table", "hr",
-            "clear", "confirm",
-        ] {
-            let full = format!("term.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            term_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let term_ref = self.gc.alloc(ObjKind::Object(term_map));
-        self.globals
-            .insert("term".to_string(), Value::obj(term_ref));
-
-        // csv module
-        let mut csv_map = IndexMap::new();
-        for name in &["parse", "stringify", "read", "write"] {
-            let full = format!("csv.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            csv_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let csv_ref = self.gc.alloc(ObjKind::Object(csv_map));
-        self.globals.insert("csv".to_string(), Value::obj(csv_ref));
-
-        // time module
-        let mut time_map = IndexMap::new();
-        for name in &[
-            "now",
-            "unix",
-            "parse",
-            "format",
-            "diff",
-            "add",
-            "sub",
-            "zone",
-            "zones",
-            "elapsed",
-            "is_before",
-            "is_after",
-            "start_of",
-            "end_of",
-            "from_unix",
-            "today",
-            "date",
-            "sleep",
-            "measure",
-            "local",
-            "is_weekend",
-            "is_weekday",
-            "day_of_week",
-            "days_in_month",
-            "is_leap_year",
-        ] {
-            let full = format!("time.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            time_map.insert(name.to_string(), Value::obj(nr));
-        }
-        // time() as a function calls the "time" builtin (returns datetime object)
-        let time_call = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-            name: "time".to_string(),
-        }));
-        time_map.insert("__call__".to_string(), Value::obj(time_call));
-        let time_ref = self.gc.alloc(ObjKind::Object(time_map));
-        self.globals
-            .insert("time".to_string(), Value::obj(time_ref));
-
-        // pg module
-        #[cfg(feature = "postgres")]
-        {
-            let mut pg_map = IndexMap::new();
-            for name in &["connect", "query", "execute", "close"] {
-                let full = format!("pg.{}", name);
-                let nr = self
-                    .gc
-                    .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-                pg_map.insert(name.to_string(), Value::obj(nr));
+        use crate::interpreter::Value as IV;
+        for module in crate::builtins_registry::modules() {
+            let IV::Object(members) = (module.create)() else {
+                continue;
+            };
+            let mut map = IndexMap::new();
+            for (key, member) in members {
+                let value = match &member {
+                    IV::BuiltIn(name) => self.alloc_builtin(name),
+                    other => self.convert_interp_value(other),
+                };
+                map.insert(key, value);
             }
-            let pg_ref = self.gc.alloc(ObjKind::Object(pg_map));
-            self.globals.insert("pg".to_string(), Value::obj(pg_ref));
-        }
-
-        // jwt module
-        let mut jwt_map = IndexMap::new();
-        for name in &["sign", "verify", "decode", "valid"] {
-            let full = format!("jwt.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            jwt_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let jwt_ref = self.gc.alloc(ObjKind::Object(jwt_map));
-        self.globals.insert("jwt".to_string(), Value::obj(jwt_ref));
-
-        // mysql module
-        #[cfg(feature = "mysql")]
-        {
-            let mut mysql_map = IndexMap::new();
-            for name in &[
-                "connect", "query", "execute", "close", "begin", "commit", "rollback",
-            ] {
-                let full = format!("mysql.{}", name);
-                let nr = self
-                    .gc
-                    .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-                mysql_map.insert(name.to_string(), Value::obj(nr));
+            if module.name == "time" {
+                // `time()` called as a function returns the current datetime.
+                let time_call = self.alloc_builtin("time");
+                map.insert("__call__".to_string(), time_call);
             }
-            let mysql_ref = self.gc.alloc(ObjKind::Object(mysql_map));
+            let module_ref = self.gc.alloc(ObjKind::Object(map));
             self.globals
-                .insert("mysql".to_string(), Value::obj(mysql_ref));
+                .insert(module.name.to_string(), Value::obj(module_ref));
         }
-
-        // os module
-        let mut os_map = IndexMap::new();
-        for name in &["hostname", "platform", "arch", "pid", "cpus", "homedir"] {
-            let full = format!("os.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            os_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let os_ref = self.gc.alloc(ObjKind::Object(os_map));
-        self.globals.insert("os".to_string(), Value::obj(os_ref));
-
-        // path module
-        let mut path_map = IndexMap::new();
-        for name in &[
-            "join",
-            "resolve",
-            "relative",
-            "is_absolute",
-            "dirname",
-            "basename",
-            "extname",
-        ] {
-            let full = format!("path.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            path_map.insert(name.to_string(), Value::obj(nr));
-        }
-        path_map.insert(
-            "separator".to_string(),
-            self.alloc_string(std::path::MAIN_SEPARATOR_STR),
-        );
-        let path_ref = self.gc.alloc(ObjKind::Object(path_map));
-        self.globals
-            .insert("path".to_string(), Value::obj(path_ref));
 
         // Option prelude
         let mut none_obj = IndexMap::new();
@@ -760,71 +363,6 @@ impl VM {
         let none_ref = self.gc.alloc(ObjKind::Object(none_obj));
         self.globals
             .insert("None".to_string(), Value::obj(none_ref));
-
-        let some_native = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-            name: "Some".to_string(),
-        }));
-        self.globals
-            .insert("Some".to_string(), Value::obj(some_native));
-
-        self.backfill_stdlib_from_interpreter();
-    }
-
-    /// The hand-written module tables above drifted from the interpreter's
-    /// (`fs.size`, `term.sparkline`, `math.inf`, ... were missing on the VM).
-    /// The interpreter's `create_module()` is the source of truth for which
-    /// members a module has, so add every member the VM table lacks. Existing
-    /// VM entries are never overwritten.
-    fn backfill_stdlib_from_interpreter(&mut self) {
-        use crate::interpreter::Value as IV;
-        let modules: Vec<(&str, IV)> = vec![
-            ("math", crate::stdlib::math::create_module()),
-            ("fs", crate::stdlib::fs::create_module()),
-            ("io", crate::stdlib::io::create_module()),
-            ("crypto", crate::stdlib::crypto::create_module()),
-            ("db", crate::stdlib::db::create_module()),
-            ("env", crate::stdlib::env::create_module()),
-            ("json", crate::stdlib::json_module::create_module()),
-            ("regex", crate::stdlib::regex_module::create_module()),
-            ("log", crate::stdlib::log::create_module()),
-            ("http", crate::stdlib::http::create_module()),
-            ("term", crate::stdlib::term::create_module()),
-            ("csv", crate::stdlib::csv::create_module()),
-        ];
-        for (module, interp_module) in modules {
-            let IV::Object(members) = interp_module else {
-                continue;
-            };
-            let Some(module_ref) = self.globals.get(module).and_then(|v| v.as_obj()) else {
-                continue;
-            };
-            for (key, member) in members {
-                let already = matches!(
-                    self.gc.get(module_ref).map(|o| &o.kind),
-                    Some(ObjKind::Object(map)) if map.contains_key(&key)
-                );
-                if already {
-                    continue;
-                }
-                let value = match &member {
-                    IV::BuiltIn(name) => {
-                        let r = self
-                            .gc
-                            .alloc(ObjKind::NativeFunction(NativeFn { name: name.clone() }));
-                        Value::obj(r)
-                    }
-                    IV::Int(_) | IV::Float(_) | IV::Bool(_) | IV::String(_) | IV::Null => {
-                        self.convert_interp_value(&member)
-                    }
-                    _ => continue,
-                };
-                if let Some(obj) = self.gc.get_mut(module_ref) {
-                    if let ObjKind::Object(map) = &mut obj.kind {
-                        map.insert(key, value);
-                    }
-                }
-            }
-        }
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {

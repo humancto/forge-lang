@@ -1070,53 +1070,11 @@ impl Interpreter {
     }
 
     fn register_builtins(&mut self) {
-        self.env
-            .define("math".to_string(), crate::stdlib::create_math_module());
-        self.env
-            .define("fs".to_string(), crate::stdlib::create_fs_module());
-        self.env
-            .define("io".to_string(), crate::stdlib::create_io_module());
-        self.env
-            .define("crypto".to_string(), crate::stdlib::create_crypto_module());
-        self.env
-            .define("db".to_string(), crate::stdlib::create_db_module());
-        self.env
-            .define("env".to_string(), crate::stdlib::create_env_module());
-        self.env
-            .define("json".to_string(), crate::stdlib::create_json_module());
-        self.env
-            .define("regex".to_string(), crate::stdlib::create_regex_module());
-        self.env
-            .define("log".to_string(), crate::stdlib::create_log_module());
-        #[cfg(feature = "postgres")]
-        self.env
-            .define("pg".to_string(), crate::stdlib::create_pg_module());
-        self.env
-            .define("term".to_string(), crate::stdlib::create_term_module());
-        self.env
-            .define("http".to_string(), crate::stdlib::create_http_module());
-        self.env
-            .define("csv".to_string(), crate::stdlib::create_csv_module());
-        self.env
-            .define("time".to_string(), crate::stdlib::create_time_module());
-        self.env
-            .define("npc".to_string(), crate::stdlib::create_npc_module());
-        self.env
-            .define("url".to_string(), crate::stdlib::create_url_module());
-        self.env
-            .define("toml".to_string(), crate::stdlib::create_toml_module());
-        self.env
-            .define("ws".to_string(), crate::stdlib::create_ws_module());
-        self.env
-            .define("jwt".to_string(), crate::stdlib::create_jwt_module());
-        self.env
-            .define("os".to_string(), crate::stdlib::create_os_module());
-        self.env
-            .define("path".to_string(), crate::stdlib::create_path_module());
-        #[cfg(feature = "mysql")]
-        self.env
-            .define("mysql".to_string(), crate::stdlib::create_mysql_module());
-
+        // Modules and global builtins come from the shared registry so both
+        // engines expose exactly the same names (see builtins_registry.rs).
+        for module in crate::builtins_registry::modules() {
+            self.env.define(module.name.to_string(), (module.create)());
+        }
         // Prelude: Option type = Some(value) | None
         self.env
             .define("Some".to_string(), Value::BuiltIn("Some".to_string()));
@@ -1137,138 +1095,11 @@ impl Interpreter {
                 .define("__type_Option__".to_string(), Value::Object(type_meta));
         }
 
-        for name in &[
-            "print",
-            "println",
-            "len",
-            "type",
-            "typeof",
-            "str",
-            "int",
-            "float",
-            "push",
-            "pop",
-            "keys",
-            "values",
-            "contains",
-            "has_key",
-            "get",
-            "pick",
-            "omit",
-            "merge",
-            "find",
-            "flat_map",
-            "entries",
-            "from_entries",
-            "range",
-            "set",
-            "enumerate",
-            "map",
-            "filter",
-            "Ok",
-            "ok",
-            "Err",
-            "err",
-            "is_ok",
-            "is_err",
-            "unwrap",
-            "unwrap_or",
-            "unwrap_err",
-            "fetch",
-            "uuid",
-            "say",
-            "yell",
-            "whisper",
-            "wait",
-            "channel",
-            "send",
-            "receive",
-            "is_some",
-            "is_none",
-            "satisfies",
-            "assert",
-            "assert_eq",
-            "exit",
-            "run_command",
-            "shell",
-            "sh",
-            "sh_lines",
-            "sh_json",
-            "sh_ok",
-            "which",
-            "cwd",
-            "cd",
-            "lines",
-            "pipe_to",
-            "input",
-            "reduce",
-            "sort",
-            "reverse",
-            "split",
-            "join",
-            "replace",
-            "starts_with",
-            "ends_with",
-            "substring",
-            "index_of",
-            "last_index_of",
-            "pad_start",
-            "pad_end",
-            "capitalize",
-            "title",
-            "repeat_str",
-            "count",
-            "sum",
-            "min_of",
-            "max_of",
-            "any",
-            "all",
-            "unique",
-            "zip",
-            "flatten",
-            "group_by",
-            "chunk",
-            "slice",
-            "assert_ne",
-            "assert_throws",
-            "try_send",
-            "try_receive",
-            "select",
-            "close",
-            "await_all",
-            "await_timeout",
-            // GenZ Debug Kit
-            "sus",
-            "bruh",
-            "bet",
-            "no_cap",
-            "ick",
-            // Execution helpers
-            "cook",
-            "yolo",
-            "ghost",
-            "slay",
-            // String utils
-            "slugify",
-            "snake_case",
-            "camel_case",
-            // Array utils
-            "sample",
-            "shuffle",
-            "partition",
-            "diff",
-            // New collection utils
-            "sort_by",
-            "first",
-            "last",
-            "compact",
-            "take_n",
-            "skip",
-            "frequencies",
-            "for_each",
-        ] {
-            self.env
-                .define(name.to_string(), Value::BuiltIn(name.to_string()));
+        for builtin in crate::builtins_registry::GLOBALS {
+            self.env.define(
+                builtin.name.to_string(),
+                Value::BuiltIn(builtin.name.to_string()),
+            );
         }
     }
 

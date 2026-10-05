@@ -1227,3 +1227,62 @@ fn vm_many_try_blocks_reuse_registers() {
     source.push_str("n\n");
     assert_eq!(run_on_vm_value(&source), "300");
 }
+
+// ----- Builtin registry: one source of truth for both engines -----
+
+#[test]
+fn registry_globals_and_modules_exist_on_both_engines() {
+    use crate::interpreter::Value as IV;
+    let interp = Interpreter::new();
+    let vm = VM::new();
+    let mut missing = Vec::new();
+    for builtin in crate::builtins_registry::GLOBALS {
+        if interp.env.get(builtin.name).is_none() {
+            missing.push(format!("interpreter global {}", builtin.name));
+        }
+        if !vm.globals.contains_key(builtin.name) {
+            missing.push(format!("vm global {}", builtin.name));
+        }
+    }
+    for module in crate::builtins_registry::modules() {
+        let IV::Object(expected) = (module.create)() else {
+            panic!("module {} is not an object", module.name);
+        };
+        let expected: Vec<String> = expected.keys().cloned().collect();
+        match interp.env.get(module.name) {
+            Some(IV::Object(members)) => {
+                let keys: Vec<String> = members.keys().cloned().collect();
+                if keys != expected {
+                    missing.push(format!("interpreter module {} members differ", module.name));
+                }
+            }
+            _ => missing.push(format!("interpreter module {}", module.name)),
+        }
+        let vm_members = vm
+            .globals
+            .get(module.name)
+            .and_then(|v| v.as_obj())
+            .and_then(|r| vm.gc.get(r))
+            .and_then(|o| match &o.kind {
+                crate::vm::value::ObjKind::Object(map) => {
+                    Some(map.keys().cloned().collect::<Vec<_>>())
+                }
+                _ => None,
+            });
+        match vm_members {
+            Some(keys) => {
+                for key in &expected {
+                    if !keys.contains(key) {
+                        missing.push(format!("vm {}.{}", module.name, key));
+                    }
+                }
+            }
+            None => missing.push(format!("vm module {}", module.name)),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "registry entries missing: {:?}",
+        missing
+    );
+}

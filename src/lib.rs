@@ -3,6 +3,7 @@
 // AOT binaries link against libforge.a and call forge_execute_bytecode()
 // to run embedded bytecode without needing the `forge` CLI.
 
+mod builtins_registry;
 mod errors;
 pub mod interpreter;
 pub mod lexer;
