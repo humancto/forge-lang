@@ -375,6 +375,23 @@ pub fn check_call_arity(
     Err(format!("{} expects {}, got {}", name, expected, got))
 }
 
+/// Implicit-return rule for the *last* statement of a function, lambda or
+/// `spawn` body: an expression statement yields its value (handled by each
+/// engine directly), and so do these block statements — the value of the
+/// branch or arm that ran (null when none ran, e.g. `if` without `else`).
+/// Every other statement (loops, `let`, assignments, ...) yields null.
+///
+/// So `fn sign(x) { if x < 0 { -1 } else { 1 } }` returns -1 or 1. Side
+/// effects are unchanged: the taken branch runs exactly as before, only
+/// its final expression's value is kept.
+pub fn is_value_tail(stmt: &crate::parser::ast::Stmt) -> bool {
+    use crate::parser::ast::Stmt;
+    matches!(
+        stmt,
+        Stmt::If { .. } | Stmt::When { .. } | Stmt::Match { .. } | Stmt::SafeBlock { .. }
+    )
+}
+
 /// Number of leading parameters a caller must pass, given which parameters
 /// have default values (see [`check_call_arity`]).
 pub fn required_params<I>(has_default: I) -> usize
@@ -582,5 +599,18 @@ mod tests {
         assert!(!is_truthy(Shape::ResultErr));
         assert!(!is_truthy(Shape::OptionNone));
         assert!(is_truthy(Shape::Other));
+    }
+
+    #[test]
+    fn value_tails_are_block_statements() {
+        use crate::parser::ast::{Expr, Stmt};
+        assert!(is_value_tail(&Stmt::If {
+            condition: Expr::Bool(true),
+            then_body: vec![],
+            else_body: None,
+        }));
+        assert!(is_value_tail(&Stmt::SafeBlock { body: vec![] }));
+        assert!(!is_value_tail(&Stmt::Expression(Expr::Int(1))));
+        assert!(!is_value_tail(&Stmt::Break));
     }
 }
