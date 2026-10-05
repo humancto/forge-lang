@@ -289,7 +289,8 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
         opts.map(parse_http_opts).unwrap_or((None, None, None));
 
     crate::permissions::require_net(&url)?;
-    crate::stdlib::fs::confine_write(&dest)?;
+    // Write to the checked path, never the original string.
+    let dest_path = crate::stdlib::fs::confine_write(&dest)?;
     let validated = crate::runtime::client::validate_url_full(&url)?;
 
     crate::color::ceprintln!("  Downloading {}...", url);
@@ -318,7 +319,7 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
 
         let bytes = crate::runtime::client::read_body_capped(resp, cap).await?;
 
-        std::fs::write(&dest_clone, &bytes).map_err(|e| format!("write error: {}", e))?;
+        std::fs::write(&dest_path, &bytes).map_err(|e| format!("write error: {}", e))?;
 
         crate::color::ceprintln!("  Saved to {} ({} bytes)", dest_clone, bytes.len());
 

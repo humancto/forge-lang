@@ -116,8 +116,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "crypto.random_bytes" => match args.first() {
             Some(Value::Int(n)) => {
-                let n = *n as usize;
-                let mut bytes = vec![0u8; n];
+                let n = usize::try_from(*n)
+                    .map_err(|_| "crypto.random_bytes() count must be non-negative".to_string())?;
+                let mut bytes =
+                    crate::semantics::alloc::vec_with_capacity::<u8>(n, "crypto.random_bytes()")?;
+                bytes.resize(n, 0);
                 getrandom::getrandom(&mut bytes)
                     .map_err(|e| format!("crypto.random_bytes error: {}", e))?;
                 Ok(Value::String(hex::encode(&bytes)))

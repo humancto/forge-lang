@@ -16,6 +16,7 @@
 //! `interpreter/` or `vm/`.
 
 pub mod types;
+pub mod alloc;
 
 /// Borrowed view of a binary-operator operand.
 #[derive(Clone, Copy, Debug)]

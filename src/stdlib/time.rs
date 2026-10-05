@@ -615,7 +615,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Ok(Value::Null)
             }
             Some(Value::Float(secs)) => {
-                std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0)));
+                // try_: `from_secs_f64` panics on huge or infinite values.
+                let d = std::time::Duration::try_from_secs_f64(secs.max(0.0))
+                    .map_err(|_| "time.sleep() duration is out of range".to_string())?;
+                std::thread::sleep(d);
                 Ok(Value::Null)
             }
             _ => Err("time.sleep() requires seconds (number)".to_string()),
