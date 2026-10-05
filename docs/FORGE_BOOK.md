@@ -1921,7 +1921,7 @@ The bytecode VM (`src/vm/`) provides a faster execution path:
 The VM is the default engine as of v0.7.0. To use the interpreter instead (e.g., for HTTP server apps):
 
 ```
-forge run --interp myprogram.fg
+forge --interp run myprogram.fg
 ```
 
 ---
@@ -2266,6 +2266,8 @@ COMMANDS:
 OPTIONS:
     -e <code>         Evaluate inline code
     --interp          Use tree-walking interpreter (VM is default)
+    --jit             JIT-compile numeric functions on top of the VM
+    --allow-run       Allow shell builtins under `forge run`
     -h, --help        Print help
     -V, --version     Print version
 
