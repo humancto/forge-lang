@@ -23,12 +23,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`forge yank <name@version> --registry <index-clone> [--undo]`** — yanked versions are skipped by new resolutions but stay installable from a lockfile, and `forge install` keeps lockfile versions that still match the manifest.
 - **Benchmark regression gate** — `tools/bench.sh` is the single benchmark runner (suites `vm`, `interp`, `startup`, plus `peers` for Python/Node/Lua ports; human table or `--json`). `tools/bench_compare.py` runs it against two binaries in interleaved A/B rounds and compares medians. The new `Performance` workflow builds the PR base and head in release mode on one runner and fails when a benchmark is more than 15% slower, with the table in the job summary. The `perf-regression-ok` label accepts an intended slowdown. `tools/bench_vm.sh` / `bench_interp.sh` are now wrappers. Methodology and current numbers: `docs/BENCHMARKS.md`.
 - **`tools/registry-template/`** — seed for the hosted index repository: README, `config.json`, `owners.toml`, CODEOWNERS placeholder and a CI validator (`scripts/validate_index.py`: format, names, semver, ownership, signatures, append-only history, archive checksums), cross-checked against `forge publish` output in `tests/registry_index.rs`.
+- Outbound HTTP requests (`fetch`, `http.*`, `download`, `crawl`) run in an `http.client.request` span and, when OpenTelemetry export is active, send the W3C `traceparent` of that span, so downstream services join the caller's trace. A `traceparent` header the script sets itself is never replaced (#134)
+- `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` configure head sampling (`always_on`, `always_off`, `traceidratio`, `parentbased_always_on` (default), `parentbased_always_off`, `parentbased_traceidratio`); invalid values fall back to the default with a warning (#135)
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is honored and takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT` (#132)
+- Rust panics are reported as structured `ERROR` events on the `forge.panic` target (payload, location, thread, backtrace when `RUST_BACKTRACE` is set) once Forge's tracing subscriber is installed, inside the current request span; if the active filter drops that target the standard panic message is printed instead (#121)
+- Windows shell support, completed: when no POSIX `sh` is on `PATH`, shell builtins run through `cmd /d /s /c "<command>"` with the command passed verbatim, so quoted arguments survive (`.arg()` escaping mangled them); `which` searches `PATH` in-process and honors `PATHEXT` (`which("npm")` finds `npm.cmd`); `run_command` resolves programs through `PATHEXT`
 
 ### Changed
 
 - A `Float` value is no longer accepted where an `Int` is declared (an `Int` still widens to `Float`).
 - The default registry is now `humancto/forge-registry` (the old `forge-lang/registry` URL never existed). A registry without `config.json` is reported as "not a Forge registry" with guidance, instead of every package looking missing.
 - Registry archive extraction rejects symlinks, hard links and device entries as well as absolute and `..` paths.
+- Updates of the form `x = x op e`, `x op= e`, `o.f = o.f op e`, `a[i] op= e` (any field/index chain) with an effect-free `e` and indexes are a single atomic read-modify-write in the interpreter, so squad `spawn`s that update state shared through a captured closure no longer lose updates (#128)
+
+### Fixed
+
+- `pipe_to` no longer deadlocks when both its input and the command's output exceed the OS pipe buffer
+- `which` no longer depends on `/usr/bin/which` being installed
+- `forge run` logs: the default filter now enables the CLI binary's own targets (`forge=info`), so the server's per-request `request` span (`method`, `uri`, `request_id`) and the `forge.server` startup event are no longer filtered out; under `FORGE_LOG_FORMAT=json` the VM-to-interpreter fallback note is a `forge.runtime` JSON event instead of plain text, so stderr stays line-delimited JSON (#119, #120)
+- The debug-build check that rejects a `Value::Stream` in a server's top-level environment now also finds streams captured by closures, and names the binding path (#115)
 
 ### Security
 

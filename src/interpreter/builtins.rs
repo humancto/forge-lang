@@ -1589,8 +1589,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("shell() requires a command string")),
                 };
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("shell error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout)
                     .trim_end()
@@ -1614,8 +1613,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh() requires a command string")),
                 };
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh error: {}", e)))?;
                 Ok(Value::String(
                     String::from_utf8_lossy(&output.stdout)
@@ -1629,8 +1627,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_lines() requires a command string")),
                 };
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_lines error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let lines: Vec<Value> = stdout
@@ -1646,8 +1643,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_json() requires a command string")),
                 };
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let json: serde_json::Value = serde_json::from_str(stdout.trim())
@@ -1660,27 +1656,19 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_ok() requires a command string")),
                 };
-                let status = crate::runtime::shell::command(&cmd)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
+                let ok = crate::runtime::shell::succeeds(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_ok error: {}", e)))?;
-                Ok(Value::Bool(status.success()))
+                Ok(Value::Bool(ok))
             }
             "which" => {
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("which() requires a command name")),
                 };
-                let result = std::process::Command::new("/usr/bin/which")
-                    .arg(&cmd)
-                    .output();
-                match result {
-                    Ok(output) if output.status.success() => Ok(Value::String(
-                        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-                    )),
-                    _ => Ok(Value::Null),
-                }
+                Ok(match crate::runtime::shell::which(&cmd) {
+                    Some(path) => Value::String(path.display().to_string()),
+                    None => Value::Null,
+                })
             }
             "cwd" => {
                 let path = std::env::current_dir()
@@ -1718,18 +1706,7 @@ impl Interpreter {
                         ))
                     }
                 };
-                use std::io::Write;
-                let mut child = crate::runtime::shell::command(&cmd)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|e| RuntimeError::new(&format!("pipe_to error: {}", e)))?;
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(input.as_bytes());
-                }
-                let output = child
-                    .wait_with_output()
+                let output = crate::runtime::shell::pipe(&cmd, input.as_bytes())
                     .map_err(|e| RuntimeError::new(&format!("pipe_to error: {}", e)))?;
                 let mut result = IndexMap::new();
                 result.insert(

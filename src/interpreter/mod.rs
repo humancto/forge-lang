@@ -496,10 +496,6 @@ impl Scope {
     fn names(&self) -> impl Iterator<Item = &str> {
         self.bindings.iter().map(|b| b.name.as_str())
     }
-
-    fn values(&self) -> impl Iterator<Item = &Value> {
-        self.bindings.iter().map(|b| &b.value)
-    }
 }
 
 /// Shared, lockable scope. Closures capture scopes by `Arc`, so a write
@@ -1056,30 +1052,84 @@ impl Interpreter {
     /// most once per request; release builds skip the check entirely.
     #[cfg(debug_assertions)]
     fn assert_no_streams_in_env(env: &Environment) {
-        fn walk(v: &Value) {
-            match v {
-                Value::Stream(_) => panic!(
-                    "Value::Stream found in template env; streams are single-use and \
-                     cannot be safely shared across per-request forks. Construct \
-                     streams inside handlers, not at the top level."
-                ),
-                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => a.iter().for_each(walk),
-                Value::Map(pairs) => pairs.iter().for_each(|(k, v)| {
-                    walk(k);
-                    walk(v);
-                }),
-                Value::Object(o) => o.values().for_each(walk),
-                Value::ResultOk(b) | Value::ResultErr(b) | Value::Some(b) | Value::Frozen(b) => {
-                    walk(b)
+        if let Some(path) = Self::find_stream_in_env(env) {
+            panic!(
+                "Value::Stream found in template env (reachable via `{}`); streams are \
+                 single-use and cannot be safely shared across per-request forks. \
+                 Construct streams inside handlers, not at the top level.",
+                path
+            );
+        }
+    }
+
+    /// Path (`name`, `name.field`, `name[2]`, `f.<closure>.s`, ...) to the
+    /// first `Value::Stream` reachable from `env`, including through the
+    /// captured scopes of functions and lambdas. Each scope is visited
+    /// once (keyed by `Arc` identity), which terminates the walk on the
+    /// recursive-function cycle and avoids re-walking scopes many closures
+    /// share.
+    #[cfg(debug_assertions)]
+    fn find_stream_in_env(env: &Environment) -> Option<String> {
+        type Seen = std::collections::HashSet<*const std::sync::Mutex<Scope>>;
+
+        fn walk_env(env: &Environment, prefix: &str, seen: &mut Seen) -> Option<String> {
+            for scope in &env.scopes {
+                if !seen.insert(Arc::as_ptr(scope)) {
+                    continue;
                 }
-                // Closure scopes are walked separately by deep_clone_isolated.
-                // Don't recurse into them here — that would re-walk the env.
-                _ => {}
+                // Snapshot the scope so no lock is held while descending
+                // (a closure may capture the scope being walked).
+                let bindings: Vec<(String, Value)> = {
+                    let guard = lock_scope(scope);
+                    guard
+                        .bindings
+                        .iter()
+                        .map(|b| (b.name.clone(), b.value.clone()))
+                        .collect()
+                };
+                for (name, value) in &bindings {
+                    let path = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}.{}", prefix, name)
+                    };
+                    if let Some(found) = walk(value, &path, seen) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        fn walk(v: &Value, path: &str, seen: &mut Seen) -> Option<String> {
+            match v {
+                Value::Stream(_) => Some(path.to_string()),
+                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => a
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, x)| walk(x, &format!("{}[{}]", path, i), seen)),
+                Value::Map(pairs) => pairs.iter().find_map(|(k, x)| {
+                    walk(k, &format!("{}.<key>", path), seen)
+                        .or_else(|| walk(x, &format!("{}[{}]", path, k), seen))
+                }),
+                Value::Object(o) => o
+                    .iter()
+                    .find_map(|(k, x)| walk(x, &format!("{}.{}", path, k), seen)),
+                Value::ResultOk(b) | Value::ResultErr(b) | Value::Some(b) | Value::Frozen(b) => {
+                    walk(b, path, seen)
+                }
+                Value::Function(func) => {
+                    walk_env(&func.closure, &format!("{}.<closure>", path), seen)
+                }
+                Value::Lambda { closure, .. } => {
+                    let captured = closure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                    walk_env(&captured, &format!("{}.<closure>", path), seen)
+                }
+                _ => None,
             }
         }
-        for scope in &env.scopes {
-            lock_scope(scope).values().for_each(walk);
-        }
+
+        walk_env(env, "", &mut Seen::new())
     }
 
     /// Fork this interpreter for serving a single HTTP request.

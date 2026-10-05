@@ -1279,6 +1279,18 @@ fn report_vm_error(source: &str, filename: &str, error: &vm::machine::VMError) {
 
 /// Run a package-manager operation on a plain OS thread.
 ///
+/// Tell the user a program is running on the interpreter instead of the
+/// VM. Under `FORGE_LOG_FORMAT=json` stderr carries only JSON events, so
+/// the note becomes a structured `forge.runtime` event instead of text.
+fn note_interpreter_fallback(reason: &str) {
+    if std::env::var("FORGE_LOG_FORMAT").as_deref() == Ok("json") {
+        forge_lang::runtime::tracing_init::init_subscriber();
+        tracing::info!(target: "forge.runtime", reason = %reason, "falling back to interpreter");
+    } else {
+        eprintln!("  Info: falling back to interpreter ({})", reason);
+    }
+}
+
 /// The registry client uses `reqwest::blocking`, which panics ("Cannot drop a
 /// runtime in a context where blocking is not allowed") when called from the
 /// `#[tokio::main]` async context. A scoped thread has no runtime context.
@@ -1314,7 +1326,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
                 match vm::compiler::compile_with(&program, &options) {
                     Ok(compiled) => chunk = Some(compiled),
                     Err(e) if e.is_unsupported() => {
-                        eprintln!("  Info: falling back to interpreter ({})", e.message);
+                        note_interpreter_fallback(&e.message);
                     }
                     Err(e) => {
                         eprintln!("{}", errors::format_simple_error(&e.message));
@@ -1323,7 +1335,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
                 }
             }
             Err(message) => {
-                eprintln!("  Info: falling back to interpreter ({})", message);
+                note_interpreter_fallback(&message);
             }
         }
     }
