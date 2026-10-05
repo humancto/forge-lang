@@ -45,6 +45,10 @@ jobs:
           echo "cpus: $(getconf _NPROCESSORS_ONLN 2>/dev/null || echo "$NUMBER_OF_PROCESSORS")"
           df -h . || true
       - run: cargo test --locked --verbose
+      # Native plugin SDK (standalone crates; tests/native_plugins.rs above
+      # builds examples/plugins/hello_rust against it).
+      - name: Plugin SDK tests
+        run: cargo test --manifest-path crates/forge-plugin/Cargo.toml
       - name: Runner resources after tests
         if: always()
         shell: bash
@@ -72,6 +76,9 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+      - run: cargo fmt --check --manifest-path crates/forge-plugin/Cargo.toml
+      - run: cargo fmt --check --manifest-path crates/forge-plugin-macros/Cargo.toml
+      - run: cargo fmt --check --manifest-path examples/plugins/hello_rust/Cargo.toml
 
   # Build the forge CLI once and share it with the Forge-level gates below
   # (Forge tests on both engines, examples, differential engine check).
