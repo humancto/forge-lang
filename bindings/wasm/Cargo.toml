@@ -1,0 +1,40 @@
+[package]
+name = "forge-wasm"
+# Kept in lockstep with the forge-lang crate.
+version = "0.9.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Forge compiled to WebAssembly: run, check and format Forge in the browser (the playground)"
+license = "MIT"
+repository = "https://github.com/humancto/forge-lang"
+# Ships as the playground's static files (docs/playground/pkg), not a crate.
+publish = false
+
+# A standalone workspace root, so this crate never joins (or changes how
+# cargo resolves or publishes) the main forge-lang package at the repo root.
+[workspace]
+
+[lib]
+# cdylib: the .wasm module. rlib: so `cargo test` can run the pure-Rust
+# API natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The portable core only (no `host`): no tokio/axum/reqwest/rusqlite/JIT.
+forge-lang = { path = "../..", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Must match the wasm-bindgen CLI used to generate the JS glue exactly
+# (see build.sh and .github/workflows/playground.yml).
+wasm-bindgen = "=0.2.114"
+
+[profile.release]
+# Measured (Node 22): opt-level 3 is 1.37 MiB gzipped and runs the
+# interpreter ~2.5x faster than "z" (1.05 MiB); speed wins for a playground.
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
