@@ -129,14 +129,26 @@ impl VM {
 
         let suffix = rhs.display(&self.gc);
         if let Some(r) = self.owned_by_local(frame_idx, slot, cur) {
+            let caps = self.caps;
+            let mut grown = None;
             if let Some(obj) = self.gc.get_mut(r) {
                 if let ObjKind::String(s) = &mut obj.kind {
+                    caps.check_string(s.len() + suffix.len())
+                        .map_err(|m| VMError::new(&m))?;
+                    let before = s.capacity();
                     s.push_str(&suffix);
-                    return Ok(());
+                    grown = Some(s.capacity() - before);
                 }
+            }
+            if let Some(bytes) = grown {
+                self.gc.note_growth(bytes);
+                return Ok(());
             }
         }
         let mut text = cur.display(&self.gc);
+        self.caps
+            .check_string(text.len() + suffix.len())
+            .map_err(|m| VMError::new(&m))?;
         text.push_str(&suffix);
         let result = if self.local_can_own(frame_idx, slot) {
             Value::obj(self.gc.alloc_unique_string(text))
@@ -157,11 +169,20 @@ impl VM {
     ) -> Result<(), VMError> {
         let cur = self.read_local(frame_idx, base, slot)?;
         if let Some(r) = self.owned_by_local(frame_idx, slot, cur) {
+            let caps = self.caps;
+            let mut grown = None;
             if let Some(obj) = self.gc.get_mut(r) {
                 if let ObjKind::Array(items) = &mut obj.kind {
+                    caps.check_collection(items.len() + 1)
+                        .map_err(|m| VMError::new(&m))?;
+                    let before = items.capacity();
                     items.push(value);
-                    return Ok(());
+                    grown = Some((items.capacity() - before) * std::mem::size_of::<Value>());
                 }
+            }
+            if let Some(bytes) = grown {
+                self.gc.note_growth(bytes);
+                return Ok(());
             }
         }
         self.method_mut_local(frame_idx, base, slot, cur, "push", vec![value])

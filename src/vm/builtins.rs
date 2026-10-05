@@ -10,6 +10,15 @@ use super::machine::{VMError, VM};
 use super::value::*;
 
 impl VM {
+    /// `range(start, end)` must not build more elements than the size cap
+    /// allows (`runtime::limits`); checked before allocating anything.
+    fn check_range_len(&self, start: i64, end: i64) -> Result<(), VMError> {
+        let len = (end as i128 - start as i128).max(0);
+        self.caps
+            .check_collection(usize::try_from(len).unwrap_or(usize::MAX))
+            .map_err(|m| VMError::new(&m))
+    }
+
     /// Call a native builtin inside a GC native scope (see the rooting
     /// invariants in `vm/gc.rs`): the arguments and everything the builtin
     /// allocates are pinned until it returns, so a GC triggered by a Forge
@@ -762,12 +771,14 @@ impl VM {
                 args.get(1).and_then(|v| v.as_int(&self.gc)),
             ) {
                 (Some(start), Some(end)) => {
+                    self.check_range_len(start, end)?;
                     let items: Vec<Value> =
                         (start..end).map(|n| Value::int(n, &mut self.gc)).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
                 (Some(end_val), None) => {
+                    self.check_range_len(0, end_val)?;
                     let items: Vec<Value> =
                         (0..end_val).map(|n| Value::int(n, &mut self.gc)).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
@@ -1777,7 +1788,8 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             "shell" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1802,7 +1814,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "sh" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1816,7 +1829,8 @@ impl VM {
                 ))
             }
             "sh_lines" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1833,7 +1847,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "sh_json" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1847,7 +1862,8 @@ impl VM {
                 self.from_interp_checked(&interp_val)
             }
             "sh_ok" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let status = std::process::Command::new("/bin/sh")
                     .arg("-c")
@@ -1889,7 +1905,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "pipe_to" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let input = self.get_string_arg(&args, 0)?;
                 let cmd = self.get_string_arg(&args, 1)?;
                 use std::io::Write;
@@ -2599,9 +2616,13 @@ impl VM {
                 }
                 let s = self.get_string_arg(&args, 0)?;
                 let target = match args[1].classify(&self.gc) {
-                    ValueKind::Int(n) => n as usize,
+                    // A negative width pads nothing.
+                    ValueKind::Int(n) => n.max(0) as usize,
                     _ => return Err(VMError::new("pad_start() second arg must be int")),
                 };
+                self.caps
+                    .check_string(target)
+                    .map_err(|m| VMError::new(&m))?;
                 let pad_char = match args.get(2) {
                     Some(v) => self
                         .get_string(v)
@@ -2625,9 +2646,13 @@ impl VM {
                 }
                 let s = self.get_string_arg(&args, 0)?;
                 let target = match args[1].classify(&self.gc) {
-                    ValueKind::Int(n) => n as usize,
+                    // A negative width pads nothing.
+                    ValueKind::Int(n) => n.max(0) as usize,
                     _ => return Err(VMError::new("pad_end() second arg must be int")),
                 };
+                self.caps
+                    .check_string(target)
+                    .map_err(|m| VMError::new(&m))?;
                 let pad_char = match args.get(2) {
                     Some(v) => self
                         .get_string(v)
@@ -2657,6 +2682,9 @@ impl VM {
                     }
                     _ => return Err(VMError::new("repeat_str() second arg must be int")),
                 };
+                self.caps
+                    .check_string(s.len().saturating_mul(n))
+                    .map_err(|m| VMError::new(&m))?;
                 Ok(self.alloc_string(&s.repeat(n)))
             }
             "count" => {

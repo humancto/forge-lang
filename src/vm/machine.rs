@@ -16,14 +16,16 @@ use super::value::*;
 struct SendableVM(VM);
 unsafe impl Send for SendableVM {}
 
-/// Run a spawned closure on a forked VM in a new OS thread.
+/// Run a spawned closure on a forked VM in a new OS thread. `task` is the
+/// run's task slot (`runtime::limits`), held until the task finishes.
 fn spawn_thread(
     sendable: SendableVM,
     closure: Value,
     slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>,
+    task: crate::runtime::limits::Slot,
 ) {
     crate::permissions::spawn(move || {
-        sendable.run(closure, slot);
+        sendable.run(closure, slot, task);
     });
 }
 
@@ -42,7 +44,12 @@ fn spawn_watch_thread(sendable: SendableVM, closure: Value, path: String) {
 }
 
 impl SendableVM {
-    fn run(mut self, closure: Value, slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>) {
+    fn run(
+        mut self,
+        closure: Value,
+        slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>,
+        task: crate::runtime::limits::Slot,
+    ) {
         let vm = &mut self.0;
         let val = match vm.call_value(closure, vec![]) {
             Ok(v) => {
@@ -57,6 +64,9 @@ impl SendableVM {
             }
             Err(e) => SharedValue::ResultErr(Box::new(SharedValue::String(e.message.clone()))),
         };
+        // Free the task slot before anyone can observe the result, so a
+        // caller that awaits and immediately spawns again is not refused.
+        drop(task);
         if let Ok(mut guard) = slot.0.lock() {
             *guard = Some(val);
             slot.1.notify_all();
@@ -184,6 +194,15 @@ pub struct VM {
     /// a fired timeout refills it so the catch path's `PopTimeout` runs
     /// before the next poll.
     safepoint_countdown: u32,
+    /// Instructions in the current safe-point window (the countdown it
+    /// started with + 1). `fuel_window - safepoint_countdown` is the number
+    /// executed so far, which the next safe point charges to the fuel budget
+    /// (see `runtime::limits::Meter`).
+    fuel_window: u64,
+    /// Fuel / fatal-limit accounting against the run's resource budget.
+    meter: crate::runtime::limits::Meter,
+    /// Size caps for strings and collections the VM builds.
+    pub(super) caps: crate::runtime::limits::Caps,
     /// Set by the Stream arms of `convert_to_interp_val` / `convert_interp_value`
     /// / `value_to_shared` when a Stream is encountered at the VM↔interpreter
     /// boundary. Callers of those conversions must check this flag after each
@@ -210,6 +229,8 @@ pub struct VM {
 enum ErrorControl {
     Runtime,
     UnwoundToHandler,
+    /// A fatal resource limit (fuel, memory): never caught by `try`/`safe`.
+    Fatal,
 }
 
 #[derive(Debug)]
@@ -255,6 +276,20 @@ impl VMError {
     pub fn is_unwound_to_handler(&self) -> bool {
         self.control == ErrorControl::UnwoundToHandler
     }
+
+    /// A fatal resource-limit error (`runtime::limits`): it unwinds past
+    /// every handler.
+    pub fn fatal(msg: &str) -> Self {
+        Self {
+            message: msg.to_string(),
+            stack_trace: Vec::new(),
+            control: ErrorControl::Fatal,
+        }
+    }
+
+    pub fn is_fatal(&self) -> bool {
+        self.control == ErrorControl::Fatal
+    }
 }
 
 impl std::fmt::Display for VMError {
@@ -298,6 +333,7 @@ impl std::fmt::Display for VMError {
 
 impl VM {
     pub fn new() -> Self {
+        let (meter, caps, gc) = Self::limits_state();
         let mut vm = Self {
             registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
@@ -306,7 +342,7 @@ impl VM {
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
-            gc: Gc::new(),
+            gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
             jit: super::jit::tier::JitState::default(),
@@ -314,6 +350,9 @@ impl VM {
             jit_bridge_error: None,
             profiler: Profiler::new(false),
             safepoint_countdown: 0,
+            fuel_window: 0,
+            meter,
+            caps,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
@@ -324,6 +363,7 @@ impl VM {
     }
 
     pub fn with_profiling() -> Self {
+        let (meter, caps, gc) = Self::limits_state();
         let mut vm = Self {
             registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
@@ -332,7 +372,7 @@ impl VM {
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
-            gc: Gc::new(),
+            gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
             jit: super::jit::tier::JitState::default(),
@@ -340,6 +380,9 @@ impl VM {
             jit_bridge_error: None,
             profiler: Profiler::new(true),
             safepoint_countdown: 0,
+            fuel_window: 0,
+            meter,
+            caps,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
@@ -347,6 +390,36 @@ impl VM {
         };
         vm.register_builtins();
         vm
+    }
+
+    /// Resource-limit state for a new VM: the budget active on this thread
+    /// (`runtime::limits`) decides the fuel meter, the size caps and the GC
+    /// heap's memory limit.
+    fn limits_state() -> (
+        crate::runtime::limits::Meter,
+        crate::runtime::limits::Caps,
+        Gc,
+    ) {
+        let meter = crate::runtime::limits::Meter::current();
+        let limits = meter
+            .budget()
+            .map(|b| b.limits().clone())
+            .unwrap_or_default();
+        let gc = Gc::with_memory_limit(limits.max_memory);
+        (meter, limits.caps(), gc)
+    }
+
+    /// Fail the run with a fatal resource-limit error: it skips every
+    /// `try`/`safe` handler and unwinds this `run_until` invocation.
+    fn raise_fatal(&mut self, message: &str, boundary_frame_idx: usize) -> VMError {
+        // The countdown stays at 0, so every later instruction goes back
+        // through the safe point and fails again (the trip is sticky).
+        self.safepoint_countdown = 0;
+        self.fuel_window = 0;
+        match self.handle_runtime_error(VMError::fatal(message), boundary_frame_idx) {
+            Err(e) => e,
+            Ok(_) => VMError::fatal(message),
+        }
     }
 
     fn register_builtins(&mut self) {
@@ -681,7 +754,8 @@ impl VM {
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
         frame.ip = guard.catch_ip;
-        self.safepoint_countdown = SAFEPOINT_INTERVAL;
+        // The safe point that called us has already refilled the countdown,
+        // so the catch path's `PopTimeout` runs before the next poll.
         Ok(frame_idx)
     }
 
@@ -724,10 +798,16 @@ impl VM {
                 continue;
             }
 
-            // Safe point: poll `timeout` deadlines every SAFEPOINT_INTERVAL
-            // instructions (see `safepoint_countdown`).
+            // Safe point: settle fuel and poll `timeout` deadlines every
+            // SAFEPOINT_INTERVAL instructions (see `safepoint_countdown`).
             if self.safepoint_countdown == 0 {
-                self.safepoint_countdown = SAFEPOINT_INTERVAL;
+                match self.meter.safepoint(self.fuel_window, SAFEPOINT_INTERVAL) {
+                    Ok(next) => {
+                        self.safepoint_countdown = next;
+                        self.fuel_window = u64::from(next) + 1;
+                    }
+                    Err(message) => return Err(self.raise_fatal(&message, boundary_frame_idx)),
+                }
                 if self.earliest_expired_timeout().is_some() {
                     let handler_frame_idx = self.handle_timeout_expiry()?;
                     if handler_frame_idx < boundary_frame_idx {
@@ -1289,6 +1369,10 @@ impl VM {
                         }
                     }
                     OpCode::Spawn => {
+                        let task = crate::runtime::limits::acquire(
+                            crate::runtime::limits::Resource::Tasks,
+                        )
+                        .map_err(|m| VMError::new(&m))?;
                         let closure_val = self.registers[base + a as usize];
                         let result_slot: Arc<(Mutex<Option<SharedValue>>, Condvar)> =
                             Arc::new((Mutex::new(None), Condvar::new()));
@@ -1301,7 +1385,7 @@ impl VM {
                             Value::null()
                         };
 
-                        spawn_thread(sendable, child_closure, slot_clone);
+                        spawn_thread(sendable, child_closure, slot_clone, task);
                         self.drain_stream_boundary_flags();
 
                         // Register handle with squad if active
@@ -1465,7 +1549,10 @@ impl VM {
                             handler_base,
                         });
                         // Poll at the next instruction, so an already
-                        // expired scope fires before its body runs.
+                        // expired scope fires before its body runs. The
+                        // window shrinks to what actually ran, keeping the
+                        // fuel count exact.
+                        self.fuel_window -= u64::from(self.safepoint_countdown);
                         self.safepoint_countdown = 0;
                     }
                     OpCode::PopTimeout => {
@@ -1718,6 +1805,14 @@ impl VM {
                     }
                 }
                 self.gc.collect(&roots);
+                if self.gc.memory_exceeded() {
+                    let limit = self.gc.memory_limit().unwrap_or(0);
+                    let message = match self.meter.budget() {
+                        Some(b) => b.trip(crate::runtime::limits::Trip::Memory),
+                        None => crate::runtime::limits::memory_exceeded_message(limit),
+                    };
+                    return Err(self.raise_fatal(&message, boundary_frame_idx));
+                }
             }
         }
     }
@@ -1802,7 +1897,10 @@ impl VM {
         // instructions; native code does not), or the global the code calls
         // itself through no longer names this function.
         let depth_limit = crate::runtime::recursion::max_depth();
+        // Native code has no fuel counter: with a fuel budget every call
+        // stays in the VM, so exhaustion is exact and deterministic.
         let guards_ok = depth_below < depth_limit
+            && !self.meter.fuel_limited()
             && self.frames.iter().all(|f| f.timeouts.is_empty())
             && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
         if !guards_ok {
@@ -2022,11 +2120,6 @@ impl VM {
         trace
     }
 
-    #[allow(dead_code)]
-    fn error_with_trace(&self, msg: &str) -> VMError {
-        VMError::with_trace(msg, self.collect_stack_trace())
-    }
-
     fn classify_error_type(message: &str) -> &'static str {
         if message.contains("type") || message.contains("Type") {
             "TypeError"
@@ -2072,7 +2165,13 @@ impl VM {
             return Err(err);
         }
 
-        for frame_idx in (boundary_frame_idx.min(self.frames.len())..self.frames.len()).rev() {
+        // Fatal resource-limit errors skip every handler.
+        let handler_frames = if err.is_fatal() {
+            0..0
+        } else {
+            boundary_frame_idx.min(self.frames.len())..self.frames.len()
+        };
+        for frame_idx in handler_frames.rev() {
             let handler = {
                 let frame = &mut self.frames[frame_idx];
                 frame.handlers.pop()
@@ -2093,7 +2192,10 @@ impl VM {
         }
 
         let err = if err.stack_trace.is_empty() {
-            self.error_with_trace(&err.message)
+            VMError {
+                stack_trace: self.collect_stack_trace(),
+                ..err
+            }
         } else {
             err
         };
@@ -2602,8 +2704,11 @@ impl VM {
             Outcome::Float(f) => Value::float(f),
             Outcome::Bool(b) => Value::bool_val(b),
             Outcome::Concat => {
-                let text = format!("{}{}", left.display(&self.gc), right.display(&self.gc));
-                Value::obj(self.gc.alloc_string(text))
+                let (l, r) = (left.display(&self.gc), right.display(&self.gc));
+                self.caps
+                    .check_string(l.len() + r.len())
+                    .map_err(|m| VMError::new(&m))?;
+                Value::obj(self.gc.alloc_string(l + &r))
             }
         })
     }

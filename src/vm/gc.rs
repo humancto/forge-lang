@@ -31,6 +31,20 @@
 //! `FORGE_GC_STRESS=1` (or `Gc::set_stress(true)`) collects at every safe
 //! point that follows an allocation, which turns any missing root into a
 //! deterministic `<freed>` / wrong-value failure in tests.
+//!
+//! # Memory limit
+//!
+//! With a limit set ([`Gc::with_memory_limit`], from `--max-memory` /
+//! `runtime::limits`), the heap keeps an estimate of its live bytes
+//! (`ObjKind::heap_bytes`): every allocation and every in-place growth
+//! ([`Gc::note_growth`]) adds to it, and every collection recomputes it from
+//! the surviving objects. Crossing the limit forces a collection at the next
+//! safe point; only if the heap is *still* over the limit after collecting
+//! does [`Gc::memory_exceeded`] report it and the VM fail the run. So that a
+//! heap living just under the limit does not collect on every allocation,
+//! the next forced collection waits for `limit / MEM_SLACK_DIVISOR` bytes of
+//! new allocation (the live heap can therefore exceed the limit by that much
+//! before it is detected). Without a limit none of this bookkeeping runs.
 
 use std::collections::HashMap;
 
@@ -38,6 +52,9 @@ use super::value::{GcObject, GcRef, ObjKind, Value};
 
 const INITIAL_GC_THRESHOLD: usize = 8192;
 const GC_GROWTH_FACTOR: usize = 2;
+/// Once the live heap is close to the memory limit, a forced collection
+/// waits for `limit / MEM_SLACK_DIVISOR` bytes of new allocation.
+const MEM_SLACK_DIVISOR: usize = 8;
 /// Strings longer than this are not interned (avoids bloating the table with
 /// large unique strings like HTTP bodies or file contents).
 const INTERN_MAX_LEN: usize = 128;
@@ -59,6 +76,14 @@ pub struct Gc {
     stress: bool,
     /// Allocations since the last collection (drives stress mode).
     allocs_since_collect: usize,
+    /// Byte limit for the live heap (`None` = unlimited, no accounting).
+    mem_limit: Option<usize>,
+    /// Estimated live bytes; maintained only when `mem_limit` is set.
+    mem_bytes: usize,
+    /// Estimated bytes at which the next collection is forced.
+    mem_trigger: usize,
+    /// Set by a collection that left the heap above `mem_limit`.
+    mem_exceeded: bool,
 }
 
 /// Saved state returned by `Gc::enter_native`; hand it back to `exit_native`.
@@ -82,6 +107,56 @@ impl Gc {
                 .map(|v| !v.is_empty() && v != "0")
                 .unwrap_or(false),
             allocs_since_collect: 0,
+            mem_limit: None,
+            mem_bytes: 0,
+            mem_trigger: usize::MAX,
+            mem_exceeded: false,
+        }
+    }
+
+    /// A heap that fails the run once its live bytes exceed `limit` (see the
+    /// module docs). `None` is the same as [`Gc::new`].
+    pub fn with_memory_limit(limit: Option<usize>) -> Self {
+        Self {
+            mem_limit: limit,
+            mem_trigger: limit.unwrap_or(usize::MAX),
+            ..Self::new()
+        }
+    }
+
+    /// The byte limit, if any.
+    pub fn memory_limit(&self) -> Option<usize> {
+        self.mem_limit
+    }
+
+    /// Estimated live heap bytes (0 when no limit is set).
+    #[cfg(test)]
+    pub fn memory_bytes(&self) -> usize {
+        self.mem_bytes
+    }
+
+    /// True when the last collection left the heap above its limit.
+    #[inline]
+    pub fn memory_exceeded(&self) -> bool {
+        self.mem_exceeded
+    }
+
+    /// Account `bytes` of growth of an existing object (an in-place append
+    /// to a uniquely owned string or array).
+    #[inline]
+    pub fn note_growth(&mut self, bytes: usize) {
+        if self.mem_limit.is_some() {
+            self.charge(bytes);
+        }
+    }
+
+    #[inline]
+    fn charge(&mut self, bytes: usize) {
+        self.mem_bytes = self.mem_bytes.saturating_add(bytes);
+        if self.mem_bytes > self.mem_trigger {
+            // Collect at the next safe point; fail only if that does not
+            // bring the heap back under the limit.
+            self.next_gc = 0;
         }
     }
 
@@ -143,6 +218,9 @@ impl Gc {
     pub fn alloc(&mut self, kind: ObjKind) -> GcRef {
         self.alloc_count += 1;
         self.allocs_since_collect += 1;
+        if self.mem_limit.is_some() {
+            self.charge(kind.heap_bytes());
+        }
         let obj = GcObject::new(kind);
         let r = if let Some(idx) = self.free_list.pop() {
             self.objects[idx] = Some(obj);
@@ -258,6 +336,16 @@ impl Gc {
         self.next_gc = self.alloc_count * GC_GROWTH_FACTOR;
         if self.next_gc < INITIAL_GC_THRESHOLD {
             self.next_gc = INITIAL_GC_THRESHOLD;
+        }
+        if let Some(limit) = self.mem_limit {
+            self.mem_bytes = self
+                .objects
+                .iter()
+                .flatten()
+                .map(|o| o.kind.heap_bytes())
+                .sum();
+            self.mem_exceeded = self.mem_bytes > limit;
+            self.mem_trigger = limit.max(self.mem_bytes + limit / MEM_SLACK_DIVISOR);
         }
     }
 

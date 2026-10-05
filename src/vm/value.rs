@@ -857,6 +857,53 @@ pub enum StreamKind {
 /// Wrapper around `StreamKind` carrying a poisoning slot. If a user
 /// closure errors mid-pipeline the error is recorded here and every
 /// subsequent `next()` re-yields it.
+impl ObjKind {
+    /// Approximate bytes this object holds on the heap, including its GC
+    /// slot. Used only for `--max-memory` accounting (see `Gc`), so it is an
+    /// estimate: capacities where Rust exposes them, element counts times
+    /// element size otherwise. Shared data (`Arc`'d chunks, channel buffers)
+    /// is not counted.
+    pub fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let slot = size_of::<Option<GcObject>>();
+        let value = size_of::<Value>();
+        slot + match self {
+            ObjKind::String(s) => s.capacity(),
+            ObjKind::Array(items) | ObjKind::Tuple(items) | ObjKind::Set(items) => {
+                items.capacity() * value
+            }
+            ObjKind::Object(map) => map
+                .iter()
+                .map(|(k, _)| k.capacity() + size_of::<String>() + value + 2 * size_of::<usize>())
+                .sum(),
+            ObjKind::Map(pairs) => pairs.capacity() * 2 * value,
+            ObjKind::Function(f) => f.name.capacity(),
+            ObjKind::Closure(c) => c.function.name.capacity() + c.upvalues.capacity() * value,
+            ObjKind::NativeFunction(f) => f.name.capacity(),
+            ObjKind::Stream(b) => {
+                size_of::<StreamBox>()
+                    + match &b.kind {
+                        StreamKind::ArrayIter { items, .. }
+                        | StreamKind::TupleIter { items, .. }
+                        | StreamKind::SetIter { items, .. } => items.capacity() * value,
+                        StreamKind::MapIter { pairs, .. } => pairs.capacity() * 2 * value,
+                        StreamKind::StringIter { chars, .. } => {
+                            chars.capacity() * size_of::<char>()
+                        }
+                        _ => 0,
+                    }
+            }
+            ObjKind::Upvalue(_)
+            | ObjKind::ResultOk(_)
+            | ObjKind::ResultErr(_)
+            | ObjKind::TaskHandle(_)
+            | ObjKind::Channel(_)
+            | ObjKind::Frozen(_)
+            | ObjKind::BoxedInt(_) => 0,
+        }
+    }
+}
+
 pub struct StreamBox {
     pub kind: StreamKind,
     pub poisoned: Option<String>,
