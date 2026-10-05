@@ -1,0 +1,60 @@
+name: Validate index
+
+# Every change to the index is a pull request; this job is the gate.
+# See rfcs/0007-package-registry.md in forge-lang.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install signature verifier
+        run: pip install "cryptography>=42,<50"
+
+      - name: Validate (format, names, ownership, signatures, history, checksums)
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          args=(--root .)
+          # Append-only history: compare with the base of the PR (or the
+          # previous main commit). Only new or changed entries' archives are
+          # downloaded and checksummed.
+          if [ -n "${BASE_REF:-}" ] && git cat-file -e "${BASE_REF}^{commit}" 2>/dev/null; then
+            args+=(--base "$BASE_REF")
+          fi
+          python3 scripts/validate_index.py "${args[@]}"
+
+      - name: Protect index infrastructure
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # A publish/yank PR may only touch index/ and index.toml. Changes to
+          # owners.toml, CI or scripts must come in their own PR so that
+          # CODEOWNERS review is never bundled with a package change.
+          changed=$(git diff --name-only "$BASE_SHA" HEAD)
+          echo "$changed"
+          pkg=$(echo "$changed" | grep -E '^(index/|index\.toml$)' || true)
+          infra=$(echo "$changed" | grep -vE '^(index/|index\.toml$)' || true)
+          if [ -n "$pkg" ] && [ -n "$infra" ]; then
+            echo "::error::Package changes and infrastructure changes must be separate pull requests:"
+            echo "$infra"
+            exit 1
+          fi

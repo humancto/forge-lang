@@ -17,7 +17,9 @@ mod native;
 mod package;
 mod parser;
 mod permissions;
+mod plugins;
 mod publish;
+mod publish_index;
 mod registry;
 mod repl;
 mod runtime;
@@ -160,6 +162,13 @@ struct PermissionFlags {
     #[arg(long = "allow-ai", global = true)]
     allow_ai: bool,
 
+    /// Allow loading native plugins (`import native`); with =PATHS, only
+    /// libraries at or under those paths. Native code runs with full trust.
+    #[arg(long = "allow-ffi", value_name = "PATHS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_ffi: Option<Vec<String>>,
+
     /// Stop the program after SECS seconds of wall-clock time (exit code 124)
     #[arg(long = "max-time", value_name = "SECS", global = true)]
     max_time: Option<f64>,
@@ -195,6 +204,7 @@ fn apply_scoped_grant(
         Capability::Read => caps.grant_read_paths(items),
         Capability::Write => caps.grant_write_paths(items),
         Capability::Net => caps.grant_net_hosts(items),
+        Capability::Ffi => caps.grant_ffi_paths(items),
         _ => caps.grant(cap),
     }
 }
@@ -222,6 +232,12 @@ fn build_policy(
     // there unless the user explicitly asked for a sandbox.
     let run = allow_run || toml.allow_run.unwrap_or(false) || (is_interactive && !sandboxed);
     caps.set(Capability::Run, run);
+    // Native plugins follow `run`: opt-in for scripts, available when a
+    // person is typing (REPL, -e) unless sandboxed. An explicit grant
+    // (`--allow-ffi[=PATHS]`, `allow-ffi`) was applied above and wins.
+    if is_interactive && !sandboxed && flags.allow_ffi.is_none() && toml.allow_ffi.is_none() {
+        caps.set(Capability::Ffi, true);
+    }
     // Modules next to the entry script (and installed packages) stay
     // importable even when fs.read is scoped elsewhere.
     if let Some(root) = import_root {
@@ -246,7 +262,7 @@ fn build_mcp_policy(
     caps
 }
 
-/// Apply the fs/net/env/db/ai grants from CLI flags and forge.toml (flags
+/// Apply the fs/net/ffi/env/db/ai grants from CLI flags and forge.toml (flags
 /// win per capability). `run` and `process` are left to the caller.
 fn apply_grants(
     mut caps: permissions::Capabilities,
@@ -270,6 +286,11 @@ fn apply_grants(
         caps,
         Capability::Net,
         cli_list(&flags.allow_net).or(toml.allow_net),
+    );
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Ffi,
+        cli_list(&flags.allow_ffi).or(toml.allow_ffi),
     );
     for (cap, flag, from_toml) in [
         (Capability::Env, flags.allow_env, toml.allow_env),
@@ -417,14 +438,45 @@ enum Command {
     },
     /// Update all dependencies to latest compatible versions
     Update,
-    /// Publish the current project to the local registry
+    /// Publish the current project to a local registry, or to a clone of a
+    /// sparse-index repository (a directory with config.json; rfcs/0007)
     Publish {
         /// Show what would be packaged without publishing
         #[arg(long)]
         dry_run: bool,
-        /// Custom registry path (defaults to ~/.forge/registry/)
+        /// Local registry directory (default ~/.forge/registry/), or a local
+        /// clone of a sparse-index repository
         #[arg(long)]
         registry: Option<String>,
+        /// Sign the index entry with your ed25519 publisher key
+        /// (~/.forge/keys/publish.key or $FORGE_SIGNING_KEY; created on first use)
+        #[arg(long)]
+        sign: bool,
+        /// Archive URL template for index publishing ({name}, {vers});
+        /// default: a GitHub release asset of project.repository
+        #[arg(long, value_name = "URL")]
+        download_url: Option<String>,
+        /// Where to write the archive for index publishing (default ./dist)
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+        /// Do not create a branch and commit in the index clone
+        #[arg(long)]
+        no_commit: bool,
+    },
+    /// Mark a published version as yanked (or un-yank it) in a local clone
+    /// of a sparse-index repository
+    Yank {
+        /// name@version to yank
+        package: String,
+        /// Local clone of the sparse-index repository
+        #[arg(long)]
+        registry: PathBuf,
+        /// Un-yank instead
+        #[arg(long)]
+        undo: bool,
+        /// Do not create a branch and commit in the index clone
+        #[arg(long)]
+        no_commit: bool,
     },
     /// Search the package registry
     Search {
@@ -730,8 +782,74 @@ async fn async_main() {
         Some(Command::Update) => {
             run_off_runtime(package::update);
         }
-        Some(Command::Publish { dry_run, registry }) => {
-            publish::publish(dry_run, registry.as_deref());
+        Some(Command::Publish {
+            dry_run,
+            registry,
+            sign,
+            download_url,
+            out_dir,
+            no_commit,
+        }) => {
+            let index_dir = registry
+                .as_deref()
+                .map(PathBuf::from)
+                .filter(|p| publish_index::is_index_repo(p));
+            match index_dir {
+                Some(index_dir) => {
+                    let opts = publish_index::IndexPublishOptions {
+                        project_dir: std::path::Path::new("."),
+                        index_dir: &index_dir,
+                        dry_run,
+                        sign,
+                        key_path: None,
+                        download_url,
+                        out_dir,
+                        commit: !no_commit,
+                    };
+                    match publish_index::publish_to_index(&opts) {
+                        Ok(published) => publish_index::print_report(&index_dir, &published),
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+                None => {
+                    if sign || download_url.is_some() || out_dir.is_some() || no_commit {
+                        eprintln!(
+                            "Error: --sign, --download-url, --out-dir and --no-commit apply to \
+                             publishing into a sparse-index clone (a --registry directory with config.json)"
+                        );
+                        process::exit(2);
+                    }
+                    publish::publish(dry_run, registry.as_deref());
+                }
+            }
+        }
+        Some(Command::Yank {
+            package: pkg,
+            registry,
+            undo,
+            no_commit,
+        }) => {
+            let Some((name, vers)) = pkg.split_once('@') else {
+                eprintln!("Error: expected name@version, got '{}'", pkg);
+                process::exit(2);
+            };
+            match publish_index::yank(&registry, name, vers, undo, !no_commit) {
+                Ok(branch) => {
+                    let verb = if undo { "Un-yanked" } else { "Yanked" };
+                    println!("  {} {}@{} in {}", verb, name, vers, registry.display());
+                    match branch {
+                        Some(b) => println!("  Push branch '{}' and open a pull request.", b),
+                        None => println!("  Commit the change and open a pull request."),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
         }
         Some(Command::Search { query }) => {
             let q = query.as_deref().unwrap_or("");
@@ -903,7 +1021,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         Stmt::DecoratorStmt(_) => {
             issues.insert("decorator-driven runtime features");
         }
-        Stmt::Import { .. } => {}
+        Stmt::Import { .. } | Stmt::ImportNative { .. } => {}
         Stmt::FnDef {
             body, decorators, ..
         } => {
@@ -1484,6 +1602,32 @@ mod tests {
         assert!(help.contains("--jit"));
         assert!(help.contains("JIT-compile numeric leaf functions"));
         assert!(help.contains("falls back to the bytecode interpreter automatically"));
+    }
+
+    #[test]
+    fn ffi_is_opt_in_everywhere_but_interactive_use() {
+        use permissions::Capability::Ffi;
+        let parse = |args: &[&str]| Cli::try_parse_from(args).expect("parse").perms;
+        let plain = parse(&["forge", "run", "a.fg"]);
+        // `forge run`: denied unless granted.
+        assert!(!build_policy(&plain, None, false, false, None).is_granted(Ffi));
+        // REPL / -e: allowed, unless sandboxed.
+        assert!(build_policy(&plain, None, false, true, None).is_granted(Ffi));
+        let sandboxed = parse(&["forge", "--sandbox", "run", "a.fg"]);
+        assert!(!build_policy(&sandboxed, None, false, true, None).is_granted(Ffi));
+        // An explicit grant wins, including a scoped one under --sandbox.
+        let granted = parse(&["forge", "--sandbox", "--allow-ffi=./plugins", "run", "a.fg"]);
+        assert!(build_policy(&granted, None, false, false, None).is_granted(Ffi));
+        // forge.toml can grant it too.
+        let toml = manifest::PermissionsConfig {
+            allow_ffi: Some(manifest::GrantSpec::Flag(true)),
+            ..Default::default()
+        };
+        assert!(build_policy(&plain, Some(toml), false, false, None).is_granted(Ffi));
+        // forge mcp: deny-all unless --allow-ffi.
+        assert!(!build_mcp_policy(&plain, None, false).is_granted(Ffi));
+        let mcp = parse(&["forge", "--allow-ffi", "mcp"]);
+        assert!(build_mcp_policy(&mcp, None, false).is_granted(Ffi));
     }
 
     #[test]

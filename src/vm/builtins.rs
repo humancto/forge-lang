@@ -36,6 +36,13 @@ impl VM {
     }
 
     fn dispatch_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
+        // Native plugin functions (`import native`) run the shared
+        // implementation in `plugins`, converting values at the boundary.
+        if crate::plugins::is_plugin_fn(name) {
+            let interp_args = self.args_to_interp(&args)?;
+            let result = crate::plugins::call(name, interp_args).map_err(|e| VMError::new(&e))?;
+            return self.from_interp_checked(&result);
+        }
         match name {
             "__forge_register_struct" => {
                 if args.len() != 3 {
@@ -534,6 +541,45 @@ impl VM {
                 };
                 let pair = self.gc.alloc(ObjKind::Tuple(vec![new_receiver, result]));
                 Ok(Value::obj(pair))
+            }
+            "__forge_import_native" => {
+                // (path_as_written, base_dir | null, names | false)
+                if args.len() != 3 {
+                    return Err(VMError::new(
+                        "__forge_import_native() requires (path, base_dir, names)",
+                    ));
+                }
+                let path = self.get_string_arg(&args, 0)?;
+                // An empty base directory means "no importing file" (REPL, -e).
+                let base_dir = self
+                    .get_string(&args[1])
+                    .filter(|d| !d.is_empty())
+                    .map(std::path::PathBuf::from);
+                let names: Option<Vec<String>> = match args[2].classify(&self.gc) {
+                    ValueKind::Obj(r) => Some(
+                        self.gc
+                            .get(r)
+                            .and_then(|obj| match &obj.kind {
+                                ObjKind::Array(items) => Some(
+                                    items
+                                        .iter()
+                                        .filter_map(|item| self.get_string(item))
+                                        .collect::<Vec<_>>(),
+                                ),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                VMError::new(
+                                    "__forge_import_native() names must be an array of strings",
+                                )
+                            })?,
+                    ),
+                    _ => None,
+                };
+                let namespace =
+                    crate::plugins::import(&path, base_dir.as_deref(), names.as_deref())
+                        .map_err(|e| VMError::new(&e))?;
+                self.from_interp_checked(&namespace)
             }
             "__forge_import_module" => {
                 // (resolved_path, names | false, path_as_written)

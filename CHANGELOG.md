@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Python package `forge-lang`** (`bindings/python`, PyO3 + maturin, abi3 wheels for CPython 3.9+ on Linux/macOS/Windows) — `forge_lang.Sandbox(allow=..., allow_read=..., allow_write=..., allow_net=..., max_time=..., max_output=...)` runs untrusted Forge code in-process under the deny-by-default sandbox. `run()` releases the GIL, is safe to call from many threads, honours Ctrl-C and a `CancelToken`, and raises typed exceptions (`ForgeSyntaxError`, `ForgePermissionError`, `ForgeRuntimeError`, `ForgeTimeoutError`, `ForgeOutputLimitError`, `ForgeCancelledError`, all `ForgeError`) carrying `kind`, `stdout`, `line`/`column` and `limit`; `check()` returns the same diagnostics as `forge mcp`'s `check_forge`. Ships type stubs and `py.typed`. A new `Python` workflow builds wheels and an sdist, runs pytest on Linux, and publishes to PyPI on `py-v*` tags via trusted publishing once enabled. A Node.js (napi-rs) design is in `bindings/node/README.md`.
+- **Native plugins: call Rust and C from Forge** — `import native "path/libfoo" [as foo]` and `import { add } from native "path/libfoo"` load a shared library (platform suffix resolved) that implements Forge's versioned C plugin ABI (v1, `crates/forge-plugin/include/forge_plugin.h`) and call its functions with typed values (null/bool/int/float/string/bytes/array/object) on both engines. Plugin errors and panics become catchable Forge errors. New SDK crate `crates/forge-plugin` with `#[forge_fn]` and `export!`; examples in `examples/plugins/hello_rust` and `examples/plugins/hello_c`. Design: `rfcs/0006-native-plugins.md`.
+- **`ffi` capability and `--allow-ffi[=PATHS]`** (also `allow-ffi` in `forge.toml`, `Sandbox::allow_ffi`) — loading native code is full trust, so it is opt-in for `forge run`/`forge test`, allowed in the REPL and `-e`, and denied under `--sandbox`, in `forge mcp` and in embedded sandboxes unless granted.
+- **Sparse package registry** ([RFC 0007](rfcs/0007-package-registry.md)) — `forge add`/`install`/`update` resolve remote packages from a Git-hosted sparse index (one JSON-lines file per package) at `FORGE_REGISTRY_URL` (default `https://raw.githubusercontent.com/humancto/forge-registry/main`; `file://` and mirrors supported). Index files are cached per registry and revalidated with ETags (`FORGE_CACHE_TTL`), `FORGE_OFFLINE=1` works from the cache, archives are cached content-addressed, and a mirror's `config.json` can redirect downloads (`dl`).
+- **Mandatory checksums and optional ed25519 signatures** — every archive is verified against its index SHA-256 before extraction. `forge publish --sign` signs entries with `~/.forge/keys/publish.key` (`$FORGE_SIGNING_KEY`). Installs pin each package's publisher key on first use (`~/.forge/trusted-keys.toml`) and refuse key changes or signature stripping. `FORGE_REQUIRE_SIGNATURES=1` refuses unsigned packages. `forge.lock` records `archive_checksum` and `signer` and refuses a locked version whose content or signer changed.
+- **`forge publish --registry <index-clone>`** — builds a deterministic `dist/<name>-<version>.tar.gz`, appends the entry (deps, checksum, URL, signature) and commits it on a `publish/<name>-<version>` branch, ready for a pull request (`--download-url`, `--out-dir`, `--no-commit`). It enforces name rules (lowercase, reserved and look-alike names), immutable versions, `owners.toml` namespace/key ownership and signing-key continuity.
+- **`forge yank <name@version> --registry <index-clone> [--undo]`** — yanked versions are skipped by new resolutions but stay installable from a lockfile, and `forge install` keeps lockfile versions that still match the manifest.
+- **Benchmark regression gate** — `tools/bench.sh` is the single benchmark runner (suites `vm`, `interp`, `startup`, plus `peers` for Python/Node/Lua ports; human table or `--json`). `tools/bench_compare.py` runs it against two binaries in interleaved A/B rounds and compares medians. The new `Performance` workflow builds the PR base and head in release mode on one runner and fails when a benchmark is more than 15% slower, with the table in the job summary. The `perf-regression-ok` label accepts an intended slowdown. `tools/bench_vm.sh` / `bench_interp.sh` are now wrappers. Methodology and current numbers: `docs/BENCHMARKS.md`.
+- **`tools/registry-template/`** — seed for the hosted index repository: README, `config.json`, `owners.toml`, CODEOWNERS placeholder and a CI validator (`scripts/validate_index.py`: format, names, semver, ownership, signatures, append-only history, archive checksums), cross-checked against `forge publish` output in `tests/registry_index.rs`.
 - Outbound HTTP requests (`fetch`, `http.*`, `download`, `crawl`) run in an `http.client.request` span and, when OpenTelemetry export is active, send the W3C `traceparent` of that span, so downstream services join the caller's trace. A `traceparent` header the script sets itself is never replaced (#134)
 - `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` configure head sampling (`always_on`, `always_off`, `traceidratio`, `parentbased_always_on` (default), `parentbased_always_off`, `parentbased_traceidratio`); invalid values fall back to the default with a warning (#135)
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is honored and takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT` (#132)
@@ -17,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The default registry is now `humancto/forge-registry` (the old `forge-lang/registry` URL never existed). A registry without `config.json` is reported as "not a Forge registry" with guidance, instead of every package looking missing.
+- Registry archive extraction rejects symlinks, hard links and device entries as well as absolute and `..` paths.
 - Updates of the form `x = x op e`, `x op= e`, `o.f = o.f op e`, `a[i] op= e` (any field/index chain) with an effect-free `e` and indexes are a single atomic read-modify-write in the interpreter, so squad `spawn`s that update state shared through a captured closure no longer lose updates (#128)
 
 ### Fixed
@@ -25,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `which` no longer depends on `/usr/bin/which` being installed
 - `forge run` logs: the default filter now enables the CLI binary's own targets (`forge=info`), so the server's per-request `request` span (`method`, `uri`, `request_id`) and the `forge.server` startup event are no longer filtered out; under `FORGE_LOG_FORMAT=json` the VM-to-interpreter fallback note is a `forge.runtime` JSON event instead of plain text, so stderr stays line-delimited JSON (#119, #120)
 - The debug-build check that rejects a `Value::Stream` in a server's top-level environment now also finds streams captured by closures, and names the binding path (#115)
+
+### Security
+
+- `GITHUB_TOKEN` is sent only over HTTPS to GitHub hosts. It was previously attached to requests for any `FORGE_REGISTRY_URL` and archive URL.
 
 ## [0.9.0] - 2026-10-05
 

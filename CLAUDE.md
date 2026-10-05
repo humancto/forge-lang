@@ -66,11 +66,13 @@ forge fmt                    # format code
 
 Source of truth: `forge help` (clap `Command` enum in `src/main.rs`).
 
-run, repl, version, fmt, test, new, build, install, add, update, publish, search, lsp, dap, mcp, learn, chat, watch, doc, help, plus `-e` for inline eval.
+run, repl, version, fmt, test, new, build, install, add, update, publish, yank, search, lsp, dap, mcp, learn, chat, watch, doc, help, plus `-e` for inline eval.
 
 `forge mcp` (`src/mcp.rs`, test `tests/mcp_stdio.rs`) is a stdio MCP server for AI agents: tools `run_forge` / `check_forge` / `forge_reference`; scripts run in `Sandbox` under deny-all plus the `--allow-*` / `[permissions]` grants (`build_mcp_policy` in `main.rs`). Both the binary and the lib compile `mcp.rs` and `sandbox.rs`.
 
-Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run` (`--vm` is a backwards-compatible no-op). `forge build` takes `--native` (embeds source) or `--aot` (embeds bytecode).
+Package registry (`rfcs/0007-package-registry.md`): `src/registry/` = `index.rs` (sparse-index format, name rules, resolution, ownership; pure), `client.rs` (fetch + ETag cache, offline, archives), `signing.rs` (ed25519, TOFU pins); `src/publish_index.rs` = `forge publish --registry <index-clone>` / `forge yank` (binary only). End-to-end tests: `tests/registry_index.rs` (file:// index + in-process HTTP server). `tools/registry-template/` seeds the hosted index repo; its Python validator is cross-checked by those tests.
+
+Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run`, `--allow-ffi[=PATHS]` (`--vm` is a backwards-compatible no-op). `forge build` takes `--native` (embeds source) or `--aot` (embeds bytecode).
 
 ## Standard Library (22 global modules, 200+ module functions)
 
@@ -124,6 +126,7 @@ cargo build          # 0 errors
 cargo test           # 1,600+ Rust tests pass
 forge --allow-run test --engine both # 640+ Forge tests on VM and interpreter (shell tests need --allow-run)
 forge test --coverage # with line coverage report
+tools/bench.sh [--json]    # wall-clock benchmarks (release build); PRs are gated by perf.yml: >15% slower fails unless labelled perf-regression-ok (docs/BENCHMARKS.md)
 ```
 
 `examples/` holds 20+ programs. Server examples (`api.fg`, `bench_server*.fg`) block until killed; `devops.fg`/`showcase.fg` need `--allow-run`; `bench_client.fg` needs `FORGE_HTTP_ALLOW_PRIVATE=1` and a running bench server. `tools/run_examples.sh` runs every runnable example on the default engine, and `cargo test --test engine_diff` compares all examples, parity fixtures and `tests/*.fg` across both engines.
@@ -457,6 +460,9 @@ call `tracing_init::init_subscriber()` on first use.
 - **One shell implementation.** Every builtin that runs a command string goes through `runtime::shell` (`command`/`output`/`succeeds`/`pipe`, `which`, `resolve_program`). Never call `Command::new("/bin/sh")` or `/usr/bin/which` directly; cmd.exe needs `raw_arg` (MSVCRT `.arg()` escaping is not undone by cmd). Feeding a child's stdin must happen on a separate thread from reading its output (`shell::pipe`), or large I/O deadlocks.
 - **Shared-state atomicity in squads (interpreter).** Spawned tasks share state captured by closures. `x = x op e` / `x op= e` and the field/index forms (`o.f op= e`, `a[i] = a[i] op e`, nested chains) are one read-modify-write under the scope lock *only* when `e` and the indexes are effect-free (`try_update_ident` / `try_update_place` in `places.rs`). Anything else (e.g. `x = x + f()`, `x = g(x)`) reads and writes under separate locks and can lose updates; use channels or the `squad` result array for cross-task aggregation. Never evaluate Forge code while holding a scope lock.
 - **Panics go through `tracing`.** `init_subscriber` installs `install_panic_hook`: an `ERROR` event on `forge.panic`, falling back to the previous hook when that target is filtered out. Keep `forge.panic=error` in `DEFAULT_FILTER`.
+- **Native plugins (`src/plugins`, RFC 0006): the C ABI is the contract.** `crates/forge-plugin/include/forge_plugin.h` is normative; `src/plugins/abi.rs` (host) and `crates/forge-plugin/src/abi.rs` (SDK) mirror it with layout tests. Any layout change is an ABI break: bump `ABI_VERSION` in all three. Rules: arguments are borrowed for one call (strings point into the caller's `Vec<Value>`, arrays/objects into a per-call arena); results are copied out and then always handed back to the plugin's `free_value` (the host never frees plugin memory); the `ffi` check runs on the canonical path *before* `dlopen`; libraries are never unloaded (function values are `Value::BuiltIn("native:<lib>:<fn>")` and may outlive any scope). Both engines route the `native:` prefix to `plugins::call` before any other dispatch. The SDK is a standalone crate (own `[workspace]`), not a dependency of `forge-lang`, so publishing the language crate is unaffected; `tests/native_plugins.rs` builds the example plugins with cargo/cc and diffs both engines.
+- **Standalone crates carry their own lockfiles.** `bindings/python/Cargo.lock` (and `examples/plugins/hello_rust/Cargo.lock`) pin `forge-lang` by path, and CI builds them with `--locked`. Any change to the main crate's dependencies makes them stale: run `cargo update -p forge-lang` in `bindings/python` (and `cargo metadata --locked` in each standalone crate) in the same commit.
+- **Registry entries are immutable; checksums are mandatory.** A published index line never changes except its `yanked` flag, and the lockfile (`archive_checksum`, `signer`) and the index CI both enforce it. Change the entry format only by bumping `index::INDEX_FORMAT_VERSION` (old clients skip newer lines) and updating `tools/registry-template/scripts/validate_index.py` in the same change (`tests/registry_index.rs` runs it). Never send `GITHUB_TOKEN` outside `client::GITHUB_HOSTS`.
 - **Threads that run Forge code need a registered stack.** Use `recursion::spawn_worker` (std threads) or `recursion::configure_runtime` (tokio runtimes); an unregistered thread is assumed to have 2 MiB and the guard stops recursion early.
 
 ## Module Dependency Map

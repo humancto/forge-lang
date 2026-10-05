@@ -1,0 +1,9 @@
+# PLACEHOLDER: replace @humancto with the registry maintainers before going
+# live. Every change to the index needs a review from one of them; enable
+# "Require review from Code Owners" on the main branch.
+*                 @humancto
+
+# Name and key ownership is security-sensitive.
+/owners.toml      @humancto
+/.github/         @humancto
+/scripts/         @humancto
