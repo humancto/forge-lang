@@ -423,7 +423,7 @@ pub fn traces_endpoint(env: impl Fn(&str) -> Option<String>) -> Option<String> {
         "OTEL_EXPORTER_OTLP_ENDPOINT",
     ]
     .into_iter()
-    .filter_map(|key| env(key))
+    .filter_map(&env)
     .map(|value| value.trim().to_string())
     .find(|value| !value.is_empty())
 }
