@@ -246,12 +246,12 @@ pub fn parse_package_spec(spec: &str) -> Result<(String, String), String> {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Lockfile {
     pub packages: Vec<LockedPackage>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LockedPackage {
     pub name: String,
     pub version: String,
@@ -261,6 +261,14 @@ pub struct LockedPackage {
     pub checksum: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum_kind: Option<String>,
+    /// `sha256:<hex>` of the registry archive (sparse-registry packages).
+    /// Reinstalling the same version with a different archive is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_checksum: Option<String>,
+    /// `ed25519:<base64>` key that signed the installed version, if signed.
+    /// A later install of the same version signed by another key is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -422,6 +430,7 @@ test = "forge test"
                     source: "registry".to_string(),
                     checksum: "abc123".to_string(),
                     checksum_kind: None,
+                    ..Default::default()
                 },
                 LockedPackage {
                     name: "auth".to_string(),
@@ -429,6 +438,7 @@ test = "forge test"
                     source: "git+https://github.com/x/auth.git".to_string(),
                     checksum: "def456".to_string(),
                     checksum_kind: None,
+                    ..Default::default()
                 },
             ],
         };
@@ -448,6 +458,7 @@ test = "forge test"
                 source: String::new(),
                 checksum: String::new(),
                 checksum_kind: None,
+                ..Default::default()
             }],
         };
         assert!(lockfile.find("foo").is_some());
