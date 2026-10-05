@@ -15,6 +15,8 @@
 //! make both engines call it. Never re-implement one of these rules inline in
 //! `interpreter/` or `vm/`.
 
+pub mod alloc;
+
 /// Borrowed view of a binary-operator operand.
 #[derive(Clone, Copy, Debug)]
 pub enum Operand<'a> {

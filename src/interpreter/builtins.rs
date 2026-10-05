@@ -280,12 +280,14 @@ impl Interpreter {
                 )),
             },
             "range" => match (args.first(), args.get(1)) {
-                (Some(Value::Int(start)), Some(Value::Int(end))) => {
-                    Ok(Value::Array((*start..*end).map(Value::Int).collect()))
-                }
-                (Some(Value::Int(end)), None) => {
-                    Ok(Value::Array((0..*end).map(Value::Int).collect()))
-                }
+                (Some(Value::Int(start)), Some(Value::Int(end))) => Ok(Value::Array(
+                    crate::semantics::alloc::int_range(*start, *end, "range()", Value::Int)
+                        .map_err(|e| RuntimeError::new(&e))?,
+                )),
+                (Some(Value::Int(end)), None) => Ok(Value::Array(
+                    crate::semantics::alloc::int_range(0, *end, "range()", Value::Int)
+                        .map_err(|e| RuntimeError::new(&e))?,
+                )),
                 _ => Err(RuntimeError::new("range() requires integer arguments")),
             },
             "set" => {
@@ -487,7 +489,7 @@ impl Interpreter {
             }
             "wait" => match args.first() {
                 Some(Value::Int(secs)) => {
-                    let total_ms = ((*secs).max(0) as u64) * 1000;
+                    let total_ms = ((*secs).max(0) as u64).saturating_mul(1000);
                     let mut elapsed = 0u64;
                     while elapsed < total_ms {
                         if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -995,14 +997,19 @@ impl Interpreter {
                         Some(Value::String(c)) => c.chars().next().unwrap_or(' '),
                         _ => ' ',
                     };
-                    let target = *target_len as usize;
+                    // A negative length pads nothing (it used to wrap to a
+                    // huge usize and abort the process).
+                    let target = usize::try_from(*target_len).unwrap_or(0);
                     let char_count = s.chars().count();
                     if char_count >= target {
                         Ok(Value::String(s.clone()))
                     } else {
-                        let padding: String = std::iter::repeat(pad_char)
-                            .take(target - char_count)
-                            .collect();
+                        let padding = crate::semantics::alloc::padding(
+                            pad_char,
+                            target - char_count,
+                            "pad_start()",
+                        )
+                        .map_err(|e| RuntimeError::new(&e))?;
                         Ok(Value::String(format!("{}{}", padding, s)))
                     }
                 }
@@ -1014,14 +1021,19 @@ impl Interpreter {
                         Some(Value::String(c)) => c.chars().next().unwrap_or(' '),
                         _ => ' ',
                     };
-                    let target = *target_len as usize;
+                    // A negative length pads nothing (it used to wrap to a
+                    // huge usize and abort the process).
+                    let target = usize::try_from(*target_len).unwrap_or(0);
                     let char_count = s.chars().count();
                     if char_count >= target {
                         Ok(Value::String(s.clone()))
                     } else {
-                        let padding: String = std::iter::repeat(pad_char)
-                            .take(target - char_count)
-                            .collect();
+                        let padding = crate::semantics::alloc::padding(
+                            pad_char,
+                            target - char_count,
+                            "pad_end()",
+                        )
+                        .map_err(|e| RuntimeError::new(&e))?;
                         Ok(Value::String(format!("{}{}", s, padding)))
                     }
                 }
@@ -1068,7 +1080,9 @@ impl Interpreter {
                     if *n < 0 {
                         return Err(RuntimeError::new("repeat_str() count must be non-negative"));
                     }
-                    Ok(Value::String(s.repeat(*n as usize)))
+                    crate::semantics::alloc::repeat_str(s, *n as usize, "repeat_str()")
+                        .map(Value::String)
+                        .map_err(|e| RuntimeError::new(&e))
                 }
                 _ => Err(RuntimeError::new("repeat_str() requires (string, count)")),
             },
@@ -1887,7 +1901,8 @@ impl Interpreter {
                     Some(Value::Int(n)) => *n as usize,
                     _ => 100,
                 };
-                let mut times: Vec<f64> = Vec::with_capacity(n);
+                let mut times: Vec<f64> = crate::semantics::alloc::vec_with_capacity(n, "slay()")
+                    .map_err(|e| RuntimeError::new(&e))?;
                 let mut last_result = Value::Null;
                 for _ in 0..n {
                     let start = std::time::Instant::now();
@@ -2009,7 +2024,8 @@ impl Interpreter {
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_nanos() as u64;
-                        let mut result = Vec::with_capacity(n);
+                        let mut result = crate::semantics::alloc::vec_with_capacity(n, "sample()")
+                            .map_err(|e| RuntimeError::new(&e))?;
                         for i in 0..n {
                             let mut x = seed.wrapping_add(i as u64);
                             x ^= x << 13;
