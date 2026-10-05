@@ -182,7 +182,9 @@ cargo test test_name
 ### Run Forge integration tests
 
 ```bash
-./target/debug/forge test tests/
+./target/debug/forge test tests/                  # default engine (VM, interpreter fallback)
+./target/debug/forge test tests/ --engine interp  # tree-walking interpreter only
+./target/debug/forge test tests/ --engine both    # every file on both engines
 ```
 
 ### Interpreter/VM differential test
@@ -203,6 +205,28 @@ fails on any new divergence, and also when a listed divergence disappears, so th
 list only ever shrinks. Rules both engines share (operators, comparisons,
 indexing, truthiness, error messages) live in `src/semantics/` — change them there,
 not in one engine.
+
+### Run the CI gates locally
+
+Every required CI job can be reproduced from a checkout. Run them before
+opening a PR:
+
+| CI job | Local command |
+| --- | --- |
+| Format | `cargo fmt --check` |
+| Clippy | `cargo clippy --all-targets -- -A clippy::approx_constant -A clippy::result_large_err -A clippy::only_used_in_recursion -A clippy::len_zero` |
+| Test (ubuntu/macos/windows) | `CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked` |
+| Forge tests (vm) | `cargo build --bin forge && ./target/debug/forge --allow-run test tests/ --engine vm` |
+| Forge tests (interp) | `./target/debug/forge --allow-run test tests/ --engine interp` |
+| Examples (default engine) | `tools/run_examples.sh target/debug/forge` (skip-list with reasons is in the script) |
+| Backend parity corpus | `cargo test --bin forge parity_corpus_` |
+| Security Audit | `cargo install cargo-audit --locked && cargo audit` (ignores, with reasons, live in `.cargo/audit.toml`) |
+| Build with otel feature | `cargo build --features otel && cargo test --test otel_smoke --features otel` |
+
+CI also runs weekly (Monday 06:17 UTC) so new RustSec advisories and toolchain
+changes surface even without pushes. `CARGO_PROFILE_DEV_DEBUG=0` matches CI and
+keeps the debug target directory (which includes the `libforge_lang.a` static
+runtime) small.
 
 ### Writing tests
 
@@ -249,7 +273,8 @@ define my_test() {
 - [ ] `cargo test` passes (all 189+ tests)
 - [ ] `cargo clippy` has no new warnings
 - [ ] New features have tests
-- [ ] Examples still work (`forge run examples/showcase.fg`)
+- [ ] Examples still work (`tools/run_examples.sh`)
+- [ ] Forge tests pass on both engines (`forge test tests/ --engine both`)
 - [ ] Code follows the style guide (no `unwrap()`, no `unsafe`)
 
 ## Issue Reporting

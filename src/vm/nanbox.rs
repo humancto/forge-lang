@@ -89,7 +89,12 @@ impl NanBoxedValue {
     }
 
     /// Box an integer, panicking if it doesn't fit in 48 bits.
-    /// Use only when the value is known to be small (e.g., array length, bool-to-int).
+    ///
+    /// Test-only by design: production code must never be able to panic on a
+    /// large integer. Runtime code goes through `Value::int(n, gc)`, which
+    /// heap-boxes out-of-range values, or `Value::try_inline_int` when no GC
+    /// is available.
+    #[cfg(test)]
     #[inline]
     pub fn from_small_int(n: i64) -> Self {
         Self::try_from_int(n).expect("BUG: integer too large for inline NaN-boxing")

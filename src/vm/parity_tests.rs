@@ -3,13 +3,7 @@ use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 #[cfg(feature = "jit")]
-use crate::vm::bytecode::Constant;
-#[cfg(feature = "jit")]
-use crate::vm::jit::jit_module::JitCompiler;
-#[cfg(feature = "jit")]
-use crate::vm::jit::type_analysis;
-#[cfg(feature = "jit")]
-use crate::vm::machine::JitEntry;
+use crate::vm::jit::tier::JitMode;
 
 fn parse_program(source: &str) -> crate::parser::ast::Program {
     let mut lexer = Lexer::new(source);
@@ -56,64 +50,8 @@ fn run_on_jit_value(source: &str) -> String {
     let program = parse_program(source);
     let chunk = compiler::compile_repl(&program).expect("compile error");
 
-    let mut jit = JitCompiler::new().expect("jit init");
     let mut vm = VM::new();
-    for (i, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() || proto.name == "<lambda>" {
-            format!("fn_{}", i)
-        } else {
-            proto.name.clone()
-        };
-        let info = type_analysis::analyze(proto);
-        if !info.has_unsupported_ops {
-            let string_refs: Option<Vec<Option<i64>>> =
-                if info.has_string_ops || info.has_collection_ops || info.has_global_ops {
-                    Some(
-                        proto
-                            .constants
-                            .iter()
-                            .map(|c| match c {
-                                Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
-                                _ => None,
-                            })
-                            .collect(),
-                    )
-                } else {
-                    None
-                };
-            let _ = jit.compile_function(proto, &name, string_refs.as_ref());
-        }
-    }
-
-    // (vm already created above for string_refs pre-allocation)
-    for (i, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() || proto.name == "<lambda>" {
-            format!("fn_{}", i)
-        } else {
-            proto.name.clone()
-        };
-        let info = type_analysis::analyze(proto);
-        if !info.has_unsupported_ops {
-            if let Some(ptr) = jit.get_compiled(&name) {
-                vm.jit_cache.insert(
-                    name,
-                    JitEntry {
-                        ptr,
-                        uses_float: info.has_float,
-                        has_string_ops: info.has_string_ops,
-                        has_collection_ops: info.has_collection_ops,
-                        has_global_ops: info.has_global_ops,
-                        returns_obj: matches!(
-                            info.return_type,
-                            type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
-                        ),
-                        returns_float: matches!(info.return_type, type_analysis::RegType::Float),
-                    },
-                );
-            }
-        }
-    }
-
+    vm.set_jit_mode(JitMode::Eager);
     let value = vm.execute(&chunk).expect("jit-assisted vm error");
     value.display(&vm.gc)
 }
@@ -158,49 +96,8 @@ fn assert_cross_backend_error_contains(source: &str, expected: &str) {
 
     #[cfg(feature = "jit")]
     let jit_err = {
-        let mut jit = JitCompiler::new().expect("jit init error");
-        for (index, proto) in chunk.prototypes.iter().enumerate() {
-            let name = if proto.name.is_empty() {
-                format!("fn_{}", index)
-            } else {
-                proto.name.clone()
-            };
-            let info = type_analysis::analyze(proto);
-            if !info.has_unsupported_ops {
-                let _ = jit.compile_function(proto, &name, None);
-            }
-        }
         let mut jit_vm = VM::new();
-        for (index, proto) in chunk.prototypes.iter().enumerate() {
-            let name = if proto.name.is_empty() {
-                format!("fn_{}", index)
-            } else {
-                proto.name.clone()
-            };
-            let info = type_analysis::analyze(proto);
-            if !info.has_unsupported_ops {
-                if let Some(ptr) = jit.get_compiled(&name) {
-                    jit_vm.jit_cache.insert(
-                        name,
-                        JitEntry {
-                            ptr,
-                            uses_float: info.has_float,
-                            has_string_ops: info.has_string_ops,
-                            has_collection_ops: info.has_collection_ops,
-                            has_global_ops: info.has_global_ops,
-                            returns_obj: matches!(
-                                info.return_type,
-                                type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
-                            ),
-                            returns_float: matches!(
-                                info.return_type,
-                                type_analysis::RegType::Float
-                            ),
-                        },
-                    );
-                }
-            }
-        }
+        jit_vm.set_jit_mode(JitMode::Eager);
         jit_vm
             .execute(&chunk)
             .expect_err("jit-assisted vm should error")

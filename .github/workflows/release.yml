@@ -1,12 +1,32 @@
 name: Release
 
+# Asset contract (install.sh depends on it — change both together):
+#   forge-<tag>-<target>.tar.gz   (unix)    forge-<tag>-<target>.zip (windows)
+#   containing a top-level directory forge-<tag>-<target>/ with:
+#     forge[.exe]          the CLI
+#     libforge_lang.a      static runtime (unix only) so `forge build --native`
+#                          / `--aot` produce standalone binaries; it is found
+#                          next to the forge executable (src/native.rs)
+#     README.md LICENSE CHANGELOG.md
+#   SHA256SUMS.txt          `sha256sum` format, one line per archive
+# <tag> keeps the leading "v" (e.g. forge-v0.9.0-x86_64-unknown-linux-gnu.tar.gz).
+
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish, e.g. v0.9.0"
+        required: true
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -16,21 +36,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            runner: macos-latest
+          # Every target is built natively except x86_64-apple-darwin, which is
+          # cross-compiled on the arm64 macos-latest runner (rustup adds the
+          # target below) and smoke-tested under Rosetta 2.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04 # older glibc => binary runs on more distros
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
             archive: tar.gz
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive: tar.gz
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
             archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -38,62 +66,127 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release-${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package binary
+      - name: Check tag matches Cargo.toml version
         shell: bash
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          ARCHIVE_NAME="forge-${TAG}-${{ matrix.target }}"
-          mkdir -p "${ARCHIVE_NAME}"
-          cp "target/${{ matrix.target }}/release/forge" "${ARCHIVE_NAME}/"
-          cp README.md LICENSE CHANGELOG.md "${ARCHIVE_NAME}/"
-          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
-          echo "ASSET=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
+          CRATE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v${CRATE_VERSION}" != "${RELEASE_TAG}" ]; then
+            echo "::error::tag ${RELEASE_TAG} does not match Cargo.toml version ${CRATE_VERSION}"
+            exit 1
+          fi
+
+      - name: Build release binary and static runtime
+        shell: bash
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin forge --lib
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="forge-${RELEASE_TAG}-${{ matrix.target }}"
+          OUT="target/${{ matrix.target }}/release"
+          mkdir -p "dist/${NAME}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "${OUT}/forge.exe" "dist/${NAME}/"
+          else
+            cp "${OUT}/forge" "dist/${NAME}/"
+            cp "${OUT}/libforge_lang.a" "dist/${NAME}/"
+            # Drop debug sections from the bundled std/deps objects; symbols
+            # needed for linking are kept.
+            strip -S "dist/${NAME}/libforge_lang.a" || true
+          fi
+          cp README.md LICENSE CHANGELOG.md "dist/${NAME}/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "${NAME}.zip" "${NAME}" >/dev/null
+            echo "ASSET=dist/${NAME}.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "${NAME}.tar.gz" "${NAME}"
+            echo "ASSET=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
+          fi
+          echo "PKG_DIR=dist/${NAME}" >> "$GITHUB_ENV"
+
+      - name: Smoke test packaged binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN=""
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            if arch -x86_64 /usr/bin/true 2>/dev/null; then
+              RUN="arch -x86_64"
+            else
+              echo "::warning::Rosetta 2 unavailable; cannot execute x86_64 binary on this runner"
+              file "${PKG_DIR}/forge"
+              exit 0
+            fi
+          fi
+          FORGE="${PKG_DIR}/forge"
+          [ "${{ runner.os }}" = "Windows" ] && FORGE="${PKG_DIR}/forge.exe"
+          $RUN "$FORGE" version | tee version.txt
+          grep -q "Forge ${RELEASE_TAG}" version.txt
+          $RUN "$FORGE" -e 'say "smoke ok"' | grep -q "smoke ok"
+          $RUN "$FORGE" run examples/hello.fg
+          # Standalone native build must find libforge_lang.a next to the
+          # packaged binary (no FORGE_LIB_DIR) and run without forge on PATH.
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            mkdir -p smoke && printf 'say "native ok"\n' > smoke/app.fg
+            $RUN "$FORGE" build --native smoke/app.fg | tee native.txt
+            grep -q "standalone" native.txt
+            $RUN env PATH=/usr/bin:/bin ./smoke/app | grep -q "native ok"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: forge-${{ matrix.target }}
           path: ${{ env.ASSET }}
+          if-no-files-found: error
 
   release:
-    name: Create Release
+    name: Publish release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: forge-*
+          merge-multiple: true
 
-      - name: Generate checksums
+      - name: Generate and verify checksums
         shell: bash
         run: |
+          set -euo pipefail
           cd artifacts
-          find . -name '*.tar.gz' -exec mv {} . \;
-          sha256sum *.tar.gz > SHA256SUMS.txt
+          shopt -s nullglob
+          archives=(forge-"${RELEASE_TAG}"-*.tar.gz forge-"${RELEASE_TAG}"-*.zip)
+          # Expect exactly one archive per build target (see matrix above).
+          if [ "${#archives[@]}" -ne 5 ]; then
+            echo "::error::expected 5 release archives, found ${#archives[@]}: ${archives[*]}"
+            exit 1
+          fi
+          sha256sum "${archives[@]}" > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
+          set -euo pipefail
           cd artifacts
-          gh release create "$TAG" \
-            --title "Forge $TAG" \
-            --generate-notes \
-            *.tar.gz SHA256SUMS.txt
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # Release was created by hand (or a previous run): replace assets.
+            gh release upload "$RELEASE_TAG" --clobber forge-*.tar.gz forge-*.zip SHA256SUMS.txt
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "Forge $RELEASE_TAG" \
+              --generate-notes \
+              forge-*.tar.gz forge-*.zip SHA256SUMS.txt
+          fi

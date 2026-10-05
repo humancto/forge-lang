@@ -7187,3 +7187,70 @@ fn fork_for_serving_panics_if_template_env_holds_a_stream() {
 
     let _ = template.fork_for_serving();
 }
+
+#[test]
+fn runaway_recursion_is_catchable_and_depth_recovers() {
+    // Previously the interpreter overflowed the native stack (process abort)
+    // before its 512-frame check, and reset call_depth to 0 on overflow.
+    // (Test threads have 2 MiB stacks, so the native-stack guard trips
+    // long before the 10000 depth limit here; the CLI uses a 1 GiB stack.)
+    let value = run_forge(
+        r#"
+        fn inf(n) { return inf(n + 1) }
+        let mut msg = ""
+        try { inf(0) } catch e { msg = e.message }
+        fn d(n) { if n == 0 { return 0 }
+ return 1 + d(n - 1) }
+        [msg, d(40)]
+        "#,
+    );
+    let Value::Array(items) = value else {
+        panic!("expected array");
+    };
+    let Value::String(msg) = &items[0] else {
+        panic!("expected message string");
+    };
+    assert!(
+        msg.starts_with("maximum recursion depth exceeded"),
+        "{}",
+        msg
+    );
+    assert_eq!(items[1], Value::Int(40));
+}
+
+#[test]
+fn import_cycle_reports_chain() {
+    let dir = unique_temp_path("import_cycle");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let a = dir.join("a.fg");
+    let b = dir.join("b.fg");
+    std::fs::write(
+        &a,
+        format!(
+            "import \"{}\"\nfn fa() {{ return 1 }}\n",
+            forge_string_literal_path(&b)
+        ),
+    )
+    .expect("write a");
+    std::fs::write(
+        &b,
+        format!(
+            "import \"{}\"\nfn fb() {{ return 2 }}\n",
+            forge_string_literal_path(&a)
+        ),
+    )
+    .expect("write b");
+    let err = try_run_forge(&format!(
+        "import \"{}\"\nfa()",
+        forge_string_literal_path(&a)
+    ))
+    .expect_err("cycle must fail");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        err.message.starts_with("circular import: "),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("a.fg -> "), "{}", err.message);
+    assert!(err.message.ends_with("a.fg"), "{}", err.message);
+}

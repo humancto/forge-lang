@@ -10,7 +10,7 @@ use super::profiler::Profiler;
 use super::value::*;
 
 /// Wrapper for sending a VM to another thread.
-/// SAFETY: fork_for_spawn() asserts jit_cache/jit_modules are empty (no raw
+/// SAFETY: fork_for_spawn() asserts the JIT state is empty (no raw
 /// pointers cross threads). All other VM fields are owned or Arc-wrapped.
 /// The assert runs in release builds to prevent UB if the invariant breaks.
 struct SendableVM(VM);
@@ -109,78 +109,6 @@ impl SendableVM {
     }
 }
 
-#[cfg(feature = "jit")]
-#[derive(Clone, Copy)]
-pub struct JitEntry {
-    pub ptr: *const u8,
-    pub uses_float: bool,
-    pub has_string_ops: bool,
-    pub has_collection_ops: bool,
-    pub has_global_ops: bool,
-    /// True when the function returns a GcRef (string, array, or object).
-    pub returns_obj: bool,
-    /// True when the function's return type is Float (decode result as f64 bits).
-    pub returns_float: bool,
-}
-
-#[cfg(feature = "jit")]
-/// Call a JIT-compiled function with arbitrary i64 arguments.
-/// Supports 0–8 args; returns Err beyond that.
-pub(super) unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> Result<i64, VMError> {
-    Ok(match args.len() {
-        0 => {
-            let f: extern "C" fn() -> i64 = std::mem::transmute(ptr);
-            f()
-        }
-        1 => {
-            let f: extern "C" fn(i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0])
-        }
-        2 => {
-            let f: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1])
-        }
-        3 => {
-            let f: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2])
-        }
-        4 => {
-            let f: extern "C" fn(i64, i64, i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3])
-        }
-        5 => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3], args[4])
-        }
-        6 => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3], args[4], args[5])
-        }
-        7 => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                std::mem::transmute(ptr);
-            f(
-                args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-            )
-        }
-        8 => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                std::mem::transmute(ptr);
-            f(
-                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-            )
-        }
-        n => {
-            return Err(VMError::new(&format!(
-                "JIT dispatch supports up to 8 arguments, got {}",
-                n
-            )))
-        }
-    })
-}
-
-#[cfg(feature = "jit")]
-
 pub struct VM {
     pub registers: Vec<Value>,
     pub frames: Vec<CallFrame>,
@@ -191,17 +119,10 @@ pub struct VM {
     pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
     pub gc: Gc,
     pub output: Vec<String>,
+    /// JIT tier state: specialization cache keyed by (prototype id, type
+    /// signature), hotness and deopt accounting. See `vm::jit`.
     #[cfg(feature = "jit")]
-    pub jit_cache: HashMap<String, JitEntry>,
-    #[cfg(feature = "jit")]
-    /// Keeps JIT-compiled code pages alive. Must never be shrunk while
-    /// `jit_cache` holds pointers into these modules.
-    jit_modules: Vec<super::jit::jit_module::JitCompiler>,
-    #[cfg(feature = "jit")]
-    /// GcRef roots for string constants baked into JIT native code.
-    /// These must survive GC so that bridge calls using the baked indices
-    /// continue to resolve valid objects.
-    pub jit_roots: Vec<GcRef>,
+    pub jit: super::jit::tier::JitState,
     pub profiler: Profiler,
     skip_timeout_check_once: bool,
     /// Set by the Stream arms of `convert_to_interp_val` / `convert_interp_value`
@@ -277,8 +198,19 @@ impl VMError {
 impl std::fmt::Display for VMError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)?;
-        if !self.stack_trace.is_empty() {
-            for frame in &self.stack_trace {
+        // Runs of identical frames (deep recursion) are collapsed after
+        // `SHOWN_REPEATS` copies so a depth-limit error stays readable.
+        const SHOWN_REPEATS: usize = 3;
+        let mut i = 0;
+        while i < self.stack_trace.len() {
+            let frame = &self.stack_trace[i];
+            let run = self.stack_trace[i..]
+                .iter()
+                .take_while(|g| {
+                    g.function == frame.function && g.line == frame.line && g.col == frame.col
+                })
+                .count();
+            for _ in 0..run.min(SHOWN_REPEATS) {
                 if frame.col > 0 {
                     write!(
                         f,
@@ -289,6 +221,14 @@ impl std::fmt::Display for VMError {
                     write!(f, "\n  at {} (line {})", frame.function, frame.line)?;
                 }
             }
+            if run > SHOWN_REPEATS {
+                write!(
+                    f,
+                    "\n  ... previous frame repeated {} more times",
+                    run - SHOWN_REPEATS
+                )?;
+            }
+            i += run;
         }
         Ok(())
     }
@@ -298,7 +238,7 @@ impl VM {
     pub fn new() -> Self {
         let mut vm = Self {
             registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(MAX_FRAMES),
+            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
@@ -307,11 +247,7 @@ impl VM {
             gc: Gc::new(),
             output: Vec::new(),
             #[cfg(feature = "jit")]
-            jit_cache: HashMap::new(),
-            #[cfg(feature = "jit")]
-            jit_modules: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_roots: Vec::new(),
+            jit: super::jit::tier::JitState::default(),
             profiler: Profiler::new(false),
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
@@ -325,7 +261,7 @@ impl VM {
     pub fn with_profiling() -> Self {
         let mut vm = Self {
             registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(MAX_FRAMES),
+            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
@@ -334,11 +270,7 @@ impl VM {
             gc: Gc::new(),
             output: Vec::new(),
             #[cfg(feature = "jit")]
-            jit_cache: HashMap::new(),
-            #[cfg(feature = "jit")]
-            jit_modules: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_roots: Vec::new(),
+            jit: super::jit::tier::JitState::default(),
             profiler: Profiler::new(true),
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
@@ -834,6 +766,65 @@ impl VM {
         }));
         self.globals
             .insert("Some".to_string(), Value::obj(some_native));
+
+        self.backfill_stdlib_from_interpreter();
+    }
+
+    /// The hand-written module tables above drifted from the interpreter's
+    /// (`fs.size`, `term.sparkline`, `math.inf`, ... were missing on the VM).
+    /// The interpreter's `create_module()` is the source of truth for which
+    /// members a module has, so add every member the VM table lacks. Existing
+    /// VM entries are never overwritten.
+    fn backfill_stdlib_from_interpreter(&mut self) {
+        use crate::interpreter::Value as IV;
+        let modules: Vec<(&str, IV)> = vec![
+            ("math", crate::stdlib::math::create_module()),
+            ("fs", crate::stdlib::fs::create_module()),
+            ("io", crate::stdlib::io::create_module()),
+            ("crypto", crate::stdlib::crypto::create_module()),
+            ("db", crate::stdlib::db::create_module()),
+            ("env", crate::stdlib::env::create_module()),
+            ("json", crate::stdlib::json_module::create_module()),
+            ("regex", crate::stdlib::regex_module::create_module()),
+            ("log", crate::stdlib::log::create_module()),
+            ("http", crate::stdlib::http::create_module()),
+            ("term", crate::stdlib::term::create_module()),
+            ("csv", crate::stdlib::csv::create_module()),
+        ];
+        for (module, interp_module) in modules {
+            let IV::Object(members) = interp_module else {
+                continue;
+            };
+            let Some(module_ref) = self.globals.get(module).and_then(|v| v.as_obj()) else {
+                continue;
+            };
+            for (key, member) in members {
+                let already = matches!(
+                    self.gc.get(module_ref).map(|o| &o.kind),
+                    Some(ObjKind::Object(map)) if map.contains_key(&key)
+                );
+                if already {
+                    continue;
+                }
+                let value = match &member {
+                    IV::BuiltIn(name) => {
+                        let r = self
+                            .gc
+                            .alloc(ObjKind::NativeFunction(NativeFn { name: name.clone() }));
+                        Value::obj(r)
+                    }
+                    IV::Int(_) | IV::Float(_) | IV::Bool(_) | IV::String(_) | IV::Null => {
+                        self.convert_interp_value(&member)
+                    }
+                    _ => continue,
+                };
+                if let Some(obj) = self.gc.get_mut(module_ref) {
+                    if let ObjKind::Object(map) = &mut obj.kind {
+                        map.insert(key, value);
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
@@ -873,7 +864,7 @@ impl VM {
     }
 
     /// Create a new VM for a spawn thread with copies of this VM's state.
-    /// Calls VM::new() for fresh builtins + empty jit_cache, then copies
+    /// Calls VM::new() for fresh builtins + empty JIT state, then copies
     /// non-function globals and struct metadata from the parent.
     fn fork_for_spawn(&self) -> SendableVM {
         let mut child = VM::new();
@@ -932,9 +923,13 @@ impl VM {
 
         #[cfg(feature = "jit")]
         assert!(
-            child.jit_cache.is_empty() && child.jit_modules.is_empty(),
-            "BUG: SendableVM must have empty jit_cache/jit_modules to be safely Send"
+            child.jit.is_empty(),
+            "BUG: SendableVM must have empty JIT state to be safely Send"
         );
+        #[cfg(feature = "jit")]
+        {
+            child.jit.mode = self.jit.mode;
+        }
         SendableVM(child)
     }
 
@@ -1030,14 +1025,19 @@ impl VM {
         let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
         let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
         let frame_size = (chunk.max_registers as usize).max(1);
-        if self.frames.len() >= MAX_FRAMES {
-            return Err(VMError::new("stack overflow"));
-        }
+        // Shared depth limit + native stack guard (runtime/recursion.rs).
+        crate::runtime::recursion::check_call_depth(self.frames.len())
+            .map_err(|m| VMError::new(&m))?;
         self.ensure_registers(new_base + frame_size);
         self.frames
             .push(CallFrame::new(closure_ref, new_base, frame_size));
         let boundary = self.frames.len() - 1;
-        self.run_until(boundary)
+        // Module bytecode is ordinary bytecode: don't auto-pin its
+        // allocations even when an `import` builtin is the caller.
+        let was_pinning = self.gc.set_pinning(false);
+        let result = self.run_until(boundary);
+        self.gc.set_pinning(was_pinning);
+        result
     }
 
     fn ensure_registers(&mut self, needed: usize) {
@@ -1615,7 +1615,7 @@ impl VM {
                         } else {
                             0
                         };
-                        self.registers[base + a as usize] = Value::small_int(len);
+                        self.registers[base + a as usize] = Value::int(len, &mut self.gc);
                     }
                     OpCode::Concat => {
                         let left = self.registers[base + b as usize].display(&self.gc);
@@ -2093,15 +2093,100 @@ impl VM {
                         }
                     }
                 }
-                // Keep string constants baked into JIT native code alive.
-                #[cfg(feature = "jit")]
-                roots.extend_from_slice(&self.jit_roots);
                 self.gc.collect(&roots);
             }
         }
     }
 
+    /// Select the JIT mode (`Off`, `Auto` = tier up hot functions, `Eager`
+    /// = compile on first call as with `forge --jit`).
+    #[cfg(feature = "jit")]
+    pub fn set_jit_mode(&mut self, mode: super::jit::tier::JitMode) {
+        self.jit.mode = mode;
+    }
+
+    /// Run `chunk` natively if a specialization exists (or can be compiled)
+    /// for these arguments and every entry guard passes. `None` means the
+    /// caller must execute the call in the VM — including after a deopt,
+    /// which is safe because every compiled function is pure.
+    #[cfg(feature = "jit")]
+    fn try_jit_call(&mut self, chunk: &Arc<Chunk>, args: &[Value]) -> Option<Value> {
+        use super::jit::tier::{invoke, Invoke};
+
+        let sel = self.jit.select(chunk, args, &self.gc)?;
+
+        // VM-state guards: the VM itself would refuse the call (stack
+        // overflow), a `timeout` is active (the VM checks deadlines between
+        // instructions; native code does not), or the global the code calls
+        // itself through no longer names this function.
+        let depth_limit = crate::runtime::recursion::max_depth();
+        let guards_ok = self.frames.len() < depth_limit
+            && self.frames.iter().all(|f| f.timeouts.is_empty())
+            && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
+        if !guards_ok {
+            self.jit.record_guard_failure(&sel);
+            return None;
+        }
+
+        let mut raw: Vec<i64> = Vec::with_capacity(args.len());
+        for v in args {
+            // `select` already checked every argument's kind.
+            let kind = super::jit::types::JitType::of_value(v, &self.gc)?;
+            raw.push(kind.encode(v, &self.gc)?);
+        }
+        let max_depth = (depth_limit - 1 - self.frames.len()) as i64;
+        // SAFETY: `sel.entry` was produced by the JIT compiler owned by
+        // `self.jit`, which outlives this call; `raw` has exactly the
+        // specialization's arity (checked by `select`); `self.cancelled` is
+        // alive for the duration of the call.
+        let outcome = unsafe { invoke(sel.entry, &raw, max_depth, Arc::as_ptr(&self.cancelled)) };
+        match outcome {
+            Invoke::Returned(r) => {
+                self.jit.record_run(&sel);
+                Some(sel.ret.decode(r, &mut self.gc))
+            }
+            Invoke::Deopt => {
+                self.jit.record_deopt(&sel);
+                None
+            }
+        }
+    }
+
+    /// True when the global named like `chunk` is a closure over the same
+    /// prototype code, so native self-calls behave like the VM's
+    /// `GetGlobal` + `Call`.
+    #[cfg(feature = "jit")]
+    fn jit_self_binding_matches(&self, chunk: &Arc<Chunk>) -> bool {
+        let Some(r) = self.globals.get(&chunk.name).and_then(|v| v.as_obj()) else {
+            return false;
+        };
+        match self.gc.get(r).map(|o| &o.kind) {
+            Some(ObjKind::Closure(c)) => {
+                Arc::ptr_eq(&c.function.chunk, chunk)
+                    || super::jit::tier::same_code(&c.function.chunk, chunk)
+            }
+            _ => false,
+        }
+    }
+
+    /// Call any callable value (closure, function, native, `__call__`
+    /// object).
+    ///
+    /// GC rooting (see `vm/gc.rs`): bytecode run by the callee must not be
+    /// auto-pinned, so pinning is suspended for the duration of the call; if
+    /// the caller is a native builtin (pinning was on), the returned value is
+    /// pinned into the caller's native scope so it survives later callbacks.
     pub fn call_value(&mut self, func: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let was_pinning = self.gc.set_pinning(false);
+        let result = self.call_value_inner(func, args);
+        self.gc.set_pinning(was_pinning);
+        if let Ok(v) = &result {
+            self.gc.pin_value(*v);
+        }
+        result
+    }
+
+    fn call_value_inner(&mut self, func: Value, args: Vec<Value>) -> Result<Value, VMError> {
         if let Some(r) = func.as_obj() {
             let obj = self
                 .gc
@@ -2113,148 +2198,35 @@ impl VM {
                         let chunk = closure.function.chunk.clone();
                         let func_name = closure.function.name.clone();
 
-                        // Count calls for profiling and JIT hotness detection.
-                        // Skip for functions already JIT-compiled to avoid
-                        // per-call string allocation overhead on hot paths.
+                        // JIT dispatch: a verified, type-specialized native
+                        // version runs when its entry guards pass; otherwise
+                        // (or on deopt) the call runs in the VM below.
                         #[cfg(feature = "jit")]
-                        let already_jit =
-                            !func_name.is_empty() && self.jit_cache.contains_key(&func_name);
-                        #[cfg(not(feature = "jit"))]
-                        let already_jit = false;
-
-                        // Anonymous lambdas all share the name "<lambda>", so
-                        // JIT cache keyed by name would collide across distinct
-                        // lambdas. Exclude them from auto-JIT and hotness
-                        // tracking until a stable per-prototype key exists.
-                        let jit_eligible = !func_name.is_empty() && func_name != "<lambda>";
-                        if jit_eligible && !already_jit {
-                            self.profiler.enter_function(&func_name);
-                        }
-
-                        // Auto-JIT: compile hot functions on the fly
-                        #[cfg(feature = "jit")]
-                        if jit_eligible && !already_jit && self.profiler.is_hot(&func_name) {
-                            let type_info = super::jit::type_analysis::analyze(&chunk);
-                            let needs_vm_ptr = type_info.has_string_ops
-                                || type_info.has_collection_ops
-                                || type_info.has_global_ops;
-                            let max_arity: u8 = if needs_vm_ptr { 7 } else { 8 };
-                            if !type_info.has_unsupported_ops && chunk.arity <= max_arity {
-                                // Pre-allocate string constants into GC so their
-                                // GcRef indices can be baked into JIT code.
-                                let string_refs = if needs_vm_ptr {
-                                    let refs: Vec<Option<i64>> = chunk
-                                        .constants
-                                        .iter()
-                                        .map(|c| match c {
-                                            Constant::Str(s) => {
-                                                let r = self.gc.alloc_string(s.clone());
-                                                self.jit_roots.push(r);
-                                                Some(r.0 as i64)
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect();
-                                    Some(refs)
-                                } else {
-                                    None
-                                };
-                                if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
-                                    if let Ok(ptr) = jit.compile_function(
-                                        &chunk,
-                                        &func_name,
-                                        string_refs.as_ref(),
-                                    ) {
-                                        let ret_is_obj = matches!(
-                                            type_info.return_type,
-                                            super::jit::type_analysis::RegType::StringRef
-                                                | super::jit::type_analysis::RegType::ObjRef
-                                        );
-                                        self.jit_cache.insert(
-                                            func_name.clone(),
-                                            JitEntry {
-                                                ptr,
-                                                uses_float: type_info.has_float,
-                                                has_string_ops: type_info.has_string_ops,
-                                                has_collection_ops: type_info.has_collection_ops,
-                                                has_global_ops: type_info.has_global_ops,
-                                                returns_obj: ret_is_obj,
-                                                returns_float: matches!(
-                                                    type_info.return_type,
-                                                    super::jit::type_analysis::RegType::Float
-                                                ),
-                                            },
-                                        );
-                                        self.jit_modules.push(jit);
-                                    }
-                                }
-                            }
-                        }
-
-                        // JIT dispatch — unified I64 ABI
-                        // Float values are passed/returned as IEEE 754 bits in i64.
-                        #[cfg(feature = "jit")]
-                        if jit_eligible {
-                            if let Some(&entry) = self.jit_cache.get(&func_name) {
-                                let mut raw_args: Vec<i64> = Vec::new();
-                                if entry.has_string_ops
-                                    || entry.has_collection_ops
-                                    || entry.has_global_ops
-                                {
-                                    raw_args.push(self as *mut VM as *mut () as i64);
-                                }
-                                for v in &args {
-                                    raw_args.push(if let Some(n) = v.as_inline_int() {
-                                        if entry.uses_float {
-                                            // Float functions expect all args as f64 bits
-                                            (n as f64).to_bits() as i64
-                                        } else {
-                                            n
-                                        }
-                                    } else if let Some(f) = v.as_float() {
-                                        // Float values: pass IEEE 754 bits in i64
-                                        f.to_bits() as i64
-                                    } else if let Some(b) = v.as_bool() {
-                                        if entry.uses_float {
-                                            (if b { 1.0_f64 } else { 0.0_f64 }).to_bits() as i64
-                                        } else if b {
-                                            1
-                                        } else {
-                                            0
-                                        }
-                                    } else if let Some(r) = v.as_obj() {
-                                        r.0 as i64
-                                    } else {
-                                        0
-                                    });
-                                }
-                                let result: i64 = unsafe { jit_call_i64(entry.ptr, &raw_args)? };
-                                let result_val = if entry.returns_obj {
-                                    Value::obj(GcRef(result as usize))
-                                } else if entry.returns_float {
-                                    let f = f64::from_bits(result as u64);
-                                    if f.fract() == 0.0
-                                        && f >= i64::MIN as f64
-                                        && f <= i64::MAX as f64
-                                    {
-                                        Value::int(f as i64, &mut self.gc)
-                                    } else {
-                                        Value::float(f)
-                                    }
-                                } else {
-                                    Value::int(result, &mut self.gc)
-                                };
+                        if let Some(result) = self.try_jit_call(&chunk, &args) {
+                            if self.profiler.is_enabled()
+                                && !func_name.is_empty()
+                                && func_name != "<lambda>"
+                            {
+                                self.profiler.enter_function(&func_name);
                                 self.profiler.exit_function();
-                                return Ok(result_val);
                             }
+                            return Ok(result);
+                        }
+
+                        // Count calls for profiling. Anonymous lambdas all
+                        // share the name "<lambda>" and are not profiled.
+                        if !func_name.is_empty() && func_name != "<lambda>" {
+                            self.profiler.enter_function(&func_name);
                         }
 
                         let arity = chunk.arity as usize;
                         let frame_size = (chunk.max_registers as usize).max(1);
                         let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
-                        if self.frames.len() >= MAX_FRAMES {
-                            return Err(VMError::new("stack overflow"));
-                        }
+                        // Shared depth limit + native stack guard
+                        // (runtime/recursion.rs): runaway recursion is a
+                        // catchable error, never a process abort.
+                        crate::runtime::recursion::check_call_depth(self.frames.len())
+                            .map_err(|m| VMError::new(&m))?;
                         self.ensure_registers(new_base + frame_size);
 
                         for (i, arg) in args.iter().enumerate() {
@@ -2675,8 +2647,8 @@ impl VM {
             }
             ObjKind::String(s) => match field {
                 "len" => {
-                    direct_result = Some(Value::small_int(s.chars().count() as i64));
-                    needs_alloc = None;
+                    let len = s.chars().count() as i64;
+                    return Ok(Value::int(len, &mut self.gc));
                 }
                 "upper" => {
                     needs_alloc = Some(s.to_uppercase());
@@ -2694,8 +2666,8 @@ impl VM {
             },
             ObjKind::Array(items) | ObjKind::Set(items) => match field {
                 "len" => {
-                    direct_result = Some(Value::small_int(items.len() as i64));
-                    needs_alloc = None;
+                    let len = items.len() as i64;
+                    return Ok(Value::int(len, &mut self.gc));
                 }
                 _ => {
                     let type_name = if matches!(&obj.kind, ObjKind::Set(_)) {

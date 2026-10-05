@@ -64,6 +64,13 @@ rustyline = { version = "15", features = ["derive"] }
 # === Error Reporting ===
 ariadne = "0.4"
 
+# === Language Server ===
+# rust-analyzer's synchronous LSP scaffold (framing, initialize/shutdown
+# handshake) plus typed protocol structs. Small footprint: crossbeam-channel,
+# log, serde, fluent-uri, bitflags.
+lsp-server = "0.10"
+lsp-types = "0.97"
+
 # === Utilities ===
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"

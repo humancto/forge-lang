@@ -274,6 +274,7 @@ fn read_chunk_inner<R: Read>(r: &mut R, minor_version: u8) -> Result<Chunk, Seri
         upvalue_count,
         arity,
         upvalue_sources,
+        proto_id: crate::vm::bytecode::next_proto_id(),
     })
 }
 

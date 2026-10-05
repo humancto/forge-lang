@@ -103,6 +103,11 @@ struct Cli {
     /// Without this flag, these builtins return a permission error.
     #[arg(long = "allow-run")]
     allow_run: bool,
+
+    /// Maximum Forge call depth before "maximum recursion depth exceeded"
+    /// (default 10000; also settable with FORGE_MAX_DEPTH).
+    #[arg(long = "max-depth", value_name = "N")]
+    max_depth: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -132,9 +137,18 @@ enum Command {
         /// Filter tests by name pattern
         #[arg(long)]
         filter: Option<String>,
-        /// Show line coverage report after tests
+        /// Show line coverage report after tests (interpreter only)
         #[arg(long)]
         coverage: bool,
+        /// Engine to run tests on: vm, interp, or both. Defaults to the same
+        /// engine as `forge run` (VM, or interpreter with the global --interp
+        /// flag); files the VM cannot run yet fall back to the interpreter.
+        #[arg(long, value_enum)]
+        engine: Option<testing::Engine>,
+        /// Per-test time limit in seconds; a test that exceeds it aborts the
+        /// run with a failure (0 disables the limit)
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
     },
     /// Create a new Forge project
     New {
@@ -204,8 +218,30 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() {
+/// Entry point: run the real CLI on a thread with a large stack so deep (but
+/// bounded) Forge recursion works; the recursion guard in
+/// `runtime/recursion.rs` turns anything deeper into a catchable error
+/// instead of a native stack overflow.
+fn main() {
+    let stack = runtime::recursion::MAIN_STACK_SIZE;
+    let worker = std::thread::Builder::new()
+        .name("forge-main".to_string())
+        .stack_size(stack)
+        .spawn(move || {
+            runtime::recursion::register_thread_stack(stack);
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("BUG: failed to build the tokio runtime")
+                .block_on(async_main());
+        })
+        .expect("BUG: failed to spawn the forge main thread");
+    if let Err(panic) = worker.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn async_main() {
     // OTel must initialize on the main tokio runtime (not from a
     // nested runtime created by a stdlib helper). Calling here ensures
     // CLI scripts that emit `tracing` events (via the `log` stdlib)
@@ -214,6 +250,9 @@ async fn main() {
     forge_lang::runtime::tracing_init::init_otel();
 
     let cli = Cli::parse();
+    if let Some(n) = cli.max_depth {
+        runtime::recursion::set_max_depth(n);
+    }
     let use_jit = cli.use_jit;
     #[cfg(not(feature = "jit"))]
     if use_jit {
@@ -307,6 +346,8 @@ async fn main() {
             dir,
             filter,
             coverage,
+            engine,
+            timeout,
         }) => {
             let test_dir = if dir == "tests" {
                 if let Some(m) = manifest::load_manifest() {
@@ -317,7 +358,22 @@ async fn main() {
             } else {
                 dir
             };
-            testing::run_tests(&test_dir, filter.as_deref(), coverage);
+            let engine = engine.unwrap_or(if cli.use_interp {
+                testing::Engine::Interp
+            } else {
+                testing::Engine::Vm
+            });
+            let vm_compat = |program: &Program| ensure_vm_compatible(program, "VM");
+            testing::run_tests(
+                &test_dir,
+                &testing::TestOptions {
+                    filter: filter.as_deref(),
+                    coverage,
+                    engine,
+                    vm_compat: &vm_compat,
+                    timeout: (timeout > 0).then(|| std::time::Duration::from_secs(timeout)),
+                },
+            );
         }
         Some(Command::New { name }) => {
             scaffold::create_project(&name);
@@ -357,71 +413,29 @@ async fn main() {
             }
         }
         Some(Command::Install { source }) => {
-            package::install(&source);
+            run_off_runtime(|| package::install(&source));
         }
         Some(Command::Add { package: pkg }) => match manifest::parse_package_spec(&pkg) {
-            Ok((name, version)) => {
-                let mut m = manifest::load_manifest().unwrap_or_default();
-                let action = if m.dependencies.contains_key(&name) {
-                    "Updated"
-                } else {
-                    "Added"
-                };
-                m.dependencies.insert(
-                    name.clone(),
-                    manifest::DependencySpec::Version(version.clone()),
-                );
-                if let Err(e) = manifest::save_manifest(&m) {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                }
-                println!("  {} {} = \"{}\" to forge.toml", action, name, version);
-                package::install_from_manifest();
-            }
+            Ok((name, version)) => run_off_runtime(|| package::add(&name, &version)),
             Err(e) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         },
         Some(Command::Update) => {
-            package::update();
+            run_off_runtime(package::update);
         }
         Some(Command::Publish { dry_run, registry }) => {
             publish::publish(dry_run, registry.as_deref());
         }
         Some(Command::Search { query }) => {
             let q = query.as_deref().unwrap_or("");
-            match registry::fetch_index() {
-                Ok(index) => {
-                    let results = registry::search_packages(q, &index);
-                    if results.is_empty() {
-                        if q.is_empty() {
-                            println!("No packages found in registry.");
-                        } else {
-                            println!("No packages found matching '{}'.", q);
-                        }
-                    } else {
-                        println!("{:<20} {:<10} {}", "NAME", "VERSION", "DESCRIPTION");
-                        println!("{}", "-".repeat(60));
-                        for pkg in &results {
-                            println!(
-                                "{:<20} {:<10} {}",
-                                pkg.name,
-                                if pkg.latest.is_empty() {
-                                    "-"
-                                } else {
-                                    &pkg.latest
-                                },
-                                pkg.description
-                            );
-                        }
-                        println!("\n{} package(s) found.", results.len());
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                }
+            let roots = package::default_registry_roots();
+            let remote = run_off_runtime(registry::fetch_index);
+            let report = registry::search_all(q, &roots, remote);
+            let code = registry::print_search_report(q, &report, &roots);
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Some(Command::Lsp) => {
@@ -804,6 +818,19 @@ fn report_vm_error(source: &str, filename: &str, error: &vm::machine::VMError) {
     }
 }
 
+/// Run a package-manager operation on a plain OS thread.
+///
+/// The registry client uses `reqwest::blocking`, which panics ("Cannot drop a
+/// runtime in a context where blocking is not allowed") when called from the
+/// `#[tokio::main]` async context. A scoped thread has no runtime context.
+fn run_off_runtime<T: Send, F: FnOnce() -> T + Send>(f: F) -> T {
+    std::thread::scope(|scope| match scope.spawn(f).join() {
+        Ok(value) => value,
+        // The panic message has already been printed by the panic hook.
+        Err(_) => process::exit(101),
+    })
+}
+
 async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, strict: bool) {
     let (program, warnings) = match prepare_program(source, strict) {
         Ok(prepared) => prepared,
@@ -907,80 +934,13 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
         }
     };
 
-    let mut jit = match vm::jit::jit_module::JitCompiler::new() {
-        Ok(j) => j,
-        Err(e) => {
-            eprintln!("JIT init error: {}", e);
-            process::exit(1);
-        }
-    };
-
-    // Create the VM first so we can pre-allocate string constants into GC
-    // for functions that need runtime bridges (string/collection/global ops).
+    // Eager tier: every function is offered to the JIT on its first call.
+    // Each (function, argument-kind signature) pair is verified and compiled
+    // once; anything the verifier cannot prove is reported and runs in the
+    // VM. Native code never changes program semantics.
     let mut vm = vm::machine::VM::new();
-
-    for (i, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() {
-            format!("fn_{}", i)
-        } else {
-            proto.name.clone()
-        };
-        let type_info = vm::jit::type_analysis::analyze(proto);
-        let needs_vm_ptr =
-            type_info.has_string_ops || type_info.has_collection_ops || type_info.has_global_ops;
-
-        // Pre-allocate string constants into GC so their GcRef indices
-        // can be baked into JIT code for runtime bridge calls.
-        let string_refs = if needs_vm_ptr {
-            let refs: Vec<Option<i64>> = proto
-                .constants
-                .iter()
-                .map(|c| match c {
-                    vm::bytecode::Constant::Str(s) => {
-                        let r = vm.gc.alloc_string(s.clone());
-                        vm.jit_roots.push(r);
-                        Some(r.0 as i64)
-                    }
-                    _ => None,
-                })
-                .collect();
-            Some(refs)
-        } else {
-            None
-        };
-
-        match jit.compile_function(proto, &name, string_refs.as_ref()) {
-            Ok(ptr) => {
-                eprintln!(
-                    "  JIT compiled: {} ({} instructions -> native)",
-                    name,
-                    proto.code.len()
-                );
-                vm.jit_cache.insert(
-                    name,
-                    vm::machine::JitEntry {
-                        ptr,
-                        uses_float: type_info.has_float,
-                        has_string_ops: type_info.has_string_ops,
-                        has_collection_ops: type_info.has_collection_ops,
-                        has_global_ops: type_info.has_global_ops,
-                        returns_obj: matches!(
-                            type_info.return_type,
-                            vm::jit::type_analysis::RegType::StringRef
-                                | vm::jit::type_analysis::RegType::ObjRef
-                        ),
-                        returns_float: matches!(
-                            type_info.return_type,
-                            vm::jit::type_analysis::RegType::Float
-                        ),
-                    },
-                );
-            }
-            Err(e) => {
-                eprintln!("  JIT skip: {} ({})", name, e);
-            }
-        }
-    }
+    vm.set_jit_mode(vm::jit::tier::JitMode::Eager);
+    vm.jit.verbose = true;
 
     match vm.execute(&chunk) {
         Ok(_) => {}

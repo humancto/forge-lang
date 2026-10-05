@@ -21,11 +21,5 @@ skip tests/mysql_test.fg                 # MySQL server
 
 # Known VM standard-library gaps (language semantics agree; these are
 # missing or differently-shaped builtins in src/vm/builtins.rs)
-diverges examples/data.fg                    # db.query rows are not accepted by term.table() on the VM
-diverges tests/error_handling_test.fg        # io.args_has / args_get missing on the VM
-diverges tests/interpreter_behavior_test.fg  # crypto.sha512 missing on the VM
-diverges tests/language_spec_test.fg         # crypto.hmac_sha256/sha512, db parameterized query args
+diverges tests/error_handling_test.fg        # io.args_has / args_get / args_parse missing on the VM
 diverges tests/npc_test.fg                   # `npc` module missing on the VM
-diverges tests/stdlib_audit_test.fg          # db.query parameter binding, sh() permission default
-diverges tests/stdlib_extended_test.fg       # fs.copy etc. missing on the VM
-diverges tests/stdlib_math_fs_test.fg        # math.clamp etc. missing on the VM

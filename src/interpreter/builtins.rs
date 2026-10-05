@@ -1115,7 +1115,11 @@ impl Interpreter {
                     for item in arr {
                         match item {
                             Value::Int(n) => {
-                                int_sum += n;
+                                // i64 overflow promotes the result to float.
+                                match int_sum.checked_add(*n) {
+                                    Some(t) => int_sum = t,
+                                    None => has_float = true,
+                                }
                                 float_sum += *n as f64;
                             }
                             Value::Float(n) => {

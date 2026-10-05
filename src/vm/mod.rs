@@ -49,6 +49,8 @@ mod must_ask_freeze_tests;
 #[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
+mod runtime_safety_tests;
+#[cfg(test)]
 mod schedule_watch_tests;
 #[cfg(test)]
 mod set_tests;

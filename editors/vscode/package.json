@@ -1,20 +1,57 @@
 {
   "name": "forge-lang",
   "displayName": "Forge Language",
-  "description": "Syntax highlighting, snippets, and language support for the Forge programming language",
-  "version": "0.2.0",
+  "description": "Language server, debugger, syntax highlighting and snippets for the Forge programming language",
+  "version": "0.3.0",
   "publisher": "forge-lang",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "homepage": "https://github.com/humancto/forge-lang/tree/main/editors/vscode",
+  "bugs": {
+    "url": "https://github.com/humancto/forge-lang/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/humancto/forge-lang"
+    "url": "https://github.com/humancto/forge-lang",
+    "directory": "editors/vscode"
   },
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
+  "keywords": [
+    "forge",
+    "fg",
+    "language server",
+    "lsp",
+    "debugger"
+  ],
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.91.0"
   },
   "categories": [
     "Programming Languages",
-    "Snippets"
+    "Snippets",
+    "Debuggers",
+    "Formatters"
   ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:forge",
+    "onDebugResolve:forge",
+    "onDebugDynamicConfigurations:forge"
+  ],
+  "scripts": {
+    "check": "node --check extension.js && node -e \"JSON.parse(require('fs').readFileSync('package.json','utf8'))\"",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.2"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0"
+  },
   "contributes": {
     "languages": [
       {
@@ -40,6 +77,94 @@
       {
         "language": "forge",
         "path": "./snippets/forge.json"
+      }
+    ],
+    "configuration": {
+      "title": "Forge",
+      "properties": {
+        "forge.path": {
+          "type": "string",
+          "default": "forge",
+          "scope": "machine-overridable",
+          "markdownDescription": "Path to the `forge` executable used for the language server (`forge lsp`) and debugger (`forge dap`). Defaults to `forge` on your `PATH`."
+        },
+        "forge.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the Forge language server for diagnostics, hover, completion, go-to-definition, formatting and signature help."
+        },
+        "forge.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace communication between VS Code and the Forge language server (shown in the Forge output channel)."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "forge.restartServer",
+        "title": "Restart Language Server",
+        "category": "Forge"
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "forge"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "forge",
+        "label": "Forge",
+        "languages": [
+          "forge"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the .fg file to debug.",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Pause on the first statement.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "forge",
+            "request": "launch",
+            "name": "Debug current Forge file",
+            "program": "${file}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Forge: Launch",
+            "description": "Debug a Forge program with the built-in debugger (forge dap).",
+            "body": {
+              "type": "forge",
+              "request": "launch",
+              "name": "Debug Forge program",
+              "program": "^\"\\${file}\"",
+              "stopOnEntry": false
+            }
+          }
+        ]
       }
     ]
   }
