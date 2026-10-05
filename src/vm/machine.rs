@@ -1801,18 +1801,24 @@ impl VM {
     ) -> Result<Option<Value>, VMError> {
         use super::jit::tier::{invoke, Invoke};
 
-        let Some(sel) = self.jit.select(chunk, args, &self.gc, force_hot) else {
+        let globals = JitGlobals {
+            globals: &self.globals,
+            gc: &self.gc,
+        };
+        let Some(sel) = self.jit.select(chunk, args, &self.gc, force_hot, &globals) else {
             return Ok(None);
         };
 
         // VM-state guards: the VM itself would refuse the call (stack
         // overflow), a `timeout` is active (the VM checks deadlines between
-        // instructions; native code does not), or the global the code calls
-        // itself through no longer names this function.
+        // instructions; native code does not), or a global the code relies
+        // on (its own binding, a function it calls, a builtin) changed.
+        // Native code cannot assign globals, so guards that hold here hold
+        // for the whole native call.
         let depth_limit = crate::runtime::recursion::max_depth();
         let guards_ok = depth_below < depth_limit
             && self.frames.iter().all(|f| f.timeouts.is_empty())
-            && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
+            && sel.guards.iter().all(|g| globals.holds(g));
         if !guards_ok {
             self.jit.record_guard_failure(&sel);
             return Ok(None);
@@ -1867,23 +1873,6 @@ impl VM {
     #[cfg(all(test, feature = "jit"))]
     pub(crate) fn take_jit_bridge_error(&mut self) -> Option<VMError> {
         self.jit_bridge_error.take()
-    }
-
-    /// True when the global named like `chunk` is a closure over the same
-    /// prototype code, so native self-calls behave like the VM's
-    /// `GetGlobal` + `Call`.
-    #[cfg(feature = "jit")]
-    fn jit_self_binding_matches(&self, chunk: &Arc<Chunk>) -> bool {
-        let Some(r) = self.globals.get(&chunk.name).and_then(|v| v.as_obj()) else {
-            return false;
-        };
-        match self.gc.get(r).map(|o| &o.kind) {
-            Some(ObjKind::Closure(c)) => {
-                Arc::ptr_eq(&c.function.chunk, chunk)
-                    || super::jit::tier::same_code(&c.function.chunk, chunk)
-            }
-            _ => false,
-        }
     }
 
     /// Call any callable value (closure, function, native, `__call__`
@@ -2672,5 +2661,86 @@ impl VM {
             _ => return Err(VMError::new("invalid comparison")),
         };
         self.binary_op(left, right, shared)
+    }
+}
+
+/// The VM's globals as seen by the JIT verifier and entry guards.
+#[cfg(feature = "jit")]
+struct JitGlobals<'a> {
+    globals: &'a HashMap<String, Value>,
+    gc: &'a super::gc::Gc,
+}
+
+#[cfg(feature = "jit")]
+impl JitGlobals<'_> {
+    fn kind(&self, v: &Value) -> Option<&ObjKind> {
+        v.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind)
+    }
+
+    /// Does the assumption `g` hold for the current globals?
+    fn holds(&self, g: &super::jit::verifier::Guard) -> bool {
+        use super::jit::verifier::{Guard, MemberExpect};
+        let Some(v) = self.globals.get(match g {
+            Guard::Closure { name, .. } => name.as_str(),
+            Guard::Native(b) => b.name(),
+            Guard::Member { object, .. } => object,
+        }) else {
+            return false;
+        };
+        match (g, self.kind(v)) {
+            (Guard::Closure { chunk, .. }, Some(ObjKind::Closure(c))) => {
+                Arc::ptr_eq(&c.function.chunk, chunk)
+                    || super::jit::tier::same_code(&c.function.chunk, chunk)
+            }
+            (Guard::Native(b), Some(ObjKind::NativeFunction(nf))) => nf.name == b.name(),
+            (
+                Guard::Member {
+                    object,
+                    field,
+                    expect,
+                },
+                Some(ObjKind::Object(fields)),
+            ) => match (expect, fields.get(*field)) {
+                (MemberExpect::Native, Some(m)) => matches!(
+                    self.kind(m),
+                    Some(ObjKind::NativeFunction(nf))
+                        if nf.name.strip_prefix(*object).and_then(|r| r.strip_prefix('.'))
+                            == Some(*field)
+                ),
+                (MemberExpect::FloatBits(bits), Some(m)) => {
+                    m.as_float().is_some_and(|f| f.to_bits() == *bits)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
+#[cfg(feature = "jit")]
+impl super::jit::tier::Globals for JitGlobals<'_> {
+    fn global(&self, name: &str) -> super::jit::verifier::GlobalView {
+        use super::jit::verifier::GlobalView;
+        match self.globals.get(name).and_then(|v| self.kind(v)) {
+            Some(ObjKind::Closure(c)) => GlobalView::Closure(c.function.chunk.clone()),
+            Some(ObjKind::NativeFunction(nf)) => GlobalView::Native(nf.name.clone()),
+            _ => GlobalView::Other,
+        }
+    }
+
+    fn member(&self, object: &str, field: &str) -> super::jit::verifier::MemberView {
+        use super::jit::verifier::MemberView;
+        let Some(Some(ObjKind::Object(fields))) = self.globals.get(object).map(|v| self.kind(v))
+        else {
+            return MemberView::Other;
+        };
+        match fields.get(field) {
+            Some(m) => match (self.kind(m), m.as_float()) {
+                (Some(ObjKind::NativeFunction(nf)), _) => MemberView::Native(nf.name.clone()),
+                (_, Some(f)) => MemberView::Float(f),
+                _ => MemberView::Other,
+            },
+            None => MemberView::Other,
+        }
     }
 }

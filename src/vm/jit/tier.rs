@@ -10,11 +10,16 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use cranelift_module::FuncId;
+
 use crate::vm::bytecode::{Chunk, Constant};
 use crate::vm::gc::Gc;
+use crate::vm::jit::ir_builder::CalleeBodies;
 use crate::vm::jit::jit_module::JitCompiler;
 use crate::vm::jit::types::{FnId, JitType, TypeSig};
-use crate::vm::jit::verifier::{self, Reject};
+use crate::vm::jit::verifier::{
+    self, push_guard, CallInfo, Env, GlobalView, Guard, MemberView, OpInfo, Reject,
+};
 use crate::vm::value::Value;
 
 /// Calls before a function is considered hot in [`JitMode::Auto`].
@@ -24,6 +29,15 @@ pub const MAX_DEOPTS: u32 = 8;
 /// Guard failures after which a function that never ran natively is
 /// disabled (we stop classifying its arguments).
 pub const GUARD_FAILURE_LIMIT: u32 = 256;
+/// Longest chain of distinct functions compiled for one call (`f` calls
+/// `g` calls `h` ...). Bounds compile-time recursion.
+pub const MAX_CALLEE_CHAIN: usize = 8;
+
+/// Read access to the VM's globals for the verifier. Implemented by the VM.
+pub trait Globals {
+    fn global(&self, name: &str) -> GlobalView;
+    fn member(&self, object: &str, field: &str) -> MemberView;
+}
 
 /// When the VM compiles functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,10 +108,12 @@ pub unsafe fn invoke(
 #[derive(Debug, Clone)]
 pub struct CompiledSpec {
     pub entry: *const u8,
+    /// Body function, called directly by other compiled functions.
+    pub body: FuncId,
     pub ret: JitType,
-    /// Whether the code calls itself through its global binding (the entry
-    /// guard must then confirm the binding still names this function).
-    pub needs_self_binding: bool,
+    /// Every assumption about globals the code (including all code it
+    /// calls) relies on; the VM checks them before each native entry.
+    pub guards: Arc<Vec<Guard>>,
     pub runs: u64,
     pub deopts: u32,
 }
@@ -147,13 +163,14 @@ impl FnJitState {
 }
 
 /// A specialization chosen for one call.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Selected {
     pub id: FnId,
     pub spec: usize,
     pub entry: *const u8,
     pub ret: JitType,
-    pub needs_self_binding: bool,
+    /// Entry guards (see [`CompiledSpec::guards`]).
+    pub guards: Arc<Vec<Guard>>,
 }
 
 /// All JIT state owned by one VM.
@@ -280,6 +297,7 @@ impl JitState {
         args: &[Value],
         gc: &Gc,
         force_hot: bool,
+        globals: &dyn Globals,
     ) -> Option<Selected> {
         if self.mode == JitMode::Off {
             return None;
@@ -303,26 +321,9 @@ impl JitState {
         if state.calls < threshold && !force_hot {
             return None;
         }
-
-        // Identity is the prototype id; additionally confirm the bytecode is
-        // what we compiled (or will compile) from.
-        match &state.reference {
-            None => state.reference = Some(chunk.clone()),
-            Some(reference) => {
-                let validated = Arc::ptr_eq(reference, chunk)
-                    || state
-                        .last_validated
-                        .as_ref()
-                        .is_some_and(|l| Arc::ptr_eq(l, chunk));
-                if !validated {
-                    if same_code(reference, chunk) {
-                        state.last_validated = Some(chunk.clone());
-                    } else {
-                        Self::guard_failed(state);
-                        return None;
-                    }
-                }
-            }
+        if !Self::validate_code(state, chunk) {
+            Self::guard_failed(state);
+            return None;
         }
 
         if args.len() != chunk.arity as usize {
@@ -336,37 +337,110 @@ impl JitState {
 
         let idx = match state.specs.iter().position(|(s, _)| *s == sig) {
             Some(i) => i,
-            None => {
-                let outcome =
-                    Self::compile_spec(&mut self.compiler, &mut self.compiler_failed, chunk, &sig);
-                if self.verbose {
-                    match &outcome {
-                        SpecState::Compiled(c) => {
-                            eprintln!("  JIT compiled: {}{} -> {}", chunk.name, sig, c.ret)
-                        }
-                        SpecState::Rejected(why) => {
-                            eprintln!("  JIT skip: {}{} ({})", chunk.name, sig, why)
-                        }
-                        SpecState::Disabled => {}
+            None => match self.ensure_spec(chunk, &sig, globals, &mut Vec::new()) {
+                Ok(i) => i,
+                Err(_) => {
+                    if let Some(state) = self.fns.get_mut(&id) {
+                        Self::guard_failed(state);
                     }
+                    return None;
                 }
-                state.specs.push((sig, outcome));
-                state.specs.len() - 1
-            }
+            },
         };
+        let state = self.fns.get_mut(&id)?;
         match &state.specs[idx].1 {
             SpecState::Compiled(c) => Some(Selected {
                 id,
                 spec: idx,
                 entry: c.entry,
                 ret: c.ret,
-                needs_self_binding: c.needs_self_binding,
+                guards: c.guards.clone(),
             }),
             _ => {
                 Self::guard_failed(state);
                 None
             }
         }
+    }
+
+    /// Identity is the prototype id; additionally confirm the bytecode is
+    /// what we compiled (or will compile) from.
+    fn validate_code(state: &mut FnJitState, chunk: &Arc<Chunk>) -> bool {
+        match &state.reference {
+            None => {
+                state.reference = Some(chunk.clone());
+                true
+            }
+            Some(reference) => {
+                let validated = Arc::ptr_eq(reference, chunk)
+                    || state
+                        .last_validated
+                        .as_ref()
+                        .is_some_and(|l| Arc::ptr_eq(l, chunk));
+                if validated {
+                    return true;
+                }
+                if same_code(reference, chunk) {
+                    state.last_validated = Some(chunk.clone());
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Index of the specialization of `chunk` for `sig`, verifying and
+    /// compiling it first if there is none yet (the outcome, including a
+    /// rejection, is cached). `stack` holds the functions whose compilation
+    /// is in progress (the callers of this one).
+    fn ensure_spec(
+        &mut self,
+        chunk: &Arc<Chunk>,
+        sig: &TypeSig,
+        globals: &dyn Globals,
+        stack: &mut Vec<FnId>,
+    ) -> Result<usize, String> {
+        let id = FnId::of(chunk);
+        {
+            let state = self
+                .fns
+                .entry(id)
+                .or_insert_with(|| FnJitState::new(&chunk.name));
+            if !Self::validate_code(state, chunk) {
+                return Err("bytecode differs from the compiled prototype".into());
+            }
+            if let Some(i) = state.specs.iter().position(|(s, _)| s == sig) {
+                return Ok(i);
+            }
+        }
+        stack.push(id);
+        let outcome = self.compile_spec(chunk, sig, globals, stack);
+        stack.pop();
+        if self.verbose {
+            match &outcome {
+                SpecState::Compiled(c) => {
+                    eprintln!("  JIT compiled: {}{} -> {}", chunk.name, sig, c.ret)
+                }
+                SpecState::Rejected(why) => {
+                    eprintln!("  JIT skip: {}{} ({})", chunk.name, sig, why)
+                }
+                SpecState::Disabled => {}
+            }
+        }
+        let state = self
+            .fns
+            .get_mut(&id)
+            .ok_or_else(|| "BUG: JIT state vanished during compilation".to_string())?;
+        state.specs.push((sig.clone(), outcome));
+        Ok(state.specs.len() - 1)
+    }
+
+    fn compiled(&self, id: FnId, sig: &TypeSig) -> Option<&CompiledSpec> {
+        self.fns.get(&id)?.specs.iter().find_map(|(s, st)| match st {
+            SpecState::Compiled(c) if s == sig => Some(c),
+            _ => None,
+        })
     }
 
     fn guard_failed(state: &mut FnJitState) {
@@ -377,29 +451,66 @@ impl JitState {
     }
 
     fn compile_spec(
-        compiler: &mut Option<JitCompiler>,
-        compiler_failed: &mut bool,
-        chunk: &Chunk,
+        &mut self,
+        chunk: &Arc<Chunk>,
         sig: &TypeSig,
+        globals: &dyn Globals,
+        stack: &mut Vec<FnId>,
     ) -> SpecState {
-        let vf = match verifier::verify(chunk, sig) {
+        let verified = {
+            let mut env = TierEnv {
+                tier: self,
+                globals,
+                stack,
+            };
+            verifier::verify_in(chunk, sig, &mut env)
+        };
+        let vf = match verified {
             Ok(vf) => vf,
             Err(reject) => return SpecState::Rejected(describe(&reject)),
         };
-        if compiler.is_none() && !*compiler_failed {
-            match JitCompiler::new() {
-                Ok(c) => *compiler = Some(c),
-                Err(_) => *compiler_failed = true,
+
+        // Entry guards: this function's own, its self-binding, and
+        // (transitively) those of every function it calls natively.
+        let mut guards = vf.guards.clone();
+        if vf.has_self_calls {
+            push_guard(
+                &mut guards,
+                Guard::Closure {
+                    name: chunk.name.clone(),
+                    chunk: chunk.clone(),
+                },
+            );
+        }
+        let mut bodies = CalleeBodies::new();
+        for op in vf.ops.iter().flatten() {
+            let OpInfo::Call(CallInfo::Callee { id, sig, .. }) = op else {
+                continue;
+            };
+            let Some(callee) = self.compiled(*id, sig) else {
+                return SpecState::Rejected("BUG: verified callee is not compiled".into());
+            };
+            bodies.insert((*id, sig.clone()), callee.body);
+            for g in callee.guards.iter() {
+                push_guard(&mut guards, g.clone());
             }
         }
-        let Some(jit) = compiler.as_mut() else {
+
+        if self.compiler.is_none() && !self.compiler_failed {
+            match JitCompiler::new() {
+                Ok(c) => self.compiler = Some(c),
+                Err(_) => self.compiler_failed = true,
+            }
+        }
+        let Some(jit) = self.compiler.as_mut() else {
             return SpecState::Rejected("JIT backend unavailable".into());
         };
-        match jit.compile(chunk, &vf) {
-            Ok(entry) => SpecState::Compiled(CompiledSpec {
+        match jit.compile(chunk, &vf, &bodies) {
+            Ok((entry, body)) => SpecState::Compiled(CompiledSpec {
                 entry,
+                body,
                 ret: vf.ret,
-                needs_self_binding: vf.has_self_calls,
+                guards: Arc::new(guards),
                 runs: 0,
                 deopts: 0,
             }),
@@ -446,4 +557,47 @@ impl JitState {
 
 fn describe(r: &Reject) -> String {
     r.to_string()
+}
+
+/// The verifier's environment during compilation: globals from the VM,
+/// callees compiled (and cached) through the tier.
+struct TierEnv<'a> {
+    tier: &'a mut JitState,
+    globals: &'a dyn Globals,
+    stack: &'a mut Vec<FnId>,
+}
+
+impl Env for TierEnv<'_> {
+    fn global(&self, name: &str) -> GlobalView {
+        self.globals.global(name)
+    }
+
+    fn member(&self, object: &str, field: &str) -> MemberView {
+        self.globals.member(object, field)
+    }
+
+    fn callee(&mut self, chunk: &Arc<Chunk>, sig: &TypeSig) -> Result<JitType, String> {
+        let id = FnId::of(chunk);
+        if self.stack.contains(&id) {
+            // Mutual recursion: the callee's return kind would depend on
+            // the caller being compiled. Only direct self-recursion is
+            // supported.
+            return Err("mutually recursive".into());
+        }
+        if self.stack.len() >= MAX_CALLEE_CHAIN {
+            return Err("call chain too deep".into());
+        }
+        let idx = self.tier.ensure_spec(chunk, sig, self.globals, self.stack)?;
+        let spec = self
+            .tier
+            .fns
+            .get(&id)
+            .and_then(|f| f.specs.get(idx))
+            .map(|(_, s)| s);
+        match spec {
+            Some(SpecState::Compiled(c)) => Ok(c.ret),
+            Some(SpecState::Rejected(why)) => Err(why.clone()),
+            _ => Err("disabled after repeated deopts".into()),
+        }
+    }
 }
