@@ -20,10 +20,12 @@ impl EmbeddedSourceConfig {
 }
 
 pub fn execute_source_standalone(source: &str, config: EmbeddedSourceConfig) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| format!("failed to create Tokio runtime: {err}"))?;
+    let runtime = crate::runtime::recursion::configure_runtime(
+        &mut tokio::runtime::Builder::new_multi_thread(),
+    )
+    .enable_all()
+    .build()
+    .map_err(|err| format!("failed to create Tokio runtime: {err}"))?;
 
     runtime.block_on(execute_source_on_current_runtime(source, config))
 }
@@ -73,10 +75,11 @@ fn format_runtime_error(
 ) -> String {
     if err.line > 0 {
         crate::errors::format_error(
+            &crate::errors::display_path(label),
             source,
             err.line,
             if err.col > 0 { err.col } else { 1 },
-            &format!("[{}] {}", label, err.message),
+            &err.message,
         )
     } else {
         crate::errors::format_simple_error(&format!("[{}] {}", label, err.message))
@@ -105,7 +108,7 @@ mod tests {
         .expect_err("shell should be denied");
 
         assert!(
-            err.contains("Shell execution denied"),
+            err.contains("permission denied: run"),
             "unexpected error: {err}"
         );
     }

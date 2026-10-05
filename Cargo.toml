@@ -1,6 +1,6 @@
 [package]
 name = "forge-lang"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Forge — Internet-native programming language with natural syntax, bytecode VM, and built-in HTTP/database/crypto"
@@ -64,6 +64,13 @@ rustyline = { version = "15", features = ["derive"] }
 # === Error Reporting ===
 ariadne = "0.4"
 
+# === Language Server ===
+# rust-analyzer's synchronous LSP scaffold (framing, initialize/shutdown
+# handshake) plus typed protocol structs. Small footprint: crossbeam-channel,
+# log, serde, fluent-uri, bitflags.
+lsp-server = "0.10"
+lsp-types = "0.97"
+
 # === Utilities ===
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
@@ -114,6 +121,10 @@ gethostname = "1.1.0"
 semver = "1"
 tar = "0.4"
 
+# `forge mcp` moves the protocol off fds 0/1 so scripts cannot touch it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["jit", "postgres", "mysql"]
 jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
@@ -145,4 +156,8 @@ criterion = { version = "0.7.0", features = ["html_reports"] }
 
 [[bench]]
 name = "fork_for_serving"
+harness = false
+
+[[bench]]
+name = "interpreter_hot_paths"
 harness = false

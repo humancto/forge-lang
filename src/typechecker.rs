@@ -55,6 +55,9 @@ struct FnSignature {
     type_params: Vec<String>,
     params: Vec<(String, Option<InferredType>)>,
     param_count: usize,
+    /// Arguments a call must pass (parameters with defaults may be omitted);
+    /// see `semantics::required_params`.
+    required: usize,
     return_type: Option<InferredType>,
 }
 
@@ -517,6 +520,9 @@ impl TypeChecker {
                     FnSignature {
                         type_params: type_params.clone(),
                         param_count: params.len(),
+                        required: crate::semantics::required_params(
+                            params.iter().map(|p| p.default.is_some()),
+                        ),
                         params: param_types,
                         return_type: return_type.as_ref().map(type_ann_to_inferred),
                     },
@@ -605,6 +611,9 @@ impl TypeChecker {
                             FnSignature {
                                 type_params: method_type_params,
                                 param_count: params.len(),
+                                required: crate::semantics::required_params(
+                                    params.iter().map(|p| p.default.is_some()),
+                                ),
                                 params: param_info,
                                 return_type: ret,
                             },
@@ -1247,15 +1256,15 @@ impl TypeChecker {
                 if let Expr::Ident(name) = function.as_ref() {
                     if let Some(sig) = self.functions.get(name).cloned() {
                         // Arity check
-                        if args.len() != sig.param_count
-                            && !args.iter().any(|a| matches!(a, Expr::Spread(_)))
-                        {
-                            self.emit(format!(
-                                "function '{}' expects {} argument(s), got {}",
+                        if !args.iter().any(|a| matches!(a, Expr::Spread(_))) {
+                            if let Err(message) = crate::semantics::check_call_arity(
                                 name,
                                 sig.param_count,
-                                args.len()
-                            ));
+                                sig.required,
+                                args.len(),
+                            ) {
+                                self.emit(message);
+                            }
                         }
 
                         // Infer all argument types first

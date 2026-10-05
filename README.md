@@ -5,17 +5,17 @@
 ### The internet-native programming language that reads like English.
 
 Built-in HTTP, databases, crypto, AI, and a JIT compiler.<br>
-**18 modules. 238+ functions. No extra packages required.**
+**22 stdlib modules. 200+ functions. No extra packages required.**
 
 [![CI](https://github.com/humancto/forge-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/humancto/forge-lang/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64ffda?style=flat-square)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built_with-Rust-%23f74c00?style=flat-square)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-1,275_passing-64ffda?style=flat-square)](#project-status)
+[![Tests](https://img.shields.io/badge/tests-2,200%2B_passing-64ffda?style=flat-square)](#project-status)
 [![Stars](https://img.shields.io/github/stars/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/stargazers)
 [![crates.io](https://img.shields.io/crates/v/forge-lang?color=%23ff6b35&style=flat-square)](https://crates.io/crates/forge-lang)
 
-[📥 **Download Book**](https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf) · [📖 **Language Spec**](https://humancto.github.io/forge-lang/spec/) · [🌐 **Website**](https://humancto.github.io/forge-lang/) · [💬 **Discussions**](https://github.com/humancto/forge-lang/discussions) · [🐛 **Issues**](https://github.com/humancto/forge-lang/issues)
+[📥 **Download Book**](https://github.com/humancto/forge-lang/releases/download/v0.4.1/programming-forge.pdf) · [🤖 **llms.txt**](llms.txt) · [📖 **Language Spec**](https://humancto.github.io/forge-lang/spec/) · [🌐 **Website**](https://humancto.github.io/forge-lang/) · [💬 **Discussions**](https://github.com/humancto/forge-lang/discussions) · [🐛 **Issues**](https://github.com/humancto/forge-lang/issues)
 
 </div>
 
@@ -76,9 +76,10 @@ say crypto.sha256("password")
 | ---------------------------------------------------- | ------------------------------- | ------------------------------------- |
 | [⚡ Quick Example](#-see-it-in-action)               | [🎯 Why Forge?](#-why-forge)    | [📦 Installation](#-installation)     |
 | [🗣️ Dual Syntax](#️-dual-syntax)                      | [🚀 Quick Tour](#-quick-tour)   | [🏗️ Type System](#️-type-system)       |
-| [📚 Standard Library](#-standard-library-18-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
+| [📚 Standard Library](#-standard-library-22-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
 | [🔧 CLI](#-cli-commands)                             | [📂 Examples](#-examples)       | [🏛️ Architecture](#️-architecture)     |
 | [📕 Book](#-the-book)                                | [🗺️ Roadmap](#️-roadmap)         | [🤝 Contributing](#-contributing)     |
+| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) |                                 |                                       |
 
 ---
 
@@ -127,7 +128,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → forge 0.8.0
+forge version          # → Forge v0.9.0
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -228,7 +229,7 @@ let mut count = 0               // mutable
 count += 1
 
 fn add(a, b) { return a + b }
-let double = fn(x) { x * 2 }   // lambda with implicit return
+let double = fn(x) { return x * 2 }   // anonymous function
 ```
 
 ### 🎤 The Output Trio
@@ -248,8 +249,8 @@ otherwise { say "C" }
 
 // When guards
 let label = when temp {
-    > 100 -> "Boiling"
-    > 60  -> "Warm"
+    > 100 -> "Boiling",
+    > 60  -> "Warm",
     else  -> "Cold"
 }
 
@@ -276,9 +277,7 @@ wait 2 seconds                                     // sleep with units
 
 ```forge
 let nums = [1, 2, 3, 4, 5]
-let result = nums
-    .filter(fn(x) { x % 2 == 0 })
-    .map(fn(x) { x * 2 })
+let result = nums.filter(fn(x) { return x % 2 == 0 }).map(fn(x) { return x * 2 })
 say result   // [4, 8]
 
 let user = { name: "Alice", age: 30 }
@@ -294,16 +293,14 @@ fn safe_divide(a, b) {
     return Ok(a / b)
 }
 
-match safe_divide(10, 0) {
-    Ok(val) => say "Got: {val}"
-    Err(msg) => say "Error: {msg}"
+// Propagate with ?
+fn halve_quotient(a, b) {
+    let q = safe_divide(a, b)?
+    return Ok(q / 2)
 }
 
-// Propagate with ?
-fn compute(input) {
-    let n = parse_int(input)?
-    return Ok(n * 2)
-}
+if is_err(halve_quotient(10, 0)) { say "failed" }
+say unwrap_or(halve_quotient(20, 2), 0)   // 5
 ```
 
 ---
@@ -414,7 +411,7 @@ say emp.full()      // delegated to emp.addr.full() → "123 Main St, Portland"
 
 ---
 
-## 📚 Standard Library (18 Modules)
+## 📚 Standard Library (22 Modules)
 
 Every module is available from line 1. No imports. No installs.
 
@@ -425,7 +422,7 @@ Every module is available from line 1. No imports. No installs.
 @server(port: 3000)
 @get("/users/:id")
 fn get_user(id: String) -> Json {
-    return db.query("SELECT * FROM users WHERE id = " + id)
+    return db.query("SELECT * FROM users WHERE id = ?", [id])
 }
 
 // Client — just fetch
@@ -466,6 +463,8 @@ if sh_ok("which docker") { say "Docker installed" }
 let sorted = pipe_to(csv_data, "sort")     // pipe Forge data into shell
 ```
 
+Shell builtins are opt-in: run scripts with `forge --allow-run run script.fg`.
+
 ### 🖥️ Terminal UI
 
 ```forge
@@ -491,7 +490,7 @@ let exists = fs.exists("config.json")
 ```
 
 <details>
-<summary><strong>📋 All 18 modules at a glance (click to expand)</strong></summary>
+<summary><strong>📋 All 22 modules at a glance (click to expand)</strong></summary>
 
 | Module     | Functions                                                                                                                            |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -510,8 +509,12 @@ let exists = fs.exists("config.json")
 | **term**   | colors, table, sparkline, bar, banner, box, gradient, countdown, confirm, menu                                                       |
 | **http**   | get, post, put, delete, patch, head, download, crawl                                                                                 |
 | **io**     | prompt, print, args_parse, args_get, args_has                                                                                        |
-| **exec**   | run_command                                                                                                                          |
-| **time**   | now, format, parse, sleep, elapsed                                                                                                   |
+| **time**   | now, format, parse, add, diff, sleep, elapsed, unix, zone, and more                                                                  |
+| **os**     | hostname, platform, arch, pid, cpus, homedir                                                                                         |
+| **path**   | join, resolve, relative, is_absolute, dirname, basename, extname, separator                                                          |
+| **url**    | parse, build, encode, decode                                                                                                         |
+| **toml**   | parse, stringify, read                                                                                                               |
+| **ws**     | WebSocket client — connect, send, receive, close                                                                                     |
 | **npc**    | Fake data — name, email, username, phone, number, pick, bool, sentence, id, color, ip, url, company                                  |
 
 </details>
@@ -522,31 +525,21 @@ let exists = fs.exists("config.json")
 
 Three execution tiers — pick your tradeoff:
 
-| Engine         |  fib(30) |   vs Python    | Best For                              |
-| -------------- | -------: | :------------: | ------------------------------------- |
-| 🔥 `--jit`     | **10ms** | **11x faster** | Compute-heavy hot functions           |
-| ⚙️ `--vm`      |    252ms |   ~2x slower   | General bytecode execution            |
-| 📦 Interpreter |  2,300ms |  ~20x slower   | Full feature set + all 238+ functions |
+| Engine                 | Flag       | Best For                                                         |
+| ---------------------- | ---------- | ---------------------------------------------------------------- |
+| ⚙️ Bytecode VM         | (default)  | General programs                                                 |
+| 🔥 VM + Cranelift JIT  | `--jit`    | Tight numeric leaf functions (Int/Float math, loops)             |
+| 📦 Tree-walking interp | `--interp` | Full feature surface; HTTP servers fall back to it automatically |
 
-<details>
-<summary><strong>📊 Full cross-language benchmark — fib(30)</strong></summary>
+Measured on one 4-vCPU x86_64 Linux VM (Intel Xeon @ 2.10GHz) with a release build, wall-clock including process startup. Numbers vary by machine — run them yourself.
 
-| Language                |     Time | Relative |
-| ----------------------- | -------: | -------: |
-| Rust 1.91 (-O)          |   1.46ms | baseline |
-| C (clang -O2)           |   1.57ms |    ~1.1x |
-| Go 1.23                 |   4.24ms |    ~2.9x |
-| Scala 2.12 (JVM)        |   4.33ms |    ~3.0x |
-| Java 1.8 (JVM)          |   5.77ms |    ~4.0x |
-| JavaScript (Node 22/V8) |   9.53ms |    ~6.5x |
-| **Forge (JIT)**         | **10ms** |  **~7x** |
-| Python 3                |    114ms |     ~79x |
-| Forge (VM)              |    252ms |    ~173x |
-| Forge (interpreter)     |  2,300ms |  ~1,575x |
+| Workload                             | VM (default) | `--jit` | `--interp` | Python 3.11 |
+| ------------------------------------ | -----------: | ------: | ---------: | ----------: |
+| Recursive `fib(30)`                  |       ~14 ms |  ~14 ms |     ~1.3 s |     ~100 ms |
+| Numeric `while` loop, 20M iterations |       ~30 ms |  ~27 ms |     ~7.9 s |     ~0.9 s  |
+| Startup (`forge -e 'println(1)'`)    |        ~6 ms |       — |          — |           — |
 
-The JIT compiles hot functions to native code via [Cranelift](https://cranelift.dev/), placing Forge alongside Node.js/V8 for recursive workloads.
-
-</details>
+The JIT compiles functions over `Int`/`Bool` values (arithmetic, comparisons, loops, self-recursion) to native code, guarded by type checks that fall back to the VM, so it never changes results. The default VM tiers a function up after 100 calls, or after 1000 iterations of a loop inside it, so both rows above run native by default. Code the JIT does not accept (floats, strings, collections, closures) runs in the VM; `tools/bench_vm.sh` and `tools/bench_interp.sh` cover those workloads.
 
 <details>
 <summary><strong>🌐 HTTP Server benchmark — 20,000 requests / 200 concurrent (GET /ping → JSON)</strong></summary>
@@ -559,7 +552,7 @@ The JIT compiles hot functions to native code via [Cranelift](https://cranelift.
 
 Forge's HTTP server is built on axum + tokio — the same stack powering production Rust services. For typical JSON API endpoints, Forge matches raw Rust throughput while giving you a 4-line handler instead of 40.
 
-Tested with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS. Run your own:
+Measured at v0.4 with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS. The server has since moved to a per-request fork model, so re-measure on your hardware:
 
 ```bash
 # Terminal 1
@@ -599,21 +592,66 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 
 ## 🔧 CLI Commands
 
-| Command                       | What It Does                       |
-| ----------------------------- | ---------------------------------- |
-| `forge run <file>`            | Run a program                      |
-| `forge`                       | Start REPL                         |
-| `forge -e '<code>'`           | Evaluate inline                    |
-| `forge learn [n]`             | 30 interactive tutorials           |
-| `forge new <name>`            | Scaffold a project                 |
-| `forge test [dir]`            | Run tests                          |
-| `forge fmt [files]`           | Format code                        |
-| `forge build <file>`          | Compile to `.fgc` bytecode         |
-| `forge build --native <file>` | Build a native launcher executable |
-| `forge install <src>`         | Install a package                  |
-| `forge lsp`                   | Language server                    |
-| `forge chat`                  | AI assistant                       |
-| `forge version`               | Version info                       |
+| Command                       | What It Does                                         |
+| ----------------------------- | ---------------------------------------------------- |
+| `forge run <file>`            | Run a `.fg` program or `.fgc` bytecode               |
+| `forge` / `forge repl`        | Start REPL                                           |
+| `forge -e '<code>'`           | Evaluate inline                                      |
+| `forge learn [n]`             | 30 interactive tutorials                             |
+| `forge new <name>`            | Scaffold a project                                   |
+| `forge test [dir]`            | Run `@test` functions (`--coverage`, `--filter`)     |
+| `forge fmt [files]`           | Format code (`--check` for CI)                       |
+| `forge build <file>`          | Compile to `.fgc` bytecode                           |
+| `forge build --native <file>` | Native executable embedding source (servers work)    |
+| `forge build --aot <file>`    | Native executable embedding bytecode (VM programs)   |
+| `forge install` / `add` / `update` / `search` / `publish` | Package management       |
+| `forge watch <file>`          | Re-run on file changes                               |
+| `forge doc [paths]`           | Generate documentation                               |
+| `forge lsp` / `forge dap`     | Language server / debug adapter                      |
+| `forge mcp`                   | MCP server: AI agents run Forge in a sandbox         |
+| `forge chat`                  | AI assistant                                         |
+| `forge version`               | Version info                                         |
+
+**Global flags go before the subcommand:** `forge --interp run app.fg`, `forge --jit run app.fg`, `forge --allow-run run deploy.fg`. Also `--profile` and `--strict`. `--vm` is accepted for compatibility and does nothing (the VM is already the default).
+
+Native builds are standalone when `libforge_lang.a` is available (set `FORGE_LIB_DIR`, or keep it next to the `forge` binary); otherwise Forge builds a launcher that runs the program through an installed `forge`.
+
+---
+
+## 🤖 Use Forge from an AI agent (MCP)
+
+`forge mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. It gives an agent a sandboxed Forge runtime ("code mode"): instead of many tool calls, the agent writes one short script — fetch, filter, compute, print — and runs it.
+
+| Tool              | What it does                                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------------------------- |
+| `run_forge`       | Runs `{code, timeout_secs?}` in the sandbox; returns what the script printed, or `isError` with a typed error (`syntax`, `permission_denied`, `runtime`, `timeout`, `output_limit`) and the output so far |
+| `check_forge`     | Parses and type-checks `{code}` without running it; returns diagnostics with line numbers                      |
+| `forge_reference` | The compact language guide ([`llms.txt`](llms.txt)) so the agent can learn Forge                                |
+
+Scripts are **denied everything by default** — files, network, environment, databases, subprocesses, AI calls, `exit()`. Grant only what the agent needs with the usual flags (or `[permissions]` in a `forge.toml` in the server's working directory; flags win):
+
+```bash
+forge mcp                                         # pure computation only
+forge mcp --allow-net=api.example.com             # HTTP to one host
+forge mcp --allow-read=./data --allow-write=./out --max-time 10
+```
+
+Claude Desktop (`claude_desktop_config.json`) or a project `.mcp.json` for Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "forge": { "command": "forge", "args": ["mcp", "--allow-net=api.example.com"] }
+  }
+}
+```
+
+or `claude mcp add forge -- forge mcp --allow-net=api.example.com`.
+
+- `--max-time` (default 30s) is the per-call limit; an agent's `timeout_secs` can only lower it. Output returned to the agent is capped at 64 KiB (a script printing over 1 MiB is stopped).
+- Each call runs on its own thread: a stuck script times out while the server keeps answering, and `notifications/cancelled` stops it. `run` (shell) is never granted unless you pass `--allow-run`.
+- Nothing a script prints or reads can reach the protocol stream (stdin/stdout are moved off fds 0/1 on Unix).
+- Protocol: `2026-07-28` (stateless, `server/discover`) and the `initialize` handshake for `2025-11-25` back to `2024-11-05`. Rust hosts can embed the same server: `forge_lang::mcp::serve(reader, writer, config)`.
 
 ---
 
@@ -644,14 +682,14 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
                             ┌────────────────────────┼────────────────────────┐
                             ↓                        ↓                        ↓
                        Interpreter              Bytecode VM              JIT Compiler
-                     (full features)           (--vm flag)             (--jit flag)
+                     (--interp flag)            (default)              (--jit flag)
                             ↓                        ↓                        ↓
                      Runtime Bridge            Mark-Sweep GC          Cranelift Native
                   (axum, reqwest, tokio,       Green Threads              Code
                    rusqlite, postgres)
 ```
 
-**~26,000 lines of Rust.** Zero `unsafe` blocks in application code.
+**60k+ lines of Rust.** `unsafe` is confined to the C ABI entry points used by native binaries (`src/lib.rs`) and the JIT's native-code boundary (`src/vm/`).
 
 <details>
 <summary><strong>🔩 Core dependencies</strong></summary>
@@ -674,7 +712,7 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 ## 📕 The Book
 
 <p align="center">
-  <a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf">
+  <a href="https://github.com/humancto/forge-lang/releases/download/v0.4.1/programming-forge.pdf">
     <img src="docs/cover.jpeg" alt="Programming Forge — The Internet-Native Language That Reads Like English" width="280">
   </a>
 </p>
@@ -682,51 +720,47 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 <p align="center">
   <strong>Programming Forge: The Internet-Native Language That Reads Like English</strong><br>
   36 chapters · Foundations · Standard Library · Real-World Projects · Internals<br><br>
-  <a href="https://github.com/humancto/forge-lang/releases/latest/download/programming-forge.pdf">📥 Download PDF (Free)</a> · <a href="docs/PROGRAMMING_FORGE.md">📖 Read Online</a>
+  <a href="https://github.com/humancto/forge-lang/releases/download/v0.4.1/programming-forge.pdf">📥 Download PDF (v0.4 edition)</a> · <a href="docs/PROGRAMMING_FORGE.md">📖 Read Online</a>
 </p>
 
 ---
 
 ## 📊 Project Status
 
-Forge is **v0.8.0**. The language, interpreter, and standard library are stable; VM/JIT backends are fast but still subset runtimes.
+Forge is **v0.9.0**. The bytecode VM is the default engine and matches the reference tree-walking interpreter on the full test suite; a guarded JIT tier compiles hot integer code.
 
-| Metric                   |                        Value |
-| ------------------------ | ---------------------------: |
-| Lines of Rust            |                      ~27,000 |
-| Standard library modules |                           18 |
-| Built-in functions       |                         238+ |
-| Keywords                 |                          80+ |
-| Tests passing            | 1,275 (644 Rust + 631 Forge) |
-| Interactive lessons      |                           30 |
-| Example programs         |                           18 |
-| Dependencies (CVEs)      |          344 crates (0 CVEs) |
+| Metric                   |                            Value |
+| ------------------------ | -------------------------------: |
+| Lines of Rust            |                             60k+ |
+| Standard library modules |                               22 |
+| Stdlib functions         |                             200+ |
+| Tests passing            | 2,200+ (1,600+ Rust, 600+ Forge) |
+| Interactive lessons      |                               30 |
+| Example programs         |                              20+ |
 
 ### Known Limitations
 
 > [!NOTE]
 > Forge is a young language. These are documented, not hidden.
 
-- **Parameterized SQL queries supported** — pass a params array as the second argument to `db.query`, `db.execute`, `pg.query`, `pg.execute`, and `mysql.query` / `mysql.execute` to safely bind user input and prevent SQL injection.
-- **Three execution tiers with different trade-offs** — The interpreter is the full language runtime. Use `--vm` for supported bytecode execution, `--jit` for integer-heavy hot paths, and `--profile` to inspect VM execution.
-- **VM/JIT feature gap** — VM and JIT now fail fast on unsupported language features instead of silently compiling partial behavior. Use the default interpreter for full stdlib, HTTP, database, AI, and advanced language features.
-- **`forge build --native` is a launcher today** — it produces a native executable wrapper that shells back into the Forge runtime. Standalone AOT binaries are still on the roadmap.
+- **VM parity is in progress** — the default VM does not yet cover everything the interpreter does (for example implicit last-expression returns, `match` on `Ok`/`Err`, SQL bind parameters, and the `url`/`toml`/`npc`/`ws` modules). If a program behaves unexpectedly, try `forge --interp run`. Gaps are tracked in [ROADMAP.md](ROADMAP.md).
+- **Parameterized SQL queries** — pass a params array as the second argument to `db.query`, `db.execute`, `pg.query`, `pg.execute`, `mysql.query`, and `mysql.execute` to bind user input safely.
+- **Shell access is opt-in** — `sh`, `run_command` and friends need `forge --allow-run run ...`.
 - **`regex` functions** take `(text, pattern)` argument order, not `(pattern, text)`.
 
 ---
 
 ## 🗺️ Roadmap
 
-| Version     | Focus                                                                                             |
-| ----------- | ------------------------------------------------------------------------------------------------- |
-| **v0.3** ✅ | Type system (thing/power/give/craft/has), 73 new functions, GenZ debug kit, NPC module, 822 tests |
-| **v0.4** ✅ | JWT auth, MySQL, parameterized SQL (all DBs), CORS, PG TLS, 18 modules, 1,019 tests               |
-| **v0.5**    | Backend parity, package foundations, richer LSP                                                   |
-| **v0.6**    | Stronger typing, permissions, profiling and benching                                              |
-| **v0.7**    | Standalone native compilation groundwork                                                          |
-| **v1.0**    | Stable API, compatibility guarantees, production hardening                                        |
-
-Near-term execution focus: semantic parity across backends, package/module correctness, stronger typing, better editor tooling, and a path from launcher-based native builds to real standalone binaries.
+| Version         | Focus                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------- |
+| **v0.3** ✅     | Type system (thing/power/give/craft/has), GenZ debug kit, NPC module                  |
+| **v0.4** ✅     | JWT auth, MySQL, parameterized SQL (all DBs), CORS, PG TLS                            |
+| **v0.5–0.7** ✅ | Packages + registry, LSP/DAP, VM as default engine, native/AOT builds                 |
+| **v0.8** ✅     | `os`/`path` modules, `--allow-run`, SSRF guard, optional JIT/DB cargo features        |
+| **v0.9** ✅     | Guarded JIT tier, full VM parity, VM/interpreter perf, sandbox (`--sandbox`, `--allow-*`), `forge mcp` |
+| **Next**        | Sandbox memory limits, true OSR, Arc-shared values, broader JIT types (float/string)  |
+| **v1.0**        | Stable API, compatibility guarantees, production hardening                            |
 
 See [ROADMAP.md](ROADMAP.md) for the public roadmap. Have ideas? [Open an issue](https://github.com/humancto/forge-lang/issues).
 
@@ -764,6 +798,31 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the architecture guide and PR guideli
 ---
 
 ## 🔒 Security
+
+### Sandboxing and permissions
+
+Forge has a Deno-style capability model shared by both engines. Defaults are unchanged (`forge run` allows everything except subprocesses), and `--sandbox` turns it into default-deny:
+
+```bash
+forge run --sandbox --allow-read=./data --allow-net=api.example.com agent.fg
+forge run --max-time 10 job.fg     # wall-clock limit (exit 124)
+```
+
+Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`. Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
+
+Embedding Forge in a Rust host (for AI agents and automation) starts from deny-all:
+
+```rust
+let out = forge_lang::Sandbox::new()
+    .allow_read(["./data"])
+    .max_time(std::time::Duration::from_secs(5))
+    .run_source(r#"say "hi""#)?;
+assert_eq!(out.stdout, "hi\n");
+```
+
+AI agents can use the same sandbox through [`forge mcp`](#-use-forge-from-an-ai-agent-mcp).
+
+Details and current limits: [SECURITY.md — Sandboxing and permissions](SECURITY.md#sandboxing-and-permissions).
 
 To report a security vulnerability, please email the maintainers directly instead of opening a public issue. See [SECURITY.md](SECURITY.md).
 

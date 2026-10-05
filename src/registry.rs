@@ -211,7 +211,11 @@ pub fn fetch_index() -> Result<PackageIndex, String> {
     };
 
     if !response.status().is_success() {
-        return Err(format!("registry returned {} for index", response.status()));
+        return Err(format!(
+            "registry returned {} for {}",
+            response.status(),
+            url
+        ));
     }
 
     let body = response
@@ -231,18 +235,199 @@ pub fn fetch_index() -> Result<PackageIndex, String> {
 /// Search packages by case-insensitive substring match on name or description.
 /// Empty query returns all packages.
 pub fn search_packages<'a>(query: &str, index: &'a PackageIndex) -> Vec<&'a PackageSummary> {
-    let query_lower = query.to_lowercase();
     index
         .packages
         .iter()
-        .filter(|p| {
-            if query_lower.is_empty() {
-                return true;
-            }
-            p.name.to_lowercase().contains(&query_lower)
-                || p.description.to_lowercase().contains(&query_lower)
-        })
+        .filter(|p| matches_query(query, p))
         .collect()
+}
+
+/// Where a search hit was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageOrigin {
+    /// A local registry directory (e.g. `~/.forge/registry`).
+    Local(PathBuf),
+    /// The remote registry index.
+    Remote,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub summary: PackageSummary,
+    pub origin: PackageOrigin,
+}
+
+/// Result of searching local registries plus (optionally) the remote index.
+#[derive(Debug, Clone)]
+pub struct SearchReport {
+    pub hits: Vec<SearchHit>,
+    /// Set when the remote index could not be fetched; local hits are still
+    /// reported.
+    pub remote_error: Option<String>,
+}
+
+/// Build an index of the packages published to local registry roots.
+///
+/// The layout is the one `forge publish` writes: `<root>/<name>/<semver>/`.
+/// The description comes from the newest version's `forge.toml`. Roots that
+/// do not exist are ignored. When a package appears in several roots, the
+/// first root wins for the description and the newest version overall is
+/// reported as `latest`.
+pub fn local_index(roots: &[PathBuf]) -> Vec<(PackageSummary, PathBuf)> {
+    let mut found: Vec<(PackageSummary, PathBuf, semver::Version)> = Vec::new();
+    for root in roots {
+        let Ok(packages) = std::fs::read_dir(root) else {
+            continue;
+        };
+        let mut names: Vec<_> = packages
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .collect();
+        names.sort_by_key(|e| e.file_name());
+        for pkg in names {
+            let name = pkg.file_name().to_string_lossy().to_string();
+            let Ok(versions) = std::fs::read_dir(pkg.path()) else {
+                continue;
+            };
+            let newest = versions
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| {
+                    semver::Version::parse(&e.file_name().to_string_lossy())
+                        .ok()
+                        .map(|v| (v, e.path()))
+                })
+                .max_by(|a, b| a.0.cmp(&b.0));
+            let Some((version, version_dir)) = newest else {
+                continue;
+            };
+            let description = crate::manifest::load_manifest_from(&version_dir.join("forge.toml"))
+                .map(|m| m.project.description)
+                .unwrap_or_default();
+            if let Some(existing) = found.iter_mut().find(|(s, _, _)| s.name == name) {
+                if version > existing.2 {
+                    existing.0.latest = version.to_string();
+                    existing.2 = version;
+                }
+                continue;
+            }
+            found.push((
+                PackageSummary {
+                    name,
+                    description,
+                    latest: version.to_string(),
+                },
+                root.clone(),
+                version,
+            ));
+        }
+    }
+    found.into_iter().map(|(s, root, _)| (s, root)).collect()
+}
+
+/// Search local registries and the remote index together.
+///
+/// Local packages are listed first and shadow remote packages with the same
+/// name (installs also prefer the local registry). A remote failure is
+/// reported in `remote_error` instead of aborting the search.
+pub fn search_all(
+    query: &str,
+    local_roots: &[PathBuf],
+    remote: Result<PackageIndex, String>,
+) -> SearchReport {
+    let mut hits: Vec<SearchHit> = Vec::new();
+    for (summary, root) in local_index(local_roots) {
+        if matches_query(query, &summary) {
+            hits.push(SearchHit {
+                summary,
+                origin: PackageOrigin::Local(root),
+            });
+        }
+    }
+    let remote_error = match remote {
+        Ok(index) => {
+            for summary in search_packages(query, &index) {
+                if hits.iter().any(|h| h.summary.name == summary.name) {
+                    continue;
+                }
+                hits.push(SearchHit {
+                    summary: summary.clone(),
+                    origin: PackageOrigin::Remote,
+                });
+            }
+            None
+        }
+        Err(e) => Some(e),
+    };
+    SearchReport { hits, remote_error }
+}
+
+/// Print a search report for `forge search`. Returns the process exit code:
+/// non-zero only when the remote registry was unreachable and nothing was
+/// found locally either.
+pub fn print_search_report(query: &str, report: &SearchReport, local_roots: &[PathBuf]) -> i32 {
+    if let Some(ref err) = report.remote_error {
+        eprintln!(
+            "  Warning: remote registry {} is unreachable: {}",
+            registry_url(),
+            err
+        );
+        eprintln!("  Showing packages from the local registry only. Set FORGE_REGISTRY_URL to use a different registry.");
+    }
+
+    if report.hits.is_empty() {
+        let scope = if report.remote_error.is_some() {
+            "the local registry"
+        } else {
+            "the registry"
+        };
+        if query.is_empty() {
+            println!("No packages found in {}.", scope);
+        } else {
+            println!("No packages found matching '{}' in {}.", query, scope);
+        }
+        if report.remote_error.is_some() {
+            let searched: Vec<String> = local_roots
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect();
+            println!("  Searched local registries: {}", searched.join(", "));
+            println!("  Publish a package locally with `forge publish`.");
+            return 1;
+        }
+        return 0;
+    }
+
+    println!(
+        "{:<20} {:<10} {:<8} DESCRIPTION",
+        "NAME", "VERSION", "SOURCE"
+    );
+    println!("{}", "-".repeat(68));
+    for hit in &report.hits {
+        let pkg = &hit.summary;
+        let source = match hit.origin {
+            PackageOrigin::Local(_) => "local",
+            PackageOrigin::Remote => "remote",
+        };
+        println!(
+            "{:<20} {:<10} {:<8} {}",
+            pkg.name,
+            if pkg.latest.is_empty() {
+                "-"
+            } else {
+                &pkg.latest
+            },
+            source,
+            pkg.description
+        );
+    }
+    println!("\n{} package(s) found.", report.hits.len());
+    0
+}
+
+fn matches_query(query: &str, p: &PackageSummary) -> bool {
+    let q = query.to_lowercase();
+    q.is_empty() || p.name.to_lowercase().contains(&q) || p.description.to_lowercase().contains(&q)
 }
 
 /// Resolve the best version from a list of version entries using semver.
@@ -700,5 +885,100 @@ latest = "2.0.0"
         assert_eq!(index.packages.len(), 2);
         assert_eq!(index.packages[0].name, "router");
         assert_eq!(index.packages[1].latest, "2.0.0");
+    }
+
+    fn local_registry(tag: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("forge-search-{}-{}", tag, unique));
+        for (name, version, desc) in [
+            ("router", "1.0.0", "Old router"),
+            ("router", "1.2.0", "Local HTTP router"),
+            ("kv", "0.1.0", "Tiny key-value store"),
+        ] {
+            let dir = root.join(name).join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("forge.toml"),
+                format!(
+                    "[project]\nname = \"{}\"\nversion = \"{}\"\ndescription = \"{}\"\n",
+                    name, version, desc
+                ),
+            )
+            .unwrap();
+        }
+        // Non-semver directories are ignored.
+        std::fs::create_dir_all(root.join("junk").join("not-a-version")).unwrap();
+        root
+    }
+
+    #[test]
+    fn local_index_reports_newest_version_and_description() {
+        let root = local_registry("index");
+        let index = local_index(&[root.clone(), root.join("missing")]);
+        let names: Vec<&str> = index.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert_eq!(names, vec!["kv", "router"]);
+        let router = &index[1].0;
+        assert_eq!(router.latest, "1.2.0");
+        assert_eq!(router.description, "Local HTTP router");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn search_falls_back_to_local_when_remote_unreachable() {
+        let root = local_registry("offline");
+        let report = search_all(
+            "router",
+            std::slice::from_ref(&root),
+            Err("registry returned 404 Not Found".into()),
+        );
+        assert_eq!(report.hits.len(), 1);
+        assert_eq!(report.hits[0].summary.name, "router");
+        assert_eq!(report.hits[0].origin, PackageOrigin::Local(root.clone()));
+        assert!(report.remote_error.unwrap().contains("404"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn search_merges_local_and_remote_with_local_shadowing() {
+        let root = local_registry("merge");
+        let report = search_all("", std::slice::from_ref(&root), Ok(test_index()));
+        let names: Vec<(&str, bool)> = report
+            .hits
+            .iter()
+            .map(|h| {
+                (
+                    h.summary.name.as_str(),
+                    matches!(h.origin, PackageOrigin::Local(_)),
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("kv", true),
+                ("router", true),
+                ("auth", false),
+                ("csv-utils", false)
+            ]
+        );
+        assert!(report.remote_error.is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn search_report_exit_code_only_fails_when_nothing_is_reachable() {
+        let empty = SearchReport {
+            hits: Vec::new(),
+            remote_error: Some("offline".into()),
+        };
+        assert_eq!(print_search_report("x", &empty, &[]), 1);
+        let ok_empty = SearchReport {
+            hits: Vec::new(),
+            remote_error: None,
+        };
+        assert_eq!(print_search_report("x", &ok_empty, &[]), 0);
     }
 }

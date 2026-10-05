@@ -1,0 +1,20 @@
+# cargo-audit configuration (read by `cargo audit` in CI and locally).
+#
+# Every ignore must say why it is safe and what would let us drop it.
+# Re-check these whenever mysql_async is upgraded.
+
+[advisories]
+ignore = [
+    # lru 0.12.5 -- unsound `IterMut` (RUSTSEC-2026-0002) and a second
+    # soundness issue (RUSTSEC-2026-0253). Informational "unsound", not a
+    # vulnerability. Pulled in only by mysql_async 0.34's statement cache,
+    # which never calls the affected APIs from Forge code paths. Fixed lru
+    # versions (>= 0.18.2) need a mysql_async major upgrade; drop these
+    # ignores when mysql_async is bumped.
+    "RUSTSEC-2026-0002",
+    "RUSTSEC-2026-0253",
+    # rustls-pemfile 2.2.0 -- unmaintained (RUSTSEC-2025-0134), no known
+    # vulnerability. Only used by mysql_async 0.34 to parse PEM client
+    # certificates. Same exit as above: upgrade mysql_async.
+    "RUSTSEC-2025-0134",
+]

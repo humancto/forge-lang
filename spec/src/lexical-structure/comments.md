@@ -42,6 +42,10 @@ Block comments do **not** nest. The first `*/` encountered after a `/*` ends the
 
 In the example above, the comment ends at the first `*/`, and the text `this is NOT inside the comment */` would be parsed as code (and likely produce a syntax error).
 
+A block comment that is never closed is a lexical error reported at the comment's opening `/*` (``unterminated block comment (missing `*/`)``).
+
+A block comment that spans several lines separates statements exactly like the line breaks inside it would: `let a = 1 /* ... (newline) ... */ let b = 2` is two statements. A block comment on a single line is just whitespace.
+
 ## Doc Comments
 
 Forge does not currently have a dedicated doc comment syntax (such as `///` or `/** */`). Documentation is written using regular line comments or block comments by convention.

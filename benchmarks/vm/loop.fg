@@ -1,0 +1,11 @@
+// VM benchmark: a hot `while` loop inside a function called once.
+fn count(n) {
+    let mut i = 0
+    let mut total = 0
+    while i < n {
+        total = total + i
+        i = i + 1
+    }
+    return total
+}
+println(count(20000000))

@@ -1,0 +1,9 @@
+// expect: [3, 3, 3]
+// A binding declared outside the loop is shared by every closure.
+let mut fs = []
+let mut i = 0
+while i < 3 {
+    fs = push(fs, fn() { return i })
+    i = i + 1
+}
+map(fs, fn(f) { return f() })

@@ -3,7 +3,12 @@
 //! Per-request fork architecture: each incoming request gets its own
 //! Interpreter forked from a shared, read-only [`InterpreterTemplate`].
 //! Handlers run on tokio's blocking pool via [`tokio::task::spawn_blocking`]
-//! so synchronous Forge code never blocks an async worker thread.
+//! so synchronous Forge code never blocks an async worker thread. The CLI
+//! and standalone binaries build their runtime with
+//! [`crate::runtime::recursion::configure_runtime`], which gives blocking
+//! threads `WORKER_STACK_SIZE` bytes of stack registered with the recursion
+//! guard, so recursion inside a handler is limited like anywhere else
+//! instead of by tokio's 2 MiB default.
 //!
 //! Concurrency guarantees:
 //! - **No global lock on the hot path.** Forks share only the
@@ -206,8 +211,8 @@ fn call_handler(
     };
 
     let mut args: Vec<Value> = Vec::new();
-    if let Value::Function { ref params, .. } = handler {
-        for param in params {
+    if let Value::Function(ref func) = handler {
+        for param in &func.params {
             if let Some(val) = path_params.get(&param.name) {
                 args.push(Value::String(val.clone()));
             } else if param.name == "body" || param.name == "data" {
@@ -673,6 +678,8 @@ pub async fn start_server(
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| RuntimeError::new(&format!("invalid address: {}", e)))?;
+    crate::permissions::require_net(&format!("{}:{}", config.host, config.port))
+        .map_err(|e| RuntimeError::new(&e.to_string()))?;
 
     // Always emit the structured startup event so log aggregators see
     // server boot regardless of TTY / format choice.
@@ -699,21 +706,21 @@ pub async fn start_server(
             CorsMode::Permissive => "\x1B[33mpermissive (any origin)\x1B[0m",
             CorsMode::Restrictive => "\x1B[32mrestrictive (same-origin)\x1B[0m",
         };
-        println!();
-        println!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
-        println!("  \x1B[1m   http://{}\x1B[0m", addr);
-        println!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
-        println!(
+        crate::color::cprintln!();
+        crate::color::cprintln!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
+        crate::color::cprintln!("  \x1B[1m   http://{}\x1B[0m", addr);
+        crate::color::cprintln!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
+        crate::color::cprintln!(
             "  \x1B[90m   max in-flight: {} (excess returns 503)\x1B[0m",
             DEFAULT_MAX_INFLIGHT
         );
-        println!();
+        crate::color::cprintln!();
         for route in routes {
-            println!("  \x1B[36m{:>6}\x1B[0m  {}", route.method, route.pattern);
+            crate::color::cprintln!("  \x1B[36m{:>6}\x1B[0m  {}", route.method, route.pattern);
         }
-        println!();
-        println!("  \x1B[90mPowered by axum + tokio | Ctrl+C to stop\x1B[0m");
-        println!();
+        crate::color::cprintln!();
+        crate::color::cprintln!("  \x1B[90mPowered by axum + tokio | Ctrl+C to stop\x1B[0m");
+        crate::color::cprintln!();
     }
 
     let listener = tokio::net::TcpListener::bind(addr)

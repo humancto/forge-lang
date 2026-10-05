@@ -2,7 +2,7 @@
 
 ## What Is This?
 
-Forge is an internet-native programming language built in Rust. ~26,000 lines. Dual syntax (classic + natural language). Built-in HTTP, database, crypto, AI, CSV, terminal UI, shell integration, NPC fake data, GenZ debug kit, and 30 interactive tutorials.
+Forge is an internet-native programming language built in Rust (60k+ lines; run `find src -name '*.rs' | xargs wc -l` for the current figure). Dual syntax (classic + natural language). Built-in HTTP, database, crypto, AI, CSV, terminal UI, shell integration, NPC fake data, GenZ debug kit, and 30 interactive tutorials.
 
 ## Architecture
 
@@ -13,7 +13,9 @@ Source (.fg) → Lexer → Parser → AST → Type Checker → VM / Interpreter 
                                               (axum, reqwest, tokio, rusqlite)
 ```
 
-The bytecode VM is the default engine. A tree-walking interpreter (`--interp` flag) is available for full feature coverage (decorator-driven HTTP servers auto-fallback). A JIT compiler (`--jit`) is available for maximum performance on numeric workloads.
+The bytecode VM is the default engine (`--vm` is accepted but is a no-op). A tree-walking interpreter (`--interp` flag) is available for full feature coverage (decorator-driven HTTP servers auto-fallback). A JIT compiler (`--jit`) is available for maximum performance on numeric workloads.
+
+For a compact, verified description of canonical Forge (written for AI models), see `llms.txt` at the repo root. Keep it in sync when syntax or stdlib signatures change.
 
 ## Quick Start
 
@@ -41,7 +43,7 @@ forge fmt                    # format code
 | Async fn    | `async fn x() { }` | `forge x() { }`             |
 | Await       | `await expr`       | `hold expr`                 |
 | Yield       | `yield value`      | `emit value`                |
-| Destructure | `let {a, b} = obj` | `unpack {a, b} from obj`    |
+| Destructure | `let (a, b) = tuple` (tuples only) | `unpack {a, b} from obj` / `unpack [x, ...rest] from arr` |
 | Fetch       | `fetch("url")`     | `grab resp from "url"`      |
 
 ## Innovation Keywords (unique to Forge)
@@ -60,11 +62,19 @@ forge fmt                    # format code
 - `repeat 5 times { }` -- counted loop
 - `wait 2 seconds` -- sleep with units
 
-## CLI Commands (16)
+## CLI Commands
 
-run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, chat, doc, help, -e
+Source of truth: `forge help` (clap `Command` enum in `src/main.rs`).
 
-## Standard Library (20 modules, 250+ functions)
+run, repl, version, fmt, test, new, build, install, add, update, publish, search, lsp, dap, mcp, learn, chat, watch, doc, help, plus `-e` for inline eval.
+
+`forge mcp` (`src/mcp.rs`, test `tests/mcp_stdio.rs`) is a stdio MCP server for AI agents: tools `run_forge` / `check_forge` / `forge_reference`; scripts run in `Sandbox` under deny-all plus the `--allow-*` / `[permissions]` grants (`build_mcp_policy` in `main.rs`). Both the binary and the lib compile `mcp.rs` and `sandbox.rs`.
+
+Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run` (`--vm` is a backwards-compatible no-op). `forge build` takes `--native` (embeds source) or `--aot` (embeds bytecode).
+
+## Standard Library (22 global modules, 200+ module functions)
+
+Source of truth: `src/stdlib/`. Globals on both engines (registered from `src/builtins_registry.rs`): math, fs, io, crypto, db, pg, mysql, jwt, env, json, regex, log, http, csv, term, os, path, time, url, toml, npc, ws. `exec` is not a global object — use the `run_command` builtin.
 
 | Module   | Key Functions                                                                                                                                                    |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -95,7 +105,7 @@ run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, ch
 - Collections: len, push, pop, keys, values, contains, range, enumerate, sum, min_of, max_of, unique, zip, flatten, group_by, chunk, slice, partition
 - Functional: map, filter, reduce, sort (with custom comparator), reverse, find, flat_map, any, all, sample, shuffle
 - Streams: `.stream()` on arrays/tuples/sets/maps/strings → lazy pull-based iterator. Combinators: filter, map, take, skip, chain, zip, enumerate. Terminals: collect/to_array, count, for_each, first, reduce, sum, find, any, all. Single-use (drained streams yield empty terminals), iterative (no recursion depth limit), poisons on closure error.
-- Enum methods: `impl MyType { fn foo(it, ...) { ... } }` attaches instance methods to algebraic `type` definitions; dispatch walks through the ADT value's `__type__` field into the method table. Supports method bodies with `match it { Variant(f) => ... }`, returning new ADT instances, chained calls, and dispatch via collection lambdas. Known gaps: `TypeName.method()` static dispatch on algebraic types is not resolved today (works only for `struct`), and a preexisting interpreter bug in `match_pattern` rejects deeply recursive ADT matches when outer-frame bindings collide with field pattern names (the VM is unaffected).
+- Enum methods: `impl MyType { fn foo(it, ...) { ... } }` attaches instance methods to algebraic `type` definitions; dispatch walks through the ADT value's `__type__` field into the method table. Supports method bodies with `match it { Variant(f) => ... }`, returning new ADT instances, chained calls, and dispatch via collection lambdas. Known gap: `TypeName.method()` static dispatch on algebraic types is not resolved today (works only for `struct`).
 - Objects: has_key, get (with dot-paths), pick, omit, merge, entries, from_entries, diff
 - Strings: split, join, replace, starts_with, ends_with, lines, substring, index_of, last_index_of, pad_start, pad_end, capitalize, title, repeat_str, count, slugify, snake_case, camel_case
 - Results: Ok, Err, is_ok, is_err, unwrap, unwrap_or
@@ -111,19 +121,20 @@ run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, ch
 
 ```bash
 cargo build          # 0 errors
-cargo test           # 948+ Rust tests pass
-forge test           # integration tests pass (run after cargo build)
+cargo test           # 1,600+ Rust tests pass
+forge --allow-run test --engine both # 640+ Forge tests on VM and interpreter (shell tests need --allow-run)
 forge test --coverage # with line coverage report
 ```
 
-All 18 example files run successfully.
+`examples/` holds 20+ programs. Server examples (`api.fg`, `bench_server*.fg`) block until killed; `devops.fg`/`showcase.fg` need `--allow-run`; `bench_client.fg` needs `FORGE_HTTP_ALLOW_PRIVATE=1` and a running bench server. `tools/run_examples.sh` runs every runnable example on the default engine, and `cargo test --test engine_diff` compares all examples, parity fixtures and `tests/*.fg` across both engines.
 
-## Known Limitations (v0.8.0)
+## Known Limitations (v0.9.0)
 
 - All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
 - The VM is the default engine; programs using decorator-driven HTTP servers (`@server`, `@get`, etc.) auto-fallback to the interpreter
 - Use `--interp` for full feature coverage, `--jit` for maximum numeric performance
-- `forge build --aot` embeds bytecode in a native binary but still requires the Forge runtime at execution time
+- `forge build --native` / `--aot` produce standalone executables when `libforge_lang.a` is found (via `FORGE_LIB_DIR` or next to the `forge` binary); otherwise they fall back to a launcher that shells into an installed `forge`. `--aot` is VM-only and rejects decorator-driven servers — use `--native` for those.
+- Shell builtins (`sh`, `shell`, `run_command`, `pipe_to`, ...) require `--allow-run` for `forge run`; the REPL and `-e` enable it automatically.
 - `regex` functions take `(text, pattern)` order, not `(pattern, text)`
 - Result constructors accept both cases: `Ok(42)`/`ok(42)`, `Err("msg")`/`err("msg")`
 
@@ -144,13 +155,13 @@ These rules are non-negotiable. Follow them on every change.
 6. **No `unwrap()` in production paths.** Use `?` or proper error handling. If structurally impossible, use `expect("BUG: ...")` with an explanation.
 7. **If it compiles but feels wrong, stop.** Check the design.
 8. **Never remove a working execution path.** Interpreter, VM, and JIT must all keep working.
-9. **VM parity is your responsibility.** When adding or fixing a builtin in the interpreter, port the same fix to `src/vm/builtins.rs`. The VM is not automatically in sync.
+9. **VM parity is your responsibility.** Builtin names, arities and stdlib modules come from `src/builtins_registry.rs` (both engines register from it; module members share one implementation). Global builtins still have one match arm per engine — add both (`src/interpreter/builtins.rs`, `src/vm/builtins.rs`); the registry tests fail otherwise. Shared language rules live in `src/semantics/`.
 
 ### After Every Change
 
 10. **Run `cargo test`.** If tests fail, fix before committing.
 11. **Run the examples.** `forge run examples/hello.fg` and `forge run examples/functional.fg` must pass.
-12. **Check for regressions.** If you changed the VM, test with `--vm`. If you changed the JIT, test with `--jit`.
+12. **Check for regressions.** The VM is the default engine, so plain `forge run` exercises it; also run with `--interp` when you touch shared semantics, and with `--jit` when you change the JIT.
 13. **Update CHANGELOG.md.** Every PR that ships user-facing changes must have an entry under `[Unreleased]`. Format: `- Description of change ([#PR](link))`. On release, `[Unreleased]` is cut into a version block.
 14. **Bump the version together.** When cutting a release, update `Cargo.toml` version, add CHANGELOG heading (e.g. `## [0.5.0] - 2026-03-06`), and tag the commit.
 
@@ -259,8 +270,14 @@ program's `Interpreter` is wrapped in a read-only
   WS connections are fully isolated.
 - Large top-level state (`let huge = read_file("100mb.json")`) is
   copied on every request fork. `Value::String` is `String`, not
-  `Arc<str>`. Keep top-level data small or load it lazily inside the
-  handler.
+  `Arc<str>` (only `Value::Function` bodies are `Arc`-shared). Keep
+  top-level data small or load it lazily inside the handler.
+- Handlers run on the blocking pool, whose threads get
+  `recursion::WORKER_STACK_SIZE` (256 MiB reserved) when the runtime is
+  built with `recursion::configure_runtime` (the CLI and standalone
+  binaries do this). A host embedding `start_server` in its own runtime
+  should call it too, or handler recursion is capped by the 2 MiB
+  default (~150 frames).
 - `Value::Stream` in the template env is **forbidden** (debug builds
   panic at first fork). Streams are single-use; sharing across forks
   silently breaks. Construct streams inside handlers, not at module
@@ -382,22 +399,44 @@ call `tracing_init::init_subscriber()` on first use.
 - **GitHub Actions runners:** `macos-13` is deprecated. Use `macos-latest` for both ARM and x86_64 targets.
 - **Bytecode encoding:** Instructions are 32-bit. Format: `[op:8][a:8][b:8][c:8]` or `[op:8][a:8][bx:16]` or `[op:8][a:8][sbx:16]`. The `sbx` field is signed 16-bit stored as unsigned.
 - **Constant dedup:** `Chunk::add_constant()` deduplicates via `identical()`. Don't add the same constant twice — it wastes the constant pool.
+- **Builtin registry.** `src/builtins_registry.rs` is the single list of global builtins (name + arity) and stdlib modules for both engines. Never add a name to only one engine's table; the registry tests (`every_global_is_dispatched_by_both_engines`, `registry_globals_and_modules_exist_on_both_engines`) catch it. VM module calls go through `call_module` (the interpreter's stdlib code) after `args_to_interp`; do not hand-roll per-module argument conversion.
+- **VM collections are values.** `SetIndex`/`SetField` return an updated copy and the compiler stores it back into the place (`compile_store`). Never mutate an `ObjKind::Array`/`Object` in place through `gc.get_mut` from user-visible operations — aliases (`let w = z`, arguments, captured values) would observe it. The one sanctioned exception is `GcObject::unique` (see `src/vm/local_ops.rs`).
+- **VM single-owner updates (`GcObject::unique`).** `AddLocal`/`PushLocal`/`PopLocal` mutate a string/array in place only when it carries the `unique` bit, which is set solely on a value those opcodes just allocated into one local register with no open upvalue. Every copy of a reference *out of* a local register must clear it: today that is `GetLocal`, `Move` and closure capture (`Gc::share`). If you add an opcode or compiler path that reads a local's register directly as an operand, call `self.gc.share(v)` on what it reads, or in-place updates become visible through the alias. Unique strings are never interned (`Gc::alloc_unique_string`); interned strings are shared and must never be mutated.
+- **VM safe points are budgeted.** `timeout` deadlines are polled every `SAFEPOINT_INTERVAL` instructions (`safepoint_countdown`), not per instruction — reading the clock per instruction cost ~6x on tight loops. Anything that must take effect promptly (like `PushTimeout`) sets `safepoint_countdown = 0`. Cancellation remains a per-back-edge/per-call atomic load.
+- **JIT loop tier-up restarts the call.** `CallFrame::entry_args` keeps the call's arguments (GC-rooted) so `try_jit_loop_restart` can re-run a pure function natively after `LOOP_HOT_THRESHOLD` back-edges. This is only sound because the verifier admits pure functions; if the JIT ever accepts side effects (globals, output, bridges with effects), restart must be replaced by real OSR or disabled for those functions.
+- **Direct calls vs callbacks.** `semantics::check_call_arity` applies to direct calls (VM `Call` opcode; interpreter `Expr::Call`/pipelines). Builtins call back through `call_value`/`call_function`, which stay lenient so `map(xs, fn(x, i) {...})` keeps working.
+- **JIT bridges cannot return `Result`.** A failing `extern "C"` bridge must call `VM::record_jit_bridge_error`; `try_jit_call` raises it. Returning a placeholder without recording swallows the error.
 - **VM-interpreter parity is not automatic.** The two share no code. Every interpreter builtin fix must be manually ported to `src/vm/builtins.rs`. Known audit-tracked gaps: `sort()` string support, `split("")` char-splitting, `int(bool)`, `keys({})`, `is_some`/`is_none` — all fixed in March 2026.
 - **`sort()` with custom comparator:** `sort_by` closure borrows `self` immutably but calling `self.call_value()` needs `&mut self`. Work around by collecting items first (releasing the `gc` borrow), then sort with `call_value` on cloned items.
 - **GC borrow in closures:** Never call `self.alloc_string()` or `self.call_value()` inside a closure that still holds `self.gc.get()`. Always collect into a `Vec<String>` or `Vec<Value>` first to drop the GC borrow.
-- **VM `TryCatch`:** The compiler currently drops the catch block (logs as TODO, M1.2.2). Until it's implemented, `--vm` mode does not catch runtime errors.
-- **VM `Destructure`:** Similarly dropped by the compiler (M1.2.1). Any `let {a, b} = obj` in `--vm` mode is silently skipped.
+- **VM `TryCatch` (resolved):** The compiler used to drop the catch block (M1.2.2), so the VM did not catch runtime errors. It is now compiled; `try { } catch e { }` works on the default VM engine.
+- **VM `Destructure` (resolved):** Also once dropped by the compiler (M1.2.1). `unpack {a, b} from obj`, `unpack [x, ...rest] from arr` and `let (a, b) = tuple` now work on the VM. Note there is no `let {a, b} = obj` form — object destructuring is `unpack` only.
+- **VM GC rooting is structural — keep it that way.** GC only runs at safe points in `run_until`, so the danger is a native builtin holding `Value`s in Rust locals while it calls back into Forge code. `VM::call_native` wraps every builtin in a GC *native scope* (`Gc::enter_native`/`exit_native`): args are pinned and every allocation made by native code is auto-pinned until the builtin returns; `VM::call_value` suspends auto-pinning while bytecode runs and pins the callback's return value into the caller's scope. The one manual duty: if a builtin snapshots values *out of* a heap object and then calls back, pin the snapshot (`self.gc.pin_values(&items)`) because the callback may mutate the source. Never call the private `dispatch_native` directly. Test with `FORGE_GC_STRESS=1` / `vm.gc.set_stress(true)` (collects at every safe point after an allocation); `vm::runtime_safety_tests` runs all parity fixtures under stress. Invariants are documented in `src/vm/gc.rs`.
+- **VM integers: only `Value::int(n, gc)`.** There is no public panicking inline-int constructor any more (`NanBoxedValue::from_small_int` is `#[cfg(test)]`). Values outside 48 bits become `ObjKind::BoxedInt`; use `Value::try_inline_int` when no GC is available. Integer overflow policy (both engines): results that don't fit in i64 promote to float, like `i64::MAX + 1` — shared helpers live in `stdlib/math.rs` (`int_pow`, `int_abs`, `rounded_float_to_num`).
+- **Recursion limits live in `runtime/recursion.rs`.** Every engine calls `check_call_depth(depth)` per Forge call: a configurable depth limit (default 10000, `FORGE_MAX_DEPTH` / `--max-depth`) plus a native-stack guard (red zone below the thread's stack end), and reports `depth_exceeded_message` so the text is identical everywhere. The CLI runs on a `forge-main` thread with a 1 GiB (lazily committed) stack; unregistered threads are assumed to have 2 MiB. Measured cost per Forge call: ~16 KB interpreter, ~4 KB VM. JIT'd self-recursion receives the remaining depth budget and deopts to the VM before exceeding the limit, so the error is identical.
+- **Import cycles: `runtime/imports.rs::enter_import`.** Both engines push the resolved module path (RAII `ImportGuard`) before running an imported file and get `circular import: a.fg -> b.fg -> a.fg` on re-entry. The chain is per-thread and unwinds on drop.
+- **VM stdlib tables are backfilled from the interpreter.** `VM::backfill_stdlib_from_interpreter` adds any member of `stdlib::*::create_module()` missing from the hand-written VM module tables (fixed `fs.size`, `term.sparkline`, `math.inf` on the VM). VM `db.*`/`term.*` now use the full `args_to_interp` conversion — a string-only conversion silently dropped array/object arguments.
+- **Interpreter calls are lexical.** `call_function_inner` runs every function in `closure` + one fresh parameter scope. The old "global function fast path" pushed the callee's scope onto the *caller's* env: dynamic scoping, and O(call depth) global lookups. Never reintroduce a path that executes a body on top of the caller's scopes.
+- **Reading a variable copies it.** `Environment::get` deep-clones (strings, arrays, objects are owned). Hot paths must borrow via `Environment::with_value` / `with_value_mut` / `with_binding_mut` (see `src/interpreter/places.rs`). The callback runs under the scope `Mutex`, which is not re-entrant: it must not touch the environment or run Forge code — evaluate operands first, and only reorder evaluation when the operand `is_effect_free`.
+- **Statement bodies don't produce values.** Loop bodies, statement `if` branches, `match` arms and `try`/`catch` run via `exec_body`, which evaluates a trailing expression for effect only (so a trailing `out.push(x)` does not copy `out`). Only `when`/`safe` statement values are consumed by `eval_block_value`; if that changes, `exec_body` callers must change too.
+- **Arc-backed `Value::String`/`Array`/`Object` is blocked on the VM.** `src/vm` constructs and destructures `interpreter::Value::{Array, Object, Set, Map, Tuple, String}` with owned payloads, so moving them to `Arc` (copy-on-write, and hashed Set/Map indexes) needs a coordinated VM change.
+- **Threads that run Forge code need a registered stack.** Use `recursion::spawn_worker` (std threads) or `recursion::configure_runtime` (tokio runtimes); an unregistered thread is assumed to have 2 MiB and the guard stops recursion early.
 
 ## Module Dependency Map
 
 ```
 main.rs → lexer, parser, interpreter, vm, runtime, errors, typechecker, ...
 vm/mod.rs → compiler, machine, bytecode, frame, gc, green, jit, value
-vm/machine.rs → bytecode, frame, gc, value (2483 lines — largest VM file)
-vm/compiler.rs → bytecode, parser::ast (927 lines)
-vm/jit/ir_builder.rs → bytecode, cranelift (276 lines)
-vm/jit/jit_module.rs → ir_builder (47 lines)
-interpreter/mod.rs → parser::ast, runtime, stdlib (8153 lines — largest file)
-runtime/server.rs → interpreter, parser::ast, axum (354 lines)
-runtime/client.rs → reqwest (100 lines)
+vm/machine.rs → bytecode, frame, gc, value (largest VM file)
+vm/compiler.rs → bytecode, parser::ast
+vm/jit/ir_builder.rs → bytecode, cranelift
+vm/jit/jit_module.rs → ir_builder
+vm/jit/runtime.rs → extern "C" helpers called from JIT code (unsafe)
+interpreter/mod.rs → parser::ast, runtime, stdlib (largest file)
+runtime/server.rs → interpreter, parser::ast, axum
+runtime/client.rs → reqwest (SSRF guard)
+lib.rs → C ABI entry points used by native/AOT binaries (unsafe FFI)
+native.rs → `forge build --native/--aot` (standalone vs launcher)
+
+Line counts drift fast; measure with `wc -l` instead of recording them here.
 ```

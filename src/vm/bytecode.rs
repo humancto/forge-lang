@@ -64,11 +64,34 @@ pub enum OpCode {
     IterGet, // A=dst, B=obj_reg, C=idx_reg — like GetIndex but allows Set (for for-loop iteration)
     SquadBegin, // A=dst (push squad context for collecting spawn handles)
     SquadEnd, // A=dst (join all collected handles, produce result array)
+    /// A=first register, B=last register (inclusive). Detaches any open
+    /// upvalue cells for locals in that range so the next binding stored in
+    /// those registers (e.g. the next loop iteration) gets a fresh cell.
+    CloseUpvalues,
+    /// A=dst (bool), B=iterable, C=index: `for` loop condition. True while
+    /// index < length; for a channel, receives the next value (consumed by
+    /// the following `IterGet`) and is false once the channel is closed.
+    IterHas,
+    /// A=parameter register, sBx=offset: jump when the caller passed an
+    /// argument for parameter A (skips that parameter's default value).
+    JumpIfArg,
+    /// A=local register, B=operand: `local = local + R(B)` for a mutable
+    /// local. Reads and writes the local exactly like `GetLocal` + `Add` +
+    /// `SetLocal`, but appends to a uniquely owned string in place (see
+    /// `GcObject::unique`), making `s = s + x` amortized O(len(x)).
+    AddLocal,
+    /// A=local register, B=value: statement `local.push(R(B))` on a mutable
+    /// local (result discarded). Pushes in place when the local uniquely
+    /// owns its array; otherwise behaves like `__forge_method_mut`.
+    PushLocal,
+    /// A=local register, B=dst: `R(B) = local.pop()` on a mutable local,
+    /// in place when the local uniquely owns its array.
+    PopLocal,
 }
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::SquadEnd as u8 + 1 == 61);
+const _: () = assert!(OpCode::PopLocal as u8 + 1 == 67);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -136,6 +159,12 @@ impl TryFrom<u8> for OpCode {
             58 => Ok(OpCode::IterGet),
             59 => Ok(OpCode::SquadBegin),
             60 => Ok(OpCode::SquadEnd),
+            61 => Ok(OpCode::CloseUpvalues),
+            62 => Ok(OpCode::IterHas),
+            63 => Ok(OpCode::JumpIfArg),
+            64 => Ok(OpCode::AddLocal),
+            65 => Ok(OpCode::PushLocal),
+            66 => Ok(OpCode::PopLocal),
             _ => Err(value),
         }
     }
@@ -171,12 +200,27 @@ pub struct Chunk {
     pub max_registers: u8,
     pub upvalue_count: u8,
     pub arity: u8,
+    /// Arguments a direct call must pass (parameters up to the last one
+    /// without a default); see `semantics::check_call_arity`.
+    pub min_arity: u8,
     pub upvalue_sources: Vec<UpvalueSource>,
+    /// Process-unique prototype id, assigned at construction. `Clone`
+    /// preserves it, so every closure instantiated from the same prototype
+    /// shares it. The JIT keys its caches by this id (never by name); see
+    /// `vm::jit::types::FnId`.
+    pub proto_id: u64,
+}
+
+/// Allocate a fresh, process-unique `Chunk::proto_id`.
+pub fn next_proto_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Chunk {
     pub fn new(name: &str) -> Self {
         Self {
+            proto_id: next_proto_id(),
             code: Vec::new(),
             constants: Vec::new(),
             lines: Vec::new(),
@@ -186,6 +230,7 @@ impl Chunk {
             max_registers: 0,
             upvalue_count: 0,
             arity: 0,
+            min_arity: 0,
             upvalue_sources: Vec::new(),
         }
     }
@@ -299,7 +344,13 @@ mod tests {
 
     #[test]
     fn try_from_invalid_opcode() {
-        assert_eq!(OpCode::try_from(61u8), Err(61));
+        assert_eq!(OpCode::try_from(61u8), Ok(OpCode::CloseUpvalues));
+        assert_eq!(OpCode::try_from(62u8), Ok(OpCode::IterHas));
+        assert_eq!(OpCode::try_from(63u8), Ok(OpCode::JumpIfArg));
+        assert_eq!(OpCode::try_from(64u8), Ok(OpCode::AddLocal));
+        assert_eq!(OpCode::try_from(65u8), Ok(OpCode::PushLocal));
+        assert_eq!(OpCode::try_from(66u8), Ok(OpCode::PopLocal));
+        assert_eq!(OpCode::try_from(67u8), Err(67));
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }

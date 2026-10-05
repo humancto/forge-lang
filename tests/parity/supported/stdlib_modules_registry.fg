@@ -1,0 +1,17 @@
+// expect: Array
+// Every stdlib module comes from the shared builtin registry, so both
+// engines expose the same modules and members.
+say type(npc)
+say type(url)
+say type(toml)
+say type(ws)
+say type(io.args())
+say io.args_has("--no-such-flag-xyz")
+say io.args_get("--no-such-flag-xyz")
+say type(io.args_parse())
+say type(npc.first_name())
+say len(npc.email()) > 0
+say upper("abc")
+say lower("ABC")
+say trim("  x  ")
+type(io.args())

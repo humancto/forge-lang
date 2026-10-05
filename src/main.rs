@@ -1,4 +1,6 @@
+mod builtins_registry;
 mod chat;
+mod color;
 mod dap;
 mod doc;
 mod errors;
@@ -10,6 +12,7 @@ mod learn;
 mod lexer;
 mod lsp;
 mod manifest;
+mod mcp;
 mod native;
 mod package;
 mod parser;
@@ -18,7 +21,11 @@ mod publish;
 mod registry;
 mod repl;
 mod runtime;
+// The binary only uses the sandbox through `forge mcp`.
+#[allow(dead_code)]
+mod sandbox;
 mod scaffold;
+mod semantics;
 mod stdlib;
 mod testing;
 mod typechecker;
@@ -102,6 +109,238 @@ struct Cli {
     /// Without this flag, these builtins return a permission error.
     #[arg(long = "allow-run")]
     allow_run: bool,
+
+    /// Maximum Forge call depth before "maximum recursion depth exceeded"
+    /// (default 10000; also settable with FORGE_MAX_DEPTH).
+    #[arg(long = "max-depth", value_name = "N")]
+    max_depth: Option<usize>,
+
+    #[command(flatten)]
+    perms: PermissionFlags,
+}
+
+/// Deno-style permission flags. Without `--sandbox`, Forge keeps its
+/// historical defaults (everything except `run`); a flag only changes the
+/// capability it names. With `--sandbox`, everything not granted is denied.
+#[derive(clap::Args, Debug, Default, Clone)]
+struct PermissionFlags {
+    /// Deny every capability (fs, net, env, db, run, ai) not granted with an
+    /// --allow-* flag. Also settable with `sandbox = true` under
+    /// [permissions] in forge.toml.
+    #[arg(long = "sandbox", global = true)]
+    sandbox: bool,
+
+    /// Allow file reads; with =PATHS, only under those comma-separated paths
+    #[arg(long = "allow-read", value_name = "PATHS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_read: Option<Vec<String>>,
+
+    /// Allow file writes; with =PATHS, only under those comma-separated paths
+    #[arg(long = "allow-write", value_name = "PATHS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_write: Option<Vec<String>>,
+
+    /// Allow network access; with =HOSTS, only to those hosts (host, *.domain, host:port)
+    #[arg(long = "allow-net", value_name = "HOSTS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_net: Option<Vec<String>>,
+
+    /// Allow reading and setting environment variables (env.*)
+    #[arg(long = "allow-env", global = true)]
+    allow_env: bool,
+
+    /// Allow database drivers (db.*, pg.*, mysql.*)
+    #[arg(long = "allow-db", global = true)]
+    allow_db: bool,
+
+    /// Allow AI/LLM calls (ask)
+    #[arg(long = "allow-ai", global = true)]
+    allow_ai: bool,
+
+    /// Stop the program after SECS seconds of wall-clock time (exit code 124)
+    #[arg(long = "max-time", value_name = "SECS", global = true)]
+    max_time: Option<f64>,
+}
+
+/// Exit code used when `--max-time` expires (same as coreutils `timeout`).
+const MAX_TIME_EXIT_CODE: i32 = 124;
+
+/// Turn `--allow-x[=a,b]` / a forge.toml grant into a scope update.
+/// `None` = leave as is; empty list = unrestricted; list = only those.
+fn apply_scoped_grant(
+    caps: permissions::Capabilities,
+    cap: permissions::Capability,
+    grant: Option<manifest::GrantSpec>,
+) -> permissions::Capabilities {
+    use permissions::Capability;
+    let items: Vec<String> = match grant {
+        None => return caps,
+        Some(manifest::GrantSpec::Flag(b)) => {
+            return if b { caps.grant(cap) } else { caps.deny(cap) }
+        }
+        Some(manifest::GrantSpec::List(items)) => items
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    };
+    if items.is_empty() {
+        return caps.grant(cap);
+    }
+    let caps = caps.deny(cap);
+    match cap {
+        Capability::Read => caps.grant_read_paths(items),
+        Capability::Write => caps.grant_write_paths(items),
+        Capability::Net => caps.grant_net_hosts(items),
+        _ => caps.grant(cap),
+    }
+}
+
+/// Build the process-wide policy from forge.toml `[permissions]` and CLI
+/// flags (flags win per capability).
+fn build_policy(
+    flags: &PermissionFlags,
+    toml: Option<manifest::PermissionsConfig>,
+    allow_run: bool,
+    is_interactive: bool,
+    import_root: Option<PathBuf>,
+) -> permissions::Capabilities {
+    use permissions::{Capabilities, Capability};
+    let toml = toml.unwrap_or_default();
+    let sandboxed = flags.sandbox || toml.sandbox;
+    let caps = if sandboxed {
+        // The CLI owns its process: exit()/cd() stay available.
+        Capabilities::deny_all().grant(Capability::Process)
+    } else {
+        Capabilities::cli_default()
+    };
+    let mut caps = apply_grants(caps, flags, &toml);
+    // REPL and -e are user-invoked contexts — shell execution stays allowed
+    // there unless the user explicitly asked for a sandbox.
+    let run = allow_run || toml.allow_run.unwrap_or(false) || (is_interactive && !sandboxed);
+    caps.set(Capability::Run, run);
+    // Modules next to the entry script (and installed packages) stay
+    // importable even when fs.read is scoped elsewhere.
+    if let Some(root) = import_root {
+        caps = caps.grant_import_root(root);
+    }
+    caps.grant_import_root("forge_modules")
+}
+
+/// The policy for scripts run by `forge mcp`: always default-deny
+/// (including `process`, so a script cannot end the server), plus exactly
+/// the grants from the flags and forge.toml. `run` needs an explicit
+/// `--allow-run` / `allow-run = true`; `sandbox = false` is ignored.
+fn build_mcp_policy(
+    flags: &PermissionFlags,
+    toml: Option<manifest::PermissionsConfig>,
+    allow_run: bool,
+) -> permissions::Capabilities {
+    use permissions::{Capabilities, Capability};
+    let toml = toml.unwrap_or_default();
+    let mut caps = apply_grants(Capabilities::deny_all(), flags, &toml);
+    caps.set(Capability::Run, allow_run || toml.allow_run == Some(true));
+    caps
+}
+
+/// Apply the fs/net/env/db/ai grants from CLI flags and forge.toml (flags
+/// win per capability). `run` and `process` are left to the caller.
+fn apply_grants(
+    mut caps: permissions::Capabilities,
+    flags: &PermissionFlags,
+    toml: &manifest::PermissionsConfig,
+) -> permissions::Capabilities {
+    use permissions::Capability;
+    let toml = toml.clone();
+    let cli_list = |v: &Option<Vec<String>>| v.clone().map(manifest::GrantSpec::List);
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Read,
+        cli_list(&flags.allow_read).or(toml.allow_read),
+    );
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Write,
+        cli_list(&flags.allow_write).or(toml.allow_write),
+    );
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Net,
+        cli_list(&flags.allow_net).or(toml.allow_net),
+    );
+    for (cap, flag, from_toml) in [
+        (Capability::Env, flags.allow_env, toml.allow_env),
+        (Capability::Db, flags.allow_db, toml.allow_db),
+        (Capability::Ai, flags.allow_ai, toml.allow_ai),
+    ] {
+        if flag {
+            caps = caps.grant(cap);
+        } else if let Some(b) = from_toml {
+            caps.set(cap, b);
+        }
+    }
+    caps
+}
+
+/// `forge mcp`: serve until the client closes stdin, then exit.
+fn run_mcp(caps: permissions::Capabilities, max_time: Option<f64>) -> ! {
+    let mut config = mcp::ServerConfig::new(caps);
+    if let Some(secs) = max_time {
+        match std::time::Duration::try_from_secs_f64(secs) {
+            Ok(limit) if secs > 0.0 => config.max_time = limit,
+            _ => {
+                eprintln!(
+                    "{}",
+                    errors::format_simple_error("--max-time must be a positive number of seconds")
+                );
+                process::exit(2);
+            }
+        }
+    }
+    // Nothing on this side of the protocol runs user code; scripts get the
+    // configured policy on their own sandbox threads.
+    permissions::set_global(permissions::Capabilities::deny_all());
+    eprintln!(
+        "forge mcp {}: {}",
+        env!("CARGO_PKG_VERSION"),
+        config.policy_summary()
+    );
+    match mcp::serve_stdio(config) {
+        Ok(()) => process::exit(0),
+        Err(e) => {
+            eprintln!(
+                "{}",
+                errors::format_simple_error(&format!("forge mcp: {}", e))
+            );
+            process::exit(1);
+        }
+    }
+}
+
+/// Enforce `--max-time` on every engine: after `secs`, flush output, report
+/// and exit with [`MAX_TIME_EXIT_CODE`].
+fn start_max_time_watchdog(secs: f64) {
+    if !(secs.is_finite() && secs > 0.0) {
+        eprintln!(
+            "{}",
+            errors::format_simple_error("--max-time must be a positive number of seconds")
+        );
+        process::exit(2);
+    }
+    let limit = std::time::Duration::from_secs_f64(secs);
+    std::thread::spawn(move || {
+        std::thread::sleep(limit);
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        eprintln!(
+            "{}",
+            errors::format_simple_error(&format!("execution exceeded --max-time of {}s", secs))
+        );
+        process::exit(MAX_TIME_EXIT_CODE);
+    });
 }
 
 #[derive(Subcommand)]
@@ -110,6 +349,9 @@ enum Command {
     Run {
         /// Path to a .fg or .fgc file (reads entry from forge.toml if omitted)
         file: Option<PathBuf>,
+        /// Allow shell execution (same as the top-level --allow-run)
+        #[arg(long = "allow-run")]
+        allow_run: bool,
     },
     /// Start the interactive REPL
     Repl,
@@ -131,9 +373,18 @@ enum Command {
         /// Filter tests by name pattern
         #[arg(long)]
         filter: Option<String>,
-        /// Show line coverage report after tests
+        /// Show line coverage report after tests (interpreter only)
         #[arg(long)]
         coverage: bool,
+        /// Engine to run tests on: vm, interp, or both. Defaults to the same
+        /// engine as `forge run` (VM, or interpreter with the global --interp
+        /// flag); files the VM cannot run yet fall back to the interpreter.
+        #[arg(long, value_enum)]
+        engine: Option<testing::Engine>,
+        /// Per-test time limit in seconds; a test that exceeds it aborts the
+        /// run with a failure (0 disables the limit)
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
     },
     /// Create a new Forge project
     New {
@@ -184,6 +435,20 @@ enum Command {
     Lsp,
     /// Start the Debug Adapter Protocol server
     Dap,
+    /// Serve the Model Context Protocol over stdio so AI agents can run
+    /// Forge code in a sandbox (tools: run_forge, check_forge,
+    /// forge_reference). Scripts are denied everything (files, network,
+    /// env, db, subprocesses, AI) unless granted with --allow-* flags or
+    /// [permissions] in forge.toml; --max-time caps each call (default 30s).
+    #[command(
+        after_help = "Example (Claude Desktop / Claude Code config):\n  {\"command\": \"forge\", \"args\": [\"mcp\", \"--allow-net=api.example.com\"]}"
+    )]
+    Mcp {
+        /// Let scripts run subprocesses (sh, run_command, ...). Never granted
+        /// by default.
+        #[arg(long = "allow-run")]
+        allow_run: bool,
+    },
     /// Interactive tutorials to learn Forge
     Learn {
         /// Lesson number (optional)
@@ -203,8 +468,30 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() {
+/// Entry point: run the real CLI on a thread with a large stack so deep (but
+/// bounded) Forge recursion works; the recursion guard in
+/// `runtime/recursion.rs` turns anything deeper into a catchable error
+/// instead of a native stack overflow.
+fn main() {
+    let stack = runtime::recursion::MAIN_STACK_SIZE;
+    let worker = std::thread::Builder::new()
+        .name("forge-main".to_string())
+        .stack_size(stack)
+        .spawn(move || {
+            runtime::recursion::register_thread_stack(stack);
+            runtime::recursion::configure_runtime(&mut tokio::runtime::Builder::new_multi_thread())
+                .enable_all()
+                .build()
+                .expect("BUG: failed to build the tokio runtime")
+                .block_on(async_main());
+        })
+        .expect("BUG: failed to spawn the forge main thread");
+    if let Err(panic) = worker.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn async_main() {
     // OTel must initialize on the main tokio runtime (not from a
     // nested runtime created by a stdlib helper). Calling here ensures
     // CLI scripts that emit `tracing` events (via the `log` stdlib)
@@ -213,6 +500,9 @@ async fn main() {
     forge_lang::runtime::tracing_init::init_otel();
 
     let cli = Cli::parse();
+    if let Some(n) = cli.max_depth {
+        runtime::recursion::set_max_depth(n);
+    }
     let use_jit = cli.use_jit;
     #[cfg(not(feature = "jit"))]
     if use_jit {
@@ -226,7 +516,62 @@ async fn main() {
     // For file execution (forge run), require explicit --allow-run.
     let is_interactive =
         cli.eval_code.is_some() || matches!(cli.command, Some(Command::Repl) | None);
-    permissions::set_allow_run(cli.allow_run || is_interactive);
+    let run_allow_run = matches!(
+        cli.command,
+        Some(Command::Run {
+            allow_run: true,
+            ..
+        })
+    );
+    // forge.toml [permissions] applies to commands that execute the project.
+    let toml_perms = if matches!(
+        cli.command,
+        Some(Command::Run { .. } | Command::Test { .. } | Command::Mcp { .. })
+    ) {
+        match manifest::load_permissions() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", errors::format_simple_error(&e));
+                process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    let import_root = match &cli.command {
+        Some(Command::Run { file: Some(f), .. }) => {
+            Some(f.parent().map(|p| p.to_path_buf()).unwrap_or_default())
+        }
+        Some(Command::Test { dir, .. }) => Some(PathBuf::from(dir)),
+        _ => Some(PathBuf::from(".")),
+    }
+    .map(|p| {
+        if p.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            p
+        }
+    });
+    let max_time = cli
+        .perms
+        .max_time
+        .or(toml_perms.as_ref().and_then(|p| p.max_time));
+    if let Some(Command::Mcp { allow_run }) = cli.command {
+        // No process watchdog for the server: the limit applies to each
+        // script instead.
+        let caps = build_mcp_policy(&cli.perms, toml_perms, cli.allow_run || allow_run);
+        run_mcp(caps, max_time);
+    }
+    permissions::set_global(build_policy(
+        &cli.perms,
+        toml_perms,
+        cli.allow_run || run_allow_run,
+        is_interactive,
+        import_root,
+    ));
+    if let Some(secs) = max_time {
+        start_max_time_watchdog(secs);
+    }
 
     if let Some(code) = cli.eval_code {
         let code = code.replace(';', "\n");
@@ -240,7 +585,7 @@ async fn main() {
     }
 
     match cli.command {
-        Some(Command::Run { file }) => {
+        Some(Command::Run { file, .. }) => {
             let file = match file {
                 Some(f) => f,
                 None => {
@@ -306,6 +651,8 @@ async fn main() {
             dir,
             filter,
             coverage,
+            engine,
+            timeout,
         }) => {
             let test_dir = if dir == "tests" {
                 if let Some(m) = manifest::load_manifest() {
@@ -316,7 +663,22 @@ async fn main() {
             } else {
                 dir
             };
-            testing::run_tests(&test_dir, filter.as_deref(), coverage);
+            let engine = engine.unwrap_or(if cli.use_interp {
+                testing::Engine::Interp
+            } else {
+                testing::Engine::Vm
+            });
+            let vm_compat = |program: &Program| ensure_vm_compatible(program, "VM");
+            testing::run_tests(
+                &test_dir,
+                &testing::TestOptions {
+                    filter: filter.as_deref(),
+                    coverage,
+                    engine,
+                    vm_compat: &vm_compat,
+                    timeout: (timeout > 0).then(|| std::time::Duration::from_secs(timeout)),
+                },
+            );
         }
         Some(Command::New { name }) => {
             scaffold::create_project(&name);
@@ -356,71 +718,29 @@ async fn main() {
             }
         }
         Some(Command::Install { source }) => {
-            package::install(&source);
+            run_off_runtime(|| package::install(&source));
         }
         Some(Command::Add { package: pkg }) => match manifest::parse_package_spec(&pkg) {
-            Ok((name, version)) => {
-                let mut m = manifest::load_manifest().unwrap_or_default();
-                let action = if m.dependencies.contains_key(&name) {
-                    "Updated"
-                } else {
-                    "Added"
-                };
-                m.dependencies.insert(
-                    name.clone(),
-                    manifest::DependencySpec::Version(version.clone()),
-                );
-                if let Err(e) = manifest::save_manifest(&m) {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                }
-                println!("  {} {} = \"{}\" to forge.toml", action, name, version);
-                package::install_from_manifest();
-            }
+            Ok((name, version)) => run_off_runtime(|| package::add(&name, &version)),
             Err(e) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         },
         Some(Command::Update) => {
-            package::update();
+            run_off_runtime(package::update);
         }
         Some(Command::Publish { dry_run, registry }) => {
             publish::publish(dry_run, registry.as_deref());
         }
         Some(Command::Search { query }) => {
             let q = query.as_deref().unwrap_or("");
-            match registry::fetch_index() {
-                Ok(index) => {
-                    let results = registry::search_packages(q, &index);
-                    if results.is_empty() {
-                        if q.is_empty() {
-                            println!("No packages found in registry.");
-                        } else {
-                            println!("No packages found matching '{}'.", q);
-                        }
-                    } else {
-                        println!("{:<20} {:<10} {}", "NAME", "VERSION", "DESCRIPTION");
-                        println!("{}", "-".repeat(60));
-                        for pkg in &results {
-                            println!(
-                                "{:<20} {:<10} {}",
-                                pkg.name,
-                                if pkg.latest.is_empty() {
-                                    "-"
-                                } else {
-                                    &pkg.latest
-                                },
-                                pkg.description
-                            );
-                        }
-                        println!("\n{} package(s) found.", results.len());
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                }
+            let roots = package::default_registry_roots();
+            let remote = run_off_runtime(registry::fetch_index);
+            let report = registry::search_all(q, &roots, remote);
+            let code = registry::print_search_report(q, &report, &roots);
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Some(Command::Lsp) => {
@@ -428,6 +748,9 @@ async fn main() {
         }
         Some(Command::Dap) => {
             dap::run_dap();
+        }
+        Some(Command::Mcp { .. }) => {
+            unreachable!("BUG: forge mcp is dispatched before the CLI policy is installed")
         }
         Some(Command::Learn { lesson }) => {
             learn::run_learn(lesson);
@@ -484,11 +807,12 @@ fn prepare_program(
 }
 
 fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
+    let filename = &errors::display_path(filename);
     match err {
         FrontendError::Lex { line, col, message } | FrontendError::Parse { line, col, message } => {
             eprintln!(
                 "{}",
-                errors::format_error(source, line, col, &format!("[{}] {}", filename, message))
+                errors::format_error(filename, source, line, col, &message)
             );
         }
         FrontendError::Type(warnings) => {
@@ -745,8 +1069,22 @@ fn vm_incompatibilities(program: &Program) -> Vec<&'static str> {
     issues.into_iter().collect()
 }
 
+/// Whether the bytecode VM can run `program` faithfully. Combines the AST
+/// scan above with a trial compile: any construct the VM compiler reports as
+/// `Unsupported` (instead of silently dropping it) is rejected here, so
+/// `forge run` falls back to the interpreter rather than misbehaving.
 fn ensure_vm_compatible(program: &Program, mode: &str) -> Result<(), String> {
-    let issues = vm_incompatibilities(program);
+    let mut issues: Vec<String> = vm_incompatibilities(program)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if issues.is_empty() {
+        if let Err(e) = vm::compiler::compile(program) {
+            if e.is_unsupported() {
+                issues.push(e.message);
+            }
+        }
+    }
     if issues.is_empty() {
         return Ok(());
     }
@@ -759,6 +1097,51 @@ fn ensure_vm_compatible(program: &Program, mode: &str) -> Result<(), String> {
     ))
 }
 
+/// Print a VM runtime error with the same source snippet the interpreter
+/// shows (anchored at the failing statement of the main program), followed
+/// by the VM stack trace.
+fn report_vm_error(source: &str, filename: &str, error: &vm::machine::VMError) {
+    let filename = &errors::display_path(filename);
+    let main_frame = error
+        .stack_trace
+        .iter()
+        .rev()
+        .find(|frame| frame.function == "<main>" && frame.line > 0);
+    match main_frame {
+        Some(frame) if source.lines().count() >= frame.line => {
+            eprintln!(
+                "{}",
+                errors::format_error(
+                    filename,
+                    source,
+                    frame.line,
+                    frame.col.max(1),
+                    &error.message
+                )
+            );
+            if error.stack_trace.len() > 1 {
+                for frame in &error.stack_trace {
+                    eprintln!("  at {} (line {})", frame.function, frame.line);
+                }
+            }
+        }
+        _ => eprintln!("{}", errors::format_simple_error(&error.to_string())),
+    }
+}
+
+/// Run a package-manager operation on a plain OS thread.
+///
+/// The registry client uses `reqwest::blocking`, which panics ("Cannot drop a
+/// runtime in a context where blocking is not allowed") when called from the
+/// `#[tokio::main]` async context. A scoped thread has no runtime context.
+fn run_off_runtime<T: Send, F: FnOnce() -> T + Send>(f: F) -> T {
+    std::thread::scope(|scope| match scope.spawn(f).join() {
+        Ok(value) => value,
+        // The panic message has already been printed by the panic hook.
+        Err(_) => process::exit(101),
+    })
+}
+
 async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, strict: bool) {
     let (program, warnings) = match prepare_program(source, strict) {
         Ok(prepared) => prepared,
@@ -766,36 +1149,41 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     };
     emit_type_warnings(&warnings);
 
-    // Auto-fallback: if VM is requested but program uses decorators, fall back to interpreter
-    let effective_vm = if use_vm {
+    // Auto-fallback: if VM is requested but the program uses constructs the
+    // VM does not support (decorators, or anything the compiler rejects as
+    // `Unsupported`), run it on the interpreter instead.
+    let mut chunk = None;
+    if use_vm {
         match ensure_vm_compatible(&program, "VM") {
-            Ok(()) => true,
+            Ok(()) => {
+                let path = std::path::Path::new(filename);
+                let options = vm::compiler::CompileOptions {
+                    base_dir: path
+                        .exists()
+                        .then(|| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+                        .and_then(|p| p.parent().map(|d| d.to_path_buf())),
+                };
+                match vm::compiler::compile_with(&program, &options) {
+                    Ok(compiled) => chunk = Some(compiled),
+                    Err(e) if e.is_unsupported() => {
+                        eprintln!("  Info: falling back to interpreter ({})", e.message);
+                    }
+                    Err(e) => {
+                        eprintln!("{}", errors::format_simple_error(&e.message));
+                        process::exit(1);
+                    }
+                }
+            }
             Err(message) => {
                 eprintln!("  Info: falling back to interpreter ({})", message);
-                false
             }
         }
-    } else {
-        false
-    };
+    }
 
-    if effective_vm {
-        if profile {
-            match vm::run_with_profiling(&program) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{}", errors::format_simple_error(&e.to_string()));
-                    process::exit(1);
-                }
-            }
-        } else {
-            match vm::run(&program) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{}", errors::format_simple_error(&e.to_string()));
-                    process::exit(1);
-                }
-            }
+    if let Some(chunk) = chunk {
+        if let Err(e) = vm::run_chunk(&chunk, profile) {
+            report_vm_error(source, filename, &e);
+            process::exit(1);
         }
     } else {
         let mut interpreter = Interpreter::new();
@@ -809,14 +1197,16 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
         match interpreter.run(&program) {
             Ok(_) => {}
             Err(e) => {
+                let filename = &errors::display_path(filename);
                 if e.line > 0 {
                     eprintln!(
                         "{}",
                         errors::format_error(
+                            filename,
                             source,
                             e.line,
                             if e.col > 0 { e.col } else { 1 },
-                            &format!("[{}] {}", filename, e.message)
+                            &e.message
                         )
                     );
                 } else {
@@ -857,80 +1247,13 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
         }
     };
 
-    let mut jit = match vm::jit::jit_module::JitCompiler::new() {
-        Ok(j) => j,
-        Err(e) => {
-            eprintln!("JIT init error: {}", e);
-            process::exit(1);
-        }
-    };
-
-    // Create the VM first so we can pre-allocate string constants into GC
-    // for functions that need runtime bridges (string/collection/global ops).
+    // Eager tier: every function is offered to the JIT on its first call.
+    // Each (function, argument-kind signature) pair is verified and compiled
+    // once; anything the verifier cannot prove is reported and runs in the
+    // VM. Native code never changes program semantics.
     let mut vm = vm::machine::VM::new();
-
-    for (i, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() {
-            format!("fn_{}", i)
-        } else {
-            proto.name.clone()
-        };
-        let type_info = vm::jit::type_analysis::analyze(proto);
-        let needs_vm_ptr =
-            type_info.has_string_ops || type_info.has_collection_ops || type_info.has_global_ops;
-
-        // Pre-allocate string constants into GC so their GcRef indices
-        // can be baked into JIT code for runtime bridge calls.
-        let string_refs = if needs_vm_ptr {
-            let refs: Vec<Option<i64>> = proto
-                .constants
-                .iter()
-                .map(|c| match c {
-                    vm::bytecode::Constant::Str(s) => {
-                        let r = vm.gc.alloc_string(s.clone());
-                        vm.jit_roots.push(r);
-                        Some(r.0 as i64)
-                    }
-                    _ => None,
-                })
-                .collect();
-            Some(refs)
-        } else {
-            None
-        };
-
-        match jit.compile_function(proto, &name, string_refs.as_ref()) {
-            Ok(ptr) => {
-                eprintln!(
-                    "  JIT compiled: {} ({} instructions -> native)",
-                    name,
-                    proto.code.len()
-                );
-                vm.jit_cache.insert(
-                    name,
-                    vm::machine::JitEntry {
-                        ptr,
-                        uses_float: type_info.has_float,
-                        has_string_ops: type_info.has_string_ops,
-                        has_collection_ops: type_info.has_collection_ops,
-                        has_global_ops: type_info.has_global_ops,
-                        returns_obj: matches!(
-                            type_info.return_type,
-                            vm::jit::type_analysis::RegType::StringRef
-                                | vm::jit::type_analysis::RegType::ObjRef
-                        ),
-                        returns_float: matches!(
-                            type_info.return_type,
-                            vm::jit::type_analysis::RegType::Float
-                        ),
-                    },
-                );
-            }
-            Err(e) => {
-                eprintln!("  JIT skip: {} ({})", name, e);
-            }
-        }
-    }
+    vm.set_jit_mode(vm::jit::tier::JitMode::Eager);
+    vm.jit.verbose = true;
 
     match vm.execute(&chunk) {
         Ok(_) => {}

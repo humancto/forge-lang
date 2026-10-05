@@ -1,0 +1,2 @@
+fn hidden_helper() { return "hidden" }
+fn visible() { return "visible:" + hidden_helper() }

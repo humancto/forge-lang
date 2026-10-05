@@ -10,7 +10,7 @@ use super::profiler::Profiler;
 use super::value::*;
 
 /// Wrapper for sending a VM to another thread.
-/// SAFETY: fork_for_spawn() asserts jit_cache/jit_modules are empty (no raw
+/// SAFETY: fork_for_spawn() asserts the JIT state is empty (no raw
 /// pointers cross threads). All other VM fields are owned or Arc-wrapped.
 /// The assert runs in release builds to prevent UB if the invariant breaks.
 struct SendableVM(VM);
@@ -22,21 +22,21 @@ fn spawn_thread(
     closure: Value,
     slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>,
 ) {
-    std::thread::spawn(move || {
+    crate::permissions::spawn(move || {
         sendable.run(closure, slot);
     });
 }
 
 /// Run a schedule closure in a loop on a forked VM in a new OS thread.
 fn spawn_schedule_thread(sendable: SendableVM, closure: Value, interval: Duration) {
-    std::thread::spawn(move || {
+    crate::permissions::spawn(move || {
         sendable.run_loop(closure, interval);
     });
 }
 
 /// Run a watch closure on a forked VM, polling a file path for mtime changes.
 fn spawn_watch_thread(sendable: SendableVM, closure: Value, path: String) {
-    std::thread::spawn(move || {
+    crate::permissions::spawn(move || {
         sendable.run_watch(closure, path);
     });
 }
@@ -109,77 +109,49 @@ impl SendableVM {
     }
 }
 
-#[cfg(feature = "jit")]
-#[derive(Clone, Copy)]
-pub struct JitEntry {
-    pub ptr: *const u8,
-    pub uses_float: bool,
-    pub has_string_ops: bool,
-    pub has_collection_ops: bool,
-    pub has_global_ops: bool,
-    /// True when the function returns a GcRef (string, array, or object).
-    pub returns_obj: bool,
-    /// True when the function's return type is Float (decode result as f64 bits).
-    pub returns_float: bool,
-}
+/// Instructions executed between two polls of `timeout` deadlines. Polling
+/// reads the clock and walks every frame, so it must not run per
+/// instruction; 1024 simple instructions take a few microseconds, far below
+/// the one-second resolution of `timeout` scopes. Cancellation (squads,
+/// HTTP cancel-on-drop) is a single atomic load and is still checked on
+/// every backward jump and call.
+pub(super) const SAFEPOINT_INTERVAL: u32 = 1024;
 
+/// Backward jumps after which a frame's function is offered to the JIT
+/// (see `VM::try_jit_loop_restart`). Low enough that a loop-heavy function
+/// called once still tiers up early, high enough that short loops never
+/// pay for compilation.
 #[cfg(feature = "jit")]
-/// Call a JIT-compiled function with arbitrary i64 arguments.
-/// Supports 0–8 args; returns Err beyond that.
-pub(super) unsafe fn jit_call_i64(ptr: *const u8, args: &[i64]) -> Result<i64, VMError> {
-    Ok(match args.len() {
-        0 => {
-            let f: extern "C" fn() -> i64 = std::mem::transmute(ptr);
-            f()
-        }
-        1 => {
-            let f: extern "C" fn(i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0])
-        }
-        2 => {
-            let f: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1])
-        }
-        3 => {
-            let f: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2])
-        }
-        4 => {
-            let f: extern "C" fn(i64, i64, i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3])
-        }
-        5 => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3], args[4])
-        }
-        6 => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(ptr);
-            f(args[0], args[1], args[2], args[3], args[4], args[5])
-        }
-        7 => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                std::mem::transmute(ptr);
-            f(
-                args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-            )
-        }
-        8 => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                std::mem::transmute(ptr);
-            f(
-                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-            )
-        }
-        n => {
-            return Err(VMError::new(&format!(
-                "JIT dispatch supports up to 8 arguments, got {}",
-                n
-            )))
-        }
-    })
-}
+pub(super) const LOOP_HOT_THRESHOLD: u32 = 1000;
 
-#[cfg(feature = "jit")]
+/// Compiler intrinsics: natives the bytecode compiler emits calls to. They
+/// are not user-visible builtins (those live in `crate::builtins_registry`).
+const COMPILER_INTRINSICS: &[&str] = &[
+    "__forge_register_struct",
+    "__forge_new_struct",
+    "__forge_register_interface",
+    "__forge_register_method",
+    "__forge_validate_impl",
+    "__forge_call_method",
+    "__forge_binding_matches",
+    "__forge_retry_count",
+    "__forge_retry_wait",
+    "__forge_retry_failed",
+    "__forge_where_filter",
+    "__forge_pipe_sort",
+    "__forge_pipe_take",
+    "__forge_register_prompt",
+    "__forge_register_agent",
+    "__forge_raise_error",
+    "__forge_import_module",
+    "__forge_get_field",
+    "__forge_set_field",
+    "__forge_destructure",
+    "__forge_array_spread",
+    "__forge_check",
+    "__forge_when_matches",
+    "__forge_method_mut",
+];
 
 pub struct VM {
     pub registers: Vec<Value>,
@@ -191,19 +163,27 @@ pub struct VM {
     pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
     pub gc: Gc,
     pub output: Vec<String>,
+    /// JIT tier state: specialization cache keyed by (prototype id, type
+    /// signature), hotness and deopt accounting. See `vm::jit`.
     #[cfg(feature = "jit")]
-    pub jit_cache: HashMap<String, JitEntry>,
+    pub jit: super::jit::tier::JitState,
+    /// Error raised inside a runtime bridge (`vm::jit::runtime`) while
+    /// native code was running. Bridges are `extern "C"` and cannot return
+    /// a `Result`, so they record the error here and return a placeholder;
+    /// `try_jit_call` turns it into the call's error. Never silently
+    /// dropped.
     #[cfg(feature = "jit")]
-    /// Keeps JIT-compiled code pages alive. Must never be shrunk while
-    /// `jit_cache` holds pointers into these modules.
-    jit_modules: Vec<super::jit::jit_module::JitCompiler>,
-    #[cfg(feature = "jit")]
-    /// GcRef roots for string constants baked into JIT native code.
-    /// These must survive GC so that bridge calls using the baked indices
-    /// continue to resolve valid objects.
-    pub jit_roots: Vec<GcRef>,
+    pub(crate) jit_bridge_error: Option<VMError>,
     pub profiler: Profiler,
-    skip_timeout_check_once: bool,
+    /// Instructions left before the next safe-point poll of `timeout`
+    /// deadlines (see [`SAFEPOINT_INTERVAL`]). Reading the clock and walking
+    /// every frame's timeout stack on each instruction dominated the cost of
+    /// simple loops, so deadlines are polled every `SAFEPOINT_INTERVAL`
+    /// instructions instead. `PushTimeout` zeroes it so a scope that is
+    /// already expired (`timeout 0 seconds`) fires before its body runs, and
+    /// a fired timeout refills it so the catch path's `PopTimeout` runs
+    /// before the next poll.
+    safepoint_countdown: u32,
     /// Set by the Stream arms of `convert_to_interp_val` / `convert_interp_value`
     /// / `value_to_shared` when a Stream is encountered at the VM↔interpreter
     /// boundary. Callers of those conversions must check this flag after each
@@ -213,6 +193,9 @@ pub struct VM {
     pub(super) stream_boundary_error: std::cell::Cell<bool>,
     /// Squad handle collector stack: when non-empty, Spawn registers handles here.
     /// Each entry is (dst_register, cancel_flag, handles, saved_outer_cancelled).
+    /// Values received by `IterHas` from a channel being iterated by a
+    /// `for` loop, consumed by the `IterGet` that immediately follows.
+    iter_prefetch: Vec<SharedValue>,
     squad_stack: Vec<(
         u8,
         Arc<std::sync::atomic::AtomicBool>,
@@ -277,8 +260,19 @@ impl VMError {
 impl std::fmt::Display for VMError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)?;
-        if !self.stack_trace.is_empty() {
-            for frame in &self.stack_trace {
+        // Runs of identical frames (deep recursion) are collapsed after
+        // `SHOWN_REPEATS` copies so a depth-limit error stays readable.
+        const SHOWN_REPEATS: usize = 3;
+        let mut i = 0;
+        while i < self.stack_trace.len() {
+            let frame = &self.stack_trace[i];
+            let run = self.stack_trace[i..]
+                .iter()
+                .take_while(|g| {
+                    g.function == frame.function && g.line == frame.line && g.col == frame.col
+                })
+                .count();
+            for _ in 0..run.min(SHOWN_REPEATS) {
                 if frame.col > 0 {
                     write!(
                         f,
@@ -289,6 +283,14 @@ impl std::fmt::Display for VMError {
                     write!(f, "\n  at {} (line {})", frame.function, frame.line)?;
                 }
             }
+            if run > SHOWN_REPEATS {
+                write!(
+                    f,
+                    "\n  ... previous frame repeated {} more times",
+                    run - SHOWN_REPEATS
+                )?;
+            }
+            i += run;
         }
         Ok(())
     }
@@ -298,7 +300,7 @@ impl VM {
     pub fn new() -> Self {
         let mut vm = Self {
             registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(MAX_FRAMES),
+            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
@@ -307,15 +309,14 @@ impl VM {
             gc: Gc::new(),
             output: Vec::new(),
             #[cfg(feature = "jit")]
-            jit_cache: HashMap::new(),
+            jit: super::jit::tier::JitState::default(),
             #[cfg(feature = "jit")]
-            jit_modules: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_roots: Vec::new(),
+            jit_bridge_error: None,
             profiler: Profiler::new(false),
-            skip_timeout_check_once: false,
+            safepoint_countdown: 0,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
+            iter_prefetch: Vec::new(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         vm.register_builtins();
@@ -325,7 +326,7 @@ impl VM {
     pub fn with_profiling() -> Self {
         let mut vm = Self {
             registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(MAX_FRAMES),
+            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
@@ -334,15 +335,14 @@ impl VM {
             gc: Gc::new(),
             output: Vec::new(),
             #[cfg(feature = "jit")]
-            jit_cache: HashMap::new(),
+            jit: super::jit::tier::JitState::default(),
             #[cfg(feature = "jit")]
-            jit_modules: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_roots: Vec::new(),
+            jit_bridge_error: None,
             profiler: Profiler::new(true),
-            skip_timeout_check_once: false,
+            safepoint_countdown: 0,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
+            iter_prefetch: Vec::new(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         vm.register_builtins();
@@ -350,162 +350,10 @@ impl VM {
     }
 
     fn register_builtins(&mut self) {
-        let builtins = [
-            "print",
-            "println",
-            "len",
-            "type",
-            "str",
-            "int",
-            "float",
-            "push",
-            "pop",
-            "keys",
-            "values",
-            "contains",
-            "range",
-            "set",
-            "enumerate",
-            "map",
-            "filter",
-            "reduce",
-            "sort",
-            "reverse",
-            "split",
-            "join",
-            "replace",
-            "starts_with",
-            "ends_with",
-            "Ok",
-            "Err",
-            "is_ok",
-            "is_err",
-            "unwrap",
-            "unwrap_or",
-            "json",
-            "fetch",
-            "uuid",
-            "exit",
-            "run_command",
-            "say",
-            "yell",
-            "whisper",
-            "wait",
-            "is_some",
-            "is_none",
-            "satisfies",
-            "assert",
-            "assert_eq",
-            "shell",
-            "sh",
-            "sh_lines",
-            "sh_json",
-            "sh_ok",
-            "which",
-            "cwd",
-            "cd",
-            "lines",
-            "pipe_to",
-            "has_key",
-            "get",
-            "pick",
-            "omit",
-            "merge",
-            "find",
-            "flat_map",
-            "entries",
-            "from_entries",
-            "ok",
-            "err",
-            "input",
-            "Some",
-            // Added in audit fix — implementations in vm/builtins.rs
-            "assert_ne",
-            "any",
-            "all",
-            "unique",
-            "sum",
-            "min_of",
-            "max_of",
-            "__forge_register_struct",
-            "__forge_new_struct",
-            "__forge_register_interface",
-            "__forge_register_method",
-            "__forge_validate_impl",
-            "__forge_call_method",
-            "__forge_binding_matches",
-            "__forge_retry_count",
-            "__forge_retry_wait",
-            "__forge_retry_failed",
-            "__forge_where_filter",
-            "__forge_pipe_sort",
-            "__forge_pipe_take",
-            "__forge_register_prompt",
-            "__forge_register_agent",
-            "__forge_raise_error",
-            "__forge_import_module",
-            // Collections
-            "first",
-            "last",
-            "zip",
-            "flatten",
-            "chunk",
-            "slice",
-            "compact",
-            "partition",
-            "group_by",
-            "sort_by",
-            "for_each",
-            "take_n",
-            "skip",
-            "frequencies",
-            "sample",
-            "shuffle",
-            // Strings
-            "typeof",
-            "substring",
-            "index_of",
-            "last_index_of",
-            "capitalize",
-            "title",
-            "upper",
-            "lower",
-            "trim",
-            "pad_start",
-            "pad_end",
-            "repeat_str",
-            "count",
-            "slugify",
-            "snake_case",
-            "camel_case",
-            // Results
-            "unwrap_err",
-            // Misc
-            "diff",
-            "assert_throws",
-            // GenZ debug kit
-            "sus",
-            "bruh",
-            "bet",
-            "no_cap",
-            "ick",
-            // Execution helpers
-            "cook",
-            "yolo",
-            "ghost",
-            "slay",
-            // Channels
-            "channel",
-            "send",
-            "receive",
-            "close",
-            "try_send",
-            "try_receive",
-            "select",
-            "await_all",
-            "await_timeout",
-        ];
-        for name in &builtins {
+        // User-visible globals come from the shared registry, so the VM and
+        // the interpreter expose exactly the same builtins.
+        let globals = crate::builtins_registry::GLOBALS.iter().map(|b| b.name);
+        for name in globals.chain(COMPILER_INTRINSICS.iter().copied()) {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
                 name: name.to_string(),
             }));
@@ -518,301 +366,34 @@ impl VM {
         self.register_stdlib();
     }
 
+    /// Build every stdlib module object from the shared registry. Members
+    /// are `NativeFunction`s named `module.member`; `dispatch_native`
+    /// routes them to the shared implementation (`builtins_registry::
+    /// call_module`), so a module available on the interpreter is available
+    /// here with the same members.
     fn register_stdlib(&mut self) {
-        // math module
-        let mut math_map = IndexMap::new();
-        math_map.insert("pi".to_string(), Value::float(std::f64::consts::PI));
-        math_map.insert("e".to_string(), Value::float(std::f64::consts::E));
-        for name in &[
-            "sqrt", "pow", "abs", "max", "min", "floor", "ceil", "round", "random", "sin", "cos",
-            "tan", "log",
-        ] {
-            let full = format!("math.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            math_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let math_ref = self.gc.alloc(ObjKind::Object(math_map));
-        self.globals
-            .insert("math".to_string(), Value::obj(math_ref));
-
-        // fs module
-        let mut fs_map = IndexMap::new();
-        for name in &[
-            "read", "write", "append", "exists", "list", "remove", "mkdir",
-        ] {
-            let full = format!("fs.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            fs_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let fs_ref = self.gc.alloc(ObjKind::Object(fs_map));
-        self.globals.insert("fs".to_string(), Value::obj(fs_ref));
-
-        // io module
-        let mut io_map = IndexMap::new();
-        for name in &["prompt", "print", "args"] {
-            let full = format!("io.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            io_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let io_ref = self.gc.alloc(ObjKind::Object(io_map));
-        self.globals.insert("io".to_string(), Value::obj(io_ref));
-
-        // crypto module
-        let mut crypto_map = IndexMap::new();
-        for name in &[
-            "sha256",
-            "md5",
-            "base64_encode",
-            "base64_decode",
-            "hex_encode",
-            "hex_decode",
-        ] {
-            let full = format!("crypto.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            crypto_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let crypto_ref = self.gc.alloc(ObjKind::Object(crypto_map));
-        self.globals
-            .insert("crypto".to_string(), Value::obj(crypto_ref));
-
-        // db module
-        let mut db_map = IndexMap::new();
-        for name in &["open", "query", "execute", "close"] {
-            let full = format!("db.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            db_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let db_ref = self.gc.alloc(ObjKind::Object(db_map));
-        self.globals.insert("db".to_string(), Value::obj(db_ref));
-
-        // env module
-        let mut env_map = IndexMap::new();
-        for name in &["get", "set", "keys", "has"] {
-            let full = format!("env.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            env_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let env_ref = self.gc.alloc(ObjKind::Object(env_map));
-        self.globals.insert("env".to_string(), Value::obj(env_ref));
-
-        // json module
-        let mut json_map = IndexMap::new();
-        for name in &["parse", "stringify"] {
-            let full = format!("json.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            json_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let json_ref = self.gc.alloc(ObjKind::Object(json_map));
-        self.globals
-            .insert("json".to_string(), Value::obj(json_ref));
-
-        // regex module
-        let mut regex_map = IndexMap::new();
-        for name in &["test", "find", "find_all", "replace", "split"] {
-            let full = format!("regex.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            regex_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let regex_ref = self.gc.alloc(ObjKind::Object(regex_map));
-        self.globals
-            .insert("regex".to_string(), Value::obj(regex_ref));
-
-        // log module
-        let mut log_map = IndexMap::new();
-        for name in &["info", "warn", "error", "debug"] {
-            let full = format!("log.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            log_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let log_ref = self.gc.alloc(ObjKind::Object(log_map));
-        self.globals.insert("log".to_string(), Value::obj(log_ref));
-
-        // http module
-        let mut http_map = IndexMap::new();
-        for name in &[
-            "get", "post", "put", "delete", "patch", "head", "download", "crawl",
-        ] {
-            let full = format!("http.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            http_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let http_ref = self.gc.alloc(ObjKind::Object(http_map));
-        self.globals
-            .insert("http".to_string(), Value::obj(http_ref));
-
-        // term module
-        let mut term_map = IndexMap::new();
-        for name in &[
-            "red", "green", "blue", "yellow", "cyan", "magenta", "bold", "dim", "table", "hr",
-            "clear", "confirm",
-        ] {
-            let full = format!("term.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            term_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let term_ref = self.gc.alloc(ObjKind::Object(term_map));
-        self.globals
-            .insert("term".to_string(), Value::obj(term_ref));
-
-        // csv module
-        let mut csv_map = IndexMap::new();
-        for name in &["parse", "stringify", "read", "write"] {
-            let full = format!("csv.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            csv_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let csv_ref = self.gc.alloc(ObjKind::Object(csv_map));
-        self.globals.insert("csv".to_string(), Value::obj(csv_ref));
-
-        // time module
-        let mut time_map = IndexMap::new();
-        for name in &[
-            "now",
-            "unix",
-            "parse",
-            "format",
-            "diff",
-            "add",
-            "sub",
-            "zone",
-            "zones",
-            "elapsed",
-            "is_before",
-            "is_after",
-            "start_of",
-            "end_of",
-            "from_unix",
-            "today",
-            "date",
-            "sleep",
-            "measure",
-            "local",
-            "is_weekend",
-            "is_weekday",
-            "day_of_week",
-            "days_in_month",
-            "is_leap_year",
-        ] {
-            let full = format!("time.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            time_map.insert(name.to_string(), Value::obj(nr));
-        }
-        // time() as a function calls the "time" builtin (returns datetime object)
-        let time_call = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-            name: "time".to_string(),
-        }));
-        time_map.insert("__call__".to_string(), Value::obj(time_call));
-        let time_ref = self.gc.alloc(ObjKind::Object(time_map));
-        self.globals
-            .insert("time".to_string(), Value::obj(time_ref));
-
-        // pg module
-        #[cfg(feature = "postgres")]
-        {
-            let mut pg_map = IndexMap::new();
-            for name in &["connect", "query", "execute", "close"] {
-                let full = format!("pg.{}", name);
-                let nr = self
-                    .gc
-                    .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-                pg_map.insert(name.to_string(), Value::obj(nr));
+        use crate::interpreter::Value as IV;
+        for module in crate::builtins_registry::modules() {
+            let IV::Object(members) = (module.create)() else {
+                continue;
+            };
+            let mut map = IndexMap::new();
+            for (key, member) in members {
+                let value = match &member {
+                    IV::BuiltIn(name) => self.alloc_builtin(name),
+                    other => self.convert_interp_value(other),
+                };
+                map.insert(key, value);
             }
-            let pg_ref = self.gc.alloc(ObjKind::Object(pg_map));
-            self.globals.insert("pg".to_string(), Value::obj(pg_ref));
-        }
-
-        // jwt module
-        let mut jwt_map = IndexMap::new();
-        for name in &["sign", "verify", "decode", "valid"] {
-            let full = format!("jwt.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            jwt_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let jwt_ref = self.gc.alloc(ObjKind::Object(jwt_map));
-        self.globals.insert("jwt".to_string(), Value::obj(jwt_ref));
-
-        // mysql module
-        #[cfg(feature = "mysql")]
-        {
-            let mut mysql_map = IndexMap::new();
-            for name in &[
-                "connect", "query", "execute", "close", "begin", "commit", "rollback",
-            ] {
-                let full = format!("mysql.{}", name);
-                let nr = self
-                    .gc
-                    .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-                mysql_map.insert(name.to_string(), Value::obj(nr));
+            if module.name == "time" {
+                // `time()` called as a function returns the current datetime.
+                let time_call = self.alloc_builtin("time");
+                map.insert("__call__".to_string(), time_call);
             }
-            let mysql_ref = self.gc.alloc(ObjKind::Object(mysql_map));
+            let module_ref = self.gc.alloc(ObjKind::Object(map));
             self.globals
-                .insert("mysql".to_string(), Value::obj(mysql_ref));
+                .insert(module.name.to_string(), Value::obj(module_ref));
         }
-
-        // os module
-        let mut os_map = IndexMap::new();
-        for name in &["hostname", "platform", "arch", "pid", "cpus", "homedir"] {
-            let full = format!("os.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            os_map.insert(name.to_string(), Value::obj(nr));
-        }
-        let os_ref = self.gc.alloc(ObjKind::Object(os_map));
-        self.globals.insert("os".to_string(), Value::obj(os_ref));
-
-        // path module
-        let mut path_map = IndexMap::new();
-        for name in &[
-            "join",
-            "resolve",
-            "relative",
-            "is_absolute",
-            "dirname",
-            "basename",
-            "extname",
-        ] {
-            let full = format!("path.{}", name);
-            let nr = self
-                .gc
-                .alloc(ObjKind::NativeFunction(NativeFn { name: full }));
-            path_map.insert(name.to_string(), Value::obj(nr));
-        }
-        path_map.insert(
-            "separator".to_string(),
-            self.alloc_string(std::path::MAIN_SEPARATOR_STR),
-        );
-        let path_ref = self.gc.alloc(ObjKind::Object(path_map));
-        self.globals
-            .insert("path".to_string(), Value::obj(path_ref));
 
         // Option prelude
         let mut none_obj = IndexMap::new();
@@ -821,16 +402,10 @@ impl VM {
         let none_ref = self.gc.alloc(ObjKind::Object(none_obj));
         self.globals
             .insert("None".to_string(), Value::obj(none_ref));
-
-        let some_native = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
-            name: "Some".to_string(),
-        }));
-        self.globals
-            .insert("Some".to_string(), Value::obj(some_native));
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
-        let r = self.gc.alloc_string(s.to_string());
+        let r = self.gc.alloc_str(s);
         Value::obj(r)
     }
 
@@ -841,16 +416,14 @@ impl VM {
         Value::obj(native)
     }
 
+    #[inline]
     fn constant_to_value(&mut self, constant: &Constant) -> Value {
         match constant {
             Constant::Int(n) => Value::int(*n, &mut self.gc),
             Constant::Float(n) => Value::float(*n),
             Constant::Bool(b) => Value::bool_val(*b),
             Constant::Null => Value::null(),
-            Constant::Str(s) => {
-                let r = self.gc.alloc_string(s.clone());
-                Value::obj(r)
-            }
+            Constant::Str(s) => Value::obj(self.gc.alloc_str(s)),
         }
     }
 
@@ -866,7 +439,7 @@ impl VM {
     }
 
     /// Create a new VM for a spawn thread with copies of this VM's state.
-    /// Calls VM::new() for fresh builtins + empty jit_cache, then copies
+    /// Calls VM::new() for fresh builtins + empty JIT state, then copies
     /// non-function globals and struct metadata from the parent.
     fn fork_for_spawn(&self) -> SendableVM {
         let mut child = VM::new();
@@ -925,9 +498,13 @@ impl VM {
 
         #[cfg(feature = "jit")]
         assert!(
-            child.jit_cache.is_empty() && child.jit_modules.is_empty(),
-            "BUG: SendableVM must have empty jit_cache/jit_modules to be safely Send"
+            child.jit.is_empty(),
+            "BUG: SendableVM must have empty JIT state to be safely Send"
         );
+        #[cfg(feature = "jit")]
+        {
+            child.jit.mode = self.jit.mode;
+        }
         SendableVM(child)
     }
 
@@ -1023,14 +600,19 @@ impl VM {
         let closure_ref = self.gc.alloc(ObjKind::Closure(closure));
         let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
         let frame_size = (chunk.max_registers as usize).max(1);
-        if self.frames.len() >= MAX_FRAMES {
-            return Err(VMError::new("stack overflow"));
-        }
+        // Shared depth limit + native stack guard (runtime/recursion.rs).
+        crate::runtime::recursion::check_call_depth(self.frames.len())
+            .map_err(|m| VMError::new(&m))?;
         self.ensure_registers(new_base + frame_size);
         self.frames
             .push(CallFrame::new(closure_ref, new_base, frame_size));
         let boundary = self.frames.len() - 1;
-        self.run_until(boundary)
+        // Module bytecode is ordinary bytecode: don't auto-pin its
+        // allocations even when an `import` builtin is the caller.
+        let was_pinning = self.gc.set_pinning(false);
+        let result = self.run_until(boundary);
+        self.gc.set_pinning(was_pinning);
+        result
     }
 
     fn ensure_registers(&mut self, needed: usize) {
@@ -1099,7 +681,7 @@ impl VM {
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
         frame.ip = guard.catch_ip;
-        self.skip_timeout_check_once = true;
+        self.safepoint_countdown = SAFEPOINT_INTERVAL;
         Ok(frame_idx)
     }
 
@@ -1129,29 +711,32 @@ impl VM {
                 };
                 cached_closure = Some((current_closure, c));
             }
-            let chunk = cached_closure
+            // Borrowed, not cloned: an `Arc` clone/drop pair per instruction
+            // showed up in the dispatch cost. The cache is only refreshed
+            // when the top frame's closure changes.
+            let chunk: &Arc<Chunk> = &cached_closure
                 .as_ref()
                 .expect("BUG: cached_closure is None after need_fetch guard always fills it")
-                .1
-                .clone();
+                .1;
 
             if self.frames[frame_idx].ip >= chunk.code.len() {
                 self.frames.pop();
                 continue;
             }
 
-            if self.skip_timeout_check_once {
-                self.skip_timeout_check_once = false;
-            } else if self.earliest_expired_timeout().is_some() {
-                match self.handle_timeout_expiry() {
-                    Ok(handler_frame_idx) => {
-                        if handler_frame_idx < boundary_frame_idx {
-                            return Err(VMError::unwound_to_handler());
-                        }
-                        continue;
+            // Safe point: poll `timeout` deadlines every SAFEPOINT_INTERVAL
+            // instructions (see `safepoint_countdown`).
+            if self.safepoint_countdown == 0 {
+                self.safepoint_countdown = SAFEPOINT_INTERVAL;
+                if self.earliest_expired_timeout().is_some() {
+                    let handler_frame_idx = self.handle_timeout_expiry()?;
+                    if handler_frame_idx < boundary_frame_idx {
+                        return Err(VMError::unwound_to_handler());
                     }
-                    Err(err) => return Err(err),
+                    continue;
                 }
+            } else {
+                self.safepoint_countdown -= 1;
             }
 
             let frame = &mut self.frames[frame_idx];
@@ -1184,7 +769,11 @@ impl VM {
                         self.registers[base + a as usize] = Value::bool_val(false);
                     }
                     OpCode::Move => {
-                        self.registers[base + a as usize] = self.registers[base + b as usize];
+                        let v = self.registers[base + b as usize];
+                        // The source may be a local register: the copy is a
+                        // second reference (see `GcObject::unique`).
+                        self.gc.share(v);
+                        self.registers[base + a as usize] = v;
                     }
                     OpCode::Add => {
                         let left = self.registers[base + b as usize];
@@ -1240,28 +829,28 @@ impl VM {
                             Value::bool_val(!left.equals(right, &self.gc));
                     }
                     OpCode::Lt => {
-                        let left = &self.registers[base + b as usize];
-                        let right = &self.registers[base + c as usize];
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            self.compare_op(left, right, OpCode::Lt)?;
+                            self.compare_op(&left, &right, OpCode::Lt)?;
                     }
                     OpCode::Gt => {
-                        let left = &self.registers[base + b as usize];
-                        let right = &self.registers[base + c as usize];
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            self.compare_op(left, right, OpCode::Gt)?;
+                            self.compare_op(&left, &right, OpCode::Gt)?;
                     }
                     OpCode::LtEq => {
-                        let left = &self.registers[base + b as usize];
-                        let right = &self.registers[base + c as usize];
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            self.compare_op(left, right, OpCode::LtEq)?;
+                            self.compare_op(&left, &right, OpCode::LtEq)?;
                     }
                     OpCode::GtEq => {
-                        let left = &self.registers[base + b as usize];
-                        let right = &self.registers[base + c as usize];
+                        let left = self.registers[base + b as usize];
+                        let right = self.registers[base + c as usize];
                         self.registers[base + a as usize] =
-                            self.compare_op(left, right, OpCode::GtEq)?;
+                            self.compare_op(&left, &right, OpCode::GtEq)?;
                     }
                     OpCode::And => {
                         let left = self.registers[base + b as usize].is_truthy(&self.gc);
@@ -1281,7 +870,7 @@ impl VM {
                         let name_const = &chunk.constants[bx as usize];
                         if let Constant::Str(name) = name_const {
                             let val = self.globals.get(name).cloned().ok_or_else(|| {
-                                VMError::new(&format!("undefined variable: {}", name))
+                                VMError::new(&crate::semantics::undefined_variable(name, None))
                             })?;
                             self.registers[base + a as usize] = val;
                         }
@@ -1294,38 +883,27 @@ impl VM {
                         }
                     }
                     OpCode::GetLocal => {
-                        let local_slot = b;
-                        let value = if let Some(uv_ref) = self.frames[frame_idx]
-                            .open_upvalues
-                            .get(&local_slot)
-                            .copied()
-                        {
-                            let value = self
-                                .gc
-                                .get(uv_ref)
-                                .and_then(|uv_obj| match &uv_obj.kind {
-                                    ObjKind::Upvalue(uv) => Some(uv.value),
-                                    _ => None,
-                                })
-                                .ok_or_else(|| VMError::new("invalid open upvalue"))?;
-                            self.registers[base + local_slot as usize] = value;
-                            value
-                        } else {
-                            self.registers[base + local_slot as usize]
-                        };
+                        let value = self.read_local(frame_idx, base, b)?;
+                        // Copying a reference out of a local: it is no
+                        // longer uniquely owned (see `GcObject::unique`).
+                        self.gc.share(value);
                         self.registers[base + a as usize] = value;
                     }
                     OpCode::SetLocal => {
                         let val = self.registers[base + b as usize];
-                        self.registers[base + a as usize] = val;
-                        let open_upvalue = self.frames[frame_idx].open_upvalues.get(&a).copied();
-                        if let Some(uv_ref) = open_upvalue {
-                            if let Some(uv_obj) = self.gc.get_mut(uv_ref) {
-                                if let ObjKind::Upvalue(uv) = &mut uv_obj.kind {
-                                    uv.value = val;
-                                }
-                            }
-                        }
+                        self.write_local(frame_idx, base, a, val);
+                    }
+                    OpCode::AddLocal => {
+                        let rhs = self.registers[base + b as usize];
+                        self.add_local(frame_idx, base, a, rhs)?;
+                    }
+                    OpCode::PushLocal => {
+                        let value = self.registers[base + b as usize];
+                        self.push_local(frame_idx, base, a, value)?;
+                    }
+                    OpCode::PopLocal => {
+                        let popped = self.pop_local(frame_idx, base, a)?;
+                        self.registers[base + b as usize] = popped;
                     }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
@@ -1352,6 +930,16 @@ impl VM {
                         }
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
+                        frame.back_edges = frame.back_edges.saturating_add(1);
+                        #[cfg(feature = "jit")]
+                        if frame.back_edges == LOOP_HOT_THRESHOLD {
+                            if let Some(value) = self.try_jit_loop_restart(frame_idx, chunk)? {
+                                // Exactly what `Return` does with the value.
+                                self.profiler.exit_function();
+                                self.frames.pop();
+                                return Ok(Some(value));
+                            }
+                        }
                     }
                     OpCode::Call => {
                         // Cooperative cancellation check at function call
@@ -1367,6 +955,10 @@ impl VM {
                             args.push(self.registers[base + a as usize + 1 + i]);
                         }
 
+                        // Direct calls of user functions follow the shared
+                        // arity rule; callbacks invoked by builtins (which
+                        // also use `call_value`) stay lenient.
+                        self.check_direct_call_arity(func_val, args.len())?;
                         let result = self.call_value(func_val, args)?;
                         self.registers[dst_reg] = result;
                     }
@@ -1406,6 +998,9 @@ impl VM {
                                         existing
                                     } else {
                                         let val = self.registers[base + *src_reg as usize];
+                                        // The upvalue cell is a second
+                                        // reference to the local's value.
+                                        self.gc.share(val);
                                         let uv_ref = self
                                             .gc
                                             .alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
@@ -1505,201 +1100,40 @@ impl VM {
                         self.registers[base + a as usize] = Value::obj(r);
                     }
                     OpCode::GetField => {
-                        let obj_val = &self.registers[base + b as usize];
-                        let field_const = &chunk.constants[c as usize];
-                        if let (Some(r), Constant::Str(field)) = (obj_val.as_obj(), field_const) {
-                            let needs_alloc: Option<String>;
-                            let direct_result: Option<Value>;
-                            if let Some(obj) = self.gc.get(r) {
-                                match &obj.kind {
-                                    ObjKind::Object(map) => {
-                                        if let Some(value) = map.get(field.as_str()).cloned() {
-                                            direct_result = Some(value);
-                                        } else if let Some(type_name) = map
-                                            .get("__type__")
-                                            .and_then(|value| self.get_string(value))
-                                        {
-                                            let mut delegated = None;
-                                            if let Some(embeds) =
-                                                self.embedded_fields.get(&type_name).cloned()
-                                            {
-                                                for (embed_field, _) in embeds {
-                                                    let Some(embed_ref) = map
-                                                        .get(&embed_field)
-                                                        .and_then(|v| v.as_obj())
-                                                    else {
-                                                        continue;
-                                                    };
-                                                    let Some(embed_obj) = self.gc.get(embed_ref)
-                                                    else {
-                                                        continue;
-                                                    };
-                                                    let ObjKind::Object(embed_map) =
-                                                        &embed_obj.kind
-                                                    else {
-                                                        continue;
-                                                    };
-                                                    if let Some(value) =
-                                                        embed_map.get(field.as_str())
-                                                    {
-                                                        delegated = Some(*value);
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            direct_result = Some(delegated.ok_or_else(|| {
-                                                VMError::new(&format!(
-                                                    "no field '{}' on object",
-                                                    field
-                                                ))
-                                            })?);
-                                        } else {
-                                            direct_result =
-                                                Some(map.get(field.as_str()).cloned().ok_or_else(
-                                                    || {
-                                                        VMError::new(&format!(
-                                                            "no field '{}' on object",
-                                                            field
-                                                        ))
-                                                    },
-                                                )?);
-                                        }
-                                        needs_alloc = None;
-                                    }
-                                    ObjKind::String(s) => match field.as_str() {
-                                        "len" => {
-                                            direct_result =
-                                                Some(Value::small_int(s.chars().count() as i64));
-                                            needs_alloc = None;
-                                        }
-                                        "upper" => {
-                                            needs_alloc = Some(s.to_uppercase());
-                                            direct_result = None;
-                                        }
-                                        "lower" => {
-                                            needs_alloc = Some(s.to_lowercase());
-                                            direct_result = None;
-                                        }
-                                        "trim" => {
-                                            needs_alloc = Some(s.trim().to_string());
-                                            direct_result = None;
-                                        }
-                                        _ => {
-                                            return Err(VMError::new(&format!(
-                                                "no method '{}' on String",
-                                                field
-                                            )))
-                                        }
-                                    },
-                                    ObjKind::Array(items) | ObjKind::Set(items) => {
-                                        match field.as_str() {
-                                            "len" => {
-                                                direct_result =
-                                                    Some(Value::small_int(items.len() as i64));
-                                                needs_alloc = None;
-                                            }
-                                            _ => {
-                                                let type_name =
-                                                    if matches!(&obj.kind, ObjKind::Set(_)) {
-                                                        "Set"
-                                                    } else {
-                                                        "Array"
-                                                    };
-                                                return Err(VMError::new(&format!(
-                                                    "no method '{}' on {}",
-                                                    field, type_name
-                                                )));
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        return Err(VMError::new(&format!(
-                                            "cannot access field '{}' on {}",
-                                            field,
-                                            obj.type_name()
-                                        )))
-                                    }
-                                }
-                            } else {
-                                return Err(VMError::new("null reference"));
-                            }
-                            let result = if let Some(s) = needs_alloc {
-                                self.alloc_string(&s)
-                            } else {
-                                direct_result.expect(
-                                    "BUG: direct_result must be Some when needs_alloc is None",
-                                )
-                            };
-                            self.registers[base + a as usize] = result;
-                        }
+                        let obj_val = self.registers[base + b as usize];
+                        let Constant::Str(field) = &chunk.constants[c as usize] else {
+                            return Err(VMError::new("BUG: GetField constant is not a string"));
+                        };
+                        self.registers[base + a as usize] = self.get_field(obj_val, field)?;
                     }
                     OpCode::SetField => {
-                        let field_const = &chunk.constants[b as usize];
+                        let target = self.registers[base + a as usize];
                         let val = self.registers[base + c as usize];
-                        if let Constant::Str(field) = field_const {
-                            let obj_ref =
-                                if let Some(r) = self.registers[base + a as usize].as_obj() {
-                                    r
-                                } else {
-                                    return Err(VMError::new("cannot set field on non-object"));
-                                };
-                            if let Some(obj) = self.gc.get(obj_ref) {
-                                if matches!(&obj.kind, ObjKind::Frozen(_)) {
-                                    return Err(VMError::new("cannot mutate a frozen value"));
-                                }
-                            }
-                            if let Some(obj) = self.gc.get_mut(obj_ref) {
-                                if let ObjKind::Object(map) = &mut obj.kind {
-                                    map.insert(field.clone(), val);
-                                }
-                            }
-                        }
+                        let Constant::Str(field) = &chunk.constants[b as usize] else {
+                            return Err(VMError::new("BUG: SetField constant is not a string"));
+                        };
+                        self.registers[base + a as usize] = self.set_field(target, field, val)?;
                     }
                     OpCode::GetIndex => {
                         let obj = self.registers[base + b as usize];
                         let idx = self.registers[base + c as usize];
-                        let result = if let Some(r) = obj.as_obj() {
-                            if let Some(i) = idx.as_int(&self.gc) {
-                                if let Some(o) = self.gc.get(r) {
-                                    if let ObjKind::Array(items) | ObjKind::Tuple(items) = &o.kind {
-                                        items
-                                            .get(i as usize)
-                                            .cloned()
-                                            .ok_or_else(|| VMError::new("index out of bounds"))?
-                                    } else if matches!(&o.kind, ObjKind::Set(_)) {
-                                        return Err(VMError::new(
-                                            "cannot index a set; sets are unordered — use .has() or iteration",
-                                        ));
-                                    } else {
-                                        return Err(VMError::new("cannot index non-array"));
-                                    }
-                                } else {
-                                    Value::null()
-                                }
-                            } else if idx.as_obj().is_some() {
-                                let key = self.get_string(&idx).ok_or_else(|| {
-                                    VMError::new("index must be string for objects")
-                                })?;
-                                if let Some(o) = self.gc.get(r) {
-                                    if let ObjKind::Object(map) = &o.kind {
-                                        map.get(&key).cloned().unwrap_or(Value::null())
-                                    } else {
-                                        Value::null()
-                                    }
-                                } else {
-                                    Value::null()
-                                }
-                            } else {
-                                return Err(VMError::new("invalid index operation"));
-                            }
-                        } else {
-                            return Err(VMError::new("invalid index operation"));
-                        };
-                        self.registers[base + a as usize] = result;
+                        self.registers[base + a as usize] = self.index_get(obj, idx)?;
                     }
                     OpCode::IterGet => {
                         let obj = self.registers[base + b as usize];
                         let idx = self.registers[base + c as usize];
+                        let is_channel = matches!(
+                            obj.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
+                            Some(ObjKind::Channel(_))
+                        );
+                        if is_channel {
+                            let shared = self.iter_prefetch.pop().ok_or_else(|| {
+                                VMError::new("BUG: channel IterGet without a prefetched value")
+                            })?;
+                            self.registers[base + a as usize] =
+                                shared_to_value(&mut self.gc, &shared);
+                            return Ok(None);
+                        }
                         let result = if let Some(r) = obj.as_obj() {
                             if let Some(i) = idx.as_int(&self.gc) {
                                 // Classify the source; clone out any pair so
@@ -1757,58 +1191,49 @@ impl VM {
                         self.registers[base + a as usize] = result;
                     }
                     OpCode::SetIndex => {
+                        let target = self.registers[base + a as usize];
                         let idx = self.registers[base + b as usize];
                         let val = self.registers[base + c as usize];
-                        if let Some(r) = self.registers[base + a as usize].as_obj() {
-                            // Check for tuple mutation
-                            if let Some(obj) = self.gc.get(r) {
-                                if matches!(&obj.kind, ObjKind::Tuple(_)) {
-                                    return Err(VMError::new("cannot mutate a tuple"));
-                                }
-                                if matches!(&obj.kind, ObjKind::Set(_)) {
-                                    return Err(VMError::new(
-                                        "cannot index-assign a set; use .add() and .remove()",
-                                    ));
-                                }
-                            }
-                            let key_str = self.get_string(&idx);
-                            let idx_int = idx.as_int(&self.gc);
-                            if let Some(obj) = self.gc.get_mut(r) {
-                                if let Some(i) = idx_int {
-                                    if let ObjKind::Array(items) = &mut obj.kind {
-                                        let i = i as usize;
-                                        if i < items.len() {
-                                            items[i] = val;
-                                        }
-                                    }
-                                } else if let ObjKind::Object(map) = &mut obj.kind {
-                                    if let Some(key) = key_str {
-                                        map.insert(key, val);
-                                    }
-                                }
-                            }
+                        self.registers[base + a as usize] = self.index_set(target, idx, val)?;
+                    }
+                    OpCode::JumpIfArg => {
+                        if self.frames[frame_idx].argc > a as usize {
+                            self.frames[frame_idx].ip =
+                                (self.frames[frame_idx].ip as isize + sbx as isize) as usize;
                         }
+                    }
+                    OpCode::IterHas => {
+                        // `for` loop condition: is there an element at index C?
+                        // Channels are iterated lazily: receive the next value
+                        // (blocking) and hand it to the following `IterGet`;
+                        // a closed, drained channel ends the loop.
+                        let src = self.registers[base + b as usize];
+                        let channel = src.as_obj().and_then(|r| match self.gc.get(r) {
+                            Some(obj) => match &obj.kind {
+                                ObjKind::Channel(ch) => Some(ch.clone()),
+                                _ => None,
+                            },
+                            None => None,
+                        });
+                        let has = if let Some(ch) = channel {
+                            let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
+                            match guard.as_ref().map(|rx| rx.recv()) {
+                                Some(Ok(shared)) => {
+                                    self.iter_prefetch.push(shared);
+                                    true
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            let idx = self.registers[base + c as usize].as_int(&self.gc);
+                            idx.is_some_and(|i| i < self.collection_len(src))
+                        };
+                        self.registers[base + a as usize] = Value::bool_val(has);
                     }
                     OpCode::Len => {
                         let src = self.registers[base + b as usize];
-                        let len = if let Some(r) = src.as_obj() {
-                            if let Some(obj) = self.gc.get(r) {
-                                match &obj.kind {
-                                    ObjKind::String(s) => s.chars().count() as i64,
-                                    ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a) => {
-                                        a.len() as i64
-                                    }
-                                    ObjKind::Object(o) => o.len() as i64,
-                                    ObjKind::Map(p) => p.len() as i64,
-                                    _ => 0,
-                                }
-                            } else {
-                                0
-                            }
-                        } else {
-                            0
-                        };
-                        self.registers[base + a as usize] = Value::small_int(len);
+                        let len = self.collection_len(src);
+                        self.registers[base + a as usize] = Value::int(len, &mut self.gc);
                     }
                     OpCode::Concat => {
                         let left = self.registers[base + b as usize].display(&self.gc);
@@ -1829,14 +1254,15 @@ impl VM {
                     OpCode::ExtractField => {
                         let obj = &self.registers[base + b as usize];
                         let field_name = format!("_{}", c);
-                        if let Some(r) = obj.as_obj() {
-                            if let Some(o) = self.gc.get(r) {
-                                if let ObjKind::Object(map) = &o.kind {
-                                    self.registers[base + a as usize] =
-                                        map.get(&field_name).cloned().unwrap_or(Value::null());
+                        let extracted =
+                            match obj.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+                                Some(ObjKind::Object(map)) => {
+                                    map.get(&field_name).cloned().unwrap_or(Value::null())
                                 }
-                            }
-                        }
+                                Some(ObjKind::ResultOk(v) | ObjKind::ResultErr(v)) if c == 0 => *v,
+                                _ => Value::null(),
+                            };
+                        self.registers[base + a as usize] = extracted;
                     }
                     OpCode::Try => {
                         let src = self.registers[base + b as usize];
@@ -1891,6 +1317,14 @@ impl VM {
                         let saved = self.cancelled.clone();
                         self.cancelled = cancel_flag.clone();
                         self.squad_stack.push((a, cancel_flag, Vec::new(), saved));
+                    }
+                    OpCode::CloseUpvalues => {
+                        let frame = &mut self.frames[frame_idx];
+                        if !frame.open_upvalues.is_empty() {
+                            for reg in a..=b {
+                                frame.open_upvalues.remove(&reg);
+                            }
+                        }
                     }
                     OpCode::SquadEnd => {
                         let (dst_reg, cancel_flag, handles, saved_cancelled) =
@@ -2030,6 +1464,9 @@ impl VM {
                             error_register: a,
                             handler_base,
                         });
+                        // Poll at the next instruction, so an already
+                        // expired scope fires before its body runs.
+                        self.safepoint_countdown = 0;
                     }
                     OpCode::PopTimeout => {
                         self.frames[frame_idx].timeouts.pop();
@@ -2119,6 +1556,8 @@ impl VM {
                         self.registers[base + a as usize] = result;
                     }
                     OpCode::Ask => {
+                        crate::permissions::require(crate::permissions::Capability::Ai, "ask")
+                            .map_err(|e| VMError::new(&e.to_string()))?;
                         let prompt_val = &self.registers[base + b as usize];
                         let prompt_str = prompt_val.display(&self.gc);
 
@@ -2229,13 +1668,8 @@ impl VM {
                     }
                     continue;
                 }
-                Err(err) => match self.handle_runtime_error(err) {
-                    Ok(handler_frame_idx) => {
-                        if handler_frame_idx < boundary_frame_idx {
-                            return Err(VMError::unwound_to_handler());
-                        }
-                        continue;
-                    }
+                Err(err) => match self.handle_runtime_error(err, boundary_frame_idx) {
+                    Ok(_handler_frame_idx) => continue,
                     Err(err) => return Err(err),
                 },
             }
@@ -2257,6 +1691,7 @@ impl VM {
                 }
                 for frame in &self.frames {
                     roots.push(frame.closure);
+                    roots.extend(frame.entry_args.iter().filter_map(|v| v.as_obj()));
                     for gr in frame.open_upvalues.values() {
                         roots.push(*gr);
                     }
@@ -2282,15 +1717,185 @@ impl VM {
                         }
                     }
                 }
-                // Keep string constants baked into JIT native code alive.
-                #[cfg(feature = "jit")]
-                roots.extend_from_slice(&self.jit_roots);
                 self.gc.collect(&roots);
             }
         }
     }
 
+    /// Select the JIT mode (`Off`, `Auto` = tier up hot functions, `Eager`
+    /// = compile on first call as with `forge --jit`).
+    #[cfg(feature = "jit")]
+    pub fn set_jit_mode(&mut self, mode: super::jit::tier::JitMode) {
+        self.jit.mode = mode;
+    }
+
+    /// Run `chunk` natively if a specialization exists (or can be compiled)
+    /// for these arguments and every entry guard passes. `None` means the
+    /// caller must execute the call in the VM — including after a deopt,
+    /// which is safe because every compiled function is pure.
+    #[cfg(feature = "jit")]
+    fn try_jit_call(
+        &mut self,
+        chunk: &Arc<Chunk>,
+        args: &[Value],
+    ) -> Result<Option<Value>, VMError> {
+        self.try_jit_native(chunk, args, self.frames.len(), false)
+    }
+
+    /// Loop tier-up ("restart in native code"). Called when the frame at
+    /// `frame_idx` takes its [`LOOP_HOT_THRESHOLD`]th backward jump: if its
+    /// function has (or can now get) a specialization for the arguments the
+    /// frame was entered with, the *whole call* is re-run natively from the
+    /// start and its result is the frame's result.
+    ///
+    /// This is sound for the same reason deoptimization is: the verifier
+    /// only accepts pure functions (they read only their arguments, write
+    /// only their own registers and call only themselves), so the work the
+    /// VM has done in this frame so far has no observable effect and
+    /// repeating it natively is indistinguishable from finishing it in the
+    /// VM. The repeated work is bounded by the threshold. On a guard
+    /// failure, rejection or deopt the frame simply continues in the VM.
+    ///
+    /// True on-stack replacement (entering native code at the loop header
+    /// with the frame's live registers) is a possible follow-up; restarting
+    /// needs no new entry points or state mapping in the JIT.
+    #[cfg(feature = "jit")]
+    fn try_jit_loop_restart(
+        &mut self,
+        frame_idx: usize,
+        chunk: &Arc<Chunk>,
+    ) -> Result<Option<Value>, VMError> {
+        if self.jit.mode == super::jit::tier::JitMode::Off
+            || chunk.name == "<main>"
+            || chunk.name == "<module>"
+        {
+            return Ok(None);
+        }
+        let frame = &self.frames[frame_idx];
+        if frame.entry_args.len() != chunk.arity as usize {
+            return Ok(None);
+        }
+        let args = frame.entry_args.clone();
+        // The native call replaces this frame, so it starts at its depth.
+        self.try_jit_native(chunk, &args, frame_idx, true)
+    }
+
+    /// Shared native-call path. `depth_below` is the number of VM frames
+    /// beneath the call; `force_hot` skips the call-count threshold (the
+    /// caller has its own hotness evidence).
+    #[cfg(feature = "jit")]
+    fn try_jit_native(
+        &mut self,
+        chunk: &Arc<Chunk>,
+        args: &[Value],
+        depth_below: usize,
+        force_hot: bool,
+    ) -> Result<Option<Value>, VMError> {
+        use super::jit::tier::{invoke, Invoke};
+
+        let Some(sel) = self.jit.select(chunk, args, &self.gc, force_hot) else {
+            return Ok(None);
+        };
+
+        // VM-state guards: the VM itself would refuse the call (stack
+        // overflow), a `timeout` is active (the VM checks deadlines between
+        // instructions; native code does not), or the global the code calls
+        // itself through no longer names this function.
+        let depth_limit = crate::runtime::recursion::max_depth();
+        let guards_ok = depth_below < depth_limit
+            && self.frames.iter().all(|f| f.timeouts.is_empty())
+            && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
+        if !guards_ok {
+            self.jit.record_guard_failure(&sel);
+            return Ok(None);
+        }
+
+        let mut raw: Vec<i64> = Vec::with_capacity(args.len());
+        for v in args {
+            // `select` already checked every argument's kind.
+            let encoded = super::jit::types::JitType::of_value(v, &self.gc)
+                .and_then(|kind| kind.encode(v, &self.gc));
+            let Some(encoded) = encoded else {
+                return Ok(None);
+            };
+            raw.push(encoded);
+        }
+        let max_depth = (depth_limit - 1 - depth_below) as i64;
+        // SAFETY: `sel.entry` was produced by the JIT compiler owned by
+        // `self.jit`, which outlives this call; `raw` has exactly the
+        // specialization's arity (checked by `select`); `self.cancelled` is
+        // alive for the duration of the call.
+        let outcome = unsafe { invoke(sel.entry, &raw, max_depth, Arc::as_ptr(&self.cancelled)) };
+        // An error raised by a runtime bridge is the call's outcome. It is
+        // checked before the return/deopt result: a deopt would re-run the
+        // call in the VM and repeat the side effects that preceded the
+        // error, and a normal return would swallow it.
+        if let Some(err) = self.jit_bridge_error.take() {
+            self.jit.record_run(&sel);
+            return Err(err);
+        }
+        match outcome {
+            Invoke::Returned(r) => {
+                self.jit.record_run(&sel);
+                Ok(Some(sel.ret.decode(r, &mut self.gc)))
+            }
+            Invoke::Deopt => {
+                self.jit.record_deopt(&sel);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Record an error raised by a JIT runtime bridge (see
+    /// `jit_bridge_error`). The first error wins.
+    #[cfg(feature = "jit")]
+    pub(crate) fn record_jit_bridge_error(&mut self, err: VMError) {
+        if self.jit_bridge_error.is_none() {
+            self.jit_bridge_error = Some(err);
+        }
+    }
+
+    /// Take the pending bridge error, if any.
+    #[cfg(all(test, feature = "jit"))]
+    pub(crate) fn take_jit_bridge_error(&mut self) -> Option<VMError> {
+        self.jit_bridge_error.take()
+    }
+
+    /// True when the global named like `chunk` is a closure over the same
+    /// prototype code, so native self-calls behave like the VM's
+    /// `GetGlobal` + `Call`.
+    #[cfg(feature = "jit")]
+    fn jit_self_binding_matches(&self, chunk: &Arc<Chunk>) -> bool {
+        let Some(r) = self.globals.get(&chunk.name).and_then(|v| v.as_obj()) else {
+            return false;
+        };
+        match self.gc.get(r).map(|o| &o.kind) {
+            Some(ObjKind::Closure(c)) => {
+                Arc::ptr_eq(&c.function.chunk, chunk)
+                    || super::jit::tier::same_code(&c.function.chunk, chunk)
+            }
+            _ => false,
+        }
+    }
+
+    /// Call any callable value (closure, function, native, `__call__`
+    /// object).
+    ///
+    /// GC rooting (see `vm/gc.rs`): bytecode run by the callee must not be
+    /// auto-pinned, so pinning is suspended for the duration of the call; if
+    /// the caller is a native builtin (pinning was on), the returned value is
+    /// pinned into the caller's native scope so it survives later callbacks.
     pub fn call_value(&mut self, func: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let was_pinning = self.gc.set_pinning(false);
+        let result = self.call_value_inner(func, args);
+        self.gc.set_pinning(was_pinning);
+        if let Ok(v) = &result {
+            self.gc.pin_value(*v);
+        }
+        result
+    }
+
+    fn call_value_inner(&mut self, func: Value, args: Vec<Value>) -> Result<Value, VMError> {
         if let Some(r) = func.as_obj() {
             let obj = self
                 .gc
@@ -2302,148 +1907,35 @@ impl VM {
                         let chunk = closure.function.chunk.clone();
                         let func_name = closure.function.name.clone();
 
-                        // Count calls for profiling and JIT hotness detection.
-                        // Skip for functions already JIT-compiled to avoid
-                        // per-call string allocation overhead on hot paths.
+                        // JIT dispatch: a verified, type-specialized native
+                        // version runs when its entry guards pass; otherwise
+                        // (or on deopt) the call runs in the VM below.
                         #[cfg(feature = "jit")]
-                        let already_jit =
-                            !func_name.is_empty() && self.jit_cache.contains_key(&func_name);
-                        #[cfg(not(feature = "jit"))]
-                        let already_jit = false;
-
-                        // Anonymous lambdas all share the name "<lambda>", so
-                        // JIT cache keyed by name would collide across distinct
-                        // lambdas. Exclude them from auto-JIT and hotness
-                        // tracking until a stable per-prototype key exists.
-                        let jit_eligible = !func_name.is_empty() && func_name != "<lambda>";
-                        if jit_eligible && !already_jit {
-                            self.profiler.enter_function(&func_name);
-                        }
-
-                        // Auto-JIT: compile hot functions on the fly
-                        #[cfg(feature = "jit")]
-                        if jit_eligible && !already_jit && self.profiler.is_hot(&func_name) {
-                            let type_info = super::jit::type_analysis::analyze(&chunk);
-                            let needs_vm_ptr = type_info.has_string_ops
-                                || type_info.has_collection_ops
-                                || type_info.has_global_ops;
-                            let max_arity: u8 = if needs_vm_ptr { 7 } else { 8 };
-                            if !type_info.has_unsupported_ops && chunk.arity <= max_arity {
-                                // Pre-allocate string constants into GC so their
-                                // GcRef indices can be baked into JIT code.
-                                let string_refs = if needs_vm_ptr {
-                                    let refs: Vec<Option<i64>> = chunk
-                                        .constants
-                                        .iter()
-                                        .map(|c| match c {
-                                            Constant::Str(s) => {
-                                                let r = self.gc.alloc_string(s.clone());
-                                                self.jit_roots.push(r);
-                                                Some(r.0 as i64)
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect();
-                                    Some(refs)
-                                } else {
-                                    None
-                                };
-                                if let Ok(mut jit) = super::jit::jit_module::JitCompiler::new() {
-                                    if let Ok(ptr) = jit.compile_function(
-                                        &chunk,
-                                        &func_name,
-                                        string_refs.as_ref(),
-                                    ) {
-                                        let ret_is_obj = matches!(
-                                            type_info.return_type,
-                                            super::jit::type_analysis::RegType::StringRef
-                                                | super::jit::type_analysis::RegType::ObjRef
-                                        );
-                                        self.jit_cache.insert(
-                                            func_name.clone(),
-                                            JitEntry {
-                                                ptr,
-                                                uses_float: type_info.has_float,
-                                                has_string_ops: type_info.has_string_ops,
-                                                has_collection_ops: type_info.has_collection_ops,
-                                                has_global_ops: type_info.has_global_ops,
-                                                returns_obj: ret_is_obj,
-                                                returns_float: matches!(
-                                                    type_info.return_type,
-                                                    super::jit::type_analysis::RegType::Float
-                                                ),
-                                            },
-                                        );
-                                        self.jit_modules.push(jit);
-                                    }
-                                }
-                            }
-                        }
-
-                        // JIT dispatch — unified I64 ABI
-                        // Float values are passed/returned as IEEE 754 bits in i64.
-                        #[cfg(feature = "jit")]
-                        if jit_eligible {
-                            if let Some(&entry) = self.jit_cache.get(&func_name) {
-                                let mut raw_args: Vec<i64> = Vec::new();
-                                if entry.has_string_ops
-                                    || entry.has_collection_ops
-                                    || entry.has_global_ops
-                                {
-                                    raw_args.push(self as *mut VM as *mut () as i64);
-                                }
-                                for v in &args {
-                                    raw_args.push(if let Some(n) = v.as_inline_int() {
-                                        if entry.uses_float {
-                                            // Float functions expect all args as f64 bits
-                                            (n as f64).to_bits() as i64
-                                        } else {
-                                            n
-                                        }
-                                    } else if let Some(f) = v.as_float() {
-                                        // Float values: pass IEEE 754 bits in i64
-                                        f.to_bits() as i64
-                                    } else if let Some(b) = v.as_bool() {
-                                        if entry.uses_float {
-                                            (if b { 1.0_f64 } else { 0.0_f64 }).to_bits() as i64
-                                        } else if b {
-                                            1
-                                        } else {
-                                            0
-                                        }
-                                    } else if let Some(r) = v.as_obj() {
-                                        r.0 as i64
-                                    } else {
-                                        0
-                                    });
-                                }
-                                let result: i64 = unsafe { jit_call_i64(entry.ptr, &raw_args)? };
-                                let result_val = if entry.returns_obj {
-                                    Value::obj(GcRef(result as usize))
-                                } else if entry.returns_float {
-                                    let f = f64::from_bits(result as u64);
-                                    if f.fract() == 0.0
-                                        && f >= i64::MIN as f64
-                                        && f <= i64::MAX as f64
-                                    {
-                                        Value::int(f as i64, &mut self.gc)
-                                    } else {
-                                        Value::float(f)
-                                    }
-                                } else {
-                                    Value::int(result, &mut self.gc)
-                                };
+                        if let Some(result) = self.try_jit_call(&chunk, &args)? {
+                            if self.profiler.is_enabled()
+                                && !func_name.is_empty()
+                                && func_name != "<lambda>"
+                            {
+                                self.profiler.enter_function(&func_name);
                                 self.profiler.exit_function();
-                                return Ok(result_val);
                             }
+                            return Ok(result);
+                        }
+
+                        // Count calls for profiling. Anonymous lambdas all
+                        // share the name "<lambda>" and are not profiled.
+                        if !func_name.is_empty() && func_name != "<lambda>" {
+                            self.profiler.enter_function(&func_name);
                         }
 
                         let arity = chunk.arity as usize;
                         let frame_size = (chunk.max_registers as usize).max(1);
                         let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
-                        if self.frames.len() >= MAX_FRAMES {
-                            return Err(VMError::new("stack overflow"));
-                        }
+                        // Shared depth limit + native stack guard
+                        // (runtime/recursion.rs): runaway recursion is a
+                        // catchable error, never a process abort.
+                        crate::runtime::recursion::check_call_depth(self.frames.len())
+                            .map_err(|m| VMError::new(&m))?;
                         self.ensure_registers(new_base + frame_size);
 
                         for (i, arg) in args.iter().enumerate() {
@@ -2455,7 +1947,10 @@ impl VM {
                             self.registers[new_base + i] = Value::null();
                         }
 
-                        self.frames.push(CallFrame::new(r, new_base, frame_size));
+                        let mut frame = CallFrame::new(r, new_base, frame_size);
+                        frame.argc = args.len();
+                        frame.entry_args = args;
+                        self.frames.push(frame);
                         let boundary = self.frames.len() - 1;
                         self.run_until(boundary)
                     }
@@ -2561,12 +2056,23 @@ impl VM {
         Value::obj(err_ref)
     }
 
-    fn handle_runtime_error(&mut self, err: VMError) -> Result<usize, VMError> {
+    /// Route a runtime error to the innermost `try`/`safe` handler that
+    /// belongs to this `run_until` invocation (frames at or above
+    /// `boundary_frame_idx`). If there is none, the frames of this
+    /// invocation are discarded and the error is returned to the caller —
+    /// which may be a native builtin (`yolo`, `assert_throws`, `map`, ...)
+    /// that gets to observe it before any outer handler does, exactly like
+    /// the interpreter's `Result` propagation.
+    fn handle_runtime_error(
+        &mut self,
+        err: VMError,
+        boundary_frame_idx: usize,
+    ) -> Result<usize, VMError> {
         if err.is_unwound_to_handler() {
             return Err(err);
         }
 
-        for frame_idx in (0..self.frames.len()).rev() {
+        for frame_idx in (boundary_frame_idx.min(self.frames.len())..self.frames.len()).rev() {
             let handler = {
                 let frame = &mut self.frames[frame_idx];
                 frame.handlers.pop()
@@ -2586,11 +2092,16 @@ impl VM {
             }
         }
 
-        if err.stack_trace.is_empty() {
-            Err(self.error_with_trace(&err.message))
+        let err = if err.stack_trace.is_empty() {
+            self.error_with_trace(&err.message)
         } else {
-            Err(err)
+            err
+        };
+        while self.frames.len() > boundary_frame_idx {
+            self.profiler.exit_function();
+            self.frames.pop();
         }
+        Err(err)
     }
 
     pub(super) fn convert_to_interp_val(&self, v: &Value) -> crate::interpreter::Value {
@@ -2774,94 +2285,381 @@ impl VM {
         Ok(())
     }
 
-    fn arith_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
-        match (left.classify(&self.gc), right.classify(&self.gc)) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => match op {
-                OpCode::Add => match a.checked_add(b) {
-                    Some(r) => Ok(Value::int(r, &mut self.gc)),
-                    None => Ok(Value::float(a as f64 + b as f64)),
-                },
-                OpCode::Sub => match a.checked_sub(b) {
-                    Some(r) => Ok(Value::int(r, &mut self.gc)),
-                    None => Ok(Value::float(a as f64 - b as f64)),
-                },
-                OpCode::Mul => match a.checked_mul(b) {
-                    Some(r) => Ok(Value::int(r, &mut self.gc)),
-                    None => Ok(Value::float(a as f64 * b as f64)),
-                },
-                OpCode::Div => {
-                    if b == 0 {
-                        return Err(VMError::new("division by zero"));
-                    }
-                    Ok(Value::int(a / b, &mut self.gc))
-                }
-                OpCode::Mod => {
-                    if b == 0 {
-                        return Err(VMError::new("modulo by zero"));
-                    }
-                    Ok(Value::int(a % b, &mut self.gc))
-                }
-                _ => Err(VMError::new("invalid operation")),
-            },
-            (ValueKind::Float(a), ValueKind::Float(b)) => match op {
-                OpCode::Add => Ok(Value::float(a + b)),
-                OpCode::Sub => Ok(Value::float(a - b)),
-                OpCode::Mul => Ok(Value::float(a * b)),
-                OpCode::Div => Ok(Value::float(a / b)),
-                OpCode::Mod => Ok(Value::float(a % b)),
-                _ => Err(VMError::new("invalid operation")),
-            },
-            (ValueKind::Int(a), ValueKind::Float(_b)) => {
-                self.arith_op(&Value::float(a as f64), right, op)
-            }
-            (ValueKind::Float(_a), ValueKind::Int(b)) => {
-                self.arith_op(left, &Value::float(b as f64), op)
-            }
-            // String concatenation
-            (ValueKind::Obj(_), _) | (_, ValueKind::Obj(_)) if op == OpCode::Add => {
-                let ls = left.display(&self.gc);
-                let rs = right.display(&self.gc);
-                let r = self.gc.alloc_string(format!("{}{}", ls, rs));
-                Ok(Value::obj(r))
-            }
-            _ => Err(VMError::new(&format!(
-                "cannot apply {:?} to {} and {}",
-                op,
-                left.type_name(&self.gc),
-                right.type_name(&self.gc)
-            ))),
+    /// `object.field` read. Shared by the `GetField` opcode and the
+    /// `__forge_get_field` builtin (used when a constant index does not fit
+    /// in the 8-bit operand).
+    pub(super) fn get_field(&mut self, obj_val: Value, field: &str) -> Result<Value, VMError> {
+        match self.get_field_strict(obj_val, field) {
+            // Compiler-internal fields (`__variant__`, `__type__`, ...) are
+            // probed on arbitrary values by pattern matching; a value that
+            // lacks them simply does not match.
+            Err(_) if field.starts_with("__") => Ok(Value::null()),
+            other => other,
         }
     }
 
-    fn compare_op(&self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
-        match (left.classify(&self.gc), right.classify(&self.gc)) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => {
-                let result = match op {
-                    OpCode::Lt => a < b,
-                    OpCode::Gt => a > b,
-                    OpCode::LtEq => a <= b,
-                    OpCode::GtEq => a >= b,
-                    _ => false,
+    fn get_field_strict(&mut self, obj_val: Value, field: &str) -> Result<Value, VMError> {
+        let Some(r) = obj_val.as_obj() else {
+            return Err(VMError::new(&format!(
+                "cannot access field '{}' on {}",
+                field,
+                obj_val.type_name(&self.gc)
+            )));
+        };
+        let needs_alloc: Option<String>;
+        let direct_result: Option<Value>;
+        let Some(obj) = self.gc.get(r) else {
+            return Err(VMError::new("null reference"));
+        };
+        match &obj.kind {
+            // Results are not ADT objects in the VM; expose the same
+            // pattern-matching view (`Ok(v)` / `Err(e)`) the interpreter has.
+            ObjKind::ResultOk(_) | ObjKind::ResultErr(_) if field.starts_with("__") => {
+                let text = match (field, &obj.kind) {
+                    ("__variant__", ObjKind::ResultOk(_)) => "Ok",
+                    ("__variant__", _) => "Err",
+                    ("__type__", _) => "Result",
+                    _ => return Ok(Value::null()),
                 };
-                Ok(Value::bool_val(result))
+                return Ok(self.alloc_string(text));
             }
-            (ValueKind::Float(a), ValueKind::Float(b)) => {
-                let result = match op {
-                    OpCode::Lt => a < b,
-                    OpCode::Gt => a > b,
-                    OpCode::LtEq => a <= b,
-                    OpCode::GtEq => a >= b,
-                    _ => false,
-                };
-                Ok(Value::bool_val(result))
+            ObjKind::Object(map) => {
+                if let Some(value) = map.get(field).cloned() {
+                    direct_result = Some(value);
+                } else if let Some(type_name) =
+                    map.get("__type__").and_then(|value| self.get_string(value))
+                {
+                    let mut delegated = None;
+                    if let Some(embeds) = self.embedded_fields.get(&type_name).cloned() {
+                        for (embed_field, _) in embeds {
+                            let Some(embed_ref) = map.get(&embed_field).and_then(|v| v.as_obj())
+                            else {
+                                continue;
+                            };
+                            let Some(embed_obj) = self.gc.get(embed_ref) else {
+                                continue;
+                            };
+                            let ObjKind::Object(embed_map) = &embed_obj.kind else {
+                                continue;
+                            };
+                            if let Some(value) = embed_map.get(field) {
+                                delegated = Some(*value);
+                                break;
+                            }
+                        }
+                    }
+                    direct_result =
+                        Some(delegated.ok_or_else(|| {
+                            VMError::new(&format!("no field '{}' on object", field))
+                        })?);
+                } else {
+                    return Err(VMError::new(&format!("no field '{}' on object", field)));
+                }
+                needs_alloc = None;
             }
-            (ValueKind::Int(a), ValueKind::Float(_b)) => {
-                self.compare_op(&Value::float(a as f64), right, op)
+            ObjKind::String(s) => match field {
+                "len" => {
+                    let len = s.chars().count() as i64;
+                    return Ok(Value::int(len, &mut self.gc));
+                }
+                "upper" => {
+                    needs_alloc = Some(s.to_uppercase());
+                    direct_result = None;
+                }
+                "lower" => {
+                    needs_alloc = Some(s.to_lowercase());
+                    direct_result = None;
+                }
+                "trim" => {
+                    needs_alloc = Some(s.trim().to_string());
+                    direct_result = None;
+                }
+                _ => return Err(VMError::new(&format!("no method '{}' on String", field))),
+            },
+            ObjKind::Array(items) | ObjKind::Set(items) => match field {
+                "len" => {
+                    let len = items.len() as i64;
+                    return Ok(Value::int(len, &mut self.gc));
+                }
+                _ => {
+                    let type_name = if matches!(&obj.kind, ObjKind::Set(_)) {
+                        "Set"
+                    } else {
+                        "Array"
+                    };
+                    return Err(VMError::new(&format!(
+                        "no method '{}' on {}",
+                        field, type_name
+                    )));
+                }
+            },
+            ObjKind::Frozen(inner) => {
+                let inner = *inner;
+                return self.get_field(inner, field);
             }
-            (ValueKind::Float(_a), ValueKind::Int(b)) => {
-                self.compare_op(left, &Value::float(b as f64), op)
+            _ => {
+                return Err(VMError::new(&format!(
+                    "cannot access field '{}' on {}",
+                    field,
+                    obj.type_name()
+                )))
             }
-            _ => Err(VMError::new("cannot compare non-numbers")),
         }
+        Ok(match needs_alloc {
+            Some(s) => self.alloc_string(&s),
+            None => {
+                direct_result.expect("BUG: direct_result must be Some when needs_alloc is None")
+            }
+        })
+    }
+
+    /// `object.field = value`. Shared by `SetField` and `__forge_set_field`.
+    /// Returns an updated copy; the original object is never modified
+    /// (value semantics, see `compile_store` in the compiler).
+    pub(super) fn set_field(
+        &mut self,
+        target: Value,
+        field: &str,
+        val: Value,
+    ) -> Result<Value, VMError> {
+        let Some(obj_ref) = target.as_obj() else {
+            return Err(VMError::new("cannot set field on non-object"));
+        };
+        let mut map = match self.gc.get(obj_ref).map(|obj| &obj.kind) {
+            Some(ObjKind::Object(map)) => map.clone(),
+            Some(ObjKind::Frozen(_)) => return Err(VMError::new("cannot mutate a frozen value")),
+            _ => return Err(VMError::new("cannot set field on non-object")),
+        };
+        map.insert(field.to_string(), val);
+        Ok(Value::obj(self.gc.alloc(ObjKind::Object(map))))
+    }
+
+    /// `crate::semantics::check_call_arity` for a closure called directly.
+    fn check_direct_call_arity(&self, func: Value, argc: usize) -> Result<(), VMError> {
+        let kind = func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
+        let Some(ObjKind::Closure(closure)) = kind else {
+            return Ok(());
+        };
+        let chunk = &closure.function.chunk;
+        crate::semantics::check_call_arity(
+            &closure.function.name,
+            chunk.arity as usize,
+            chunk.min_arity as usize,
+            argc,
+        )
+        .map_err(|e| VMError::new(&e))
+    }
+
+    /// Element count used by `Len` and `for` loops (0 for non-collections).
+    fn collection_len(&self, src: Value) -> i64 {
+        match src.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::String(s)) => s.chars().count() as i64,
+            Some(ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a)) => a.len() as i64,
+            Some(ObjKind::Object(o)) => o.len() as i64,
+            Some(ObjKind::Map(p)) => p.len() as i64,
+            _ => 0,
+        }
+    }
+
+    /// `container[index]` — shares negative-index and error-message rules
+    /// with the interpreter through `crate::semantics`.
+    pub(super) fn index_get(&self, container: Value, index: Value) -> Result<Value, VMError> {
+        use crate::semantics;
+        let mut current = container;
+        loop {
+            let Some(obj) = current.as_obj().and_then(|r| self.gc.get(r)) else {
+                return Err(VMError::new(&semantics::invalid_index(
+                    current.type_name(&self.gc),
+                    index.type_name(&self.gc),
+                )));
+            };
+            match (&obj.kind, index.classify(&self.gc)) {
+                (ObjKind::Frozen(inner), _) => current = *inner,
+                (ObjKind::Array(items) | ObjKind::Tuple(items), ValueKind::Int(i)) => {
+                    return match semantics::normalize_index(i, items.len()) {
+                        Some(slot) => Ok(items[slot]),
+                        None => Err(VMError::new(&semantics::index_out_of_bounds(
+                            i,
+                            if matches!(obj.kind, ObjKind::Tuple(_)) {
+                                "tuple"
+                            } else {
+                                "array"
+                            },
+                            items.len(),
+                        ))),
+                    };
+                }
+                (ObjKind::Object(map), _) if self.get_str_ref(&index).is_some() => {
+                    let key = self.get_str_ref(&index).unwrap_or_default();
+                    return map
+                        .get(key)
+                        .copied()
+                        .ok_or_else(|| VMError::new(&semantics::missing_key(key)));
+                }
+                _ => {
+                    return Err(VMError::new(&semantics::invalid_index(
+                        current.type_name(&self.gc),
+                        index.type_name(&self.gc),
+                    )))
+                }
+            }
+        }
+    }
+
+    /// `container[index] = value` — same rules as `index_get`. Returns an
+    /// updated copy; the original container is never modified (value
+    /// semantics, see `compile_store` in the compiler).
+    pub(super) fn index_set(
+        &mut self,
+        container: Value,
+        index: Value,
+        value: Value,
+    ) -> Result<Value, VMError> {
+        use crate::semantics;
+        let key = self.get_string(&index);
+        let index_int = index.as_int(&self.gc);
+        let index_type = index.type_name(&self.gc);
+        let container_type = container.type_name(&self.gc);
+        let Some(obj) = container.as_obj().and_then(|r| self.gc.get(r)) else {
+            return Err(VMError::new(&semantics::invalid_index_assign(
+                container_type,
+            )));
+        };
+        let updated = match (&obj.kind, index_int, key) {
+            (ObjKind::Array(items), Some(i), _) => {
+                let len = items.len();
+                let slot = semantics::normalize_index(i, len).ok_or_else(|| {
+                    VMError::new(&semantics::index_out_of_bounds(i, "array", len))
+                })?;
+                let mut items = items.clone();
+                items[slot] = value;
+                ObjKind::Array(items)
+            }
+            (ObjKind::Object(map), _, Some(key)) => {
+                let mut map = map.clone();
+                map.insert(key, value);
+                ObjKind::Object(map)
+            }
+            (ObjKind::Array(_) | ObjKind::Object(_), _, _) => {
+                return Err(VMError::new(&semantics::invalid_index(
+                    container_type,
+                    index_type,
+                )))
+            }
+            (ObjKind::Frozen(_), _, _) => {
+                return Err(VMError::new("cannot modify frozen value: index assignment"))
+            }
+            _ => {
+                return Err(VMError::new(&semantics::invalid_index_assign(
+                    container_type,
+                )))
+            }
+        };
+        Ok(Value::obj(self.gc.alloc(updated)))
+    }
+
+    fn get_str_ref<'a>(&'a self, val: &Value) -> Option<&'a str> {
+        match val.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::String(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Project a VM value onto the shared operand view (see `crate::semantics`).
+    pub(super) fn semantic_operand<'g>(gc: &'g Gc, value: &Value) -> crate::semantics::Operand<'g> {
+        use crate::semantics::Operand;
+        match value.classify(gc) {
+            ValueKind::Int(n) => Operand::Int(n),
+            ValueKind::Float(f) => Operand::Float(f),
+            ValueKind::Bool(_) => Operand::Bool,
+            ValueKind::Null => Operand::Null,
+            ValueKind::Obj(r) => match gc.get(r).map(|obj| &obj.kind) {
+                Some(ObjKind::String(s)) => Operand::Str(s.as_str()),
+                Some(ObjKind::Frozen(inner)) => Operand::Other(inner.type_name(gc)),
+                Some(_) => Operand::Other(value.type_name(gc)),
+                None => Operand::Null,
+            },
+        }
+    }
+
+    /// Arithmetic and ordering share their rules with the interpreter via
+    /// `crate::semantics::binary`.
+    fn binary_op(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        op: crate::semantics::BinaryOp,
+    ) -> Result<Value, VMError> {
+        use crate::semantics::Outcome;
+        let outcome = crate::semantics::binary(
+            op,
+            Self::semantic_operand(&self.gc, left),
+            Self::semantic_operand(&self.gc, right),
+        )
+        .map_err(|message| VMError::new(&message))?;
+        Ok(match outcome {
+            Outcome::Int(n) => Value::int(n, &mut self.gc),
+            Outcome::Float(f) => Value::float(f),
+            Outcome::Bool(b) => Value::bool_val(b),
+            Outcome::Concat => {
+                let text = format!("{}{}", left.display(&self.gc), right.display(&self.gc));
+                Value::obj(self.gc.alloc_string(text))
+            }
+        })
+    }
+
+    pub(super) fn arith_op(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        op: OpCode,
+    ) -> Result<Value, VMError> {
+        use crate::semantics::BinaryOp;
+        // Fast path: non-overflowing int arithmetic never needs the shared table.
+        if let (ValueKind::Int(a), ValueKind::Int(b)) =
+            (left.classify(&self.gc), right.classify(&self.gc))
+        {
+            let fast = match op {
+                OpCode::Add => a.checked_add(b),
+                OpCode::Sub => a.checked_sub(b),
+                OpCode::Mul => a.checked_mul(b),
+                _ => None,
+            };
+            if let Some(r) = fast {
+                return Ok(Value::int(r, &mut self.gc));
+            }
+        }
+        let shared = match op {
+            OpCode::Add => BinaryOp::Add,
+            OpCode::Sub => BinaryOp::Sub,
+            OpCode::Mul => BinaryOp::Mul,
+            OpCode::Div => BinaryOp::Div,
+            OpCode::Mod => BinaryOp::Mod,
+            _ => return Err(VMError::new("invalid operation")),
+        };
+        self.binary_op(left, right, shared)
+    }
+
+    fn compare_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
+        use crate::semantics::BinaryOp;
+        if let (ValueKind::Int(a), ValueKind::Int(b)) =
+            (left.classify(&self.gc), right.classify(&self.gc))
+        {
+            return Ok(Value::bool_val(match op {
+                OpCode::Lt => a < b,
+                OpCode::Gt => a > b,
+                OpCode::LtEq => a <= b,
+                OpCode::GtEq => a >= b,
+                _ => false,
+            }));
+        }
+        let shared = match op {
+            OpCode::Lt => BinaryOp::Lt,
+            OpCode::Gt => BinaryOp::Gt,
+            OpCode::LtEq => BinaryOp::LtEq,
+            OpCode::GtEq => BinaryOp::GtEq,
+            _ => return Err(VMError::new("invalid comparison")),
+        };
+        self.binary_op(left, right, shared)
     }
 }

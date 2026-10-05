@@ -1,0 +1,5 @@
+// expect: [1, null, 1, 2, null]
+let obj = {a: 1}
+unpack {a, missing} from obj
+unpack [x, y, z] from [1, 2]
+[a, missing, x, y, z]

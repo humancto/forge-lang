@@ -182,8 +182,84 @@ cargo test test_name
 ### Run Forge integration tests
 
 ```bash
-./target/debug/forge test tests/
+./target/debug/forge test tests/                  # default engine (VM, interpreter fallback)
+./target/debug/forge test tests/ --engine interp  # tree-walking interpreter only
+./target/debug/forge test tests/ --engine both    # every file on both engines
 ```
+
+### Interpreter/VM differential test
+
+The interpreter and the bytecode VM must behave identically. `tests/engine_diff.rs`
+runs every program in `examples/`, `tests/parity/supported/` and every `tests/*.fg`
+suite (each `@test` function is called with its hooks, printing `PASS`/`FAIL`) on
+both engines and compares stdout and exit status:
+
+```bash
+cargo test --test engine_diff -- --nocapture
+FORGE_ENGINE_DIFF_FILTER=closure FORGE_ENGINE_DIFF_VERBOSE=1 cargo test --test engine_diff
+```
+
+Programs that cannot be compared (servers, network, databases) and known,
+not-yet-fixed divergences are listed in `tests/engine_diff_known.txt`. The test
+fails on any new divergence, and also when a listed divergence disappears, so the
+list only ever shrinks. Rules both engines share (operators, comparisons,
+indexing, truthiness, error messages) live in `src/semantics/` — change them there,
+not in one engine.
+
+### Adding a builtin or stdlib function
+
+Both engines take their builtin names from `src/builtins_registry.rs`:
+
+- **Global builtin** — add a `Builtin` entry (name + arity) to `GLOBALS`, then a
+  match arm in `src/interpreter/builtins.rs` *and* in `src/vm/builtins.rs`. The
+  registry tests fail if either arm is missing.
+- **Stdlib module member** — add it to the module's `create_module()` and `call()` in
+  `src/stdlib/<module>.rs`. Both engines dispatch module calls through
+  `builtins_registry::call_module`, so there is nothing to port to the VM.
+- **New stdlib module** — add one `module!(...)` line to `builtins_registry::modules()`
+  and its name to `semantics::BUILTIN_MODULES`.
+
+Language rules both engines must agree on (operators, `check ... between`, call
+arity, error messages) go in `src/semantics/`.
+
+### Run the CI gates locally
+
+Every required CI job can be reproduced from a checkout. Run them before
+opening a PR:
+
+| CI job | Local command |
+| --- | --- |
+| Format | `cargo fmt --check` |
+| Clippy | `cargo clippy --all-targets -- -A clippy::approx_constant -A clippy::result_large_err -A clippy::only_used_in_recursion -A clippy::len_zero` |
+| Test (ubuntu/macos/windows) | `CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked` |
+| Forge tests (vm) | `cargo build --bin forge && ./target/debug/forge --allow-run test tests/ --engine vm` |
+| Forge tests (interp) | `./target/debug/forge --allow-run test tests/ --engine interp` |
+| Examples (default engine) | `tools/run_examples.sh target/debug/forge` (skip-list with reasons is in the script) |
+| Backend parity corpus | `cargo test --bin forge parity_corpus_` |
+| Security Audit | `cargo install cargo-audit --locked && cargo audit` (ignores, with reasons, live in `.cargo/audit.toml`) |
+| Build with otel feature | `cargo build --features otel && cargo test --test otel_smoke --features otel` |
+
+CI also runs weekly (Monday 06:17 UTC) so new RustSec advisories and toolchain
+changes surface even without pushes. `CARGO_PROFILE_DEV_DEBUG=0` matches CI and
+keeps the debug target directory (which includes the `libforge_lang.a` static
+runtime) small.
+
+### Performance benchmarks
+
+Report-only timing harnesses (use a release build; there are no thresholds):
+
+```bash
+cargo build --release
+tools/bench_vm.sh target/release/forge            # VM + JIT: loop, fib, string build, push, map/filter
+tools/bench_vm.sh target/release/forge -- --jit   # eager JIT
+tools/bench_interp.sh target/release/forge        # tree-walking interpreter hot paths
+```
+
+CI prints `tools/bench_vm.sh` results in the startup-benchmark job. A change
+that reintroduces per-instruction overhead or quadratic copying shows up there
+as seconds instead of milliseconds. VM fast paths that must stay unobservable
+are pinned by `src/vm/perf_tests.rs` and the loop tier-up tests in
+`src/vm/jit_tests.rs`.
 
 ### Writing tests
 
@@ -230,7 +306,8 @@ define my_test() {
 - [ ] `cargo test` passes (all 189+ tests)
 - [ ] `cargo clippy` has no new warnings
 - [ ] New features have tests
-- [ ] Examples still work (`forge run examples/showcase.fg`)
+- [ ] Examples still work (`tools/run_examples.sh`)
+- [ ] Forge tests pass on both engines (`forge test tests/ --engine both`)
 - [ ] Code follows the style guide (no `unwrap()`, no `unsafe`)
 
 ## Issue Reporting

@@ -89,7 +89,12 @@ impl NanBoxedValue {
     }
 
     /// Box an integer, panicking if it doesn't fit in 48 bits.
-    /// Use only when the value is known to be small (e.g., array length, bool-to-int).
+    ///
+    /// Test-only by design: production code must never be able to panic on a
+    /// large integer. Runtime code goes through `Value::int(n, gc)`, which
+    /// heap-boxes out-of-range values, or `Value::try_inline_int` when no GC
+    /// is available.
+    #[cfg(test)]
     #[inline]
     pub fn from_small_int(n: i64) -> Self {
         Self::try_from_int(n).expect("BUG: integer too large for inline NaN-boxing")
@@ -219,31 +224,53 @@ impl NanBoxedValue {
     // ---- Value methods (matching existing Value API) ----
 
     pub fn is_truthy(&self, gc: &Gc) -> bool {
+        use super::value::ObjKind;
+        use crate::semantics::Shape;
         if let Some(b) = self.as_bool() {
             return b;
         }
         if let Some(n) = self.as_int() {
             return n != 0;
         }
-        if let Some(f) = self.as_float() {
-            return f != 0.0;
-        }
-        if self.is_null() {
-            return false;
-        }
-        if let Some(r) = self.as_obj() {
-            return gc.get(r).is_some_and(|obj| match &obj.kind {
-                super::value::ObjKind::String(s) => !s.is_empty(),
-                super::value::ObjKind::Array(a) => !a.is_empty(),
-                super::value::ObjKind::Object(o) => !o.is_empty(),
-                super::value::ObjKind::Tuple(a) | super::value::ObjKind::Set(a) => !a.is_empty(),
-                super::value::ObjKind::Map(pairs) => !pairs.is_empty(),
-                super::value::ObjKind::ResultOk(_) => true,
-                super::value::ObjKind::ResultErr(_) => false,
-                _ => true,
-            });
-        }
-        false
+        let shape = if let Some(f) = self.as_float() {
+            Shape::Float(f)
+        } else if self.is_null() {
+            Shape::Null
+        } else if let Some(r) = self.as_obj() {
+            match gc.get(r).map(|obj| &obj.kind) {
+                None => Shape::Null,
+                Some(ObjKind::String(s)) => Shape::Sized(s.len()),
+                Some(ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a)) => {
+                    Shape::Sized(a.len())
+                }
+                Some(ObjKind::Object(o)) => {
+                    // VM Options are ADT objects; give them Option truthiness.
+                    let field_str = |key: &str| {
+                        o.get(key)
+                            .and_then(|v| v.as_obj())
+                            .and_then(|r| gc.get(r))
+                            .and_then(|obj| match &obj.kind {
+                                ObjKind::String(s) => Some(s.as_str()),
+                                _ => None,
+                            })
+                    };
+                    match (field_str("__type__"), field_str("__variant__")) {
+                        (Some("Option"), Some("Some")) => Shape::OptionSome,
+                        (Some("Option"), Some("None")) => Shape::OptionNone,
+                        _ => Shape::Sized(o.len()),
+                    }
+                }
+                Some(ObjKind::Map(pairs)) => Shape::Sized(pairs.len()),
+                Some(ObjKind::ResultOk(_)) => Shape::ResultOk,
+                Some(ObjKind::ResultErr(_)) => Shape::ResultErr,
+                Some(ObjKind::BoxedInt(n)) => Shape::Int(*n),
+                Some(ObjKind::Frozen(inner)) => return inner.is_truthy(gc),
+                Some(_) => Shape::Other,
+            }
+        } else {
+            Shape::Null
+        };
+        crate::semantics::is_truthy(shape)
     }
 
     pub fn type_name(&self, gc: &Gc) -> &'static str {

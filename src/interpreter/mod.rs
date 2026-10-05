@@ -1,4 +1,5 @@
 mod builtins; // call_builtin — extracted for readability
+mod places; // in-place reads and updates of variables
 use crate::parser::ast::*;
 /// Forge Tree-Walk Interpreter
 /// Walks the AST and executes it directly.
@@ -132,6 +133,17 @@ impl StreamKind {
     }
 }
 
+/// A named function: its definition plus the environment it closes over.
+/// Immutable once created; see [`Value::Function`].
+#[derive(Debug)]
+pub struct FunctionValue {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub body: Vec<SpannedStmt>,
+    pub closure: Environment,
+    pub decorators: Vec<Decorator>,
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -150,16 +162,12 @@ pub enum Value {
     /// combinators can wrap upstreams without cloning cursor state.
     Stream(Arc<Mutex<StreamCell>>),
     Object(IndexMap<String, Value>),
-    Function {
-        name: String,
-        params: Vec<Param>,
-        body: Vec<SpannedStmt>,
-        closure: Environment,
-        decorators: Vec<Decorator>,
-    },
+    /// Named function. Shared by `Arc`: reading a function variable (every
+    /// call does) is a refcount bump, never a copy of its body.
+    Function(Arc<FunctionValue>),
     Lambda {
-        params: Vec<Param>,
-        body: Vec<SpannedStmt>,
+        params: Arc<[Param]>,
+        body: Arc<[SpannedStmt]>,
         closure: Arc<std::sync::Mutex<Environment>>,
     },
     ResultOk(Box<Value>),
@@ -292,7 +300,7 @@ impl Value {
             Value::Map(_) => "Map",
             Value::Object(_) => "Object",
             Value::Stream(_) => "Stream",
-            Value::Function { .. } => "Function",
+            Value::Function(_) => "Function",
             Value::Lambda { .. } => "Lambda",
             Value::ResultOk(_) | Value::ResultErr(_) => "Result",
             Value::Some(_) | Value::None => "Option",
@@ -305,22 +313,24 @@ impl Value {
     }
 
     pub fn is_truthy(&self) -> bool {
-        match self {
-            Value::Bool(b) => *b,
-            Value::Int(n) => *n != 0,
-            Value::Float(n) => *n != 0.0,
-            Value::String(s) => !s.is_empty(),
-            Value::Null => false,
-            Value::Array(a) | Value::Tuple(a) | Value::Set(a) => !a.is_empty(),
-            Value::Map(m) => !m.is_empty(),
-            Value::Object(o) => !o.is_empty(),
-            Value::ResultOk(_) => true,
-            Value::ResultErr(_) => false,
-            Value::Some(_) => true,
-            Value::None => false,
-            Value::Frozen(inner) => inner.is_truthy(),
-            _ => true,
-        }
+        use crate::semantics::Shape;
+        let shape = match self {
+            Value::Bool(b) => Shape::Bool(*b),
+            Value::Int(n) => Shape::Int(*n),
+            Value::Float(n) => Shape::Float(*n),
+            Value::String(s) => Shape::Sized(s.len()),
+            Value::Null => Shape::Null,
+            Value::Array(a) | Value::Tuple(a) | Value::Set(a) => Shape::Sized(a.len()),
+            Value::Map(m) => Shape::Sized(m.len()),
+            Value::Object(o) => Shape::Sized(o.len()),
+            Value::ResultOk(_) => Shape::ResultOk,
+            Value::ResultErr(_) => Shape::ResultErr,
+            Value::Some(_) => Shape::OptionSome,
+            Value::None => Shape::OptionNone,
+            Value::Frozen(inner) => return inner.is_truthy(),
+            _ => Shape::Other,
+        };
+        crate::semantics::is_truthy(shape)
     }
 
     /// Check if this value is frozen (immutable)
@@ -402,7 +412,7 @@ impl fmt::Display for Value {
                 write!(f, "Stream({})", name)
             }
             Value::Object(_) => write!(f, "{}", self.to_json_string()),
-            Value::Function { name, .. } => write!(f, "<fn {}>", name),
+            Value::Function(func) => write!(f, "<fn {}>", func.name),
             Value::Lambda { .. } => write!(f, "<lambda>"),
             Value::ResultOk(v) => write!(f, "Ok({})", v),
             Value::ResultErr(v) => write!(f, "Err({})", v),
@@ -416,40 +426,134 @@ impl fmt::Display for Value {
     }
 }
 
-/// Variable environment (scope chain) — uses Arc for O(1) cloning
+/// One variable binding inside a [`Scope`].
+#[derive(Debug, Clone)]
+struct Binding {
+    name: String,
+    value: Value,
+    mutable: bool,
+}
+
+/// Scopes with more bindings than this get a hash index; smaller ones
+/// (function frames, loop bodies, blocks) are scanned linearly, which is
+/// faster than hashing for a handful of short names.
+const SCOPE_INDEX_THRESHOLD: usize = 12;
+
+/// The bindings of one lexical scope, in definition order.
+///
+/// Value and mutability live in the same entry so a lookup touches one
+/// lock and one table. Bindings are never removed from a scope (a scope is
+/// dropped as a whole), so positions stay valid for the lazily built index.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    bindings: Vec<Binding>,
+    index: Option<HashMap<String, usize>>,
+}
+
+impl Scope {
+    fn position(&self, name: &str) -> Option<usize> {
+        match &self.index {
+            Some(index) => index.get(name).copied(),
+            None => self.bindings.iter().position(|b| b.name == name),
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&Binding> {
+        self.position(name).map(|i| &self.bindings[i])
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        self.position(name).map(move |i| &mut self.bindings[i])
+    }
+
+    /// Define or redefine `name` in this scope.
+    fn insert(&mut self, name: String, value: Value, mutable: bool) {
+        if let Some(binding) = self.get_mut(&name) {
+            binding.value = value;
+            binding.mutable = mutable;
+            return;
+        }
+        let pos = self.bindings.len();
+        if let Some(index) = &mut self.index {
+            index.insert(name.clone(), pos);
+        }
+        self.bindings.push(Binding {
+            name,
+            value,
+            mutable,
+        });
+        if self.index.is_none() && self.bindings.len() > SCOPE_INDEX_THRESHOLD {
+            self.index = Some(
+                self.bindings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (b.name.clone(), i))
+                    .collect(),
+            );
+        }
+    }
+
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.bindings.iter().map(|b| b.name.as_str())
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Value> {
+        self.bindings.iter().map(|b| &b.value)
+    }
+}
+
+/// Shared, lockable scope. Closures capture scopes by `Arc`, so a write
+/// through one handle is visible through every other handle to the same
+/// scope (that is how captured variables and recursion work).
+type ScopeCell = Arc<std::sync::Mutex<Scope>>;
+
+/// Lock a scope, recovering from poisoning: a panic on another thread that
+/// held the lock must not take this interpreter down with it.
+fn lock_scope(cell: &ScopeCell) -> std::sync::MutexGuard<'_, Scope> {
+    cell.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Variable environment: a chain of scopes, innermost last.
+///
+/// `Clone` is shallow (it shares the scope `Arc`s) and is what closures
+/// use to capture their defining environment. Use [`deep_clone`] or
+/// [`deep_clone_isolated`] to get independent storage.
+///
+/// # Reading without copying
+///
+/// [`get`](Self::get) returns an owned `Value`, which deep-copies strings,
+/// arrays and objects. Hot paths that only need to look at a value use
+/// [`with_value`](Self::with_value), and in-place updates use
+/// [`with_value_mut`](Self::with_value_mut). The callbacks run while the
+/// scope lock is held, so they must not touch the environment again
+/// (the lock is not re-entrant).
+///
+/// [`deep_clone`]: Self::deep_clone
+/// [`deep_clone_isolated`]: Self::deep_clone_isolated
 #[derive(Debug, Clone)]
 pub struct Environment {
-    scopes: Vec<Arc<std::sync::Mutex<HashMap<String, Value>>>>,
-    mutability: Vec<Arc<std::sync::Mutex<HashMap<String, bool>>>>,
+    scopes: Vec<ScopeCell>,
 }
 
 /// Map from old scope `Arc` pointer to its newly allocated counterpart.
 /// Used by [`Environment::deep_clone_isolated`] to memoize Arc identity
 /// during the recursive value-walk so cycles (recursive functions whose
 /// closure captures the env that holds them) terminate.
-type ScopeMap = HashMap<
-    *const std::sync::Mutex<HashMap<String, Value>>,
-    Arc<std::sync::Mutex<HashMap<String, Value>>>,
->;
+type ScopeMap = HashMap<*const std::sync::Mutex<Scope>, ScopeCell>;
 
 impl Environment {
     pub fn new() -> Self {
         Self {
-            scopes: vec![Arc::new(std::sync::Mutex::new(HashMap::new()))],
-            mutability: vec![Arc::new(std::sync::Mutex::new(HashMap::new()))],
+            scopes: vec![ScopeCell::default()],
         }
     }
 
     pub fn push_scope(&mut self) {
-        self.scopes
-            .push(Arc::new(std::sync::Mutex::new(HashMap::new())));
-        self.mutability
-            .push(Arc::new(std::sync::Mutex::new(HashMap::new())));
+        self.scopes.push(ScopeCell::default());
     }
 
     pub fn pop_scope(&mut self) {
         self.scopes.pop();
-        self.mutability.pop();
     }
 
     pub fn define(&mut self, name: String, value: Value) {
@@ -457,64 +561,96 @@ impl Environment {
     }
 
     pub fn define_with_mutability(&mut self, name: String, value: Value, mutable: bool) {
-        // Use poison-recovery: if another thread panicked while holding the lock,
-        // we still get a usable guard rather than propagating the panic.
         if let Some(scope) = self.scopes.last() {
-            scope
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(name.clone(), value);
-        }
-        if let Some(muts) = self.mutability.last() {
-            muts.lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(name, mutable);
+            lock_scope(scope).insert(name, value, mutable);
         }
     }
 
+    /// Owned copy of the innermost binding of `name`.
     pub fn get(&self, name: &str) -> Option<Value> {
+        self.with_value(name, Value::clone)
+    }
+
+    /// True when `name` is bound in any enclosing scope.
+    pub fn contains(&self, name: &str) -> bool {
+        self.with_value(name, |_| ()).is_some()
+    }
+
+    /// Run `f` on a reference to the innermost binding of `name` without
+    /// copying it. `f` must not access this environment (see type docs).
+    pub fn with_value<R>(&self, name: &str, f: impl FnOnce(&Value) -> R) -> Option<R> {
         for scope in self.scopes.iter().rev() {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(val) = guard.get(name) {
-                return Some(val.clone());
+            let guard = lock_scope(scope);
+            if let Some(binding) = guard.get(name) {
+                return Some(f(&binding.value));
             }
         }
         None
     }
 
-    fn is_mutable(&self, name: &str) -> Option<bool> {
-        for muts in self.mutability.iter().rev() {
-            let guard = muts.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(m) = guard.get(name) {
-                return Some(*m);
-            }
-        }
-        None
-    }
-
-    pub fn set(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
-        if let Some(false) = self.is_mutable(name) {
-            return Err(RuntimeError::new(&format!(
-                "cannot reassign immutable variable '{}' (use 'let mut' to make it mutable)",
-                name
-            )));
-        }
+    /// Run `f` on a mutable reference to the innermost binding of `name`,
+    /// with the same checks as [`set`](Self::set): the variable must exist
+    /// and be mutable. `f` must not access this environment.
+    pub fn with_value_mut<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut Value) -> R,
+    ) -> Result<R, RuntimeError> {
         for scope in self.scopes.iter().rev() {
-            let mut guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            if guard.contains_key(name) {
-                guard.insert(name.to_string(), value);
-                return Ok(());
+            let mut guard = lock_scope(scope);
+            if let Some(binding) = guard.get_mut(name) {
+                if !binding.mutable {
+                    return Err(Self::immutable_error(name));
+                }
+                return Ok(f(&mut binding.value));
             }
         }
         Err(RuntimeError::new(&format!("undefined variable: {}", name)))
+    }
+
+    /// Raw access to the innermost binding of `name` together with its
+    /// mutability, for callers that must order their own checks (index
+    /// assignment reports a frozen value before an immutable binding).
+    /// Returns `None` when `name` is unbound. `f` must not access this
+    /// environment.
+    pub(crate) fn with_binding_mut<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut Value, bool) -> R,
+    ) -> Option<R> {
+        for scope in self.scopes.iter().rev() {
+            let mut guard = lock_scope(scope);
+            if let Some(binding) = guard.get_mut(name) {
+                return Some(f(&mut binding.value, binding.mutable));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn is_mutable(&self, name: &str) -> Option<bool> {
+        for scope in self.scopes.iter().rev() {
+            let guard = lock_scope(scope);
+            if let Some(binding) = guard.get(name) {
+                return Some(binding.mutable);
+            }
+        }
+        None
+    }
+
+    fn immutable_error(name: &str) -> RuntimeError {
+        RuntimeError::new(&crate::semantics::immutable_reassign(name))
+    }
+
+    pub fn set(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
+        self.with_value_mut(name, |slot| *slot = value)
     }
 
     /// Collect all defined variable names across all scopes (for REPL tab completion).
     pub fn all_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for scope in &self.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            names.extend(guard.keys().cloned());
+            let guard = lock_scope(scope);
+            names.extend(guard.names().map(str::to_string));
         }
         names.sort();
         names.dedup();
@@ -523,14 +659,14 @@ impl Environment {
 
     /// Deep clone for spawn — breaks sharing so thread gets independent copy.
     ///
-    /// "Deep" only at the scope-storage layer: scope `Arc<Mutex<HashMap>>`s
+    /// "Deep" only at the scope-storage layer: scope `Arc<Mutex<Scope>>`s
     /// are duplicated, but the `Value`s inside are cloned by `Value::clone`,
-    /// which is shallow on `Value::Function::closure: Environment` and
-    /// `Value::Lambda::closure: Arc<Mutex<Environment>>`. That is the
-    /// intended semantics for `spawn_task` and `fork_for_background_runtime`:
-    /// their callers want spawned/scheduled tasks to share captured closure
-    /// state with the parent (so a counter captured by a Lambda accumulates
-    /// across spawns).
+    /// which is shallow on `Value::Function`'s closure (an `Environment`
+    /// inside the shared function `Arc`) and `Value::Lambda::closure:
+    /// Arc<Mutex<Environment>>`. That is the intended semantics for
+    /// `spawn_task` and `fork_for_background_runtime`: their callers want
+    /// spawned/scheduled tasks to share captured closure state with the
+    /// parent (so a counter captured by a Lambda accumulates across spawns).
     ///
     /// The HTTP server uses [`deep_clone_isolated`](Self::deep_clone_isolated)
     /// instead — it requires per-request closure isolation as well.
@@ -539,20 +675,7 @@ impl Environment {
             scopes: self
                 .scopes
                 .iter()
-                .map(|s| {
-                    Arc::new(std::sync::Mutex::new(
-                        s.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                    ))
-                })
-                .collect(),
-            mutability: self
-                .mutability
-                .iter()
-                .map(|m| {
-                    Arc::new(std::sync::Mutex::new(
-                        m.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                    ))
-                })
+                .map(|s| Arc::new(std::sync::Mutex::new(lock_scope(s).clone())))
                 .collect(),
         }
     }
@@ -560,26 +683,25 @@ impl Environment {
     /// Deep clone with **closure isolation** — used by `fork_for_serving`
     /// to give each HTTP request a fully independent interpreter graph.
     ///
-    /// Walks every reachable `Value` and rewrites
-    /// `Value::Function::closure` and `Value::Lambda::closure` so the
-    /// returned `Environment` shares **no** scope `Arc<Mutex<...>>` with
-    /// the original. After this call, mutations made by code running
-    /// against the cloned env (including writes through captured
-    /// closures and the Lambda writeback path at
-    /// `call_function_inner` line ~4317) are invisible to the original
-    /// or any other isolated clone.
+    /// Walks every reachable `Value` and rewrites the closures of
+    /// `Value::Function` and `Value::Lambda` so the returned `Environment`
+    /// shares **no** scope `Arc<Mutex<...>>` with the original. After this
+    /// call, mutations made by code running against the cloned env
+    /// (including writes through captured closures and the Lambda
+    /// writeback path in `call_function_inner`) are invisible to the
+    /// original or any other isolated clone.
     ///
     /// # Cycle handling
     ///
-    /// Forge's `Stmt::FnDef` (lines 1130–1153) installs a function whose
-    /// closure scope vec contains the same `Arc` as the env that holds
-    /// the function — a cycle. We tie the knot via Arc-pointer-keyed
-    /// memoization (`ScopeMap`): the first time we see a scope `Arc`,
-    /// we install an empty placeholder in the map and recurse; any
-    /// re-entry resolves to the placeholder and returns immediately.
-    /// After the recursion, we fill the placeholder with the populated
-    /// `HashMap`. Topological identity is preserved: every reference
-    /// to the original scope resolves to a single new `Arc`.
+    /// Forge's `Stmt::FnDef` installs a function whose closure scope vec
+    /// contains the same `Arc` as the env that holds the function — a
+    /// cycle. We tie the knot via Arc-pointer-keyed memoization
+    /// (`ScopeMap`): the first time we see a scope `Arc`, we install an
+    /// empty placeholder in the map and recurse; any re-entry resolves to
+    /// the placeholder and returns immediately. After the recursion, we
+    /// fill the placeholder with the populated scope. Topological identity
+    /// is preserved: every reference to the original scope resolves to a
+    /// single new `Arc`.
     ///
     /// # Performance
     ///
@@ -594,28 +716,16 @@ impl Environment {
     }
 
     fn deep_clone_env(env: &Environment, scope_map: &mut ScopeMap) -> Self {
-        let scopes = env
-            .scopes
-            .iter()
-            .map(|s| Self::dup_scope(s, scope_map))
-            .collect();
-        // mutability table is just String -> bool; no Values to walk.
-        let mutability = env
-            .mutability
-            .iter()
-            .map(|m| {
-                Arc::new(std::sync::Mutex::new(
-                    m.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                ))
-            })
-            .collect();
-        Self { scopes, mutability }
+        Self {
+            scopes: env
+                .scopes
+                .iter()
+                .map(|s| Self::dup_scope(s, scope_map))
+                .collect(),
+        }
     }
 
-    fn dup_scope(
-        s: &Arc<std::sync::Mutex<HashMap<String, Value>>>,
-        scope_map: &mut ScopeMap,
-    ) -> Arc<std::sync::Mutex<HashMap<String, Value>>> {
+    fn dup_scope(s: &ScopeCell, scope_map: &mut ScopeMap) -> ScopeCell {
         let key = Arc::as_ptr(s);
         if let Some(existing) = scope_map.get(&key) {
             // Cycle: this scope is already being cloned. Return the
@@ -626,33 +736,30 @@ impl Environment {
         }
         // Tie the knot: install the placeholder before we recurse so
         // any self-reference resolves to it.
-        let new_arc = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let new_arc = ScopeCell::default();
         scope_map.insert(key, new_arc.clone());
 
-        let original = s.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let mut new_map = HashMap::with_capacity(original.len());
-        for (k, v) in original {
-            new_map.insert(k, Self::dup_value(v, scope_map));
+        let mut copy = lock_scope(s).clone();
+        for binding in &mut copy.bindings {
+            let value = std::mem::replace(&mut binding.value, Value::Null);
+            binding.value = Self::dup_value(value, scope_map);
         }
-        *new_arc.lock().unwrap_or_else(|p| p.into_inner()) = new_map;
+        *lock_scope(&new_arc) = copy;
         new_arc
     }
 
     fn dup_value(v: Value, scope_map: &mut ScopeMap) -> Value {
         match v {
-            Value::Function {
-                name,
-                params,
-                body,
-                closure,
-                decorators,
-            } => Value::Function {
-                name,
-                params,
-                body,
-                decorators,
-                closure: Self::deep_clone_env(&closure, scope_map),
-            },
+            Value::Function(func) => {
+                let closure = Self::deep_clone_env(&func.closure, scope_map);
+                Value::Function(Arc::new(FunctionValue {
+                    name: func.name.clone(),
+                    params: func.params.clone(),
+                    body: func.body.clone(),
+                    decorators: func.decorators.clone(),
+                    closure,
+                }))
+            }
             Value::Lambda {
                 params,
                 body,
@@ -718,13 +825,13 @@ impl Environment {
     pub fn suggest_similar(&self, name: &str) -> Option<String> {
         let mut best: Option<(String, usize)> = None;
         for scope in &self.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            for key in guard.keys() {
+            let guard = lock_scope(scope);
+            for key in guard.names() {
                 let dist = levenshtein(name, key);
                 if dist <= 2 && dist < name.len() {
                     match &best {
-                        Some((_, d)) if dist < *d => best = Some((key.clone(), dist)),
-                        None => best = Some((key.clone(), dist)),
+                        Some((_, d)) if dist < *d => best = Some((key.to_string(), dist)),
+                        None => best = Some((key.to_string(), dist)),
                         _ => {}
                     }
                 }
@@ -755,6 +862,83 @@ fn levenshtein(a: &str, b: &str) -> usize {
     matrix[a.len()][b.len()]
 }
 
+/// Map an AST operator onto the shared arithmetic/ordering rules.
+fn shared_binary_op(op: &BinOp) -> Option<crate::semantics::BinaryOp> {
+    use crate::semantics::BinaryOp as S;
+    Some(match op {
+        BinOp::Add => S::Add,
+        BinOp::Sub => S::Sub,
+        BinOp::Mul => S::Mul,
+        BinOp::Div => S::Div,
+        BinOp::Mod => S::Mod,
+        BinOp::Lt => S::Lt,
+        BinOp::Gt => S::Gt,
+        BinOp::LtEq => S::LtEq,
+        BinOp::GtEq => S::GtEq,
+        _ => return None,
+    })
+}
+
+/// Project an interpreter value onto the shared operand view.
+fn semantic_operand(value: &Value) -> crate::semantics::Operand<'_> {
+    use crate::semantics::Operand;
+    match value {
+        Value::Int(n) => Operand::Int(*n),
+        Value::Float(f) => Operand::Float(*f),
+        Value::String(s) => Operand::Str(s),
+        Value::Bool(_) => Operand::Bool,
+        Value::Null => Operand::Null,
+        other => Operand::Other(other.type_name()),
+    }
+}
+
+/// Arity rule for a direct call (`f(a, b)`, `x |> f`) of a user-defined
+/// function or lambda, shared with the VM through `crate::semantics`.
+/// Callbacks invoked by builtins go through `call_function` unchecked.
+fn check_direct_call_arity(func: &Value, argc: usize) -> Result<(), RuntimeError> {
+    let (name, params): (&str, &[Param]) = match func {
+        Value::Function(f) => (f.name.as_str(), &f.params),
+        Value::Lambda { params, .. } => ("", params),
+        _ => return Ok(()),
+    };
+    let required = crate::semantics::required_params(params.iter().map(|p| p.default.is_some()));
+    crate::semantics::check_call_arity(name, params.len(), required, argc)
+        .map_err(|e| RuntimeError::new(&e))
+}
+
+/// Arity rule for `receiver.method(args)` reaching a user-defined function
+/// (an object field, a static method, or an instance method whose first
+/// parameter receives `receiver` when `receiver_param`). `argc` counts the
+/// explicit arguments; errors name the method as written at the call site.
+/// The VM applies the same rule (`check_user_method_arity`).
+fn check_method_call_arity(
+    func: &Value,
+    method: &str,
+    argc: usize,
+    receiver_param: bool,
+) -> Result<(), RuntimeError> {
+    let params: &[Param] = match func {
+        Value::Function(f) => &f.params,
+        Value::Lambda { params, .. } => params,
+        _ => return Ok(()),
+    };
+    let required = crate::semantics::required_params(params.iter().map(|p| p.default.is_some()));
+    if receiver_param {
+        crate::semantics::check_method_arity(method, params.len(), required, argc)
+    } else {
+        crate::semantics::check_call_arity(method, params.len(), required, argc)
+    }
+    .map_err(|e| RuntimeError::new(&e))
+}
+
+/// How a block expression (or a body's value-producing tail) finished.
+enum BlockExit {
+    Value(Value),
+    Return(Value),
+    Break,
+    Continue,
+}
+
 /// Control flow signals
 enum Signal {
     None,
@@ -763,8 +947,6 @@ enum Signal {
     Break,
     Continue,
 }
-
-const MAX_CALL_DEPTH: usize = 512;
 
 /// Debug action requested by the DAP client
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -896,10 +1078,7 @@ impl Interpreter {
             }
         }
         for scope in &env.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            for v in guard.values() {
-                walk(v);
-            }
+            lock_scope(scope).values().for_each(walk);
         }
     }
 
@@ -1007,53 +1186,11 @@ impl Interpreter {
     }
 
     fn register_builtins(&mut self) {
-        self.env
-            .define("math".to_string(), crate::stdlib::create_math_module());
-        self.env
-            .define("fs".to_string(), crate::stdlib::create_fs_module());
-        self.env
-            .define("io".to_string(), crate::stdlib::create_io_module());
-        self.env
-            .define("crypto".to_string(), crate::stdlib::create_crypto_module());
-        self.env
-            .define("db".to_string(), crate::stdlib::create_db_module());
-        self.env
-            .define("env".to_string(), crate::stdlib::create_env_module());
-        self.env
-            .define("json".to_string(), crate::stdlib::create_json_module());
-        self.env
-            .define("regex".to_string(), crate::stdlib::create_regex_module());
-        self.env
-            .define("log".to_string(), crate::stdlib::create_log_module());
-        #[cfg(feature = "postgres")]
-        self.env
-            .define("pg".to_string(), crate::stdlib::create_pg_module());
-        self.env
-            .define("term".to_string(), crate::stdlib::create_term_module());
-        self.env
-            .define("http".to_string(), crate::stdlib::create_http_module());
-        self.env
-            .define("csv".to_string(), crate::stdlib::create_csv_module());
-        self.env
-            .define("time".to_string(), crate::stdlib::create_time_module());
-        self.env
-            .define("npc".to_string(), crate::stdlib::create_npc_module());
-        self.env
-            .define("url".to_string(), crate::stdlib::create_url_module());
-        self.env
-            .define("toml".to_string(), crate::stdlib::create_toml_module());
-        self.env
-            .define("ws".to_string(), crate::stdlib::create_ws_module());
-        self.env
-            .define("jwt".to_string(), crate::stdlib::create_jwt_module());
-        self.env
-            .define("os".to_string(), crate::stdlib::create_os_module());
-        self.env
-            .define("path".to_string(), crate::stdlib::create_path_module());
-        #[cfg(feature = "mysql")]
-        self.env
-            .define("mysql".to_string(), crate::stdlib::create_mysql_module());
-
+        // Modules and global builtins come from the shared registry so both
+        // engines expose exactly the same names (see builtins_registry.rs).
+        for module in crate::builtins_registry::modules() {
+            self.env.define(module.name.to_string(), (module.create)());
+        }
         // Prelude: Option type = Some(value) | None
         self.env
             .define("Some".to_string(), Value::BuiltIn("Some".to_string()));
@@ -1074,138 +1211,11 @@ impl Interpreter {
                 .define("__type_Option__".to_string(), Value::Object(type_meta));
         }
 
-        for name in &[
-            "print",
-            "println",
-            "len",
-            "type",
-            "typeof",
-            "str",
-            "int",
-            "float",
-            "push",
-            "pop",
-            "keys",
-            "values",
-            "contains",
-            "has_key",
-            "get",
-            "pick",
-            "omit",
-            "merge",
-            "find",
-            "flat_map",
-            "entries",
-            "from_entries",
-            "range",
-            "set",
-            "enumerate",
-            "map",
-            "filter",
-            "Ok",
-            "ok",
-            "Err",
-            "err",
-            "is_ok",
-            "is_err",
-            "unwrap",
-            "unwrap_or",
-            "unwrap_err",
-            "fetch",
-            "uuid",
-            "say",
-            "yell",
-            "whisper",
-            "wait",
-            "channel",
-            "send",
-            "receive",
-            "is_some",
-            "is_none",
-            "satisfies",
-            "assert",
-            "assert_eq",
-            "exit",
-            "run_command",
-            "shell",
-            "sh",
-            "sh_lines",
-            "sh_json",
-            "sh_ok",
-            "which",
-            "cwd",
-            "cd",
-            "lines",
-            "pipe_to",
-            "input",
-            "reduce",
-            "sort",
-            "reverse",
-            "split",
-            "join",
-            "replace",
-            "starts_with",
-            "ends_with",
-            "substring",
-            "index_of",
-            "last_index_of",
-            "pad_start",
-            "pad_end",
-            "capitalize",
-            "title",
-            "repeat_str",
-            "count",
-            "sum",
-            "min_of",
-            "max_of",
-            "any",
-            "all",
-            "unique",
-            "zip",
-            "flatten",
-            "group_by",
-            "chunk",
-            "slice",
-            "assert_ne",
-            "assert_throws",
-            "try_send",
-            "try_receive",
-            "select",
-            "close",
-            "await_all",
-            "await_timeout",
-            // GenZ Debug Kit
-            "sus",
-            "bruh",
-            "bet",
-            "no_cap",
-            "ick",
-            // Execution helpers
-            "cook",
-            "yolo",
-            "ghost",
-            "slay",
-            // String utils
-            "slugify",
-            "snake_case",
-            "camel_case",
-            // Array utils
-            "sample",
-            "shuffle",
-            "partition",
-            "diff",
-            // New collection utils
-            "sort_by",
-            "first",
-            "last",
-            "compact",
-            "take_n",
-            "skip",
-            "frequencies",
-            "for_each",
-        ] {
-            self.env
-                .define(name.to_string(), Value::BuiltIn(name.to_string()));
+        for builtin in crate::builtins_registry::GLOBALS {
+            self.env.define(
+                builtin.name.to_string(),
+                Value::BuiltIn(builtin.name.to_string()),
+            );
         }
     }
 
@@ -1217,7 +1227,15 @@ impl Interpreter {
                     cov.insert(spanned.line);
                 }
             }
+            // Top-level statements are debugger stop points too (breakpoints,
+            // stepping, stop-on-entry); `exec_stmts` only covers blocks.
+            if spanned.line > 0 {
+                self.debug_check(spanned.line);
+            }
             match self.exec_stmt(&spanned.stmt) {
+                Err(e) if e.is_early_return() => {
+                    return Ok(e.propagated_value().unwrap_or(Value::Null))
+                }
                 Ok(signal) => match signal {
                     Signal::Return(v) => return Ok(v),
                     Signal::Break => return Err(RuntimeError::new("break outside of loop")),
@@ -1241,36 +1259,50 @@ impl Interpreter {
         let mut last = Value::Null;
         for spanned in &program.statements {
             self.current_line = spanned.line;
-            match self.exec_stmt(&spanned.stmt).map_err(|mut e| {
+            let patch = |mut e: RuntimeError| {
                 if e.line == 0 {
                     e.line = spanned.line;
                     e.col = spanned.col;
                 }
                 e
-            })? {
+            };
+            // Expression statements are evaluated exactly once; their value
+            // (unless it is an output call) is the REPL result.
+            if let Stmt::Expression(ref expr) = spanned.stmt {
+                let value = match self.eval_expr(expr) {
+                    Err(e) if e.is_early_return() => {
+                        return Ok(e.propagated_value().unwrap_or(Value::Null))
+                    }
+                    other => other.map_err(patch)?,
+                };
+                let is_output = matches!(
+                    expr,
+                    Expr::Call { function, .. }
+                        if matches!(
+                            function.as_ref(),
+                            Expr::Ident(name)
+                                if matches!(
+                                    name.as_str(),
+                                    "print" | "println" | "say" | "yell" | "whisper"
+                                )
+                        )
+                );
+                if !is_output {
+                    last = value;
+                }
+                continue;
+            }
+            let signal = match self.exec_stmt(&spanned.stmt) {
+                Err(e) if e.is_early_return() => {
+                    return Ok(e.propagated_value().unwrap_or(Value::Null))
+                }
+                other => other.map_err(patch)?,
+            };
+            match signal {
                 Signal::Return(v) => return Ok(v),
                 Signal::Break => return Err(RuntimeError::new("break outside of loop")),
                 Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
                 Signal::None | Signal::ImplicitReturn(_) => {}
-            }
-            if let Stmt::Expression(ref expr) = spanned.stmt {
-                match expr {
-                    Expr::Call { function, .. } => {
-                        if let Expr::Ident(name) = function.as_ref() {
-                            let is_output = matches!(
-                                name.as_str(),
-                                "print" | "println" | "say" | "yell" | "whisper"
-                            );
-                            if is_output {
-                                continue;
-                            }
-                        }
-                        last = self.eval_expr(expr)?;
-                    }
-                    _ => {
-                        last = self.eval_expr(expr)?;
-                    }
-                }
             }
         }
         Ok(last)
@@ -1294,66 +1326,21 @@ impl Interpreter {
             }
 
             Stmt::Assign { target, value } => {
+                // Variable, field and index targets are handled in place
+                // (see places.rs); this is the general path for `x = expr`
+                // and the error for anything else.
+                if let Some(result) = self.try_assign_in_place(target, value) {
+                    result?;
+                    return Ok(Signal::None);
+                }
                 let val = self.eval_expr(value)?;
                 match target {
                     Expr::Ident(name) => self.env.set(name, val)?,
-                    Expr::FieldAccess { object, field } => {
-                        let name = if let Expr::Ident(n) = object.as_ref() {
-                            n.clone()
-                        } else {
-                            return Err(RuntimeError::new("can only assign to variable fields"));
-                        };
-                        let obj = self
-                            .env
-                            .get(&name)
-                            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", name)))?;
-                        if obj.is_frozen() {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot modify frozen value '{}': field '{}'",
-                                name, field
-                            )));
-                        }
-                        let mut obj = obj;
-                        if let Value::Object(ref mut map) = obj {
-                            map.insert(field.clone(), val);
-                        }
-                        self.env.set(&name, obj)?;
+                    Expr::FieldAccess { .. } => {
+                        return Err(RuntimeError::new("can only assign to variable fields"))
                     }
-                    Expr::Index { object, index } => {
-                        let name = if let Expr::Ident(n) = object.as_ref() {
-                            n.clone()
-                        } else {
-                            return Err(RuntimeError::new("can only assign to variable indices"));
-                        };
-                        let idx = self.eval_expr(index)?;
-                        let existing = self
-                            .env
-                            .get(&name)
-                            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", name)))?;
-                        if existing.is_frozen() {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot modify frozen value '{}': index assignment",
-                                name
-                            )));
-                        }
-                        if matches!(existing, Value::Tuple(_)) {
-                            return Err(RuntimeError::new("cannot mutate a tuple"));
-                        }
-                        if matches!(existing, Value::Set(_)) {
-                            return Err(RuntimeError::new(
-                                "cannot index-assign a set; use .add() and .remove()",
-                            ));
-                        }
-                        let mut arr = existing;
-                        if let (Value::Array(ref mut items), Value::Int(i)) = (&mut arr, &idx) {
-                            let i = *i as usize;
-                            if i < items.len() {
-                                items[i] = val;
-                            } else {
-                                return Err(RuntimeError::new("index out of bounds"));
-                            }
-                        }
-                        self.env.set(&name, arr)?;
+                    Expr::Index { .. } => {
+                        return Err(RuntimeError::new("can only assign to variable indices"))
                     }
                     _ => return Err(RuntimeError::new("invalid assignment target")),
                 }
@@ -1367,31 +1354,16 @@ impl Interpreter {
                 decorators,
                 ..
             } => {
-                let func = Value::Function {
+                // The closure shares the current scope's Arc, so the function
+                // sees its own binding (recursion) once it is defined below.
+                let func = Value::Function(Arc::new(FunctionValue {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
                     closure: self.env.clone(),
                     decorators: decorators.clone(),
-                };
-                self.env.define(name.clone(), func.clone());
-                if let Value::Function {
-                    name: n,
-                    params: p,
-                    body: b,
-                    decorators: d,
-                    ..
-                } = func
-                {
-                    let recursive_func = Value::Function {
-                        name: n,
-                        params: p,
-                        body: b,
-                        closure: self.env.clone(),
-                        decorators: d,
-                    };
-                    self.env.define(name.clone(), recursive_func);
-                }
+                }));
+                self.env.define(name.clone(), func);
                 Ok(Signal::None)
             }
 
@@ -1512,13 +1484,13 @@ impl Interpreter {
                             format!("{}::{}", type_name, method_name)
                         };
 
-                        let func_val = Value::Function {
+                        let func_val = Value::Function(Arc::new(FunctionValue {
                             name: qualified_name.clone(),
                             params: params.clone(),
                             body: body.clone(),
                             closure: self.env.clone(),
                             decorators: Vec::new(),
-                        };
+                        }));
 
                         // Register in method tables
                         let type_methods = self
@@ -1579,9 +1551,9 @@ impl Interpreter {
             } => {
                 let cond = self.eval_expr(condition)?;
                 if cond.is_truthy() {
-                    self.exec_block(then_body)
+                    self.exec_body(then_body)
                 } else if let Some(else_b) = else_body {
-                    self.exec_block(else_b)
+                    self.exec_body(else_b)
                 } else {
                     Ok(Signal::None)
                 }
@@ -1590,56 +1562,13 @@ impl Interpreter {
             Stmt::Match { subject, arms } => {
                 let val = self.eval_expr(subject)?;
 
-                // Check exhaustiveness for ADT values
-                if let Value::Object(ref obj) = val {
-                    if let Some(Value::String(type_name)) = obj.get("__type__") {
-                        let type_key = format!("__type_{}__", type_name);
-                        if let Some(Value::Object(type_meta)) = self.env.get(&type_key) {
-                            if let Some(Value::Array(variant_list)) = type_meta.get("variants") {
-                                let has_wildcard =
-                                    arms.iter().any(|a| matches!(a.pattern, Pattern::Wildcard));
-                                let variant_names: Vec<&str> = variant_list
-                                    .iter()
-                                    .filter_map(|v| {
-                                        if let Value::String(s) = v {
-                                            Some(s.as_str())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect();
-                                let has_true_catchall = arms.iter().any(|a| {
-                                    if let Pattern::Binding(bname) = &a.pattern {
-                                        !variant_names.contains(&bname.as_str())
-                                    } else {
-                                        false
-                                    }
-                                });
-                                if !has_wildcard && !has_true_catchall {
-                                    for vname in &variant_names {
-                                        let covered = arms.iter().any(|a| match &a.pattern {
-                                            Pattern::Constructor { name, .. } => name == vname,
-                                            Pattern::Binding(bname) => bname == vname,
-                                            _ => false,
-                                        });
-                                        if !covered {
-                                            return Err(RuntimeError::new(&format!(
-                                                "non-exhaustive match: missing variant '{}'",
-                                                vname
-                                            )));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                self.check_match_exhaustive(&val, arms)?;
 
                 for arm in arms {
                     if self.match_pattern(&arm.pattern, &val) {
                         self.env.push_scope();
                         self.bind_pattern(&arm.pattern, &val);
-                        let result = self.exec_block(&arm.body);
+                        let result = self.exec_body(&arm.body);
                         self.env.pop_scope();
                         return result;
                     }
@@ -1659,7 +1588,7 @@ impl Interpreter {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
-                            match self.exec_block(body)? {
+                            match self.exec_loop_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1685,7 +1614,7 @@ impl Interpreter {
                             if let Some(v2) = var2 {
                                 self.env.define(v2.clone(), val);
                             }
-                            match self.exec_block(body)? {
+                            match self.exec_loop_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1713,7 +1642,7 @@ impl Interpreter {
                             } else {
                                 self.env.define(var.clone(), Value::Tuple(vec![key, val]));
                             }
-                            match self.exec_block(body)? {
+                            match self.exec_loop_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1745,7 +1674,7 @@ impl Interpreter {
                         };
                         self.env.push_scope();
                         self.env.define(var.clone(), val);
-                        match self.exec_block(body)? {
+                        match self.exec_loop_body(body)? {
                             Signal::Break => {
                                 self.env.pop_scope();
                                 break;
@@ -1778,7 +1707,7 @@ impl Interpreter {
                     if !cond.is_truthy() {
                         break;
                     }
-                    match self.exec_block(body)? {
+                    match self.exec_loop_body(body)? {
                         Signal::Break => break,
                         Signal::Continue => continue,
                         Signal::Return(v) => return Ok(Signal::Return(v)),
@@ -1790,7 +1719,7 @@ impl Interpreter {
 
             Stmt::Loop { body } => {
                 loop {
-                    match self.exec_block(body)? {
+                    match self.exec_loop_body(body)? {
                         Signal::Break => break,
                         Signal::Continue => continue,
                         Signal::Return(v) => return Ok(Signal::Return(v)),
@@ -1818,8 +1747,9 @@ impl Interpreter {
                 try_body,
                 catch_var,
                 catch_body,
-            } => match self.exec_block(try_body) {
+            } => match self.exec_body(try_body) {
                 Ok(signal) => Ok(signal),
+                Err(e) if e.is_control_escape() => Err(e),
                 Err(e) => {
                     self.env.push_scope();
                     let mut err_obj = IndexMap::new();
@@ -1845,7 +1775,7 @@ impl Interpreter {
                     self.env.define(catch_var.clone(), Value::Object(err_obj));
                     // FIX: was `result.unwrap_or(Signal::None);` — the semicolon
                     // silently discarded errors from the catch body itself.
-                    let catch_result = self.exec_block(catch_body);
+                    let catch_result = self.exec_body(catch_body);
                     self.env.pop_scope();
                     match catch_result {
                         Ok(sig) => Ok(sig),
@@ -1855,12 +1785,7 @@ impl Interpreter {
             },
 
             Stmt::Import { path, names } => {
-                let builtin_modules = [
-                    "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log",
-                    "term", "http", "csv", "exec", "time", "url", "toml", "npc", "ws", "jwt",
-                    "mysql",
-                ];
-                if builtin_modules.contains(&path.as_str()) {
+                if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
                     if self.env.get(path).is_some() {
                         return Ok(Signal::None);
                     }
@@ -1878,12 +1803,11 @@ impl Interpreter {
                 {
                     Some(p) => p,
                     None => {
-                        return Err(RuntimeError::new(&format!(
-                            "cannot import '{}': file not found (checked {0}.fg, forge_modules/{0}/main.fg)",
-                            path
-                        )));
+                        return Err(RuntimeError::new(&crate::semantics::import_not_found(path)));
                     }
                 };
+                crate::permissions::require_import(&file_path)
+                    .map_err(|e| RuntimeError::new(&e.to_string()))?;
                 let source = std::fs::read_to_string(&file_path)
                     .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
                 let mut lexer = crate::lexer::Lexer::new(&source);
@@ -1895,15 +1819,22 @@ impl Interpreter {
                     RuntimeError::new(&format!("import '{}' parse error: {}", path, e.message))
                 })?;
 
+                // Shared cycle detection (runtime/imports.rs); the guard keeps
+                // this module on the import chain while it runs.
+                let _import_guard = crate::runtime::imports::enter_import(&file_path)
+                    .map_err(|msg| RuntimeError::new(&msg))?;
                 let mut import_interp = Interpreter::new();
                 import_interp.source_file = Some(file_path.clone());
+                // Module top-level output goes where ours goes (sandbox/DAP capture).
+                import_interp.output_sink = self.output_sink.clone();
                 import_interp.run(&program)?;
 
                 if let Some(name_list) = names {
                     for name in name_list {
-                        if let Some(val) = import_interp.env.get(name) {
-                            self.env.define(name.to_string(), val);
-                        }
+                        let val = import_interp.env.get(name).ok_or_else(|| {
+                            RuntimeError::new(&crate::semantics::import_missing_name(path, name))
+                        })?;
+                        self.env.define(name.to_string(), val);
                     }
                 } else {
                     // Import all top-level definitions
@@ -2031,7 +1962,7 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
-            Stmt::YieldStmt(_expr) => Ok(Signal::None),
+            Stmt::YieldStmt(_expr) => Err(RuntimeError::new(crate::semantics::YIELD_UNSUPPORTED)),
 
             Stmt::When { subject, arms } => {
                 let val = self.eval_expr(subject)?;
@@ -2042,23 +1973,21 @@ impl Interpreter {
                     }
                     if let (Some(op), Some(cmp_val)) = (&arm.op, &arm.value) {
                         let cmp = self.eval_expr(cmp_val)?;
-                        let matches = match (op, &val, &cmp) {
-                            (BinOp::Lt, Value::Int(a), Value::Int(b)) => a < b,
-                            (BinOp::Gt, Value::Int(a), Value::Int(b)) => a > b,
-                            (BinOp::LtEq, Value::Int(a), Value::Int(b)) => a <= b,
-                            (BinOp::GtEq, Value::Int(a), Value::Int(b)) => a >= b,
-                            (BinOp::Eq, _, _) => format!("{}", val) == format!("{}", cmp),
-                            (BinOp::NotEq, _, _) => format!("{}", val) != format!("{}", cmp),
-                            (BinOp::Lt, Value::Float(a), Value::Float(b)) => a < b,
-                            (BinOp::Gt, Value::Float(a), Value::Float(b)) => a > b,
-                            (BinOp::LtEq, Value::Float(a), Value::Float(b)) => a <= b,
-                            (BinOp::GtEq, Value::Float(a), Value::Float(b)) => a >= b,
-                            (BinOp::Lt, Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
-                            (BinOp::Gt, Value::Int(a), Value::Float(b)) => (*a as f64) > *b,
-                            (BinOp::Lt, Value::Float(a), Value::Int(b)) => *a < (*b as f64),
-                            (BinOp::Gt, Value::Float(a), Value::Int(b)) => *a > (*b as f64),
-                            _ => false,
+                        let op_text = match op {
+                            BinOp::Eq => "==",
+                            BinOp::NotEq => "!=",
+                            BinOp::Lt => "<",
+                            BinOp::Gt => ">",
+                            BinOp::LtEq => "<=",
+                            BinOp::GtEq => ">=",
+                            _ => "",
                         };
+                        let matches = crate::semantics::when_matches(
+                            op_text,
+                            semantic_operand(&val),
+                            semantic_operand(&cmp),
+                            format!("{}", val) == format!("{}", cmp),
+                        );
                         if matches {
                             let result = self.eval_expr(&arm.result)?;
                             return Ok(Signal::ImplicitReturn(result));
@@ -2087,18 +2016,17 @@ impl Interpreter {
                     CheckKind::Between(lo_expr, hi_expr) => {
                         let lo = self.eval_expr(lo_expr)?;
                         let hi = self.eval_expr(hi_expr)?;
-                        match (&val, &lo, &hi) {
-                            (Value::Int(v), Value::Int(l), Value::Int(h)) => v >= l && v <= h,
-                            (Value::Float(v), Value::Float(l), Value::Float(h)) => v >= l && v <= h,
-                            _ => false,
-                        }
+                        crate::semantics::between(
+                            semantic_operand(&val),
+                            semantic_operand(&lo),
+                            semantic_operand(&hi),
+                        )
                     }
                     CheckKind::IsTrue => val.is_truthy(),
                 };
                 if !valid {
-                    return Err(RuntimeError::new(&format!(
-                        "check failed: {} did not pass validation",
-                        val
+                    return Err(RuntimeError::new(&crate::semantics::check_failed(
+                        &val.to_string(),
                     )));
                 }
                 Ok(Signal::None)
@@ -2106,6 +2034,7 @@ impl Interpreter {
 
             Stmt::SafeBlock { body } => match self.exec_block(body) {
                 Ok(signal) => Ok(signal),
+                Err(e) if e.is_control_escape() => Err(e),
                 Err(_) => Ok(Signal::ImplicitReturn(Value::Null)),
             },
 
@@ -2120,11 +2049,15 @@ impl Interpreter {
                 let mut timeout_interp = Interpreter::new();
                 timeout_interp.env = self.env.clone();
                 timeout_interp.cancelled = cancel_flag.clone();
+                timeout_interp.output_sink = self.output_sink.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
-                let handle = std::thread::spawn(move || {
+                let handle = crate::runtime::recursion::spawn_worker(move || {
                     let result = timeout_interp.exec_block(&body);
                     let _ = tx.send(result);
-                });
+                })
+                .map_err(|e| {
+                    RuntimeError::new(&format!("timeout: cannot start worker thread: {}", e))
+                })?;
                 match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
                     Ok(result) => {
                         let _ = handle.join();
@@ -2151,8 +2084,9 @@ impl Interpreter {
                 };
                 let mut last_err = String::new();
                 for attempt in 0..max {
-                    match self.exec_block(body) {
+                    match self.exec_body(body) {
                         Ok(signal) => return Ok(signal),
+                        Err(e) if e.is_control_escape() => return Err(e),
                         Err(e) => {
                             last_err = e.message.clone();
                             if attempt < max - 1 {
@@ -2227,9 +2161,159 @@ impl Interpreter {
             }
 
             Stmt::Expression(expr) => {
-                self.eval_expr(expr)?;
+                self.eval_expr_stmt(expr, false)?;
                 Ok(Signal::None)
             }
+        }
+    }
+
+    /// A `match` on an ADT value must cover every variant unless it has a
+    /// wildcard or catch-all binding arm.
+    fn check_match_exhaustive(&self, val: &Value, arms: &[MatchArm]) -> Result<(), RuntimeError> {
+        // Check exhaustiveness for ADT values
+        if let Value::Object(obj) = val {
+            if let Some(Value::String(type_name)) = obj.get("__type__") {
+                let type_key = format!("__type_{}__", type_name);
+                if let Some(Value::Object(type_meta)) = self.env.get(&type_key) {
+                    if let Some(Value::Array(variant_list)) = type_meta.get("variants") {
+                        let has_wildcard =
+                            arms.iter().any(|a| matches!(a.pattern, Pattern::Wildcard));
+                        let variant_names: Vec<&str> = variant_list
+                            .iter()
+                            .filter_map(|v| {
+                                if let Value::String(s) = v {
+                                    Some(s.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let has_true_catchall = arms.iter().any(|a| {
+                            if let Pattern::Binding(bname) = &a.pattern {
+                                !variant_names.contains(&bname.as_str())
+                            } else {
+                                false
+                            }
+                        });
+                        if !has_wildcard && !has_true_catchall {
+                            for vname in &variant_names {
+                                let covered = arms.iter().any(|a| match &a.pattern {
+                                    Pattern::Constructor { name, .. } => name == vname,
+                                    Pattern::Binding(bname) => bname == vname,
+                                    _ => false,
+                                });
+                                if !covered {
+                                    return Err(RuntimeError::new(&format!(
+                                        "non-exhaustive match: missing variant '{}'",
+                                        vname
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Bookkeeping before running a statement: current line, coverage and
+    /// debugger stop point.
+    fn enter_stmt(&mut self, s: &SpannedStmt) {
+        self.current_line = s.line;
+        if s.line > 0 {
+            if let Some(ref mut cov) = self.coverage {
+                cov.insert(s.line);
+            }
+            self.debug_check(s.line);
+        }
+    }
+
+    /// Value of a block expression (`if`/`when`/`safe` expressions and
+    /// `{ ... }` blocks): the value of the final statement (see
+    /// [`Interpreter::eval_stmt_value`]). The VM compiler implements the
+    /// same rule (`compile_block_value`).
+    fn eval_block_value(&mut self, stmts: &[SpannedStmt]) -> Result<BlockExit, RuntimeError> {
+        let mut last = Value::Null;
+        for spanned in stmts {
+            self.enter_stmt(spanned);
+            match self.eval_stmt_value(spanned)? {
+                BlockExit::Value(v) => last = v,
+                exit => return Ok(exit),
+            }
+        }
+        Ok(BlockExit::Value(last))
+    }
+
+    /// Run one statement and produce its value: an expression's value, the
+    /// taken branch of an `if`, the matched arm of a `when` or `match`, the
+    /// result of a `safe` block — or null for any other statement
+    /// (`semantics::is_value_tail`). `return`/`break`/`continue` inside
+    /// stop evaluation and are reported as the matching [`BlockExit`].
+    fn eval_stmt_value(&mut self, spanned: &SpannedStmt) -> Result<BlockExit, RuntimeError> {
+        let patch_err = |mut e: RuntimeError| -> RuntimeError {
+            if e.line == 0 {
+                e.line = spanned.line;
+                e.col = spanned.col;
+            }
+            e
+        };
+        match &spanned.stmt {
+            Stmt::Expression(expr) => {
+                Ok(BlockExit::Value(self.eval_expr(expr).map_err(patch_err)?))
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(RuntimeError::new("cancelled"));
+                }
+                let cond = self.eval_expr(condition).map_err(patch_err)?;
+                let branch = if cond.is_truthy() {
+                    Some(then_body)
+                } else {
+                    else_body.as_ref()
+                };
+                match branch {
+                    Some(branch) => {
+                        self.env.push_scope();
+                        let result = self.eval_block_value(branch);
+                        self.env.pop_scope();
+                        result
+                    }
+                    None => Ok(BlockExit::Value(Value::Null)),
+                }
+            }
+            Stmt::Match { subject, arms } => {
+                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(RuntimeError::new("cancelled"));
+                }
+                let val = self.eval_expr(subject).map_err(patch_err)?;
+                self.check_match_exhaustive(&val, arms).map_err(patch_err)?;
+                for arm in arms {
+                    if self.match_pattern(&arm.pattern, &val) {
+                        self.env.push_scope();
+                        self.bind_pattern(&arm.pattern, &val);
+                        let result = self.eval_block_value(&arm.body);
+                        self.env.pop_scope();
+                        return result;
+                    }
+                }
+                Err(patch_err(RuntimeError::new("non-exhaustive match")))
+            }
+            stmt => Ok(match self.exec_stmt(stmt).map_err(patch_err)? {
+                Signal::Return(v) => BlockExit::Return(v),
+                Signal::Break => BlockExit::Break,
+                Signal::Continue => BlockExit::Continue,
+                Signal::ImplicitReturn(v)
+                    if matches!(stmt, Stmt::When { .. } | Stmt::SafeBlock { .. }) =>
+                {
+                    BlockExit::Value(v)
+                }
+                Signal::None | Signal::ImplicitReturn(_) => BlockExit::Value(Value::Null),
+            }),
         }
     }
 
@@ -2240,22 +2324,65 @@ impl Interpreter {
         result
     }
 
+    /// Run the body of a statement (loop body, `if` branch, `match` arm,
+    /// `try`/`catch` block) in a new scope. Such bodies never produce a
+    /// value — `exec_stmts` and `eval_block_value` drop the
+    /// `ImplicitReturn` payload of every statement except `when`/`safe` —
+    /// so their final expression is evaluated for effect only, which lets
+    /// a trailing `out.push(x)` mutate in place without copying `out`.
+    fn exec_body(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        self.env.push_scope();
+        let result = self.exec_stmts_with(stmts, false);
+        self.env.pop_scope();
+        result
+    }
+
+    /// `exec_body` for a loop body: a `break`/`continue` that unwound out of
+    /// a block expression (`RuntimeError::loop_escape`) ends here as the
+    /// matching loop signal.
+    fn exec_loop_body(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        match self.exec_body(stmts) {
+            Err(e) => match e.loop_escape {
+                Some(LoopEscape::Break) => Ok(Signal::Break),
+                Some(LoopEscape::Continue) => Ok(Signal::Continue),
+                None => Err(e),
+            },
+            other => other,
+        }
+    }
+
     fn exec_stmts(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        self.exec_stmts_with(stmts, true)
+    }
+
+    /// Execute statements, returning `ImplicitReturn(v)` where `v` is the
+    /// value of a trailing expression statement. With `keep_value == false`
+    /// the caller promises to ignore `v`, so it is not materialised.
+    fn exec_stmts_with(
+        &mut self,
+        stmts: &[SpannedStmt],
+        keep_value: bool,
+    ) -> Result<Signal, RuntimeError> {
         let mut result = Signal::None;
         let mut last_expr_value = Value::Null;
-        for s in stmts {
-            self.current_line = s.line;
-            if let Some(ref mut cov) = self.coverage {
-                if s.line > 0 {
-                    cov.insert(s.line);
-                }
-            }
-            if s.line > 0 {
-                self.debug_check(s.line);
-            }
+        let last_index = stmts.len().saturating_sub(1);
+        for (index, s) in stmts.iter().enumerate() {
+            self.enter_stmt(s);
             let stmt = &s.stmt;
+            if keep_value && index == last_index && crate::semantics::is_value_tail(stmt) {
+                // A trailing `if`/`when`/`match`/`safe` yields the value of
+                // the branch that ran (same rule as the VM's
+                // `compile_function_body`).
+                return Ok(match self.eval_stmt_value(s)? {
+                    BlockExit::Value(v) => Signal::ImplicitReturn(v),
+                    BlockExit::Return(v) => Signal::Return(v),
+                    BlockExit::Break => Signal::Break,
+                    BlockExit::Continue => Signal::Continue,
+                });
+            }
             if let Stmt::Expression(expr) = stmt {
-                last_expr_value = self.eval_expr(expr).map_err(|mut e| {
+                let want_value = keep_value && index == last_index;
+                last_expr_value = self.eval_expr_stmt(expr, want_value).map_err(|mut e| {
                     if e.line == 0 {
                         e.line = s.line;
                         e.col = s.col;
@@ -2323,13 +2450,18 @@ impl Interpreter {
                 *d = self.call_depth;
             }
 
+            // Clear the resume flag BEFORE notifying the DAP server. Clearing
+            // it afterwards loses a wakeup when the client resumes quickly:
+            // the server's `resumed = true` would be overwritten and this
+            // thread would wait forever.
+            let (lock, cvar) = &ds.resume;
+            *lock.lock().unwrap_or_else(|e| e.into_inner()) = false;
+
             // Notify DAP server we've paused
             let _ = ds.paused_sender.send(line);
 
             // Wait for resume signal
-            let (lock, cvar) = &ds.resume;
             let mut resumed = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *resumed = false;
             while !*resumed {
                 // Use timeout to keep cooperative cancellation alive
                 let result = cvar
@@ -2373,7 +2505,7 @@ impl Interpreter {
                 }
                 let val = self.env.get(&name)?;
                 match val {
-                    Value::BuiltIn(_) | Value::Function { .. } | Value::Lambda { .. } => None,
+                    Value::BuiltIn(_) | Value::Function(_) | Value::Lambda { .. } => None,
                     Value::Object(ref map) if map.contains_key("__module__") => None,
                     _ => Some((name, format!("{}", val))),
                 }
@@ -2439,13 +2571,10 @@ impl Interpreter {
 
             Expr::Ident(name) => self.env.get(name).ok_or_else(|| {
                 let suggestion = self.env.suggest_similar(name);
-                let mut msg = format!("undefined variable: '{}'", name);
-                if let Some(similar) = suggestion {
-                    msg.push_str(&format!("\n  hint: did you mean '{}'?", similar));
-                } else {
-                    msg.push_str("\n  hint: make sure the variable is defined before use");
-                }
-                RuntimeError::new(&msg)
+                RuntimeError::new(&crate::semantics::undefined_variable(
+                    name,
+                    suggestion.as_deref(),
+                ))
             }),
 
             Expr::BinOp { left, op, right } => {
@@ -2495,206 +2624,49 @@ impl Interpreter {
             }
 
             Expr::FieldAccess { object, field } => {
-                let obj = self.eval_expr(object)?;
-                // Unwrap Frozen for read access
-                let inner = match &obj {
-                    Value::Frozen(v) => v.as_ref(),
-                    other => other,
-                };
-                match inner {
-                    Value::Object(map) => {
-                        // Direct field access
-                        if let Some(val) = map.get(field) {
-                            return Ok(val.clone());
-                        }
-                        // Embedded field delegation: check embedded sub-objects
-                        if let Some(Value::String(type_name)) = map.get("__type__") {
-                            if let Some(embeds) = self.embedded_fields.get(type_name).cloned() {
-                                for (embed_field, _embed_type) in &embeds {
-                                    if let Some(Value::Object(sub)) = map.get(embed_field) {
-                                        if let Some(val) = sub.get(field) {
-                                            return Ok(val.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(RuntimeError::new(&format!(
-                            "no field '{}' on object",
-                            field
-                        )))
+                // Read a field of a variable in place instead of copying
+                // the whole object first.
+                if let Expr::Ident(name) = object.as_ref() {
+                    if let Some(result) = self.env.with_value(name, |obj| self.field_of(obj, field))
+                    {
+                        return result;
                     }
-                    Value::String(s) => match field.as_str() {
-                        "len" => Ok(Value::Int(s.chars().count() as i64)),
-                        "upper" => Ok(Value::String(s.to_uppercase())),
-                        "lower" => Ok(Value::String(s.to_lowercase())),
-                        "trim" => Ok(Value::String(s.trim().to_string())),
-                        "trim_start" => Ok(Value::String(s.trim_start().to_string())),
-                        "trim_end" => Ok(Value::String(s.trim_end().to_string())),
-                        "is_empty" => Ok(Value::Bool(s.is_empty())),
-                        "is_numeric" => Ok(Value::Bool(
-                            s.chars()
-                                .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
-                        )),
-                        "is_alpha" => Ok(Value::Bool(
-                            !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
-                        )),
-                        "is_alphanumeric" => Ok(Value::Bool(
-                            !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
-                        )),
-                        "chars" => Ok(Value::Array(
-                            s.chars().map(|c| Value::String(c.to_string())).collect(),
-                        )),
-                        "bytes" => Ok(Value::Array(
-                            s.bytes().map(|b| Value::Int(b as i64)).collect(),
-                        )),
-                        "words" => Ok(Value::Array(
-                            s.split_whitespace()
-                                .map(|w| Value::String(w.to_string()))
-                                .collect(),
-                        )),
-                        "lines" => Ok(Value::Array(
-                            s.lines().map(|l| Value::String(l.to_string())).collect(),
-                        )),
-                        "reverse" => Ok(Value::String(s.chars().rev().collect())),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on String",
-                            field
-                        ))),
-                    },
-                    Value::Array(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on Array",
-                            field
-                        ))),
-                    },
-                    Value::Tuple(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on Tuple",
-                            field
-                        ))),
-                    },
-                    Value::Set(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
-                    },
-                    _ => Err(RuntimeError::new(&format!(
-                        "cannot access field '{}' on {}",
-                        field,
-                        obj.type_name()
-                    ))),
                 }
+                let obj = self.eval_expr(object)?;
+                self.field_of(&obj, field)
             }
 
             Expr::Index { object, index } => {
-                let obj = self.eval_expr(object)?;
-                let idx = self.eval_expr(index)?;
-                // Unwrap Frozen for read access
-                let inner = match &obj {
-                    Value::Frozen(v) => v.as_ref(),
-                    other => other,
-                };
-                match (inner, &idx) {
-                    (Value::Array(items) | Value::Tuple(items), Value::Int(i)) => {
-                        // Support negative indices (Python-style: -1 = last)
-                        let len = items.len() as i64;
-                        let actual = if *i < 0 { len + i } else { *i };
-                        if actual < 0 || actual >= len {
-                            Err(RuntimeError::new(&format!(
-                                "index out of bounds: index {} on {} of length {}",
-                                i,
-                                if matches!(inner, Value::Tuple(_)) {
-                                    "tuple"
-                                } else {
-                                    "array"
-                                },
-                                len
-                            )))
-                        } else {
-                            Ok(items[actual as usize].clone())
+                // `name[i]`: index the variable in place so only the element
+                // is copied. The index is evaluated before the variable is
+                // read, which is only unobservable when it cannot run code.
+                if let Expr::Ident(name) = object.as_ref() {
+                    if self.env.contains(name) && self.is_effect_free(index) {
+                        let idx = self.eval_expr(index)?;
+                        if let Some(result) =
+                            self.env.with_value(name, |obj| Self::index_of(obj, &idx))
+                        {
+                            return result;
                         }
                     }
-                    (Value::Object(map), Value::String(key)) => map
-                        .get(key)
-                        .cloned()
-                        .ok_or_else(|| RuntimeError::new(&format!("key '{}' not found", key))),
-                    _ => Err(RuntimeError::new("invalid index operation")),
                 }
+                let obj = self.eval_expr(object)?;
+                let idx = self.eval_expr(index)?;
+                Self::index_of(&obj, &idx)
             }
 
             Expr::Call { function, args } => {
                 // Method call: obj.method(args) -> method(obj, args)
+                // In-place forms on variables: mutating collection methods
+                // (`a.push(x)`, `push(a, x)`, `s.add(x)`, ...) and cheap
+                // reads (`len(a)`, `s.has(x)`, `m.get(k)`, ...).
+                if let Some(result) = self.try_mutate_in_place(expr, true) {
+                    return result;
+                }
+                if let Some(result) = self.try_read_in_place(expr) {
+                    return result;
+                }
                 if let Expr::FieldAccess { object, field } = function.as_ref() {
-                    // In-place mutation for arr.push(x) / arr.pop() on mutable variables
-                    if let Expr::Ident(var_name) = object.as_ref() {
-                        if self.env.is_mutable(var_name) == Some(true) {
-                            if field == "push" && args.len() == 1 {
-                                let arr = self.eval_expr(object)?;
-                                let val = self.eval_expr(&args[0])?;
-                                if let Value::Array(mut items) = arr {
-                                    items.push(val);
-                                    let new_arr = Value::Array(items);
-                                    self.env.set(var_name, new_arr.clone())?;
-                                    return Ok(new_arr);
-                                }
-                                return Err(RuntimeError::new(
-                                    "push() first argument must be array",
-                                ));
-                            }
-                            if field == "pop" && args.is_empty() {
-                                let arr = self.eval_expr(object)?;
-                                if let Value::Array(mut items) = arr {
-                                    let popped = items.pop().unwrap_or(Value::Null);
-                                    self.env.set(var_name, Value::Array(items))?;
-                                    return Ok(popped);
-                                }
-                                return Err(RuntimeError::new("pop() requires array"));
-                            }
-                            // In-place set mutation: s.add(x) / s.remove(x) on a mutable set variable.
-                            // Peel Frozen so we can produce a useful error rather than a silent no-op.
-                            if field == "add" && args.len() == 1 {
-                                let s = self.eval_expr(object)?;
-                                let raw = match s {
-                                    Value::Frozen(_) => {
-                                        return Err(RuntimeError::new("cannot add to a frozen set"))
-                                    }
-                                    other => other,
-                                };
-                                if let Value::Set(mut items) = raw {
-                                    let val = self.eval_expr(&args[0])?;
-                                    if !items.iter().any(|v| Value::container_eq(v, &val)) {
-                                        items.push(val);
-                                    }
-                                    let new_set = Value::Set(items);
-                                    self.env.set(var_name, new_set.clone())?;
-                                    return Ok(new_set);
-                                }
-                            }
-                            if field == "remove" && args.len() == 1 {
-                                let s = self.eval_expr(object)?;
-                                let raw = match s {
-                                    Value::Frozen(_) => {
-                                        return Err(RuntimeError::new(
-                                            "cannot remove from a frozen set",
-                                        ))
-                                    }
-                                    other => other,
-                                };
-                                if let Value::Set(items) = raw {
-                                    let val = self.eval_expr(&args[0])?;
-                                    let filtered: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| !Value::container_eq(v, &val))
-                                        .collect();
-                                    let new_set = Value::Set(filtered);
-                                    self.env.set(var_name, new_set.clone())?;
-                                    return Ok(new_set);
-                                }
-                            }
-                        }
-                    }
                     let obj = self.eval_expr(object)?;
                     let method_name = field.as_str();
                     let known_methods = [
@@ -2792,7 +2764,14 @@ impl Interpreter {
                             if let Some(func) = func_opt {
                                 let eval_args: Result<Vec<Value>, _> =
                                     args.iter().map(|a| self.eval_expr(a)).collect();
-                                return self.call_function(func, eval_args?);
+                                let eval_args = eval_args?;
+                                check_method_call_arity(
+                                    &func,
+                                    method_name,
+                                    eval_args.len(),
+                                    false,
+                                )?;
+                                return self.call_function(func, eval_args);
                             }
                             return Err(RuntimeError::new(&format!(
                                 "no static method '{}' on {}",
@@ -2816,6 +2795,7 @@ impl Interpreter {
                                 for arg in args {
                                     full_args.push(self.eval_expr(arg)?);
                                 }
+                                check_method_call_arity(&func, method_name, args.len(), true)?;
                                 return self.call_function(func, full_args);
                             }
                             // Check embedded fields for delegation
@@ -2834,6 +2814,12 @@ impl Interpreter {
                                         for arg in args {
                                             full_args.push(self.eval_expr(arg)?);
                                         }
+                                        check_method_call_arity(
+                                            &func,
+                                            method_name,
+                                            args.len(),
+                                            true,
+                                        )?;
                                         return self.call_function(func, full_args);
                                     }
                                 }
@@ -3309,55 +3295,27 @@ impl Interpreter {
                             )))
                         }
                     };
+                    // A function stored in an object field is called
+                    // directly: same arity rule as `f(args)`.
                     let eval_args: Result<Vec<Value>, _> =
                         args.iter().map(|a| self.eval_expr(a)).collect();
-                    return self.call_function(func, eval_args?);
-                }
-
-                // Special-case push/pop for in-place mutation when first arg is a mutable variable
-                if let Expr::Ident(fn_name) = function.as_ref() {
-                    if fn_name == "push" && args.len() == 2 {
-                        if let Expr::Ident(var_name) = &args[0] {
-                            if self.env.is_mutable(var_name) == Some(true) {
-                                let arr = self.eval_expr(&args[0])?;
-                                let val = self.eval_expr(&args[1])?;
-                                if let Value::Array(mut items) = arr {
-                                    items.push(val);
-                                    let new_arr = Value::Array(items);
-                                    self.env.set(var_name, new_arr.clone())?;
-                                    return Ok(new_arr);
-                                }
-                                return Err(RuntimeError::new(
-                                    "push() first argument must be array",
-                                ));
-                            }
-                        }
-                    }
-                    if fn_name == "pop" && args.len() == 1 {
-                        if let Expr::Ident(var_name) = &args[0] {
-                            if self.env.is_mutable(var_name) == Some(true) {
-                                let arr = self.eval_expr(&args[0])?;
-                                if let Value::Array(mut items) = arr {
-                                    let popped = items.pop().unwrap_or(Value::Null);
-                                    self.env.set(var_name, Value::Array(items))?;
-                                    return Ok(popped);
-                                }
-                                return Err(RuntimeError::new("pop() requires array"));
-                            }
-                        }
-                    }
+                    let eval_args = eval_args?;
+                    check_method_call_arity(&func, method_name, eval_args.len(), false)?;
+                    return self.call_function(func, eval_args);
                 }
 
                 let func = self.eval_expr(function)?;
                 let eval_args: Result<Vec<Value>, _> =
                     args.iter().map(|a| self.eval_expr(a)).collect();
                 let eval_args = eval_args?;
+                check_direct_call_arity(&func, eval_args.len())?;
                 self.call_function(func, eval_args)
             }
 
             Expr::Pipeline { value, function } => {
                 let val = self.eval_expr(value)?;
                 let func = self.eval_expr(function)?;
+                check_direct_call_arity(&func, 1)?;
                 self.call_function(func, vec![val])
             }
 
@@ -3373,8 +3331,8 @@ impl Interpreter {
             }
 
             Expr::Lambda { params, body } => Ok(Value::Lambda {
-                params: params.clone(),
-                body: body.clone(),
+                params: Arc::from(params.as_slice()),
+                body: Arc::from(body.as_slice()),
                 closure: Arc::new(std::sync::Mutex::new(self.env.clone())),
             }),
 
@@ -3395,65 +3353,19 @@ impl Interpreter {
 
             Expr::Block(stmts) => {
                 self.env.push_scope();
-                let mut last = Value::Null;
-                let patch_err = |mut e: RuntimeError, s: &SpannedStmt| -> RuntimeError {
-                    if e.line == 0 {
-                        e.line = s.line;
-                        e.col = s.col;
-                    }
-                    e
-                };
-                for spanned in stmts {
-                    self.current_line = spanned.line;
-                    let stmt = &spanned.stmt;
-                    match stmt {
-                        Stmt::If {
-                            condition,
-                            then_body,
-                            else_body,
-                        } => {
-                            let cond = self
-                                .eval_expr(condition)
-                                .map_err(|e| patch_err(e, spanned))?;
-                            let branch = if cond.is_truthy() {
-                                then_body
-                            } else if let Some(eb) = else_body {
-                                eb
-                            } else {
-                                &vec![]
-                            };
-                            for s in branch {
-                                self.current_line = s.line;
-                                if let Signal::Return(v) =
-                                    self.exec_stmt(&s.stmt).map_err(|e| patch_err(e, s))?
-                                {
-                                    self.env.pop_scope();
-                                    return Ok(v);
-                                }
-                                if let Stmt::Expression(e) = &s.stmt {
-                                    last = self.eval_expr(e).map_err(|e| patch_err(e, s))?;
-                                }
-                            }
-                        }
-                        _ => match self.exec_stmt(stmt).map_err(|e| patch_err(e, spanned))? {
-                            Signal::Return(v) => {
-                                self.env.pop_scope();
-                                return Ok(v);
-                            }
-                            Signal::ImplicitReturn(v) => {
-                                last = v;
-                            }
-                            _ => {
-                                if let Stmt::Expression(expr) = stmt {
-                                    last =
-                                        self.eval_expr(expr).map_err(|e| patch_err(e, spanned))?;
-                                }
-                            }
-                        },
-                    }
-                }
+                let result = self.eval_block_value(stmts);
                 self.env.pop_scope();
-                Ok(last)
+                match result? {
+                    BlockExit::Value(v) => Ok(v),
+                    // `return` inside an `if`/block expression returns from
+                    // the enclosing function (same as the VM), not just
+                    // from the block.
+                    BlockExit::Return(v) => Err(RuntimeError::early_return(v)),
+                    // `break`/`continue` inside a block *expression* unwind
+                    // to the enclosing loop (same as the VM).
+                    BlockExit::Break => Err(RuntimeError::loop_escape(LoopEscape::Break)),
+                    BlockExit::Continue => Err(RuntimeError::loop_escape(LoopEscape::Continue)),
+                }
             }
 
             Expr::Spawn(body) => self.spawn_task(body),
@@ -3505,6 +3417,8 @@ impl Interpreter {
             }
 
             Expr::Ask(prompt_expr) => {
+                crate::permissions::require(crate::permissions::Capability::Ai, "ask")
+                    .map_err(|e| RuntimeError::new(&e.to_string()))?;
                 let prompt = self.eval_expr(prompt_expr)?;
                 let prompt_str = format!("{}", prompt);
                 let api_key = std::env::var("FORGE_AI_KEY")
@@ -3665,6 +3579,7 @@ impl Interpreter {
                         }
                         PipeStep::Apply(func_expr) => {
                             let func = self.eval_expr(func_expr)?;
+                            check_direct_call_arity(&func, 1)?;
                             self.call_function(func, vec![current])?
                         }
                     };
@@ -3726,7 +3641,151 @@ impl Interpreter {
         }
     }
 
+    /// `obj.field` for an already-evaluated receiver (see `Expr::FieldAccess`).
+    fn field_of(&self, obj: &Value, field: &str) -> Result<Value, RuntimeError> {
+        // Unwrap Frozen for read access
+        let inner = match &obj {
+            Value::Frozen(v) => v.as_ref(),
+            other => other,
+        };
+        match inner {
+            Value::Object(map) => {
+                // Direct field access
+                if let Some(val) = map.get(field) {
+                    return Ok(val.clone());
+                }
+                // Embedded field delegation: check embedded sub-objects
+                if let Some(Value::String(type_name)) = map.get("__type__") {
+                    if let Some(embeds) = self.embedded_fields.get(type_name).cloned() {
+                        for (embed_field, _embed_type) in &embeds {
+                            if let Some(Value::Object(sub)) = map.get(embed_field) {
+                                if let Some(val) = sub.get(field) {
+                                    return Ok(val.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(RuntimeError::new(&format!(
+                    "no field '{}' on object",
+                    field
+                )))
+            }
+            Value::String(s) => match field {
+                "len" => Ok(Value::Int(s.chars().count() as i64)),
+                "upper" => Ok(Value::String(s.to_uppercase())),
+                "lower" => Ok(Value::String(s.to_lowercase())),
+                "trim" => Ok(Value::String(s.trim().to_string())),
+                "trim_start" => Ok(Value::String(s.trim_start().to_string())),
+                "trim_end" => Ok(Value::String(s.trim_end().to_string())),
+                "is_empty" => Ok(Value::Bool(s.is_empty())),
+                "is_numeric" => Ok(Value::Bool(
+                    s.chars()
+                        .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
+                )),
+                "is_alpha" => Ok(Value::Bool(
+                    !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+                )),
+                "is_alphanumeric" => Ok(Value::Bool(
+                    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
+                )),
+                "chars" => Ok(Value::Array(
+                    s.chars().map(|c| Value::String(c.to_string())).collect(),
+                )),
+                "bytes" => Ok(Value::Array(
+                    s.bytes().map(|b| Value::Int(b as i64)).collect(),
+                )),
+                "words" => Ok(Value::Array(
+                    s.split_whitespace()
+                        .map(|w| Value::String(w.to_string()))
+                        .collect(),
+                )),
+                "lines" => Ok(Value::Array(
+                    s.lines().map(|l| Value::String(l.to_string())).collect(),
+                )),
+                "reverse" => Ok(Value::String(s.chars().rev().collect())),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on String",
+                    field
+                ))),
+            },
+            Value::Array(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on Array",
+                    field
+                ))),
+            },
+            Value::Tuple(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on Tuple",
+                    field
+                ))),
+            },
+            Value::Set(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
+            },
+            _ => Err(RuntimeError::new(&format!(
+                "cannot access field '{}' on {}",
+                field,
+                obj.type_name()
+            ))),
+        }
+    }
+
+    /// `obj[idx]` for already-evaluated operands (see `Expr::Index`).
+    fn index_of(obj: &Value, idx: &Value) -> Result<Value, RuntimeError> {
+        // Unwrap Frozen for read access
+        let inner = match &obj {
+            Value::Frozen(v) => v.as_ref(),
+            other => other,
+        };
+        match (inner, &idx) {
+            (Value::Array(items) | Value::Tuple(items), Value::Int(i)) => {
+                // Negative indices count from the end (shared with the VM).
+                match crate::semantics::normalize_index(*i, items.len()) {
+                    Some(slot) => Ok(items[slot].clone()),
+                    None => Err(RuntimeError::new(&crate::semantics::index_out_of_bounds(
+                        *i,
+                        if matches!(inner, Value::Tuple(_)) {
+                            "tuple"
+                        } else {
+                            "array"
+                        },
+                        items.len(),
+                    ))),
+                }
+            }
+            (Value::Object(map), Value::String(key)) => map
+                .get(key)
+                .cloned()
+                .ok_or_else(|| RuntimeError::new(&crate::semantics::missing_key(key))),
+            (container, index) => Err(RuntimeError::new(&crate::semantics::invalid_index(
+                container.type_name(),
+                index.type_name(),
+            ))),
+        }
+    }
+
     fn eval_binop(&self, left: &Value, op: &BinOp, right: &Value) -> Result<Value, RuntimeError> {
+        // Arithmetic and ordering follow the rules shared with the VM.
+        if let Some(shared_op) = shared_binary_op(op) {
+            return match crate::semantics::binary(
+                shared_op,
+                semantic_operand(left),
+                semantic_operand(right),
+            ) {
+                Ok(crate::semantics::Outcome::Int(n)) => Ok(Value::Int(n)),
+                Ok(crate::semantics::Outcome::Float(f)) => Ok(Value::Float(f)),
+                Ok(crate::semantics::Outcome::Bool(b)) => Ok(Value::Bool(b)),
+                Ok(crate::semantics::Outcome::Concat) => {
+                    Ok(Value::String(format!("{}{}", left, right)))
+                }
+                Err(message) => Err(RuntimeError::new(&message)),
+            };
+        }
         match (left, right) {
             (Value::Int(a), Value::Int(b)) => match op {
                 BinOp::Add => match a.checked_add(*b) {
@@ -4333,8 +4392,12 @@ impl Interpreter {
                         Value::Int(n) => {
                             if is_float {
                                 acc_float += n as f64;
+                            } else if let Some(next) = acc_int.checked_add(n) {
+                                acc_int = next;
                             } else {
-                                acc_int += n;
+                                // i64 overflow promotes to float, like `+`.
+                                acc_float = acc_int as f64 + n as f64;
+                                is_float = true;
                             }
                         }
                         Value::Float(f) => {
@@ -4427,27 +4490,44 @@ impl Interpreter {
         }
     }
 
-    pub fn call_function(&mut self, func: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
-        self.call_depth += 1;
-        if self.call_depth > MAX_CALL_DEPTH {
-            self.call_depth = 0;
-            return Err(RuntimeError::new(
-                "maximum recursion depth exceeded (512 frames)\n  hint: check for infinite recursion, or restructure to use iteration",
-            ));
+    /// Bind call arguments to parameters in the current (fresh) scope.
+    /// Missing arguments take the parameter default (evaluated in the
+    /// callee scope, so earlier parameters are visible) or `null`.
+    fn bind_params(&mut self, params: &[Param], args: Vec<Value>) {
+        let mut args = args.into_iter();
+        for param in params {
+            let val = match args.next() {
+                Some(v) => v,
+                None => param
+                    .default
+                    .as_ref()
+                    .and_then(|d| self.eval_expr(d).ok())
+                    .unwrap_or(Value::Null),
+            };
+            self.env.define(param.name.clone(), val);
         }
-        let frame_name = match &func {
-            Value::Function { name, .. } => {
-                if name.is_empty() {
-                    "<anonymous>".to_string()
-                } else {
-                    name.clone()
-                }
-            }
-            Value::Lambda { .. } => "<lambda>".to_string(),
-            Value::BuiltIn(n) => n.clone(),
-            _ => "<call>".to_string(),
-        };
+    }
+
+    pub fn call_function(&mut self, func: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        // Shared depth limit + native stack guard (runtime/recursion.rs):
+        // runaway recursion is a catchable error, never a process abort.
+        if let Err(msg) = crate::runtime::recursion::check_call_depth(self.call_depth + 1) {
+            return Err(RuntimeError::new(&msg));
+        }
+        self.call_depth += 1;
         if self.debug_state.is_some() {
+            let frame_name = match &func {
+                Value::Function(func) => {
+                    if func.name.is_empty() {
+                        "<anonymous>".to_string()
+                    } else {
+                        func.name.clone()
+                    }
+                }
+                Value::Lambda { .. } => "<lambda>".to_string(),
+                Value::BuiltIn(n) => n.clone(),
+                _ => "<call>".to_string(),
+            };
             self.call_stack.push(DebugFrame {
                 name: frame_name,
                 line: self.current_line,
@@ -4468,50 +4548,23 @@ impl Interpreter {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         match func {
-            Value::Function {
-                name,
-                params,
-                body,
-                closure,
-                ..
-            } => {
-                let is_global_fn = !name.is_empty() && closure.scopes.len() == 1;
-
-                let result = if is_global_fn {
-                    self.env.push_scope();
-                    for (i, param) in params.iter().enumerate() {
-                        let val = args
-                            .get(i)
-                            .cloned()
-                            .or_else(|| param.default.as_ref().and_then(|d| self.eval_expr(d).ok()))
-                            .unwrap_or(Value::Null);
-                        self.env.define(param.name.clone(), val);
-                    }
-                    let result = self.exec_stmts(&body);
-                    self.env.pop_scope();
-                    result
-                } else {
-                    let saved_env = self.env.clone();
-                    self.env = closure;
-                    self.env.push_scope();
-                    if !name.is_empty() {
-                        if let Some(func_val) = saved_env.get(&name) {
-                            self.env.define(name.clone(), func_val.clone());
-                        }
-                    }
-                    for (i, param) in params.iter().enumerate() {
-                        let val = args
-                            .get(i)
-                            .cloned()
-                            .or_else(|| param.default.as_ref().and_then(|d| self.eval_expr(d).ok()))
-                            .unwrap_or(Value::Null);
-                        self.env.define(param.name.clone(), val);
-                    }
-                    let result = self.exec_stmts(&body);
-                    self.env.pop_scope();
-                    self.env = saved_env;
-                    result
-                };
+            Value::Function(func) => {
+                let FunctionValue {
+                    params,
+                    body,
+                    closure,
+                    ..
+                } = &*func;
+                // Lexical scoping: the body runs in the environment the
+                // function closed over plus one fresh scope for its
+                // parameters — never on top of the caller's scopes. That
+                // keeps lookups O(lexical depth) instead of O(call depth)
+                // and means a function cannot see its caller's locals.
+                let saved_env = std::mem::replace(&mut self.env, closure.clone());
+                self.env.push_scope();
+                self.bind_params(params, args);
+                let result = self.exec_stmts(body);
+                self.env = saved_env;
 
                 match result {
                     Ok(Signal::Return(v)) => Ok(v),
@@ -4521,7 +4574,7 @@ impl Interpreter {
                         if let Some(value) = e.propagated_value() {
                             Ok(value)
                         } else {
-                            Err(e)
+                            Err(e.outside_function_boundary())
                         }
                     }
                 }
@@ -4532,7 +4585,6 @@ impl Interpreter {
                 body,
                 closure,
             } => {
-                let saved_env = self.env.clone();
                 // Lock the shared closure to get the current captured state.
                 // Using Arc<Mutex<Environment>> means mutations inside the lambda
                 // persist across calls (fixes BUG-005: mutable closure capture).
@@ -4540,13 +4592,11 @@ impl Interpreter {
                     .lock()
                     .map_err(|_| RuntimeError::new("closure lock poisoned"))?
                     .clone();
-                self.env = captured_env;
+                let saved_env = std::mem::replace(&mut self.env, captured_env);
                 self.env.push_scope();
 
-                for (i, param) in params.iter().enumerate() {
-                    let val = args.get(i).cloned().unwrap_or(Value::Null);
-                    self.env.define(param.name.clone(), val);
-                }
+                // Same default-parameter rule as named functions.
+                self.bind_params(&params, args);
 
                 let result = self.exec_stmts(&body);
                 self.env.pop_scope();
@@ -4567,7 +4617,7 @@ impl Interpreter {
                         if let Some(value) = e.propagated_value() {
                             Ok(value)
                         } else {
-                            Err(e)
+                            Err(e.outside_function_boundary())
                         }
                     }
                 }
@@ -4592,9 +4642,14 @@ impl Interpreter {
         spawn_interp.env = self.env.deep_clone();
         // Propagate cancellation token so squad can cancel spawned tasks
         spawn_interp.cancelled = self.cancelled.clone();
+        // Output from the task must reach the same capture (sandbox/DAP) as
+        // the parent's, never the host's stdout.
+        spawn_interp.output_sink = self.output_sink.clone();
 
-        // Always use std::thread — simpler, avoids tokio dependency issues
-        std::thread::spawn(move || {
+        // A plain OS thread with the same recursion headroom as the CLI
+        // (WORKER_STACK_SIZE, registered with the stack guard) and the
+        // caller's permission policy.
+        crate::runtime::recursion::spawn_worker(move || {
             let result = spawn_interp.exec_block(&body);
             let val = match result {
                 Ok(Signal::Return(v)) | Ok(Signal::ImplicitReturn(v)) => {
@@ -4608,7 +4663,8 @@ impl Interpreter {
                 *guard = Some(val);
                 cvar.notify_all();
             }
-        });
+        })
+        .map_err(|e| RuntimeError::new(&format!("spawn: cannot start task thread: {}", e)))?;
         let handle = Value::TaskHandle(result_slot);
         // If inside a squad block, register the handle for automatic join
         if let Some(ref mut handles) = self.squad_handles {
@@ -4885,6 +4941,24 @@ pub struct RuntimeError {
     pub line: usize,
     pub col: usize,
     propagated: Option<Value>,
+    /// Set for a `return` executed inside a block expression
+    /// (`let x = if c { return 1 } else { 2 }`): it unwinds to the enclosing
+    /// function call like a `return` statement and is never caught by
+    /// `try`/`safe`.
+    early_return: bool,
+    /// Set for a `break`/`continue` executed inside a block expression
+    /// (`let q = if c { break } else { 1 }`): it unwinds to the innermost
+    /// enclosing loop (see `exec_loop_body`), passes through `try`/`safe`
+    /// like `early_return`, and becomes a plain "outside of loop" error at
+    /// a function boundary (`outside_function_boundary`).
+    loop_escape: Option<LoopEscape>,
+}
+
+/// Which loop control a `RuntimeError::loop_escape` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopEscape {
+    Break,
+    Continue,
 }
 
 impl RuntimeError {
@@ -4894,6 +4968,8 @@ impl RuntimeError {
             line: 0,
             col: 0,
             propagated: None,
+            early_return: false,
+            loop_escape: None,
         }
     }
 
@@ -4907,7 +4983,44 @@ impl RuntimeError {
             line: 0,
             col: 0,
             propagated: Some(value),
+            early_return: false,
+            loop_escape: None,
         }
+    }
+
+    /// `return value` from inside a block expression; see `early_return`.
+    pub fn early_return(value: Value) -> Self {
+        let mut err = Self::propagate(value);
+        err.message = crate::semantics::RETURN_OUTSIDE_FUNCTION.to_string();
+        err.early_return = true;
+        err
+    }
+
+    pub fn is_early_return(&self) -> bool {
+        self.early_return
+    }
+
+    fn loop_escape(kind: LoopEscape) -> Self {
+        let mut err = Self::new(match kind {
+            LoopEscape::Break => "break outside of loop",
+            LoopEscape::Continue => "continue outside of loop",
+        });
+        err.loop_escape = Some(kind);
+        err
+    }
+
+    /// True for control flow that unwinds through errors (`return`, `break`,
+    /// `continue` inside block expressions); `try`/`safe` must not catch it.
+    pub fn is_control_escape(&self) -> bool {
+        self.early_return || self.loop_escape.is_some()
+    }
+
+    /// A loop escape that reaches a function boundary did not come from a
+    /// loop in that function: it becomes an ordinary error there instead of
+    /// breaking a loop in the caller.
+    fn outside_function_boundary(mut self) -> Self {
+        self.loop_escape = None;
+        self
     }
 
     pub fn propagated_value(&self) -> Option<Value> {

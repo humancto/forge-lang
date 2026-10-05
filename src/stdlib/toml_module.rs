@@ -36,6 +36,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "toml.read" => match args.first() {
             Some(Value::String(path)) => {
+                let path = crate::stdlib::fs::confine_read(path)?;
                 let content =
                     std::fs::read_to_string(path).map_err(|e| format!("file read error: {}", e))?;
                 let val: toml::Value =

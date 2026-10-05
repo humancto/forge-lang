@@ -1,0 +1,2 @@
+// expect: [true, true, false, true, cba, n1]
+["abc" < "abd", "b" >= "a", "a" > "b", "a" <= "a", reverse("abc"), "n" + 1]

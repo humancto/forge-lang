@@ -226,6 +226,9 @@ impl Completer for ForgeHelper {
 
 impl Highlighter for ForgeHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        if !crate::color::enabled(crate::color::Stream::Stdout) {
+            return Cow::Borrowed(line);
+        }
         let mut result = String::with_capacity(line.len() * 2);
         let chars: Vec<char> = line.chars().collect();
         let len = chars.len();
@@ -463,7 +466,10 @@ pub fn run_repl() {
                 let tokens = match lexer.tokenize() {
                     Ok(tokens) => tokens,
                     Err(e) => {
-                        eprintln!("\x1B[31m{}\x1B[0m", e);
+                        eprintln!(
+                            "{}",
+                            crate::color::paint(crate::color::Stream::Stderr, "31", &e.to_string())
+                        );
                         continue;
                     }
                 };
@@ -472,7 +478,10 @@ pub fn run_repl() {
                 let program = match parser.parse_program() {
                     Ok(prog) => prog,
                     Err(e) => {
-                        eprintln!("\x1B[31m{}\x1B[0m", e);
+                        eprintln!(
+                            "{}",
+                            crate::color::paint(crate::color::Stream::Stderr, "31", &e.to_string())
+                        );
                         continue;
                     }
                 };
@@ -481,12 +490,22 @@ pub fn run_repl() {
                     Ok(value) => {
                         match &value {
                             crate::interpreter::Value::Null => {}
-                            _ => println!("\x1B[32m=> {}\x1B[0m", value),
+                            _ => println!(
+                                "{}",
+                                crate::color::paint(
+                                    crate::color::Stream::Stdout,
+                                    "32",
+                                    &format!("=> {}", value)
+                                )
+                            ),
                         }
                         interpreter.env.define("_last".to_string(), value);
                     }
                     Err(e) => {
-                        eprintln!("\x1B[31m{}\x1B[0m", e);
+                        eprintln!(
+                            "{}",
+                            crate::color::paint(crate::color::Stream::Stderr, "31", &e.to_string())
+                        );
                     }
                 }
 

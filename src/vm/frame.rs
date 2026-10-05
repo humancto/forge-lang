@@ -1,4 +1,4 @@
-use super::value::GcRef;
+use super::value::{GcRef, Value};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -34,6 +34,16 @@ pub struct CallFrame {
     pub timeouts: Vec<TimeoutGuard>,
     /// Shared cells for locals captured by closures created in this frame.
     pub open_upvalues: HashMap<u8, GcRef>,
+    /// Number of arguments the caller passed (`JumpIfArg` uses it to decide
+    /// whether a parameter's default value applies).
+    pub argc: usize,
+    /// The arguments this call was entered with (empty for the main and
+    /// module frames). Kept so a hot loop can re-run the whole call in
+    /// native code (`VM::try_jit_loop_restart`) even after the body has
+    /// overwritten its parameters. GC roots.
+    pub entry_args: Vec<Value>,
+    /// Backward jumps taken in this frame (loop hotness for JIT tier-up).
+    pub back_edges: u32,
 }
 
 impl CallFrame {
@@ -46,6 +56,9 @@ impl CallFrame {
             handlers: Vec::new(),
             timeouts: Vec::new(),
             open_upvalues: HashMap::new(),
+            argc: usize::MAX,
+            entry_args: Vec::new(),
+            back_edges: 0,
         }
     }
 
@@ -57,9 +70,7 @@ impl CallFrame {
     }
 }
 
-/// Maximum call stack depth to prevent stack overflow.
-pub const MAX_FRAMES: usize = 256;
-
-/// Maximum register count across all frames.
-#[allow(dead_code)]
-pub const MAX_REGISTERS: usize = MAX_FRAMES * 256;
+/// Initial capacity of the frame stack. This is NOT a depth limit: call depth
+/// is bounded by `runtime::recursion::check_call_depth` (configurable, shared
+/// with the interpreter), which also guards the native stack.
+pub const INITIAL_FRAME_CAPACITY: usize = 256;

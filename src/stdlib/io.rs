@@ -27,6 +27,9 @@ pub fn create_module() -> Value {
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "io.prompt" => {
+            if !crate::permissions::host_stdin_allowed() {
+                return Ok(Value::String(String::new()));
+            }
             let prompt_text = args.first().map(|v| format!("{}", v)).unwrap_or_default();
             use std::io::Write;
             print!("{}", prompt_text);
@@ -90,37 +93,6 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             };
             let cli_args: Vec<String> = std::env::args().collect();
             Ok(Value::Bool(cli_args.contains(&flag)))
-        }
-        _ => Err(format!("unknown io function: {}", name)),
-    }
-}
-
-/// VM-compatible io dispatch.
-pub fn call_vm(
-    name: &str,
-    args: &[crate::vm::value::Value],
-    gc: &crate::vm::gc::Gc,
-) -> Result<crate::vm::value::Value, String> {
-    use crate::vm::value::Value as V;
-    match name {
-        "io.prompt" => {
-            let prompt = args.first().map(|v| v.display(gc)).unwrap_or_default();
-            use std::io::Write;
-            print!("{}", prompt);
-            std::io::stdout().flush().ok();
-            let mut input = String::new();
-            std::io::stdin()
-                .read_line(&mut input)
-                .map_err(|e| format!("{}", e))?;
-            Ok(V::null()) // VM needs GC to alloc string; caller handles
-        }
-        "io.print" => {
-            let text: Vec<String> = args.iter().map(|v| v.display(gc)).collect();
-            print!("{}", text.join(" "));
-            Ok(V::null())
-        }
-        "io.args" => {
-            Ok(V::null()) // Would need GC to alloc array
         }
         _ => Err(format!("unknown io function: {}", name)),
     }

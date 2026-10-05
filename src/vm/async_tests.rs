@@ -132,8 +132,10 @@ fn vm_nested_spawn() {
 
 #[test]
 fn vm_spawn_error_no_crash() {
-    // Spawn block that errors — parent awaits and gets null
-    let out = run_on_vm_value(
+    // Spawn block that errors — awaiting it surfaces the task error (as on
+    // the interpreter) instead of crashing. Field access on null used to be
+    // a silent no-op in the VM, which made this await yield null.
+    let program = parse_program(
         r#"
         let h = spawn {
             let x = null
@@ -142,7 +144,17 @@ fn vm_spawn_error_no_crash() {
         await h
     "#,
     );
-    assert_eq!(out, "null");
+    let chunk = compiler::compile_repl(&program).expect("compile error");
+    let mut vm = VM::new();
+    let err = vm
+        .execute(&chunk)
+        .expect_err("awaiting a failed task errors");
+    assert!(
+        err.message
+            .contains("task error: cannot access field 'field' on Null"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
@@ -182,7 +194,7 @@ fn vm_channel_create_bounded() {
         println(type(ch))
     "#,
     );
-    assert_eq!(out, vec!["channel"]);
+    assert_eq!(out, vec!["Channel"]);
 }
 
 #[test]
@@ -193,7 +205,7 @@ fn vm_channel_create_unbounded() {
         println(type(ch))
     "#,
     );
-    assert_eq!(out, vec!["channel"]);
+    assert_eq!(out, vec!["Channel"]);
 }
 
 #[test]

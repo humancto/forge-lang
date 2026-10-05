@@ -8,11 +8,43 @@ use crate::lexer::Lexer;
 pub struct Parser {
     tokens: Vec<Spanned>,
     pos: usize,
+    /// Current nesting of recursive productions (see [`MAX_NESTING`]).
+    depth: usize,
 }
+
+/// Deepest nesting of expressions, statements, patterns and type
+/// annotations the parser accepts. Untrusted source (e.g. `((((...` from an
+/// agent) must produce a parse error, never a native stack overflow that
+/// aborts the host; this also bounds the recursion of every later pass.
+pub const MAX_NESTING: usize = 1000;
 
 impl Parser {
     pub fn new(tokens: Vec<Spanned>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Enter one level of a recursive production. Pair with
+    /// [`Parser::leave`] (see [`Parser::nested`]).
+    fn enter(&mut self) -> Result<(), ParseError> {
+        if self.depth >= MAX_NESTING || crate::runtime::recursion::native_stack_exhausted() {
+            return Err(self.error("code is nested too deeply"));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn nested<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        self.enter()?;
+        let result = f(self);
+        self.depth -= 1;
+        result
     }
 
     /// Return (line, col) of the current token position.
@@ -41,6 +73,10 @@ impl Parser {
     // ========== Statement Parsing ==========
 
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.nested(Self::parse_statement_inner)
+    }
+
+    fn parse_statement_inner(&mut self) -> Result<Stmt, ParseError> {
         self.skip_newlines();
 
         match self.current_token() {
@@ -613,13 +649,22 @@ impl Parser {
                 }
                 Token::Ident(ref s) if s == "between" => {
                     self.advance();
-                    let lo = self.parse_expr()?;
-                    if let Token::Ident(ref w) = self.current_token() {
-                        if w == "and" {
-                            self.advance();
+                    // Bounds are parsed below the logical operators so the
+                    // separator `and` (or `&&`) is never folded into the
+                    // lower bound: `check x between 1 && 10` has bounds
+                    // 1 and 10, not `1 && 10`.
+                    let lo = self.parse_addition()?;
+                    match self.current_token() {
+                        Token::Ident(ref w) if w == "and" => self.advance(),
+                        Token::And => self.advance(),
+                        other => {
+                            return Err(self.error(&format!(
+                            "expected 'and' between the bounds of `check ... between`, found {:?}",
+                            other
+                        )))
                         }
                     }
-                    let hi = self.parse_expr()?;
+                    let hi = self.parse_addition()?;
                     CheckKind::Between(lo, hi)
                 }
                 _ => CheckKind::IsTrue,
@@ -1065,6 +1110,10 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        self.nested(Self::parse_pattern_inner)
+    }
+
+    fn parse_pattern_inner(&mut self) -> Result<Pattern, ParseError> {
         match self.current_token() {
             Token::Ident(ref name) if name == "_" => {
                 self.advance();
@@ -1281,7 +1330,7 @@ impl Parser {
     // ========== Expression Parsing (Pratt) ==========
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_query_chain()
+        self.nested(Self::parse_query_chain)
     }
 
     fn parse_query_chain(&mut self) -> Result<Expr, ParseError> {
@@ -1519,6 +1568,10 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        self.nested(Self::parse_unary_inner)
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
         match self.current_token() {
             Token::Await | Token::Hold => {
                 self.advance();
@@ -2033,6 +2086,10 @@ impl Parser {
     }
 
     fn parse_type_ann(&mut self) -> Result<TypeAnn, ParseError> {
+        self.nested(Self::parse_type_ann_inner)
+    }
+
+    fn parse_type_ann_inner(&mut self) -> Result<TypeAnn, ParseError> {
         match self.current_token() {
             Token::LBracket => {
                 self.advance();
@@ -2258,6 +2315,86 @@ mod tests {
         let tokens = lexer.tokenize().expect("lexing should succeed");
         let mut parser = Parser::new(tokens);
         parser.parse_program().expect("parsing should succeed")
+    }
+
+    fn parse_err(input: &str) -> ParseError {
+        let tokens = Lexer::new(input).tokenize().expect("lexing should succeed");
+        match Parser::new(tokens).parse_program() {
+            Ok(_) => panic!("expected a parse error for {input:.40}"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn pathological_nesting_is_a_parse_error_not_a_stack_overflow() {
+        // Run on a small stack: the guard must trip before it overflows.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let n = 100_000;
+                for src in [
+                    format!("let x = {}1{}", "(".repeat(n), ")".repeat(n)),
+                    format!("let x = {}1", "-".repeat(n)),
+                    format!("let x = {}{}", "[".repeat(n), "]".repeat(n)),
+                    format!("{}{}", "if true { ".repeat(n), "}".repeat(n)),
+                ] {
+                    let e = parse_err(&src);
+                    assert!(e.message.contains("nested too deeply"), "{}", e.message);
+                }
+                // Reasonable nesting still parses.
+                let ok = format!("let x = {}1{}", "(".repeat(100), ")".repeat(100));
+                parse_program(&ok);
+            })
+            .expect("spawn")
+            .join()
+            .expect("no stack overflow");
+    }
+
+    #[test]
+    fn check_between_bounds_are_not_a_logical_expression() {
+        for src in [
+            "check x between 1 and 10",
+            "check x between 1 && 10",
+            "check x between lo and hi + 1",
+        ] {
+            let program = parse_program(src);
+            match &program.statements[0].stmt {
+                Stmt::CheckStmt {
+                    check_kind: CheckKind::Between(lo, hi),
+                    ..
+                } => {
+                    assert!(
+                        !matches!(lo, Expr::BinOp { op: BinOp::And, .. }),
+                        "{}: lower bound swallowed the separator: {:?}",
+                        src,
+                        lo
+                    );
+                    assert!(
+                        matches!(lo, Expr::Int(1) | Expr::Ident(_)),
+                        "{}: {:?}",
+                        src,
+                        lo
+                    );
+                    assert!(
+                        matches!(hi, Expr::Int(10) | Expr::BinOp { op: BinOp::Add, .. }),
+                        "{}: {:?}",
+                        src,
+                        hi
+                    );
+                }
+                other => panic!("{}: expected check between, got {:?}", src, other),
+            }
+        }
+    }
+
+    #[test]
+    fn check_between_requires_and() {
+        let mut lexer = Lexer::new("check x between 1 10");
+        let tokens = lexer.tokenize().expect("lexing should succeed");
+        let err = Parser::new(tokens)
+            .parse_program()
+            .expect_err("missing `and` must be a parse error");
+        assert!(err.message.contains("expected 'and'"), "{}", err.message);
     }
 
     #[test]

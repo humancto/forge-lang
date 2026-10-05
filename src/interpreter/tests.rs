@@ -1863,9 +1863,16 @@ fn interface_def() {
 }
 
 #[test]
-fn yield_stmt_noop() {
+fn yield_stmt_errors_instead_of_silently_dropping() {
+    // Generators are not implemented; `emit`/`yield` used to be a silent
+    // no-op. Both engines now raise the shared `YIELD_UNSUPPORTED` error.
     let result = try_run_forge(r#"emit 42"#);
-    assert!(result.is_ok());
+    let err = result.expect_err("emit must not be silently dropped");
+    assert!(
+        err.message.contains("yield/emit is not supported yet"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
@@ -6336,13 +6343,8 @@ fn enum_method_closure_captures_it() {
 #[test]
 fn enum_method_recursive_on_nested_adt() {
     // Per M1: constructor-recursive fields, not flat self-recursion.
-    // NOTE: This tests only 2-level (flat) recursion. Deeper recursion
-    // hits a preexisting interpreter bug where match_pattern's
-    // Binding(name) peeks at env and treats field captures as type
-    // checks — when l/r are bound in an outer frame, the inner match
-    // compares variants of outer-l vs inner-l and rejects. Fix is
-    // orthogonal to M9.5. See enum_method_pin_deep_recursion_quirk
-    // below for a pin of the broken case.
+    // 2-level (flat) recursion; see enum_method_deep_recursion_on_nested_adt
+    // for the 3-level case.
     assert_eq!(
         enum_display(
             r#"
@@ -6363,30 +6365,28 @@ fn enum_method_recursive_on_nested_adt() {
 }
 
 #[test]
-fn enum_method_pin_deep_recursion_quirk() {
-    // Pin: 3+ level recursion through ADT methods errors with
-    // non-exhaustive match because match_pattern's Binding(name)
-    // smart-check incorrectly uses outer-scope bindings. Once that
-    // interpreter bug is fixed, this test will start passing, which is
-    // the signal to flip it to a success assertion.
-    let res = try_run_forge(
-        r#"
-        type Tree = Leaf(int) | Node(Tree, Tree)
-        impl Tree {
-            fn sum(it) {
-                match it {
-                    Leaf(n) => return n
-                    Node(l, r) => return l.sum() + r.sum()
+fn enum_method_deep_recursion_on_nested_adt() {
+    // Formerly a pin of a bug: 3+ level recursion through ADT methods
+    // failed with "non-exhaustive match" because calls to top-level
+    // functions ran on top of the caller's scopes (dynamic scoping), so
+    // match_pattern's Binding(name) check saw the outer frame's `l`/`r`.
+    // Calls are now lexically scoped and the deep case works.
+    assert_eq!(
+        enum_display(
+            r#"
+            type Tree = Leaf(int) | Node(Tree, Tree)
+            impl Tree {
+                fn sum(it) {
+                    match it {
+                        Leaf(n) => return n
+                        Node(l, r) => return l.sum() + r.sum()
+                    }
                 }
             }
-        }
-        Node(Leaf(1), Node(Leaf(2), Leaf(3))).sum()
-        "#,
-    );
-    assert!(
-        res.is_err(),
-        "deep recursion was expected to fail (pin) but returned {:?}",
-        res
+            Node(Leaf(1), Node(Leaf(2), Leaf(3))).sum()
+            "#
+        ),
+        "6"
     );
 }
 
@@ -7179,4 +7179,402 @@ fn fork_for_serving_panics_if_template_env_holds_a_stream() {
         .define("s".to_string(), Value::Stream(Arc::new(Mutex::new(cell))));
 
     let _ = template.fork_for_serving();
+}
+
+#[test]
+fn runaway_recursion_is_catchable_and_depth_recovers() {
+    // Previously the interpreter overflowed the native stack (process abort)
+    // before its 512-frame check, and reset call_depth to 0 on overflow.
+    // (Test threads have 2 MiB stacks, so the native-stack guard trips
+    // long before the 10000 depth limit here; the CLI uses a 1 GiB stack.)
+    let value = run_forge(
+        r#"
+        fn inf(n) { return inf(n + 1) }
+        let mut msg = ""
+        try { inf(0) } catch e { msg = e.message }
+        fn d(n) { if n == 0 { return 0 }
+ return 1 + d(n - 1) }
+        [msg, d(40)]
+        "#,
+    );
+    let Value::Array(items) = value else {
+        panic!("expected array");
+    };
+    let Value::String(msg) = &items[0] else {
+        panic!("expected message string");
+    };
+    assert!(
+        msg.starts_with("maximum recursion depth exceeded"),
+        "{}",
+        msg
+    );
+    assert_eq!(items[1], Value::Int(40));
+}
+
+#[test]
+fn import_cycle_reports_chain() {
+    let dir = unique_temp_path("import_cycle");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let a = dir.join("a.fg");
+    let b = dir.join("b.fg");
+    std::fs::write(
+        &a,
+        format!(
+            "import \"{}\"\nfn fa() {{ return 1 }}\n",
+            forge_string_literal_path(&b)
+        ),
+    )
+    .expect("write a");
+    std::fs::write(
+        &b,
+        format!(
+            "import \"{}\"\nfn fb() {{ return 2 }}\n",
+            forge_string_literal_path(&a)
+        ),
+    )
+    .expect("write b");
+    let err = try_run_forge(&format!(
+        "import \"{}\"\nfa()",
+        forge_string_literal_path(&a)
+    ))
+    .expect_err("cycle must fail");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        err.message.starts_with("circular import: "),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("a.fg -> "), "{}", err.message);
+    assert!(err.message.ends_with("a.fg"), "{}", err.message);
+}
+
+// ----- Lexical scoping of calls ---------------------------------------------
+
+#[test]
+fn top_level_function_does_not_see_caller_locals() {
+    let res = try_run_forge(
+        r#"
+        fn peek() { return secret }
+        fn caller() {
+            let secret = 42
+            return peek()
+        }
+        caller()
+        "#,
+    );
+    let err = res.expect_err("callee must not see the caller's locals");
+    assert!(
+        err.message.contains("secret"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn top_level_function_sees_globals_defined_after_it() {
+    assert_eq!(
+        run_forge(
+            r#"
+            fn read_cap() { return cap_value }
+            let cap_value = 7
+            read_cap()
+            "#
+        ),
+        Value::Int(7)
+    );
+}
+
+#[test]
+fn call_cost_does_not_grow_with_recursion_depth() {
+    // Before lexical scoping every frame was pushed on top of the
+    // caller's scopes, so a global lookup at depth d walked d scopes.
+    // Compare the cost of the same number of calls at two depths.
+    fn time_depth(depth: usize, reps: usize) -> std::time::Duration {
+        let src = format!(
+            "fn down(n) {{ if n == 0 {{ return 0 }} return 1 + down(n - 1) }}\n\
+             let mut k = 0\nwhile k < {reps} {{ down({depth})\nk = k + 1 }}\n"
+        );
+        let stack = crate::runtime::recursion::MAIN_STACK_SIZE;
+        let start = std::time::Instant::now();
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(move || {
+                crate::runtime::recursion::register_thread_stack(stack);
+                try_run_forge(&src).expect("recursion should succeed");
+            })
+            .expect("spawn")
+            .join()
+            .expect("join");
+        start.elapsed()
+    }
+    // 20k calls either way; best of three to damp scheduler noise. With
+    // depth-proportional lookups the ratio was ~40x; cache and page
+    // effects alone stay well under the bound.
+    let best = |depth, reps| {
+        (0..3)
+            .map(|_| time_depth(depth, reps))
+            .min()
+            .expect("3 runs")
+    };
+    let shallow = best(100, 200);
+    let deep = best(4000, 5);
+    assert!(
+        deep < shallow * 15,
+        "deep recursion is disproportionately slow: shallow {:?}, deep {:?}",
+        shallow,
+        deep
+    );
+}
+
+// ----- In-place reads and updates (places.rs) -------------------------------
+
+fn display_of(source: &str) -> String {
+    format!("{}", run_forge(source))
+}
+
+#[test]
+fn in_place_push_keeps_value_semantics() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut a = [1]
+            let b = a
+            a.push(2)
+            push(a, 3)
+            a = push(a, 4)
+            [a, b]
+            "#
+        ),
+        "[[1, 2, 3, 4], [1]]"
+    );
+}
+
+#[test]
+fn in_place_push_still_evaluates_to_the_array() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut a = []
+            let r = a.push(1)
+            fn add_one(xs) {
+                let mut ys = xs
+                ys.push(9)
+            }
+            [r, add_one([5])]
+            "#
+        ),
+        "[[1], [5, 9]]"
+    );
+}
+
+#[test]
+fn trailing_push_in_loop_body_mutates() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut out = []
+            for x in [1, 2, 3] {
+                if x != 2 { out.push(x * 10) }
+            }
+            let mut i = 0
+            while i < 2 {
+                i = i + 1
+                out.push(i)
+            }
+            out
+            "#
+        ),
+        "[10, 30, 1, 2]"
+    );
+}
+
+#[test]
+fn push_argument_runs_before_mutation() {
+    // The mutating method applies to the variable's value after its
+    // argument is evaluated, so the inner push is not lost.
+    assert_eq!(
+        display_of(
+            r#"
+            let mut a = [1]
+            fn grow() {
+                a.push(2)
+                return 3
+            }
+            a.push(grow())
+            a
+            "#
+        ),
+        "[1, 2, 3]"
+    );
+}
+
+#[test]
+fn in_place_pop_add_remove() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut a = [1, 2, 3]
+            let last = a.pop()
+            let first_pop = pop(a)
+            let mut s = set([1, 2])
+            s.add(3)
+            s.add(2)
+            s.remove(1)
+            [last, first_pop, a, s.has(3), s.has(1), len(s)]
+            "#
+        ),
+        "[3, 2, [1], true, false, 2]"
+    );
+}
+
+#[test]
+fn self_concat_appends_and_converts() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut s = "a"
+            s = s + "b"
+            s += 1
+            s = s + str(2) + "!"
+            let t = s
+            s += "?"
+            [s, t]
+            "#
+        ),
+        "[ab12!?, ab12!]"
+    );
+}
+
+#[test]
+fn self_update_with_user_call_keeps_old_value() {
+    // `s = s + f()` where f reassigns s: the left operand is the value
+    // read before the call (not taken by the in-place path).
+    assert_eq!(
+        display_of(
+            r#"
+            let mut s = "x"
+            fn bump() {
+                s = "zzz"
+                return "y"
+            }
+            s = s + bump()
+            s
+            "#
+        ),
+        "xy"
+    );
+}
+
+#[test]
+fn self_update_respects_immutability_and_numbers() {
+    let err = try_run_forge("let s = \"a\"\ns = s + \"b\"\n").expect_err("immutable");
+    assert!(err.message.contains("immutable"), "{}", err.message);
+    assert_eq!(display_of("let mut n = 5\nn = n * 3\nn -= 1\nn"), "14");
+}
+
+#[test]
+fn in_place_index_and_field_assignment() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut grid = [[0, 0], [0, 0]]
+            let snapshot = grid
+            let mut row = grid[1]
+            row[0] = 7
+            grid[1] = row
+            grid[-1] = [grid[-1][0], 99]
+            let mut o = { a: 1 }
+            o.b = 2
+            o["c"] = 3
+            [grid, snapshot, o]
+            "#
+        ),
+        r#"[[[0, 0], [7, 99]], [[0, 0], [0, 0]], { "a": 1, "b": 2, "c": 3 }]"#
+    );
+}
+
+#[test]
+fn in_place_assignment_errors_keep_their_order() {
+    let frozen = try_run_forge("let mut a = freeze([1])\na[0] = 2\n").expect_err("frozen");
+    assert!(frozen.message.contains("frozen"), "{}", frozen.message);
+    let immutable = try_run_forge("let a = [1]\na[0] = 2\n").expect_err("immutable");
+    assert!(
+        immutable.message.contains("immutable"),
+        "{}",
+        immutable.message
+    );
+    let oob = try_run_forge("let a = [1]\na[5] = 2\n").expect_err("oob");
+    assert!(oob.message.contains("out of bounds"), "{}", oob.message);
+    let undefined = try_run_forge("nope[0] = 1\n").expect_err("undefined");
+    assert!(undefined.message.contains("nope"), "{}", undefined.message);
+}
+
+#[test]
+fn borrowed_reads_match_copying_reads() {
+    assert_eq!(
+        display_of(
+            r#"
+            let a = [10, 20, 30]
+            let o = { k: "v" }
+            let m = map([["x", 1]])
+            [a[1], a[-1], o.k, o["k"], len(a), contains(a, 20), m.get("x"), m.has("y"), m.len()]
+            "#
+        ),
+        "[20, 30, v, v, 3, true, 1, false, 1]"
+    );
+}
+
+#[test]
+fn shadowed_len_is_not_bypassed() {
+    assert_eq!(
+        display_of(
+            r#"
+            fn len(x) { return "mine" }
+            let a = [1, 2]
+            len(a)
+            "#
+        ),
+        "mine"
+    );
+}
+
+#[test]
+fn break_in_block_expression_leaves_enclosing_loop() {
+    let value = run_forge(
+        "let mut out = []\n\
+         for i in range(0, 5) {\n\
+           let q = if i == 2 { break } else { i }\n\
+           out.push(q)\n\
+         }\n\
+         let mut out2 = []\n\
+         for i in range(0, 4) {\n\
+           try { let q = if i == 1 { continue } else { i }\n out2.push(q) } catch e { out2.push(-1) }\n\
+         }\n\
+         [len(out), len(out2)]",
+    );
+    assert_eq!(
+        value,
+        Value::Array(vec![Value::Int(2), Value::Int(3)]),
+        "break/continue in an if-expression must reach the loop, through try"
+    );
+}
+
+#[test]
+fn break_in_block_expression_does_not_cross_function_boundary() {
+    let value = run_forge(
+        "fn bad() {\n\
+           let x = if true { break } else { 1 }\n\
+           return x\n\
+         }\n\
+         let mut msgs = []\n\
+         for i in range(0, 3) {\n\
+           try { bad() } catch e { msgs.push(e.message) }\n\
+         }\n\
+         len(msgs)",
+    );
+    assert_eq!(
+        value,
+        Value::Int(3),
+        "a break escaping a function must be an error, not break the caller's loop"
+    );
 }

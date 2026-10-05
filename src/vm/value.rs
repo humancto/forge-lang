@@ -57,6 +57,19 @@ pub enum SharedValue {
     Tuple(Vec<SharedValue>),
     Set(Vec<SharedValue>),
     Map(Vec<(SharedValue, SharedValue)>),
+    /// A closure (or plain function). `id` is unique within one conversion;
+    /// a closure reachable from its own upvalues (recursion through a
+    /// captured binding) is encoded as [`SharedValue::ClosureRef`].
+    Closure {
+        id: usize,
+        name: String,
+        chunk: Arc<Chunk>,
+        upvalues: Vec<SharedValue>,
+    },
+    /// Back-reference to an enclosing `Closure` with the same `id`.
+    ClosureRef(usize),
+    /// A native builtin, by name.
+    Native(String),
 }
 
 thread_local! {
@@ -80,6 +93,12 @@ pub fn take_stream_boundary_error() -> bool {
 /// Streams also map to Null but set the thread-local boundary flag —
 /// callers must check via `take_stream_boundary_error`.
 pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
+    to_shared(gc, val, &mut Vec::new())
+}
+
+/// `seen` holds the closures currently being converted (index = id), so a
+/// closure that captures itself becomes a `ClosureRef` instead of looping.
+fn to_shared(gc: &Gc, val: &Value, seen: &mut Vec<GcRef>) -> SharedValue {
     match val.classify(gc) {
         ValueKind::Int(n) => SharedValue::Int(n),
         ValueKind::Float(n) => SharedValue::Float(n),
@@ -89,29 +108,29 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
             Some(obj) => match &obj.kind {
                 ObjKind::String(s) => SharedValue::String(s.clone()),
                 ObjKind::Array(items) => {
-                    SharedValue::Array(items.iter().map(|v| value_to_shared(gc, v)).collect())
+                    SharedValue::Array(items.iter().map(|v| to_shared(gc, v, seen)).collect())
                 }
                 ObjKind::Object(map) => {
                     let entries = map
                         .iter()
-                        .map(|(k, v)| (k.clone(), value_to_shared(gc, v)))
+                        .map(|(k, v)| (k.clone(), to_shared(gc, v, seen)))
                         .collect();
                     SharedValue::Object(entries)
                 }
-                ObjKind::ResultOk(v) => SharedValue::ResultOk(Box::new(value_to_shared(gc, v))),
-                ObjKind::ResultErr(v) => SharedValue::ResultErr(Box::new(value_to_shared(gc, v))),
+                ObjKind::ResultOk(v) => SharedValue::ResultOk(Box::new(to_shared(gc, v, seen))),
+                ObjKind::ResultErr(v) => SharedValue::ResultErr(Box::new(to_shared(gc, v, seen))),
                 ObjKind::Channel(ch) => SharedValue::Channel(ch.clone()),
-                ObjKind::Frozen(v) => value_to_shared(gc, v),
+                ObjKind::Frozen(v) => to_shared(gc, v, seen),
                 ObjKind::Tuple(items) => {
-                    SharedValue::Tuple(items.iter().map(|v| value_to_shared(gc, v)).collect())
+                    SharedValue::Tuple(items.iter().map(|v| to_shared(gc, v, seen)).collect())
                 }
                 ObjKind::Set(items) => {
-                    SharedValue::Set(items.iter().map(|v| value_to_shared(gc, v)).collect())
+                    SharedValue::Set(items.iter().map(|v| to_shared(gc, v, seen)).collect())
                 }
                 ObjKind::Map(pairs) => SharedValue::Map(
                     pairs
                         .iter()
-                        .map(|(k, v)| (value_to_shared(gc, k), value_to_shared(gc, v)))
+                        .map(|(k, v)| (to_shared(gc, k, seen), to_shared(gc, v, seen)))
                         .collect(),
                 ),
                 ObjKind::BoxedInt(n) => SharedValue::Int(*n),
@@ -122,7 +141,35 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
                     STREAM_BOUNDARY_ERROR.with(|c| c.set(true));
                     SharedValue::Null
                 }
-                // Functions, closures, natives, upvalues, task handles are not transferable
+                ObjKind::Closure(c) => {
+                    if let Some(id) = seen.iter().position(|seen_ref| *seen_ref == r) {
+                        return SharedValue::ClosureRef(id);
+                    }
+                    let id = seen.len();
+                    seen.push(r);
+                    let upvalues = c
+                        .upvalues
+                        .iter()
+                        .map(|uv| match gc.get(*uv).map(|o| &o.kind) {
+                            Some(ObjKind::Upvalue(cell)) => to_shared(gc, &cell.value, seen),
+                            _ => SharedValue::Null,
+                        })
+                        .collect();
+                    SharedValue::Closure {
+                        id,
+                        name: c.function.name.clone(),
+                        chunk: Arc::clone(&c.function.chunk),
+                        upvalues,
+                    }
+                }
+                ObjKind::Function(f) => SharedValue::Closure {
+                    id: usize::MAX,
+                    name: f.name.clone(),
+                    chunk: Arc::clone(&f.chunk),
+                    upvalues: Vec::new(),
+                },
+                ObjKind::NativeFunction(nf) => SharedValue::Native(nf.name.clone()),
+                // Upvalue cells and task handles are not transferable.
                 _ => SharedValue::Null,
             },
             None => SharedValue::Null,
@@ -132,6 +179,14 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
 
 /// Convert a SharedValue back to a VM Value (allocates in target GC).
 pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
+    from_shared(gc, sv, &mut std::collections::HashMap::new())
+}
+
+fn from_shared(
+    gc: &mut Gc,
+    sv: &SharedValue,
+    closures: &mut std::collections::HashMap<usize, GcRef>,
+) -> Value {
     match sv {
         SharedValue::Int(n) => Value::int(*n, gc),
         SharedValue::Float(n) => Value::float(*n),
@@ -142,25 +197,28 @@ pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
             Value::obj(r)
         }
         SharedValue::Array(items) => {
-            let vals: Vec<Value> = items.iter().map(|sv| shared_to_value(gc, sv)).collect();
+            let vals: Vec<Value> = items
+                .iter()
+                .map(|sv| from_shared(gc, sv, closures))
+                .collect();
             let r = gc.alloc(ObjKind::Array(vals));
             Value::obj(r)
         }
         SharedValue::Object(map) => {
             let entries: IndexMap<String, Value> = map
                 .iter()
-                .map(|(k, sv)| (k.clone(), shared_to_value(gc, sv)))
+                .map(|(k, sv)| (k.clone(), from_shared(gc, sv, closures)))
                 .collect();
             let r = gc.alloc(ObjKind::Object(entries));
             Value::obj(r)
         }
         SharedValue::ResultOk(v) => {
-            let inner = shared_to_value(gc, v);
+            let inner = from_shared(gc, v, closures);
             let r = gc.alloc(ObjKind::ResultOk(inner));
             Value::obj(r)
         }
         SharedValue::ResultErr(v) => {
-            let inner = shared_to_value(gc, v);
+            let inner = from_shared(gc, v, closures);
             let r = gc.alloc(ObjKind::ResultErr(inner));
             Value::obj(r)
         }
@@ -169,21 +227,63 @@ pub fn shared_to_value(gc: &mut Gc, sv: &SharedValue) -> Value {
             Value::obj(r)
         }
         SharedValue::Tuple(items) => {
-            let vals: Vec<Value> = items.iter().map(|sv| shared_to_value(gc, sv)).collect();
+            let vals: Vec<Value> = items
+                .iter()
+                .map(|sv| from_shared(gc, sv, closures))
+                .collect();
             let r = gc.alloc(ObjKind::Tuple(vals));
             Value::obj(r)
         }
         SharedValue::Set(items) => {
-            let vals: Vec<Value> = items.iter().map(|sv| shared_to_value(gc, sv)).collect();
+            let vals: Vec<Value> = items
+                .iter()
+                .map(|sv| from_shared(gc, sv, closures))
+                .collect();
             let r = gc.alloc(ObjKind::Set(vals));
             Value::obj(r)
         }
         SharedValue::Map(pairs) => {
             let vals: Vec<(Value, Value)> = pairs
                 .iter()
-                .map(|(k, v)| (shared_to_value(gc, k), shared_to_value(gc, v)))
+                .map(|(k, v)| (from_shared(gc, k, closures), from_shared(gc, v, closures)))
                 .collect();
             let r = gc.alloc(ObjKind::Map(vals));
+            Value::obj(r)
+        }
+        SharedValue::Closure {
+            id,
+            name,
+            chunk,
+            upvalues,
+        } => {
+            // Allocate first so upvalues that refer back to this closure
+            // (`ClosureRef(id)`) resolve to it.
+            let r = gc.alloc(ObjKind::Closure(ObjClosure {
+                function: ObjFunction {
+                    name: name.clone(),
+                    chunk: Arc::clone(chunk),
+                },
+                upvalues: Vec::new(),
+            }));
+            closures.insert(*id, r);
+            let mut cells = Vec::with_capacity(upvalues.len());
+            for uv in upvalues {
+                let value = from_shared(gc, uv, closures);
+                cells.push(gc.alloc(ObjKind::Upvalue(ObjUpvalue { value })));
+            }
+            if let Some(obj) = gc.get_mut(r) {
+                if let ObjKind::Closure(c) = &mut obj.kind {
+                    c.upvalues = cells;
+                }
+            }
+            Value::obj(r)
+        }
+        SharedValue::ClosureRef(id) => match closures.get(id) {
+            Some(r) => Value::obj(*r),
+            None => Value::null(),
+        },
+        SharedValue::Native(name) => {
+            let r = gc.alloc(ObjKind::NativeFunction(NativeFn { name: name.clone() }));
             Value::obj(r)
         }
     }
@@ -210,8 +310,12 @@ pub struct Value(pub(crate) NanBoxedValue);
 impl Value {
     // ---- Constructors ----
 
-    /// Create an integer value. For values known to be small, prefer `small_int`.
-    /// This allocates a BoxedInt on the GC heap if the value exceeds 48-bit range.
+    /// Create an integer value. This is THE integer constructor for runtime
+    /// code: values inside the 48-bit inline range are NaN-boxed, larger ones
+    /// are heap-allocated as `ObjKind::BoxedInt`. It can never panic.
+    ///
+    /// Invariant: there is deliberately no public panicking "small int"
+    /// constructor. Use `try_inline_int` when no `Gc` is at hand.
     #[inline]
     pub fn int(n: i64, gc: &mut Gc) -> Value {
         match NanBoxedValue::try_from_int(n) {
@@ -223,11 +327,12 @@ impl Value {
         }
     }
 
-    /// Create an integer value that is known to fit in 48 bits.
-    /// Panics in debug mode if the value is out of range.
+    /// Inline an integer without a GC. Returns `None` when `n` is outside
+    /// the 48-bit NaN-box range; the caller must then pick a fallback
+    /// (usually `Value::int` with a GC, or a float).
     #[inline]
-    pub fn small_int(n: i64) -> Value {
-        Value(NanBoxedValue::from_small_int(n))
+    pub fn try_inline_int(n: i64) -> Option<Value> {
+        NanBoxedValue::try_from_int(n).map(Value)
     }
 
     #[inline]
@@ -395,6 +500,14 @@ impl fmt::Debug for Value {
 pub struct GcObject {
     pub kind: ObjKind,
     pub marked: bool,
+    /// Single-owner bit: set only on a string or array that the VM created
+    /// for, and stored into, exactly one local-variable register (by
+    /// `AddLocal` / `PushLocal` / `PopLocal`). While it is set, no other
+    /// register, global, upvalue or heap object refers to the object, so
+    /// those opcodes may update it in place without breaking value
+    /// semantics. Every operation that copies a reference out of a local
+    /// register (`GetLocal`, `Move`, closure capture) clears it first.
+    pub unique: bool,
 }
 
 impl GcObject {
@@ -402,6 +515,7 @@ impl GcObject {
         Self {
             kind,
             marked: false,
+            unique: false,
         }
     }
 
@@ -516,7 +630,7 @@ impl GcObject {
             ObjKind::Upvalue(_) => "Upvalue",
             ObjKind::ResultOk(_) | ObjKind::ResultErr(_) => "Result",
             ObjKind::TaskHandle(_) => "TaskHandle",
-            ObjKind::Channel(_) => "channel",
+            ObjKind::Channel(_) => "Channel",
             ObjKind::Frozen(_) => "Frozen",
             ObjKind::Tuple(_) => "Tuple",
             ObjKind::Set(_) => "Set",

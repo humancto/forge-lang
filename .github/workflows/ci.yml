@@ -5,9 +5,27 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly run so dependency rot (new RustSec advisories, toolchain changes,
+  # runner image updates) is noticed even when nobody is pushing.
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  # Debug info is not needed to run tests. Without it the `cargo test`
+  # target dir shrinks from ~4.1 GB to ~1.3 GB (the debug libforge_lang.a
+  # staticlib alone drops from ~790 MB to ~150 MB), so builds, links and
+  # rust-cache save/restore are all faster.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   test:
@@ -21,7 +39,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --verbose
+      - name: Runner resources
+        shell: bash
+        run: |
+          echo "cpus: $(getconf _NPROCESSORS_ONLN 2>/dev/null || echo "$NUMBER_OF_PROCESSORS")"
+          df -h . || true
+      - run: cargo test --locked --no-fail-fast --verbose
+      - name: Runner resources after tests
+        if: always()
+        shell: bash
+        run: df -h . || true
 
   clippy:
     name: Clippy
@@ -34,32 +61,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Keep only targeted suppressions for known in-progress JIT stubs.
       # Broad suppressions (-A dead-code, -A unused-variables, etc.) removed.
-      - run: cargo clippy --all-targets -- -A clippy::approx_constant -A clippy::result_large_err -A clippy::only_used_in_recursion -A clippy::len_zero
-
-  fork-benchmark:
-    name: fork_for_serving benchmark
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --bench fork_for_serving -- --warm-up-time 3 --measurement-time 5 --sample-size 50
-
-  startup-benchmark:
-    name: Startup benchmark
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build release forge and static runtime
-        run: cargo build --release --lib --bin forge
-      - name: Build startup measurement harness
-        run: rustc tools/startup_time.rs -O -o target/startup_time
-      - name: Measure startup modes
-        env:
-          FORGE_LIB_DIR: target/release
-        run: ./target/startup_time --forge ./target/release/forge --warmups 2 --reps 20
+      - run: cargo clippy --locked --all-targets -- -A clippy::approx_constant -A clippy::result_large_err -A clippy::only_used_in_recursion -A clippy::len_zero
 
   fmt:
     name: Format
@@ -71,6 +73,125 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  # Build the forge CLI once and share it with the Forge-level gates below
+  # (Forge tests on both engines, examples, differential engine check).
+  build-forge:
+    name: Build forge (debug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: forge-cli
+      - run: cargo build --locked --bin forge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forge-cli-linux
+          path: target/debug/forge
+          retention-days: 3
+          if-no-files-found: error
+
+  forge-tests:
+    name: Forge tests (${{ matrix.engine }})
+    needs: build-forge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # `forge test` defaults to the VM (same as `forge run`); the
+        # interpreter is still a supported engine (`--interp`), so both
+        # are gated independently.
+        engine: [vm, interp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: forge-cli-linux
+          path: bin
+      - run: chmod +x bin/forge
+      - name: Run Forge test suite on the ${{ matrix.engine }} engine
+        # `forge test` exits non-zero when any test fails.
+        run: ./bin/forge --allow-run test tests/ --engine ${{ matrix.engine }}
+
+  examples:
+    name: Examples (default engine)
+    needs: build-forge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: forge-cli-linux
+          path: bin
+      - run: chmod +x bin/forge
+      - name: Run examples/*.fg
+        # Skip-list and --allow-run list live in the script, with reasons.
+        env:
+          EXAMPLE_TIMEOUT: "60"
+        run: tools/run_examples.sh bin/forge
+
+  engine-diff:
+    name: Differential engine check (VM vs interpreter)
+    needs: build-forge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: forge-cli-linux
+          path: bin
+      - run: chmod +x bin/forge
+      # TODO(engine-diff): a tool that diffs VM vs interpreter output over
+      # tests/, examples/ and tests/parity is being added in a separate
+      # change. Once it lands under one of the paths below this step starts
+      # enforcing it automatically; then delete the "not present" branch so
+      # a missing tool fails the job.
+      - name: Run differential engine tool if present
+        env:
+          FORGE: ${{ github.workspace }}/bin/forge
+        run: |
+          set -euo pipefail
+          for candidate in tools/engine_diff.sh tools/diff_engines.sh tools/engine-diff.sh \
+                           tools/differential.sh tools/engine_diff.py tools/diff_engines.py; do
+            if [ -f "$candidate" ]; then
+              echo "Running $candidate with FORGE=$FORGE"
+              case "$candidate" in
+                *.py) python3 "$candidate" ;;
+                *)    bash "$candidate" ;;
+              esac
+              exit $?
+            fi
+          done
+          echo "::notice::No differential engine tool found yet (looked under tools/); nothing to run."
+
+  backend-parity:
+    name: Backend parity corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run parity corpus
+        run: cargo test --locked --bin forge parity_corpus_ --verbose
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Run cargo-audit directly instead of rustsec/audit-check: the action
+      # needs `checks: write` to publish a check run, which the default
+      # read-only GITHUB_TOKEN on push/schedule events does not grant.
+      # Ignored advisories (with justification) live in .cargo/audit.toml.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
   otel-build:
     name: Build with otel feature
     runs-on: ubuntu-latest
@@ -78,45 +199,36 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --features otel --verbose
-      - run: cargo test --lib --features otel runtime::tracing_init
-      - run: cargo test --test otel_smoke --features otel
+      - run: cargo build --locked --features otel --verbose
+      - run: cargo test --locked --lib --features otel runtime::tracing_init
+      - run: cargo test --locked --test otel_smoke --features otel
 
-  audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  forge-tests:
-    name: Forge Integration Tests
+  fork-benchmark:
+    name: fork_for_serving benchmark
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build forge binary
-        run: cargo build --release
-      - name: Run Forge test suite
-        run: |
-          echo "Running all .fg tests in tests/ directory..."
-          ./target/release/forge --allow-run test tests/ 2>&1 | tee /tmp/forge-test-out.txt
-          # Check for any failures in the summary line
-          if grep -qE "[1-9][0-9]* failed" /tmp/forge-test-out.txt; then
-            echo "FAILURE: Some Forge tests failed"
-            exit 1
-          fi
-          echo "All Forge tests passed!"
+      - run: cargo bench --locked --bench fork_for_serving -- --warm-up-time 3 --measurement-time 5 --sample-size 50
 
-  backend-parity:
-    name: Backend Parity Corpus
+  startup-benchmark:
+    name: Startup benchmark
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run parity corpus
-        run: cargo test parity_corpus_ --verbose
+      - name: Build release forge and static runtime
+        run: cargo build --locked --release --lib --bin forge
+      - name: Build startup measurement harness
+        run: rustc tools/startup_time.rs -O -o target/startup_time
+      - name: Measure startup modes
+        env:
+          FORGE_LIB_DIR: target/release
+        run: ./target/startup_time --forge ./target/release/forge --warmups 2 --reps 20
+      - name: VM hot-path benchmarks (report-only)
+        continue-on-error: true
+        env:
+          BENCH_TIMEOUT: "60"
+        run: tools/bench_vm.sh target/release/forge

@@ -1,0 +1,6 @@
+// VM benchmark: map/filter/reduce over 1M items.
+let xs = range(0, 1000000)
+let ys = map(xs, fn(x) { return x * 2 })
+let zs = filter(ys, fn(x) { return x % 3 == 0 })
+println(len(zs))
+println(reduce(zs, 0, fn(acc, x) { return acc + x }))

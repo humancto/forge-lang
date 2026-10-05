@@ -3,13 +3,7 @@ use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 #[cfg(feature = "jit")]
-use crate::vm::bytecode::Constant;
-#[cfg(feature = "jit")]
-use crate::vm::jit::jit_module::JitCompiler;
-#[cfg(feature = "jit")]
-use crate::vm::jit::type_analysis;
-#[cfg(feature = "jit")]
-use crate::vm::machine::JitEntry;
+use crate::vm::jit::tier::JitMode;
 
 fn parse_program(source: &str) -> crate::parser::ast::Program {
     let mut lexer = Lexer::new(source);
@@ -56,64 +50,8 @@ fn run_on_jit_value(source: &str) -> String {
     let program = parse_program(source);
     let chunk = compiler::compile_repl(&program).expect("compile error");
 
-    let mut jit = JitCompiler::new().expect("jit init");
     let mut vm = VM::new();
-    for (i, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() || proto.name == "<lambda>" {
-            format!("fn_{}", i)
-        } else {
-            proto.name.clone()
-        };
-        let info = type_analysis::analyze(proto);
-        if !info.has_unsupported_ops {
-            let string_refs: Option<Vec<Option<i64>>> =
-                if info.has_string_ops || info.has_collection_ops || info.has_global_ops {
-                    Some(
-                        proto
-                            .constants
-                            .iter()
-                            .map(|c| match c {
-                                Constant::Str(s) => Some(vm.gc.alloc_string(s.clone()).0 as i64),
-                                _ => None,
-                            })
-                            .collect(),
-                    )
-                } else {
-                    None
-                };
-            let _ = jit.compile_function(proto, &name, string_refs.as_ref());
-        }
-    }
-
-    // (vm already created above for string_refs pre-allocation)
-    for (i, proto) in chunk.prototypes.iter().enumerate() {
-        let name = if proto.name.is_empty() || proto.name == "<lambda>" {
-            format!("fn_{}", i)
-        } else {
-            proto.name.clone()
-        };
-        let info = type_analysis::analyze(proto);
-        if !info.has_unsupported_ops {
-            if let Some(ptr) = jit.get_compiled(&name) {
-                vm.jit_cache.insert(
-                    name,
-                    JitEntry {
-                        ptr,
-                        uses_float: info.has_float,
-                        has_string_ops: info.has_string_ops,
-                        has_collection_ops: info.has_collection_ops,
-                        has_global_ops: info.has_global_ops,
-                        returns_obj: matches!(
-                            info.return_type,
-                            type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
-                        ),
-                        returns_float: matches!(info.return_type, type_analysis::RegType::Float),
-                    },
-                );
-            }
-        }
-    }
-
+    vm.set_jit_mode(JitMode::Eager);
     let value = vm.execute(&chunk).expect("jit-assisted vm error");
     value.display(&vm.gc)
 }
@@ -158,49 +96,8 @@ fn assert_cross_backend_error_contains(source: &str, expected: &str) {
 
     #[cfg(feature = "jit")]
     let jit_err = {
-        let mut jit = JitCompiler::new().expect("jit init error");
-        for (index, proto) in chunk.prototypes.iter().enumerate() {
-            let name = if proto.name.is_empty() {
-                format!("fn_{}", index)
-            } else {
-                proto.name.clone()
-            };
-            let info = type_analysis::analyze(proto);
-            if !info.has_unsupported_ops {
-                let _ = jit.compile_function(proto, &name, None);
-            }
-        }
         let mut jit_vm = VM::new();
-        for (index, proto) in chunk.prototypes.iter().enumerate() {
-            let name = if proto.name.is_empty() {
-                format!("fn_{}", index)
-            } else {
-                proto.name.clone()
-            };
-            let info = type_analysis::analyze(proto);
-            if !info.has_unsupported_ops {
-                if let Some(ptr) = jit.get_compiled(&name) {
-                    jit_vm.jit_cache.insert(
-                        name,
-                        JitEntry {
-                            ptr,
-                            uses_float: info.has_float,
-                            has_string_ops: info.has_string_ops,
-                            has_collection_ops: info.has_collection_ops,
-                            has_global_ops: info.has_global_ops,
-                            returns_obj: matches!(
-                                info.return_type,
-                                type_analysis::RegType::StringRef | type_analysis::RegType::ObjRef
-                            ),
-                            returns_float: matches!(
-                                info.return_type,
-                                type_analysis::RegType::Float
-                            ),
-                        },
-                    );
-                }
-            }
-        }
+        jit_vm.set_jit_mode(JitMode::Eager);
         jit_vm
             .execute(&chunk)
             .expect_err("jit-assisted vm should error")
@@ -1188,4 +1085,391 @@ fn vm_bet_no_cap() {
     // bet(true) and no_cap(1, 1) should not crash
     run_on_vm("bet(true)");
     run_on_vm("no_cap(1, 1)");
+}
+
+// ----- Language-semantics parity (shared rules in `crate::semantics`) -----
+
+#[test]
+fn parity_array_plus_array_is_type_error() {
+    assert_cross_backend_error_contains("[1, 2] + [3]", "cannot apply Add to Array and Array");
+}
+
+#[test]
+fn parity_index_out_of_bounds_message() {
+    assert_cross_backend_error_contains(
+        "let a = [1, 2]\na[10]",
+        "index out of bounds: index 10 on array of length 2",
+    );
+    assert_cross_backend_error_contains(
+        "let a = [1, 2]\na[-3]",
+        "index out of bounds: index -3 on array of length 2",
+    );
+    assert_cross_backend_error_contains(
+        "let mut a = [1, 2]\na[2] = 5\na",
+        "index out of bounds: index 2 on array of length 2",
+    );
+}
+
+#[test]
+fn parity_missing_object_key_errors() {
+    assert_cross_backend_error_contains("let o = {a: 1}\no[\"b\"]", "key 'b' not found");
+}
+
+#[test]
+fn parity_string_index_is_invalid() {
+    assert_cross_backend_error_contains("\"abc\"[1]", "cannot index String with Int");
+}
+
+#[test]
+fn parity_index_assign_object_key() {
+    assert_cross_backend_value("let mut o = {a: 1}\no[\"b\"] = 2\no.b", "2");
+}
+
+#[test]
+fn parity_division_by_zero_message() {
+    assert_cross_backend_error_contains("1 / 0", "division by zero");
+    assert_cross_backend_error_contains("5 % 0", "modulo by zero");
+}
+
+#[test]
+fn parity_bool_ordering_is_error() {
+    assert_cross_backend_error_contains("true < false", "invalid operator for Bool");
+}
+
+#[test]
+fn parity_yield_is_a_runtime_error_not_dropped() {
+    assert_cross_backend_error_contains("emit 1\n3", "yield/emit is not supported yet");
+    // Inside a hot function (the eager JIT tier sees it on the first call):
+    // the error must surface, never be swallowed by native code.
+    assert_cross_backend_error_contains(
+        "fn gen(n) {\n    emit n\n    return n\n}\nlet mut i = 0\nwhile i < 50 {\n    gen(i)\n    i = i + 1\n}\n3",
+        "yield/emit is not supported yet",
+    );
+}
+
+// ----- Value semantics: collections are values on both engines -----
+
+#[test]
+fn parity_assignment_copies_collections() {
+    assert_cross_backend_value(
+        "let mut z = [1, 2]\nlet w = z\nz[0] = 9\n[w, z]",
+        "[[1, 2], [9, 2]]",
+    );
+    assert_cross_backend_value(
+        "let mut o = {a: 1}\nlet p = o\no.a = 5\n[p.a, o.a]",
+        "[1, 5]",
+    );
+}
+
+#[test]
+fn parity_function_arguments_are_copies() {
+    assert_cross_backend_value(
+        "fn f(a) {\n    let mut b = a\n    b[0] = 100\n    return b\n}\nlet q = [1]\nlet r = f(q)\n[q, r]",
+        "[[1], [100]]",
+    );
+    assert_cross_backend_value(
+        "fn setx(o) {\n    o.x = 99\n    return o.x\n}\nlet mut obj = {x: 1}\nlet r = setx(obj)\n[obj.x, r]",
+        "[1, 99]",
+    );
+}
+
+#[test]
+fn parity_methods_do_not_mutate_receiver() {
+    assert_cross_backend_value(
+        "struct Counter { n: Int }\ngive Counter {\n    fn bump(it) {\n        it.n = it.n + 1\n        return it.n\n    }\n}\nlet mut c = Counter { n: 0 }\nlet a = c.bump()\nlet b = c.bump()\n[a, b, c.n]",
+        "[1, 1, 0]",
+    );
+}
+
+#[test]
+fn parity_index_assign_on_immutable_binding_errors() {
+    assert_cross_backend_error_contains(
+        "let imm = [1]\nimm[0] = 2\nimm",
+        "cannot reassign immutable variable 'imm'",
+    );
+    assert_cross_backend_error_contains(
+        "let o = {a: 1}\no.a = 2\no",
+        "cannot reassign immutable variable 'o'",
+    );
+}
+
+#[test]
+fn parity_global_collection_updated_from_function() {
+    assert_cross_backend_value(
+        "let mut cnt = [0]\nfn bump() {\n    cnt[0] = cnt[0] + 1\n}\nbump()\nbump()\ncnt",
+        "[2]",
+    );
+}
+
+#[test]
+fn vm_nested_index_assign_has_value_semantics() {
+    // The interpreter only supports `name[i] = v`; the VM also supports
+    // nested places and rebuilds each level instead of mutating shared rows.
+    assert_eq!(
+        run_on_vm_value("let mut g = [[1, 2], [3]]\nlet snap = g\ng[0][1] = 7\n[g, snap]"),
+        "[[[1, 7], [3]], [[1, 2], [3]]]"
+    );
+}
+
+// ----- `return` inside an if-expression returns from the function -----
+
+#[test]
+fn parity_return_inside_if_expression_returns_from_function() {
+    assert_cross_backend_value(
+        "fn g(x) {\n    let y = if x > 0 { return \"pos\" } else { \"neg\" }\n    return \"after \" + y\n}\n[g(1), g(-1)]",
+        "[pos, after neg]",
+    );
+    // Not intercepted by an enclosing try.
+    assert_cross_backend_value(
+        "fn h() {\n    try {\n        let y = if true { return 1 } else { 2 }\n    } catch e {\n        return -1\n    }\n    return 0\n}\nh()",
+        "1",
+    );
+}
+
+// ----- `check ... between` -----
+
+#[test]
+fn parity_check_between_bounds() {
+    assert_cross_backend_value(
+        "let x = 5\ncheck x between 1 && 10\ncheck x between 1 and 10\ncheck x between 1.0 and 10.0\ncheck 2.5 between 1 and 10\ncheck x between 0 - 1 and 2 * 5\n\"ok\"",
+        "ok",
+    );
+    assert_cross_backend_error_contains("let x = 50\ncheck x between 1 and 10\n1", "check failed");
+    assert_cross_backend_error_contains("let x = 0\ncheck x between 1 && 10\n1", "check failed");
+}
+
+// ----- Call arity and default parameters -----
+
+#[test]
+fn parity_default_parameters() {
+    assert_cross_backend_value(
+        "fn g(a, b = 10) {\n    return a + b\n}\n[g(1), g(1, 2)]",
+        "[11, 3]",
+    );
+    // Defaults may use earlier parameters; an explicit null is kept.
+    assert_cross_backend_value(
+        "fn h(a, b = a * 2) {\n    return [a, b]\n}\n[h(3), h(3, null)]",
+        "[[3, 6], [3, null]]",
+    );
+    assert_cross_backend_value("let l = fn(x, y = 1) { x + y }\nl(4)", "5");
+}
+
+#[test]
+fn parity_call_arity_errors() {
+    assert_cross_backend_error_contains(
+        "fn add(a, b) {\n    return a + b\n}\nadd(1)",
+        "fn add expects 2 arguments, got 1",
+    );
+    assert_cross_backend_error_contains(
+        "fn add(a, b) {\n    return a + b\n}\nadd(1, 2, 3)",
+        "fn add expects 2 arguments, got 3",
+    );
+    assert_cross_backend_error_contains(
+        "fn g(a, b = 1) {\n    return a\n}\ng()",
+        "fn g expects at least 1 argument, got 0",
+    );
+    assert_cross_backend_error_contains(
+        "let l = fn(x) { x }\nl(1, 2)",
+        "fn expects 1 argument, got 2",
+    );
+    // Arity errors are catchable.
+    assert_cross_backend_value(
+        "fn add(a, b) {\n    return a + b\n}\nlet mut m = \"\"\ntry {\n    add(1)\n} catch e {\n    m = e.message\n}\nm",
+        "fn add expects 2 arguments, got 1",
+    );
+}
+
+#[test]
+fn parity_callbacks_from_builtins_are_lenient() {
+    // Builtins may pass fewer or more arguments than a callback declares.
+    assert_cross_backend_value("map([1, 2], fn(x, i) { return x })", "[1, 2]");
+    assert_cross_backend_value("reduce([1, 2, 3], 0, fn(acc, x) { acc + x })", "6");
+    assert_cross_backend_value("filter([1, 2, 3], fn(x) { x > 1 })", "[2, 3]");
+}
+
+#[test]
+fn parity_builtin_arity_comes_from_the_registry() {
+    assert_cross_backend_error_contains("len([1], [2])", "len() expects 1 argument, got 2");
+    assert_cross_backend_error_contains("upper()", "upper() expects 1 argument, got 0");
+    assert_cross_backend_value("upper(\"ab\") + lower(\"CD\") + trim(\"  x \")", "ABcdx");
+}
+
+// ----- Concurrency and modules -----
+
+#[test]
+fn parity_for_loop_over_channel() {
+    assert_cross_backend_value(
+        "let ch = channel()\nsend(ch, 1)\nsend(ch, 2)\nclose(ch)\nlet mut got = []\nfor m in ch {\n    got = push(got, m)\n}\ngot",
+        "[1, 2]",
+    );
+    // `break` leaves the remaining values in the channel.
+    assert_cross_backend_value(
+        "let ch = channel()\nsend(ch, 1)\nsend(ch, 2)\nsend(ch, 3)\nclose(ch)\nfor m in ch {\n    break\n}\nreceive(ch)",
+        "2",
+    );
+}
+
+#[test]
+fn parity_spawn_sees_top_level_functions_and_globals() {
+    assert_cross_backend_value(
+        "fn w() {\n    return 42\n}\nlet h = spawn { w() }\nawait h",
+        "42",
+    );
+    assert_cross_backend_value(
+        "let base = 10\nfn add(x) {\n    return x + base\n}\nlet h = spawn { add(5) }\nawait h",
+        "15",
+    );
+    // A captured recursive lambda survives the transfer.
+    assert_cross_backend_value(
+        "let fact = fn(n) {\n    if n <= 1 {\n        return 1\n    }\n    return n * fact(n - 1)\n}\nlet h = spawn { fact(5) }\nawait h",
+        "120",
+    );
+}
+
+#[test]
+fn parity_stdlib_modules_exist_on_both_engines() {
+    assert_cross_backend_value(
+        "[type(npc), type(url), type(toml), type(ws), type(io.args()), type(npc.first_name())]",
+        "[Object, Object, Object, Object, Array, String]",
+    );
+}
+
+#[test]
+fn parity_check_statement_is_enforced() {
+    assert_cross_backend_error_contains(
+        "let name = \"\"\ncheck name is not empty\n1",
+        "check failed",
+    );
+    assert_cross_backend_value("let s = \"hi\"\ncheck s is not empty\ns", "hi");
+}
+
+#[test]
+fn parity_immutable_reassign_is_catchable() {
+    assert_cross_backend_value(
+        "let mut caught = false\ntry {\n    let x = 1\n    x = 2\n} catch e {\n    caught = true\n}\ncaught",
+        "true",
+    );
+}
+
+#[test]
+fn parity_native_callers_observe_errors_before_outer_try() {
+    // yolo/assert_throws swallow errors from the closure they call; an
+    // enclosing try must not intercept them first.
+    assert_cross_backend_value(
+        "let mut out = \"none\"\ntry {\n    let r = yolo(fn() { return 1 / 0 })\n    assert_throws(fn() { return 1 / 0 })\n    out = \"swallowed\"\n} catch e {\n    out = \"caught\"\n}\nout",
+        "swallowed",
+    );
+    // ...while errors that no native caller handles still reach the try.
+    assert_cross_backend_value(
+        "let mut out = \"none\"\ntry {\n    map([1, 0], fn(x) { return 1 / x })\n} catch e {\n    out = \"caught\"\n}\nout",
+        "caught",
+    );
+}
+
+#[test]
+fn parity_import_missing_name_errors() {
+    assert_cross_backend_error_contains(
+        "import { nope } from \"tests/parity/modules/private_helper.fg\"\n1",
+        "does not export 'nope'",
+    );
+}
+
+#[test]
+fn parity_import_does_not_leak_private_names() {
+    assert_cross_backend_error_contains(
+        "import { visible } from \"tests/parity/modules/private_helper.fg\"\nhidden_helper()",
+        "undefined variable: 'hidden_helper'",
+    );
+}
+
+#[test]
+fn parity_option_truthiness() {
+    assert_cross_backend_value("[!!Some(0), !!None]", "[true, false]");
+}
+
+#[test]
+fn parity_match_on_result_constructors() {
+    assert_cross_backend_value(
+        "let r = Ok(41)\nlet mut out = 0\nmatch r {\n    Ok(v) => out = v + 1\n    Err(e) => out = -1\n}\nout",
+        "42",
+    );
+}
+
+#[test]
+fn vm_unsupported_constructs_are_rejected_not_dropped() {
+    // `break` outside a loop used to compile to a silent no-op.
+    let program = parse_program("break\n");
+    let err = compiler::compile(&program).expect_err("must be rejected");
+    assert!(err.is_unsupported(), "{}", err.message);
+}
+
+#[test]
+fn vm_many_try_blocks_reuse_registers() {
+    // Each top-level try/catch used to leak its catch register, so large
+    // programs hit the 255-register limit.
+    let mut source = String::from("let mut n = 0\n");
+    for _ in 0..300 {
+        source.push_str("try {\n    let t = n + 1\n    n = t\n} catch e {\n    n = -1\n}\n");
+    }
+    source.push_str("n\n");
+    assert_eq!(run_on_vm_value(&source), "300");
+}
+
+// ----- Builtin registry: one source of truth for both engines -----
+
+#[test]
+fn registry_globals_and_modules_exist_on_both_engines() {
+    use crate::interpreter::Value as IV;
+    let interp = Interpreter::new();
+    let vm = VM::new();
+    let mut missing = Vec::new();
+    for builtin in crate::builtins_registry::GLOBALS {
+        if interp.env.get(builtin.name).is_none() {
+            missing.push(format!("interpreter global {}", builtin.name));
+        }
+        if !vm.globals.contains_key(builtin.name) {
+            missing.push(format!("vm global {}", builtin.name));
+        }
+    }
+    for module in crate::builtins_registry::modules() {
+        let IV::Object(expected) = (module.create)() else {
+            panic!("module {} is not an object", module.name);
+        };
+        let expected: Vec<String> = expected.keys().cloned().collect();
+        match interp.env.get(module.name) {
+            Some(IV::Object(members)) => {
+                let keys: Vec<String> = members.keys().cloned().collect();
+                if keys != expected {
+                    missing.push(format!("interpreter module {} members differ", module.name));
+                }
+            }
+            _ => missing.push(format!("interpreter module {}", module.name)),
+        }
+        let vm_members = vm
+            .globals
+            .get(module.name)
+            .and_then(|v| v.as_obj())
+            .and_then(|r| vm.gc.get(r))
+            .and_then(|o| match &o.kind {
+                crate::vm::value::ObjKind::Object(map) => {
+                    Some(map.keys().cloned().collect::<Vec<_>>())
+                }
+                _ => None,
+            });
+        match vm_members {
+            Some(keys) => {
+                for key in &expected {
+                    if !keys.contains(key) {
+                        missing.push(format!("vm {}.{}", module.name, key));
+                    }
+                }
+            }
+            None => missing.push(format!("vm module {}", module.name)),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "registry entries missing: {:?}",
+        missing
+    );
 }

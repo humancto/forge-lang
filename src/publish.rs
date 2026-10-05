@@ -20,7 +20,7 @@ const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &["*.lock", "*.tar.gz", "*.secret*"];
 /// Entry point from CLI — uses CWD as project directory.
 pub fn publish(dry_run: bool, registry_override: Option<&str>) {
     if let Err(e) = publish_from(Path::new("."), dry_run, registry_override) {
-        eprintln!("Error: {}", e);
+        crate::color::ceprintln!("Error: {}", e);
         std::process::exit(1);
     }
 }
@@ -56,20 +56,21 @@ pub fn publish_from(
     }
 
     if dry_run {
-        println!("  Would publish {} v{}", name, version);
-        println!("  Registry: {}", registry_root.display());
-        println!("  Files ({}):", files.len());
+        crate::color::cprintln!("  Would publish {} v{}", name, version);
+        crate::color::cprintln!("  Registry: {}", registry_root.display());
+        crate::color::cprintln!("  Files ({}):", files.len());
         for f in &files {
-            println!("    {}", f.display());
+            crate::color::cprintln!("    {}", f.display());
         }
         return Ok(());
     }
 
     // Warn if overwriting
     if target_dir.exists() {
-        eprintln!(
+        crate::color::ceprintln!(
             "  Warning: replacing existing {}@{} in local registry",
-            name, version
+            name,
+            version
         );
         std::fs::remove_dir_all(&target_dir)
             .map_err(|e| format!("failed to remove existing version: {}", e))?;
@@ -107,22 +108,22 @@ pub fn publish_from(
     // Write checksum file
     let checksum_content = format!("sha256:{}\n", checksum);
     if let Err(e) = std::fs::write(target_dir.join(".forge-checksum"), &checksum_content) {
-        eprintln!("  Warning: failed to write checksum file: {}", e);
+        crate::color::ceprintln!("  Warning: failed to write checksum file: {}", e);
     }
 
     // Verify the package is findable
     let found = crate::package::find_in_registry(name, version, &[registry_root.clone()]);
     if found.is_none() {
-        eprintln!(
+        crate::color::ceprintln!(
             "  Warning: published package not found in registry at {}",
             target_dir.display()
         );
     }
 
-    println!("  \x1B[32m✓\x1B[0m Published {} v{}", name, version);
-    println!("    Registry: {}", registry_root.display());
-    println!("    Files: {}", files.len());
-    println!(
+    crate::color::cprintln!("  \x1B[32m✓\x1B[0m Published {} v{}", name, version);
+    crate::color::cprintln!("    Registry: {}", registry_root.display());
+    crate::color::cprintln!("    Files: {}", files.len());
+    crate::color::cprintln!(
         "    Size: {}",
         if total_size > 1024 {
             format!("{:.1} KB", total_size as f64 / 1024.0)
@@ -130,7 +131,7 @@ pub fn publish_from(
             format!("{} bytes", total_size)
         }
     );
-    println!("    Checksum: {}", &checksum[..16]);
+    crate::color::cprintln!("    Checksum: {}", &checksum[..16]);
 
     Ok(())
 }
@@ -194,10 +195,10 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
 
     // Warn about missing recommended fields
     if manifest.project.description.is_empty() {
-        eprintln!("  Warning: project.description is empty in forge.toml");
+        crate::color::ceprintln!("  Warning: project.description is empty in forge.toml");
     }
     if manifest.project.license.is_empty() {
-        eprintln!("  Warning: project.license is empty in forge.toml");
+        crate::color::ceprintln!("  Warning: project.license is empty in forge.toml");
     }
 
     Ok(())

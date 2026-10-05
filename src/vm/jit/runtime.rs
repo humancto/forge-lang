@@ -17,7 +17,7 @@
 /// The allow(dead_code) below suppresses the warnings until then.
 use indexmap::IndexMap;
 
-use crate::vm::machine::VM;
+use crate::vm::machine::{VMError, VM};
 use crate::vm::value::*;
 
 pub const TAG_INT: u64 = 0;
@@ -53,13 +53,7 @@ pub fn decode_value(encoded: u64) -> Value {
             };
             // JIT uses 60-bit payload which can exceed NaN-box 48-bit inline range.
             // Fall back to float if we can't inline (no gc available for BoxedInt).
-            const INT48_MAX: i64 = (1_i64 << 47) - 1;
-            const INT48_MIN: i64 = -(1_i64 << 47);
-            if n >= INT48_MIN && n <= INT48_MAX {
-                Value::small_int(n)
-            } else {
-                Value::float(n as f64)
-            }
+            Value::try_inline_int(n).unwrap_or_else(|| Value::float(n as f64))
         }
         TAG_FLOAT => {
             let bits = payload;
@@ -127,7 +121,13 @@ pub extern "C" fn rt_get_global(vm_ptr: *mut VM, name_ref: i64) -> u64 {
     };
     match vm.globals.get(&name) {
         Some(val) => encode_value(val, &vm.gc),
-        None => encode_null(),
+        None => {
+            // Same error the VM's `GetGlobal` raises.
+            vm.record_jit_bridge_error(VMError::new(&crate::semantics::undefined_variable(
+                &name, None,
+            )));
+            encode_null()
+        }
     }
 }
 
@@ -154,7 +154,10 @@ pub extern "C" fn rt_set_global(vm_ptr: *mut VM, name_ref: i64, val: i64) {
 
 /// Bridge: call a function value with arguments.
 /// `func_encoded` and all elements of `args_ptr` are tagged values.
-/// Returns a tagged value (encode_value of the result), or encode_null on error.
+/// Returns a tagged value (encode_value of the result). On error it returns
+/// `encode_null()` *and records the error on the VM*
+/// (`VM::record_jit_bridge_error`); the JIT dispatcher raises it as the
+/// call's error, so native code can never swallow a runtime error.
 ///
 /// # Safety
 /// Same aliasing caveat as `rt_get_global`. Additionally, this re-enters the VM
@@ -173,7 +176,10 @@ pub extern "C" fn rt_call_native(
         .collect();
     match vm.call_value(func, args) {
         Ok(result) => encode_value(&result, &vm.gc),
-        Err(_) => encode_null(),
+        Err(err) => {
+            vm.record_jit_bridge_error(err);
+            encode_null()
+        }
     }
 }
 

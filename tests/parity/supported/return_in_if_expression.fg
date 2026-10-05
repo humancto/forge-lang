@@ -1,0 +1,22 @@
+// expect: [pos, after neg, 1]
+// `return` inside an if-expression returns from the enclosing function on
+// both engines (it is not the value of the if-expression), and an enclosing
+// `try` does not intercept it.
+fn classify(x) {
+    let y = if x > 0 { return "pos" } else { "neg" }
+    return "after " + y
+}
+say classify(1)
+say classify(-1)
+
+fn guarded() {
+    try {
+        let v = if true { return 1 } else { 2 }
+        say "unreachable {v}"
+    } catch e {
+        return -1
+    }
+    return 0
+}
+say guarded()
+[classify(1), classify(-1), guarded()]

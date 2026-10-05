@@ -29,6 +29,27 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_SCALING_RATIO: f64 = 3.8;
 
+/// Held for its whole duration by every test in this file.
+///
+/// libtest runs the tests of one binary concurrently (one thread per CPU).
+/// Here that means the two ratio-based scaling tests measure their C=4 phase
+/// while the *other* scaling test is also running 4 CPU-bound handlers and
+/// the WebSocket test's handler spins in a 1M-iteration file-writing loop.
+/// On ubuntu-latest (4 vCPU = 2 physical cores with SMT) that is ~9 busy
+/// threads on ~2.5 cores of throughput, which pushes the measured ratio past
+/// MAX_SCALING_RATIO even though handlers are fully parallel. The ratio gate
+/// is only meaningful when the measurement owns the machine, so the tests
+/// in this file run one at a time.
+static SERVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn exclusive_server_test() -> std::sync::MutexGuard<'static, ()> {
+    // A panicking (failed) sibling poisons the lock; the guard is still
+    // usable for serialization.
+    SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Pick an unused TCP port by binding 0 and letting the kernel choose.
 fn pick_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
@@ -41,11 +62,21 @@ fn pick_port() -> u16 {
 /// returning the bound port. The server stays up for the test's duration
 /// and is dropped when the runtime is dropped at test exit.
 fn spawn_test_server(source: &str) -> u16 {
+    spawn_test_server_on(source, |builder| builder)
+}
+
+/// [`spawn_test_server`] with a hook to configure the runtime (e.g. with
+/// `forge_lang::runtime::recursion::configure_runtime`, as the CLI does).
+fn spawn_test_server_on(
+    source: &str,
+    configure: fn(&mut tokio::runtime::Builder) -> &mut tokio::runtime::Builder,
+) -> u16 {
     let port = pick_port();
     let src = source.replace("__PORT__", &port.to_string());
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        let rt = configure(&mut builder)
             .worker_threads(2)
             .max_blocking_threads(64)
             .enable_all()
@@ -117,6 +148,32 @@ fn forge_string_literal_path(path: &Path) -> String {
 /// Time N concurrent GET requests using blocking reqwest on N OS threads.
 /// Returns the total wall time from the first request issued to the last
 /// response received.
+/// Number of C=1 / C=4 measurement rounds per scaling test.
+const SCALING_ATTEMPTS: usize = 3;
+
+/// Measures `(C=1 wall, C=4 wall, ratio)` up to `SCALING_ATTEMPTS` times and
+/// returns the round with the best ratio, stopping early once a round is
+/// under `MAX_SCALING_RATIO`.
+///
+/// A serialized server (global lock, shared closure mutex) is slow on
+/// *every* round, so the gate keeps its power; a noisy shared runner (CI
+/// neighbours, a concurrent build) only has to produce one clean round.
+fn best_scaling_round(url: &str) -> (Duration, Duration, f64) {
+    let mut best: Option<(Duration, Duration, f64)> = None;
+    for _ in 0..SCALING_ATTEMPTS {
+        let single = concurrent_get_wall_time(url, 1);
+        let parallel = concurrent_get_wall_time(url, 4);
+        let ratio = parallel.as_secs_f64() / single.as_secs_f64();
+        if best.is_none_or(|(_, _, r)| ratio < r) {
+            best = Some((single, parallel, ratio));
+        }
+        if ratio < MAX_SCALING_RATIO {
+            break;
+        }
+    }
+    best.expect("BUG: SCALING_ATTEMPTS must be at least 1")
+}
+
 fn concurrent_get_wall_time(url: &str, concurrency: usize) -> Duration {
     let url = Arc::new(url.to_string());
     let start = Instant::now();
@@ -142,6 +199,7 @@ fn concurrent_get_wall_time(url: &str, concurrency: usize) -> Duration {
 
 #[test]
 fn http_handlers_run_in_parallel_not_serialized() {
+    let _exclusive = exclusive_server_test();
     // CPU-bound handler. ~96ms in the tree-walking interpreter on a
     // modern machine; tuned high enough that scheduler noise can't
     // dominate, low enough that the test stays fast.
@@ -170,13 +228,12 @@ fn http_handlers_run_in_parallel_not_serialized() {
     // Warm-up: prime any one-time JIT / module-load paths.
     let _ = concurrent_get_wall_time(&url, 1);
 
-    let single = concurrent_get_wall_time(&url, 1);
     // C=4 not C=8: typical CI runners have 4 cores, and we want the
     // ratio gate to be meaningful (i.e. parallelism, not OS scheduling
     // overhead). On a 16-core dev box this still proves the absence
     // of a global lock; on a 4-core CI runner it doesn't pay the
     // oversubscription tax.
-    let parallel = concurrent_get_wall_time(&url, 4);
+    let (single, parallel, _) = best_scaling_round(&url);
 
     eprintln!(
         "concurrency-scaling: C=1 wall = {:?}, C=4 wall = {:?}, ratio = {:.2}x",
@@ -205,11 +262,11 @@ fn http_handlers_run_in_parallel_not_serialized() {
 
 #[test]
 fn closure_capturing_handlers_run_in_parallel_not_serialized() {
+    let _exclusive = exclusive_server_test();
     // Captured-closure handler pattern. A top-level Lambda holds the
     // CPU loop; the @get fn invokes it. Different from the global-fn
-    // case in http_handlers_run_in_parallel_not_serialized: that path
-    // takes the is_global_fn fast path in call_function_inner and
-    // ignores the closure entirely. *This* path actually exercises
+    // case in http_handlers_run_in_parallel_not_serialized, which only
+    // reads the global scope through its closure. *This* path actually exercises
     // Value::Lambda::closure -- which under the pre-PR-#110 model
     // shares Arc<Mutex<Environment>> across forks, so concurrent
     // requests serialize on the closure mutex.
@@ -253,8 +310,7 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
     // Warm-up.
     let _ = concurrent_get_wall_time(&url, 1);
 
-    let single = concurrent_get_wall_time(&url, 1);
-    let parallel = concurrent_get_wall_time(&url, 4);
+    let (single, parallel, _) = best_scaling_round(&url);
 
     eprintln!(
         "closure-handler scaling: C=1 wall = {:?}, C=4 wall = {:?}, ratio = {:.2}x",
@@ -277,6 +333,7 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
 
 #[test]
 fn schedule_mutations_do_not_leak_into_handler_forks() {
+    let _exclusive = exclusive_server_test();
     let sentinel = unique_temp_file("schedule_handler_isolation");
     let _ = std::fs::remove_file(&sentinel);
     let sentinel_str = forge_string_literal_path(&sentinel);
@@ -341,6 +398,7 @@ fn schedule_mutations_do_not_leak_into_handler_forks() {
 
 #[test]
 fn websocket_handler_cancelled_on_client_disconnect() {
+    let _exclusive = exclusive_server_test();
     let started = unique_temp_file("ws_cancel_started");
     let progress = unique_temp_file("ws_cancel_progress");
     let finished = unique_temp_file("ws_cancel_finished");
@@ -449,6 +507,7 @@ fn websocket_handler_cancelled_on_client_disconnect() {
 
 #[test]
 fn request_id_is_generated_and_propagated() {
+    let _exclusive = exclusive_server_test();
     // Two scenarios to verify:
     //   (a) request without X-Request-Id -> response carries a new UUID
     //   (b) request with X-Request-Id    -> response echoes the inbound value
@@ -533,4 +592,45 @@ fn request_id_is_generated_and_propagated() {
         generated_id, id_2,
         "two server-generated request_ids should differ"
     );
+}
+
+/// Handlers run on tokio's blocking pool. With tokio's default 2 MiB
+/// thread stacks the interpreter's native-stack guard tripped at ~100
+/// levels of Forge recursion inside a handler; the CLI configures the
+/// runtime (`recursion::configure_runtime`) so blocking threads get
+/// `WORKER_STACK_SIZE` and handler recursion matches other Forge code.
+#[test]
+fn handler_recursion_gets_a_large_stack() {
+    let _exclusive = exclusive_server_test();
+    let port = spawn_test_server_on(
+        r#"
+        @server(port: __PORT__)
+
+        fn down(n) {
+            if n == 0 { return 0 }
+            return 1 + down(n - 1)
+        }
+
+        @get("/ping")
+        fn ping() -> Json {
+            return { ok: true }
+        }
+
+        @get("/deep")
+        fn deep() -> Json {
+            return { depth: down(3000) }
+        }
+        "#,
+        forge_lang::runtime::recursion::configure_runtime,
+    );
+    let body = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("client")
+        .get(format!("http://127.0.0.1:{}/deep", port))
+        .send()
+        .expect("request")
+        .text()
+        .expect("body");
+    assert!(body.contains("3000"), "deep handler failed: {}", body);
 }

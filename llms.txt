@@ -1,0 +1,394 @@
+# Forge
+
+> Forge is an internet-native programming language implemented in Rust. HTTP client and server, SQLite/Postgres/MySQL, JSON, CSV, crypto, JWT, regex, filesystem, shell, and concurrency are built in, with no imports or packages. Source files use the `.fg` extension.
+
+This file is the canonical, compact guide for AI models writing Forge. Every code block below was run on Forge v0.9.x with the default engine (`forge run file.fg`). Prefer the forms shown here.
+
+Forge also has an optional "natural" syntax (`set x to 5`, `say`, `define`, `otherwise`, ...). It is sugar for the classic syntax below. Write classic syntax unless asked otherwise.
+
+## Running
+
+```
+forge run app.fg                 # run (bytecode VM, the default engine)
+forge --interp run app.fg        # tree-walking interpreter (reference semantics)
+forge --jit run app.fg           # VM + Cranelift JIT for numeric functions
+forge --allow-run run app.fg     # allow sh/run_command and other shell builtins
+forge -e 'println(1 + 2)'        # evaluate inline
+forge test                       # run @test functions in tests/*.fg
+forge build --native app.fg      # native executable (also: fmt, new, lsp, add, install)
+forge mcp --allow-net=api.x.com  # MCP server: AI agents run Forge in a deny-all sandbox
+```
+
+Engine flags go BEFORE the subcommand: `forge --interp run x.fg`, not `forge run x.fg --interp`. Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `+=`.
+
+## Values, variables, strings
+
+```forge
+let name = "Forge"            // immutable binding
+let mut count = 0             // mutable binding
+count += 1
+count = count + 1
+let pi = 3.14                 // Float
+let ok = true                 // Bool
+let nothing = null            // Null
+let nums = [1, 2, 3]          // Array
+let user = { name: "Ada", age: 36 }   // Object (string keys, insertion-ordered)
+let pair = (1, "one")         // Tuple
+println("Hello, {name}! count={count}")   // "{expr}" interpolates inside double-quoted strings
+println(typeof(pi))           // Float
+println(user.name)
+println(nums[0])
+println(len(nums))
+println(str(42) + "!")
+println(int("7") + 1)
+println(10 / 4)               // 2 (Int / Int is integer division)
+```
+
+Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines.
+
+## Control flow
+
+```forge
+let score = 85
+if score >= 90 {
+    println("A")
+} else if score >= 80 {
+    println("B")
+} else {
+    println("C")
+}
+
+for i in range(0, 3) {        // 0, 1, 2 (end is exclusive); also: for x in array
+    println(i)
+}
+for e in enumerate(["x", "y"]) {   // enumerate yields { index, value }
+    println("{e.index}: {e.value}")
+}
+for k, v in { a: 1, b: 2 } {       // two-variable form is for objects and maps
+    println("{k}={v}")
+}
+
+let mut n = 0
+while n < 3 {
+    n += 1
+}
+
+let mut m = 0
+loop {
+    m += 1
+    if m == 2 { continue }
+    if m >= 4 { break }
+}
+println(score > 0 && score < 100)
+```
+
+## Functions and closures
+
+```forge
+fn add(a, b) {
+    return a + b
+}
+
+fn greet(name: String) -> String {
+    return "Hello, {name}!"
+}
+
+let square = fn(x) { return x * x }   // anonymous function
+
+fn make_counter() {
+    let mut count = 0
+    return fn() {
+        count += 1
+        return count
+    }
+}
+
+println(add(2, 3))
+println(greet("Ada"))
+println(square(4))
+let c = make_counter()
+c()
+println(c())                  // 2
+```
+
+Always write an explicit `return`.
+
+## Structs, methods, interfaces
+
+```forge
+struct Point {
+    x: Int,
+    y: Int
+}
+
+impl Point {
+    fn sum(it) {              // `it` is the receiver (like self)
+        return it.x + it.y
+    }
+}
+
+let p = Point { x: 1, y: 2 }
+println(p.sum())
+
+struct User {
+    name: String,
+    role: String = "member"   // field default
+}
+let u = User { name: "Ada" }
+
+interface Describable {
+    fn describe() -> String
+}
+
+impl Describable for User {
+    fn describe(it) {
+        return it.name + " (" + it.role + ")"
+    }
+}
+println(u.describe())
+println(satisfies(u, Describable))
+```
+
+## Algebraic types and match
+
+```forge
+type Shape = Circle(Float) | Rect(Float, Float)
+
+impl Shape {
+    fn area(it) {
+        match it {
+            Circle(r) => { return 3.14159 * r * r }
+            Rect(w, h) => { return w * h }
+        }
+    }
+}
+
+for s in [Circle(1.0), Rect(2.0, 3.0)] {
+    println(s.area())
+}
+
+match Rect(2.0, 5.0) {
+    Circle(r) => println("circle {r}"),
+    Rect(w, h) => println("rect {w}x{h}"),
+}
+
+let v = 7
+match v {
+    0 => println("zero"),
+    7 => println("seven"),
+    _ => println("other"),
+}
+```
+
+`match` is a statement. Patterns: literals, `_`, bindings, and constructors `Name(a, b)`. There are no guard clauses (`n if ...`) or or-patterns (`1 | 2`).
+
+## Result, Option, errors
+
+```forge
+fn parse_age(s) {
+    let n = int(s)
+    if n < 0 {
+        return Err("negative age")
+    }
+    return Ok(n)
+}
+
+fn next_age(s) {
+    let n = parse_age(s)?          // ? returns the Err early, unwraps the Ok
+    return Ok(n + 1)
+}
+
+let good = next_age("41")
+if is_ok(good) {
+    println("ok {unwrap(good)}")
+}
+let bad = next_age("-3")
+println(is_err(bad))
+println(unwrap_or(bad, 0))
+
+let found = Some(3)
+println(is_some(found))
+println(is_none(None))
+match found {
+    Some(x) => println("got {x}"),
+    None => println("none"),
+}
+
+try {
+    let z = 1 / 0
+} catch e {
+    println("caught {e.type}: {e.message}")   // ArithmeticError: division by zero
+}
+try {
+    must Err("bad config")       // must: unwrap or raise
+} catch e {
+    println(e.message)
+}
+```
+
+There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `must expr` (both are catchable). `?` only works on `Result` values. `safe { ... }` runs a block and swallows its errors.
+
+## Modules
+
+```forge
+import { double, shout } from "utils.fg"   // selected names
+println(double(21))
+```
+
+`import "utils.fg"` brings every top-level name into scope. Paths resolve relative to the current working directory, then `forge_modules/<name>/main.fg`. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
+
+## Collections and builtins
+
+```forge
+let nums = [5, 3, 8, 1]
+let mut xs = [1, 2]
+xs = push(xs, 3)              // portable: reassign the result
+println(map(nums, fn(x) { return x * 2 }))
+println(filter(nums, fn(x) { return x > 2 }))
+println(reduce(nums, 0, fn(acc, x) { return acc + x }))   // (array, initial, fn)
+println(sort(nums))
+println(sort(nums, fn(a, b) { return b - a }))            // comparator returns a number
+println(nums.filter(fn(x) { return x % 2 == 1 }).map(fn(x) { return x * 10 }))
+println(find(nums, fn(x) { return x > 4 }))
+println(contains(nums, 8))
+
+let mut user = { name: "Ada", age: 36 }
+user.email = "ada@example.com"
+println(keys(user))
+println(get(user, "missing", "default"))
+println(pick(user, ["name"]))
+println(merge(user, { age: 37 }))
+
+let s = "Hello, World"
+println(split(s, ", "))
+println(join(["a", "b"], "-"))
+println(replace(s, "World", "Forge"))
+println(s.upper())
+println("  pad  ".trim())
+println(starts_with(s, "Hell"))
+println(substring(s, 0, 5))
+println(contains(s, "lo, W"))
+
+let st = set([1, 2, 2, 3])
+println(st.has(2))
+let mut m = map()
+m = m.set("k", 1)
+println(m.get("k"))
+println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
+```
+
+Other builtins: `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+
+## Standard library (always in scope)
+
+| Module | Most-used functions (argument order matters) |
+| ------ | -------------------------------------------- |
+| `math` | `sqrt(x)`, `pow(b, e)`, `abs`, `max(a, b)`, `min`, `floor`, `ceil`, `round`, `random_int(lo, hi)`, `pi`, `e` |
+| `fs` | `read(path)`, `write(path, text)`, `append`, `exists`, `list(dir)`, `remove`, `mkdir`, `copy(src, dst)`, `rename` |
+| `json` | `parse(text)`, `stringify(value)` |
+| `regex` | `test(text, pattern)`, `find(text, pattern)`, `find_all(text, pattern)`, `replace(text, pattern, repl)`, `split(text, pattern)` — text FIRST |
+| `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
+| `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }`; response: `{ status, ok, body, json, headers }` |
+| `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `close()` |
+| `pg`, `mysql` | `connect(url)`, `query(conn, sql, params?)`, `execute(conn, sql, params?)`, `close(conn)`; mysql adds `begin/commit/rollback` |
+| `jwt` | `sign(claims, secret, opts?)`, `verify(token, secret)`, `decode(token)`, `valid(token, secret)` |
+| `csv` | `parse(text)`, `stringify(rows)`, `read(path)`, `write(path, rows)` |
+| `env` | `get(name, default?)`, `set`, `has`, `keys` |
+| `log` | `info`, `warn`, `error`, `debug` (structured, via tracing) |
+| `term` | `red`, `green`, `bold`, `table(rows)`, `bar`, `sparkline`, `banner`, `box` |
+| `time` | `now()`, `format`, `parse`, `add`, `diff`, `unix`, `sleep` |
+| `os`, `path` | `os.platform()`, `os.cpus()`; `path.join(a, b)`, `path.extname(p)`, `path.basename(p)` |
+| `io` | `prompt`, `args_parse`, `args_get`, `args_has` |
+
+`fetch(url)` is shorthand for `http.get`. Shell builtins: `sh(cmd)`, `sh_lines`, `sh_ok`, `sh_json`, `run_command`, `pipe_to(data, cmd)` (need `--allow-run`).
+
+```forge
+println(math.sqrt(16.0))
+println(regex.find_all("a1b22c333", "\\d+"))
+println(regex.replace("a1b2", "\\d", "#"))
+println(json.stringify({ a: [1, 2] }))
+println(json.parse("[1, 2]")[1])
+println(env.get("FORGE_LLMS_UNSET", "fallback"))
+println(path.join("a", "b.txt"))
+fs.write("/tmp/forge_llms_demo.txt", "line1\nline2")
+println(fs.read("/tmp/forge_llms_demo.txt"))
+fs.remove("/tmp/forge_llms_demo.txt")
+let tok = jwt.sign({ uid: 1 }, "secret")
+println(jwt.verify(tok, "secret").uid)
+```
+
+## Concurrency
+
+```forge
+// Structured concurrency: all spawns join before the block ends; results in spawn order
+let results = squad {
+    spawn { 1 + 1 }
+    spawn { 2 + 2 }
+}
+println(results)              // [2, 4]
+
+let h = spawn { 40 + 2 }      // detached task
+println(await h)
+println(await_all([spawn { 1 }, spawn { 2 }]))
+
+let ch = channel()            // unbounded; channel(n) is bounded
+spawn {
+    send(ch, "ping")
+    send(ch, "pong")
+}
+println(receive(ch))
+println(receive(ch))
+
+let t = spawn {
+    wait(1)
+    return "late"
+}
+println(await_timeout(t, 10))  // null on timeout (milliseconds)
+```
+
+Also: `try_send`, `try_receive`, `select(channels, timeout_ms?)`, `close(ch)`.
+
+## HTTP server
+
+```forge
+@server(port: 8080)
+
+@get("/hello/:name")
+fn hello(name: String) -> Json {
+    return { greeting: "Hello, {name}!" }
+}
+
+@get("/search")
+fn search(query) -> Json {
+    return { q: query.q }
+}
+
+@post("/echo")
+fn echo(body: Json) -> Json {
+    return { received: body }
+}
+```
+
+Handler parameters bind by name: path params (`:name`), `body`/`data` (parsed JSON body), `query`/`qs` (all query params), or a single query param by its name. Return an object to send JSON. Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. Server programs always run on the interpreter (automatic).
+
+## Tests
+
+Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and run `forge test` (`forge --allow-run test` if tests use the shell).
+
+## Common mistakes
+
+- `let {a, b} = obj` does not parse. Use `unpack {a, b} from obj` or `unpack [x, ...rest] from arr`; `let (a, b) = tuple` works for tuples.
+- `for i, x in array` does not work. Use `for e in enumerate(array) { e.index, e.value }`.
+- No `|x| ...` closures and no arrow functions. Write `fn(x) { return ... }`.
+- No `throw`, no `elif`, no `??` operator. Use `Err`/`?`, `else if`, and `get(obj, key, default)`.
+- Method chains cannot start a line with `.`; keep `a.filter(...).map(...)` on one line.
+- `regex.*` takes `(text, pattern)`, not `(pattern, text)`. Escape backslashes in patterns: `"\\d+"`.
+- `reduce(array, initial, fn)` — the initial value comes second.
+- Mutating a field or index requires a `let mut` binding.
+- `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
+- Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.
+- Always pass user input to SQL as a params array: `db.query("... WHERE id = ?", [id])`.
+
+## Engine notes (v0.9.x)
+
+The default bytecode VM and the reference interpreter run the full Forge test suite identically; `cargo test --test engine_diff` gates every example and fixture on both. Programs the VM compiler cannot handle, and `@server` programs, fall back to the interpreter automatically. Force the interpreter with `forge --interp run`.

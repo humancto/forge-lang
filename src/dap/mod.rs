@@ -1,14 +1,27 @@
-use crate::interpreter::{DebugAction, DebugFrame, DebugState, Interpreter, Value};
+use crate::interpreter::{DebugAction, DebugState, Interpreter};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashSet;
-use std::io::{self, BufRead, Read as _, Write};
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+mod transport;
+
+/// A `launch` request whose program has not started yet. The program starts
+/// on `configurationDone`, so breakpoints sent during configuration are in
+/// place before the first statement runs.
+struct PendingLaunch {
+    program: String,
+    stop_on_entry: bool,
+}
 
 /// Run the DAP server over stdin/stdout.
 pub fn run_dap() {
-    let mut reader = io::BufReader::new(io::stdin());
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
     let stdout = Arc::new(Mutex::new(io::stdout()));
 
     eprintln!("Forge DAP server started");
@@ -17,34 +30,25 @@ pub fn run_dap() {
     let mut pending_breakpoints: std::collections::HashMap<String, HashSet<usize>> =
         std::collections::HashMap::new();
     let mut interpreter_handle: Option<InterpreterSession> = None;
+    let mut pending_launch: Option<PendingLaunch> = None;
+    let mut configuration_done = false;
 
     loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            _ => {}
-        }
-        let line = line.trim().to_string();
-
-        if line.starts_with("Content-Length:") {
-            let len: usize = line
-                .trim_start_matches("Content-Length:")
-                .trim()
-                .parse()
-                .unwrap_or(0);
-
-            // Read empty line separator
-            let mut sep = String::new();
-            reader.read_line(&mut sep).ok();
-
-            // Read content body
-            let mut content = vec![0u8; len];
-            reader.read_exact(&mut content).ok();
-            let body = String::from_utf8_lossy(&content).to_string();
-
-            let msg: JsonValue = match serde_json::from_str(&body) {
+        let content = match transport::read_message(&mut reader) {
+            Ok(Some(body)) => body,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("forge dap: {}", e);
+                break;
+            }
+        };
+        {
+            let msg: JsonValue = match serde_json::from_slice(&content) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("forge dap: ignoring malformed message: {}", e);
+                    continue;
+                }
             };
 
             let command = msg["command"].as_str().unwrap_or("");
@@ -86,51 +90,30 @@ pub fn run_dap() {
                     let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
 
-                    // Launch the interpreter in a background thread
-                    let session = launch_interpreter(&program, stop_on_entry, stdout.clone(), &seq);
-
-                    match session {
-                        Ok(s) => {
-                            // Apply any pre-launch breakpoints
-                            if !pending_breakpoints.is_empty() {
-                                let mut bps = s
-                                    .debug_state
-                                    .breakpoints
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner());
-                                for (path, lines) in &pending_breakpoints {
-                                    let entry = bps.entry(path.clone()).or_default();
-                                    for &l in lines {
-                                        entry.insert(l);
-                                    }
-                                }
-                                pending_breakpoints.clear();
-                            }
-                            interpreter_handle = Some(s);
-                        }
-                        Err(e) => {
-                            let event = make_event(
-                                "output",
-                                &seq,
-                                json!({
-                                    "category": "stderr",
-                                    "output": format!("Launch failed: {}\n", e),
-                                }),
-                            );
-                            send_message(&stdout, &event);
-                            let event = make_event("terminated", &seq, json!({}));
-                            send_message(&stdout, &event);
-                        }
+                    let launch = PendingLaunch {
+                        program,
+                        stop_on_entry,
+                    };
+                    if configuration_done {
+                        interpreter_handle =
+                            start_program(launch, &mut pending_breakpoints, &stdout, &seq);
+                    } else {
+                        pending_launch = Some(launch);
                     }
                 }
 
                 "configurationDone" => {
+                    configuration_done = true;
                     let resp = make_response(request_seq, command, &seq, json!(null));
                     send_message(&stdout, &resp);
+                    if let Some(launch) = pending_launch.take() {
+                        interpreter_handle =
+                            start_program(launch, &mut pending_breakpoints, &stdout, &seq);
+                    }
                 }
 
                 "setBreakpoints" => {
-                    let source_path = args["source"]["path"].as_str().unwrap_or("").to_string();
+                    let source_path = breakpoint_key(args["source"]["path"].as_str().unwrap_or(""));
                     let lines: Vec<usize> = args["breakpoints"]
                         .as_array()
                         .map(|arr| {
@@ -362,29 +345,66 @@ pub fn run_dap() {
                     send_message(&stdout, &resp);
                 }
             }
+        }
+    }
+}
 
-            // Drain output and paused events from the interpreter
-            if let Some(ref session) = interpreter_handle {
-                drain_output(&session.output_sink, &stdout, &seq);
-                drain_paused_events(session, &stdout, &seq);
-            }
+/// The key breakpoints are stored under: the canonical form of a client
+/// path, so `./a.fg`, `a.fg` and `/abs/a.fg` name the same file. Paths that
+/// do not exist are kept as given.
+fn breakpoint_key(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Start a launched program and apply breakpoints collected before launch.
+/// On failure, reports the error to the client and ends the session.
+fn start_program(
+    launch: PendingLaunch,
+    pending_breakpoints: &mut std::collections::HashMap<String, HashSet<usize>>,
+    stdout: &Arc<Mutex<io::Stdout>>,
+    seq: &Arc<Mutex<i64>>,
+) -> Option<InterpreterSession> {
+    let initial_breakpoints = std::mem::take(pending_breakpoints);
+    match launch_interpreter(
+        &launch.program,
+        launch.stop_on_entry,
+        initial_breakpoints,
+        stdout.clone(),
+        seq,
+    ) {
+        Ok(session) => Some(session),
+        Err(e) => {
+            let event = make_event(
+                "output",
+                seq,
+                json!({
+                    "category": "stderr",
+                    "output": format!("Launch failed: {}\n", e),
+                }),
+            );
+            send_message(stdout, &event);
+            let event = make_event("terminated", seq, json!({}));
+            send_message(stdout, &event);
+            None
         }
     }
 }
 
 struct InterpreterSession {
     debug_state: Arc<DebugState>,
-    output_sink: Arc<Mutex<Vec<String>>>,
     current_line: Arc<Mutex<usize>>,
-    paused_receiver: std::sync::mpsc::Receiver<usize>,
     source_name: String,
     source_path: String,
     _thread: std::thread::JoinHandle<()>,
+    _forwarder: std::thread::JoinHandle<()>,
 }
 
 fn launch_interpreter(
     program_path: &str,
     stop_on_entry: bool,
+    initial_breakpoints: std::collections::HashMap<String, HashSet<usize>>,
     stdout: Arc<Mutex<io::Stdout>>,
     seq: &Arc<Mutex<i64>>,
 ) -> Result<InterpreterSession, String> {
@@ -404,7 +424,7 @@ fn launch_interpreter(
     let (paused_sender, paused_receiver) = std::sync::mpsc::channel::<usize>();
 
     let debug_state = Arc::new(DebugState {
-        breakpoints: Mutex::new(std::collections::HashMap::new()),
+        breakpoints: Mutex::new(initial_breakpoints),
         action: Mutex::new(if stop_on_entry {
             DebugAction::Pause
         } else {
@@ -420,76 +440,145 @@ fn launch_interpreter(
 
     let output_sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let current_line: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-
-    let ds = debug_state.clone();
-    let sink = output_sink.clone();
-    let stdout_clone = stdout.clone();
-    let seq_clone = seq.clone();
+    // Set by the interpreter thread when the program ends: `Some(error)`.
+    let finished: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
 
     let source_name = std::path::Path::new(program_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| program_path.to_string());
     let source_path = program_path.to_string();
+    let program_file = std::path::PathBuf::from(breakpoint_key(program_path));
 
-    let thread = std::thread::spawn(move || {
-        let mut interp = Interpreter::new();
-        interp.debug_state = Some(ds);
-        interp.output_sink = Some(sink.clone());
-        interp.source = Some(source.clone());
+    let thread = {
+        let ds = debug_state.clone();
+        let sink = output_sink.clone();
+        let finished = finished.clone();
+        std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.debug_state = Some(ds);
+            interp.output_sink = Some(sink);
+            interp.source = Some(source);
+            // Breakpoints are keyed by canonical path (see `breakpoint_key`);
+            // with `source_file` set the interpreter only stops on lines of
+            // this file instead of on that line number in any file.
+            interp.source_file = Some(program_file);
 
-        let result = interp.run(&program);
+            let error = interp
+                .run(&program)
+                .err()
+                .map(|e| format!("Runtime error (line {}): {}\n", e.line, e.message));
+            *finished.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+        })
+    };
 
-        // Send output events for any remaining output
-        drain_output(&sink, &stdout_clone, &seq_clone);
-
-        // Send terminated event
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                let event = make_event(
-                    "output",
-                    &seq_clone,
-                    json!({
-                        "category": "stderr",
-                        "output": format!("Runtime error (line {}): {}\n", e.line, e.message),
-                    }),
-                );
-                send_message(&stdout_clone, &event);
-            }
-        }
-
-        let event = make_event("terminated", &seq_clone, json!({}));
-        send_message(&stdout_clone, &event);
-    });
-
-    // If stop_on_entry, wait for the first pause
-    if stop_on_entry {
-        if let Ok(line_num) = paused_receiver.recv_timeout(std::time::Duration::from_secs(5)) {
-            *current_line.lock().unwrap_or_else(|e| e.into_inner()) = line_num;
-
-            let event = make_event(
-                "stopped",
-                seq,
-                json!({
-                    "reason": "entry",
-                    "threadId": 1,
-                    "allThreadsStopped": true,
-                }),
-            );
-            send_message(&stdout, &event);
-        }
-    }
+    // The forwarder is the only thread that emits program events, so
+    // output, `stopped`, `exited` and `terminated` reach the client promptly
+    // (without waiting for the next client request) and in order.
+    let forwarder = {
+        let forwarder = EventForwarder {
+            paused_receiver,
+            debug_state: debug_state.clone(),
+            output_sink,
+            current_line: current_line.clone(),
+            finished,
+            stdout,
+            seq: seq.clone(),
+            first_stop_is_entry: AtomicBool::new(stop_on_entry),
+        };
+        std::thread::spawn(move || forwarder.run())
+    };
 
     Ok(InterpreterSession {
         debug_state,
-        output_sink,
         current_line,
-        paused_receiver,
         source_name,
         source_path,
         _thread: thread,
+        _forwarder: forwarder,
     })
+}
+
+struct EventForwarder {
+    paused_receiver: std::sync::mpsc::Receiver<usize>,
+    debug_state: Arc<DebugState>,
+    output_sink: Arc<Mutex<Vec<String>>>,
+    current_line: Arc<Mutex<usize>>,
+    finished: Arc<Mutex<Option<Option<String>>>>,
+    stdout: Arc<Mutex<io::Stdout>>,
+    seq: Arc<Mutex<i64>>,
+    first_stop_is_entry: AtomicBool,
+}
+
+impl EventForwarder {
+    fn run(self) {
+        loop {
+            match self.paused_receiver.recv_timeout(Duration::from_millis(25)) {
+                Ok(line) => {
+                    drain_output(&self.output_sink, &self.stdout, &self.seq);
+                    self.send_stopped(line);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    drain_output(&self.output_sink, &self.stdout, &self.seq);
+                    let done = self
+                        .finished
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take();
+                    if let Some(error) = done {
+                        self.send_end(error);
+                        return;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+
+    fn send_stopped(&self, line: usize) {
+        *self.current_line.lock().unwrap_or_else(|e| e.into_inner()) = line;
+        let reason = if self.first_stop_is_entry.swap(false, Ordering::SeqCst) {
+            "entry"
+        } else {
+            let action = *self
+                .debug_state
+                .action
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match action {
+                DebugAction::Pause => "pause",
+                DebugAction::StepOver | DebugAction::StepIn | DebugAction::StepOut => "step",
+                DebugAction::Continue => "breakpoint",
+            }
+        };
+        let event = make_event(
+            "stopped",
+            &self.seq,
+            json!({
+                "reason": reason,
+                "threadId": 1,
+                "allThreadsStopped": true,
+            }),
+        );
+        send_message(&self.stdout, &event);
+    }
+
+    fn send_end(&self, error: Option<String>) {
+        drain_output(&self.output_sink, &self.stdout, &self.seq);
+        if let Some(ref message) = error {
+            let event = make_event(
+                "output",
+                &self.seq,
+                json!({ "category": "stderr", "output": message }),
+            );
+            send_message(&self.stdout, &event);
+        }
+        let exit_code = if error.is_some() { 1 } else { 0 };
+        let event = make_event("exited", &self.seq, json!({ "exitCode": exit_code }));
+        send_message(&self.stdout, &event);
+        let event = make_event("terminated", &self.seq, json!({}));
+        send_message(&self.stdout, &event);
+    }
 }
 
 fn resume_interpreter(debug_state: &Arc<DebugState>, action: DebugAction, depth: usize) {
@@ -520,48 +609,6 @@ fn drain_output(
             json!({
                 "category": "stdout",
                 "output": msg,
-            }),
-        );
-        send_message(stdout, &event);
-    }
-}
-
-fn drain_paused_events(
-    session: &InterpreterSession,
-    stdout: &Arc<Mutex<io::Stdout>>,
-    seq: &Arc<Mutex<i64>>,
-) {
-    // Non-blocking check for pause events from the interpreter
-    while let Ok(line) = session.paused_receiver.try_recv() {
-        *session
-            .current_line
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = line;
-
-        // Snapshot variables when paused
-        // (variables are snapped by the interpreter thread before pause — not accessible here
-        //  since the interpreter is on another thread. We use the shared variables Arc instead.)
-
-        let reason = {
-            let action = *session
-                .debug_state
-                .action
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            match action {
-                DebugAction::Pause => "pause",
-                DebugAction::StepOver | DebugAction::StepIn | DebugAction::StepOut => "step",
-                DebugAction::Continue => "breakpoint",
-            }
-        };
-
-        let event = make_event(
-            "stopped",
-            seq,
-            json!({
-                "reason": reason,
-                "threadId": 1,
-                "allThreadsStopped": true,
             }),
         );
         send_message(stdout, &event);
@@ -603,10 +650,10 @@ fn make_event(event: &str, seq: &Arc<Mutex<i64>>, body: JsonValue) -> String {
 }
 
 fn send_message(stdout: &Arc<Mutex<io::Stdout>>, msg: &str) {
-    if let Ok(mut out) = stdout.lock() {
-        let bytes = msg.as_bytes();
-        let _ = write!(out, "Content-Length: {}\r\n\r\n{}", bytes.len(), msg);
-        let _ = out.flush();
+    // Recover from poisoning: a panicked writer must not silence the adapter.
+    let mut out = stdout.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = transport::write_message(&mut *out, msg) {
+        eprintln!("forge dap: failed to write message: {}", e);
     }
 }
 
@@ -679,6 +726,19 @@ mod tests {
         assert!(file_bps.contains(&5));
         assert!(file_bps.contains(&10));
         assert!(!file_bps.contains(&7));
+    }
+
+    #[test]
+    fn breakpoint_key_canonicalizes_existing_paths() {
+        let dir = std::env::temp_dir().join(format!("forge-dap-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.fg");
+        std::fs::write(&file, "say 1\n").unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        let via_dot = dir.join(".").join("main.fg").to_string_lossy().into_owned();
+        assert_eq!(breakpoint_key(&via_dot), canonical.to_string_lossy());
+        assert_eq!(breakpoint_key("no/such/file.fg"), "no/such/file.fg");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

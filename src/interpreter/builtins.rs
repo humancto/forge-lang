@@ -51,6 +51,8 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
 
 impl Interpreter {
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        crate::builtins_registry::check_arity(name, args.len())
+            .map_err(|e| RuntimeError::new(&e))?;
         match name {
             "print" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
@@ -64,17 +66,7 @@ impl Interpreter {
                 self.write_output(&output, true);
                 Ok(Value::Null)
             }
-            "len" => match args.first() {
-                Some(Value::String(s)) => Ok(Value::Int(s.chars().count() as i64)),
-                Some(Value::Array(a) | Value::Tuple(a) | Value::Set(a)) => {
-                    Ok(Value::Int(a.len() as i64))
-                }
-                Some(Value::Object(o)) => Ok(Value::Int(o.len() as i64)),
-                Some(Value::Map(m)) => Ok(Value::Int(m.len() as i64)),
-                _ => Err(RuntimeError::new(
-                    "len() requires string, array, tuple, set, map, or object",
-                )),
-            },
+            "len" => super::places::len_of(args.first()),
             "type" | "typeof" => match args.first() {
                 Some(v) => Ok(Value::String(v.type_name().to_string())),
                 None => Err(RuntimeError::new("typeof() requires an argument")),
@@ -136,26 +128,7 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new("values() requires object or map")),
             },
-            "contains" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(sub))) => {
-                    Ok(Value::Bool(s.contains(sub.as_str())))
-                }
-                (Some(Value::Set(arr)), Some(val)) => {
-                    Ok(Value::Bool(arr.iter().any(|v| Value::container_eq(v, val))))
-                }
-                (Some(Value::Array(arr) | Value::Tuple(arr)), Some(val)) => Ok(Value::Bool(
-                    arr.iter().any(|v| format!("{}", v) == format!("{}", val)),
-                )),
-                (Some(Value::Object(map)), Some(Value::String(key))) => {
-                    Ok(Value::Bool(map.contains_key(key)))
-                }
-                (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(
-                    pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
-                )),
-                _ => Err(RuntimeError::new(
-                    "contains() requires (string, substring), (array, value), (object, key), or (map, key)",
-                )),
-            },
+            "contains" => super::places::contains_of(args.first(), args.get(1)),
             "has_key" => match (args.first(), args.get(1)) {
                 (Some(Value::Object(map)), Some(Value::String(key))) => {
                     Ok(Value::Bool(map.contains_key(key)))
@@ -455,6 +428,8 @@ impl Interpreter {
             },
             "fetch" => match args.first() {
                 Some(Value::String(url)) => {
+                    crate::permissions::require_net(url)
+                        .map_err(|e| RuntimeError::new(&e.to_string()))?;
                     let method = match args.get(1) {
                         Some(Value::Object(opts)) => opts
                             .get("method")
@@ -1115,7 +1090,11 @@ impl Interpreter {
                     for item in arr {
                         match item {
                             Value::Int(n) => {
-                                int_sum += n;
+                                // i64 overflow promotes the result to float.
+                                match int_sum.checked_add(*n) {
+                                    Some(t) => int_sum = t,
+                                    None => has_float = true,
+                                }
                                 float_sum += *n as f64;
                             }
                             Value::Float(n) => {
@@ -1555,81 +1534,40 @@ impl Interpreter {
                     )),
                 }
             }
-            _ if name.starts_with("math.") => {
-                crate::stdlib::math::call(name, args).map_err(|e| RuntimeError::new(&e))
+            // `io.print` must honour the output capture like `print` does
+            // (the shared registry version writes to the process stdout).
+            "io.print" => {
+                let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
+                self.write_output(&text.join(" "), false);
+                Ok(Value::Null)
             }
-            _ if name.starts_with("fs.") => {
-                crate::stdlib::fs::call(name, args).map_err(|e| RuntimeError::new(&e))
+            // Every stdlib module member is implemented once, in the shared
+            // registry (`builtins_registry`), for both engines.
+            _ if crate::builtins_registry::module_for(name).is_some() => {
+                crate::builtins_registry::call_module(name, args)
+                    .unwrap_or_else(|| Err(format!("unknown module function: {}", name)))
+                    .map_err(|e| RuntimeError::new(&e))
             }
-            _ if name.starts_with("io.") => {
-                crate::stdlib::io::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("crypto.") => {
-                crate::stdlib::crypto::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("db.") => {
-                crate::stdlib::db::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("env.") => {
-                crate::stdlib::env::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("json.") => {
-                crate::stdlib::json_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("regex.") => {
-                crate::stdlib::regex_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("log.") => {
-                crate::stdlib::log::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            #[cfg(feature = "postgres")]
-            _ if name.starts_with("pg.") => {
-                crate::stdlib::pg::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("term.") => {
-                crate::stdlib::term::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("http.") => {
-                crate::stdlib::http::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("csv.") => {
-                crate::stdlib::csv::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("time.") => {
-                crate::stdlib::time::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("npc.") => {
-                crate::stdlib::npc::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("url.") => {
-                crate::stdlib::url_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("toml.") => {
-                crate::stdlib::toml_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("ws.") => {
-                crate::stdlib::ws::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("jwt.") => {
-                crate::stdlib::jwt::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("os.") => {
-                crate::stdlib::os_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("path.") => {
-                crate::stdlib::path_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            #[cfg(feature = "mysql")]
-            _ if name.starts_with("mysql.") => {
-                crate::stdlib::mysql::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
+            "upper" | "lower" | "trim" => match args.first() {
+                Some(Value::String(s)) => Ok(Value::String(match name {
+                    "upper" => s.to_uppercase(),
+                    "lower" => s.to_lowercase(),
+                    _ => s.trim().to_string(),
+                })),
+                _ => Err(RuntimeError::new(&format!("{}() requires a string", name))),
+            },
             "input" => {
                 use std::io::Read;
+                if !crate::permissions::host_stdin_allowed() {
+                    return Ok(Value::String(String::new()));
+                }
                 let mut buffer = String::new();
                 std::io::stdin().read_to_string(&mut buffer).ok();
                 Ok(Value::String(buffer.trim_end().to_string()))
             }
             "exit" => {
+                crate::permissions::require(crate::permissions::Capability::Process, "exit")
+                    .map_err(|e| RuntimeError::new(&e.to_string()))?;
                 let code = match args.first() {
                     Some(Value::Int(n)) => *n as i32,
                     _ => 0,
@@ -1646,9 +1584,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("shell() requires a command string")),
                 };
-                let output = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let output = crate::runtime::shell::command(&cmd)
                     .output()
                     .map_err(|e| RuntimeError::new(&format!("shell error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout)
@@ -1673,9 +1609,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh() requires a command string")),
                 };
-                let output = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let output = crate::runtime::shell::command(&cmd)
                     .output()
                     .map_err(|e| RuntimeError::new(&format!("sh error: {}", e)))?;
                 Ok(Value::String(
@@ -1690,9 +1624,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_lines() requires a command string")),
                 };
-                let output = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let output = crate::runtime::shell::command(&cmd)
                     .output()
                     .map_err(|e| RuntimeError::new(&format!("sh_lines error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1709,9 +1641,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_json() requires a command string")),
                 };
-                let output = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let output = crate::runtime::shell::command(&cmd)
                     .output()
                     .map_err(|e| RuntimeError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1725,9 +1655,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_ok() requires a command string")),
                 };
-                let status = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let status = crate::runtime::shell::command(&cmd)
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
@@ -1759,6 +1687,8 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("cd() requires a path string")),
                 };
+                crate::permissions::require(crate::permissions::Capability::Process, "cd")
+                    .map_err(|e| RuntimeError::new(&e.to_string()))?;
                 std::env::set_current_dir(&path)
                     .map_err(|e| RuntimeError::new(&format!("cd error: {}", e)))?;
                 Ok(Value::String(path))
@@ -1784,9 +1714,7 @@ impl Interpreter {
                     }
                 };
                 use std::io::Write;
-                let mut child = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let mut child = crate::runtime::shell::command(&cmd)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -1905,7 +1833,7 @@ impl Interpreter {
             "cook" => {
                 // cook(fn) — time execution with personality
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("cook() needs a function — let him cook!")),
                 };
                 let start = std::time::Instant::now();
@@ -1929,7 +1857,7 @@ impl Interpreter {
             "yolo" => {
                 // yolo(fn) — swallow ALL errors, return None on failure
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("yolo() needs a function to send it on")),
                 };
                 match self.call_function(func, vec![]) {
@@ -1942,7 +1870,7 @@ impl Interpreter {
                 // Note: In a real implementation this would redirect stdout.
                 // For now, we execute and return the result silently.
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("ghost() needs a function to haunt")),
                 };
                 // Execute the function, capturing its return value
@@ -1952,7 +1880,7 @@ impl Interpreter {
             "slay" => {
                 // slay(fn, n?) — benchmark function n times, return stats
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("slay() needs a function to benchmark")),
                 };
                 let n = match args.get(1) {
