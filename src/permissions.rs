@@ -655,8 +655,10 @@ pub fn require_import(path: impl AsRef<Path>) -> Result<(), PermissionError> {
     current().check_import(path.as_ref())
 }
 
-/// Grant or revoke `run` in the process-wide policy (CLI `--allow-run`,
-/// standalone binaries built with `forge build --native --allow-run`).
+/// Grant or revoke `run` in the process-wide policy (standalone binaries
+/// built with `forge build --native --allow-run`, tests). The CLI builds a
+/// full policy with [`set_global`] instead.
+#[allow(dead_code)] // unused in the `forge` binary's copy of this module
 pub fn set_allow_run(allowed: bool) {
     let mut guard = GLOBAL.write().unwrap_or_else(|e| e.into_inner());
     let mut caps = guard
