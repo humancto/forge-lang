@@ -1411,8 +1411,14 @@ impl VM {
                     if let Some(obj) = self.gc.get(r) {
                         match &obj.kind {
                             ObjKind::String(s) => {
-                                let sub = val.display(&self.gc);
-                                return Ok(Value::bool_val(s.contains(&sub)));
+                                if let Some(sub) = self.get_string(val) {
+                                    return Ok(Value::bool_val(s.contains(&sub)));
+                                }
+                            }
+                            ObjKind::Object(map) => {
+                                if let Some(key) = self.get_string(val) {
+                                    return Ok(Value::bool_val(map.contains_key(&key)));
+                                }
                             }
                             ObjKind::Set(items) => {
                                 // Sets use value equality (same as .has()) so that
@@ -1436,9 +1442,9 @@ impl VM {
                             _ => {}
                         }
                     }
-                    Ok(Value::bool_val(false))
+                    Err(VMError::new(crate::semantics::CONTAINS_USAGE))
                 }
-                _ => Err(VMError::new("contains() requires (collection, value)")),
+                _ => Err(VMError::new(crate::semantics::CONTAINS_USAGE)),
             },
             "keys" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
@@ -3700,6 +3706,7 @@ impl VM {
     }
 
     /// Allocate a shared string-method result (`semantics::string_method`).
+    #[allow(clippy::wrong_self_convention)]
     fn from_str_method(&mut self, v: crate::semantics::StrMethodValue) -> Value {
         use crate::semantics::StrMethodValue as V;
         match v {

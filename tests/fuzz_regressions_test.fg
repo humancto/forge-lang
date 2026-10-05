@@ -87,6 +87,16 @@ define test_substring_with_start_after_end() {
 }
 
 @test
+define test_contains_argument_rules() {
+    assert_eq(contains({ a: 1 }, "a"), true)
+    assert_eq(contains({ a: 1 }, "b"), false)
+    assert_eq(contains("x y", "y"), true)
+    assert_eq(contains([1, 2], 2), true)
+    assert_throws(fn() { contains("x y", -3) })
+    assert_throws(fn() { contains(5, 1) })
+}
+
+@test
 define test_field_assignment_on_non_object_is_an_error() {
     assert_throws(fn() {
         let mut b = false

@@ -535,6 +535,10 @@ pub fn string_method(
     }))
 }
 
+/// Error for `contains()` arguments it cannot search (both engines).
+pub const CONTAINS_USAGE: &str =
+    "contains() requires (string, substring), (array, value), (object, key), or (map, key)";
+
 /// Most elements `range()` materializes. Larger ranges are a catchable
 /// error instead of a capacity-overflow panic or an out-of-memory abort.
 pub const MAX_RANGE_LEN: u64 = 100_000_000;

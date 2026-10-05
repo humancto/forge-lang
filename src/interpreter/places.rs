@@ -102,9 +102,7 @@ pub(super) fn contains_of(
         (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(
             pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
         )),
-        _ => Err(RuntimeError::new(
-            "contains() requires (string, substring), (array, value), (object, key), or (map, key)",
-        )),
+        _ => Err(RuntimeError::new(crate::semantics::CONTAINS_USAGE)),
     }
 }
 
