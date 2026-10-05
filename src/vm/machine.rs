@@ -321,6 +321,16 @@ impl VM {
         vm
     }
 
+    /// The VM's cooperative cancellation flag. Storing `true` makes the
+    /// running program fail with "task cancelled" at its next back-edge
+    /// (`Loop`) or call — the hook for host-side time limits (e.g. the fuzz
+    /// harness's watchdog). The verifier guarantees every backward branch is
+    /// a `Loop`, so no verified program can spin without polling it.
+    #[allow(dead_code)] // library API (fuzz harness, embedders); unused by the CLI
+    pub fn cancel_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
     pub fn with_profiling() -> Self {
         let mut vm = Self::bare(Profiler::new(true));
         vm.register_builtins();
@@ -696,7 +706,7 @@ impl VM {
     }
 
     pub(super) fn sleep_with_timeout_checks(&self, duration: Duration) -> Result<(), VMError> {
-        let total_ms = duration.as_millis() as u64;
+        let total_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         let mut elapsed = 0u64;
         while elapsed < total_ms {
             if let Some((_, guard)) = self.earliest_expired_timeout() {
@@ -1288,6 +1298,13 @@ impl VM {
                         };
                         self.registers[base + a as usize] = Value::bool_val(has);
                     }
+                    OpCode::ForRangePrep => self.for_range_prep(base, a, b, c),
+                    OpCode::ForRangeNext => {
+                        if self.for_range_next(base, a, b)? {
+                            // Skip the loop-exit jump that follows.
+                            self.frames[frame_idx].ip += 1;
+                        }
+                    }
                     OpCode::Len => {
                         let src = self.registers[base + b as usize];
                         let len = self.collection_len(src);
@@ -1516,7 +1533,7 @@ impl VM {
                         };
                         let handler_base = self.frames[frame_idx].handlers.len().saturating_sub(1);
                         self.frames[frame_idx].timeouts.push(TimeoutGuard {
-                            deadline: Instant::now() + Duration::from_secs(seconds),
+                            deadline: crate::semantics::timeout_deadline(Instant::now(), seconds),
                             seconds,
                             catch_ip,
                             error_register: a,
@@ -1547,11 +1564,7 @@ impl VM {
                                 } else {
                                     String::new()
                                 };
-                                match unit_str.as_str() {
-                                    "minutes" => n as u64 * 60,
-                                    "hours" => n as u64 * 3600,
-                                    _ => n as u64, // "seconds" or default
-                                }
+                                crate::semantics::schedule_interval_secs(n as u64, &unit_str)
                             } else {
                                 return Err(VMError::new(
                                     "schedule interval must be a positive integer",
@@ -1792,10 +1805,11 @@ impl VM {
     #[cfg(feature = "jit")]
     fn try_jit_call(
         &mut self,
+        closure: GcRef,
         chunk: &Arc<Chunk>,
         args: &[Value],
     ) -> Result<Option<Value>, VMError> {
-        self.try_jit_native(chunk, args, self.frames.len(), false)
+        self.try_jit_native(closure, chunk, args, self.frames.len(), false)
     }
 
     /// Loop tier-up ("restart in native code"). Called when the frame at
@@ -1813,8 +1827,8 @@ impl VM {
     /// failure, rejection or deopt the frame simply continues in the VM.
     ///
     /// True on-stack replacement (entering native code at the loop header
-    /// with the frame's live registers) is a possible follow-up; restarting
-    /// needs no new entry points or state mapping in the JIT.
+    /// with the frame's live registers) was evaluated and deferred; see
+    /// "Why restart and not on-stack replacement" in `vm::jit`.
     #[cfg(feature = "jit")]
     fn try_jit_loop_restart(
         &mut self,
@@ -1832,8 +1846,9 @@ impl VM {
             return Ok(None);
         }
         let args = frame.entry_args.clone();
+        let closure = frame.closure;
         // The native call replaces this frame, so it starts at its depth.
-        self.try_jit_native(chunk, &args, frame_idx, true)
+        self.try_jit_native(closure, chunk, &args, frame_idx, true)
     }
 
     /// Shared native-call path. `depth_below` is the number of VM frames
@@ -1842,6 +1857,7 @@ impl VM {
     #[cfg(feature = "jit")]
     fn try_jit_native(
         &mut self,
+        closure: GcRef,
         chunk: &Arc<Chunk>,
         args: &[Value],
         depth_below: usize,
@@ -1849,18 +1865,24 @@ impl VM {
     ) -> Result<Option<Value>, VMError> {
         use super::jit::tier::{invoke, Invoke};
 
-        let Some(sel) = self.jit.select(chunk, args, &self.gc, force_hot) else {
+        let globals = JitGlobals {
+            globals: &self.globals,
+            gc: &self.gc,
+        };
+        let Some(sel) = self
+            .jit
+            .select(closure, chunk, args, &self.gc, force_hot, &globals)
+        else {
             return Ok(None);
         };
 
-        // VM-state guards: the VM itself would refuse the call (stack
-        // overflow), a `timeout` is active (the VM checks deadlines between
-        // instructions; native code does not), or the global the code calls
-        // itself through no longer names this function.
+        // VM-state guards (`select` checked the globals the code relies
+        // on): the VM itself would refuse the call (stack overflow), or a
+        // `timeout` is active (the VM checks deadlines between
+        // instructions; native code does not).
         let depth_limit = crate::runtime::recursion::max_depth();
-        let guards_ok = depth_below < depth_limit
-            && self.frames.iter().all(|f| f.timeouts.is_empty())
-            && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
+        let guards_ok =
+            depth_below < depth_limit && self.frames.iter().all(|f| f.timeouts.is_empty());
         if !guards_ok {
             self.jit.record_guard_failure(&sel);
             return Ok(None);
@@ -1917,23 +1939,6 @@ impl VM {
         self.jit_bridge_error.take()
     }
 
-    /// True when the global named like `chunk` is a closure over the same
-    /// prototype code, so native self-calls behave like the VM's
-    /// `GetGlobal` + `Call`.
-    #[cfg(feature = "jit")]
-    fn jit_self_binding_matches(&self, chunk: &Arc<Chunk>) -> bool {
-        let Some(r) = self.globals.get(&chunk.name).and_then(|v| v.as_obj()) else {
-            return false;
-        };
-        match self.gc.get(r).map(|o| &o.kind) {
-            Some(ObjKind::Closure(c)) => {
-                Arc::ptr_eq(&c.function.chunk, chunk)
-                    || super::jit::tier::same_code(&c.function.chunk, chunk)
-            }
-            _ => false,
-        }
-    }
-
     /// Call any callable value (closure, function, native, `__call__`
     /// object).
     ///
@@ -1967,7 +1972,7 @@ impl VM {
                         // version runs when its entry guards pass; otherwise
                         // (or on deopt) the call runs in the VM below.
                         #[cfg(feature = "jit")]
-                        if let Some(result) = self.try_jit_call(&chunk, &args)? {
+                        if let Some(result) = self.try_jit_call(r, &chunk, &args)? {
                             if self.profiler.is_enabled()
                                 && !func_name.is_empty()
                                 && func_name != "<lambda>"
@@ -2720,5 +2725,135 @@ impl VM {
             _ => return Err(VMError::new("invalid comparison")),
         };
         self.binary_op(left, right, shared)
+    }
+}
+
+/// The VM's globals as seen by the JIT verifier and entry guards.
+#[cfg(feature = "jit")]
+struct JitGlobals<'a> {
+    globals: &'a HashMap<String, Value>,
+    gc: &'a super::gc::Gc,
+}
+
+#[cfg(feature = "jit")]
+impl JitGlobals<'_> {
+    fn kind(&self, v: &Value) -> Option<&ObjKind> {
+        v.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind)
+    }
+
+    /// The closure captured as variable `index` of `closure`, if any.
+    fn upvalue_closure(&self, closure: GcRef, index: u8) -> Option<GcRef> {
+        let Some(ObjKind::Closure(c)) = self.gc.get(closure).map(|o| &o.kind) else {
+            return None;
+        };
+        let cell = *c.upvalues.get(index as usize)?;
+        let Some(ObjKind::Upvalue(uv)) = self.gc.get(cell).map(|o| &o.kind) else {
+            return None;
+        };
+        let r = uv.value.as_obj()?;
+        matches!(self.gc.get(r).map(|o| &o.kind), Some(ObjKind::Closure(_))).then_some(r)
+    }
+
+    /// Follow `path` from `entry` (the closure being called).
+    fn resolve(&self, entry: GcRef, path: &super::jit::verifier::ClosurePath) -> Option<GcRef> {
+        let mut at = match &path.global {
+            None => entry,
+            Some(name) => self.globals.get(name)?.as_obj()?,
+        };
+        for i in &path.upvalues {
+            at = self.upvalue_closure(at, *i)?;
+        }
+        Some(at)
+    }
+
+    /// Does the assumption `g` hold now, for a call of `entry`?
+    fn guard_holds(&self, entry: GcRef, g: &super::jit::verifier::Guard) -> bool {
+        use super::jit::verifier::{Guard, MemberExpect};
+        if let Guard::Closure { at, chunk } = g {
+            return match self
+                .resolve(entry, at)
+                .and_then(|r| self.gc.get(r))
+                .map(|o| &o.kind)
+            {
+                Some(ObjKind::Closure(c)) => {
+                    Arc::ptr_eq(&c.function.chunk, chunk)
+                        || super::jit::tier::same_code(&c.function.chunk, chunk)
+                }
+                _ => false,
+            };
+        }
+        let Some(v) = self.globals.get(match g {
+            Guard::Native(b) => b.name(),
+            Guard::Member { object, .. } => object,
+            Guard::Closure { .. } => return false,
+        }) else {
+            return false;
+        };
+        match (g, self.kind(v)) {
+            (Guard::Native(b), Some(ObjKind::NativeFunction(nf))) => nf.name == b.name(),
+            (
+                Guard::Member {
+                    object,
+                    field,
+                    expect,
+                },
+                Some(ObjKind::Object(fields)),
+            ) => match (expect, fields.get(*field)) {
+                (MemberExpect::Native, Some(m)) => matches!(
+                    self.kind(m),
+                    Some(ObjKind::NativeFunction(nf))
+                        if nf.name.strip_prefix(*object).and_then(|r| r.strip_prefix('.'))
+                            == Some(*field)
+                ),
+                (MemberExpect::FloatBits(bits), Some(m)) => {
+                    m.as_float().is_some_and(|f| f.to_bits() == *bits)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn view(&self, r: Option<GcRef>) -> super::jit::verifier::GlobalView {
+        use super::jit::verifier::GlobalView;
+        match r.map(|r| (r, self.gc.get(r).map(|o| &o.kind))) {
+            Some((r, Some(ObjKind::Closure(c)))) => GlobalView::Closure {
+                chunk: c.function.chunk.clone(),
+                closure: r,
+            },
+            Some((_, Some(ObjKind::NativeFunction(nf)))) => GlobalView::Native(nf.name.clone()),
+            _ => GlobalView::Other,
+        }
+    }
+}
+
+#[cfg(feature = "jit")]
+impl super::jit::tier::Globals for JitGlobals<'_> {
+    fn global(&self, name: &str) -> super::jit::verifier::GlobalView {
+        self.view(self.globals.get(name).and_then(|v| v.as_obj()))
+    }
+
+    fn upvalue(&self, closure: GcRef, index: u8) -> super::jit::verifier::GlobalView {
+        self.view(self.upvalue_closure(closure, index))
+    }
+
+    fn holds(&self, entry: GcRef, g: &super::jit::verifier::Guard) -> bool {
+        self.guard_holds(entry, g)
+    }
+
+    fn member(&self, object: &str, field: &str) -> super::jit::verifier::MemberView {
+        use super::jit::verifier::MemberView;
+        let Some(Some(ObjKind::Object(fields))) = self.globals.get(object).map(|v| self.kind(v))
+        else {
+            return MemberView::Other;
+        };
+        match fields.get(field) {
+            Some(m) => match (self.kind(m), m.as_float()) {
+                (Some(ObjKind::NativeFunction(nf)), _) => MemberView::Native(nf.name.clone()),
+                (_, Some(f)) => MemberView::Float(f),
+                _ => MemberView::Other,
+            },
+            None => MemberView::Other,
+        }
     }
 }

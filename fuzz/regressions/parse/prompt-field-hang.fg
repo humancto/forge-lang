@@ -1,0 +1,4 @@
+prompt summarize(text) {
+    system: "You are concise"
+   10
+}

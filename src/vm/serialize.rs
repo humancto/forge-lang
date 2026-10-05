@@ -1,5 +1,6 @@
 use super::bytecode::{Chunk, Constant, UpvalueSource};
-use std::io::{self, Read, Write};
+use super::verify::{MAX_CODE_LEN, MAX_PROTO_DEPTH};
+use std::io::{self, Write};
 
 const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
@@ -36,9 +37,38 @@ pub fn serialize_chunk(chunk: &Chunk) -> Result<Vec<u8>, SerializeError> {
     Ok(buf)
 }
 
+/// Decode serialized bytecode and verify it (see [`super::verify`]) before
+/// it can reach the VM. This is the only way bytecode from outside the
+/// process (`forge run app.fgc`, AOT binaries) enters the VM.
+///
+/// Hostile input never panics and never allocates more than a small
+/// multiple of its own size: every length prefix is checked against the
+/// bytes that remain before anything is allocated, and prototype nesting
+/// is bounded by [`MAX_PROTO_DEPTH`].
 pub fn deserialize_chunk(data: &[u8]) -> Result<Chunk, SerializeError> {
-    let mut cursor = io::Cursor::new(data);
-    read_chunk_root(&mut cursor)
+    let chunk = decode_chunk(data)?;
+    super::verify::verify_chunk(&chunk).map_err(|e| SerializeError {
+        message: e.to_string(),
+    })?;
+    Ok(chunk)
+}
+
+/// Decode without verifying. Only for tests that inspect the raw decoding.
+#[cfg(test)]
+pub(crate) fn decode_chunk_unverified(data: &[u8]) -> Result<Chunk, SerializeError> {
+    decode_chunk(data)
+}
+
+fn decode_chunk(data: &[u8]) -> Result<Chunk, SerializeError> {
+    let mut r = Reader { data, pos: 0 };
+    let chunk = read_chunk_root(&mut r)?;
+    if r.remaining() != 0 {
+        return Err(SerializeError::new(&format!(
+            "{} trailing bytes after the bytecode",
+            r.remaining()
+        )));
+    }
+    Ok(chunk)
 }
 
 fn write_chunk(w: &mut Vec<u8>, chunk: &Chunk) -> Result<(), SerializeError> {
@@ -153,17 +183,122 @@ fn write_f64(w: &mut Vec<u8>, n: f64) -> Result<(), SerializeError> {
     Ok(())
 }
 
-fn read_chunk_root<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
-    let mut magic = [0u8; 4];
-    r.read_exact(&mut magic)?;
-    if &magic != MAGIC {
+/// Bounds-checked cursor over the input.
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    fn bytes(&mut self, n: usize) -> Result<&'a [u8], SerializeError> {
+        if n > self.remaining() {
+            return Err(SerializeError::new(&format!(
+                "unexpected end of bytecode at offset {} (needed {} more bytes, {} left)",
+                self.pos,
+                n,
+                self.remaining()
+            )));
+        }
+        let out = &self.data[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(out)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], SerializeError> {
+        let mut out = [0u8; N];
+        out.copy_from_slice(self.bytes(N)?);
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8, SerializeError> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, SerializeError> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+
+    fn u32(&mut self) -> Result<u32, SerializeError> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn i64(&mut self) -> Result<i64, SerializeError> {
+        Ok(i64::from_le_bytes(self.array()?))
+    }
+
+    fn f64(&mut self) -> Result<f64, SerializeError> {
+        Ok(f64::from_bits(u64::from_le_bytes(self.array()?)))
+    }
+
+    /// Validate a section's element count: at most `max`, and no more than
+    /// the remaining input could hold at `min_element_bytes` each — so the
+    /// caller may allocate `count` elements without trusting the prefix.
+    /// A u32 length prefix, validated by [`Reader::count`].
+    fn len_u32(
+        &mut self,
+        min_element_bytes: usize,
+        max: usize,
+        what: &str,
+    ) -> Result<usize, SerializeError> {
+        let raw = self.u32()? as usize;
+        self.count(raw, min_element_bytes, max, what)
+    }
+
+    /// A u16 length prefix, validated by [`Reader::count`].
+    fn len_u16(
+        &mut self,
+        min_element_bytes: usize,
+        max: usize,
+        what: &str,
+    ) -> Result<usize, SerializeError> {
+        let raw = self.u16()? as usize;
+        self.count(raw, min_element_bytes, max, what)
+    }
+
+    fn count(
+        &self,
+        raw: usize,
+        min_element_bytes: usize,
+        max: usize,
+        what: &str,
+    ) -> Result<usize, SerializeError> {
+        if raw > max {
+            return Err(SerializeError::new(&format!(
+                "{} too large ({} entries, max {})",
+                what, raw, max
+            )));
+        }
+        if raw.saturating_mul(min_element_bytes) > self.remaining() {
+            return Err(SerializeError::new(&format!(
+                "{} claims {} entries but only {} bytes remain",
+                what,
+                raw,
+                self.remaining()
+            )));
+        }
+        Ok(raw)
+    }
+}
+
+/// Smallest possible encoding of a nested chunk: empty name, 4 meta bytes,
+/// four empty u32-counted sections and two empty u16-counted ones.
+const MIN_CHUNK_BYTES: usize = 4 + 4 + 4 * 4 + 2 * 2;
+
+fn read_chunk_root(r: &mut Reader<'_>) -> Result<Chunk, SerializeError> {
+    let magic = r
+        .bytes(4)
+        .map_err(|_| SerializeError::new("not a valid Forge bytecode file (too short)"))?;
+    if magic != MAGIC {
         return Err(SerializeError::new(
             "not a valid Forge bytecode file (bad magic bytes)",
         ));
     }
 
-    let mut version = [0u8; 2];
-    r.read_exact(&mut version)?;
+    let version: [u8; 2] = r.array()?;
     if version[0] > VERSION_MAJOR || (version[0] == VERSION_MAJOR && version[1] > VERSION_MINOR) {
         return Err(SerializeError::new(&format!(
             "bytecode version {}.{} is newer than supported {}.{}",
@@ -171,96 +306,84 @@ fn read_chunk_root<R: Read>(r: &mut R) -> Result<Chunk, SerializeError> {
         )));
     }
 
-    read_chunk_inner(r, version[1])
+    read_chunk_inner(r, version[1], 1)
 }
 
-fn read_chunk_inner<R: Read>(r: &mut R, minor_version: u8) -> Result<Chunk, SerializeError> {
+fn read_chunk_inner(
+    r: &mut Reader<'_>,
+    minor_version: u8,
+    depth: usize,
+) -> Result<Chunk, SerializeError> {
+    if depth > MAX_PROTO_DEPTH {
+        return Err(SerializeError::new(&format!(
+            "prototypes nest deeper than {}",
+            MAX_PROTO_DEPTH
+        )));
+    }
     let name = read_string(r)?;
 
-    let mut meta = [0u8; 3];
-    r.read_exact(&mut meta)?;
+    let meta: [u8; 3] = r.array()?;
     let arity = meta[0];
     let max_registers = meta[1];
     let upvalue_count = meta[2];
     // Bytecode older than v1.3 has no default parameters: every parameter
     // was optional at run time, so keep it that way.
-    let min_arity = if minor_version >= 3 {
-        let mut b = [0u8; 1];
-        r.read_exact(&mut b)?;
-        b[0]
-    } else {
-        0
-    };
+    let min_arity = if minor_version >= 3 { r.u8()? } else { 0 };
 
-    let const_count = read_u32(r)? as usize;
-    if const_count > 65536 {
-        return Err(SerializeError::new("constant pool too large"));
-    }
+    // Smallest constant: a 1-byte tag (null).
+    let const_count = r.len_u32(1, 65536, "constant pool")?;
     let mut constants = Vec::with_capacity(const_count);
     for _ in 0..const_count {
         constants.push(read_constant(r)?);
     }
 
-    let code_count = read_u32(r)? as usize;
-    if code_count > 1_000_000 {
-        return Err(SerializeError::new("code section too large"));
-    }
+    let code_count = r.len_u32(4, MAX_CODE_LEN, "code section")?;
     let mut code = Vec::with_capacity(code_count);
     for _ in 0..code_count {
-        code.push(read_u32(r)?);
+        code.push(r.u32()?);
     }
 
-    let lines_count = read_u32(r)? as usize;
-    if lines_count > 1_000_000 {
-        return Err(SerializeError::new("line table too large"));
-    }
-    let mut lines = Vec::with_capacity(lines_count);
-    for _ in 0..lines_count {
-        lines.push(read_u32(r)? as usize);
-    }
-    if lines.len() != code.len() {
+    let lines_count = r.len_u32(4, MAX_CODE_LEN, "line table")?;
+    if lines_count != code.len() {
         return Err(SerializeError::new(&format!(
             "line table length {} does not match code length {}",
-            lines.len(),
+            lines_count,
             code.len()
         )));
     }
+    let mut lines = Vec::with_capacity(lines_count);
+    for _ in 0..lines_count {
+        lines.push(r.u32()? as usize);
+    }
 
     let cols = if minor_version >= 2 {
-        let cols_count = read_u32(r)? as usize;
-        if cols_count > 1_000_000 {
-            return Err(SerializeError::new("column table too large"));
+        let cols_count = r.len_u32(4, MAX_CODE_LEN, "column table")?;
+        if cols_count != code.len() {
+            return Err(SerializeError::new(&format!(
+                "column table length {} does not match code length {}",
+                cols_count,
+                code.len()
+            )));
         }
         let mut cols = Vec::with_capacity(cols_count);
         for _ in 0..cols_count {
-            cols.push(read_u32(r)? as usize);
-        }
-        if cols.len() != code.len() {
-            return Err(SerializeError::new(&format!(
-                "column table length {} does not match code length {}",
-                cols.len(),
-                code.len()
-            )));
+            cols.push(r.u32()? as usize);
         }
         cols
     } else {
         vec![0; code.len()]
     };
 
-    let proto_count = read_u16(r)? as usize;
-    if proto_count > 65536 {
-        return Err(SerializeError::new("too many prototypes"));
-    }
+    let proto_count = r.len_u16(MIN_CHUNK_BYTES, 65536, "prototype table")?;
     let mut prototypes = Vec::with_capacity(proto_count);
     for _ in 0..proto_count {
-        prototypes.push(read_chunk_inner(r, minor_version)?);
+        prototypes.push(read_chunk_inner(r, minor_version, depth + 1)?);
     }
 
-    let uv_sources_count = read_u16(r)? as usize;
+    let uv_sources_count = r.len_u16(2, 256, "upvalue source table")?;
     let mut upvalue_sources = Vec::with_capacity(uv_sources_count);
     for _ in 0..uv_sources_count {
-        let mut source = [0u8; 2];
-        r.read_exact(&mut source)?;
+        let source: [u8; 2] = r.array()?;
         let upvalue_source = match source[0] {
             0x01 => UpvalueSource::Local(source[1]),
             0x02 => UpvalueSource::Upvalue(source[1]),
@@ -290,17 +413,11 @@ fn read_chunk_inner<R: Read>(r: &mut R, minor_version: u8) -> Result<Chunk, Seri
     })
 }
 
-fn read_constant<R: Read>(r: &mut R) -> Result<Constant, SerializeError> {
-    let mut tag = [0u8; 1];
-    r.read_exact(&mut tag)?;
-    match tag[0] {
-        0x01 => Ok(Constant::Int(read_i64(r)?)),
-        0x02 => Ok(Constant::Float(read_f64(r)?)),
-        0x03 => {
-            let mut b = [0u8; 1];
-            r.read_exact(&mut b)?;
-            Ok(Constant::Bool(b[0] != 0))
-        }
+fn read_constant(r: &mut Reader<'_>) -> Result<Constant, SerializeError> {
+    match r.u8()? {
+        0x01 => Ok(Constant::Int(r.i64()?)),
+        0x02 => Ok(Constant::Float(r.f64()?)),
+        0x03 => Ok(Constant::Bool(r.u8()? != 0)),
         0x04 => Ok(Constant::Null),
         0x05 => Ok(Constant::Str(read_string(r)?)),
         other => Err(SerializeError::new(&format!(
@@ -310,38 +427,11 @@ fn read_constant<R: Read>(r: &mut R) -> Result<Constant, SerializeError> {
     }
 }
 
-fn read_string<R: Read>(r: &mut R) -> Result<String, SerializeError> {
-    let len = read_u32(r)? as usize;
-    if len > 10_000_000 {
-        return Err(SerializeError::new("string too long"));
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
-    String::from_utf8(buf).map_err(|_| SerializeError::new("invalid UTF-8 in string constant"))
-}
-
-fn read_u16<R: Read>(r: &mut R) -> Result<u16, SerializeError> {
-    let mut buf = [0u8; 2];
-    r.read_exact(&mut buf)?;
-    Ok(u16::from_le_bytes(buf))
-}
-
-fn read_u32<R: Read>(r: &mut R) -> Result<u32, SerializeError> {
-    let mut buf = [0u8; 4];
-    r.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf))
-}
-
-fn read_i64<R: Read>(r: &mut R) -> Result<i64, SerializeError> {
-    let mut buf = [0u8; 8];
-    r.read_exact(&mut buf)?;
-    Ok(i64::from_le_bytes(buf))
-}
-
-fn read_f64<R: Read>(r: &mut R) -> Result<f64, SerializeError> {
-    let mut buf = [0u8; 8];
-    r.read_exact(&mut buf)?;
-    Ok(f64::from_bits(u64::from_le_bytes(buf)))
+fn read_string(r: &mut Reader<'_>) -> Result<String, SerializeError> {
+    let len = r.len_u32(1, 10_000_000, "string")?;
+    let bytes = r.bytes(len)?;
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| SerializeError::new("invalid UTF-8 in string constant"))
 }
 
 #[cfg(test)]
@@ -534,12 +624,125 @@ mod tests {
     fn round_trip_empty_chunk() {
         let chunk = Chunk::new("<empty>");
         let bytes = serialize_chunk(&chunk).unwrap();
-        let restored = deserialize_chunk(&bytes).unwrap();
+        let restored = decode_chunk_unverified(&bytes).unwrap();
 
         assert_eq!(restored.name, "<empty>");
         assert_eq!(restored.code.len(), 0);
         assert_eq!(restored.constants.len(), 0);
         assert_eq!(restored.prototypes.len(), 0);
+
+        // It decodes, but an empty chunk is not executable bytecode.
+        let err = deserialize_chunk(&bytes).unwrap_err();
+        assert!(err.message.contains("empty code section"), "{}", err);
+    }
+
+    /// Serialized `chunk` with one u32 field at byte `offset` overwritten.
+    fn patched(chunk: &Chunk, offset: usize, value: u32) -> Vec<u8> {
+        let mut bytes = serialize_chunk(chunk).unwrap();
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        bytes
+    }
+
+    /// Byte offset of the constant-count field of the root chunk.
+    fn const_count_offset(chunk: &Chunk) -> usize {
+        // magic + version, name (u32 len + bytes), 4 meta bytes.
+        6 + 4 + chunk.name.len() + 4
+    }
+
+    #[test]
+    fn hostile_length_prefixes_are_rejected_before_allocating() {
+        let chunk = make_simple_chunk();
+        let at = const_count_offset(&chunk);
+        // A count within the hard cap but beyond what the input can hold.
+        let err = deserialize_chunk(&patched(&chunk, at, 60_000)).unwrap_err();
+        assert!(err.message.contains("only"), "{}", err);
+        let err = deserialize_chunk(&patched(&chunk, at, u32::MAX)).unwrap_err();
+        assert!(err.message.contains("too large"), "{}", err);
+
+        // Code count, right after the constants.
+        let bytes = serialize_chunk(&chunk).unwrap();
+        let code_at = bytes.len()
+            - (4 + 4 * chunk.code.len()) // cols
+            - (4 + 4 * chunk.lines.len()) // lines
+            - (4 * chunk.code.len()) // code
+            - 4 // code count
+            - 2 // proto count
+            - 2; // upvalue count
+        assert_eq!(
+            u32::from_le_bytes(bytes[code_at..code_at + 4].try_into().unwrap()) as usize,
+            chunk.code.len()
+        );
+        let err = deserialize_chunk(&patched(&chunk, code_at, 999_999)).unwrap_err();
+        assert!(err.message.contains("code section claims"), "{}", err);
+
+        // A string length larger than the input.
+        let err = deserialize_chunk(&patched(&chunk, 6, 9_999_999)).unwrap_err();
+        assert!(err.message.contains("string claims"), "{}", err);
+    }
+
+    #[test]
+    fn deeply_nested_prototypes_are_rejected_without_recursing_unboundedly() {
+        // Header, then MAX_PROTO_DEPTH + 10 chunks that each declare one
+        // nested prototype (and are never finished).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(VERSION_MAJOR);
+        bytes.push(VERSION_MINOR);
+        for _ in 0..MAX_PROTO_DEPTH + 10 {
+            write_string(&mut bytes, "").unwrap();
+            bytes.extend_from_slice(&[0, 1, 0, 0]); // arity, regs, upvalues, min_arity
+            for _ in 0..4 {
+                write_u32(&mut bytes, 0).unwrap(); // constants, code, lines, cols
+            }
+            write_u16(&mut bytes, 1).unwrap(); // one prototype
+        }
+        bytes.resize(bytes.len() + 64 * 1024, 0);
+        let err = deserialize_chunk(&bytes).unwrap_err();
+        assert!(err.message.contains("nest deeper"), "{}", err);
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut bytes = serialize_chunk(&make_simple_chunk()).unwrap();
+        bytes.push(0);
+        let err = deserialize_chunk(&bytes).unwrap_err();
+        assert!(err.message.contains("trailing"), "{}", err);
+    }
+
+    #[test]
+    fn deserialize_runs_the_verifier() {
+        let mut chunk = make_simple_chunk();
+        chunk.code[0] = encode_abx(OpCode::LoadConst, 0, 77);
+        let err = deserialize_chunk(&serialize_chunk(&chunk).unwrap()).unwrap_err();
+        assert!(err.message.contains("constant index 77"), "{}", err);
+        assert!(
+            err.message.contains("invalid bytecode in '<test>'"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn every_truncation_of_a_compiled_program_is_an_error_not_a_panic() {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::vm::compiler;
+        let src = "fn f(a, b = 1) { let g = fn() { return a + b }\n return g() }\nlet x = [f(1), \"s\", 2.5]\nsay x";
+        let tokens = Lexer::new(src).tokenize().unwrap();
+        let program = Parser::new(tokens).parse_program().unwrap();
+        let bytes = serialize_chunk(&compiler::compile(&program).unwrap()).unwrap();
+        deserialize_chunk(&bytes).unwrap();
+        for len in 0..bytes.len() {
+            assert!(deserialize_chunk(&bytes[..len]).is_err(), "prefix {len}");
+        }
+        // Single-byte corruptions either decode to verified bytecode or fail.
+        for i in 0..bytes.len() {
+            for flip in [0x01u8, 0x80, 0xFF] {
+                let mut b = bytes.clone();
+                b[i] ^= flip;
+                let _ = deserialize_chunk(&b);
+            }
+        }
     }
 
     #[test]

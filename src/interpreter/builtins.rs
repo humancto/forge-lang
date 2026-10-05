@@ -967,7 +967,9 @@ impl Interpreter {
                         Some(Value::Int(n)) => (*n as usize).min(chars.len()),
                         _ => chars.len(),
                     };
-                    if start > chars.len() {
+                    // `end` is clamped to the length, so this also covers a
+                    // start past the end (and `start > end`, which used to panic).
+                    if start >= end {
                         return Ok(Value::String(String::new()));
                     }
                     Ok(Value::String(chars[start..end].iter().collect()))
@@ -1893,7 +1895,8 @@ impl Interpreter {
                     _ => return Err(RuntimeError::new("slay() needs a function to benchmark")),
                 };
                 let n = match args.get(1) {
-                    Some(Value::Int(n)) => *n as usize,
+                    Some(Value::Int(n)) => crate::semantics::checked_count("slay", *n)
+                        .map_err(|e| RuntimeError::new(&e))?,
                     _ => 100,
                 };
                 let mut times: Vec<f64> = crate::semantics::alloc::vec_with_capacity(n, "slay()")
@@ -2008,7 +2011,8 @@ impl Interpreter {
                 match args.first() {
                     Some(Value::Array(items)) => {
                         let n = match args.get(1) {
-                            Some(Value::Int(n)) => *n as usize,
+                            Some(Value::Int(n)) => crate::semantics::checked_count("sample", *n)
+                                .map_err(|e| RuntimeError::new(&e))?,
                             _ => 1,
                         };
                         if items.is_empty() {

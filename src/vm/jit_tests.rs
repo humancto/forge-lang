@@ -593,7 +593,17 @@ fn run_jit_chunk(chunk: &Chunk, vm: &mut VM) -> i64 {
 
     let reject =
         verifier::verify(chunk, &TypeSig(vec![])).expect_err("string code must be rejected");
-    assert_eq!(reject.kind, RejectKind::UnsupportedConstant("string"));
+    // String constants are allowed only as method names, so string code is
+    // rejected where a string is used as a value or by a string opcode.
+    assert!(
+        matches!(
+            reject.kind,
+            RejectKind::UnsupportedConstant("string")
+                | RejectKind::UnsupportedOpcode(OpCode::Concat | OpCode::Len)
+        ),
+        "{:?}",
+        reject
+    );
 
     let vm_ptr = vm as *mut VM;
     let mut regs = vec![0i64; chunk.max_registers as usize + 1];
@@ -718,7 +728,8 @@ fn jit_string_not_eq() {
 
 #[test]
 fn jit_global_function_call() {
-    // A hot function calling another function: the caller stays in the VM.
+    // A hot function calling another function: both are compiled and the
+    // call is a direct native call (see `jit_calls_between_compiled_functions`).
     let out = run_jit_function(
         "fn double(n) { return n * 2 }\nfn apply(x) { return double(x) }\nprintln(apply(21))",
     );
@@ -962,14 +973,21 @@ fn jit_closures_and_upvalues_run_in_vm() {
 
 #[test]
 fn jit_hot_function_calling_another_function() {
-    // `apply` calls `double`: only `double` may be compiled; `apply` must not
-    // turn its call into a self-call.
+    // `apply` calls `double`: the call must target `double`'s own
+    // specialization, never be turned into a self-call.
     let out = run_jit_native(
         "fn double(n) { return n * 2 }\nfn apply(x) { return double(x) + 1 }\n\
          let mut u = 0\nlet mut w = 0\nwhile w < 150 { u = u + apply(w)\nw = w + 1 }\nprintln(u)",
-        "double",
+        "apply",
     );
     assert_eq!(out, vec!["22500"]);
+    let (_, _, vm) = run_mode(
+        "fn double(n) { return n * 2 }\nfn apply(x) { return double(x) + 1 }\nprintln(apply(4))",
+        JitMode::Eager,
+    );
+    // `double` is compiled as `apply`'s callee and only ever called natively.
+    assert_eq!(vm.jit.compiled_function_names(), vec!["apply", "double"]);
+    assert_eq!(vm.jit.native_runs("double"), 0);
 }
 
 #[test]
@@ -1070,10 +1088,10 @@ fn jit_repeated_deopts_disable_the_specialization() {
 
 #[test]
 fn jit_guard_failures_disable_function() {
-    // Float args fail the type guard before any compile attempt; after
+    // String args fail the type guard before any compile attempt; after
     // enough guard failures the function is no longer considered at all.
     let src = "fn add(a, b) { return a + b }\n\
-               let mut i = 0\nwhile i < 400 { add(1.5, 2.5)\ni = i + 1 }";
+               let mut i = 0\nwhile i < 400 { add(\"x\", \"y\")\ni = i + 1 }";
     let (_, err, vm) = run_mode(src, JitMode::Auto);
     assert!(err.is_none());
     let states = vm.jit.debug_states();
@@ -1100,7 +1118,9 @@ fn jit_verifier_rejects_non_self_calls_and_accepts_fib() {
     assert!(vf.has_self_calls);
     assert_eq!(vf.ret, JitType::Int);
     let mut jit = JitCompiler::new().unwrap();
-    assert!(jit.compile(&fib, &vf).is_ok());
+    assert!(jit
+        .compile(&fib, &vf, &crate::vm::jit::ir_builder::CalleeBodies::new())
+        .is_ok());
 }
 
 #[test]
@@ -1260,4 +1280,463 @@ say r
     assert_eq!(run_jit_function(source), vec!["5000"]);
     let (_, _, vm) = run_mode(source, JitMode::Auto);
     assert_eq!(vm.jit.native_runs("count"), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Float tier: IEEE semantics, Int/Float promotion and pure math builtins
+// must match the VM bit for bit (output and errors in every mode).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn jit_float_arithmetic_matches_vm_including_nan_inf_and_signed_zero() {
+    let source = r#"
+fn ops(x, y) {
+    let s = x + y
+    let d = x - y
+    let p = x * y
+    let q = x / y
+    let r = x % y
+    return s + d * 2.0 - p + q * r
+}
+fn show(x, y) {
+    say "{x + y} {x - y} {x * y} {x / y} {x % y} {-x}"
+    say "{x < y} {x <= y} {x > y} {x >= y} {x == y} {x != y} {!x} {x && y} {x || y}"
+}
+let nan = 0.0 / 0.0
+let inf = 1.0 / 0.0
+let vals = [1.5, -2.25, 0.0, -0.0, nan, inf, -inf, 7.0, 1000000000000000000000000000000.0]
+for x in vals {
+    for y in vals {
+        show(x, y)
+        say ops(x, y)
+    }
+}
+"#;
+    let out = run_jit_native(source, "ops");
+    assert_eq!(out.len(), 9 * 9 * 3);
+    let (_, _, vm) = run_mode(source, JitMode::Eager);
+    assert_eq!(vm.jit.native_runs("show"), 0, "`say` is not pure");
+}
+
+#[test]
+fn jit_float_predicates_match_vm() {
+    let source = r#"
+fn lt(x, y) { return x < y }
+fn eq(x, y) { return x == y }
+fn ne(x, y) { return x != y }
+fn truthy(x) { if x { return 1 } return 0 }
+fn neg(x) { return !x }
+let nan = 0.0 / 0.0
+let vals = [1.5, 0.0, -0.0, nan, 2, 0, true, false]
+for x in vals {
+    for y in vals {
+        say "{eq(x, y)} {ne(x, y)}"
+    }
+    say "{truthy(x)} {neg(x)}"
+}
+for x in [1.5, 0.0, -0.0, nan, 2, -3] {
+    for y in [1.5, 0.0, nan, 2] { say lt(x, y) }
+}
+"#;
+    for f in ["lt", "eq", "ne", "truthy", "neg"] {
+        run_jit_native(source, f);
+    }
+}
+
+#[test]
+fn jit_mixed_int_float_promotion_matches_vm() {
+    let source = r#"
+fn mix(i, x) { return i * x + i / 2 - x / i + i % 3 + x % 2 }
+fn cmp(i, x) { return i < x && i != x || i == x }
+let xs = [0.5, -3.0, 2.0, 1000000000000000000.0, 0.0]
+for i in [1, -7, 3, 1000000007, 9007199254740993] {
+    for x in xs {
+        say "{mix(i, x)} {cmp(i, x)} {mix(i, i)} {cmp(i, i)}"
+    }
+}
+"#;
+    run_jit_native(source, "mix");
+    run_jit_native(source, "cmp");
+}
+
+#[test]
+fn jit_int_overflow_in_mixed_function_still_deopts() {
+    let source = r#"
+fn f(n, x) { return n * n + x }
+let mut k = 0
+while k < 150 { f(k, 0.5)
+k = k + 1 }
+say f(3, 0.5)
+say f(4000000000, 0.5)
+say f(-4000000000, 1.0)
+"#;
+    let out = run_jit_native(source, "f");
+    assert_eq!(out[0], "9.5");
+}
+
+#[test]
+fn jit_float_return_and_loops_run_natively() {
+    let source = r#"
+fn harmonic(n) {
+    let mut s = 0.0
+    let mut i = 1
+    while i <= n {
+        s = s + 1.0 / i
+        i = i + 1
+    }
+    return s
+}
+say harmonic(10)
+say harmonic(100000)
+say harmonic(0)
+"#;
+    run_jit_native(source, "harmonic");
+    let (_, _, vm) = run_mode(source, JitMode::Auto);
+    assert!(
+        vm.jit.native_runs("harmonic") >= 1,
+        "loop tier-up with a Float result"
+    );
+}
+
+#[test]
+fn jit_math_builtins_match_vm() {
+    let source = r#"
+fn m1(x) {
+    return math.sqrt(x) + math.sin(x) + math.cos(x) + math.tan(x) + math.abs(x) + math.log(x)
+}
+fn r(x) { return math.floor(x) + math.ceil(x) + math.round(x) + math.abs(x) }
+fn p(x, y) { return math.pow(x, y) }
+fn mm(x, y) { return math.min(x, y) * 10 + math.max(x, y) }
+fn cl(v, lo, hi) { return math.clamp(v, lo, hi) }
+fn conv(x) { return float(x) + int(x) }
+fn consts(x) { return x * math.pi + math.e - math.inf }
+let nan = 0.0 / 0.0
+let inf = 1.0 / 0.0
+for x in [2.5, -2.5, 0.5, -0.5, 1.5, 0.0, -0.0, 10000000000000000000.0, -10000000000000000000.0, 9300000000000000000.0, nan, inf, -inf, 4, -9] {
+    say "{m1(x)} {r(x)} {conv(x)} {consts(x)}"
+    for y in [2, -1, 0.5, 63, 64, nan, 3] {
+        say "{p(x, y)} {mm(x, y)} {cl(x, y, 3)} {cl(x, -1.5, y)}"
+    }
+}
+for i in [3, -3, 9223372036854775807, -9223372036854775807] {
+    say "{r(i)} {p(i, 2)} {p(2, i)} {mm(i, 1)} {cl(i, 0, 10)} {conv(i)}"
+}
+"#;
+    for f in ["m1", "r", "p", "mm", "cl", "conv", "consts"] {
+        run_jit_native(source, f);
+    }
+}
+
+#[test]
+fn jit_math_int_edge_cases_deopt_to_vm_results() {
+    // |i64::MIN|, floor of a huge float and Int pow overflow are Floats in
+    // the VM; native code deopts and the VM's answer is used.
+    let (out, err) = run_parity(
+        r#"
+fn a(x) { return math.abs(x) }
+fn f(x) { return math.floor(x) }
+fn p(x, y) { return math.pow(x, y) }
+let mut k = 0
+while k < 150 { a(k)
+f(1.5)
+p(2, 3)
+k = k + 1 }
+let min = -9223372036854775807 - 1
+say a(min)
+say f(1000000000000000000000000000000.0)
+say f(0.0 / 0.0)
+say p(10, 30)
+say p(2, -2)
+say p(3, 4)
+"#,
+    );
+    assert!(err.is_none(), "{:?}", err);
+    assert_eq!(out[5], "81");
+}
+
+#[test]
+fn jit_builtin_errors_match_vm() {
+    // Arguments the JIT does not accept (strings, bools) run in the VM and
+    // raise the VM's errors.
+    let (_, err) = run_parity(
+        r#"
+fn s(x) { return math.sqrt(x) }
+fn fl(x) { return float(x) }
+let mut k = 0
+while k < 150 { s(k)
+fl(k)
+k = k + 1 }
+say fl("2.5")
+try { fl(true) } catch e { say e.message }
+say s("x")
+"#,
+    );
+    assert!(err
+        .unwrap_or_default()
+        .contains("math.sqrt() requires a number"));
+}
+
+#[test]
+fn jit_shadowed_math_runs_in_the_vm() {
+    // Inside `s`, `math` is a parameter, not the module: never compiled as
+    // the builtin.
+    let (out, err) = run_parity(
+        r#"
+fn s(math, x) { return math.sqrt(x) }
+let fake = { sqrt: fn(x) { return x + 1 } }
+let mut k = 0
+while k < 150 { s(fake, 1.0)
+k = k + 1 }
+say s(fake, 16.0)
+"#,
+    );
+    assert!(err.is_none(), "{:?}", err);
+    assert_eq!(out, vec!["17"]);
+}
+
+// ---------------------------------------------------------------------------
+// Calls between compiled functions.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn jit_calls_between_compiled_functions() {
+    let source = r#"
+fn sq(x) { return x * x }
+fn norm(x, y) { return math.sqrt(sq(x) + sq(y)) }
+fn dist_sum(n) {
+    let mut s = 0.0
+    let mut i = 0
+    while i < n {
+        s = s + norm(i * 0.5, 3.0)
+        i = i + 1
+    }
+    return s
+}
+say norm(3.0, 4.0)
+say norm(3, 4)
+say dist_sum(5000)
+"#;
+    let out = run_jit_native(source, "norm");
+    assert_eq!(out[0], "5");
+    let (_, _, vm) = run_mode(source, JitMode::Auto);
+    let compiled = vm.jit.compiled_function_names();
+    for f in ["dist_sum", "norm", "sq"] {
+        assert!(
+            compiled.contains(&f.to_string()),
+            "{} not compiled: {:?}",
+            f,
+            compiled
+        );
+    }
+    // `dist_sum` tiers up once through its loop; its calls of `norm` (and
+    // `norm`'s of `sq`) are then native calls, not VM entries.
+    assert_eq!(vm.jit.native_runs("dist_sum"), 1);
+}
+
+#[test]
+fn jit_callee_deopt_reruns_the_whole_call_in_the_vm() {
+    let (out, err) = run_parity(
+        r#"
+fn sq(x) { return x * x }
+fn sum_sq(a, b) { return sq(a) + sq(b) }
+let mut k = 0
+while k < 150 { sum_sq(k, 1)
+k = k + 1 }
+say sum_sq(3, 4)
+say sum_sq(4000000000, 5000000000)
+say sum_sq(3037000499, 1)
+"#,
+    );
+    assert!(err.is_none(), "{:?}", err);
+    assert_eq!(out[0], "25");
+}
+
+#[test]
+fn jit_callee_rebinding_fails_the_guard() {
+    let (out, err) = run_parity(
+        r#"
+let mut g = fn(x) { return x * 2 }
+fn h(x) { return g(x) + 1 }
+let mut k = 0
+while k < 150 { h(k)
+k = k + 1 }
+say h(10)
+g = fn(x) { return x * 3 }
+say h(10)
+"#,
+    );
+    assert!(err.is_none(), "{:?}", err);
+    assert_eq!(out, vec!["21", "31"]);
+}
+
+#[test]
+fn jit_mutual_recursion_and_impure_callees_run_in_the_vm() {
+    let (out, err) = run_parity(
+        r#"
+fn is_even(n) { if n == 0 { return true } return is_odd(n - 1) }
+fn is_odd(n) { if n == 0 { return false } return is_even(n - 1) }
+fn loud(x) { say x
+return x }
+fn calls_loud(x) { return loud(x) + 1 }
+let mut k = 0
+while k < 120 { is_even(k)
+calls_loud(k)
+k = k + 1 }
+say is_even(101)
+say calls_loud(5)
+"#,
+    );
+    assert!(err.is_none(), "{:?}", err);
+    assert_eq!(out[out.len() - 3..], ["false", "5", "6"]);
+}
+
+#[test]
+fn jit_callee_recursion_depth_matches_vm() {
+    let (out, err) = run_parity(
+        r#"
+fn down(n) { if n == 0 { return 0 } return 1 + down(n - 1) }
+fn outer(n) { return down(n) + 1 }
+let mut k = 0
+while k < 120 { outer(5)
+k = k + 1 }
+say outer(250)
+say outer(20000)
+"#,
+    );
+    assert_eq!(out, vec!["251"]);
+    assert!(err
+        .unwrap_or_default()
+        .contains("maximum recursion depth exceeded"));
+}
+
+// ---------------------------------------------------------------------------
+// Counting `for` loops (`for i in range(..)`, `repeat n times`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn range_loops_match_vm_semantics_and_run_natively() {
+    let source = r#"
+fn sum_range(n) {
+    let mut s = 0
+    for i in range(n) { s = s + i }
+    return s
+}
+fn sum_between(a, b) {
+    let mut s = 0
+    for i in range(a, b) {
+        if i % 7 == 3 { continue }
+        if i > 100000 { break }
+        s = s + i * 2
+    }
+    return s
+}
+fn reps(n) {
+    let mut c = 0.0
+    repeat n times { c = c + 0.5 }
+    return c
+}
+say sum_range(10)
+say sum_range(0)
+say sum_range(-5)
+say sum_range(100000)
+say sum_between(-50, 50)
+say sum_between(10, 3)
+say sum_between(0, 1000000)
+say reps(3)
+say reps(20000)
+"#;
+    let out = run_jit_native(source, "sum_range");
+    assert_eq!(out[..3], ["45", "0", "0"]);
+    run_jit_native(source, "sum_between");
+    run_jit_native(source, "reps");
+}
+
+#[test]
+fn range_loop_with_user_defined_range_uses_it() {
+    // A user `range` replaces the builtin: the generic path calls it.
+    let out = run_jit_function(
+        r#"
+fn range(n) { return [n, n * 10] }
+fn total(n) {
+    let mut s = 0
+    for i in range(n) { s = s + i }
+    return s
+}
+say total(4)
+let mut k = 0
+while k < 150 { total(k)
+k = k + 1 }
+say total(5)
+repeat 2 times { say "r" }
+"#,
+    );
+    assert_eq!(out, vec!["44", "55", "r", "r"]);
+}
+
+#[test]
+fn range_loop_errors_and_odd_arguments_match_vm() {
+    let (out, err) = run_parity(
+        r#"
+for i in range(2, 5, 9) { say i }
+let n = 3
+let mut fs = []
+for i in range(n) {
+    fs.push(fn() { return i * 10 })
+}
+for f in fs { say f() }
+for i in range(9223372036854775806, 9223372036854775807) { say i }
+let big = 9223372036854775807
+let mut c = 0
+for i in range(big - 3, big) { c = c + 1 }
+say c
+for i in range(1.5) { say i }
+"#,
+    );
+    assert_eq!(
+        out,
+        vec!["2", "3", "4", "0", "10", "20", "9223372036854775806", "3"]
+    );
+    assert!(err
+        .unwrap_or_default()
+        .contains("range() requires integer arguments"));
+}
+
+#[test]
+fn range_loops_do_not_materialize_the_range() {
+    // On the old code path each loop allocated the whole range as an array.
+    let out = run_jit_function(
+        r#"
+let mut s = 0
+for i in range(3000000) { s = s + 1 }
+repeat 3000000 times { s = s + 1 }
+say s
+"#,
+    );
+    assert_eq!(out, vec!["6000000"]);
+}
+
+#[test]
+fn jit_captured_callees_are_guarded_per_closure() {
+    // Both closures share one prototype (and specialization); each call is
+    // guarded on the function *that* closure captured.
+    let source = r#"
+fn twice(x) { return x * 2 }
+fn thrice(x) { return x * 3 }
+fn make(g) { return fn(x) { return g(x) + 1 } }
+let a = make(twice)
+let b = make(thrice)
+let mut k = 0
+while k < 150 { a(k)
+k = k + 1 }
+say a(10)
+say b(10)
+let mut j = 0
+while j < 150 { b(j)
+j = j + 1 }
+say a(10)
+say b(10)
+"#;
+    assert_eq!(run_jit_function(source), vec!["21", "31", "21", "31"]);
+    let (_, _, vm) = run_mode(source, JitMode::Auto);
+    assert!(vm.jit.native_runs("<lambda>") > 0);
 }

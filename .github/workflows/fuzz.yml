@@ -1,0 +1,117 @@
+name: Fuzz
+
+# Coverage-guided fuzzing of the front end, the compiler, the bytecode
+# loader/verifier and interpreter-vs-VM parity (targets in fuzz/; see
+# fuzz/README.md). Runs nightly for a bounded time per target and uploads
+# any crash as an artifact. The quick, deterministic stable-toolchain
+# version of the same targets (tests/fuzz_smoke.rs) runs in regular CI.
+
+on:
+  schedule:
+    - cron: "41 3 * * *" # nightly, 03:41 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to fuzz each target"
+        required: false
+        default: "900"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  cargo-fuzz:
+    name: cargo fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse, compile, bytecode, differential]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Seed the corpus
+        run: |
+          set -euo pipefail
+          corpus="fuzz/corpus/${{ matrix.target }}"
+          mkdir -p "$corpus"
+          case "${{ matrix.target }}" in
+            parse|compile)
+              find examples tests -name '*.fg' -exec cp {} "$corpus/" \; ;;
+            bytecode)
+              cp fuzz/seeds/bytecode/* "$corpus/" ;;
+          esac
+          # Known crashers stay in every run's corpus.
+          if [ -d "fuzz/regressions/${{ matrix.target }}" ]; then
+            cp fuzz/regressions/${{ matrix.target }}/* "$corpus/" 2>/dev/null || true
+          fi
+      - name: Fuzz for a bounded time
+        env:
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || '900' }}
+        run: |
+          cargo fuzz run --debug-assertions ${{ matrix.target }} "fuzz/corpus/${{ matrix.target }}" -- \
+            -max_total_time="$SECONDS_PER_TARGET" -timeout=30 -rss_limit_mb=4096 \
+            -max_len=65536 -print_final_stats=1
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+
+  smoke-random-seed:
+    # The stable harness with a fresh seed every night and 10x the
+    # iterations of regular CI: finds what the fixed seed cannot.
+    name: Stable fuzz smoke (random seed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests/fuzz_smoke.rs
+        env:
+          FORGE_FUZZ_ITERS: "20000"
+          FORGE_FUZZ_SEED: ${{ github.run_id }}
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          echo "FORGE_FUZZ_SEED=$FORGE_FUZZ_SEED (rerun locally with this seed to reproduce)"
+          cargo test --locked --test fuzz_smoke -- --nocapture
+
+  miri:
+    # Undefined-behaviour check of the unsafe code Miri can execute: the
+    # C-ABI entry points in src/lib.rs and the GC/NaN-boxing unit tests.
+    # (Cranelift-generated machine code cannot run under Miri; see
+    # fuzz/README.md.)
+    name: Miri (unsafe FFI and value representation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri
+      - name: cargo miri test
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo miri test --locked --no-default-features --features jit --lib -- miri_
