@@ -157,6 +157,78 @@ fn coalesce_ansi(input: &str) -> String {
 /// Character offset of 1-based `line:col` (the lexer counts columns in
 /// characters, and ariadne indexes `Source` by character), clamped to the
 /// end of the source.
+/// How a type-checker diagnostic is rendered (see [`format_diagnostic`]).
+/// (Used by the CLI binary; the library build does not render diagnostics.)
+#[allow(dead_code)]
+pub struct DiagnosticView<'a> {
+    /// `T0006` style code.
+    pub code: &'a str,
+    pub message: &'a str,
+    pub help: Option<&'a str>,
+    pub line: usize,
+    pub col: usize,
+    /// Highlighted width in chars (at least 1).
+    pub len: usize,
+    pub is_error: bool,
+}
+
+/// Render a type-checker diagnostic with a source snippet: an error or a
+/// warning headed `[code] message`, the span underlined, and the help text
+/// (did-you-mean) as a note.
+#[allow(dead_code)]
+pub fn format_diagnostic(origin: &str, source: &str, d: &DiagnosticView<'_>) -> String {
+    format_diagnostic_with_color(origin, source, d, color_enabled())
+}
+
+#[allow(dead_code)]
+fn format_diagnostic_with_color(
+    origin: &str,
+    source: &str,
+    d: &DiagnosticView<'_>,
+    color: bool,
+) -> String {
+    if d.line == 0 {
+        let head = format!("[{}] {}", d.code, d.message);
+        let text = match d.help {
+            Some(help) => format!("{}\n  help: {}", head, help),
+            None => head,
+        };
+        return if d.is_error {
+            format_simple_error(&text)
+        } else {
+            format_warning(&text)
+        };
+    }
+    let offset = line_col_to_offset(source, d.line, d.col);
+    let (kind, label_color) = if d.is_error {
+        (ReportKind::Error, Color::Red)
+    } else {
+        (ReportKind::Warning, Color::Yellow)
+    };
+    let mut report = Report::build(kind, origin, offset)
+        .with_config(Config::default().with_color(color))
+        .with_code(d.code)
+        .with_message(d.message)
+        .with_label(
+            Label::new((origin, offset..offset + d.len.max(1)))
+                .with_message(d.message.lines().next().unwrap_or(d.message))
+                .with_color(label_color),
+        );
+    if let Some(help) = d.help {
+        report = report.with_help(help);
+    }
+    let mut buf = Vec::new();
+    report
+        .finish()
+        .write((origin, Source::from(source)), &mut buf)
+        .ok();
+    match String::from_utf8(buf) {
+        Ok(rendered) if color => coalesce_ansi(&rendered),
+        Ok(rendered) => rendered,
+        Err(_) => format!("[{}] {}", d.code, d.message),
+    }
+}
+
 fn line_col_to_offset(source: &str, line: usize, col: usize) -> usize {
     let total = source.chars().count();
     let mut current_line = 1;

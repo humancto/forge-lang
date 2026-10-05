@@ -42,9 +42,7 @@ use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 
 use interpreter::Interpreter;
-use lexer::Lexer;
 use parser::ast::{Expr, Program, Stmt};
-use parser::Parser as ForgeParser;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -60,7 +58,7 @@ enum FrontendError {
         col: usize,
         message: String,
     },
-    Type(Vec<typechecker::TypeWarning>),
+    Type(Vec<typechecker::Diagnostic>),
 }
 
 #[derive(Parser)]
@@ -101,7 +99,9 @@ struct Cli {
     #[arg(long = "profile")]
     profile: bool,
 
-    /// Enforce type annotations as errors (gradual strict mode)
+    /// Strict typing: type-checker diagnostics become errors that stop the
+    /// run, and annotated function arguments and results are checked at
+    /// run time on both engines
     #[arg(long = "strict")]
     strict: bool,
 
@@ -779,72 +779,90 @@ async fn async_main() {
         .ok();
 }
 
+/// Lex, parse and type-check `source` (from `filename`, which locates
+/// imports). With `strict`, type diagnostics are errors and stop the run,
+/// and annotations are additionally enforced at run time (see
+/// `typechecker::enforce`).
 fn prepare_program(
     source: &str,
+    filename: &str,
     strict: bool,
-) -> Result<(Program, Vec<typechecker::TypeWarning>), FrontendError> {
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize().map_err(|e| FrontendError::Lex {
-        line: e.line,
-        col: e.col,
-        message: e.message,
+) -> Result<(Program, Vec<typechecker::Diagnostic>), FrontendError> {
+    let path = std::path::Path::new(filename);
+    let options = typechecker::CheckOptions {
+        strict,
+        file: path.exists().then(|| path.to_path_buf()),
+    };
+    let analysis = typechecker::analyze(source, &options).map_err(|e| match e {
+        typechecker::FrontendError::Lex { line, col, message } => {
+            FrontendError::Lex { line, col, message }
+        }
+        typechecker::FrontendError::Parse { line, col, message } => {
+            FrontendError::Parse { line, col, message }
+        }
     })?;
-
-    let mut parser = ForgeParser::new(tokens);
-    let program = parser.parse_program().map_err(|e| FrontendError::Parse {
-        line: e.line,
-        col: e.col,
-        message: e.message,
-    })?;
-
-    let mut checker = typechecker::TypeChecker::with_strict(strict);
-    let warnings = checker.check(&program);
-    if warnings.iter().any(|w| w.is_error) {
-        return Err(FrontendError::Type(warnings));
+    let diagnostics = analysis.diagnostics;
+    if diagnostics.iter().any(|d| d.is_error()) {
+        return Err(FrontendError::Type(diagnostics));
     }
+    let mut program = analysis.program;
+    if strict {
+        typechecker::enforce::instrument(&mut program);
+    }
+    Ok((program, diagnostics))
+}
 
-    Ok((program, warnings))
+fn render_diagnostic(source: &str, filename: &str, d: &typechecker::Diagnostic) -> String {
+    let len = if d.span.end.line == d.span.start.line {
+        d.span.end.col.saturating_sub(d.span.start.col).max(1)
+    } else {
+        1
+    };
+    errors::format_diagnostic(
+        &errors::display_path(filename),
+        source,
+        &errors::DiagnosticView {
+            code: d.code.as_str(),
+            message: &d.message,
+            help: d.help.as_deref(),
+            line: d.line(),
+            col: d.col().max(1),
+            len,
+            is_error: d.is_error(),
+        },
+    )
 }
 
 fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
-    let filename = &errors::display_path(filename);
     match err {
         FrontendError::Lex { line, col, message } | FrontendError::Parse { line, col, message } => {
+            let filename = &errors::display_path(filename);
             eprintln!(
                 "{}",
                 errors::format_error(filename, source, line, col, &message)
             );
         }
-        FrontendError::Type(warnings) => {
-            for warning in warnings {
-                let rendered = if warning.line > 0 {
-                    format!("[{}:{}] {}", filename, warning.line, warning.message)
-                } else {
-                    format!("[{}] {}", filename, warning.message)
-                };
-                if warning.is_error {
-                    eprintln!("{}", errors::format_simple_error(&rendered));
-                } else {
-                    eprintln!("{}", errors::format_warning(&rendered));
-                }
+        FrontendError::Type(diagnostics) => {
+            for d in &diagnostics {
+                eprintln!("{}", render_diagnostic(source, filename, d));
             }
+            let errors = diagnostics.iter().filter(|d| d.is_error()).count();
+            eprintln!(
+                "{}",
+                errors::format_simple_error(&format!(
+                    "type checking failed with {} error{} (--strict)",
+                    errors,
+                    if errors == 1 { "" } else { "s" }
+                ))
+            );
         }
     }
     process::exit(1);
 }
 
-fn emit_type_warnings(warnings: &[typechecker::TypeWarning]) {
-    for warning in warnings {
-        if !warning.is_error {
-            if warning.line > 0 {
-                eprintln!(
-                    "{}",
-                    errors::format_warning(&format!("line {}: {}", warning.line, warning.message))
-                );
-            } else {
-                eprintln!("{}", errors::format_warning(&warning.message));
-            }
-        }
+fn emit_type_warnings(source: &str, filename: &str, warnings: &[typechecker::Diagnostic]) {
+    for d in warnings.iter().filter(|d| !d.is_error()) {
+        eprintln!("{}", render_diagnostic(source, filename, d));
     }
 }
 
@@ -1143,11 +1161,11 @@ fn run_off_runtime<T: Send, F: FnOnce() -> T + Send>(f: F) -> T {
 }
 
 async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, strict: bool) {
-    let (program, warnings) = match prepare_program(source, strict) {
+    let (program, warnings) = match prepare_program(source, filename, strict) {
         Ok(prepared) => prepared,
         Err(err) => print_frontend_error(source, filename, err),
     };
-    emit_type_warnings(&warnings);
+    emit_type_warnings(source, filename, &warnings);
 
     // Auto-fallback: if VM is requested but the program uses constructs the
     // VM does not support (decorators, or anything the compiler rejects as
@@ -1229,11 +1247,11 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
 
 #[cfg(feature = "jit")]
 fn run_jit(source: &str, filename: &str, strict: bool) {
-    let (program, warnings) = match prepare_program(source, strict) {
+    let (program, warnings) = match prepare_program(source, filename, strict) {
         Ok(prepared) => prepared,
         Err(err) => print_frontend_error(source, filename, err),
     };
-    emit_type_warnings(&warnings);
+    emit_type_warnings(source, filename, &warnings);
     if let Err(message) = ensure_vm_compatible(&program, "--jit") {
         eprintln!("{}", errors::format_simple_error(&message));
         process::exit(1);
@@ -1267,11 +1285,11 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
 }
 
 fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf, strict: bool) {
-    let (program, warnings) = match prepare_program(source, strict) {
+    let (program, warnings) = match prepare_program(source, filename, strict) {
         Ok(prepared) => prepared,
         Err(err) => print_frontend_error(source, filename, err),
     };
-    emit_type_warnings(&warnings);
+    emit_type_warnings(source, filename, &warnings);
     if let Err(message) = ensure_vm_compatible(&program, "bytecode build") {
         eprintln!("{}", errors::format_simple_error(&message));
         process::exit(1);
@@ -1323,11 +1341,11 @@ fn compile_to_native_launcher(
     strict: bool,
     allow_run: bool,
 ) {
-    let (_, warnings) = match prepare_program(source, strict) {
+    let (_, warnings) = match prepare_program(source, filename, strict) {
         Ok(prepared) => prepared,
         Err(err) => print_frontend_error(source, filename, err),
     };
-    emit_type_warnings(&warnings);
+    emit_type_warnings(source, filename, &warnings);
 
     match native::build_native_launcher(source, file_path, allow_run) {
         Ok(output) => {
@@ -1354,11 +1372,11 @@ fn compile_to_native_launcher(
 }
 
 fn compile_to_native_aot(source: &str, filename: &str, file_path: &PathBuf, strict: bool) {
-    let (program, warnings) = match prepare_program(source, strict) {
+    let (program, warnings) = match prepare_program(source, filename, strict) {
         Ok(prepared) => prepared,
         Err(err) => print_frontend_error(source, filename, err),
     };
-    emit_type_warnings(&warnings);
+    emit_type_warnings(source, filename, &warnings);
 
     if let Err(message) = ensure_vm_compatible(&program, "AOT build") {
         let message = if message.contains("decorator-driven runtime features") {
@@ -1497,7 +1515,7 @@ mod tests {
         assert!(!cases.is_empty(), "expected VM rejection parity fixtures");
 
         for case in &cases {
-            let (program, _) = prepare_program(&case.source, false)
+            let (program, _) = prepare_program(&case.source, "<test>", false)
                 .unwrap_or_else(|err| panic!("{} should parse: {:?}", case.path.display(), err));
             let error = ensure_vm_compatible(&program, "parity corpus")
                 .expect_err(&format!("{} should be rejected by VM", case.path.display()));
@@ -1518,9 +1536,9 @@ mod tests {
         needs_int("oops")
         "#;
 
-        match prepare_program(source, true) {
+        match prepare_program(source, "<test>", true) {
             Err(FrontendError::Type(warnings)) => {
-                assert!(warnings.iter().any(|w| w.is_error));
+                assert!(warnings.iter().any(|w| w.is_error()));
                 assert!(warnings.iter().any(|w| w.message.contains("expected Int")));
             }
             other => panic!("expected type error, got {:?}", other),
@@ -1534,8 +1552,9 @@ mod tests {
         needs_int("oops")
         "#;
 
-        let (_, warnings) = prepare_program(source, false).expect("program should prepare");
-        assert!(warnings.iter().any(|w| !w.is_error));
+        let (_, warnings) =
+            prepare_program(source, "<test>", false).expect("program should prepare");
+        assert!(warnings.iter().any(|w| !w.is_error()));
         assert!(warnings.iter().any(|w| w.message.contains("expected Int")));
     }
 
@@ -1549,7 +1568,7 @@ mod tests {
         }
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         let issues = vm_incompatibilities(&program);
         assert!(!issues.contains(&"interface/power definitions"));
         assert!(!issues.contains(&"impl/give blocks"));
@@ -1563,7 +1582,7 @@ mod tests {
         color
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         let issues = vm_incompatibilities(&program);
         assert!(!issues.contains(&"type definitions"));
     }
@@ -1576,7 +1595,7 @@ mod tests {
         println(sum)
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1588,7 +1607,7 @@ mod tests {
         name
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1604,7 +1623,7 @@ mod tests {
         status
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1616,7 +1635,7 @@ mod tests {
         first
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1631,7 +1650,7 @@ mod tests {
         status
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1648,7 +1667,7 @@ mod tests {
         attempts
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1660,7 +1679,7 @@ mod tests {
         }
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1677,7 +1696,7 @@ mod tests {
             import_path
         );
 
-        let (program, _) = prepare_program(&source, false).expect("program should parse");
+        let (program, _) = prepare_program(&source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
 
         std::fs::remove_file(&import_path).ok();
@@ -1690,7 +1709,7 @@ mod tests {
         users where age >= 18
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1701,7 +1720,7 @@ mod tests {
         users >> keep where active >> sort by name >> take 1
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1716,7 +1735,7 @@ mod tests {
         kind
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1732,7 +1751,7 @@ mod tests {
         kind
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1744,7 +1763,7 @@ mod tests {
         smoke()
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).is_empty());
     }
 
@@ -1756,7 +1775,7 @@ mod tests {
         fn hello() { return "hi" }
         "#;
 
-        let (program, _) = prepare_program(source, false).expect("program should parse");
+        let (program, _) = prepare_program(source, "<test>", false).expect("program should parse");
         assert!(vm_incompatibilities(&program).contains(&"decorator-driven runtime features"));
     }
 }

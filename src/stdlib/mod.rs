@@ -21,6 +21,7 @@ pub mod regex_module;
 pub mod term;
 pub mod time;
 pub mod toml_module;
+pub mod types_module;
 pub mod url_module;
 pub mod ws;
 

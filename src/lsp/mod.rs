@@ -8,9 +8,9 @@
 //! advertise it in [`server_capabilities`], add a match arm in
 //! [`handle_request`] (or [`handle_notification`]), and write the handler.
 //!
-//! Provides: diagnostics (lex/parse errors + type-check warnings),
-//! completions, hover, go-to-definition, references, document symbols,
-//! whole-document formatting and signature help.
+//! Provides: diagnostics (lex/parse errors + type-checker diagnostics with
+//! codes), completions, hover, go-to-definition, references, document
+//! symbols, whole-document formatting and signature help.
 
 use crate::parser::ast::Stmt;
 use lsp_server::{Connection, ErrorCode, Message, Notification, ProtocolError, Request, Response};
@@ -90,6 +90,7 @@ pub(crate) fn server_capabilities() -> ServerCapabilities {
         references_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
             retrigger_characters: None,
@@ -243,7 +244,10 @@ pub(crate) fn handle_notification(note: &Notification) -> Vec<Notification> {
                 return vec![];
             };
             store_document(uri, text);
-            vec![publish_diagnostics(uri, get_diagnostics(text))]
+            vec![publish_diagnostics(
+                uri,
+                get_diagnostics_for(text, uri_path(uri)),
+            )]
         }
         notification::DidChangeTextDocument::METHOD => {
             let Some(uri) = param_str(params, "/textDocument/uri") else {
@@ -260,7 +264,10 @@ pub(crate) fn handle_notification(note: &Notification) -> Vec<Notification> {
                 return vec![];
             };
             store_document(uri, text);
-            vec![publish_diagnostics(uri, get_diagnostics(text))]
+            vec![publish_diagnostics(
+                uri,
+                get_diagnostics_for(text, uri_path(uri)),
+            )]
         }
         notification::DidCloseTextDocument::METHOD => {
             let Some(uri) = param_str(params, "/textDocument/uri") else {
@@ -440,54 +447,76 @@ fn get_signature_help(uri: &str, line: usize, character: usize) -> serde_json::V
     })
 }
 
-fn get_diagnostics(source: &str) -> Vec<serde_json::Value> {
-    let mut lexer = crate::lexer::Lexer::new(source);
-    let tokens = match lexer.tokenize() {
-        Ok(t) => t,
-        Err(e) => {
-            return vec![serde_json::json!({
-                "range": {
-                    "start": {"line": e.line.saturating_sub(1), "character": e.col.saturating_sub(1)},
-                    "end": {"line": e.line.saturating_sub(1), "character": e.col}
-                },
-                "severity": 1,
-                "message": e.message
-            })];
-        }
-    };
+/// The file a `file://` URI names.
+fn uri_path(uri: &str) -> Option<std::path::PathBuf> {
+    uri.strip_prefix("file://").map(std::path::PathBuf::from)
+}
 
-    let mut parser = crate::parser::Parser::new(tokens);
-    match parser.parse_program() {
-        Ok(program) => {
-            let source_lines: Vec<&str> = source.lines().collect();
-            let mut checker = crate::typechecker::TypeChecker::with_strict(false);
-            let warnings = checker.check(&program);
-            warnings
-                .into_iter()
-                .map(|w| {
-                    let line = w.line.saturating_sub(1);
-                    let end_char = source_lines.get(line).map(|l| l.len()).unwrap_or(0);
-                    let severity = if w.is_error { 1 } else { 2 };
-                    serde_json::json!({
-                        "range": {
-                            "start": {"line": line, "character": 0},
-                            "end": {"line": line, "character": end_char}
-                        },
-                        "severity": severity,
-                        "source": "forge-typecheck",
-                        "message": w.message
-                    })
+fn get_diagnostics(source: &str) -> Vec<serde_json::Value> {
+    get_diagnostics_for(source, None)
+}
+
+/// LSP column (UTF-16 code units) of a 1-based char column on a line.
+fn utf16_col(line_text: &str, char_col: usize) -> usize {
+    line_text
+        .chars()
+        .take(char_col.saturating_sub(1))
+        .map(char::len_utf16)
+        .sum()
+}
+
+/// LSP range for a 1-based (line, char col) span.
+fn lsp_range(source: &str, span: crate::parser::index::Span) -> serde_json::Value {
+    let line_of = |n: usize| source.lines().nth(n.saturating_sub(1)).unwrap_or("");
+    let start_line = span.start.line.max(1);
+    let end_line = span.end.line.max(start_line);
+    let start = utf16_col(line_of(start_line), span.start.col.max(1));
+    let mut end = utf16_col(line_of(end_line), span.end.col.max(1));
+    if end_line == start_line && end <= start {
+        end = start + 1;
+    }
+    serde_json::json!({
+        "start": {"line": start_line - 1, "character": start},
+        "end": {"line": end_line - 1, "character": end}
+    })
+}
+
+/// Diagnostics for a document. `path` (when the document is a file on
+/// disk) lets the checker resolve imports relative to it.
+fn get_diagnostics_for(source: &str, path: Option<std::path::PathBuf>) -> Vec<serde_json::Value> {
+    use crate::typechecker::{analyze, CheckOptions, FrontendError};
+    let options = CheckOptions {
+        strict: false,
+        file: path,
+    };
+    match analyze(source, &options) {
+        Ok(analysis) => analysis
+            .diagnostics
+            .iter()
+            .map(|d| {
+                let mut message = d.message.clone();
+                if let Some(help) = &d.help {
+                    message.push_str("\nhelp: ");
+                    message.push_str(help);
+                }
+                serde_json::json!({
+                    "range": lsp_range(source, d.span),
+                    "severity": if d.is_error() { 1 } else { 2 },
+                    "code": d.code.as_str(),
+                    "source": "forge-typecheck",
+                    "message": message,
                 })
-                .collect()
-        }
-        Err(e) => {
+            })
+            .collect(),
+        Err(FrontendError::Lex { line, col, message })
+        | Err(FrontendError::Parse { line, col, message }) => {
+            let start = crate::parser::index::Pos::new(line.max(1), col.max(1));
+            let end = crate::parser::index::Pos::new(line.max(1), col.max(1) + 1);
             vec![serde_json::json!({
-                "range": {
-                    "start": {"line": e.line.saturating_sub(1), "character": e.col.saturating_sub(1)},
-                    "end": {"line": e.line.saturating_sub(1), "character": e.col}
-                },
+                "range": lsp_range(source, crate::parser::index::Span::new(start, end)),
                 "severity": 1,
-                "message": e.message
+                "source": "forge",
+                "message": message
             })]
         }
     }
@@ -1965,7 +1994,7 @@ mod tests {
     #[test]
     fn unknown_request_returns_method_not_found_error() {
         let response = handle_message(
-            r#"{"jsonrpc":"2.0","id":42,"method":"textDocument/codeAction","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":42,"method":"textDocument/foldingRange","params":{}}"#,
         )
         .expect("requests must always get a response");
         let json: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1982,7 +2011,7 @@ mod tests {
             .pointer("/error/message")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        assert!(msg.contains("textDocument/codeAction"));
+        assert!(msg.contains("textDocument/foldingRange"));
     }
 
     #[test]
@@ -2349,7 +2378,11 @@ mod tests {
         // Unknown request -> MethodNotFound, and the server keeps going.
         client
             .sender
-            .send(request(2, "textDocument/codeAction", serde_json::json!({})))
+            .send(request(
+                2,
+                "textDocument/foldingRange",
+                serde_json::json!({}),
+            ))
             .unwrap();
         let Message::Response(resp) = recv(&client) else {
             panic!("expected response")

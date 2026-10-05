@@ -1,0 +1,26 @@
+# Strict-mode type errors the corpus (tests/*.fg, examples/*.fg, parity
+# fixtures) is allowed to produce. Each line is
+#   path:line CODE  # why this is intentional
+# The test `typechecker::corpus_tests` fails on any strict error not listed
+# here and on entries that are no longer reported. Every entry below is code
+# that a test deliberately runs to assert the engines raise the error the
+# checker predicts (inside `try`, `safe` or a parity fixture).
+
+tests/block_values_test.fg:110 T0004  # asserts the run-time "method add expects 1 argument" error
+tests/block_values_test.fg:117 T0004  # asserts the run-time "method get expects 0 arguments" error
+tests/interpreter_behavior_test.fg:388 T0006  # asserts a block-local binding is not visible after the block
+tests/interpreter_behavior_test.fg:403 T0006  # asserts function parameters do not leak into the caller
+tests/interpreter_behavior_test.fg:934 T0006  # asserts `safe { }` recovers from an undefined variable
+tests/language_spec_test.fg:41 T0017  # asserts reassigning an immutable binding raises
+tests/language_spec_test.fg:1528 T0006  # asserts reading an undefined variable raises
+tests/parity/supported/call_arity.fg:13 T0004  # parity fixture: arity error text on both engines
+tests/parity/supported/call_arity.fg:18 T0004  # parity fixture: arity error text on both engines
+tests/parity/supported/call_arity.fg:23 T0004  # parity fixture: arity error text on both engines
+tests/parity/supported/call_arity.fg:28 T0004  # parity fixture: arity error text on both engines
+tests/parity/supported/call_arity.fg:33 T0004  # parity fixture: arity error text on both engines
+tests/parity/supported/call_arity.fg:38 T0004  # parity fixture: builtin arity error text on both engines
+tests/parity/supported/import_named_isolated.fg:4 T0006  # parity fixture: names not listed in `import { }` stay private
+tests/parity/supported/value_semantics_copy.fg:47 T0017  # parity fixture: index assignment on an immutable binding raises
+tests/safety_correctness_test.fg:38 T0006  # asserts try/catch catches a reference error
+tests/safety_correctness_test.fg:185 T0013  # asserts calling a non-function raises
+tests/testing_framework_test.fg:48 T0006  # asserts the error type of an undefined-variable error

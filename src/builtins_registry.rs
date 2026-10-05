@@ -289,6 +289,8 @@ pub fn modules() -> &'static [Module] {
             module!("jwt", crate::stdlib::jwt),
             module!("os", crate::stdlib::os_module),
             module!("path", crate::stdlib::path_module),
+            // Hidden: runtime checks inserted by `--strict` (typechecker::enforce).
+            module!("__types", crate::stdlib::types_module),
         ];
         #[cfg(feature = "postgres")]
         all.push(module!("pg", crate::stdlib::pg));
