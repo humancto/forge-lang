@@ -896,7 +896,7 @@ The data structures for genuine cooperative scheduling are in place—thread sta
 The bytecode VM is the default engine as of v0.7.0. To explicitly use the interpreter instead:
 
 ```bash
-forge run program.fg --interp
+forge --interp run program.fg
 ```
 
 To compile a program to bytecode and view compilation statistics:
@@ -915,7 +915,7 @@ Compiled program.fg -> program.fgc
   8 max registers
 ```
 
-The VM supports the vast majority of Forge features including variables, functions, closures, control flow, data structures, error handling, async/await, concurrency, and all standard library modules. Features that require the interpreter (HTTP server decorators, certain advanced features) are auto-detected at startup, and Forge falls back to the interpreter automatically.
+The VM supports most Forge features, including variables, functions, closures, control flow, data structures, error handling, async/await, and concurrency. A few builtins and stdlib modules are still interpreter-only (VM parity is tracked in ROADMAP.md); use `--interp` if a program behaves differently on the VM. Features that require the interpreter (HTTP server decorators, certain advanced features) are auto-detected at startup, and Forge falls back to the interpreter automatically.
 
 ---
 
@@ -1453,6 +1453,9 @@ forge [OPTIONS] [COMMAND]
 | ------------------- | ---------------------------------------------------------- |
 | `-e, --eval <CODE>` | Evaluate a Forge expression inline                         |
 | `--interp`          | Use the tree-walking interpreter instead of the default VM |
+| `--jit`             | JIT-compile numeric functions on top of the VM             |
+| `--allow-run`       | Allow shell builtins (`sh`, `run_command`, ...) under `forge run` |
+| `--vm`              | Accepted for compatibility; no effect (the VM is the default) |
 | `-h, --help`        | Print help information                                     |
 | `-V, --version`     | Print version number                                       |
 
@@ -1464,7 +1467,7 @@ Run a Forge source file.
 
 ```bash
 forge run main.fg
-forge run main.fg --interp    # Use interpreter instead of VM
+forge --interp run main.fg    # Use interpreter instead of VM (engine flags go before the subcommand)
 ```
 
 | Argument | Description                 |
