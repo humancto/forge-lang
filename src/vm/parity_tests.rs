@@ -1147,6 +1147,21 @@ fn parity_yield_is_a_runtime_error_not_dropped() {
     );
 }
 
+// ----- `return` inside an if-expression returns from the function -----
+
+#[test]
+fn parity_return_inside_if_expression_returns_from_function() {
+    assert_cross_backend_value(
+        "fn g(x) {\n    let y = if x > 0 { return \"pos\" } else { \"neg\" }\n    return \"after \" + y\n}\n[g(1), g(-1)]",
+        "[pos, after neg]",
+    );
+    // Not intercepted by an enclosing try.
+    assert_cross_backend_value(
+        "fn h() {\n    try {\n        let y = if true { return 1 } else { 2 }\n    } catch e {\n        return -1\n    }\n    return 0\n}\nh()",
+        "1",
+    );
+}
+
 // ----- `check ... between` -----
 
 #[test]

@@ -1117,6 +1117,9 @@ impl Interpreter {
                 self.debug_check(spanned.line);
             }
             match self.exec_stmt(&spanned.stmt) {
+                Err(e) if e.is_early_return() => {
+                    return Ok(e.propagated_value().unwrap_or(Value::Null))
+                }
                 Ok(signal) => match signal {
                     Signal::Return(v) => return Ok(v),
                     Signal::Break => return Err(RuntimeError::new("break outside of loop")),
@@ -1150,7 +1153,12 @@ impl Interpreter {
             // Expression statements are evaluated exactly once; their value
             // (unless it is an output call) is the REPL result.
             if let Stmt::Expression(ref expr) = spanned.stmt {
-                let value = self.eval_expr(expr).map_err(patch)?;
+                let value = match self.eval_expr(expr) {
+                    Err(e) if e.is_early_return() => {
+                        return Ok(e.propagated_value().unwrap_or(Value::Null))
+                    }
+                    other => other.map_err(patch)?,
+                };
                 let is_output = matches!(
                     expr,
                     Expr::Call { function, .. }
@@ -1168,7 +1176,13 @@ impl Interpreter {
                 }
                 continue;
             }
-            match self.exec_stmt(&spanned.stmt).map_err(patch)? {
+            let signal = match self.exec_stmt(&spanned.stmt) {
+                Err(e) if e.is_early_return() => {
+                    return Ok(e.propagated_value().unwrap_or(Value::Null))
+                }
+                other => other.map_err(patch)?,
+            };
+            match signal {
                 Signal::Return(v) => return Ok(v),
                 Signal::Break => return Err(RuntimeError::new("break outside of loop")),
                 Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
@@ -1733,6 +1747,7 @@ impl Interpreter {
                 catch_body,
             } => match self.exec_block(try_body) {
                 Ok(signal) => Ok(signal),
+                Err(e) if e.is_early_return() => Err(e),
                 Err(e) => {
                     self.env.push_scope();
                     let mut err_obj = IndexMap::new();
@@ -2013,6 +2028,7 @@ impl Interpreter {
 
             Stmt::SafeBlock { body } => match self.exec_block(body) {
                 Ok(signal) => Ok(signal),
+                Err(e) if e.is_early_return() => Err(e),
                 Err(_) => Ok(Signal::ImplicitReturn(Value::Null)),
             },
 
@@ -3364,7 +3380,11 @@ impl Interpreter {
                 let result = self.eval_block_value(stmts);
                 self.env.pop_scope();
                 match result? {
-                    BlockExit::Value(v) | BlockExit::Return(v) => Ok(v),
+                    BlockExit::Value(v) => Ok(v),
+                    // `return` inside an `if`/block expression returns from
+                    // the enclosing function (same as the VM), not just
+                    // from the block.
+                    BlockExit::Return(v) => Err(RuntimeError::early_return(v)),
                 }
             }
 
@@ -4816,6 +4836,11 @@ pub struct RuntimeError {
     pub line: usize,
     pub col: usize,
     propagated: Option<Value>,
+    /// Set for a `return` executed inside a block expression
+    /// (`let x = if c { return 1 } else { 2 }`): it unwinds to the enclosing
+    /// function call like a `return` statement and is never caught by
+    /// `try`/`safe`.
+    early_return: bool,
 }
 
 impl RuntimeError {
@@ -4825,6 +4850,7 @@ impl RuntimeError {
             line: 0,
             col: 0,
             propagated: None,
+            early_return: false,
         }
     }
 
@@ -4838,7 +4864,20 @@ impl RuntimeError {
             line: 0,
             col: 0,
             propagated: Some(value),
+            early_return: false,
         }
+    }
+
+    /// `return value` from inside a block expression; see `early_return`.
+    pub fn early_return(value: Value) -> Self {
+        let mut err = Self::propagate(value);
+        err.message = crate::semantics::RETURN_OUTSIDE_FUNCTION.to_string();
+        err.early_return = true;
+        err
+    }
+
+    pub fn is_early_return(&self) -> bool {
+        self.early_return
     }
 
     pub fn propagated_value(&self) -> Option<Value> {

@@ -312,6 +312,10 @@ pub fn check_failed(displayed_value: &str) -> String {
     format!("check failed: {} did not pass validation", displayed_value)
 }
 
+/// `return` executed outside any function (top level of a program, inside
+/// a block expression). The program ends with that value on both engines.
+pub const RETURN_OUTSIDE_FUNCTION: &str = "return outside of a function";
+
 /// `check value between lo and hi`: inclusive range check. Ints and floats
 /// may be mixed (compared as floats); strings compare lexicographically.
 /// Any other combination fails the check.
