@@ -13,7 +13,7 @@ Source (.fg) → Lexer → Parser → AST → Type Checker → VM / Interpreter 
                                               (axum, reqwest, tokio, rusqlite)
 ```
 
-The bytecode VM is the default engine (`--vm` is accepted but is a no-op). A tree-walking interpreter (`--interp` flag) is available for full feature coverage (decorator-driven HTTP servers auto-fallback). A JIT compiler (`--jit`) is available for maximum performance on numeric workloads.
+The bytecode VM is the default engine (`--vm` is accepted but is a no-op). A tree-walking interpreter (`--interp` flag) is available for full feature coverage (programs the VM cannot run faithfully, e.g. unknown decorators, auto-fallback). `@server` programs are served by the VM. A JIT compiler (`--jit`) is available for maximum performance on numeric workloads.
 
 For a compact, verified description of canonical Forge (written for AI models), see `llms.txt` at the repo root. Keep it in sync when syntax or stdlib signatures change.
 
@@ -131,7 +131,7 @@ forge test --coverage # with line coverage report
 ## Known Limitations (v0.9.0)
 
 - All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
-- The VM is the default engine; programs using decorator-driven HTTP servers (`@server`, `@get`, etc.) auto-fallback to the interpreter
+- The VM is the default engine, including for decorator-driven HTTP servers (`@server`, `@get`, ...); decorators it cannot honor (unknown ones, non-literal `@server` arguments) auto-fallback to the interpreter
 - Use `--interp` for full feature coverage, `--jit` for maximum numeric performance
 - `forge build --native` / `--aot` produce standalone executables when `libforge_lang.a` is found (via `FORGE_LIB_DIR` or next to the `forge` binary); otherwise they fall back to a launcher that shells into an installed `forge`. `--aot` is VM-only and rejects decorator-driven servers — use `--native` for those.
 - Shell builtins (`sh`, `shell`, `run_command`, `pipe_to`, ...) require `--allow-run` for `forge run`; the REPL and `-e` enable it automatically.
@@ -235,20 +235,45 @@ Categories in order: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Secu
 
 ### Server Concurrency Model
 
-The HTTP server uses **per-request fork**, not a shared interpreter.
+The HTTP server uses **per-request fork**, not a shared engine.
 
-When `forge run app.fg` boots a server (`@server` decorator), the
-program's `Interpreter` is wrapped in a read-only
-`Arc<InterpreterTemplate>`. Each incoming request:
+`runtime/server.rs` is engine-neutral: it serves any `ServeEngine` (a
+read-only template that forks a `HandlerWorker` per request). Two engines
+implement it:
+
+| Engine | Selected by | Template | Per-request fork |
+|---|---|---|---|
+| Bytecode VM (default) | `forge run app.fg` | `vm::serve::VmTemplate` (frozen heap + globals after the top level) | `VmTemplate::fork` — fresh `VM` with a private heap copy |
+| Interpreter | `forge run --interp app.fg`, or auto-fallback | `InterpreterTemplate` | `fork_for_serving` (`deep_clone_isolated`) |
+
+Routing, argument binding (`server::handler_args`), JSON encoding,
+status codes, backpressure, cancellation and tracing are shared, and
+`tests/server_engine_parity.rs` requires byte-identical responses from
+both engines. Route/server metadata is read from the AST
+(`runtime::metadata::extract_runtime_plan`) for both engines; on the VM,
+`@server(...)` with literal arguments compiles to nothing. Anything the VM
+cannot honor exactly (`metadata::vm_unsupported_decorator`: unknown
+decorators, non-literal `@server` args, route decorators with extra args)
+keeps the program on the interpreter — never silently dropped.
+
+When `forge run app.fg` boots a server, the engine runs the whole top
+level first (`schedule`/`watch` start-up is deferred: VM
+`defer_host_runtime` / `launch_deferred_host_tasks`, interpreter
+`set_defer_host_runtime` + `host::launch`), then the final state becomes
+the template. Each incoming request:
 
 1. Acquires a backpressure permit (default 512 in-flight; excess → 503).
-2. Calls `template.fork()` (~0.06ms) to get a fresh `Interpreter` with
-   a deep-cloned environment.
-3. Runs the handler synchronously on `tokio::task::spawn_blocking` so
-   it cannot block an async worker.
+2. Forks the template on a `tokio::task::spawn_blocking` thread (VM fork
+   is a single linear pass over the frozen heap, measured ~2x cheaper
+   than the interpreter's `fork_for_serving`; `cargo bench --bench
+   fork_for_serving`), with the capability
+   policy captured at server start installed (`permissions::scope`).
+3. Runs the handler synchronously on that blocking thread so it cannot
+   block an async worker.
 4. A `Drop` guard on the response future flips a per-request cancel flag
    when axum drops it (client disconnect, server shutdown). The
-   interpreter polls the flag at every safe point.
+   interpreter polls the flag at every safe point; the VM at every
+   backward jump and call (`VM::set_cancel_flag`).
 
 **Implications for handler authors:**
 
@@ -263,11 +288,19 @@ program's `Interpreter` is wrapped in a read-only
   helper (`fn make_counter() { return fn() { count = count + 1 } }`)
   returns a Lambda whose closure is fully isolated per fork — two
   concurrent requests get independent counter state. This is the
-  invariant `Environment::deep_clone_isolated` provides; cycle handling
-  for recursive functions is built in.
+  invariant `Environment::deep_clone_isolated` provides on the
+  interpreter; on the VM every upvalue cell is re-created per fork while
+  identity is preserved inside the fork (two closures sharing a cell
+  still share it). Cycle handling for recursive closures is built in to
+  both.
 - WebSocket handlers fork **once per connection**, not per message.
   Connection-scoped state is held in a `parking_lot::Mutex`. Different
-  WS connections are fully isolated.
+  WS connections are fully isolated. VM connection workers run with the
+  JIT off (JIT state is not `Send`; `vm::serve::ConnectionWorker`
+  asserts it stays empty); HTTP request workers keep the default JIT
+  mode, but compiled code is per fork (not shared across requests).
+- Channels and task handles in the template are `Arc`-shared by every
+  fork on both engines (deliberate cross-request coordination).
 - Large top-level state (`let huge = read_file("100mb.json")`) is
   copied on every request fork. `Value::String` is `String`, not
   `Arc<str>` (only `Value::Function` bodies are `Arc`-shared). Keep
@@ -278,8 +311,9 @@ program's `Interpreter` is wrapped in a read-only
   binaries do this). A host embedding `start_server` in its own runtime
   should call it too, or handler recursion is capped by the 2 MiB
   default (~150 frames).
-- `Value::Stream` in the template env is **forbidden** (debug builds
-  panic at first fork). Streams are single-use; sharing across forks
+- `Value::Stream` in the template env is **forbidden** (interpreter:
+  debug builds panic at first fork; VM: `VmTemplate::new` refuses to
+  start the server). Streams are single-use; sharing across forks
   silently breaks. Construct streams inside handlers, not at module
   top level.
 
@@ -288,6 +322,7 @@ program's `Interpreter` is wrapped in a read-only
 | Caller | Closure isolation? | Why |
 |---|---|---|
 | `fork_for_serving` (HTTP requests) | Yes (full deep walk) | Implicit fork; user did not opt in. Must be sound by default. |
+| `VmTemplate::fork` (HTTP requests, VM) | Yes (private heap copy) | Same contract as `fork_for_serving`. VM `schedule`/`watch` threads use `fork_for_spawn` (their own VM), so their writes never reach the template either. |
 | `spawn_task` (squad `spawn` blocks) | No (shallow on closures) | Squad is opt-in concurrency. `let counter = make_counter(); squad { spawn { counter() } spawn { counter() } }` legitimately wants accumulation. |
 | `fork_for_background_runtime` (schedule/watch) | No (shallow on closures) | Schedule blocks want state continuity across iterations. |
 
@@ -420,6 +455,7 @@ call `tracing_init::init_subscriber()` on first use.
 - **Reading a variable copies it.** `Environment::get` deep-clones (strings, arrays, objects are owned). Hot paths must borrow via `Environment::with_value` / `with_value_mut` / `with_binding_mut` (see `src/interpreter/places.rs`). The callback runs under the scope `Mutex`, which is not re-entrant: it must not touch the environment or run Forge code — evaluate operands first, and only reorder evaluation when the operand `is_effect_free`.
 - **Statement bodies don't produce values.** Loop bodies, statement `if` branches, `match` arms and `try`/`catch` run via `exec_body`, which evaluates a trailing expression for effect only (so a trailing `out.push(x)` does not copy `out`). Only `when`/`safe` statement values are consumed by `eval_block_value`; if that changes, `exec_body` callers must change too.
 - **Arc-backed `Value::String`/`Array`/`Object` is blocked on the VM.** `src/vm` constructs and destructures `interpreter::Value::{Array, Object, Set, Map, Tuple, String}` with owned payloads, so moving them to `Arc` (copy-on-write, and hashed Set/Map indexes) needs a coordinated VM change.
+- **VM serving: freeze once, fork linearly.** `vm::serve::VmTemplate` copies the heap reachable from globals/method tables into a slot-indexed list in post-order (children before parents). Cycles can only pass through upvalue cells (value semantics keep every other graph acyclic), so cells are allocated empty first and filled last; freezing errors out on any other cycle. A fork is then one pass with a dense slot → `GcRef` table. If you add an `ObjKind` variant, extend `FrozenObj`/`thaw`/`freeze_object` (the matches are exhaustive on purpose) and `value_to_json`. The VM keeps no parameter names in chunks, so handler argument binding uses `metadata::top_level_fn_params`.
 - **Threads that run Forge code need a registered stack.** Use `recursion::spawn_worker` (std threads) or `recursion::configure_runtime` (tokio runtimes); an unregistered thread is assumed to have 2 MiB and the guard stops recursion early.
 
 ## Module Dependency Map

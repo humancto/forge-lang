@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `cargo bench --bench server_throughput` boots `forge run` on `examples/bench_server*.fg` on both engines and reports requests per second and latency percentiles; `benches/fork_for_serving.rs` also measures the VM's per-request fork.
+- `tests/server_engine_parity.rs` runs one `@server` program on the VM and on the interpreter and requires identical responses (routes, path/query/body binding, every method, 404/405/body rejections, handler errors, panics, isolation of globals and closures, deep recursion, WebSocket echo).
+
+### Changed
+
+- **`@server` programs now run on the bytecode VM.** `forge run` no longer falls back to the interpreter for decorator-driven HTTP servers: the VM runs the top level, freezes the result into a read-only template (`vm::serve::VmTemplate`) and forks a private VM per request (and once per WebSocket connection), with the same isolation contract as the interpreter — handler mutations of globals, collections and captured closure state never leak into other requests. Backpressure, cancel-on-disconnect, request-id tracing, large handler stacks and `schedule`/`watch` start-up after the top level are unchanged. `--interp` still serves on the interpreter. Decorators the VM cannot honor (unknown decorators, `@server` arguments that are not literals, route decorators with extra arguments) keep the program on the interpreter. CPU-bound handlers get the VM's speed: on one loaded 4-core machine, `fib(25)` per request went from 5 to 1,030 req/s and `/ping` from 4.6k to 12.8k req/s (`cargo bench --bench server_throughput`).
+- Server handlers now run under the capability policy that was in force when the server started, on every blocking-pool thread (previously they used the process-wide policy).
+
 ## [0.9.0] - 2026-10-05
 
 Highlights: the default VM is now trustworthy (a guarded, verified JIT tier; GC rooting; full VM/interpreter parity on the test suite), much faster (VM and interpreter performance passes), and Forge gains a capability-based sandbox (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`) plus `forge mcp`, an MCP server that lets AI agents run sandboxed Forge code.

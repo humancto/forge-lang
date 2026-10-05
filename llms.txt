@@ -369,7 +369,7 @@ fn echo(body: Json) -> Json {
 }
 ```
 
-Handler parameters bind by name: path params (`:name`), `body`/`data` (parsed JSON body), `query`/`qs` (all query params), or a single query param by its name. Return an object to send JSON. Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. Server programs always run on the interpreter (automatic).
+Handler parameters bind by name: path params (`:name`), `body`/`data` (parsed JSON body), `query`/`qs` (all query params), or a single query param by its name. Return an object to send JSON. Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. Server programs run on the bytecode VM by default (`forge --interp run` serves on the interpreter; responses are identical). Unknown decorators or non-literal `@server` arguments make the program fall back to the interpreter automatically.
 
 ## Tests
 
@@ -391,4 +391,4 @@ Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and
 
 ## Engine notes (v0.9.x)
 
-The default bytecode VM and the reference interpreter run the full Forge test suite identically; `cargo test --test engine_diff` gates every example and fixture on both. Programs the VM compiler cannot handle, and `@server` programs, fall back to the interpreter automatically. Force the interpreter with `forge --interp run`.
+The default bytecode VM and the reference interpreter run the full Forge test suite identically; `cargo test --test engine_diff` gates every example and fixture on both. Programs the VM compiler cannot handle fall back to the interpreter automatically; `@server` programs are served by the VM. Force the interpreter with `forge --interp run`.
