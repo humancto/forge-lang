@@ -342,3 +342,93 @@ fn fuel_keeps_hot_functions_out_of_the_jit() {
     assert!(err.message.starts_with(limits::FUEL_EXHAUSTED), "{err}");
     assert_eq!(budget.fuel_used(), 200_000);
 }
+
+// ---------------------------------------------------------------------------
+// HTTP / WebSocket forks (`vm::serve`)
+// ---------------------------------------------------------------------------
+
+/// A server template built under `limits`, like `forge run --max-fuel ...`.
+fn serve_template(source: &str, limits: Limits) -> crate::vm::serve::VmTemplate {
+    let tokens = Lexer::new(source).tokenize().expect("lex");
+    let program = Parser::new(tokens).parse_program().expect("parse");
+    let chunk = compiler::compile(&program).expect("compile");
+    let _scope = limits::scope(Some(Budget::new(limits)));
+    let mut vm = VM::new();
+    vm.defer_host_runtime();
+    vm.execute(&chunk).expect("top level runs");
+    crate::vm::serve::VmTemplate::new(&vm, crate::runtime::metadata::top_level_fn_params(&program))
+        .expect("template")
+}
+
+const HANDLERS: &str = r#"
+fn work() {
+    let mut i = 0
+    while i < 2000 { i = i + 1 }
+    return i
+}
+fn spin() { while true { } }
+fn hoard() {
+    let mut kept = []
+    let mut i = 0
+    while true {
+        let item = "kept by one request " + str(i)
+        kept.push(item)
+        i = i + 1
+    }
+}
+"#;
+
+#[test]
+fn every_request_fork_gets_a_fresh_budget() {
+    use crate::runtime::server::{HandlerRequest, ServeEngine};
+    use std::sync::atomic::AtomicBool;
+    let t = serve_template(
+        HANDLERS,
+        Limits {
+            max_fuel: Some(50_000),
+            max_memory: Some(256 << 10),
+            ..Limits::none()
+        },
+    );
+    let call = |handler: &str| {
+        t.fork_request(Arc::new(AtomicBool::new(false)))
+            .call_http(handler, &HandlerRequest::default())
+    };
+    // Each request costs ~10k steps: 20 of them would exhaust one shared
+    // 50k budget, but every fork starts fresh.
+    for _ in 0..20 {
+        let (status, body) = call("work");
+        assert_eq!(status.as_u16(), 200, "{body}");
+    }
+    let (status, body) = call("spin");
+    assert_eq!(status.as_u16(), 500);
+    assert!(body.to_string().contains(limits::FUEL_EXHAUSTED), "{body}");
+    let (status, body) = call("hoard");
+    assert_eq!(status.as_u16(), 500);
+    assert!(
+        body.to_string().contains(limits::MEMORY_LIMIT_EXCEEDED),
+        "{body}"
+    );
+    // The server is unaffected by a request that tripped a limit.
+    assert_eq!(call("work").0.as_u16(), 200);
+}
+
+#[test]
+fn websocket_connections_have_their_own_budget() {
+    use crate::runtime::server::ServeEngine;
+    use std::sync::atomic::AtomicBool;
+    let t = serve_template(
+        "fn on_msg(m) { if m == \"spin\" { while true { } }\n return \"ok\" }",
+        fuel(10_000),
+    );
+    let mut a = t.fork_connection(Arc::new(AtomicBool::new(false)));
+    let mut b = t.fork_connection(Arc::new(AtomicBool::new(false)));
+    assert_eq!(a.call_ws("on_msg", "hi".into()), "ok");
+    let tripped = a.call_ws("on_msg", "spin".into());
+    assert!(tripped.contains(limits::FUEL_EXHAUSTED), "{tripped}");
+    // The trip is sticky for that connection only.
+    assert!(a
+        .call_ws("on_msg", "hi".into())
+        .contains(limits::FUEL_EXHAUSTED));
+    assert_eq!(b.call_ws("on_msg", "hi".into()), "ok");
+}

@@ -1205,6 +1205,17 @@ impl Interpreter {
         interp.output_sink = None;
         // DAP can attach across requests; keep the shared state.
         interp.debug_state = self.debug_state.clone();
+        // A fresh resource budget per request, with the template's limits:
+        // one request cannot spend another's fuel, and a long-running
+        // server never runs dry (`runtime::limits`).
+        if let Some(limits) = self.meter.budget().map(|b| b.limits().clone()) {
+            let budget = crate::runtime::limits::Budget::new(limits);
+            interp.caps = budget.limits().caps();
+            interp.meter =
+                crate::runtime::limits::Meter::for_budget(Some(budget)).with_memory_polling();
+            interp.poll_countdown = 0;
+            interp.fuel_window = 0;
+        }
         interp
     }
 

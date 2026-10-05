@@ -87,6 +87,11 @@ pub struct VmTemplate {
     fn_params: Arc<HashMap<String, Vec<String>>>,
     #[cfg(feature = "jit")]
     jit_mode: super::jit::tier::JitMode,
+    /// Resource limits (`runtime::limits`) of the run that built the
+    /// template. Every fork — one request, or one WebSocket connection —
+    /// gets a fresh budget with these limits, so one request cannot spend
+    /// another's fuel and a long-running server never runs dry.
+    limits: crate::runtime::limits::Limits,
 }
 
 impl VmTemplate {
@@ -116,13 +121,30 @@ impl VmTemplate {
             fn_params: Arc::new(fn_params),
             #[cfg(feature = "jit")]
             jit_mode: vm.jit.mode,
+            limits: crate::runtime::limits::current()
+                .map(|b| b.limits().clone())
+                .unwrap_or_default(),
         })
+    }
+
+    /// A fresh budget for one fork, or `None` when nothing is limited.
+    fn fork_budget(&self) -> Option<Arc<crate::runtime::limits::Budget>> {
+        (!self.limits.is_unlimited())
+            .then(|| crate::runtime::limits::Budget::new(self.limits.clone()))
     }
 
     /// A fresh VM holding a private copy of the template's state, polling
     /// `cancelled` at its safe points.
     pub fn fork(&self, cancelled: Arc<AtomicBool>) -> VM {
-        let mut vm = VM::bare(Profiler::new(false));
+        self.fork_with_budget(cancelled, self.fork_budget())
+    }
+
+    fn fork_with_budget(
+        &self,
+        cancelled: Arc<AtomicBool>,
+        budget: Option<Arc<crate::runtime::limits::Budget>>,
+    ) -> VM {
+        let mut vm = VM::bare_with_budget(Profiler::new(false), budget);
         let refs = self.materialize(&mut vm.gc);
         let remap = |v: &Value| remap_value(*v, &refs);
         let remap_table = |table: &IndexMap<String, Value>| {
@@ -189,9 +211,11 @@ impl VmTemplate {
     }
 
     fn worker(&self, cancelled: Arc<AtomicBool>) -> VmWorker {
+        let budget = self.fork_budget();
         VmWorker {
-            vm: self.fork(cancelled),
+            vm: self.fork_with_budget(cancelled, budget.clone()),
             fn_params: Arc::clone(&self.fn_params),
+            budget,
         }
     }
 }
@@ -259,6 +283,9 @@ impl ServeEngine for VmTemplate {
 struct VmWorker {
     vm: VM,
     fn_params: Arc<HashMap<String, Vec<String>>>,
+    /// This fork's resource budget; installed on whichever thread runs a
+    /// handler so handle slots and spawned tasks charge it too.
+    budget: Option<Arc<crate::runtime::limits::Budget>>,
 }
 
 impl VmWorker {
@@ -286,6 +313,7 @@ impl VmWorker {
 
 impl HandlerWorker for VmWorker {
     fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> (StatusCode, JsonValue) {
+        let _limits = crate::runtime::limits::scope(self.budget.clone());
         let Some(func) = self.vm.globals.get(handler).copied() else {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -303,6 +331,7 @@ impl HandlerWorker for VmWorker {
     }
 
     fn call_ws(&mut self, handler: &str, text: String) -> String {
+        let _limits = crate::runtime::limits::scope(self.budget.clone());
         let Some(func) = self.vm.globals.get(handler).copied() else {
             return "handler not found".to_string();
         };
