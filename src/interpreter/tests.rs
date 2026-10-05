@@ -7181,6 +7181,190 @@ fn fork_for_serving_panics_if_template_env_holds_a_stream() {
     let _ = template.fork_for_serving();
 }
 
+/// Run `source` in a fresh interpreter (REPL mode, so top-level bindings
+/// stay in `env`) and return it as a template for forking.
+fn template_from(source: &str) -> Interpreter {
+    let mut interp = Interpreter::new();
+    let program =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_program()
+            .expect("parse");
+    interp.run_repl(&program).expect("run setup");
+    interp
+}
+
+fn function_closure_depth(value: &Value) -> usize {
+    match value {
+        Value::Function(f) => f.closure.scopes.len(),
+        other => panic!("expected a Value::Function, got {}", other.type_name()),
+    }
+}
+
+/// Issue #116: a named inner function returned from another function is a
+/// `Value::Function` whose closure has more than the global scope, so
+/// calls run against the captured scopes and `deep_clone_isolated`'s
+/// Function branch is what keeps forks apart.
+#[test]
+fn fork_for_serving_isolates_non_global_function_closure() {
+    let template = template_from(
+        "fn outer() {\n\
+             let mut x = 0\n\
+             fn inner() {\n\
+                 x = x + 1\n\
+                 return x\n\
+             }\n\
+             return inner\n\
+         }\n\
+         let bump = outer()\n",
+    );
+    let bump_template = template.env.get("bump").expect("bump in template");
+    assert!(
+        function_closure_depth(&bump_template) > 1,
+        "inner must close over outer's frame, not just the global scope"
+    );
+
+    let mut a = template.fork_for_serving();
+    let mut b = template.fork_for_serving();
+    let bump_a = a.env.get("bump").expect("bump in fork a");
+    let bump_b = b.env.get("bump").expect("bump in fork b");
+
+    let mut last_a = Value::Null;
+    for _ in 0..4 {
+        last_a = a.call_function(bump_a.clone(), vec![]).expect("call a");
+    }
+    let last_b = b.call_function(bump_b.clone(), vec![]).expect("call b");
+    // Each fork counts from the template's x = 0 independently.
+    assert_eq!(last_a, Value::Int(4));
+    assert_eq!(last_b, Value::Int(1));
+
+    // The template's captured x is untouched: a fresh fork starts at 0.
+    let mut c = template.fork_for_serving();
+    let bump_c = c.env.get("bump").expect("bump in fork c");
+    assert_eq!(
+        c.call_function(bump_c, vec![]).expect("call c"),
+        Value::Int(1)
+    );
+
+    // And the closures share no scope storage with the template.
+    let scopes = |v: &Value| match v {
+        Value::Function(f) => f.closure.scopes.clone(),
+        _ => unreachable!(),
+    };
+    for (t, f) in scopes(&bump_template).iter().zip(scopes(&bump_a).iter()) {
+        assert!(
+            !Arc::ptr_eq(t, f),
+            "fork shares a closure scope Arc with the template"
+        );
+    }
+}
+
+/// Issue #117: the recursive-function cycle test above uses a top-level
+/// `fn`, whose closure is just the global scope. Here `fib` is defined
+/// inside `make_fib`, so its closure has two scopes and its self-reference
+/// lives in the inner one: the clone must resolve that binding to the
+/// *cloned* scope (tie-the-knot), not to the template's.
+#[test]
+fn fork_for_serving_handles_nested_recursive_function_cycle() {
+    let template = template_from(
+        "fn make_fib() {\n\
+             let mut calls = 0\n\
+             fn fib(n) {\n\
+                 calls = calls + 1\n\
+                 if n < 2 { return n }\n\
+                 return fib(n - 1) + fib(n - 2)\n\
+             }\n\
+             return fib\n\
+         }\n\
+         let fib = make_fib()\n",
+    );
+    let fib_template = template.env.get("fib").expect("fib in template");
+    assert!(function_closure_depth(&fib_template) > 1);
+
+    let mut req = template.fork_for_serving();
+    let fib = req.env.get("fib").expect("fib in fork");
+    let result = req
+        .call_function(fib.clone(), vec![Value::Int(10)])
+        .expect("call");
+    assert_eq!(result, Value::Int(55));
+
+    // The self-reference inside the cloned closure is the cloned function
+    // (whose closure is the cloned scope), so the recursive calls counted
+    // into the fork's `calls`, never the template's.
+    let Value::Function(fib_fork) = &fib else {
+        unreachable!()
+    };
+    let Value::Function(fib_tmpl) = &fib_template else {
+        unreachable!()
+    };
+    let inner_fork = fib_fork.closure.scopes.last().expect("inner scope");
+    let inner_tmpl = fib_tmpl.closure.scopes.last().expect("inner scope");
+    assert!(!Arc::ptr_eq(inner_fork, inner_tmpl));
+    let calls_in = |scope: &ScopeCell| {
+        let guard = lock_scope(scope);
+        guard.get("calls").map(|b| b.value.clone())
+    };
+    assert_eq!(calls_in(inner_fork), Some(Value::Int(177)));
+    assert_eq!(calls_in(inner_tmpl), Some(Value::Int(0)));
+    // The recursive binding resolves to a function closing over the cloned
+    // scope (cycle preserved), not over the template's.
+    let self_ref = lock_scope(inner_fork)
+        .get("fib")
+        .map(|b| b.value.clone())
+        .expect("fib bound in its own closure scope");
+    let Value::Function(self_ref) = self_ref else {
+        panic!("fib should be a Function")
+    };
+    let self_inner = self_ref.closure.scopes.last().expect("inner scope");
+    assert!(Arc::ptr_eq(self_inner, inner_fork));
+}
+
+/// Issue #115: a stream reachable only through a captured closure must
+/// also trip the fork-time assert.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "reachable via `inner.<closure>.s`")]
+fn fork_for_serving_panics_if_closure_captures_a_stream() {
+    let template = template_from(
+        "let inner = (fn() {\n\
+             let s = [1, 2, 3].stream()\n\
+             return fn() { return s.count() }\n\
+         })()\n",
+    );
+    let _ = template.fork_for_serving();
+}
+
+/// Same, for a named function's closure (and through a container).
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "Value::Stream found in template env")]
+fn fork_for_serving_panics_if_named_function_closure_holds_a_stream() {
+    let template = template_from(
+        "fn make() {\n\
+             let held = { items: [[1].stream()] }\n\
+             fn get() { return held }\n\
+             return get\n\
+         }\n\
+         let handlers = [make()]\n",
+    );
+    let _ = template.fork_for_serving();
+}
+
+/// The closure walk terminates on recursive functions and shared scopes
+/// and does not flag stream-free closures.
+#[test]
+fn fork_for_serving_closure_walk_accepts_stream_free_cycles() {
+    let template = template_from(
+        "fn make_fib() {\n\
+             fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) }\n\
+             return fib\n\
+         }\n\
+         let a = make_fib()\n\
+         let b = a\n\
+         fn top(n) { return top }\n",
+    );
+    let _ = template.fork_for_serving();
+}
+
 #[test]
 fn runaway_recursion_is_catchable_and_depth_recovers() {
     // Previously the interpreter overflowed the native stack (process abort)
