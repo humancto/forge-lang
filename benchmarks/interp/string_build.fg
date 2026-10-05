@@ -1,0 +1,8 @@
+// Interpreter benchmark: build a 200k-char string with s = s + "x".
+let mut s = ""
+let mut i = 0
+while i < 200000 {
+    s = s + "x"
+    i = i + 1
+}
+println(len(s))

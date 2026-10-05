@@ -1,0 +1,12 @@
+// Interpreter benchmark: 20 recursions to depth 9000 (cost must not grow with depth).
+fn down(n) {
+    if n == 0 { return 0 }
+    return 1 + down(n - 1)
+}
+let mut k = 0
+let mut t = 0
+while k < 20 {
+    t = t + down(9000)
+    k = k + 1
+}
+println(t)

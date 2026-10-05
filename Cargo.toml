@@ -153,3 +153,7 @@ criterion = { version = "0.7.0", features = ["html_reports"] }
 [[bench]]
 name = "fork_for_serving"
 harness = false
+
+[[bench]]
+name = "interpreter_hot_paths"
+harness = false
