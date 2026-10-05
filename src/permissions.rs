@@ -59,11 +59,13 @@ pub enum Capability {
     Run,
     /// LLM calls (`ask`).
     Ai,
-    /// Host-process state: `exit()`, `cd()`, and reading the host's stdin
-    /// (`input()`, `io.prompt`). Always granted by the CLI; denied by default
-    /// for embedders so a script cannot kill the host or consume its stdin
-    /// (which `forge mcp` uses for the protocol). Without it, stdin reads
-    /// behave like an empty stream and no prompt is printed.
+    /// Host-process state: `exit()`, `cd()`, reading the host's stdin
+    /// (`input()`, `io.prompt`, `term.confirm`, `term.menu`) and its command
+    /// line (`io.args*`). Always granted by the CLI; denied by default for
+    /// embedders so a script cannot kill the host, consume its stdin (which
+    /// `forge mcp` uses for the protocol) or read its arguments. Without it,
+    /// stdin reads behave like an empty stream, no prompt is printed and the
+    /// argument list is empty.
     Process,
 }
 
@@ -499,16 +501,48 @@ impl Capabilities {
         }
     }
 
+    /// Like [`Capabilities::check_path`], but returns the path the caller
+    /// must open. Under a scoped grant that is the *resolved absolute* path
+    /// that was checked, so a later change of the working directory (another
+    /// thread calling `cd`) or of a relative component cannot make the
+    /// operation land somewhere other than what was approved. Under an
+    /// unrestricted grant the path is returned unchanged (no behaviour
+    /// change for trusted scripts).
+    pub fn checked_path(&self, cap: Capability, path: &Path) -> Result<PathBuf, PermissionError> {
+        let shown = path.display().to_string();
+        match self.path_scope(cap) {
+            Scope::All => Ok(path.to_path_buf()),
+            Scope::Denied => Err(denied(cap, &shown)),
+            Scope::Only(roots) => match resolve_for_check(path) {
+                Some(resolved) if roots.iter().any(|r| resolved.starts_with(r)) => Ok(resolved),
+                _ => Err(denied(cap, &shown)),
+            },
+        }
+    }
+
+    /// Whether `cap` (`fs.read`, `fs.write` or `net`) is granted without any
+    /// path or host restriction. Embedded engines (SQLite) that can reach
+    /// files or hosts on their own only get those features when this holds.
+    pub fn is_unrestricted(&self, cap: Capability) -> bool {
+        match cap {
+            Capability::Read => matches!(self.read, Scope::All),
+            Capability::Write => matches!(self.write, Scope::All),
+            Capability::Net => matches!(self.net, Scope::All),
+            other => self.is_granted(other),
+        }
+    }
+
     /// Check a module import: allowed under an import root or by `fs.read`.
-    pub fn check_import(&self, path: &Path) -> Result<(), PermissionError> {
+    /// Returns the path to read (see [`Capabilities::checked_path`]).
+    pub fn check_import(&self, path: &Path) -> Result<PathBuf, PermissionError> {
         if !self.import_roots.is_empty() {
             if let Some(resolved) = resolve_for_check(path) {
                 if self.import_roots.iter().any(|r| resolved.starts_with(r)) {
-                    return Ok(());
+                    return Ok(resolved);
                 }
             }
         }
-        self.check_path(Capability::Read, path)
+        self.checked_path(Capability::Read, path)
             .map_err(|e| denied(Capability::Read, &format!("import {}", e.detail)))
     }
 
@@ -699,13 +733,39 @@ pub fn require_path(cap: Capability, path: impl AsRef<Path>) -> Result<(), Permi
     current().check_path(cap, path.as_ref())
 }
 
+/// [`require_path`] that returns the path to open (see
+/// [`Capabilities::checked_path`]). Every stdlib filesystem entry point
+/// opens what this returns, never the caller's original string.
+pub fn checked_path(cap: Capability, path: impl AsRef<Path>) -> Result<PathBuf, PermissionError> {
+    current().checked_path(cap, path.as_ref())
+}
+
 /// [`require`] for a network target (URL, `host` or `host:port`).
 pub fn require_net(target: &str) -> Result<(), PermissionError> {
     current().check_net(target)
 }
 
-/// Check that a module file may be imported.
-pub fn require_import(path: impl AsRef<Path>) -> Result<(), PermissionError> {
+/// [`require_net`] for a raw `host` + `port` pair (database drivers and
+/// other non-URL clients). IPv6 literals are bracketed for the check.
+pub fn require_net_host(host: &str, port: u16) -> Result<(), PermissionError> {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let target = if host.contains(':') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    };
+    current().check_net(&target)
+}
+
+/// Whether the active policy grants `net` with no host restriction. Clients
+/// that can reach endpoints the allowlist cannot describe (Unix sockets)
+/// only get them in that case.
+pub fn net_unrestricted() -> bool {
+    current().is_unrestricted(Capability::Net)
+}
+
+/// Check that a module file may be imported; returns the path to read.
+pub fn require_import(path: impl AsRef<Path>) -> Result<PathBuf, PermissionError> {
     current().check_import(path.as_ref())
 }
 
@@ -826,6 +886,38 @@ mod tests {
                 .check_path(Capability::Read, &allowed.join("dangling"))
                 .is_err());
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn checked_path_returns_what_was_approved() {
+        // Under a scoped grant the caller gets the resolved absolute path,
+        // so a later `cd` (or a swapped relative component) cannot change
+        // which file is opened.
+        let root = tmpdir("checked");
+        let allowed = root.join("allowed");
+        std::fs::create_dir_all(&allowed).expect("mkdir");
+        let allowed = std::fs::canonicalize(&allowed).expect("canonicalize");
+        std::fs::write(allowed.join("a.txt"), "a").expect("write");
+        let c = Capabilities::deny_all().grant_read_paths([&allowed]);
+        let got = c
+            .checked_path(Capability::Read, &allowed.join("x/../a.txt"))
+            .expect("inside");
+        assert_eq!(got, allowed.join("a.txt"));
+        assert!(got.is_absolute());
+        assert!(c
+            .checked_path(Capability::Read, &allowed.join("../outside.txt"))
+            .is_err());
+        // Unrestricted grants hand the path back untouched.
+        let all = Capabilities::allow_all();
+        assert_eq!(
+            all.checked_path(Capability::Read, Path::new("rel/x.txt"))
+                .expect("all"),
+            PathBuf::from("rel/x.txt")
+        );
+        assert!(all.is_unrestricted(Capability::Read));
+        assert!(!c.is_unrestricted(Capability::Read));
+        assert!(!c.is_unrestricted(Capability::Net));
         let _ = std::fs::remove_dir_all(&root);
     }
 

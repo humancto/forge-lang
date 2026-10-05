@@ -1806,9 +1806,10 @@ impl Interpreter {
                         return Err(RuntimeError::new(&crate::semantics::import_not_found(path)));
                     }
                 };
-                crate::permissions::require_import(&file_path)
+                // Read the path that was checked (resolved under a scoped grant).
+                let checked = crate::permissions::require_import(&file_path)
                     .map_err(|e| RuntimeError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&file_path)
+                let source = std::fs::read_to_string(&checked)
                     .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
                 let mut lexer = crate::lexer::Lexer::new(&source);
                 let tokens = lexer.tokenize().map_err(|e| {

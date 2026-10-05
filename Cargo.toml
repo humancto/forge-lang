@@ -100,7 +100,7 @@ dotenvy = "0.15"
 regex = "1"
 
 # === Database ===
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.34", features = ["bundled", "limits"] }
 tokio-postgres = { version = "0.7", optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
 rustls = { version = "0.23", optional = true }

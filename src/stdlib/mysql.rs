@@ -166,11 +166,29 @@ fn mysql_val_to_forge(val: mysql_async::Value) -> Value {
 
 fn mysql_connect(args: Vec<Value>) -> Result<Value, String> {
     let url = build_connection_url(&args)?;
+    // A database connection is network access: the server must pass the
+    // `net` policy too. Unix sockets need unrestricted `net`.
+    if !crate::permissions::net_unrestricted() {
+        let opts = mysql_async::Opts::from_url(&url)
+            .map_err(|e| format!("mysql.connect() invalid URL: {}", e))?;
+        if let Some(socket) = opts.socket() {
+            return Err(crate::permissions::PermissionError {
+                capability: crate::permissions::Capability::Net,
+                detail: format!("unix socket {}", socket),
+            }
+            .to_string());
+        }
+        crate::permissions::require_net_host(opts.ip_or_hostname(), opts.tcp_port())?;
+    }
 
+    // Connection pools live in a process-wide table, so a handle must not
+    // be guessable: another sandbox in the same host process could
+    // otherwise use this connection (and its credentials) by trying
+    // `mysql_1`, `mysql_2`, ...
     let id = {
         let mut counter = mysql_counter().lock().map_err(|e| format!("{}", e))?;
         *counter += 1;
-        format!("mysql_{}", *counter)
+        format!("mysql_{}_{}", *counter, uuid::Uuid::new_v4().simple())
     };
     let id_clone = id.clone();
 

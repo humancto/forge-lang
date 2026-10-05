@@ -575,9 +575,10 @@ impl VM {
                 };
                 let file_path = crate::package::resolve_import(&resolved)
                     .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
-                crate::permissions::require_import(&file_path)
+                // Read the path that was checked (resolved under a scoped grant).
+                let checked = crate::permissions::require_import(&file_path)
                     .map_err(|e| VMError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&file_path)
+                let source = std::fs::read_to_string(&checked)
                     .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
 
                 let mut lexer = crate::lexer::Lexer::new(&source);

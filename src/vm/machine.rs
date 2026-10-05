@@ -1526,6 +1526,9 @@ impl VM {
                         };
                         let path =
                             path.ok_or_else(|| VMError::new("watch requires a string path"))?;
+                        // Same fs.read check as the interpreter (runtime/host.rs).
+                        let path = crate::runtime::host::checked_watch_path(&path)
+                            .map_err(|e| VMError::new(&e))?;
 
                         let mut sendable = self.fork_for_spawn();
                         let child_closure = if let Some(r) = closure_val.as_obj() {
