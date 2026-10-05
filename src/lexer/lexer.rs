@@ -3,11 +3,30 @@
 /// Will migrate to `logos` in Phase 3 for performance.
 use super::token::{Spanned, Token};
 
+/// A comment found while lexing. The parser never sees comments; tools that
+/// must preserve them (the formatter) ask for them with
+/// [`Lexer::tokenize_with_comments`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comment {
+    /// The full comment text including its delimiters (`// ...` or `/* ... */`).
+    pub text: String,
+    /// `true` for `/* ... */`, `false` for `// ...`.
+    pub block: bool,
+    pub line: usize,
+    pub col: usize,
+    /// Character offset of the comment's first character.
+    pub offset: usize,
+    /// Length in characters.
+    pub len: usize,
+}
+
 pub struct Lexer {
     source: Vec<char>,
     pos: usize,
     line: usize,
     col: usize,
+    /// Collected comments, when the caller asked for them.
+    comments: Option<Vec<Comment>>,
 }
 
 impl Lexer {
@@ -17,7 +36,16 @@ impl Lexer {
             pos: 0,
             line: 1,
             col: 1,
+            comments: None,
         }
+    }
+
+    /// Like [`Lexer::tokenize`], but also returns every comment in source
+    /// order. The token stream is identical to `tokenize`'s.
+    pub fn tokenize_with_comments(&mut self) -> Result<(Vec<Spanned>, Vec<Comment>), LexError> {
+        self.comments = Some(Vec::new());
+        let tokens = self.tokenize()?;
+        Ok((tokens, self.comments.take().unwrap_or_default()))
     }
 
     pub fn tokenize(&mut self) -> Result<Vec<Spanned>, LexError> {
@@ -35,6 +63,17 @@ impl Lexer {
             // Skip comments
             if ch == '/' && self.peek() == Some('/') {
                 self.skip_line_comment();
+                continue;
+            }
+            if ch == '/' && self.peek() == Some('*') {
+                let (line, col, offset) = (self.line, self.col, self.pos);
+                self.skip_block_comment()?;
+                // A block comment that spans lines separates statements the
+                // same way the newlines inside it would have (as in Go), so
+                // `let a = 1 /* ... \n ... */ let b = 2` stays two statements.
+                if self.line > line {
+                    tokens.push(Spanned::new(Token::Newline, line, col, offset, 0));
+                }
                 continue;
             }
 
@@ -433,8 +472,49 @@ impl Lexer {
     }
 
     fn skip_line_comment(&mut self) {
+        let (line, col, start) = (self.line, self.col, self.pos);
         while self.pos < self.source.len() && self.source[self.pos] != '\n' {
             self.advance();
+        }
+        self.record_comment(false, line, col, start);
+    }
+
+    /// Skip a `/* ... */` comment. Block comments do not nest: the first
+    /// `*/` closes the comment (see the spec, lexical-structure/comments).
+    /// Line numbers stay correct because `advance` counts the newlines.
+    fn skip_block_comment(&mut self) -> Result<(), LexError> {
+        let (line, col, start) = (self.line, self.col, self.pos);
+        self.advance(); // '/'
+        self.advance(); // '*'
+        loop {
+            if self.pos >= self.source.len() {
+                return Err(LexError {
+                    message: "unterminated block comment (missing `*/`)".to_string(),
+                    line,
+                    col,
+                });
+            }
+            if self.current() == '*' && self.peek() == Some('/') {
+                self.advance();
+                self.advance();
+                break;
+            }
+            self.advance();
+        }
+        self.record_comment(true, line, col, start);
+        Ok(())
+    }
+
+    fn record_comment(&mut self, block: bool, line: usize, col: usize, start: usize) {
+        if let Some(comments) = self.comments.as_mut() {
+            comments.push(Comment {
+                text: self.source[start..self.pos].iter().collect(),
+                block,
+                line,
+                col,
+                offset: start,
+                len: self.pos - start,
+            });
         }
     }
 
@@ -530,6 +610,109 @@ mod tests {
     #[test]
     fn test_comments_skipped() {
         assert_eq!(lex("42 // this is a comment"), vec![Token::Int(42)]);
+    }
+
+    fn lex_spanned(input: &str) -> Vec<Spanned> {
+        Lexer::new(input).tokenize().unwrap()
+    }
+
+    #[test]
+    fn block_comment_inline_is_skipped() {
+        assert_eq!(
+            lex("let x = /* the answer */ 42"),
+            vec![
+                Token::Let,
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::Int(42)
+            ]
+        );
+    }
+
+    #[test]
+    fn block_comment_multiline_keeps_line_numbers() {
+        let tokens = lex_spanned("/* a\nb\nc */ let x = 1\nlet y = 2");
+        let y = tokens
+            .iter()
+            .find(|t| t.token == Token::Ident("y".into()))
+            .unwrap();
+        assert_eq!((y.line, y.col), (4, 5));
+        let x = tokens
+            .iter()
+            .find(|t| t.token == Token::Ident("x".into()))
+            .unwrap();
+        assert_eq!((x.line, x.col), (3, 10));
+    }
+
+    #[test]
+    fn multiline_block_comment_separates_statements() {
+        let tokens: Vec<Token> = lex_spanned("let a = 1 /* x\n y */ let b = 2")
+            .into_iter()
+            .map(|t| t.token)
+            .collect();
+        let newline_at = tokens.iter().position(|t| *t == Token::Newline).unwrap();
+        assert_eq!(tokens[newline_at - 1], Token::Int(1));
+        assert_eq!(tokens[newline_at + 1], Token::Let);
+        // A single-line block comment does not introduce a newline.
+        assert!(!lex_spanned("let a = /* x */ 1")
+            .iter()
+            .any(|t| t.token == Token::Newline));
+    }
+
+    #[test]
+    fn block_comments_do_not_nest() {
+        // The first `*/` closes the comment, so `c` is code.
+        assert_eq!(lex("/* a /* b */ c"), vec![Token::Ident("c".into())]);
+    }
+
+    #[test]
+    fn unterminated_block_comment_reports_its_start() {
+        let err = Lexer::new("let x = 1\n  /* never closed\nlet y = 2")
+            .tokenize()
+            .unwrap_err();
+        assert!(err.message.contains("unterminated block comment"));
+        assert_eq!((err.line, err.col), (2, 3));
+    }
+
+    #[test]
+    fn comment_markers_inside_strings_are_text() {
+        assert_eq!(
+            lex(r#""a /* b */ c // d""#),
+            vec![Token::StringLit("a /* b */ c // d".into())]
+        );
+    }
+
+    #[test]
+    fn slash_star_operators_still_lex() {
+        assert_eq!(
+            lex("a / b * c"),
+            vec![
+                Token::Ident("a".into()),
+                Token::Slash,
+                Token::Ident("b".into()),
+                Token::Star,
+                Token::Ident("c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_with_comments_collects_both_kinds() {
+        let src = "let a = 1 // one\n/* two\n */ a";
+        let (tokens, comments) = Lexer::new(src).tokenize_with_comments().unwrap();
+        let plain = Lexer::new(src).tokenize().unwrap();
+        let key = |t: &Spanned| (t.token.clone(), t.line, t.col, t.offset, t.len);
+        assert_eq!(
+            tokens.iter().map(key).collect::<Vec<_>>(),
+            plain.iter().map(key).collect::<Vec<_>>()
+        );
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].text, "// one");
+        assert!(!comments[0].block);
+        assert_eq!((comments[0].line, comments[0].col), (1, 11));
+        assert_eq!(comments[1].text, "/* two\n */");
+        assert!(comments[1].block);
+        assert_eq!((comments[1].line, comments[1].col), (2, 1));
     }
 
     #[test]

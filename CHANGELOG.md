@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/* ... */` block comments** — the lexer now accepts block comments anywhere whitespace is allowed (non-nesting, as the spec describes); line numbers after multi-line comments stay correct, a multi-line block comment separates statements like a newline, and an unclosed comment is an error pointing at its `/*`. `Lexer::tokenize_with_comments` returns the comments for tools such as the formatter.
 - **Single builtin registry** — `src/builtins_registry.rs` lists every global builtin (with its arity) and every stdlib module; both engines register and dispatch from it, so a builtin or module can no longer exist on one engine only (tests fail if it does). Builtin arity errors are identical on both engines (`len() expects 1 argument, got 2`); `upper`/`lower`/`trim` are global functions on both engines.
 - **Default parameters on the VM and call arity checks** — `fn g(a, b = 10)` works on the VM (defaults may use earlier parameters; an explicit `null` is kept). Calling a user function or lambda directly with too few or too many arguments is a catchable runtime error on both engines (`fn add expects 2 arguments, got 1`); callbacks invoked by builtins (`map`, `filter`, ...) stay lenient. Bytecode format is now v1.3.
 
