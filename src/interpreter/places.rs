@@ -108,6 +108,13 @@ pub(super) fn contains_of(
     }
 }
 
+/// One step of a nested assignment target below its root variable:
+/// `.field` or `[index]` (index already evaluated).
+enum PlaceStep<'a> {
+    Field(&'a str),
+    Index(Value),
+}
+
 /// What a mutable variable currently holds, for choosing a set fast path.
 enum SetReceiver {
     Set,
@@ -383,6 +390,10 @@ impl Interpreter {
     ///   operators compute from the borrowed value.
     /// * `name.field = v` and `name[i] = v`: update the slot in place, with
     ///   the same checks and error order as copying the container.
+    /// * `g[i][j] = v`, `o.a.b = v`, `rows[i].name = v` (any chain of
+    ///   fields and indexes on a variable): update the innermost slot in
+    ///   place. Collections have value semantics, so other variables that
+    ///   were copied from `g` are unaffected.
     pub(super) fn try_assign_in_place(
         &mut self,
         target: &Expr,
@@ -390,20 +401,76 @@ impl Interpreter {
     ) -> Option<Result<(), RuntimeError>> {
         match target {
             Expr::Ident(x) => self.try_update_ident(x, value),
-            Expr::FieldAccess { object, field } => {
-                let Expr::Ident(name) = object.as_ref() else {
-                    return None;
-                };
-                Some(self.assign_field_in_place(name, field, value))
-            }
-            Expr::Index { object, index } => {
-                let Expr::Ident(name) = object.as_ref() else {
-                    return None;
-                };
-                Some(self.assign_index_in_place(name, index, value))
-            }
+            Expr::FieldAccess { object, field } => match object.as_ref() {
+                Expr::Ident(name) => Some(self.assign_field_in_place(name, field, value)),
+                _ => self.assign_path_in_place(target, value),
+            },
+            Expr::Index { object, index } => match object.as_ref() {
+                Expr::Ident(name) => Some(self.assign_index_in_place(name, index, value)),
+                _ => self.assign_path_in_place(target, value),
+            },
             _ => None,
         }
+    }
+
+    /// Nested assignment `root<step><step>... = value`. Returns `None` when
+    /// the target is not a chain of fields/indexes rooted at a variable.
+    /// Order: the value, then the index expressions left to right, then
+    /// the update (same as the single-step forms).
+    fn assign_path_in_place(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+    ) -> Option<Result<(), RuntimeError>> {
+        let mut exprs = Vec::new();
+        let mut cur = target;
+        let root = loop {
+            match cur {
+                Expr::FieldAccess { object, field } => {
+                    exprs.push(Ok(field.as_str()));
+                    cur = object;
+                }
+                Expr::Index { object, index } => {
+                    exprs.push(Err(index.as_ref()));
+                    cur = object;
+                }
+                Expr::Ident(name) => break name.as_str(),
+                _ => return None,
+            }
+        };
+        exprs.reverse();
+        Some(self.assign_path_steps(root, &exprs, value))
+    }
+
+    fn assign_path_steps(
+        &mut self,
+        root: &str,
+        exprs: &[Result<&str, &Expr>],
+        value: &Expr,
+    ) -> Result<(), RuntimeError> {
+        let val = self.eval_expr(value)?;
+        let mut steps = Vec::with_capacity(exprs.len());
+        for step in exprs {
+            steps.push(match step {
+                Ok(field) => PlaceStep::Field(field),
+                Err(index) => PlaceStep::Index(self.eval_expr(index)?),
+            });
+        }
+        self.env
+            .with_binding_mut(root, |cur, mutable| {
+                if !mutable {
+                    return Err(RuntimeError::new(&crate::semantics::immutable_reassign(
+                        root,
+                    )));
+                }
+                let (last, init) = steps.split_last().expect("BUG: nested place has steps");
+                let mut slot = cur;
+                for step in init {
+                    slot = place_child(root, slot, step)?;
+                }
+                place_store(root, slot, last, val)
+            })
+            .unwrap_or_else(|| Err(RuntimeError::new(&format!("undefined: {}", root))))
     }
 
     fn try_update_ident(&mut self, x: &str, value: &Expr) -> Option<Result<(), RuntimeError>> {
@@ -539,5 +606,76 @@ impl Interpreter {
                 Ok(())
             })
             .unwrap_or_else(|| Err(RuntimeError::new(&format!("undefined: {}", name))))
+    }
+}
+
+fn frozen_error(root: &str) -> RuntimeError {
+    RuntimeError::new(&format!(
+        "cannot modify frozen value '{}': nested assignment",
+        root
+    ))
+}
+
+/// The slot `step` names inside `container`, for walking a nested target.
+fn place_child<'v>(
+    root: &str,
+    container: &'v mut Value,
+    step: &PlaceStep<'_>,
+) -> Result<&'v mut Value, RuntimeError> {
+    if container.is_frozen() {
+        return Err(frozen_error(root));
+    }
+    let type_name = container.type_name().to_string();
+    match (container, step) {
+        (Value::Array(items), PlaceStep::Index(Value::Int(i))) => {
+            let len = items.len();
+            let slot = crate::semantics::normalize_index(*i, len).ok_or_else(|| {
+                RuntimeError::new(&crate::semantics::index_out_of_bounds(*i, "array", len))
+            })?;
+            Ok(&mut items[slot])
+        }
+        (Value::Object(map), PlaceStep::Index(Value::String(key))) => map
+            .get_mut(key.as_str())
+            .ok_or_else(|| RuntimeError::new(&crate::semantics::missing_key(key))),
+        (Value::Object(map), PlaceStep::Field(field)) => map
+            .get_mut(*field)
+            .ok_or_else(|| RuntimeError::new(&crate::semantics::missing_key(field))),
+        (Value::Array(_) | Value::Object(_), PlaceStep::Index(other)) => Err(RuntimeError::new(
+            &crate::semantics::invalid_index(&type_name, other.type_name()),
+        )),
+        (_, PlaceStep::Field(field)) => Err(RuntimeError::new(&format!(
+            "cannot access field '{}' on {}",
+            field, type_name
+        ))),
+        (_, PlaceStep::Index(_)) => Err(RuntimeError::new(
+            &crate::semantics::invalid_index_assign(&type_name),
+        )),
+    }
+}
+
+/// Store `val` into the slot `step` names inside `container`.
+fn place_store(
+    root: &str,
+    container: &mut Value,
+    step: &PlaceStep<'_>,
+    val: Value,
+) -> Result<(), RuntimeError> {
+    if container.is_frozen() {
+        return Err(frozen_error(root));
+    }
+    match (container, step) {
+        (Value::Object(map), PlaceStep::Field(field)) => {
+            map.insert(field.to_string(), val);
+            Ok(())
+        }
+        (Value::Object(map), PlaceStep::Index(Value::String(key))) => {
+            map.insert(key.clone(), val);
+            Ok(())
+        }
+        (container, step) => {
+            let slot = place_child(root, container, step)?;
+            *slot = val;
+            Ok(())
+        }
     }
 }
