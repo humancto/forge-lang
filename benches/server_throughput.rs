@@ -1,7 +1,7 @@
 //! End-to-end HTTP throughput of `forge run` on both serving engines.
 //!
 //! Boots the real `forge` binary on `examples/bench_server.fg` (trivial
-//! handler) and `examples/bench_server_concurrent.fg` (CPU-bound handler),
+//! handler) and `examples/bench_server_concurrent.fg` (CPU-bound `/cpu` loop and `/fib`),
 //! once on the bytecode VM (the default) and once with `--interp`, drives
 //! each with a closed-loop keep-alive load generator and prints requests per
 //! second and latency percentiles.
@@ -41,6 +41,12 @@ const SCENARIOS: &[Scenario] = &[
         label: "cpu-bound GET /cpu",
         example: "examples/bench_server_concurrent.fg",
         path: "/cpu",
+        concurrency_divisor: 4,
+    },
+    Scenario {
+        label: "cpu-bound GET /fib",
+        example: "examples/bench_server_concurrent.fg",
+        path: "/fib",
         concurrency_divisor: 4,
     },
 ];
