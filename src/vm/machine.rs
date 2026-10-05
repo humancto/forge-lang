@@ -766,7 +766,11 @@ impl VM {
                         self.registers[base + a as usize] = Value::bool_val(false);
                     }
                     OpCode::Move => {
-                        self.registers[base + a as usize] = self.registers[base + b as usize];
+                        let v = self.registers[base + b as usize];
+                        // The source may be a local register: the copy is a
+                        // second reference (see `GcObject::unique`).
+                        self.gc.share(v);
+                        self.registers[base + a as usize] = v;
                     }
                     OpCode::Add => {
                         let left = self.registers[base + b as usize];
@@ -876,38 +880,27 @@ impl VM {
                         }
                     }
                     OpCode::GetLocal => {
-                        let local_slot = b;
-                        let value = if let Some(uv_ref) = self.frames[frame_idx]
-                            .open_upvalues
-                            .get(&local_slot)
-                            .copied()
-                        {
-                            let value = self
-                                .gc
-                                .get(uv_ref)
-                                .and_then(|uv_obj| match &uv_obj.kind {
-                                    ObjKind::Upvalue(uv) => Some(uv.value),
-                                    _ => None,
-                                })
-                                .ok_or_else(|| VMError::new("invalid open upvalue"))?;
-                            self.registers[base + local_slot as usize] = value;
-                            value
-                        } else {
-                            self.registers[base + local_slot as usize]
-                        };
+                        let value = self.read_local(frame_idx, base, b)?;
+                        // Copying a reference out of a local: it is no
+                        // longer uniquely owned (see `GcObject::unique`).
+                        self.gc.share(value);
                         self.registers[base + a as usize] = value;
                     }
                     OpCode::SetLocal => {
                         let val = self.registers[base + b as usize];
-                        self.registers[base + a as usize] = val;
-                        let open_upvalue = self.frames[frame_idx].open_upvalues.get(&a).copied();
-                        if let Some(uv_ref) = open_upvalue {
-                            if let Some(uv_obj) = self.gc.get_mut(uv_ref) {
-                                if let ObjKind::Upvalue(uv) = &mut uv_obj.kind {
-                                    uv.value = val;
-                                }
-                            }
-                        }
+                        self.write_local(frame_idx, base, a, val);
+                    }
+                    OpCode::AddLocal => {
+                        let rhs = self.registers[base + b as usize];
+                        self.add_local(frame_idx, base, a, rhs)?;
+                    }
+                    OpCode::PushLocal => {
+                        let value = self.registers[base + b as usize];
+                        self.push_local(frame_idx, base, a, value)?;
+                    }
+                    OpCode::PopLocal => {
+                        let popped = self.pop_local(frame_idx, base, a)?;
+                        self.registers[base + b as usize] = popped;
                     }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
@@ -992,6 +985,9 @@ impl VM {
                                         existing
                                     } else {
                                         let val = self.registers[base + *src_reg as usize];
+                                        // The upvalue cell is a second
+                                        // reference to the local's value.
+                                        self.gc.share(val);
                                         let uv_ref = self
                                             .gc
                                             .alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
@@ -2545,7 +2541,12 @@ impl VM {
         })
     }
 
-    fn arith_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
+    pub(super) fn arith_op(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        op: OpCode,
+    ) -> Result<Value, VMError> {
         use crate::semantics::BinaryOp;
         // Fast path: non-overflowing int arithmetic never needs the shared table.
         if let (ValueKind::Int(a), ValueKind::Int(b)) =

@@ -6,6 +6,7 @@ pub mod gc;
 pub mod green;
 #[cfg(feature = "jit")]
 pub mod jit;
+mod local_ops; // local-variable access and in-place update opcodes
 pub mod machine;
 pub mod nanbox;
 pub mod profiler;

@@ -204,13 +204,18 @@ fn build_body<M: Module>(
                     b.def_var(regs[a], v);
                     fall(&mut b)?;
                 }
-                OpCode::Add | OpCode::Sub | OpCode::Mul => {
-                    let x = b.use_var(regs[rb]);
-                    let y = b.use_var(regs[rc]);
+                OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::AddLocal => {
+                    // `AddLocal` is `Add` with A as both destination and
+                    // left operand (registers are plain variables here).
+                    let (x, y) = if opcode == OpCode::AddLocal {
+                        (b.use_var(regs[a]), b.use_var(regs[rb]))
+                    } else {
+                        (b.use_var(regs[rb]), b.use_var(regs[rc]))
+                    };
                     // Wrapping op + exact signed-overflow test; on overflow
                     // the VM would produce a Float, so deopt.
                     let (r, overflow) = match opcode {
-                        OpCode::Add => {
+                        OpCode::Add | OpCode::AddLocal => {
                             let r = b.ins().iadd(x, y);
                             let xr = b.ins().bxor(x, r);
                             let yr = b.ins().bxor(y, r);

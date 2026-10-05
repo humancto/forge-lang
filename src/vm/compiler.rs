@@ -992,6 +992,13 @@ fn try_compile_mutating_call(
     if !is_mutating_method(method, args.len()) || c.binding_mutability(var) != Some(true) {
         return Ok(false);
     }
+    if method == "pop" && args.is_empty() {
+        if let Some((reg, true)) = c.resolve_local(var) {
+            // In place when the local owns its array (see `vm::local_ops`).
+            c.emit(encode_abc(OpCode::PopLocal, reg, dst, 0), 0);
+            return Ok(true);
+        }
+    }
     let saved = c.next_register;
     let pair_reg = c.alloc_reg()?;
     let mut lowered = vec![receiver.clone(), Expr::StringLit(method.to_string())];
@@ -1009,6 +1016,95 @@ fn try_compile_mutating_call(
     let one = c.const_int(1);
     c.emit(encode_abx(OpCode::LoadConst, idx_reg, one), 0);
     c.emit(encode_abc(OpCode::GetIndex, dst, pair_reg, idx_reg), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// An operand whose evaluation has no side effects and runs no user code
+/// (literals, variable reads, arithmetic on those). Evaluating it before
+/// rather than after reading a local therefore cannot change the result,
+/// which lets `AddLocal` / `PushLocal` read the local last.
+fn is_simple_operand(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
+        Expr::BinOp { left, right, .. } => is_simple_operand(left) && is_simple_operand(right),
+        Expr::UnaryOp { operand, .. } => is_simple_operand(operand),
+        _ => false,
+    }
+}
+
+/// `x = x + e` (and `x += e`) on a mutable local with a simple `e`:
+/// one `AddLocal`, which appends in place to a string the local owns.
+fn try_compile_add_local(
+    c: &mut Compiler,
+    target: &Expr,
+    value: &Expr,
+) -> Result<bool, CompileError> {
+    let (
+        Expr::Ident(name),
+        Expr::BinOp {
+            left,
+            op: BinOp::Add,
+            right,
+        },
+    ) = (target, value)
+    else {
+        return Ok(false);
+    };
+    if !matches!(left.as_ref(), Expr::Ident(l) if l == name) || !is_simple_operand(right) {
+        return Ok(false);
+    }
+    let Some((reg, true)) = c.resolve_local(name) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let rhs = c.alloc_reg()?;
+    compile_expr(c, right, rhs)?;
+    c.emit(encode_abc(OpCode::AddLocal, reg, rhs, 0), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// Statement `xs.push(e)` / `push(xs, e)` on a mutable local with a simple
+/// `e`: one `PushLocal`, in place when the local owns its array. Only in
+/// statement position, because `push` returns the receiver itself and a
+/// used result would be a second reference to an owned array.
+fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, CompileError> {
+    let (receiver, value) = match expr {
+        Expr::MethodCall {
+            object,
+            method,
+            args,
+        } if method == "push" && args.len() == 1 => (object.as_ref(), &args[0]),
+        Expr::Call { function, args } => match function.as_ref() {
+            Expr::FieldAccess { object, field } if field == "push" && args.len() == 1 => {
+                (object.as_ref(), &args[0])
+            }
+            Expr::Ident(fn_name)
+                if fn_name == "push"
+                    && args.len() == 2
+                    && c.resolve_local(fn_name).is_none()
+                    && c.binding_mutability(fn_name).is_none() =>
+            {
+                (&args[0], &args[1])
+            }
+            _ => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    let Expr::Ident(var) = receiver else {
+        return Ok(false);
+    };
+    if !is_simple_operand(value) {
+        return Ok(false);
+    }
+    let Some((reg, true)) = c.resolve_local(var) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let value_reg = c.alloc_reg()?;
+    compile_expr(c, value, value_reg)?;
+    c.emit(encode_abc(OpCode::PushLocal, reg, value_reg, 0), 0);
     c.free_to(saved);
     Ok(true)
 }
@@ -1305,6 +1401,9 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::Assign { target, value } => {
+            if try_compile_add_local(c, target, value)? {
+                return Ok(());
+            }
             // Like the interpreter: evaluate the value, then store it.
             let saved = c.next_register;
             let val_reg = c.alloc_reg()?;
@@ -1642,6 +1741,9 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::Expression(expr) => {
+            if try_compile_push_statement(c, expr)? {
+                return Ok(());
+            }
             let saved = c.next_register;
             let reg = c.alloc_reg()?;
             compile_expr(c, expr, reg)?;

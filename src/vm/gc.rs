@@ -194,6 +194,40 @@ impl Gc {
         self.alloc_string(s.to_string())
     }
 
+    /// Allocate a string that is *not* interned, marked as uniquely owned
+    /// (see `GcObject::unique`). Used for strings a local variable will be
+    /// extended in place; interned strings are shared and never mutated.
+    pub fn alloc_unique_string(&mut self, s: String) -> GcRef {
+        let r = self.alloc(ObjKind::String(s));
+        self.set_unique(r);
+        r
+    }
+
+    /// Mark `r` as uniquely owned by the local register it is stored in.
+    #[inline]
+    pub fn set_unique(&mut self, r: GcRef) {
+        if let Some(obj) = self.get_mut(r) {
+            obj.unique = true;
+        }
+    }
+
+    /// `v` is being copied out of a local register: if it is a uniquely
+    /// owned object it now has a second reference, so clear the bit.
+    #[inline]
+    pub fn share(&mut self, v: Value) {
+        if let Some(r) = v.as_obj() {
+            if let Some(obj) = self.get_mut(r) {
+                obj.unique = false;
+            }
+        }
+    }
+
+    /// Whether `r` is uniquely owned by the local register holding it.
+    #[inline]
+    pub fn is_unique(&self, r: GcRef) -> bool {
+        self.get(r).is_some_and(|o| o.unique)
+    }
+
     /// Check if GC should run.
     #[inline]
     pub fn should_collect(&self) -> bool {

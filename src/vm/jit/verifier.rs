@@ -354,6 +354,13 @@ fn verify_with_ret(
                 let dst = reg_in_range(ip, a, num_regs)?;
                 s[dst] = RegState::Val(JitType::Int);
             }
+            OpCode::AddLocal => {
+                // `R(A) = R(A) + R(B)`; in a verified (int-only) function
+                // there are no strings, so no in-place path.
+                want(&s, a, INT)?;
+                want(&s, b, INT)?;
+                s[a] = RegState::Val(JitType::Int);
+            }
             OpCode::Neg => {
                 want(&s, b, INT)?;
                 let dst = reg_in_range(ip, a, num_regs)?;
