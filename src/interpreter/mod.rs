@@ -1,4 +1,5 @@
 mod builtins; // call_builtin — extracted for readability
+mod heap; // cycle collection of closure-captured scopes
 mod places; // in-place reads and updates of variables
 use crate::parser::ast::*;
 /// Forge Tree-Walk Interpreter
@@ -499,10 +500,31 @@ const SCOPE_INDEX_THRESHOLD: usize = 12;
 /// Value and mutability live in the same entry so a lookup touches one
 /// lock and one table. Bindings are never removed from a scope (a scope is
 /// dropped as a whole), so positions stay valid for the lazily built index.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct Scope {
     bindings: Vec<Binding>,
     index: Option<HashMap<String, usize>>,
+    /// Id of the [`heap::ScopeHeap`] this scope is registered with as a
+    /// cycle-collection candidate (0: none). Set when a closure captures it.
+    tracked_by: u64,
+    /// Counts live scopes for the leak tests; only its `Drop` matters.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    probe: heap::probe::ScopeProbe,
+}
+
+/// A copy is a new scope: it starts unregistered (the heap's registry
+/// holds the original, not the copy).
+impl Clone for Scope {
+    fn clone(&self) -> Self {
+        Scope {
+            bindings: self.bindings.clone(),
+            index: self.index.clone(),
+            tracked_by: 0,
+            #[cfg(test)]
+            probe: Default::default(),
+        }
+    }
 }
 
 impl Scope {
@@ -764,6 +786,16 @@ impl Environment {
     pub fn deep_clone_isolated(&self) -> Self {
         let mut scope_map = ScopeMap::new();
         Self::deep_clone_env(self, &mut scope_map)
+    }
+
+    /// [`deep_clone_isolated`](Self::deep_clone_isolated), registering
+    /// every new scope with `heap` so the copy's function cycles are
+    /// collected when the fork that owns it is dropped.
+    fn deep_clone_isolated_into(&self, heap: &heap::ScopeHeap) -> Self {
+        let mut scope_map = ScopeMap::new();
+        let env = Self::deep_clone_env(self, &mut scope_map);
+        heap.track_cells(scope_map.values());
+        env
     }
 
     fn deep_clone_env(env: &Environment, scope_map: &mut ScopeMap) -> Self {
@@ -1069,6 +1101,30 @@ pub struct Interpreter {
     meter: crate::runtime::limits::Meter,
     /// Size caps for strings and collections this interpreter builds.
     pub(crate) caps: crate::runtime::limits::Caps,
+    /// Cycle collector shared by every interpreter that can reach the same
+    /// scopes (see `heap.rs`). Imports, `timeout` bodies, spawned tasks
+    /// and background forks share their creator's heap; an HTTP request
+    /// fork gets its own.
+    heap: Arc<heap::ScopeHeap>,
+}
+
+/// Teardown: release this interpreter's own roots, and if it was the last
+/// interpreter on its heap, reclaim the scope cycles nothing else holds
+/// (recursive functions and the global scope they capture, closures
+/// stored where they were defined). Values that escaped — returned to a
+/// host, moved into an importer, held by a running task — are still
+/// referenced from outside the cycles and survive. See `heap.rs`.
+impl Drop for Interpreter {
+    fn drop(&mut self) {
+        self.env.scopes.clear();
+        self.method_tables.clear();
+        self.static_methods.clear();
+        self.struct_defaults.clear();
+        self.squad_handles = None;
+        if self.heap.detach() {
+            self.heap.collect(&[]);
+        }
+    }
 }
 
 /// Steps between two resource-limit safe points when only fuel (or
@@ -1078,7 +1134,15 @@ const INTERP_SAFEPOINT_INTERVAL: u32 = 1024;
 
 impl Interpreter {
     pub fn new() -> Self {
+        Self::new_in(heap::ScopeHeap::new())
+    }
+
+    /// A fresh interpreter attached to `heap` (its creator's, for children
+    /// that share scopes with it).
+    fn new_in(heap: Arc<heap::ScopeHeap>) -> Self {
+        heap.attach();
         let mut interp = Self {
+            heap,
             env: Environment::new(),
             call_depth: 0,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1139,6 +1203,14 @@ impl Interpreter {
         }
     }
 
+    /// The environment a new closure captures. Registers its scopes as
+    /// cycle-collection candidates (a closure stored in a scope it captures
+    /// is a reference cycle) and may run a collection; see `heap.rs`.
+    fn capture_env(&self) -> Environment {
+        self.heap.track(&self.env);
+        self.env.clone()
+    }
+
     pub(crate) fn set_defer_host_runtime(&mut self, defer: bool) {
         self.defer_host_runtime = defer;
     }
@@ -1166,7 +1238,7 @@ impl Interpreter {
     /// `schedule`/`watch` threads, even from an import or a task). A bare
     /// `Interpreter::new()` would escape all three.
     pub(crate) fn child_context(&self) -> Interpreter {
-        let mut child = Interpreter::new();
+        let mut child = Interpreter::new_in(self.heap.clone());
         child.cancelled = self.cancelled.clone();
         child.ancestor_cancels = self.ancestor_cancels.clone();
         child.defer_host_runtime = self.defer_host_runtime;
@@ -1355,7 +1427,7 @@ impl Interpreter {
         // The isolated variant walks values and gives every closure
         // its own scope graph, with cycle handling for the recursive
         // function pattern. See Environment::deep_clone_isolated.
-        interp.env = self.env.deep_clone_isolated();
+        interp.env = self.env.deep_clone_isolated_into(&interp.heap);
         interp.method_tables = self.method_tables.clone();
         interp.static_methods = self.static_methods.clone();
         interp.embedded_fields = self.embedded_fields.clone();
@@ -1389,7 +1461,8 @@ impl Interpreter {
     }
 
     pub(crate) fn fork_for_background_runtime(&self) -> Self {
-        let mut interp = Interpreter::new();
+        // Shares closure scopes with `self`, so it shares the heap too.
+        let mut interp = Interpreter::new_in(self.heap.clone());
         // CRITICAL: env.deep_clone(), not env.clone(). Environment is
         // Vec<Arc<Mutex<HashMap>>>, so a derived Clone shares the scope
         // storage by Arc. Two background tasks (or a background task +
@@ -1594,7 +1667,7 @@ impl Interpreter {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
-                    closure: self.env.clone(),
+                    closure: self.capture_env(),
                     decorators: decorators.clone(),
                 }));
                 self.env.define(name.clone(), func);
@@ -1722,7 +1795,7 @@ impl Interpreter {
                             name: qualified_name.clone(),
                             params: params.clone(),
                             body: body.clone(),
-                            closure: self.env.clone(),
+                            closure: self.capture_env(),
                             decorators: Vec::new(),
                         }));
 
@@ -3553,7 +3626,7 @@ impl Interpreter {
             Expr::Lambda { params, body } => Ok(Value::Lambda {
                 params: Arc::from(params.as_slice()),
                 body: Arc::from(body.as_slice()),
-                closure: Arc::new(std::sync::Mutex::new(self.env.clone())),
+                closure: Arc::new(std::sync::Mutex::new(self.capture_env())),
             }),
 
             Expr::StructInit { name, fields } => {
@@ -5291,5 +5364,7 @@ impl fmt::Display for RuntimeError {
     }
 }
 
+#[cfg(test)]
+mod leak_tests;
 #[cfg(test)]
 mod tests;

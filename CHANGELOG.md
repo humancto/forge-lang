@@ -79,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - VM: `range(1, 2.5)` raised no error and returned `[0]`; it now fails with "range() requires integer arguments", like the interpreter.
+- The interpreter no longer leaks memory through closure reference cycles. A function or lambda stored in a scope it captures (every recursive function, closures kept in loop bodies, inner functions, methods, imported modules) formed an `Arc` cycle that was never freed: each interpreter that defined a function leaked its whole global scope (~88 KB, stdlib modules included), and loops that created such closures leaked on every iteration. A cycle collector now reclaims them when the last interpreter of a run is dropped (each `Sandbox` run, `forge mcp` call, Python `Sandbox.run`, `--interp` HTTP request fork) and periodically during long runs. Values that outlive the interpreter, such as a lambda the host keeps, are unaffected.
 
 ### Security
 
