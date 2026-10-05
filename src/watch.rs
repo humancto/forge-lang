@@ -60,7 +60,13 @@ fn run_file(file: &Path, path_str: &str) {
         Err(e) => {
             eprintln!(
                 "{}",
-                errors::format_error(&source, e.line, e.col, &e.message)
+                errors::format_error(
+                    &errors::display_path(path_str),
+                    &source,
+                    e.line,
+                    e.col,
+                    &e.message
+                )
             );
             return;
         }
@@ -72,7 +78,13 @@ fn run_file(file: &Path, path_str: &str) {
         Err(e) => {
             eprintln!(
                 "{}",
-                errors::format_error(&source, e.line, e.col, &e.message)
+                errors::format_error(
+                    &errors::display_path(path_str),
+                    &source,
+                    e.line,
+                    e.col,
+                    &e.message
+                )
             );
             return;
         }
@@ -85,6 +97,18 @@ fn run_file(file: &Path, path_str: &str) {
             println!(
                 "  \x1B[32m✓\x1B[0m Completed at {}",
                 chrono::Local::now().format("%H:%M:%S")
+            );
+        }
+        Err(e) if e.line > 0 => {
+            eprintln!(
+                "{}",
+                errors::format_error(
+                    &errors::display_path(path_str),
+                    &source,
+                    e.line,
+                    e.col.max(1),
+                    &e.message
+                )
             );
         }
         Err(e) => {
