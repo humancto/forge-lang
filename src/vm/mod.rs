@@ -11,6 +11,7 @@ pub mod machine;
 pub mod nanbox;
 pub mod profiler;
 pub mod serialize;
+pub mod serve;
 pub mod value;
 pub mod verify;
 
@@ -56,6 +57,8 @@ mod perf_tests;
 mod runtime_safety_tests;
 #[cfg(test)]
 mod schedule_watch_tests;
+#[cfg(test)]
+mod serve_tests;
 #[cfg(test)]
 mod set_tests;
 #[cfg(test)]

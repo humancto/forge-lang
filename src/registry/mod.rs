@@ -1,37 +1,24 @@
+//! Package registry client (rfcs/0007-package-registry.md).
+//!
+//! * [`index`] — the sparse index format (pure; shared by install and publish)
+//! * [`client`] — fetching index files and archives (cache, ETag, offline)
+//! * [`signing`] — ed25519 publisher signatures and trust-on-first-use pins
+//! * this module — search over local registries + the remote summary, and
+//!   safe archive extraction.
+
+pub mod client;
+pub mod index;
+pub mod signing;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-const DEFAULT_REGISTRY_URL: &str = "https://raw.githubusercontent.com/forge-lang/registry/main";
-const DEFAULT_CACHE_TTL_SECS: u64 = 3600; // 1 hour
+pub use client::registry_url;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct PackageEntry {
-    pub package: PackageMeta,
-    #[serde(default)]
-    pub versions: Vec<VersionEntry>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct PackageMeta {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub repository: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct VersionEntry {
-    pub version: String,
-    pub url: String,
-    #[serde(default)]
-    pub checksum: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct PackageIndex {
     #[serde(default)]
     pub packages: Vec<PackageSummary>,
@@ -46,47 +33,21 @@ pub struct PackageSummary {
     pub latest: String,
 }
 
-/// Get the configured registry base URL.
-pub fn registry_url() -> String {
-    env::var("FORGE_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
-}
-
-/// Get the cache directory for registry data.
-/// Uses $HOME/.forge/cache/registry/ so the cache is shared across projects.
-fn cache_dir() -> PathBuf {
-    if let Ok(home) = env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
-        PathBuf::from(home)
-            .join(".forge")
-            .join("cache")
-            .join("registry")
-    } else {
-        PathBuf::from(".forge").join("cache").join("registry")
+/// `~/.forge` (or `./.forge` when no home directory is known).
+pub fn forge_home() -> PathBuf {
+    match env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
+        Ok(home) => PathBuf::from(home).join(".forge"),
+        Err(_) => PathBuf::from(".forge"),
     }
 }
 
-/// Get the configured cache TTL.
-fn cache_ttl() -> Duration {
-    let secs = env::var("FORGE_CACHE_TTL")
+/// True when `path` exists and was modified less than `ttl` ago.
+fn is_fresh(path: &Path, ttl: Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
         .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_CACHE_TTL_SECS);
-    Duration::from_secs(secs)
-}
-
-/// Check if a cached file is still fresh.
-fn is_cache_fresh(path: &Path) -> bool {
-    let metadata = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
-    let modified = match metadata.modified() {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    match SystemTime::now().duration_since(modified) {
-        Ok(age) => age < cache_ttl(),
-        Err(_) => false,
-    }
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age < ttl)
 }
 
 /// Write to a file atomically (write to temp, then rename).
@@ -94,142 +55,19 @@ fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let temp = path.with_file_name(format!(".{}.tmp.{}", file_name, std::process::id()));
     std::fs::write(&temp, content)?;
     std::fs::rename(&temp, path)?;
     Ok(())
 }
 
-/// Fetch a package entry from the remote registry.
-/// Returns the parsed entry, or None if the package is not found.
-/// Uses local cache when fresh.
-pub fn fetch_package_entry(name: &str) -> Result<Option<PackageEntry>, String> {
-    let cache_path = cache_dir().join(format!("{}.toml", name));
-
-    // Check cache first
-    if is_cache_fresh(&cache_path) {
-        let content = std::fs::read_to_string(&cache_path)
-            .map_err(|e| format!("failed to read cache: {}", e))?;
-        let entry: PackageEntry =
-            toml::from_str(&content).map_err(|e| format!("corrupt cache for '{}': {}", name, e))?;
-        return Ok(Some(entry));
-    }
-
-    // Fetch from remote
-    let base_url = registry_url();
-    let url = format!("{}/packages/{}.toml", base_url, name);
-
-    let mut builder = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("failed to create HTTP client: {}", e))?
-        .get(&url);
-
-    // Add auth token if available (rate limit mitigation)
-    if let Ok(token) = env::var("GITHUB_TOKEN") {
-        builder = builder.header("Authorization", format!("token {}", token));
-    }
-
-    let response = builder
-        .send()
-        .map_err(|e| format!("failed to fetch '{}': {}", url, e))?;
-
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "registry returned {} for '{}'",
-            response.status(),
-            name
-        ));
-    }
-
-    let body = response
-        .text()
-        .map_err(|e| format!("failed to read response: {}", e))?;
-
-    let entry: PackageEntry = toml::from_str(&body)
-        .map_err(|e| format!("invalid package entry for '{}': {}", name, e))?;
-
-    // Cache the result atomically
-    if let Err(e) = atomic_write(&cache_path, body.as_bytes()) {
-        eprintln!(
-            "  Warning: failed to cache registry entry for '{}': {}",
-            name, e
-        );
-    }
-
-    Ok(Some(entry))
-}
-
-/// Fetch the package index from the remote registry.
-/// Lists all available packages with name, description, and latest version.
-/// Uses local cache when fresh.
+/// Fetch the remote search summary (`index.toml`) of the configured registry.
 pub fn fetch_index() -> Result<PackageIndex, String> {
-    let cache_path = cache_dir().join("index.toml");
-
-    // Check cache first
-    if is_cache_fresh(&cache_path) {
-        let content = std::fs::read_to_string(&cache_path)
-            .map_err(|e| format!("failed to read cached index: {}", e))?;
-        let index: PackageIndex =
-            toml::from_str(&content).map_err(|e| format!("corrupt cached index: {}", e))?;
-        return Ok(index);
-    }
-
-    let base_url = registry_url();
-    let url = format!("{}/index.toml", base_url);
-
-    let mut builder = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("failed to create HTTP client: {}", e))?
-        .get(&url);
-
-    if let Ok(token) = env::var("GITHUB_TOKEN") {
-        builder = builder.header("Authorization", format!("token {}", token));
-    }
-
-    let response = match builder.send() {
-        Ok(r) => r,
-        Err(e) => {
-            // If we have a stale cache, use it on network failure
-            if cache_path.exists() {
-                eprintln!(
-                    "  Warning: failed to fetch index, using cached version: {}",
-                    e
-                );
-                let content = std::fs::read_to_string(&cache_path)
-                    .map_err(|e| format!("failed to read cached index: {}", e))?;
-                return toml::from_str(&content)
-                    .map_err(|e| format!("corrupt cached index: {}", e));
-            }
-            return Err(format!("failed to fetch package index: {}", e));
-        }
-    };
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "registry returned {} for {}",
-            response.status(),
-            url
-        ));
-    }
-
-    let body = response
-        .text()
-        .map_err(|e| format!("failed to read index response: {}", e))?;
-
-    let index: PackageIndex =
-        toml::from_str(&body).map_err(|e| format!("invalid package index: {}", e))?;
-
-    if let Err(e) = atomic_write(&cache_path, body.as_bytes()) {
-        eprintln!("  Warning: failed to cache index: {}", e);
-    }
-
-    Ok(index)
+    client::RegistryClient::from_env().search_index()
 }
 
 /// Search packages by case-insensitive substring match on name or description.
@@ -430,85 +268,6 @@ fn matches_query(query: &str, p: &PackageSummary) -> bool {
     q.is_empty() || p.name.to_lowercase().contains(&q) || p.description.to_lowercase().contains(&q)
 }
 
-/// Resolve the best version from a list of version entries using semver.
-pub fn resolve_remote_version(
-    name: &str,
-    req: &semver::VersionReq,
-    versions: &[VersionEntry],
-) -> Result<VersionEntry, String> {
-    let mut parsed: Vec<(semver::Version, &VersionEntry)> = versions
-        .iter()
-        .filter_map(|ve| semver::Version::parse(&ve.version).ok().map(|v| (v, ve)))
-        .collect();
-
-    if parsed.is_empty() {
-        return Err(format!(
-            "  Error: no valid versions found for '{}' in remote registry",
-            name
-        ));
-    }
-
-    let best = parsed
-        .iter()
-        .filter(|(v, _)| req.matches(v))
-        .max_by(|(a, _), (b, _)| a.cmp(b));
-
-    match best {
-        Some((_, entry)) => Ok((*entry).clone()),
-        None => {
-            parsed.sort_by(|(a, _), (b, _)| a.cmp(b));
-            let available: Vec<&str> = parsed.iter().map(|(_, ve)| ve.version.as_str()).collect();
-            Err(format!(
-                "  Error: no version of '{}' matches '{}' (available: {})",
-                name,
-                req,
-                available.join(", ")
-            ))
-        }
-    }
-}
-
-/// Download a file from a URL to a destination path.
-/// Uses atomic write (download to temp, then rename).
-pub fn download_to(url: &str, dest: &Path) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create directory: {}", e))?;
-    }
-
-    let mut builder = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to create HTTP client: {}", e))?
-        .get(url);
-
-    if let Ok(token) = env::var("GITHUB_TOKEN") {
-        builder = builder.header("Authorization", format!("token {}", token));
-    }
-
-    let response = builder
-        .send()
-        .map_err(|e| format!("failed to download '{}': {}", url, e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "download failed with {} for '{}'",
-            response.status(),
-            url
-        ));
-    }
-
-    let bytes = response
-        .bytes()
-        .map_err(|e| format!("failed to read download: {}", e))?;
-
-    let temp = dest.with_extension("download");
-    std::fs::write(&temp, &bytes).map_err(|e| format!("failed to write temp file: {}", e))?;
-    std::fs::rename(&temp, dest).map_err(|e| format!("failed to finalize download: {}", e))?;
-
-    Ok(())
-}
-
 /// Verify a file's SHA-256 checksum against an expected value.
 /// Checksum format: "sha256:<hex>" or plain hex.
 pub fn verify_checksum(path: &Path, expected: &str) -> Result<(), String> {
@@ -530,59 +289,27 @@ pub fn verify_checksum(path: &Path, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Download a tarball and extract it to a destination directory.
-/// Handles GitHub-style archives that contain a single root directory.
-/// Validates tar entries to prevent path traversal attacks.
-pub fn download_and_extract(url: &str, dest: &Path, checksum: &str) -> Result<(), String> {
+/// Extract a (checksum-verified) `.tar.gz` package archive into `dest`,
+/// replacing whatever is there.
+///
+/// Only regular files and directories are accepted: absolute paths, `..`
+/// components, symlinks, hard links and device nodes are rejected before
+/// anything is moved into place. An archive with a single top-level
+/// directory (the `<name>-<version>/` layout `forge publish` and GitHub
+/// produce) is flattened into `dest`.
+pub fn extract_archive(archive_path: &Path, dest: &Path) -> Result<(), String> {
     let temp_dir = dest.with_extension("extracting");
     if temp_dir.exists() {
         std::fs::remove_dir_all(&temp_dir)
             .map_err(|e| format!("failed to clean temp dir: {}", e))?;
     }
-
-    let temp_archive = dest.with_extension("tar.gz");
-    download_to(url, &temp_archive)?;
-
-    // Verify checksum if provided
-    if !checksum.is_empty() {
-        verify_checksum(&temp_archive, checksum)?;
-    }
-
-    // Extract the archive with path traversal protection
-    let file =
-        std::fs::File::open(&temp_archive).map_err(|e| format!("failed to open archive: {}", e))?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("failed to create temp dir: {}", e))?;
 
-    // Validate each entry path before extracting
-    for entry in archive
-        .entries()
-        .map_err(|e| format!("failed to read archive entries: {}", e))?
-    {
-        let mut entry = entry.map_err(|e| format!("corrupt archive entry: {}", e))?;
-        let path = entry
-            .path()
-            .map_err(|e| format!("invalid entry path: {}", e))?;
-
-        // Reject absolute paths and path traversal
-        let path_str = path.to_string_lossy().to_string();
-        if path.is_absolute() || path_str.contains("..") {
-            return Err(format!("archive contains unsafe path: {}", path_str));
-        }
-        drop(path);
-
-        entry
-            .unpack_in(&temp_dir)
-            .map_err(|e| format!("failed to extract '{}': {}", path_str, e))?;
+    if let Err(e) = unpack_checked(archive_path, &temp_dir) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(e);
     }
 
-    // Clean up the archive
-    let _ = std::fs::remove_file(&temp_archive);
-
-    // GitHub archives contain a single root directory (e.g., "repo-v1.0.0/")
-    // Flatten if there's exactly one subdirectory
     let entries: Vec<_> = std::fs::read_dir(&temp_dir)
         .map_err(|e| format!("failed to read extracted dir: {}", e))?
         .filter_map(|e| e.ok())
@@ -593,17 +320,52 @@ pub fn download_and_extract(url: &str, dest: &Path, checksum: &str) -> Result<()
             .map_err(|e| format!("failed to remove existing package: {}", e))?;
     }
 
-    if entries.len() == 1 && entries[0].file_type().map_or(false, |t| t.is_dir()) {
-        // Single root directory — move it to dest
+    if entries.len() == 1 && entries[0].file_type().is_ok_and(|t| t.is_dir()) {
         std::fs::rename(entries[0].path(), dest)
             .map_err(|e| format!("failed to move extracted package: {}", e))?;
         let _ = std::fs::remove_dir_all(&temp_dir);
     } else {
-        // Multiple entries or flat — rename the temp dir itself
         std::fs::rename(&temp_dir, dest)
             .map_err(|e| format!("failed to move extracted package: {}", e))?;
     }
+    Ok(())
+}
 
+fn unpack_checked(archive_path: &Path, into: &Path) -> Result<(), String> {
+    let file =
+        std::fs::File::open(archive_path).map_err(|e| format!("failed to open archive: {}", e))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("failed to read archive entries: {}", e))?
+    {
+        let mut entry = entry.map_err(|e| format!("corrupt archive entry: {}", e))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("invalid entry path: {}", e))?
+            .into_owned();
+        let path_str = path.to_string_lossy().to_string();
+        let unsafe_path = path.is_absolute()
+            || path.components().any(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            });
+        if unsafe_path {
+            return Err(format!("archive contains unsafe path: {}", path_str));
+        }
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir()) {
+            return Err(format!(
+                "archive entry '{}' is not a regular file or directory",
+                path_str
+            ));
+        }
+        entry
+            .unpack_in(into)
+            .map_err(|e| format!("failed to extract '{}': {}", path_str, e))?;
+    }
     Ok(())
 }
 
@@ -611,108 +373,97 @@ pub fn download_and_extract(url: &str, dest: &Path, checksum: &str) -> Result<()
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_package_entry() {
-        let toml_str = r#"
-[package]
-name = "router"
-description = "HTTP router for Forge"
-repository = "https://github.com/user/forge-router"
+    fn temp_root(tag: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "forge-extract-{}-{}-{}",
+            tag,
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
-[[versions]]
-version = "1.0.0"
-url = "https://example.com/router-1.0.0.tar.gz"
-checksum = "sha256:abc123"
-
-[[versions]]
-version = "2.0.0"
-url = "https://example.com/router-2.0.0.tar.gz"
-checksum = "sha256:def456"
-"#;
-        let entry: PackageEntry = toml::from_str(toml_str).unwrap();
-        assert_eq!(entry.package.name, "router");
-        assert_eq!(entry.package.description, "HTTP router for Forge");
-        assert_eq!(entry.versions.len(), 2);
-        assert_eq!(entry.versions[0].version, "1.0.0");
-        assert_eq!(entry.versions[1].version, "2.0.0");
-        assert_eq!(entry.versions[0].checksum, "sha256:abc123");
+    /// Build a .tar.gz with raw headers so hostile entries can be expressed.
+    fn tarball(path: &Path, entries: &[(&str, tar::EntryType, &[u8])]) {
+        let file = std::fs::File::create(path).unwrap();
+        let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(gz);
+        for (name, kind, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            {
+                let raw = header.as_old_mut();
+                raw.name[..name.len()].copy_from_slice(name.as_bytes());
+            }
+            header.set_entry_type(*kind);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            if *kind == tar::EntryType::Symlink {
+                header.set_link_name("/etc/passwd").unwrap();
+            }
+            header.set_cksum();
+            builder.append(&header, *data).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
     }
 
     #[test]
-    fn parse_minimal_package_entry() {
-        let toml_str = r#"
-[package]
-name = "utils"
-
-[[versions]]
-version = "0.1.0"
-url = "https://example.com/utils.tar.gz"
-"#;
-        let entry: PackageEntry = toml::from_str(toml_str).unwrap();
-        assert_eq!(entry.package.name, "utils");
-        assert_eq!(entry.package.description, "");
-        assert_eq!(entry.versions.len(), 1);
-        assert_eq!(entry.versions[0].checksum, "");
+    fn extract_flattens_single_root_directory() {
+        let root = temp_root("flatten");
+        let archive = root.join("pkg.tar.gz");
+        tarball(
+            &archive,
+            &[
+                (
+                    "kv-0.1.0/forge.toml",
+                    tar::EntryType::Regular,
+                    b"[project]\n",
+                ),
+                ("kv-0.1.0/main.fg", tar::EntryType::Regular, b"say 1\n"),
+            ],
+        );
+        let dest = root.join("forge_modules").join("kv");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("stale.fg"), "old").unwrap();
+        extract_archive(&archive, &dest).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("main.fg")).unwrap(),
+            "say 1\n"
+        );
+        assert!(!dest.join("stale.fg").exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn resolve_remote_caret() {
-        let versions = vec![
-            VersionEntry {
-                version: "1.0.0".into(),
-                url: "url1".into(),
-                checksum: String::new(),
-            },
-            VersionEntry {
-                version: "1.5.0".into(),
-                url: "url2".into(),
-                checksum: String::new(),
-            },
-            VersionEntry {
-                version: "2.0.0".into(),
-                url: "url3".into(),
-                checksum: String::new(),
-            },
-        ];
-
-        let req = semver::VersionReq::parse("^1.0").unwrap();
-        let resolved = resolve_remote_version("test", &req, &versions).unwrap();
-        assert_eq!(resolved.version, "1.5.0");
-        assert_eq!(resolved.url, "url2");
-    }
-
-    #[test]
-    fn resolve_remote_no_match() {
-        let versions = vec![VersionEntry {
-            version: "1.0.0".into(),
-            url: "url1".into(),
-            checksum: String::new(),
-        }];
-
-        let req = semver::VersionReq::parse("^3.0").unwrap();
-        let err = resolve_remote_version("test", &req, &versions).unwrap_err();
-        assert!(err.contains("no version of 'test' matches"));
-        assert!(err.contains("1.0.0"));
-    }
-
-    #[test]
-    fn resolve_remote_star() {
-        let versions = vec![
-            VersionEntry {
-                version: "1.0.0".into(),
-                url: "url1".into(),
-                checksum: String::new(),
-            },
-            VersionEntry {
-                version: "3.0.0".into(),
-                url: "url3".into(),
-                checksum: String::new(),
-            },
-        ];
-
-        let resolved =
-            resolve_remote_version("test", &semver::VersionReq::STAR, &versions).unwrap();
-        assert_eq!(resolved.version, "3.0.0");
+    fn extract_rejects_traversal_and_links() {
+        let root = temp_root("hostile");
+        for (i, entry) in [
+            ("../escape.fg", tar::EntryType::Regular),
+            ("pkg/../../escape.fg", tar::EntryType::Regular),
+            ("pkg/link", tar::EntryType::Symlink),
+            ("pkg/dev", tar::EntryType::Char),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let archive = root.join(format!("bad{}.tar.gz", i));
+            tarball(&archive, &[(entry.0, entry.1, b"")]);
+            let dest = root.join(format!("out{}", i));
+            let err = extract_archive(&archive, &dest).unwrap_err();
+            assert!(
+                err.contains("unsafe path") || err.contains("not a regular file"),
+                "{}: {}",
+                entry.0,
+                err
+            );
+            assert!(!dest.exists(), "nothing is installed on failure");
+        }
+        assert!(!root.parent().unwrap().join("escape.fg").exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -729,10 +480,14 @@ url = "https://example.com/utils.tar.gz"
 
         // Write a file — should be fresh
         std::fs::write(&file, "test").unwrap();
-        assert!(is_cache_fresh(&file));
+        assert!(is_fresh(&file, Duration::from_secs(3600)));
 
         // Non-existent file — not fresh
-        assert!(!is_cache_fresh(&temp.join("nonexistent")));
+        assert!(!is_fresh(
+            &temp.join("nonexistent"),
+            Duration::from_secs(3600)
+        ));
+        assert!(!is_fresh(&file, Duration::ZERO));
 
         std::fs::remove_dir_all(&temp).unwrap();
     }

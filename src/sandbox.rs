@@ -41,8 +41,10 @@
 //! * No memory limit yet; call depth is bounded by the engine's recursion
 //!   limit.
 //! * stderr output (`log`, `term`, warnings) is not captured.
-//! * stdin is the host's: `input()`/`io.prompt` read from it. Hosts that
-//!   use stdin for something else (like `forge mcp`) must redirect it.
+//! * The host's stdin is only readable with the `process` capability
+//!   (denied by default): without it `input()` / `io.prompt` see an empty
+//!   stream, so a script can never consume a host's stdin (e.g. the
+//!   `forge mcp` protocol stream) on any platform.
 
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
@@ -234,6 +236,20 @@ impl Sandbox {
         S: AsRef<str>,
     {
         self.caps = self.caps.grant_net_hosts(hosts);
+        self
+    }
+
+    /// Grant `ffi` (native plugins) for libraries at or under these paths.
+    ///
+    /// A native library runs with the full privileges of the host process
+    /// and bypasses every other capability: only grant libraries you trust
+    /// as much as the host itself.
+    pub fn allow_ffi<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        self.caps = self.caps.grant_ffi_paths(paths);
         self
     }
 
@@ -497,6 +513,16 @@ mod tests {
     }
 
     #[test]
+    fn host_stdin_is_not_readable_without_process() {
+        // Must return immediately (empty stream), never block on or consume
+        // the host's stdin; the prompt is not printed either.
+        let out = Sandbox::new()
+            .run_source("let a = io.prompt(\"name? \")\nlet b = input()\nsay \"[\" + a + b + \"]\"")
+            .expect("stdin reads are not errors");
+        assert_eq!(out.stdout, "[]\n");
+    }
+
+    #[test]
     fn scoped_filesystem() {
         let root = tmpdir("fs");
         let data = root.join("data");
@@ -504,7 +530,9 @@ mod tests {
         std::fs::write(data.join("in.txt"), "hello").expect("write");
         std::fs::write(root.join("secret.txt"), "s3cret").expect("write");
         let sb = Sandbox::new().allow_read([&data]).allow_write([&data]);
-        let d = data.display();
+        // Forge string literals treat `\` as an escape (Windows paths).
+        let d = data.display().to_string().replace('\\', "\\\\");
+        let root_lit = root.display().to_string().replace('\\', "\\\\");
         let out = sb
             .run_source(&format!(
                 "fs.write(\"{d}/out.txt\", fs.read(\"{d}/in.txt\") + \"!\")\nsay fs.read(\"{d}/out.txt\")"
@@ -516,7 +544,7 @@ mod tests {
             "fs.read",
         );
         denied(
-            sb.run_source(&format!("fs.write(\"{}/x.txt\", \"x\")", root.display())),
+            sb.run_source(&format!("fs.write(\"{root_lit}/x.txt\", \"x\")")),
             "fs.write",
         );
         #[cfg(unix)]
@@ -530,7 +558,7 @@ mod tests {
         }
         // exists() never reveals what is outside the grant.
         let out = sb
-            .run_source(&format!("say fs.exists(\"{}/secret.txt\")", root.display()))
+            .run_source(&format!("say fs.exists(\"{root_lit}/secret.txt\")"))
             .expect("exists is not an error");
         assert_eq!(out.stdout, "false\n");
         let _ = std::fs::remove_dir_all(&root);

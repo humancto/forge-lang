@@ -1,0 +1,16 @@
+// Calling C from Forge. Build the plugin first (see hello.c), then:
+//
+//   forge --allow-ffi run main.fg
+
+import native "libhello_c" as c
+
+say c.mul(6, 7)
+say c.shout("hello from c")
+say c.count()
+say c.count(1, "two", [3])
+say c.checked_div(10, 3)
+try {
+    c.checked_div(1, 0)
+} catch e {
+    say "caught: {e.message}"
+}

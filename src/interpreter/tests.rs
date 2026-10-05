@@ -7307,17 +7307,21 @@ fn call_cost_does_not_grow_with_recursion_depth() {
             .expect("join");
         start.elapsed()
     }
-    // 20k calls either way; best of three to damp scheduler noise. With
-    // depth-proportional lookups the ratio was ~40x; cache and page
-    // effects alone stay well under the bound.
-    let best = |depth, reps| {
-        (0..3)
-            .map(|_| time_depth(depth, reps))
-            .min()
-            .expect("3 runs")
-    };
-    let shallow = best(100, 200);
-    let deep = best(4000, 5);
+    // 20k calls either way. With depth-proportional lookups the ratio was
+    // ~40x; cache and page effects alone stay well under the bound.
+    // Shallow and deep samples are interleaved and the best of each is
+    // compared, so a burst of machine load cannot land on only one side;
+    // a real regression is slow on every round, so stopping early once the
+    // bound holds keeps the gate's power.
+    let mut shallow = std::time::Duration::MAX;
+    let mut deep = std::time::Duration::MAX;
+    for _ in 0..5 {
+        shallow = shallow.min(time_depth(100, 200));
+        deep = deep.min(time_depth(4000, 5));
+        if deep < shallow * 15 {
+            break;
+        }
+    }
     assert!(
         deep < shallow * 15,
         "deep recursion is disproportionately slow: shallow {:?}, deep {:?}",

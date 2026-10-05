@@ -44,7 +44,11 @@ jobs:
         run: |
           echo "cpus: $(getconf _NPROCESSORS_ONLN 2>/dev/null || echo "$NUMBER_OF_PROCESSORS")"
           df -h . || true
-      - run: cargo test --locked --verbose
+      - run: cargo test --locked --no-fail-fast --verbose
+      # Native plugin SDK (standalone crates; tests/native_plugins.rs above
+      # builds examples/plugins/hello_rust against it).
+      - name: Plugin SDK tests
+        run: cargo test --manifest-path crates/forge-plugin/Cargo.toml
       - name: Runner resources after tests
         if: always()
         shell: bash
@@ -72,6 +76,9 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+      - run: cargo fmt --check --manifest-path crates/forge-plugin/Cargo.toml
+      - run: cargo fmt --check --manifest-path crates/forge-plugin-macros/Cargo.toml
+      - run: cargo fmt --check --manifest-path examples/plugins/hello_rust/Cargo.toml
 
   # Build the forge CLI once and share it with the Forge-level gates below
   # (Forge tests on both engines, examples, differential engine check).
@@ -227,8 +234,9 @@ jobs:
         env:
           FORGE_LIB_DIR: target/release
         run: ./target/startup_time --forge ./target/release/forge --warmups 2 --reps 20
-      - name: VM hot-path benchmarks (report-only)
+      # Report-only snapshot; the gating A/B comparison is perf.yml.
+      - name: Hot-path benchmarks (report-only)
         continue-on-error: true
         env:
           BENCH_TIMEOUT: "60"
-        run: tools/bench_vm.sh target/release/forge
+        run: tools/bench.sh --forge target/release/forge

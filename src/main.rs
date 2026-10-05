@@ -17,7 +17,9 @@ mod native;
 mod package;
 mod parser;
 mod permissions;
+mod plugins;
 mod publish;
+mod publish_index;
 mod registry;
 mod repl;
 mod runtime;
@@ -83,9 +85,10 @@ struct Cli {
     #[arg(long = "vm")]
     use_vm: bool,
 
-    /// Use the tree-walking interpreter instead of the VM. Required for
-    /// decorator-driven HTTP servers (@server, @get, etc.). The VM
-    /// auto-falls back to the interpreter when decorators are detected.
+    /// Use the tree-walking interpreter instead of the VM (also for
+    /// `@server` programs, which the VM serves by default). The VM
+    /// auto-falls back to the interpreter for constructs it cannot run,
+    /// such as unknown decorators.
     #[arg(long = "interp")]
     use_interp: bool,
 
@@ -160,6 +163,13 @@ struct PermissionFlags {
     #[arg(long = "allow-ai", global = true)]
     allow_ai: bool,
 
+    /// Allow loading native plugins (`import native`); with =PATHS, only
+    /// libraries at or under those paths. Native code runs with full trust.
+    #[arg(long = "allow-ffi", value_name = "PATHS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_ffi: Option<Vec<String>>,
+
     /// Stop the program after SECS seconds of wall-clock time (exit code 124)
     #[arg(long = "max-time", value_name = "SECS", global = true)]
     max_time: Option<f64>,
@@ -195,6 +205,7 @@ fn apply_scoped_grant(
         Capability::Read => caps.grant_read_paths(items),
         Capability::Write => caps.grant_write_paths(items),
         Capability::Net => caps.grant_net_hosts(items),
+        Capability::Ffi => caps.grant_ffi_paths(items),
         _ => caps.grant(cap),
     }
 }
@@ -222,6 +233,12 @@ fn build_policy(
     // there unless the user explicitly asked for a sandbox.
     let run = allow_run || toml.allow_run.unwrap_or(false) || (is_interactive && !sandboxed);
     caps.set(Capability::Run, run);
+    // Native plugins follow `run`: opt-in for scripts, available when a
+    // person is typing (REPL, -e) unless sandboxed. An explicit grant
+    // (`--allow-ffi[=PATHS]`, `allow-ffi`) was applied above and wins.
+    if is_interactive && !sandboxed && flags.allow_ffi.is_none() && toml.allow_ffi.is_none() {
+        caps.set(Capability::Ffi, true);
+    }
     // Modules next to the entry script (and installed packages) stay
     // importable even when fs.read is scoped elsewhere.
     if let Some(root) = import_root {
@@ -246,7 +263,7 @@ fn build_mcp_policy(
     caps
 }
 
-/// Apply the fs/net/env/db/ai grants from CLI flags and forge.toml (flags
+/// Apply the fs/net/ffi/env/db/ai grants from CLI flags and forge.toml (flags
 /// win per capability). `run` and `process` are left to the caller.
 fn apply_grants(
     mut caps: permissions::Capabilities,
@@ -270,6 +287,11 @@ fn apply_grants(
         caps,
         Capability::Net,
         cli_list(&flags.allow_net).or(toml.allow_net),
+    );
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Ffi,
+        cli_list(&flags.allow_ffi).or(toml.allow_ffi),
     );
     for (cap, flag, from_toml) in [
         (Capability::Env, flags.allow_env, toml.allow_env),
@@ -417,14 +439,45 @@ enum Command {
     },
     /// Update all dependencies to latest compatible versions
     Update,
-    /// Publish the current project to the local registry
+    /// Publish the current project to a local registry, or to a clone of a
+    /// sparse-index repository (a directory with config.json; rfcs/0007)
     Publish {
         /// Show what would be packaged without publishing
         #[arg(long)]
         dry_run: bool,
-        /// Custom registry path (defaults to ~/.forge/registry/)
+        /// Local registry directory (default ~/.forge/registry/), or a local
+        /// clone of a sparse-index repository
         #[arg(long)]
         registry: Option<String>,
+        /// Sign the index entry with your ed25519 publisher key
+        /// (~/.forge/keys/publish.key or $FORGE_SIGNING_KEY; created on first use)
+        #[arg(long)]
+        sign: bool,
+        /// Archive URL template for index publishing ({name}, {vers});
+        /// default: a GitHub release asset of project.repository
+        #[arg(long, value_name = "URL")]
+        download_url: Option<String>,
+        /// Where to write the archive for index publishing (default ./dist)
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+        /// Do not create a branch and commit in the index clone
+        #[arg(long)]
+        no_commit: bool,
+    },
+    /// Mark a published version as yanked (or un-yank it) in a local clone
+    /// of a sparse-index repository
+    Yank {
+        /// name@version to yank
+        package: String,
+        /// Local clone of the sparse-index repository
+        #[arg(long)]
+        registry: PathBuf,
+        /// Un-yank instead
+        #[arg(long)]
+        undo: bool,
+        /// Do not create a branch and commit in the index clone
+        #[arg(long)]
+        no_commit: bool,
     },
     /// Search the package registry
     Search {
@@ -668,7 +721,8 @@ async fn async_main() {
             } else {
                 testing::Engine::Vm
             });
-            let vm_compat = |program: &Program| ensure_vm_compatible(program, "VM");
+            let vm_compat =
+                |program: &Program| ensure_vm_compatible(program, "VM", Serving::Supported);
             testing::run_tests(
                 &test_dir,
                 &testing::TestOptions {
@@ -730,8 +784,74 @@ async fn async_main() {
         Some(Command::Update) => {
             run_off_runtime(package::update);
         }
-        Some(Command::Publish { dry_run, registry }) => {
-            publish::publish(dry_run, registry.as_deref());
+        Some(Command::Publish {
+            dry_run,
+            registry,
+            sign,
+            download_url,
+            out_dir,
+            no_commit,
+        }) => {
+            let index_dir = registry
+                .as_deref()
+                .map(PathBuf::from)
+                .filter(|p| publish_index::is_index_repo(p));
+            match index_dir {
+                Some(index_dir) => {
+                    let opts = publish_index::IndexPublishOptions {
+                        project_dir: std::path::Path::new("."),
+                        index_dir: &index_dir,
+                        dry_run,
+                        sign,
+                        key_path: None,
+                        download_url,
+                        out_dir,
+                        commit: !no_commit,
+                    };
+                    match publish_index::publish_to_index(&opts) {
+                        Ok(published) => publish_index::print_report(&index_dir, &published),
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+                None => {
+                    if sign || download_url.is_some() || out_dir.is_some() || no_commit {
+                        eprintln!(
+                            "Error: --sign, --download-url, --out-dir and --no-commit apply to \
+                             publishing into a sparse-index clone (a --registry directory with config.json)"
+                        );
+                        process::exit(2);
+                    }
+                    publish::publish(dry_run, registry.as_deref());
+                }
+            }
+        }
+        Some(Command::Yank {
+            package: pkg,
+            registry,
+            undo,
+            no_commit,
+        }) => {
+            let Some((name, vers)) = pkg.split_once('@') else {
+                eprintln!("Error: expected name@version, got '{}'", pkg);
+                process::exit(2);
+            };
+            match publish_index::yank(&registry, name, vers, undo, !no_commit) {
+                Ok(branch) => {
+                    let verb = if undo { "Un-yanked" } else { "Yanked" };
+                    println!("  {} {}@{} in {}", verb, name, vers, registry.display());
+                    match branch {
+                        Some(b) => println!("  Push branch '{}' and open a pull request.", b),
+                        None => println!("  Commit the change and open a pull request."),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
         }
         Some(Command::Search { query }) => {
             let q = query.as_deref().unwrap_or("");
@@ -848,7 +968,7 @@ fn emit_type_warnings(warnings: &[typechecker::TypeWarning]) {
     }
 }
 
-fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>) {
+fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<String>) {
     match stmt {
         Stmt::TypeDef { .. } => {}
         Stmt::InterfaceDef { .. } => {}
@@ -900,19 +1020,18 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         }
         Stmt::PromptDef { .. } => {}
         Stmt::AgentDef { .. } => {}
-        Stmt::DecoratorStmt(_) => {
-            issues.insert("decorator-driven runtime features");
+        Stmt::DecoratorStmt(decorator) => {
+            issues.extend(runtime::metadata::vm_unsupported_decorator(decorator, true));
         }
-        Stmt::Import { .. } => {}
+        Stmt::Import { .. } | Stmt::ImportNative { .. } => {}
         Stmt::FnDef {
             body, decorators, ..
         } => {
-            if decorators
-                .iter()
-                .any(|decorator| !is_vm_metadata_decorator(&decorator.name))
-            {
-                issues.insert("decorator-driven runtime features");
-            }
+            issues.extend(
+                decorators
+                    .iter()
+                    .filter_map(|d| runtime::metadata::vm_unsupported_decorator(d, false)),
+            );
             for s in body {
                 collect_vm_incompatible_stmt(&s.stmt, issues);
             }
@@ -970,11 +1089,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
     }
 }
 
-fn is_vm_metadata_decorator(name: &str) -> bool {
-    matches!(name, "test" | "skip" | "before" | "after")
-}
-
-fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>) {
+fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<String>) {
     match expr {
         Expr::BinOp { left, right, .. } => {
             collect_vm_incompatible_expr(left, issues);
@@ -1061,7 +1176,7 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
     }
 }
 
-fn vm_incompatibilities(program: &Program) -> Vec<&'static str> {
+fn vm_incompatibilities(program: &Program) -> Vec<String> {
     let mut issues = BTreeSet::new();
     for stmt in &program.statements {
         collect_vm_incompatible_stmt(&stmt.stmt, &mut issues);
@@ -1069,15 +1184,30 @@ fn vm_incompatibilities(program: &Program) -> Vec<&'static str> {
     issues.into_iter().collect()
 }
 
+/// Whether a VM entry point can host a program's HTTP server.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Serving {
+    /// `forge run` / `forge test`: an `@server` program is served by the VM
+    /// (`runtime::host::launch_vm`).
+    Supported,
+    /// `--jit`, `forge build` and the parity corpus only execute the
+    /// bytecode; a program that would start a server is rejected.
+    Rejected,
+}
+
 /// Whether the bytecode VM can run `program` faithfully. Combines the AST
 /// scan above with a trial compile: any construct the VM compiler reports as
 /// `Unsupported` (instead of silently dropping it) is rejected here, so
 /// `forge run` falls back to the interpreter rather than misbehaving.
-fn ensure_vm_compatible(program: &Program, mode: &str) -> Result<(), String> {
-    let mut issues: Vec<String> = vm_incompatibilities(program)
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+fn ensure_vm_compatible(program: &Program, mode: &str, serving: Serving) -> Result<(), String> {
+    let mut issues = vm_incompatibilities(program);
+    if serving == Serving::Rejected
+        && runtime::metadata::extract_runtime_plan(program)
+            .server
+            .is_some()
+    {
+        issues.push("decorator-driven runtime features (@server)".to_string());
+    }
     if issues.is_empty() {
         if let Err(e) = vm::compiler::compile(program) {
             if e.is_unsupported() {
@@ -1154,7 +1284,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     // `Unsupported`), run it on the interpreter instead.
     let mut chunk = None;
     if use_vm {
-        match ensure_vm_compatible(&program, "VM") {
+        match ensure_vm_compatible(&program, "VM", Serving::Supported) {
             Ok(()) => {
                 let path = std::path::Path::new(filename);
                 let options = vm::compiler::CompileOptions {
@@ -1181,7 +1311,30 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     }
 
     if let Some(chunk) = chunk {
-        if let Err(e) = vm::run_chunk(&chunk, profile) {
+        let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
+        if runtime_plan.server.is_some() {
+            // Serve on the VM: run the top level with schedule/watch start-up
+            // deferred (as the interpreter path does), then fork the final
+            // state per request.
+            let mut machine = if profile {
+                vm::machine::VM::with_profiling()
+            } else {
+                vm::machine::VM::new()
+            };
+            machine.defer_host_runtime();
+            if let Err(e) = machine.execute(&chunk) {
+                report_vm_error(source, filename, &e);
+                process::exit(1);
+            }
+            if profile {
+                machine.profiler.print_report();
+            }
+            let fn_params = runtime::metadata::top_level_fn_params(&program);
+            if let Err(e) = runtime::host::launch_vm(machine, &runtime_plan, fn_params).await {
+                eprintln!("{}", errors::format_simple_error(&e.message));
+                process::exit(1);
+            }
+        } else if let Err(e) = vm::run_chunk(&chunk, profile) {
             report_vm_error(source, filename, &e);
             process::exit(1);
         }
@@ -1234,7 +1387,7 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
         Err(err) => print_frontend_error(source, filename, err),
     };
     emit_type_warnings(&warnings);
-    if let Err(message) = ensure_vm_compatible(&program, "--jit") {
+    if let Err(message) = ensure_vm_compatible(&program, "--jit", Serving::Rejected) {
         eprintln!("{}", errors::format_simple_error(&message));
         process::exit(1);
     }
@@ -1272,7 +1425,7 @@ fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf, strict
         Err(err) => print_frontend_error(source, filename, err),
     };
     emit_type_warnings(&warnings);
-    if let Err(message) = ensure_vm_compatible(&program, "bytecode build") {
+    if let Err(message) = ensure_vm_compatible(&program, "bytecode build", Serving::Rejected) {
         eprintln!("{}", errors::format_simple_error(&message));
         process::exit(1);
     }
@@ -1360,7 +1513,7 @@ fn compile_to_native_aot(source: &str, filename: &str, file_path: &PathBuf, stri
     };
     emit_type_warnings(&warnings);
 
-    if let Err(message) = ensure_vm_compatible(&program, "AOT build") {
+    if let Err(message) = ensure_vm_compatible(&program, "AOT build", Serving::Rejected) {
         let message = if message.contains("decorator-driven runtime features") {
             format!(
                 "{message}\n  hint: decorator-driven servers are not bytecode AOT yet; use `forge build --native` for a standalone source-runtime server binary"
@@ -1475,6 +1628,32 @@ mod tests {
     }
 
     #[test]
+    fn ffi_is_opt_in_everywhere_but_interactive_use() {
+        use permissions::Capability::Ffi;
+        let parse = |args: &[&str]| Cli::try_parse_from(args).expect("parse").perms;
+        let plain = parse(&["forge", "run", "a.fg"]);
+        // `forge run`: denied unless granted.
+        assert!(!build_policy(&plain, None, false, false, None).is_granted(Ffi));
+        // REPL / -e: allowed, unless sandboxed.
+        assert!(build_policy(&plain, None, false, true, None).is_granted(Ffi));
+        let sandboxed = parse(&["forge", "--sandbox", "run", "a.fg"]);
+        assert!(!build_policy(&sandboxed, None, false, true, None).is_granted(Ffi));
+        // An explicit grant wins, including a scoped one under --sandbox.
+        let granted = parse(&["forge", "--sandbox", "--allow-ffi=./plugins", "run", "a.fg"]);
+        assert!(build_policy(&granted, None, false, false, None).is_granted(Ffi));
+        // forge.toml can grant it too.
+        let toml = manifest::PermissionsConfig {
+            allow_ffi: Some(manifest::GrantSpec::Flag(true)),
+            ..Default::default()
+        };
+        assert!(build_policy(&plain, Some(toml), false, false, None).is_granted(Ffi));
+        // forge mcp: deny-all unless --allow-ffi.
+        assert!(!build_mcp_policy(&plain, None, false).is_granted(Ffi));
+        let mcp = parse(&["forge", "--allow-ffi", "mcp"]);
+        assert!(build_mcp_policy(&mcp, None, false).is_granted(Ffi));
+    }
+
+    #[test]
     fn build_allow_run_is_native_only() {
         assert!(
             Cli::try_parse_from(["forge", "build", "--native", "--allow-run", "app.fg"]).is_ok()
@@ -1499,7 +1678,7 @@ mod tests {
         for case in &cases {
             let (program, _) = prepare_program(&case.source, false)
                 .unwrap_or_else(|err| panic!("{} should parse: {:?}", case.path.display(), err));
-            let error = ensure_vm_compatible(&program, "parity corpus")
+            let error = ensure_vm_compatible(&program, "parity corpus", Serving::Rejected)
                 .expect_err(&format!("{} should be rejected by VM", case.path.display()));
             assert!(
                 error.contains(&case.expected_error),
@@ -1551,8 +1730,7 @@ mod tests {
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
         let issues = vm_incompatibilities(&program);
-        assert!(!issues.contains(&"interface/power definitions"));
-        assert!(!issues.contains(&"impl/give blocks"));
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1565,7 +1743,7 @@ mod tests {
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
         let issues = vm_incompatibilities(&program);
-        assert!(!issues.contains(&"type definitions"));
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1749,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_incompatibilities_reject_server_route_decorators() {
+    fn server_programs_run_on_the_vm_only_where_it_serves() {
         let source = r#"
         @server(port: 8080)
         @get("/hello")
@@ -1757,6 +1935,37 @@ mod tests {
         "#;
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
-        assert!(vm_incompatibilities(&program).contains(&"decorator-driven runtime features"));
+        assert!(vm_incompatibilities(&program).is_empty());
+        assert!(ensure_vm_compatible(&program, "VM", Serving::Supported).is_ok());
+        for mode in ["--jit", "AOT build"] {
+            let error = ensure_vm_compatible(&program, mode, Serving::Rejected)
+                .expect_err("a non-serving VM entry point must reject @server");
+            assert!(
+                error.contains("decorator-driven runtime features"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_decorators_fall_back_to_the_interpreter() {
+        for source in [
+            "@server(port: compute_port())\n@get fn a() { return 1 }",
+            "@server(8080)\n@get fn a() { return 1 }",
+            "@cache\nfn a() { return 1 }",
+            "@get(\"/a\", auth: true)\nfn a() { return 1 }",
+            "@get(path)\nfn a() { return 1 }",
+            "@patch(\"/a\")\nfn a() { return 1 }",
+            "fn outer() {\n  @cache\n  fn inner() { return 1 }\n  return inner()\n}",
+        ] {
+            let (program, _) = prepare_program(source, false).expect("program should parse");
+            let issues = vm_incompatibilities(&program);
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.contains("decorator-driven runtime features")),
+                "{source:?} should fall back, got {issues:?}"
+            );
+        }
     }
 }

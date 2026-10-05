@@ -1221,6 +1221,19 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
                 });
             }
         }
+        Stmt::ImportNative { binding, .. } => {
+            let names = match binding {
+                crate::parser::ast::NativeBinding::Namespace(name) => std::slice::from_ref(name),
+                crate::parser::ast::NativeBinding::Names(names) => names.as_slice(),
+            };
+            for n in names {
+                symbols.push(DocumentSymbolInfo {
+                    name: n.clone(),
+                    kind: 2, // Module
+                    line,
+                });
+            }
+        }
         _ => {}
     }
 }

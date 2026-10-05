@@ -12,6 +12,12 @@ use std::time::{Duration, Instant};
 const FORGE: &str = env!("CARGO_BIN_EXE_forge");
 const ENGINES: [&[&str]; 2] = [&[], &["--interp"]];
 
+/// A path as the body of a Forge string literal (`\` is an escape in Forge,
+/// so Windows paths must be doubled).
+fn forge_lit(p: &std::path::Path) -> String {
+    p.display().to_string().replace('\\', "\\\\")
+}
+
 fn tmpdir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
         "forge_perm_cli_{}_{}_{}",
@@ -229,7 +235,7 @@ fn scoped_paths_block_dotdot_and_symlink_escapes() {
 
         let escapes = [
             "say fs.read(\"allowed/../../secret.txt\")".to_string(),
-            format!("say fs.read(\"{}\")", root.join("secret.txt").display()),
+            format!("say fs.read(\"{}\")", forge_lit(&root.join("secret.txt"))),
             "say fs.read(\"allowed/nope/../../../secret.txt\")".to_string(),
             #[cfg(unix)]
             "say fs.read(\"allowed/link.txt\")".to_string(),
@@ -257,7 +263,7 @@ fn scoped_paths_block_dotdot_and_symlink_escapes() {
             &work,
             engine,
             &flags,
-            &format!("say fs.exists(\"{}\")", root.join("secret.txt").display()),
+            &format!("say fs.exists(\"{}\")", forge_lit(&root.join("secret.txt"))),
         );
         assert_ok(&o);
         assert_eq!(stdout(&o), "false\n");

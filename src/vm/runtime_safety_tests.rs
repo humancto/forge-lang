@@ -330,18 +330,20 @@ fn import_cycle_is_reported_once() {
     std::fs::create_dir_all(&dir).expect("mkdir");
     let a = dir.join("a.fg");
     let b = dir.join("b.fg");
+    // Forge string literals treat `\` as an escape (Windows paths).
+    let lit = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
     std::fs::write(
         &a,
-        format!("import \"{}\"\nfn fa() {{ return 1 }}\n", b.display()),
+        format!("import \"{}\"\nfn fa() {{ return 1 }}\n", lit(&b)),
     )
     .expect("write a");
     std::fs::write(
         &b,
-        format!("import \"{}\"\nfn fb() {{ return 2 }}\n", a.display()),
+        format!("import \"{}\"\nfn fb() {{ return 2 }}\n", lit(&a)),
     )
     .expect("write b");
-    let err = run_vm(&format!("import \"{}\"\nsay fa()", a.display()), false)
-        .expect_err("cycle must fail");
+    let err =
+        run_vm(&format!("import \"{}\"\nsay fa()", lit(&a)), false).expect_err("cycle must fail");
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         err.message.starts_with("circular import: "),
