@@ -453,7 +453,8 @@ impl Sandbox {
             parts.push(format!("allow_net={}", list(self.allow_net.clone())?));
         }
         if let Some(t) = self.max_time {
-            parts.push(format!("max_time={t}"));
+            // `{:?}` keeps the decimal point (`5.0`), like Python's float repr.
+            parts.push(format!("max_time={t:?}"));
         }
         if let Some(b) = self.max_output {
             parts.push(format!("max_output={b}"));

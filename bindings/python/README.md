@@ -26,10 +26,11 @@ variables, databases, subprocesses, LLM calls, or process control (`exit`,
 `cd`). Every grant is explicit:
 
 ```python
-import tempfile
+import pathlib, tempfile
 from forge_lang import Sandbox
 
-work = tempfile.mkdtemp()
+# Forward slashes, so the path is also a valid Forge string literal on Windows.
+work = pathlib.Path(tempfile.mkdtemp()).as_posix()
 sb = Sandbox(
     allow=["env"],                     # capabilities granted without restriction
     allow_read=[work],                 # fs.read only under these directories

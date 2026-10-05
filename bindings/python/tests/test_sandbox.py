@@ -60,6 +60,7 @@ def test_version_and_capabilities():
 def test_repr():
     r = repr(Sandbox(allow=["env"], max_time=1.5, max_output=10))
     assert r == "Sandbox(allow=['env'], max_time=1.5, max_output=10)"
+    assert repr(Sandbox(max_time=5)) == "Sandbox(allow=[], max_time=5.0)"
 
 
 # --- configuration validation ----------------------------------------------
