@@ -504,7 +504,9 @@ mod tests {
         std::fs::write(data.join("in.txt"), "hello").expect("write");
         std::fs::write(root.join("secret.txt"), "s3cret").expect("write");
         let sb = Sandbox::new().allow_read([&data]).allow_write([&data]);
-        let d = data.display();
+        // Forge string literals treat `\` as an escape (Windows paths).
+        let d = data.display().to_string().replace('\\', "\\\\");
+        let root_lit = root.display().to_string().replace('\\', "\\\\");
         let out = sb
             .run_source(&format!(
                 "fs.write(\"{d}/out.txt\", fs.read(\"{d}/in.txt\") + \"!\")\nsay fs.read(\"{d}/out.txt\")"
@@ -516,7 +518,7 @@ mod tests {
             "fs.read",
         );
         denied(
-            sb.run_source(&format!("fs.write(\"{}/x.txt\", \"x\")", root.display())),
+            sb.run_source(&format!("fs.write(\"{root_lit}/x.txt\", \"x\")")),
             "fs.write",
         );
         #[cfg(unix)]
@@ -530,7 +532,7 @@ mod tests {
         }
         // exists() never reveals what is outside the grant.
         let out = sb
-            .run_source(&format!("say fs.exists(\"{}/secret.txt\")", root.display()))
+            .run_source(&format!("say fs.exists(\"{root_lit}/secret.txt\")"))
             .expect("exists is not an error");
         assert_eq!(out.stdout, "false\n");
         let _ = std::fs::remove_dir_all(&root);

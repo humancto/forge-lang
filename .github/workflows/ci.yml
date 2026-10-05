@@ -44,7 +44,7 @@ jobs:
         run: |
           echo "cpus: $(getconf _NPROCESSORS_ONLN 2>/dev/null || echo "$NUMBER_OF_PROCESSORS")"
           df -h . || true
-      - run: cargo test --locked --verbose
+      - run: cargo test --locked --no-fail-fast --verbose
       - name: Runner resources after tests
         if: always()
         shell: bash
