@@ -152,6 +152,13 @@ pub struct VM {
     /// signature), hotness and deopt accounting. See `vm::jit`.
     #[cfg(feature = "jit")]
     pub jit: super::jit::tier::JitState,
+    /// Error raised inside a runtime bridge (`vm::jit::runtime`) while
+    /// native code was running. Bridges are `extern "C"` and cannot return
+    /// a `Result`, so they record the error here and return a placeholder;
+    /// `try_jit_call` turns it into the call's error. Never silently
+    /// dropped.
+    #[cfg(feature = "jit")]
+    pub(crate) jit_bridge_error: Option<VMError>,
     pub profiler: Profiler,
     skip_timeout_check_once: bool,
     /// Set by the Stream arms of `convert_to_interp_val` / `convert_interp_value`
@@ -277,6 +284,8 @@ impl VM {
             output: Vec::new(),
             #[cfg(feature = "jit")]
             jit: super::jit::tier::JitState::default(),
+            #[cfg(feature = "jit")]
+            jit_bridge_error: None,
             profiler: Profiler::new(false),
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
@@ -300,6 +309,8 @@ impl VM {
             output: Vec::new(),
             #[cfg(feature = "jit")]
             jit: super::jit::tier::JitState::default(),
+            #[cfg(feature = "jit")]
+            jit_bridge_error: None,
             profiler: Profiler::new(true),
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
@@ -1648,10 +1659,16 @@ impl VM {
     /// caller must execute the call in the VM — including after a deopt,
     /// which is safe because every compiled function is pure.
     #[cfg(feature = "jit")]
-    fn try_jit_call(&mut self, chunk: &Arc<Chunk>, args: &[Value]) -> Option<Value> {
+    fn try_jit_call(
+        &mut self,
+        chunk: &Arc<Chunk>,
+        args: &[Value],
+    ) -> Result<Option<Value>, VMError> {
         use super::jit::tier::{invoke, Invoke};
 
-        let sel = self.jit.select(chunk, args, &self.gc)?;
+        let Some(sel) = self.jit.select(chunk, args, &self.gc) else {
+            return Ok(None);
+        };
 
         // VM-state guards: the VM itself would refuse the call (stack
         // overflow), a `timeout` is active (the VM checks deadlines between
@@ -1663,14 +1680,18 @@ impl VM {
             && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
         if !guards_ok {
             self.jit.record_guard_failure(&sel);
-            return None;
+            return Ok(None);
         }
 
         let mut raw: Vec<i64> = Vec::with_capacity(args.len());
         for v in args {
             // `select` already checked every argument's kind.
-            let kind = super::jit::types::JitType::of_value(v, &self.gc)?;
-            raw.push(kind.encode(v, &self.gc)?);
+            let encoded = super::jit::types::JitType::of_value(v, &self.gc)
+                .and_then(|kind| kind.encode(v, &self.gc));
+            let Some(encoded) = encoded else {
+                return Ok(None);
+            };
+            raw.push(encoded);
         }
         let max_depth = (depth_limit - 1 - self.frames.len()) as i64;
         // SAFETY: `sel.entry` was produced by the JIT compiler owned by
@@ -1678,16 +1699,39 @@ impl VM {
         // specialization's arity (checked by `select`); `self.cancelled` is
         // alive for the duration of the call.
         let outcome = unsafe { invoke(sel.entry, &raw, max_depth, Arc::as_ptr(&self.cancelled)) };
+        // An error raised by a runtime bridge is the call's outcome. It is
+        // checked before the return/deopt result: a deopt would re-run the
+        // call in the VM and repeat the side effects that preceded the
+        // error, and a normal return would swallow it.
+        if let Some(err) = self.jit_bridge_error.take() {
+            self.jit.record_run(&sel);
+            return Err(err);
+        }
         match outcome {
             Invoke::Returned(r) => {
                 self.jit.record_run(&sel);
-                Some(sel.ret.decode(r, &mut self.gc))
+                Ok(Some(sel.ret.decode(r, &mut self.gc)))
             }
             Invoke::Deopt => {
                 self.jit.record_deopt(&sel);
-                None
+                Ok(None)
             }
         }
+    }
+
+    /// Record an error raised by a JIT runtime bridge (see
+    /// `jit_bridge_error`). The first error wins.
+    #[cfg(feature = "jit")]
+    pub(crate) fn record_jit_bridge_error(&mut self, err: VMError) {
+        if self.jit_bridge_error.is_none() {
+            self.jit_bridge_error = Some(err);
+        }
+    }
+
+    /// Take the pending bridge error, if any.
+    #[cfg(all(test, feature = "jit"))]
+    pub(crate) fn take_jit_bridge_error(&mut self) -> Option<VMError> {
+        self.jit_bridge_error.take()
     }
 
     /// True when the global named like `chunk` is a closure over the same
@@ -1740,7 +1784,7 @@ impl VM {
                         // version runs when its entry guards pass; otherwise
                         // (or on deopt) the call runs in the VM below.
                         #[cfg(feature = "jit")]
-                        if let Some(result) = self.try_jit_call(&chunk, &args) {
+                        if let Some(result) = self.try_jit_call(&chunk, &args)? {
                             if self.profiler.is_enabled()
                                 && !func_name.is_empty()
                                 && func_name != "<lambda>"

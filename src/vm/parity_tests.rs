@@ -1138,11 +1138,11 @@ fn parity_bool_ordering_is_error() {
 
 #[test]
 fn parity_yield_is_a_runtime_error_not_dropped() {
+    assert_cross_backend_error_contains("emit 1\n3", "yield/emit is not supported yet");
+    // Inside a hot function (the eager JIT tier sees it on the first call):
+    // the error must surface, never be swallowed by native code.
     assert_cross_backend_error_contains(
-        // Top level: JIT-compiled functions currently swallow errors raised
-        // by runtime-bridge calls (tracked separately), so keep this test
-        // about the compiler/interpreter contract.
-        "emit 1\n3",
+        "fn gen(n) {\n    emit n\n    return n\n}\nlet mut i = 0\nwhile i < 50 {\n    gen(i)\n    i = i + 1\n}\n3",
         "yield/emit is not supported yet",
     );
 }
