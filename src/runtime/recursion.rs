@@ -17,8 +17,10 @@
 //!      than expected.
 //! * The CLI runs programs on a thread with [`MAIN_STACK_SIZE`] bytes of stack
 //!   (registered via [`register_thread_stack`]) so the default depth limit is
-//!   reachable for ordinary recursion. Threads that never register are
-//!   assumed to have [`ASSUMED_STACK_SIZE`] (Rust's and tokio's default).
+//!   reachable for ordinary recursion. Runtime worker/blocking threads
+//!   ([`configure_runtime`]) and interpreter task threads ([`spawn_worker`])
+//!   get [`WORKER_STACK_SIZE`]. Threads that never register are assumed to
+//!   have [`ASSUMED_STACK_SIZE`] (Rust's and tokio's default).
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +31,13 @@ pub const DEFAULT_MAX_DEPTH: usize = 10_000;
 /// Stack size for the thread the CLI runs programs on. Only touched pages are
 /// committed, so a large reservation is cheap.
 pub const MAIN_STACK_SIZE: usize = 1024 * 1024 * 1024;
+
+/// Stack size for threads that run Forge code besides the CLI main thread:
+/// the tokio runtime's worker and blocking-pool threads (HTTP handlers run
+/// on the blocking pool) and interpreter `spawn`/`timeout` threads. Like
+/// [`MAIN_STACK_SIZE`] it is only reserved address space; pages are
+/// committed as recursion actually touches them.
+pub const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 /// Stack size assumed for threads that did not call [`register_thread_stack`].
 pub const ASSUMED_STACK_SIZE: usize = 2 * 1024 * 1024;
@@ -83,6 +92,33 @@ pub fn register_thread_stack(size: usize) {
     let sp = approx_stack_pointer();
     let limit = sp.saturating_sub(size.saturating_sub(red_zone(size)));
     STACK_LIMIT.with(|l| l.set(limit));
+}
+
+/// Give every thread of a tokio runtime [`WORKER_STACK_SIZE`] bytes of
+/// stack and register it with the guard. This covers the blocking pool,
+/// so HTTP handlers (run via `spawn_blocking`) get the same recursion
+/// headroom as other Forge code instead of tokio's 2 MiB default.
+pub fn configure_runtime(builder: &mut tokio::runtime::Builder) -> &mut tokio::runtime::Builder {
+    builder
+        .thread_stack_size(WORKER_STACK_SIZE)
+        .on_thread_start(|| register_thread_stack(WORKER_STACK_SIZE))
+}
+
+/// Spawn a thread for running Forge code with [`WORKER_STACK_SIZE`] bytes
+/// of registered stack, carrying the current permission policy (see
+/// [`crate::permissions::inherit`]).
+pub fn spawn_worker<F, T>(f: F) -> std::io::Result<std::thread::JoinHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let f = crate::permissions::inherit(f);
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK_SIZE)
+        .spawn(move || {
+            register_thread_stack(WORKER_STACK_SIZE);
+            f()
+        })
 }
 
 /// True when the current thread is too close to the end of its stack to

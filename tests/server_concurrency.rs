@@ -62,11 +62,21 @@ fn pick_port() -> u16 {
 /// returning the bound port. The server stays up for the test's duration
 /// and is dropped when the runtime is dropped at test exit.
 fn spawn_test_server(source: &str) -> u16 {
+    spawn_test_server_on(source, |builder| builder)
+}
+
+/// [`spawn_test_server`] with a hook to configure the runtime (e.g. with
+/// `forge_lang::runtime::recursion::configure_runtime`, as the CLI does).
+fn spawn_test_server_on(
+    source: &str,
+    configure: fn(&mut tokio::runtime::Builder) -> &mut tokio::runtime::Builder,
+) -> u16 {
     let port = pick_port();
     let src = source.replace("__PORT__", &port.to_string());
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        let rt = configure(&mut builder)
             .worker_threads(2)
             .max_blocking_threads(64)
             .enable_all()
@@ -255,9 +265,8 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
     let _exclusive = exclusive_server_test();
     // Captured-closure handler pattern. A top-level Lambda holds the
     // CPU loop; the @get fn invokes it. Different from the global-fn
-    // case in http_handlers_run_in_parallel_not_serialized: that path
-    // takes the is_global_fn fast path in call_function_inner and
-    // ignores the closure entirely. *This* path actually exercises
+    // case in http_handlers_run_in_parallel_not_serialized, which only
+    // reads the global scope through its closure. *This* path actually exercises
     // Value::Lambda::closure -- which under the pre-PR-#110 model
     // shares Arc<Mutex<Environment>> across forks, so concurrent
     // requests serialize on the closure mutex.
@@ -583,4 +592,45 @@ fn request_id_is_generated_and_propagated() {
         generated_id, id_2,
         "two server-generated request_ids should differ"
     );
+}
+
+/// Handlers run on tokio's blocking pool. With tokio's default 2 MiB
+/// thread stacks the interpreter's native-stack guard tripped at ~100
+/// levels of Forge recursion inside a handler; the CLI configures the
+/// runtime (`recursion::configure_runtime`) so blocking threads get
+/// `WORKER_STACK_SIZE` and handler recursion matches other Forge code.
+#[test]
+fn handler_recursion_gets_a_large_stack() {
+    let _exclusive = exclusive_server_test();
+    let port = spawn_test_server_on(
+        r#"
+        @server(port: __PORT__)
+
+        fn down(n) {
+            if n == 0 { return 0 }
+            return 1 + down(n - 1)
+        }
+
+        @get("/ping")
+        fn ping() -> Json {
+            return { ok: true }
+        }
+
+        @get("/deep")
+        fn deep() -> Json {
+            return { depth: down(3000) }
+        }
+        "#,
+        forge_lang::runtime::recursion::configure_runtime,
+    );
+    let body = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("client")
+        .get(format!("http://127.0.0.1:{}/deep", port))
+        .send()
+        .expect("request")
+        .text()
+        .expect("body");
+    assert!(body.contains("3000"), "deep handler failed: {}", body);
 }

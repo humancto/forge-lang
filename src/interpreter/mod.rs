@@ -2203,10 +2203,13 @@ impl Interpreter {
                 timeout_interp.env = self.env.clone();
                 timeout_interp.cancelled = cancel_flag.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
-                let handle = crate::permissions::spawn(move || {
+                let handle = crate::runtime::recursion::spawn_worker(move || {
                     let result = timeout_interp.exec_block(&body);
                     let _ = tx.send(result);
-                });
+                })
+                .map_err(|e| {
+                    RuntimeError::new(&format!("timeout: cannot start worker thread: {}", e))
+                })?;
                 match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
                     Ok(result) => {
                         let _ = handle.join();
@@ -4658,8 +4661,10 @@ impl Interpreter {
         // Propagate cancellation token so squad can cancel spawned tasks
         spawn_interp.cancelled = self.cancelled.clone();
 
-        // Always use std::thread — simpler, avoids tokio dependency issues
-        crate::permissions::spawn(move || {
+        // A plain OS thread with the same recursion headroom as the CLI
+        // (WORKER_STACK_SIZE, registered with the stack guard) and the
+        // caller's permission policy.
+        crate::runtime::recursion::spawn_worker(move || {
             let result = spawn_interp.exec_block(&body);
             let val = match result {
                 Ok(Signal::Return(v)) | Ok(Signal::ImplicitReturn(v)) => {
@@ -4673,7 +4678,8 @@ impl Interpreter {
                 *guard = Some(val);
                 cvar.notify_all();
             }
-        });
+        })
+        .map_err(|e| RuntimeError::new(&format!("spawn: cannot start task thread: {}", e)))?;
         let handle = Value::TaskHandle(result_slot);
         // If inside a squad block, register the handle for automatic join
         if let Some(ref mut handles) = self.squad_handles {
