@@ -41,4 +41,16 @@ fn cpu() -> Json {
     return { ok: true, work: total }
 }
 
+// /fib -> recursive CPU work (fib(25), ~250k calls): the shape the bytecode
+//         VM and its JIT accelerate most.
+fn fib(n) {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+@get("/fib")
+fn fib_route() -> Json {
+    return { ok: true, fib: fib(25) }
+}
+
 say "Concurrent benchmark server ready on :9090"

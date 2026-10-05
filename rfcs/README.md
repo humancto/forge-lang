@@ -48,3 +48,4 @@ How should this be implemented? What files need to change?
 | [0002](0002-http-as-primitive.md) | HTTP as a Language Primitive        | Implemented |
 | [0003](0003-dual-syntax.md)       | Dual Syntax: Classic and Natural    | Implemented |
 | [0004](0004-errors-as-values.md)  | Errors as Values                    | Implemented |
+| [0007](0007-package-registry.md)  | Package Registry: Sparse Index      | Implemented |

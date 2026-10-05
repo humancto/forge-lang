@@ -1,4 +1,9 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::interpreter::{Interpreter, RuntimeError, Value};
+use crate::vm::machine::VM;
+use crate::vm::serve::VmTemplate;
 
 use super::metadata::{RuntimePlan, SchedulePlan, WatchPlan};
 
@@ -21,6 +26,34 @@ pub async fn launch(interpreter: Interpreter, plan: &RuntimePlan) -> Result<(), 
     } else {
         Ok(())
     }
+}
+
+/// The bytecode VM counterpart of [`launch`]. `vm` has run the program's
+/// top level with [`VM::defer_host_runtime`] on; this starts the deferred
+/// `schedule` / `watch` blocks from the final state, then serves
+/// `plan.server` with handlers on per-request VM forks
+/// ([`crate::vm::serve::VmTemplate`]). `fn_params` are the program's
+/// top-level function parameter names
+/// ([`super::metadata::top_level_fn_params`]).
+pub async fn launch_vm(
+    mut vm: VM,
+    plan: &RuntimePlan,
+    fn_params: HashMap<String, Vec<String>>,
+) -> Result<(), RuntimeError> {
+    vm.launch_deferred_host_tasks();
+
+    let Some(server) = &plan.server else {
+        return Ok(());
+    };
+    if server.routes.is_empty() {
+        return Err(RuntimeError::new(
+            "@server defined but no route handlers found. Add @get/@post functions.",
+        ));
+    }
+    let template = VmTemplate::new(&vm, fn_params).map_err(|e| RuntimeError::new(&e))?;
+    // Every request forks the template; the VM that built it is not needed.
+    drop(vm);
+    super::server::serve(Arc::new(template), server).await
 }
 
 pub(crate) fn spawn_schedule(

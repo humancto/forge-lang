@@ -53,6 +53,11 @@ impl Interpreter {
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         crate::builtins_registry::check_arity(name, args.len())
             .map_err(|e| RuntimeError::new(&e))?;
+        // Native plugin functions (`import native`) share one implementation
+        // with the VM.
+        if crate::plugins::is_plugin_fn(name) {
+            return crate::plugins::call(name, args).map_err(|e| RuntimeError::new(&e));
+        }
         match name {
             "print" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();

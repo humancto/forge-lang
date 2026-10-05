@@ -1986,6 +1986,41 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
+            Stmt::ImportNative { path, binding } => {
+                // Shared with the VM (`__forge_import_native`): resolution,
+                // the `ffi` check, loading and the namespace object.
+                let base_dir = self
+                    .source_file
+                    .as_ref()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                let names = match binding {
+                    NativeBinding::Names(names) => Some(names.as_slice()),
+                    NativeBinding::Namespace(_) => None,
+                };
+                let namespace = crate::plugins::import(path, base_dir.as_deref(), names)
+                    .map_err(|e| RuntimeError::new(&e))?;
+                match binding {
+                    NativeBinding::Namespace(alias) => self.env.define(alias.clone(), namespace),
+                    NativeBinding::Names(names) => {
+                        let Value::Object(mut members) = namespace else {
+                            return Err(RuntimeError::new(
+                                "BUG: native import did not return a namespace object",
+                            ));
+                        };
+                        for name in names {
+                            let f = members.shift_remove(name).ok_or_else(|| {
+                                RuntimeError::new(&format!(
+                                    "BUG: native library '{}' lost function '{}'",
+                                    path, name
+                                ))
+                            })?;
+                            self.env.define(name.clone(), f);
+                        }
+                    }
+                }
+                Ok(Signal::None)
+            }
+
             Stmt::DecoratorStmt(dec) => {
                 let name = format!("@{}", dec.name);
                 let mut config = IndexMap::new();

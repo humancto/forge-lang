@@ -13,11 +13,19 @@ mod color;
 mod errors;
 pub mod interpreter;
 pub mod lexer;
+// `manifest`, `package` and `registry` are the CLI's package manager; the
+// library uses only import resolution from them (`package::resolve_import*`),
+// so the rest is dead code from the library's point of view (the binary
+// still reports genuinely unused items).
+#[allow(dead_code)]
 mod manifest;
 pub mod mcp;
+#[allow(dead_code)]
 mod package;
 pub mod parser;
 pub mod permissions;
+mod plugins;
+#[allow(dead_code)]
 mod registry;
 pub mod runtime;
 mod sandbox;

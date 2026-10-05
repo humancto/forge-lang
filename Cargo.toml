@@ -85,6 +85,9 @@ base64 = "0.22"
 hex = "0.4"
 hmac = "0.12"
 getrandom = "0.2"
+# Package-registry signatures (rfcs/0007). Keys are generated from getrandom
+# bytes, so the rand_core feature is not needed.
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "zeroize"] }
 
 # === URL Parsing ===
 url = "2"
@@ -119,6 +122,8 @@ cranelift-module = { version = "0.129", optional = true }
 cranelift-native = { version = "0.129", optional = true }
 gethostname = "1.1.0"
 semver = "1"
+# Native plugins (`import native`, src/plugins). dlopen/LoadLibrary wrapper.
+libloading = "0.8"
 tar = "0.4"
 
 # `forge mcp` moves the protocol off fds 0/1 so scripts cannot touch it.
@@ -160,4 +165,8 @@ harness = false
 
 [[bench]]
 name = "interpreter_hot_paths"
+harness = false
+
+[[bench]]
+name = "server_throughput"
 harness = false

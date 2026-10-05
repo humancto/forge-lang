@@ -547,16 +547,27 @@ fn vm_error_display_includes_trace() {
 }
 
 #[test]
-fn vm_compiler_rejects_standalone_decorator() {
-    let err = compile_source_result("@server(port: 8080)\n")
-        .expect_err("standalone decorators must not silently compile");
+fn vm_compiler_treats_literal_server_decorator_as_metadata() {
+    // The host runtime reads `@server` from the AST for both engines; with
+    // literal arguments there is nothing for the VM to execute.
+    assert!(compile_source_result("@server(port: 8080, cors: \"permissive\")\n").is_ok());
+}
 
-    assert!(
-        err.message
-            .contains("VM does not support standalone decorator"),
-        "unexpected error: {}",
-        err.message
-    );
+#[test]
+fn vm_compiler_rejects_standalone_decorators_it_cannot_honor() {
+    // The interpreter evaluates `@server` arguments; the VM must not drop
+    // a call silently, so the program stays on the interpreter.
+    for source in ["@server(port: pick_port())\n", "@cache(ttl: 60)\n"] {
+        let err = compile_source_result(source)
+            .expect_err("unsupported standalone decorators must not silently compile");
+        assert!(err.is_unsupported(), "unexpected error: {}", err.message);
+        assert!(
+            err.message
+                .contains("VM does not support decorator-driven runtime features"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
 }
 
 #[test]

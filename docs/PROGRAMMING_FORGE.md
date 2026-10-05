@@ -12159,6 +12159,28 @@ forge publish --registry /path/to/registry
 
 Packages the project, validates the manifest, computes SHA-256 checksums, and copies to `~/.forge/registry/<name>/<version>/`. Includes symlink protection and manifest validation.
 
+When `--registry` points at a local clone of a **sparse-index repository** (a directory containing `config.json`, see `rfcs/0007-package-registry.md`), `forge publish` instead builds a deterministic `dist/<name>-<version>.tar.gz`, appends the version's entry (dependencies, SHA-256, download URL, optional ed25519 signature) to the index, and commits it on a `publish/<name>-<version>` branch ready for a pull request:
+
+```bash
+forge publish --sign --registry ../forge-registry          # sign with ~/.forge/keys/publish.key
+forge publish --registry ../forge-registry --download-url 'https://example.com/{name}-{vers}.tar.gz'
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `--sign` | Sign the entry with your publisher key (created on first use; `$FORGE_SIGNING_KEY` overrides the path) |
+| `--download-url` | Archive URL template (`{name}`, `{vers}`); default is a GitHub release asset of `project.repository` |
+| `--out-dir` | Where to write the archive (default `./dist`) |
+| `--no-commit` | Edit the index without creating a branch and commit |
+
+#### `forge yank <NAME@VERSION> --registry <INDEX>`
+
+Mark a published version as yanked (`--undo` reverses it) in a sparse-index clone, on a `yank/<name>-<version>` branch. New resolutions skip yanked versions; projects whose `forge.lock` already pins one keep working.
+
+#### Remote registry
+
+`forge add` / `forge install` look in local registries first, then in the sparse registry at `FORGE_REGISTRY_URL` (default `https://raw.githubusercontent.com/humancto/forge-registry/main`; `file://` paths and mirrors work too). Archives are verified against their mandatory SHA-256 before extraction, signed packages have their publisher key pinned on first use (`~/.forge/trusted-keys.toml`), and `forge.lock` records `archive_checksum` and `signer` so a changed archive or key is refused. Index files are cached and revalidated with ETags (`FORGE_CACHE_TTL`, default 300 s); `FORGE_OFFLINE=1` uses only the cache; `FORGE_REQUIRE_SIGNATURES=1` refuses unsigned packages.
+
 #### `forge dap`
 
 Start the Debug Adapter Protocol server for debugger integration.

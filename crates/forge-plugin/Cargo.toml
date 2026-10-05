@@ -1,0 +1,20 @@
+[package]
+name = "forge-plugin"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "SDK for writing native Forge plugins in Rust: #[forge_fn] functions behind a stable, versioned C ABI"
+license = "MIT"
+repository = "https://github.com/humancto/forge-lang"
+homepage = "https://github.com/humancto/forge-lang"
+keywords = ["forge", "plugin", "ffi", "language"]
+categories = ["development-tools::ffi"]
+readme = "README.md"
+include = ["src/**", "include/**", "README.md", "Cargo.toml"]
+
+[dependencies]
+forge-plugin-macros = { path = "../forge-plugin-macros", version = "=0.1.0" }
+
+# Standalone on purpose: not a member of a workspace with `forge-lang`, so
+# building, testing and publishing the language crate is unaffected.
+[workspace]

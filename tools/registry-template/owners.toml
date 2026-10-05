@@ -1,0 +1,15 @@
+# Signing-key ownership (rfcs/0007-package-registry.md, "Names and namespacing").
+#
+# A [namespaces.<prefix>] rule owns every package named "<prefix>-*". A
+# [packages.<name>] rule owns one package and wins over a namespace rule.
+# Entries for an owned name must be signed by one of the listed keys
+# (`forge publish --sign` prints your key). Rotating a package's key is a
+# reviewed change here: list the old and the new key.
+#
+# [namespaces.acme]
+# keys = ["ed25519:BASE64PUBLICKEY="]
+# github = ["@acme/maintainers"]
+#
+# [packages.router]
+# keys = ["ed25519:OLDKEY=", "ed25519:NEWKEY="]
+# github = ["@someone"]
