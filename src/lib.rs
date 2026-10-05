@@ -8,6 +8,7 @@
 // use `forge_lang::Sandbox`: default-deny capabilities, explicit grants,
 // a wall-clock limit and captured output. See `src/sandbox.rs`.
 
+mod builtins_registry;
 mod errors;
 pub mod interpreter;
 pub mod lexer;

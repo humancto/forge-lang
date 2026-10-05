@@ -153,7 +153,7 @@ These rules are non-negotiable. Follow them on every change.
 6. **No `unwrap()` in production paths.** Use `?` or proper error handling. If structurally impossible, use `expect("BUG: ...")` with an explanation.
 7. **If it compiles but feels wrong, stop.** Check the design.
 8. **Never remove a working execution path.** Interpreter, VM, and JIT must all keep working.
-9. **VM parity is your responsibility.** When adding or fixing a builtin in the interpreter, port the same fix to `src/vm/builtins.rs`. The VM is not automatically in sync.
+9. **VM parity is your responsibility.** Builtin names, arities and stdlib modules come from `src/builtins_registry.rs` (both engines register from it; module members share one implementation). Global builtins still have one match arm per engine — add both (`src/interpreter/builtins.rs`, `src/vm/builtins.rs`); the registry tests fail otherwise. Shared language rules live in `src/semantics/`.
 
 ### After Every Change
 
@@ -397,6 +397,10 @@ call `tracing_init::init_subscriber()` on first use.
 - **GitHub Actions runners:** `macos-13` is deprecated. Use `macos-latest` for both ARM and x86_64 targets.
 - **Bytecode encoding:** Instructions are 32-bit. Format: `[op:8][a:8][b:8][c:8]` or `[op:8][a:8][bx:16]` or `[op:8][a:8][sbx:16]`. The `sbx` field is signed 16-bit stored as unsigned.
 - **Constant dedup:** `Chunk::add_constant()` deduplicates via `identical()`. Don't add the same constant twice — it wastes the constant pool.
+- **Builtin registry.** `src/builtins_registry.rs` is the single list of global builtins (name + arity) and stdlib modules for both engines. Never add a name to only one engine's table; the registry tests (`every_global_is_dispatched_by_both_engines`, `registry_globals_and_modules_exist_on_both_engines`) catch it. VM module calls go through `call_module` (the interpreter's stdlib code) after `args_to_interp`; do not hand-roll per-module argument conversion.
+- **VM collections are values.** `SetIndex`/`SetField` return an updated copy and the compiler stores it back into the place (`compile_store`). Never mutate an `ObjKind::Array`/`Object` in place through `gc.get_mut` from user-visible operations — aliases (`let w = z`, arguments, captured values) would observe it.
+- **Direct calls vs callbacks.** `semantics::check_call_arity` applies to direct calls (VM `Call` opcode; interpreter `Expr::Call`/pipelines). Builtins call back through `call_value`/`call_function`, which stay lenient so `map(xs, fn(x, i) {...})` keeps working.
+- **JIT bridges cannot return `Result`.** A failing `extern "C"` bridge must call `VM::record_jit_bridge_error`; `try_jit_call` raises it. Returning a placeholder without recording swallows the error.
 - **VM-interpreter parity is not automatic.** The two share no code. Every interpreter builtin fix must be manually ported to `src/vm/builtins.rs`. Known audit-tracked gaps: `sort()` string support, `split("")` char-splitting, `int(bool)`, `keys({})`, `is_some`/`is_none` — all fixed in March 2026.
 - **`sort()` with custom comparator:** `sort_by` closure borrows `self` immutably but calling `self.call_value()` needs `&mut self`. Work around by collecting items first (releasing the `gc` borrow), then sort with `call_value` on cloned items.
 - **GC borrow in closures:** Never call `self.alloc_string()` or `self.call_value()` inside a closure that still holds `self.gc.get()`. Always collect into a `Vec<String>` or `Vec<Value>` first to drop the GC borrow.

@@ -40,7 +40,7 @@ forge build --aot app.fg      # Native executable embedding bytecode (VM-only pr
 
 ### Known Gaps
 
-- The VM does not yet cover the full interpreter surface. Remaining verified gaps: default parameter values, iterating a channel with `for`, `spawn` blocks calling top-level functions, `io.args()`, and the `npc`, `url`, `toml`, `ws` modules. `--interp` remains the reference runtime; `cargo test --test engine_diff` tracks every known divergence.
+- The VM and interpreter now pass the full Forge test suite identically (`forge test --engine both`, `cargo test --test engine_diff`). Remaining known divergence: nested index assignment (`g[0][1] = v`) works on the VM but is rejected by the interpreter.
 - Decorator-driven servers always run on the interpreter (auto-fallback).
 - No capability-based sandbox: beyond `--allow-run`, the SSRF guard and `FORGE_FS_BASE`, programs have the host process's permissions.
 
@@ -56,10 +56,10 @@ Before new language surface, make what exists sound, safe, and fast on every eng
 | VM runtime safety                     | Done            | User-reachable panics converted to errors                                                  |
 | LSP rebuilt on `lsp-server`           | Done            |                                                                                           |
 | CI gates on both engines              | Done            | Test suites run against the VM and the interpreter                                         |
-| VM test-suite parity                  | In progress     | Close the Known Gaps above until the Forge test suite passes unchanged on the VM           |
-| Runtime arity checks                  | Planned         | Wrong argument counts become runtime errors on every engine, not just type-checker warnings |
+| VM test-suite parity                  | Done            | 635/635 Forge tests on both engines; single builtin registry (`src/builtins_registry.rs`)  |
+| Runtime arity checks                  | Done            | Direct calls on both engines (`semantics::check_call_arity`); method calls not yet checked  |
 | Performance pass                      | Planned         | Re-baseline VM/JIT/interpreter and server benchmarks; fix the worst regressions            |
-| Capability-based sandbox runtime      | Planned (strategic direction) | Embeddable runtime with default-deny permissions (net, fs, run, env), resource limits (time, memory, output), and an MCP "code mode" host so agents can run Forge safely |
+| Capability-based sandbox runtime      | Foundation done (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`); memory limits + MCP host next | Embeddable runtime with default-deny permissions (net, fs, run, env), resource limits (time, memory, output), and an MCP "code mode" host so agents can run Forge safely |
 
 ---
 

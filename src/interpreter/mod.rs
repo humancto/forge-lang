@@ -892,6 +892,20 @@ fn semantic_operand(value: &Value) -> crate::semantics::Operand<'_> {
     }
 }
 
+/// Arity rule for a direct call (`f(a, b)`, `x |> f`) of a user-defined
+/// function or lambda, shared with the VM through `crate::semantics`.
+/// Callbacks invoked by builtins go through `call_function` unchecked.
+fn check_direct_call_arity(func: &Value, argc: usize) -> Result<(), RuntimeError> {
+    let (name, params): (&str, &[Param]) = match func {
+        Value::Function(f) => (f.name.as_str(), &f.params),
+        Value::Lambda { params, .. } => ("", params),
+        _ => return Ok(()),
+    };
+    let required = crate::semantics::required_params(params.iter().map(|p| p.default.is_some()));
+    crate::semantics::check_call_arity(name, params.len(), required, argc)
+        .map_err(|e| RuntimeError::new(&e))
+}
+
 /// How a block expression finished.
 enum BlockExit {
     Value(Value),
@@ -1145,53 +1159,11 @@ impl Interpreter {
     }
 
     fn register_builtins(&mut self) {
-        self.env
-            .define("math".to_string(), crate::stdlib::create_math_module());
-        self.env
-            .define("fs".to_string(), crate::stdlib::create_fs_module());
-        self.env
-            .define("io".to_string(), crate::stdlib::create_io_module());
-        self.env
-            .define("crypto".to_string(), crate::stdlib::create_crypto_module());
-        self.env
-            .define("db".to_string(), crate::stdlib::create_db_module());
-        self.env
-            .define("env".to_string(), crate::stdlib::create_env_module());
-        self.env
-            .define("json".to_string(), crate::stdlib::create_json_module());
-        self.env
-            .define("regex".to_string(), crate::stdlib::create_regex_module());
-        self.env
-            .define("log".to_string(), crate::stdlib::create_log_module());
-        #[cfg(feature = "postgres")]
-        self.env
-            .define("pg".to_string(), crate::stdlib::create_pg_module());
-        self.env
-            .define("term".to_string(), crate::stdlib::create_term_module());
-        self.env
-            .define("http".to_string(), crate::stdlib::create_http_module());
-        self.env
-            .define("csv".to_string(), crate::stdlib::create_csv_module());
-        self.env
-            .define("time".to_string(), crate::stdlib::create_time_module());
-        self.env
-            .define("npc".to_string(), crate::stdlib::create_npc_module());
-        self.env
-            .define("url".to_string(), crate::stdlib::create_url_module());
-        self.env
-            .define("toml".to_string(), crate::stdlib::create_toml_module());
-        self.env
-            .define("ws".to_string(), crate::stdlib::create_ws_module());
-        self.env
-            .define("jwt".to_string(), crate::stdlib::create_jwt_module());
-        self.env
-            .define("os".to_string(), crate::stdlib::create_os_module());
-        self.env
-            .define("path".to_string(), crate::stdlib::create_path_module());
-        #[cfg(feature = "mysql")]
-        self.env
-            .define("mysql".to_string(), crate::stdlib::create_mysql_module());
-
+        // Modules and global builtins come from the shared registry so both
+        // engines expose exactly the same names (see builtins_registry.rs).
+        for module in crate::builtins_registry::modules() {
+            self.env.define(module.name.to_string(), (module.create)());
+        }
         // Prelude: Option type = Some(value) | None
         self.env
             .define("Some".to_string(), Value::BuiltIn("Some".to_string()));
@@ -1212,138 +1184,11 @@ impl Interpreter {
                 .define("__type_Option__".to_string(), Value::Object(type_meta));
         }
 
-        for name in &[
-            "print",
-            "println",
-            "len",
-            "type",
-            "typeof",
-            "str",
-            "int",
-            "float",
-            "push",
-            "pop",
-            "keys",
-            "values",
-            "contains",
-            "has_key",
-            "get",
-            "pick",
-            "omit",
-            "merge",
-            "find",
-            "flat_map",
-            "entries",
-            "from_entries",
-            "range",
-            "set",
-            "enumerate",
-            "map",
-            "filter",
-            "Ok",
-            "ok",
-            "Err",
-            "err",
-            "is_ok",
-            "is_err",
-            "unwrap",
-            "unwrap_or",
-            "unwrap_err",
-            "fetch",
-            "uuid",
-            "say",
-            "yell",
-            "whisper",
-            "wait",
-            "channel",
-            "send",
-            "receive",
-            "is_some",
-            "is_none",
-            "satisfies",
-            "assert",
-            "assert_eq",
-            "exit",
-            "run_command",
-            "shell",
-            "sh",
-            "sh_lines",
-            "sh_json",
-            "sh_ok",
-            "which",
-            "cwd",
-            "cd",
-            "lines",
-            "pipe_to",
-            "input",
-            "reduce",
-            "sort",
-            "reverse",
-            "split",
-            "join",
-            "replace",
-            "starts_with",
-            "ends_with",
-            "substring",
-            "index_of",
-            "last_index_of",
-            "pad_start",
-            "pad_end",
-            "capitalize",
-            "title",
-            "repeat_str",
-            "count",
-            "sum",
-            "min_of",
-            "max_of",
-            "any",
-            "all",
-            "unique",
-            "zip",
-            "flatten",
-            "group_by",
-            "chunk",
-            "slice",
-            "assert_ne",
-            "assert_throws",
-            "try_send",
-            "try_receive",
-            "select",
-            "close",
-            "await_all",
-            "await_timeout",
-            // GenZ Debug Kit
-            "sus",
-            "bruh",
-            "bet",
-            "no_cap",
-            "ick",
-            // Execution helpers
-            "cook",
-            "yolo",
-            "ghost",
-            "slay",
-            // String utils
-            "slugify",
-            "snake_case",
-            "camel_case",
-            // Array utils
-            "sample",
-            "shuffle",
-            "partition",
-            "diff",
-            // New collection utils
-            "sort_by",
-            "first",
-            "last",
-            "compact",
-            "take_n",
-            "skip",
-            "frequencies",
-            "for_each",
-        ] {
-            self.env
-                .define(name.to_string(), Value::BuiltIn(name.to_string()));
+        for builtin in crate::builtins_registry::GLOBALS {
+            self.env.define(
+                builtin.name.to_string(),
+                Value::BuiltIn(builtin.name.to_string()),
+            );
         }
     }
 
@@ -1361,6 +1206,9 @@ impl Interpreter {
                 self.debug_check(spanned.line);
             }
             match self.exec_stmt(&spanned.stmt) {
+                Err(e) if e.is_early_return() => {
+                    return Ok(e.propagated_value().unwrap_or(Value::Null))
+                }
                 Ok(signal) => match signal {
                     Signal::Return(v) => return Ok(v),
                     Signal::Break => return Err(RuntimeError::new("break outside of loop")),
@@ -1394,7 +1242,12 @@ impl Interpreter {
             // Expression statements are evaluated exactly once; their value
             // (unless it is an output call) is the REPL result.
             if let Stmt::Expression(ref expr) = spanned.stmt {
-                let value = self.eval_expr(expr).map_err(patch)?;
+                let value = match self.eval_expr(expr) {
+                    Err(e) if e.is_early_return() => {
+                        return Ok(e.propagated_value().unwrap_or(Value::Null))
+                    }
+                    other => other.map_err(patch)?,
+                };
                 let is_output = matches!(
                     expr,
                     Expr::Call { function, .. }
@@ -1412,7 +1265,13 @@ impl Interpreter {
                 }
                 continue;
             }
-            match self.exec_stmt(&spanned.stmt).map_err(patch)? {
+            let signal = match self.exec_stmt(&spanned.stmt) {
+                Err(e) if e.is_early_return() => {
+                    return Ok(e.propagated_value().unwrap_or(Value::Null))
+                }
+                other => other.map_err(patch)?,
+            };
+            match signal {
                 Signal::Return(v) => return Ok(v),
                 Signal::Break => return Err(RuntimeError::new("break outside of loop")),
                 Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
@@ -1906,6 +1765,7 @@ impl Interpreter {
                 catch_body,
             } => match self.exec_body(try_body) {
                 Ok(signal) => Ok(signal),
+                Err(e) if e.is_early_return() => Err(e),
                 Err(e) => {
                     self.env.push_scope();
                     let mut err_obj = IndexMap::new();
@@ -2170,11 +2030,11 @@ impl Interpreter {
                     CheckKind::Between(lo_expr, hi_expr) => {
                         let lo = self.eval_expr(lo_expr)?;
                         let hi = self.eval_expr(hi_expr)?;
-                        match (&val, &lo, &hi) {
-                            (Value::Int(v), Value::Int(l), Value::Int(h)) => v >= l && v <= h,
-                            (Value::Float(v), Value::Float(l), Value::Float(h)) => v >= l && v <= h,
-                            _ => false,
-                        }
+                        crate::semantics::between(
+                            semantic_operand(&val),
+                            semantic_operand(&lo),
+                            semantic_operand(&hi),
+                        )
                     }
                     CheckKind::IsTrue => val.is_truthy(),
                 };
@@ -2188,6 +2048,7 @@ impl Interpreter {
 
             Stmt::SafeBlock { body } => match self.exec_block(body) {
                 Ok(signal) => Ok(signal),
+                Err(e) if e.is_early_return() => Err(e),
                 Err(_) => Ok(Signal::ImplicitReturn(Value::Null)),
             },
 
@@ -3332,12 +3193,14 @@ impl Interpreter {
                 let eval_args: Result<Vec<Value>, _> =
                     args.iter().map(|a| self.eval_expr(a)).collect();
                 let eval_args = eval_args?;
+                check_direct_call_arity(&func, eval_args.len())?;
                 self.call_function(func, eval_args)
             }
 
             Expr::Pipeline { value, function } => {
                 let val = self.eval_expr(value)?;
                 let func = self.eval_expr(function)?;
+                check_direct_call_arity(&func, 1)?;
                 self.call_function(func, vec![val])
             }
 
@@ -3378,7 +3241,11 @@ impl Interpreter {
                 let result = self.eval_block_value(stmts);
                 self.env.pop_scope();
                 match result? {
-                    BlockExit::Value(v) | BlockExit::Return(v) => Ok(v),
+                    BlockExit::Value(v) => Ok(v),
+                    // `return` inside an `if`/block expression returns from
+                    // the enclosing function (same as the VM), not just
+                    // from the block.
+                    BlockExit::Return(v) => Err(RuntimeError::early_return(v)),
                 }
             }
 
@@ -3593,6 +3460,7 @@ impl Interpreter {
                         }
                         PipeStep::Apply(func_expr) => {
                             let func = self.eval_expr(func_expr)?;
+                            check_direct_call_arity(&func, 1)?;
                             self.call_function(func, vec![current])?
                         }
                     };
@@ -4608,13 +4476,8 @@ impl Interpreter {
                 let saved_env = std::mem::replace(&mut self.env, captured_env);
                 self.env.push_scope();
 
-                // Lambdas do not evaluate parameter defaults; missing
-                // arguments are null.
-                let mut args = args.into_iter();
-                for param in params.iter() {
-                    let val = args.next().unwrap_or(Value::Null);
-                    self.env.define(param.name.clone(), val);
-                }
+                // Same default-parameter rule as named functions.
+                self.bind_params(&params, args);
 
                 let result = self.exec_stmts(&body);
                 self.env.pop_scope();
@@ -4956,6 +4819,11 @@ pub struct RuntimeError {
     pub line: usize,
     pub col: usize,
     propagated: Option<Value>,
+    /// Set for a `return` executed inside a block expression
+    /// (`let x = if c { return 1 } else { 2 }`): it unwinds to the enclosing
+    /// function call like a `return` statement and is never caught by
+    /// `try`/`safe`.
+    early_return: bool,
 }
 
 impl RuntimeError {
@@ -4965,6 +4833,7 @@ impl RuntimeError {
             line: 0,
             col: 0,
             propagated: None,
+            early_return: false,
         }
     }
 
@@ -4978,7 +4847,20 @@ impl RuntimeError {
             line: 0,
             col: 0,
             propagated: Some(value),
+            early_return: false,
         }
+    }
+
+    /// `return value` from inside a block expression; see `early_return`.
+    pub fn early_return(value: Value) -> Self {
+        let mut err = Self::propagate(value);
+        err.message = crate::semantics::RETURN_OUTSIDE_FUNCTION.to_string();
+        err.early_return = true;
+        err
+    }
+
+    pub fn is_early_return(&self) -> bool {
+        self.early_return
     }
 
     pub fn propagated_value(&self) -> Option<Value> {

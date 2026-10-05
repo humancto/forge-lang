@@ -390,10 +390,4 @@ Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and
 
 ## Engine notes (v0.8.x)
 
-The default bytecode VM matches the interpreter on the Forge test suite apart from a few remaining gaps (tracked in ROADMAP.md, checked by `cargo test --test engine_diff`). On the default engine today:
-
-- default parameter values (`fn g(a, b = 10)`) are not applied — pass every argument;
-- `for m in channel { }` and `spawn { top_level_fn() }` do not work — use `receive(ch)` loops and pass functions in as values;
-- the `npc`, `url`, `toml` and `ws` modules and `io.args()` are missing.
-
-Programs the VM compiler cannot handle fall back to the interpreter automatically (as do `@server` programs); run with `forge --interp run` to force the reference interpreter.
+The default bytecode VM and the reference interpreter run the full Forge test suite identically; `cargo test --test engine_diff` gates every example and fixture on both. Programs the VM compiler cannot handle, and `@server` programs, fall back to the interpreter automatically. Force the interpreter with `forge --interp run`.

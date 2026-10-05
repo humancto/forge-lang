@@ -312,6 +312,80 @@ pub fn check_failed(displayed_value: &str) -> String {
     format!("check failed: {} did not pass validation", displayed_value)
 }
 
+/// `return` executed outside any function (top level of a program, inside
+/// a block expression). The program ends with that value on both engines.
+pub const RETURN_OUTSIDE_FUNCTION: &str = "return outside of a function";
+
+/// `check value between lo and hi`: inclusive range check. Ints and floats
+/// may be mixed (compared as floats); strings compare lexicographically.
+/// Any other combination fails the check.
+pub fn between(value: Operand<'_>, lo: Operand<'_>, hi: Operand<'_>) -> bool {
+    fn num(o: &Operand<'_>) -> Option<f64> {
+        match *o {
+            Operand::Int(n) => Some(n as f64),
+            Operand::Float(f) => Some(f),
+            _ => None,
+        }
+    }
+    match (value, lo, hi) {
+        (Operand::Int(v), Operand::Int(l), Operand::Int(h)) => l <= v && v <= h,
+        (Operand::Str(v), Operand::Str(l), Operand::Str(h)) => l <= v && v <= h,
+        (v, l, h) => match (num(&v), num(&l), num(&h)) {
+            (Some(v), Some(l), Some(h)) => l <= v && v <= h,
+            _ => false,
+        },
+    }
+}
+
+/// Parameter count rule for calling a user-defined function or lambda
+/// directly (`f(a, b)`).
+///
+/// * `params` - declared parameters;
+/// * `required` - parameters a caller must pass: everything up to and
+///   including the last parameter without a default value;
+/// * `got` - arguments passed.
+///
+/// Passing fewer than `required` or more than `params` arguments is an
+/// error. Functions invoked *by builtins* as callbacks (`map`, `filter`,
+/// `sort`, `reduce`, ...) are not subject to this rule: missing parameters
+/// are bound to `null` (or their default) and extra arguments are ignored,
+/// so `map(xs, fn(x) { ... })` and `map(xs, fn(x, i) { ... })` both work.
+pub fn check_call_arity(
+    fn_name: &str,
+    params: usize,
+    required: usize,
+    got: usize,
+) -> Result<(), String> {
+    if got >= required && got <= params {
+        return Ok(());
+    }
+    let name = if fn_name.is_empty() || fn_name == "<lambda>" {
+        "fn".to_string()
+    } else {
+        format!("fn {}", fn_name)
+    };
+    let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+    let expected = if required == params {
+        format!("{} {}", params, plural(params))
+    } else if got > params {
+        format!("at most {} {}", params, plural(params))
+    } else {
+        format!("at least {} {}", required, plural(required))
+    };
+    Err(format!("{} expects {}, got {}", name, expected, got))
+}
+
+/// Number of leading parameters a caller must pass, given which parameters
+/// have default values (see [`check_call_arity`]).
+pub fn required_params<I>(has_default: I) -> usize
+where
+    I: DoubleEndedIterator<Item = bool> + ExactSizeIterator,
+{
+    let total = has_default.len();
+    let trailing_defaults = has_default.rev().take_while(|d| *d).count();
+    total - trailing_defaults
+}
+
 /// Built-in module names that `import "<name>"` accepts as a no-op because
 /// the module is always in scope.
 pub const BUILTIN_MODULES: &[&str] = &[
@@ -337,6 +411,48 @@ pub fn import_not_found(path: &str) -> String {
 mod tests {
     use super::*;
     use Operand::*;
+
+    #[test]
+    fn between_table() {
+        assert!(between(Int(5), Int(1), Int(10)));
+        assert!(between(Int(1), Int(1), Int(10)));
+        assert!(!between(Int(11), Int(1), Int(10)));
+        assert!(between(Int(5), Float(1.0), Float(10.0)));
+        assert!(between(Float(2.5), Int(1), Int(10)));
+        assert!(between(Str("b"), Str("a"), Str("c")));
+        assert!(!between(Str("b"), Int(1), Int(10)));
+        assert!(!between(Null, Int(1), Int(10)));
+    }
+
+    #[test]
+    fn call_arity_table() {
+        assert_eq!(check_call_arity("add", 2, 2, 2), Ok(()));
+        assert_eq!(
+            check_call_arity("add", 2, 2, 1).unwrap_err(),
+            "fn add expects 2 arguments, got 1"
+        );
+        assert_eq!(
+            check_call_arity("add", 2, 2, 3).unwrap_err(),
+            "fn add expects 2 arguments, got 3"
+        );
+        assert_eq!(check_call_arity("g", 2, 1, 1), Ok(()));
+        assert_eq!(
+            check_call_arity("g", 2, 1, 0).unwrap_err(),
+            "fn g expects at least 1 argument, got 0"
+        );
+        assert_eq!(
+            check_call_arity("g", 2, 1, 3).unwrap_err(),
+            "fn g expects at most 2 arguments, got 3"
+        );
+        assert_eq!(
+            check_call_arity("<lambda>", 1, 1, 2).unwrap_err(),
+            "fn expects 1 argument, got 2"
+        );
+        assert_eq!(required_params([false, true].into_iter()), 1);
+        assert_eq!(required_params([true, false].into_iter()), 2);
+        assert_eq!(required_params([true, true].into_iter()), 0);
+        assert_eq!(required_params(std::iter::empty::<bool>()), 0);
+    }
 
     #[test]
     fn binary_table() {
