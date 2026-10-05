@@ -48,6 +48,12 @@ use parser::Parser as ForgeParser;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Charges each thread's allocations to the run's resource budget when it
+/// has a memory limit (`--max-memory`, `forge mcp`); see
+/// `runtime::limits::CountingAllocator`.
+#[global_allocator]
+static ALLOCATOR: runtime::limits::CountingAllocator = runtime::limits::CountingAllocator;
+
 #[derive(Debug)]
 enum FrontendError {
     Lex {
@@ -163,6 +169,42 @@ struct PermissionFlags {
     /// Stop the program after SECS seconds of wall-clock time (exit code 124)
     #[arg(long = "max-time", value_name = "SECS", global = true)]
     max_time: Option<f64>,
+
+    /// Deterministic step budget: fail with "fuel exhausted" after N steps
+    /// (VM: instructions; --interp: statements, calls and loop iterations).
+    /// Disables JIT tier-up.
+    #[arg(long = "max-fuel", value_name = "N", global = true)]
+    max_fuel: Option<u64>,
+
+    /// Fail with "memory limit exceeded" when the program holds more than
+    /// SIZE (bytes, or with a K/M/G suffix, e.g. 256MB)
+    #[arg(long = "max-memory", value_name = "SIZE", global = true)]
+    max_memory: Option<String>,
+}
+
+/// Resource limits from `--max-fuel` / `--max-memory`, or an error message.
+fn build_limits(flags: &PermissionFlags) -> Result<runtime::limits::Limits, String> {
+    let mut limits = runtime::limits::Limits::none();
+    if let Some(n) = flags.max_fuel {
+        if n == 0 {
+            return Err("--max-fuel must be a positive number of steps".to_string());
+        }
+        limits.max_fuel = Some(n);
+    }
+    if let Some(raw) = &flags.max_memory {
+        limits.max_memory =
+            Some(runtime::limits::parse_bytes(raw).map_err(|e| format!("--max-memory: {}", e))?);
+    }
+    Ok(limits)
+}
+
+/// A program can swallow a fatal limit error inside a builtin (e.g.
+/// `assert_throws`); the budget remembers the trip, so report it anyway.
+fn exit_if_limit_tripped() {
+    if let Some(message) = runtime::limits::current().and_then(|b| b.trip_message()) {
+        eprintln!("{}", errors::format_simple_error(&message));
+        process::exit(1);
+    }
 }
 
 /// Exit code used when `--max-time` expires (same as coreutils `timeout`).
@@ -286,8 +328,19 @@ fn apply_grants(
 }
 
 /// `forge mcp`: serve until the client closes stdin, then exit.
-fn run_mcp(caps: permissions::Capabilities, max_time: Option<f64>) -> ! {
+fn run_mcp(
+    caps: permissions::Capabilities,
+    max_time: Option<f64>,
+    limits: runtime::limits::Limits,
+) -> ! {
     let mut config = mcp::ServerConfig::new(caps);
+    // Flags override the server's default per-call limits.
+    if let Some(n) = limits.max_fuel {
+        config.limits.max_fuel = Some(n);
+    }
+    if let Some(n) = limits.max_memory {
+        config.limits.max_memory = Some(n);
+    }
     if let Some(secs) = max_time {
         match std::time::Duration::try_from_secs_f64(secs) {
             Ok(limit) if secs > 0.0 => config.max_time = limit,
@@ -556,12 +609,27 @@ async fn async_main() {
         .perms
         .max_time
         .or(toml_perms.as_ref().and_then(|p| p.max_time));
+    let limits = match build_limits(&cli.perms) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e));
+            process::exit(2);
+        }
+    };
     if let Some(Command::Mcp { allow_run }) = cli.command {
         // No process watchdog for the server: the limit applies to each
         // script instead.
         let caps = build_mcp_policy(&cli.perms, toml_perms, cli.allow_run || allow_run);
-        run_mcp(caps, max_time);
+        run_mcp(caps, max_time, limits);
     }
+    // One budget for the whole process: threads without a scope (runtime
+    // pools) see it through the global, and the scope on this thread (and
+    // every thread forked from it) also meters allocations.
+    let _limits = (!limits.is_unlimited()).then(|| {
+        let budget = runtime::limits::Budget::new(limits);
+        runtime::limits::set_global(Some(budget.clone()));
+        runtime::limits::scope(Some(budget))
+    });
     permissions::set_global(build_policy(
         &cli.perms,
         toml_perms,
@@ -1185,6 +1253,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             report_vm_error(source, filename, &e);
             process::exit(1);
         }
+        exit_if_limit_tripped();
     } else {
         let mut interpreter = Interpreter::new();
         interpreter.source = Some(source.to_string());
@@ -1218,6 +1287,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
                 process::exit(1);
             }
         }
+        exit_if_limit_tripped();
 
         let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
         if let Err(e) = runtime::host::launch(interpreter, &runtime_plan).await {
@@ -1256,7 +1326,7 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
     vm.jit.verbose = true;
 
     match vm.execute(&chunk) {
-        Ok(_) => {}
+        Ok(_) => exit_if_limit_tripped(),
         Err(e) => {
             // Use the full Display impl so the stack trace (function +
             // source line) gets printed, not just the bare message.
