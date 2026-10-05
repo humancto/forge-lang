@@ -534,11 +534,11 @@ Measured on one 4-vCPU x86_64 Linux VM (Intel Xeon @ 2.10GHz) with a release bui
 
 | Workload                             | VM (default) | `--jit` | `--interp` | Python 3.11 |
 | ------------------------------------ | -----------: | ------: | ---------: | ----------: |
-| Recursive `fib(30)`                  |      ~450 ms | ~450 ms |     ~6.7 s |     ~130 ms |
-| Numeric `while` loop, 20M iterations |        ~21 s |  ~80 ms |          — |      ~1.5 s |
+| Recursive `fib(30)`                  |       ~25 ms |  ~17 ms |     ~7.7 s |     ~120 ms |
+| Numeric `while` loop, 20M iterations |        ~18 s |  ~45 ms |          — |      ~1.0 s |
 | Startup (`forge -e 'println(1)'`)    |        ~7 ms |       — |          — |           — |
 
-The JIT compiles numeric **leaf** functions (no calls, strings, arrays, or closures) to native code; recursive functions like `fib` currently stay on the VM. VM interpretive overhead is a known Phase 0 performance item — see [ROADMAP.md](ROADMAP.md).
+The JIT compiles functions over `Int`/`Bool` values (arithmetic, comparisons, loops, self-recursion) to native code, guarded by type checks that fall back to the VM, so it never changes results. The default VM tiers a function up after 100 calls, which is why recursive `fib` is fast by default while a loop inside a function called once only runs native under `--jit`. VM interpretive overhead (~0.9 µs per loop iteration) is a known Phase 0 performance item — see [ROADMAP.md](ROADMAP.md).
 
 <details>
 <summary><strong>🌐 HTTP Server benchmark — 20,000 requests / 200 concurrent (GET /ping → JSON)</strong></summary>
