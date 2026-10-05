@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Interpreter calls are lexically scoped** — calling a top-level function used to push its scope on top of the caller's, so a callee could read its caller's locals, deeply recursive ADT `match` methods failed with "non-exhaustive match", and every global lookup cost one scope per active call (recursion slowed down linearly with depth: 20× depth-9000 recursion went from ~29s to ~0.3s).
+- **Recursion inside HTTP handlers** — handlers ran on tokio blocking threads with 2 MiB stacks, so the stack guard stopped them at ~150 frames. The CLI and standalone binaries now give runtime threads (and interpreter `spawn`/`timeout` threads) a 256 MiB reserved stack registered with the guard.
+- **`a.push(f())` no longer loses changes `f` makes to `a`** — the in-place mutating methods now apply to the variable's value after the argument is evaluated.
 - **VM closures created in loops capture a fresh binding per iteration** — `for i in range(0, 3) { fs = push(fs, fn() { return i }) }` now yields `[0, 1, 2]` on the VM (was `[0, 0, 0]`). The compiler closes captured upvalues when a scope ends (new `CloseUpvalues` opcode, also on `break`/`continue` and catch paths), so a local read after being captured is no longer stale, and closures can capture variables from a grandparent function.
 - **VM `continue` inside `for` loops no longer hangs** — it jumped back to the loop test without advancing the index.
 - **VM block expressions and implicit returns produce values** — `let x = if c { 1 } else { 2 }`, `when` / `safe` expressions and `fn f() { x * 2 }` evaluated to `null` on the VM. The interpreter no longer evaluates expression statements inside `if` expressions twice.
@@ -92,6 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Tree-walking interpreter performance** — no more quadratic loops: `a.push(x)` / `a = push(a, x)` (100k items: >150s → 0.05s), `s = s + t` / `s += t` (200k chars: 1.8s → 0.08s), `a[i]`, `obj.k`, `len(a)`, `s.has(x)`, `m.get(k)` and `a[i] = v` now work on the variable in place instead of deep-copying it. Function values are shared by `Arc` (fib(30): 7.2s → 1.4s), and scopes keep values and mutability in one compact table. Benchmarks: `cargo bench --bench interpreter_hot_paths`, `tools/bench_interp.sh`.
 - **Shell-permission error text** — denied `sh`/`shell`/`run_command`/... now report `permission denied: run (shell execution) — run with --allow-run or grant it in the host policy` (was `Shell execution denied. Use --allow-run ...`).
 - **`FORGE_FS_BASE` covers more file access** — `csv.read`/`csv.write`, `toml.read`, `env.load`, SQLite `db.open` files and `http.download` destinations are now confined like `fs.*`.
 - **Documentation refreshed for v0.8.x and `llms.txt` added** — README, CLAUDE.md, ROADMAP.md (new Phase 0 hardening section), SECURITY.md (0.8.x support, `--allow-run`, SSRF guard, `FORGE_FS_BASE`) and the book's CLI sections now match current behavior: VM is the default engine, engine flags go before the subcommand, native builds are standalone when `libforge_lang.a` is available, and performance numbers are re-measured. New `llms.txt` is a compact, verified guide to canonical Forge for AI models.
