@@ -12,6 +12,7 @@ mod learn;
 mod lexer;
 mod lsp;
 mod manifest;
+mod mcp;
 mod native;
 mod package;
 mod parser;
@@ -20,6 +21,9 @@ mod publish;
 mod registry;
 mod repl;
 mod runtime;
+// The binary only uses the sandbox through `forge mcp`.
+#[allow(dead_code)]
+mod sandbox;
 mod scaffold;
 mod semantics;
 mod stdlib;
@@ -207,12 +211,50 @@ fn build_policy(
     use permissions::{Capabilities, Capability};
     let toml = toml.unwrap_or_default();
     let sandboxed = flags.sandbox || toml.sandbox;
-    let mut caps = if sandboxed {
+    let caps = if sandboxed {
         // The CLI owns its process: exit()/cd() stay available.
         Capabilities::deny_all().grant(Capability::Process)
     } else {
         Capabilities::cli_default()
     };
+    let mut caps = apply_grants(caps, flags, &toml);
+    // REPL and -e are user-invoked contexts — shell execution stays allowed
+    // there unless the user explicitly asked for a sandbox.
+    let run = allow_run || toml.allow_run.unwrap_or(false) || (is_interactive && !sandboxed);
+    caps.set(Capability::Run, run);
+    // Modules next to the entry script (and installed packages) stay
+    // importable even when fs.read is scoped elsewhere.
+    if let Some(root) = import_root {
+        caps = caps.grant_import_root(root);
+    }
+    caps.grant_import_root("forge_modules")
+}
+
+/// The policy for scripts run by `forge mcp`: always default-deny
+/// (including `process`, so a script cannot end the server), plus exactly
+/// the grants from the flags and forge.toml. `run` needs an explicit
+/// `--allow-run` / `allow-run = true`; `sandbox = false` is ignored.
+fn build_mcp_policy(
+    flags: &PermissionFlags,
+    toml: Option<manifest::PermissionsConfig>,
+    allow_run: bool,
+) -> permissions::Capabilities {
+    use permissions::{Capabilities, Capability};
+    let toml = toml.unwrap_or_default();
+    let mut caps = apply_grants(Capabilities::deny_all(), flags, &toml);
+    caps.set(Capability::Run, allow_run || toml.allow_run == Some(true));
+    caps
+}
+
+/// Apply the fs/net/env/db/ai grants from CLI flags and forge.toml (flags
+/// win per capability). `run` and `process` are left to the caller.
+fn apply_grants(
+    mut caps: permissions::Capabilities,
+    flags: &PermissionFlags,
+    toml: &manifest::PermissionsConfig,
+) -> permissions::Capabilities {
+    use permissions::Capability;
+    let toml = toml.clone();
     let cli_list = |v: &Option<Vec<String>>| v.clone().map(manifest::GrantSpec::List);
     caps = apply_scoped_grant(
         caps,
@@ -240,16 +282,42 @@ fn build_policy(
             caps.set(cap, b);
         }
     }
-    // REPL and -e are user-invoked contexts — shell execution stays allowed
-    // there unless the user explicitly asked for a sandbox.
-    let run = allow_run || toml.allow_run.unwrap_or(false) || (is_interactive && !sandboxed);
-    caps.set(Capability::Run, run);
-    // Modules next to the entry script (and installed packages) stay
-    // importable even when fs.read is scoped elsewhere.
-    if let Some(root) = import_root {
-        caps = caps.grant_import_root(root);
+    caps
+}
+
+/// `forge mcp`: serve until the client closes stdin, then exit.
+fn run_mcp(caps: permissions::Capabilities, max_time: Option<f64>) -> ! {
+    let mut config = mcp::ServerConfig::new(caps);
+    if let Some(secs) = max_time {
+        match std::time::Duration::try_from_secs_f64(secs) {
+            Ok(limit) if secs > 0.0 => config.max_time = limit,
+            _ => {
+                eprintln!(
+                    "{}",
+                    errors::format_simple_error("--max-time must be a positive number of seconds")
+                );
+                process::exit(2);
+            }
+        }
     }
-    caps.grant_import_root("forge_modules")
+    // Nothing on this side of the protocol runs user code; scripts get the
+    // configured policy on their own sandbox threads.
+    permissions::set_global(permissions::Capabilities::deny_all());
+    eprintln!(
+        "forge mcp {}: {}",
+        env!("CARGO_PKG_VERSION"),
+        config.policy_summary()
+    );
+    match mcp::serve_stdio(config) {
+        Ok(()) => process::exit(0),
+        Err(e) => {
+            eprintln!(
+                "{}",
+                errors::format_simple_error(&format!("forge mcp: {}", e))
+            );
+            process::exit(1);
+        }
+    }
 }
 
 /// Enforce `--max-time` on every engine: after `secs`, flush output, report
@@ -367,6 +435,20 @@ enum Command {
     Lsp,
     /// Start the Debug Adapter Protocol server
     Dap,
+    /// Serve the Model Context Protocol over stdio so AI agents can run
+    /// Forge code in a sandbox (tools: run_forge, check_forge,
+    /// forge_reference). Scripts are denied everything (files, network,
+    /// env, db, subprocesses, AI) unless granted with --allow-* flags or
+    /// [permissions] in forge.toml; --max-time caps each call (default 30s).
+    #[command(
+        after_help = "Example (Claude Desktop / Claude Code config):\n  {\"command\": \"forge\", \"args\": [\"mcp\", \"--allow-net=api.example.com\"]}"
+    )]
+    Mcp {
+        /// Let scripts run subprocesses (sh, run_command, ...). Never granted
+        /// by default.
+        #[arg(long = "allow-run")]
+        allow_run: bool,
+    },
     /// Interactive tutorials to learn Forge
     Learn {
         /// Lesson number (optional)
@@ -444,7 +526,7 @@ async fn async_main() {
     // forge.toml [permissions] applies to commands that execute the project.
     let toml_perms = if matches!(
         cli.command,
-        Some(Command::Run { .. } | Command::Test { .. })
+        Some(Command::Run { .. } | Command::Test { .. } | Command::Mcp { .. })
     ) {
         match manifest::load_permissions() {
             Ok(p) => p,
@@ -474,6 +556,12 @@ async fn async_main() {
         .perms
         .max_time
         .or(toml_perms.as_ref().and_then(|p| p.max_time));
+    if let Some(Command::Mcp { allow_run }) = cli.command {
+        // No process watchdog for the server: the limit applies to each
+        // script instead.
+        let caps = build_mcp_policy(&cli.perms, toml_perms, cli.allow_run || allow_run);
+        run_mcp(caps, max_time);
+    }
     permissions::set_global(build_policy(
         &cli.perms,
         toml_perms,
@@ -660,6 +748,9 @@ async fn async_main() {
         }
         Some(Command::Dap) => {
             dap::run_dap();
+        }
+        Some(Command::Mcp { .. }) => {
+            unreachable!("BUG: forge mcp is dispatched before the CLI policy is installed")
         }
         Some(Command::Learn { lesson }) => {
             learn::run_learn(lesson);
