@@ -1,0 +1,28 @@
+// VM benchmark: Mandelbrot set membership on a 200x200 grid, 50 iterations
+// per point. Pure Float arithmetic in counting loops (Float JIT tier).
+fn mandelbrot(size, max_iter) {
+    let mut inside = 0
+    for py in range(size) {
+        let ci = 2.0 * py / size - 1.0
+        for px in range(size) {
+            let cr = 2.0 * px / size - 1.5
+            let mut zr = 0.0
+            let mut zi = 0.0
+            let mut i = 0
+            while i < max_iter {
+                let tr = zr * zr - zi * zi + cr
+                zi = 2.0 * zr * zi + ci
+                zr = tr
+                if zr * zr + zi * zi > 4.0 {
+                    break
+                }
+                i = i + 1
+            }
+            if i == max_iter {
+                inside = inside + 1
+            }
+        }
+    }
+    return inside
+}
+println(mandelbrot(200, 50))
