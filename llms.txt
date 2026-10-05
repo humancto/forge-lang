@@ -348,6 +348,8 @@ println(await_timeout(t, 10))  // null on timeout (milliseconds)
 
 Also: `try_send`, `try_receive`, `select(channels, timeout_ms?)`, `close(ch)`.
 
+Tasks communicate through return values (`squad` results, `await`) and channels. Do not mutate captured variables from inside `spawn` and expect the parent to see it: the default VM gives each task its own copy (the `--interp` engine shares closure state).
+
 ## HTTP server
 
 ```forge

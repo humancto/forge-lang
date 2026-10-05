@@ -135,6 +135,7 @@ forge test --coverage # with line coverage report
 - Use `--interp` for full feature coverage, `--jit` for maximum numeric performance
 - `forge build --native` / `--aot` produce standalone executables when `libforge_lang.a` is found (via `FORGE_LIB_DIR` or next to the `forge` binary); otherwise they fall back to a launcher that shells into an installed `forge`. `--aot` is VM-only and rejects decorator-driven servers — use `--native` for those.
 - Shell builtins (`sh`, `shell`, `run_command`, `pipe_to`, ...) require `--allow-run` for `forge run`; the REPL and `-e` enable it automatically.
+- Shell builtins run through `src/runtime/shell.rs`: `/bin/sh -c` on Unix; on Windows a POSIX `sh` on `PATH`, else `cmd /d /s /c "..."` (command passed verbatim); `FORGE_SHELL` overrides. `which` honors `PATHEXT` on Windows.
 - `regex` functions take `(text, pattern)` order, not `(pattern, text)`
 - Result constructors accept both cases: `Ok(42)`/`ok(42)`, `Err("msg")`/`err("msg")`
 
@@ -291,6 +292,20 @@ program's `Interpreter` is wrapped in a read-only
 | `spawn_task` (squad `spawn` blocks) | No (shallow on closures) | Squad is opt-in concurrency. `let counter = make_counter(); squad { spawn { counter() } spawn { counter() } }` legitimately wants accumulation. |
 | `fork_for_background_runtime` (schedule/watch) | No (shallow on closures) | Schedule blocks want state continuity across iterations. |
 
+Squad-shared state: in the interpreter, `count = count + 1`, `o.n += 1`,
+`a[i] = a[i] + 1` (effect-free right operand and indexes) are atomic per
+operation, so concurrent spawns calling a shared closure do not lose
+updates (#128, `squad_shared_closure_updates_are_atomic`). Other
+read-modify-writes (`x = x + f()`) are not. **Known engine divergence:**
+the VM's `spawn` gives each task *copies* of globals and captured upvalues
+(`fork_for_spawn` / `transfer_closure`; each thread has its own GC heap),
+so writes inside a task are invisible to the parent and to other tasks —
+three `spawn { bump() }` calling `let bump = fn() { count = count + 1 }`
+leave `count` at `3` on `--interp` and `0` on the default VM.
+Portable code returns values from `spawn` (the `squad` result array,
+`await`) or uses channels; it never relies on mutating captured state.
+Making the VM share would need thread-safe shared upvalue cells.
+
 **Observability:**
 
 The HTTP server and the Forge `log` stdlib emit structured events
@@ -299,18 +314,31 @@ through `tracing` (see `src/runtime/tracing_init.rs`).
 | Env var | Values | Default |
 |---|---|---|
 | `FORGE_LOG_FORMAT` | `pretty` / `compact` / `json` | `pretty` on TTY, `compact` when piped |
-| `FORGE_LOG` | any `tracing_subscriber::EnvFilter` directive | falls back to `RUST_LOG`, then to `forge_lang=info,tower_http=info,axum=warn,forge.user=info` |
+| `FORGE_LOG` | any `tracing_subscriber::EnvFilter` directive | falls back to `RUST_LOG`, then to `forge=info,forge_lang=info,tower_http=info,axum=warn,forge.user=info,forge.runtime=info,forge.panic=error` (`forge=info` matters: the CLI binary compiles the runtime itself, so its module-path targets are `forge::...`) |
 
 Stable target names:
 - `forge.server` — server lifecycle (startup, panic, shutdown, cancel-on-drop).
 - `forge.user` — user-emitted events from the Forge `log` stdlib module.
 - `tower_http::trace::*` — per-request HTTP span and response event from `TraceLayer`.
+- `forge.runtime` — CLI runtime notes (e.g. VM-to-interpreter fallback; JSON mode only, text otherwise).
+- `forge.panic` — Rust panics, emitted by the hook `init_subscriber` installs
+  (`install_panic_hook`). If the filter disables this target the previous
+  (default) hook prints the panic instead — a panic is never swallowed.
+- `forge_lang::runtime::client` span `http.client.request` — one per
+  outbound HTTP request (method + host only; never the full URL).
+
+`tests/observability_cli.rs` pins the JSON contract by running the `forge`
+binary (one subscriber per process): every stderr line parses, user events
+carry `timestamp`/`level`/`target`/`fields.message`, and a request produces
+`tower_http::trace::on_response` with `status`/`latency` inside the `request`
+span (`method`/`uri`/`request_id`).
 
 OpenTelemetry/OTLP export (behind `otel` Cargo feature, off by default):
 - Build with `cargo build --features otel` (or set in `Cargo.toml` for
   service projects). Adds ~30 transitive crates (tonic, prost, hyper).
-- Activate at runtime by setting `OTEL_EXPORTER_OTLP_ENDPOINT`
-  (e.g. `http://localhost:4317`).
+- Activate at runtime by setting `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://localhost:4317`); the
+  signal-specific one wins (`tracing_init::traces_endpoint`).
 - Honors standard OTel env vars via `Resource::builder()`:
   - `OTEL_SERVICE_NAME` (default `"forge"`)
   - `OTEL_RESOURCE_ATTRIBUTES` (parsed by `EnvResourceDetector`)
@@ -325,13 +353,19 @@ OpenTelemetry/OTLP export (behind `otel` Cargo feature, off by default):
 - `init_subscriber()` consults `OTEL_PROVIDER` and attaches the OTel
   layer at the Registry level (innermost). Layers can't be added
   after `try_init`, so `init_otel` MUST run before `init_subscriber`.
-- Default sampling is "send everything." For production high-RPS
-  services, configure your collector to sample. `OTEL_TRACES_SAMPLER`
-  support is a follow-up.
+- Sampling follows `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`
+  (`always_on`, `always_off`, `traceidratio`, `parentbased_always_on`
+  (default), `parentbased_always_off`, `parentbased_traceidratio`).
+  Invalid values fall back to the default with a stderr warning
+  (`tracing_init::SamplerConfig`).
 - Only gRPC is wired (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`). Other
   protocols are silently ignored.
-- Outbound `traceparent` injection in the HTTP client is not yet
-  wired (separate follow-up).
+- Outbound requests (`client::fetch`, `http.download`, `http.crawl`)
+  open `client::request_span` and send its W3C `traceparent` via
+  `client::inject_trace_context` (a caller-set `traceparent` header wins).
+  Any new outbound HTTP path must do the same. Compute the span on the
+  calling thread, before any `block_on`, so it parents under the
+  handler's request span. Tested in `tests/otel_propagation.rs`.
 
 Per-request `X-Request-Id`:
 - `tower_http::request_id::SetRequestIdLayer` assigns a UUID v4 to
@@ -420,6 +454,9 @@ call `tracing_init::init_subscriber()` on first use.
 - **Reading a variable copies it.** `Environment::get` deep-clones (strings, arrays, objects are owned). Hot paths must borrow via `Environment::with_value` / `with_value_mut` / `with_binding_mut` (see `src/interpreter/places.rs`). The callback runs under the scope `Mutex`, which is not re-entrant: it must not touch the environment or run Forge code — evaluate operands first, and only reorder evaluation when the operand `is_effect_free`.
 - **Statement bodies don't produce values.** Loop bodies, statement `if` branches, `match` arms and `try`/`catch` run via `exec_body`, which evaluates a trailing expression for effect only (so a trailing `out.push(x)` does not copy `out`). Only `when`/`safe` statement values are consumed by `eval_block_value`; if that changes, `exec_body` callers must change too.
 - **Arc-backed `Value::String`/`Array`/`Object` is blocked on the VM.** `src/vm` constructs and destructures `interpreter::Value::{Array, Object, Set, Map, Tuple, String}` with owned payloads, so moving them to `Arc` (copy-on-write, and hashed Set/Map indexes) needs a coordinated VM change.
+- **One shell implementation.** Every builtin that runs a command string goes through `runtime::shell` (`command`/`output`/`succeeds`/`pipe`, `which`, `resolve_program`). Never call `Command::new("/bin/sh")` or `/usr/bin/which` directly; cmd.exe needs `raw_arg` (MSVCRT `.arg()` escaping is not undone by cmd). Feeding a child's stdin must happen on a separate thread from reading its output (`shell::pipe`), or large I/O deadlocks.
+- **Shared-state atomicity in squads (interpreter).** Spawned tasks share state captured by closures. `x = x op e` / `x op= e` and the field/index forms (`o.f op= e`, `a[i] = a[i] op e`, nested chains) are one read-modify-write under the scope lock *only* when `e` and the indexes are effect-free (`try_update_ident` / `try_update_place` in `places.rs`). Anything else (e.g. `x = x + f()`, `x = g(x)`) reads and writes under separate locks and can lose updates; use channels or the `squad` result array for cross-task aggregation. Never evaluate Forge code while holding a scope lock.
+- **Panics go through `tracing`.** `init_subscriber` installs `install_panic_hook`: an `ERROR` event on `forge.panic`, falling back to the previous hook when that target is filtered out. Keep `forge.panic=error` in `DEFAULT_FILTER`.
 - **Threads that run Forge code need a registered stack.** Use `recursion::spawn_worker` (std threads) or `recursion::configure_runtime` (tokio runtimes); an unregistered thread is assumed to have 2 MiB and the guard stops recursion early.
 
 ## Module Dependency Map
