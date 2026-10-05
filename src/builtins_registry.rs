@@ -312,6 +312,81 @@ pub fn call_module(qualified: &str, args: Vec<Value>) -> Option<Result<Value, St
     module_for(qualified).map(|m| (m.call)(qualified, args))
 }
 
+/// A builtin (global or `module.member`) scheduled for removal.
+///
+/// Deprecation policy (docs/STABILITY.md): a deprecated builtin keeps
+/// working and warns for at least one minor release before it is removed
+/// (never within a patch release); after 1.0 removal waits for the next
+/// edition. Add an entry here when deprecating — both engines call
+/// [`warn_if_deprecated`] on every builtin call, so the warning is
+/// engine-independent.
+#[derive(Debug)]
+pub struct Deprecation {
+    /// Builtin name as called (`"typeof"`, `"fs.read"`).
+    pub name: &'static str,
+    /// Release that deprecated it (`"0.9.0"`).
+    pub since: &'static str,
+    /// Earliest release that may remove it.
+    pub removal: &'static str,
+    /// What to use instead.
+    pub replacement: &'static str,
+}
+
+/// Builtins that are deprecated today. Empty: nothing is deprecated yet.
+pub static DEPRECATED: &[Deprecation] = &[];
+
+/// Warn-once bookkeeping over a deprecation table.
+pub struct DeprecationRegistry {
+    entries: &'static [Deprecation],
+    warned: std::sync::Mutex<Vec<&'static str>>,
+}
+
+impl DeprecationRegistry {
+    pub const fn new(entries: &'static [Deprecation]) -> Self {
+        Self {
+            entries,
+            warned: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The entry for `name`, if it is deprecated.
+    pub fn lookup(&self, name: &str) -> Option<&'static Deprecation> {
+        self.entries.iter().find(|d| d.name == name)
+    }
+
+    /// The warning to print for a call of `name`: `Some` the first time a
+    /// deprecated builtin is called in this process, `None` otherwise.
+    pub fn first_use(&self, name: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let entry = self.lookup(name)?;
+        let mut warned = self.warned.lock().unwrap_or_else(|p| p.into_inner());
+        if warned.contains(&entry.name) {
+            return None;
+        }
+        warned.push(entry.name);
+        Some(format!(
+            "`{}` is deprecated since v{} and may be removed in v{}; use {} instead",
+            entry.name, entry.since, entry.removal, entry.replacement
+        ))
+    }
+}
+
+static DEPRECATIONS: DeprecationRegistry = DeprecationRegistry::new(DEPRECATED);
+
+/// Print a one-time warning to stderr when `name` is deprecated. Called by
+/// both engines' builtin dispatch; free when nothing is deprecated.
+#[inline]
+pub fn warn_if_deprecated(name: &str) {
+    if DEPRECATED.is_empty() {
+        return;
+    }
+    if let Some(warning) = DEPRECATIONS.first_use(name) {
+        eprintln!("{}", crate::errors::format_warning(&warning));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +483,36 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "builtins not dispatched: {:?}", missing);
+    }
+
+    #[test]
+    fn deprecated_builtins_warn_once() {
+        static TABLE: &[Deprecation] = &[Deprecation {
+            name: "typeof",
+            since: "0.9.0",
+            removal: "0.11.0",
+            replacement: "`type`",
+        }];
+        let registry = DeprecationRegistry::new(TABLE);
+        let first = registry.first_use("typeof").expect("first call warns");
+        assert!(
+            first.contains("`typeof` is deprecated since v0.9.0"),
+            "{first}"
+        );
+        assert!(first.contains("use `type` instead"), "{first}");
+        assert_eq!(registry.first_use("typeof"), None, "warns only once");
+        assert_eq!(registry.first_use("type"), None, "not deprecated");
+        assert!(DeprecationRegistry::new(&[]).first_use("typeof").is_none());
+    }
+
+    /// Every deprecated name must still exist (deprecation is not removal)
+    /// and say what replaces it.
+    #[test]
+    fn deprecated_builtins_still_exist() {
+        for d in DEPRECATED {
+            let exists = global(d.name).is_some() || module_for(d.name).is_some();
+            assert!(exists, "deprecated builtin {} is not registered", d.name);
+            assert!(!d.replacement.is_empty() && !d.since.is_empty() && !d.removal.is_empty());
+        }
     }
 }

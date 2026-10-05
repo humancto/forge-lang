@@ -18,11 +18,58 @@ impl VM {
     /// native call goes through this wrapper.
     pub(super) fn call_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
         crate::builtins_registry::check_arity(name, args.len()).map_err(|e| VMError::new(&e))?;
+        crate::builtins_registry::warn_if_deprecated(name);
+        // Values are `Copy`; keep the leading arguments (pinned below until
+        // `exit_native`) to describe them if the builtin rejects them.
+        let mut leading = [Value::null(); crate::semantics::errors::MAX_ANNOTATED_ARGS];
+        let argc = args.len().min(leading.len());
+        leading[..argc].copy_from_slice(&args[..argc]);
         let scope = self.gc.enter_native();
         self.gc.pin_values(&args);
-        let result = self.dispatch_native(name, args);
+        let mut result = self.dispatch_native(name, args);
+        if let Err(e) = &mut result {
+            // `get_string_arg` does not know which builtin called it; name
+            // it the way the interpreter's builtins do.
+            if e.message == "expected string argument" {
+                e.message = format!("{}() requires a string", name);
+            }
+            let mut types = [""; crate::semantics::errors::MAX_ANNOTATED_ARGS];
+            for (slot, value) in types.iter_mut().zip(&leading[..argc]) {
+                *slot = self.user_type_name(*value);
+            }
+            if let Some(message) =
+                crate::semantics::errors::annotate_builtin_error(name, &e.message, &types[..argc])
+            {
+                e.message = message;
+            }
+        }
         self.gc.exit_native(scope);
         result
+    }
+
+    /// The user-facing type name of `value` in error messages, matching the
+    /// interpreter's (`Option` values are ADT objects here, frozen values
+    /// are described by their contents).
+    fn user_type_name(&self, value: Value) -> &'static str {
+        if let Some(obj) = value.as_obj().and_then(|r| self.gc.get(r)) {
+            match &obj.kind {
+                ObjKind::Frozen(inner) => return self.user_type_name(*inner),
+                ObjKind::Object(map) => {
+                    let is_option = map
+                        .get("__type__")
+                        .and_then(|t| t.as_obj())
+                        .and_then(|r| self.gc.get(r))
+                        .is_some_and(
+                            |o| matches!(&o.kind, ObjKind::String(s) if s.as_str() == "Option"),
+                        );
+                    if is_option {
+                        return "Option";
+                    }
+                }
+                _ => {}
+            }
+        }
+        crate::semantics::errors::user_type_name(value.type_name(&self.gc))
     }
 
     /// Run a stdlib module member through the shared implementation in

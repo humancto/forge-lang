@@ -50,7 +50,31 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
 }
 
 impl Interpreter {
+    /// Call builtin `name`. Argument errors raised by the builtin itself
+    /// are annotated with the argument types (`len() requires ... (got
+    /// Int)`), exactly as the VM does (`semantics::errors`).
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        crate::builtins_registry::warn_if_deprecated(name);
+        let mut types = [""; crate::semantics::errors::MAX_ANNOTATED_ARGS];
+        let argc = args.len().min(crate::semantics::errors::MAX_ANNOTATED_ARGS);
+        for (slot, arg) in types.iter_mut().zip(&args) {
+            *slot = crate::semantics::errors::user_type_name(arg.type_name());
+        }
+        self.call_builtin_unannotated(name, args).map_err(|mut e| {
+            if let Some(message) =
+                crate::semantics::errors::annotate_builtin_error(name, &e.message, &types[..argc])
+            {
+                e.message = message;
+            }
+            e
+        })
+    }
+
+    fn call_builtin_unannotated(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
         crate::builtins_registry::check_arity(name, args.len())
             .map_err(|e| RuntimeError::new(&e))?;
         // Native plugin functions (`import native`) share one implementation
