@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Native plugins: call Rust and C from Forge** — `import native "path/libfoo" [as foo]` and `import { add } from native "path/libfoo"` load a shared library (platform suffix resolved) that implements Forge's versioned C plugin ABI (v1, `crates/forge-plugin/include/forge_plugin.h`) and call its functions with typed values (null/bool/int/float/string/bytes/array/object) on both engines. Plugin errors and panics become catchable Forge errors. New SDK crate `crates/forge-plugin` with `#[forge_fn]` and `export!`; examples in `examples/plugins/hello_rust` and `examples/plugins/hello_c`. Design: `rfcs/0006-native-plugins.md`.
+- **`ffi` capability and `--allow-ffi[=PATHS]`** (also `allow-ffi` in `forge.toml`, `Sandbox::allow_ffi`) — loading native code is full trust, so it is opt-in for `forge run`/`forge test`, allowed in the REPL and `-e`, and denied under `--sandbox`, in `forge mcp` and in embedded sandboxes unless granted.
+
 ## [0.9.0] - 2026-10-05
 
 Highlights: the default VM is now trustworthy (a guarded, verified JIT tier; GC rooting; full VM/interpreter parity on the test suite), much faster (VM and interpreter performance passes), and Forge gains a capability-based sandbox (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`) plus `forge mcp`, an MCP server that lets AI agents run sandboxed Forge code.
