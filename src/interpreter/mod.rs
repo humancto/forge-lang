@@ -994,7 +994,18 @@ pub struct Interpreter {
     /// Public so the HTTP server can swap in a per-request token wired to
     /// the response-future Drop guard for client-disconnect cancellation.
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancellation flags of the contexts that started this one (the
+    /// program around a `squad`, the caller of a `timeout` block). Setting
+    /// any of them cancels this interpreter too, so a host's cancel or
+    /// deadline reaches every task the program started. See
+    /// [`Interpreter::is_cancelled`] and [`Interpreter::child_context`].
+    ancestor_cancels: Vec<Arc<std::sync::atomic::AtomicBool>>,
     defer_host_runtime: bool,
+    /// Output byte budget shared by every interpreter of one sandboxed run:
+    /// `(bytes accepted so far, limit)`. Once the count passes the limit,
+    /// further output is dropped (the host reports the overflow), so a
+    /// print loop cannot grow the capture between host polls.
+    pub(crate) output_budget: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
     /// Instance methods: type_name -> { method_name -> Value::Function }
     pub method_tables: HashMap<String, IndexMap<String, Value>>,
     /// Static methods: type_name -> { method_name -> Value::Function }
@@ -1027,7 +1038,9 @@ impl Interpreter {
             env: Environment::new(),
             call_depth: 0,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ancestor_cancels: Vec::new(),
             defer_host_runtime: false,
+            output_budget: None,
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
@@ -1047,6 +1060,75 @@ impl Interpreter {
 
     pub(crate) fn set_defer_host_runtime(&mut self, defer: bool) {
         self.defer_host_runtime = defer;
+    }
+
+    /// Whether this interpreter, or any context that started it, has been
+    /// cancelled. Every safe point and every blocking wait polls this.
+    pub fn is_cancelled(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.cancelled.load(Ordering::Acquire)
+            || self
+                .ancestor_cancels
+                .iter()
+                .any(|flag| flag.load(Ordering::Acquire))
+    }
+
+    /// A fresh interpreter for code this one starts on its behalf: an
+    /// imported module, a `timeout` body, a spawned task.
+    ///
+    /// # Invariant
+    ///
+    /// Every such child must be created here (or get the same treatment) so
+    /// it carries the run's *containment*: the same cancellation (a host
+    /// deadline or cancel stops it), the same output capture and budget,
+    /// and the same "no host runtime" mode (a sandboxed run never starts
+    /// `schedule`/`watch` threads, even from an import or a task). A bare
+    /// `Interpreter::new()` would escape all three.
+    pub(crate) fn child_context(&self) -> Interpreter {
+        let mut child = Interpreter::new();
+        child.cancelled = self.cancelled.clone();
+        child.ancestor_cancels = self.ancestor_cancels.clone();
+        child.defer_host_runtime = self.defer_host_runtime;
+        child.output_sink = self.output_sink.clone();
+        child.output_budget = self.output_budget.clone();
+        child
+    }
+
+    /// Block until a spawned task has stored its result, then take it.
+    /// Cancellable (see [`Interpreter::wait_cancellable`]).
+    pub(crate) fn take_task_result(
+        &self,
+        slot: &(std::sync::Mutex<Option<Value>>, std::sync::Condvar),
+    ) -> Result<Value, RuntimeError> {
+        let (lock, cvar) = slot;
+        self.wait_cancellable(|slice| {
+            let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = if guard.is_none() {
+                cvar.wait_timeout(guard, slice)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
+            } else {
+                guard
+            };
+            guard.take()
+        })
+    }
+
+    /// Wait for a task/channel result, waking every `CANCEL_POLL` to honour
+    /// cancellation. `ready` returns `Some` once the value is available.
+    pub(crate) fn wait_cancellable<T>(
+        &self,
+        mut ready: impl FnMut(std::time::Duration) -> Option<T>,
+    ) -> Result<T, RuntimeError> {
+        const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+        loop {
+            if self.is_cancelled() {
+                return Err(RuntimeError::new("cancelled"));
+            }
+            if let Some(v) = ready(CANCEL_POLL) {
+                return Ok(v);
+            }
+        }
     }
 
     /// Debug-only safety check: walk the env and panic if any reachable
@@ -1310,7 +1392,7 @@ impl Interpreter {
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Signal, RuntimeError> {
         // Cooperative cancellation check (used by timeout blocks)
-        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        if self.is_cancelled() {
             return Err(RuntimeError::new("cancelled"));
         }
         match stmt {
@@ -1662,16 +1744,21 @@ impl Interpreter {
                         }
                     }
                     Value::Channel(ch) => loop {
-                        let val = {
-                            let rx_guard = ch.rx.lock().expect("BUG: channel mutex poisoned");
+                        // `None` = channel closed; waits stay cancellable.
+                        let next = self.wait_cancellable(|slice| {
+                            let rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
                             match rx_guard.as_ref() {
-                                Some(rx) => match rx.recv() {
-                                    Ok(v) => v,
-                                    Err(_) => break,
+                                Some(rx) => match rx.recv_timeout(slice) {
+                                    Ok(v) => Some(Some(v)),
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                        Some(None)
+                                    }
                                 },
-                                None => break,
+                                None => Some(None),
                             }
-                        };
+                        })?;
+                        let Some(val) = next else { break };
                         self.env.push_scope();
                         self.env.define(var.clone(), val);
                         match self.exec_loop_body(body)? {
@@ -1824,10 +1911,10 @@ impl Interpreter {
                 // this module on the import chain while it runs.
                 let _import_guard = crate::runtime::imports::enter_import(&file_path)
                     .map_err(|msg| RuntimeError::new(&msg))?;
-                let mut import_interp = Interpreter::new();
+                // Same containment as ours: cancellation, output capture,
+                // and no host runtime (see `child_context`).
+                let mut import_interp = self.child_context();
                 import_interp.source_file = Some(file_path.clone());
-                // Module top-level output goes where ours goes (sandbox/DAP capture).
-                import_interp.output_sink = self.output_sink.clone();
                 import_interp.run(&program)?;
 
                 if let Some(name_list) = names {
@@ -2047,10 +2134,12 @@ impl Interpreter {
                 };
                 let body = body.clone();
                 let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let mut timeout_interp = Interpreter::new();
-                timeout_interp.env = self.env.clone();
+                // The body gets its own flag (the deadline below) *and* ours
+                // as an ancestor, so cancelling this program stops it too.
+                let mut timeout_interp = self.child_context();
+                timeout_interp.ancestor_cancels.push(self.cancelled.clone());
                 timeout_interp.cancelled = cancel_flag.clone();
-                timeout_interp.output_sink = self.output_sink.clone();
+                timeout_interp.env = self.env.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 let handle = crate::runtime::recursion::spawn_worker(move || {
                     let result = timeout_interp.exec_block(&body);
@@ -2059,7 +2148,33 @@ impl Interpreter {
                 .map_err(|e| {
                     RuntimeError::new(&format!("timeout: cannot start worker thread: {}", e))
                 })?;
-                match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+                // Wait for the body or the deadline, waking up regularly so
+                // a cancel of *this* program is not held up by a long limit.
+                let deadline =
+                    std::time::Instant::now().checked_add(std::time::Duration::from_secs(secs));
+                let outcome = loop {
+                    let slice = match deadline {
+                        Some(d) => d.saturating_duration_since(std::time::Instant::now()),
+                        None => std::time::Duration::from_millis(50),
+                    }
+                    .min(std::time::Duration::from_millis(50));
+                    match rx.recv_timeout(slice) {
+                        Ok(result) => break Ok(result),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            break Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if self.is_cancelled() {
+                                cancel_flag.store(true, std::sync::atomic::Ordering::Release);
+                                return Err(RuntimeError::new("cancelled"));
+                            }
+                            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                                break Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+                            }
+                        }
+                    }
+                };
+                match outcome {
                     Ok(result) => {
                         let _ = handle.join();
                         result.map(|_| Signal::None)
@@ -2268,7 +2383,7 @@ impl Interpreter {
                 then_body,
                 else_body,
             } => {
-                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                if self.is_cancelled() {
                     return Err(RuntimeError::new("cancelled"));
                 }
                 let cond = self.eval_expr(condition).map_err(patch_err)?;
@@ -2288,7 +2403,7 @@ impl Interpreter {
                 }
             }
             Stmt::Match { subject, arms } => {
-                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                if self.is_cancelled() {
                     return Err(RuntimeError::new("cancelled"));
                 }
                 let val = self.eval_expr(subject).map_err(patch_err)?;
@@ -2342,6 +2457,11 @@ impl Interpreter {
     /// a block expression (`RuntimeError::loop_escape`) ends here as the
     /// matching loop signal.
     fn exec_loop_body(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        // Safe point per iteration: an empty body (`while true { }`) runs no
+        // statement, so the per-statement check alone never fires.
+        if self.is_cancelled() {
+            return Err(RuntimeError::new("cancelled"));
+        }
         match self.exec_body(stmts) {
             Err(e) => match e.loop_escape {
                 Some(LoopEscape::Break) => Ok(Signal::Break),
@@ -2469,7 +2589,7 @@ impl Interpreter {
                     .wait_timeout(resumed, std::time::Duration::from_millis(50))
                     .unwrap_or_else(|e| e.into_inner());
                 resumed = result.0;
-                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                if self.is_cancelled() {
                     return;
                 }
             }
@@ -2479,14 +2599,27 @@ impl Interpreter {
     /// Write output to sink (for DAP) or stdout
     pub fn write_output(&self, text: &str, newline: bool) {
         if let Some(ref sink) = self.output_sink {
-            if let Ok(mut buf) = sink.lock() {
-                if newline {
-                    buf.push(format!("{}\n", text));
-                } else {
-                    buf.push(text.to_string());
+            if let Some((used, limit)) = &self.output_budget {
+                // Accept output until the budget is passed (the chunk that
+                // passes it is kept so the host sees the overflow), then
+                // drop everything and stop the program.
+                let len = text.len() + usize::from(newline);
+                let before = used.fetch_add(len, std::sync::atomic::Ordering::AcqRel);
+                if before > *limit {
+                    self.cancelled
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    return;
                 }
-                return;
             }
+            // A poisoned sink still captures: output must never fall back to
+            // the host's stdout once a capture is installed.
+            let mut buf = sink.lock().unwrap_or_else(|e| e.into_inner());
+            if newline {
+                buf.push(format!("{}\n", text));
+            } else {
+                buf.push(text.to_string());
+            }
+            return;
         }
         if newline {
             println!("{}", text);
@@ -3377,16 +3510,7 @@ impl Interpreter {
                 let val = self.eval_expr(inner)?;
                 match val {
                     Value::TaskHandle(slot) => {
-                        let (lock, cvar) = &*slot;
-                        let mut guard = lock
-                            .lock()
-                            .map_err(|_| RuntimeError::new("await: task handle lock poisoned"))?;
-                        while guard.is_none() {
-                            guard = cvar
-                                .wait(guard)
-                                .map_err(|_| RuntimeError::new("await: condvar wait failed"))?;
-                        }
-                        let result = guard.take().unwrap_or(Value::Null);
+                        let result = self.take_task_result(&slot)?;
                         match result {
                             Value::ResultOk(v) => Ok(*v),
                             Value::ResultErr(e) => {
@@ -4639,13 +4763,11 @@ impl Interpreter {
         let result_slot: Arc<(std::sync::Mutex<Option<Value>>, std::sync::Condvar)> =
             Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
         let slot_clone = result_slot.clone();
-        let mut spawn_interp = Interpreter::new();
+        // Same containment as the parent (see `child_context`): its
+        // cancellation token (so squad and the host can cancel the task),
+        // its output capture, and no host runtime.
+        let mut spawn_interp = self.child_context();
         spawn_interp.env = self.env.deep_clone();
-        // Propagate cancellation token so squad can cancel spawned tasks
-        spawn_interp.cancelled = self.cancelled.clone();
-        // Output from the task must reach the same capture (sandbox/DAP) as
-        // the parent's, never the host's stdout.
-        spawn_interp.output_sink = self.output_sink.clone();
 
         // A plain OS thread with the same recursion headroom as the CLI
         // (WORKER_STACK_SIZE, registered with the stack guard) and the
@@ -4682,9 +4804,12 @@ impl Interpreter {
         self.squad_handles = Some(Vec::new());
 
         // Create a fresh cancellation token for this squad's tasks
+        // The outer token stays an ancestor, so cancelling the program (a
+        // host deadline) still reaches the squad body and its tasks.
         let outer_cancelled = self.cancelled.clone();
         let squad_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.cancelled = squad_cancel.clone();
+        self.ancestor_cancels.push(outer_cancelled.clone());
 
         // Execute the body — spawns will register handles via squad_handles
         let body_result = self.exec_block(body);
@@ -4694,6 +4819,7 @@ impl Interpreter {
 
         // Restore outer state
         self.squad_handles = outer_handles;
+        self.ancestor_cancels.pop();
         self.cancelled = outer_cancelled;
 
         // If the body itself errored, cancel all tasks and join

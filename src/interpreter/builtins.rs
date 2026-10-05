@@ -492,7 +492,7 @@ impl Interpreter {
                     let total_ms = ((*secs).max(0) as u64).saturating_mul(1000);
                     let mut elapsed = 0u64;
                     while elapsed < total_ms {
-                        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        if self.is_cancelled() {
                             return Err(RuntimeError::new("cancelled"));
                         }
                         let chunk = std::cmp::min(100, total_ms - elapsed);
@@ -505,7 +505,7 @@ impl Interpreter {
                     let total_ms = (secs.max(0.0) * 1000.0) as u64;
                     let mut elapsed = 0u64;
                     while elapsed < total_ms {
-                        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        if self.is_cancelled() {
                             return Err(RuntimeError::new("cancelled"));
                         }
                         let chunk = std::cmp::min(100, total_ms - elapsed);
@@ -571,15 +571,22 @@ impl Interpreter {
                 };
                 match ch {
                     Value::Channel(inner) => {
-                        if let Ok(guard) = inner.rx.lock() {
-                            if let Some(ref receiver) = *guard {
-                                match receiver.recv() {
-                                    Ok(val) => return Ok(val),
-                                    Err(_) => return Ok(Value::Null),
-                                }
-                            }
-                        }
-                        Ok(Value::Null)
+                        // Block until a value arrives or the channel closes,
+                        // but stay cancellable (host deadline / squad).
+                        let inner = inner.clone();
+                        self.wait_cancellable(|slice| match inner.rx.lock() {
+                            Ok(guard) => match guard.as_ref() {
+                                Some(receiver) => match receiver.recv_timeout(slice) {
+                                    Ok(val) => Some(val),
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                        Some(Value::Null)
+                                    }
+                                },
+                                None => Some(Value::Null),
+                            },
+                            Err(_) => Some(Value::Null),
+                        })
                     }
                     _ => Err(RuntimeError::new(
                         "receive() requires a channel as first argument",
@@ -1443,6 +1450,9 @@ impl Interpreter {
                     if all_closed {
                         return Ok(Value::Null);
                     }
+                    if self.is_cancelled() {
+                        return Err(RuntimeError::new("cancelled"));
+                    }
                     if let Some(ms) = timeout_ms {
                         if start.elapsed().as_millis() >= ms {
                             return Ok(Value::Null);
@@ -1482,12 +1492,7 @@ impl Interpreter {
                 for (i, handle) in handles.into_iter().enumerate() {
                     match handle {
                         Value::TaskHandle(slot) => {
-                            let (lock, cvar) = &*slot;
-                            let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                            while guard.is_none() {
-                                guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
-                            }
-                            let result = guard.take().unwrap_or(Value::Null);
+                            let result = self.take_task_result(&slot)?;
                             match result {
                                 Value::ResultOk(v) => results.push(*v),
                                 Value::ResultErr(e) => {
@@ -1554,6 +1559,11 @@ impl Interpreter {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
                 self.write_output(&text.join(" "), false);
                 Ok(Value::Null)
+            }
+            // `time.sleep` blocks like `wait`, so it must stay cancellable
+            // (a sandbox deadline cannot otherwise reclaim the thread).
+            "time.sleep" if matches!(args.first(), Some(Value::Int(_) | Value::Float(_))) => {
+                self.call_builtin("wait", args)
             }
             // Every stdlib module member is implemented once, in the shared
             // registry (`builtins_registry`), for both engines.
@@ -1677,6 +1687,9 @@ impl Interpreter {
                 Ok(Value::Bool(status.success()))
             }
             "which" => {
+                // Spawns `which` and reveals the host's PATH/installed tools:
+                // a subprocess, so it needs `run` like the other shell helpers.
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("which() requires a command name")),
@@ -1687,9 +1700,6 @@ impl Interpreter {
                 match result {
                     Ok(output) if output.status.success() => Ok(Value::String(
                         String::from_utf8_lossy(&output.stdout).trim().to_string(),
-                // Spawns `which` and reveals the host's PATH/installed tools:
-                // a subprocess, so it needs `run` like the other shell helpers.
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                     )),
                     _ => Ok(Value::Null),
                 }
