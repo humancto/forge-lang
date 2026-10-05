@@ -314,11 +314,12 @@ pub fn publish_to_index(opts: &IndexPublishOptions) -> Result<Published, String>
         published: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
 
-    if opts.sign {
-        let key_path = opts
-            .key_path
-            .clone()
-            .unwrap_or_else(signing::default_key_path);
+    let key_path = opts
+        .key_path
+        .clone()
+        .unwrap_or_else(signing::default_key_path);
+    // A dry run never creates a key; it signs only with an existing one.
+    if opts.sign && !(opts.dry_run && !key_path.exists()) {
         let (key, created) = signing::load_or_create_key(&key_path)?;
         if created {
             crate::color::cprintln!(
@@ -594,6 +595,26 @@ mod tests {
             .contains("already yanked"));
         yank(&idx, "kv", "0.1.0", true, false).unwrap();
         assert!(!read_entries(&idx, "kv").unwrap()[0].yanked);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dry_run_has_no_side_effects() {
+        let root = temp("dryrun");
+        let p = root.join("p");
+        let idx = root.join("index");
+        project(&p, "kv", "0.1.0", "");
+        index_repo(&idx);
+        let mut o = opts(&p, &idx);
+        o.dry_run = true;
+        o.sign = true;
+        o.key_path = Some(root.join("key"));
+        let published = publish_to_index(&o).unwrap();
+        assert!(published.dry_run);
+        assert!(published.archive_size > 0);
+        assert!(!root.join("key").exists(), "dry run must not create a key");
+        assert!(!published.archive.exists());
+        assert!(read_entries(&idx, "kv").unwrap().is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
