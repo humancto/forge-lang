@@ -7325,3 +7325,215 @@ fn call_cost_does_not_grow_with_recursion_depth() {
         deep
     );
 }
+
+// ----- In-place reads and updates (places.rs) -------------------------------
+
+fn display_of(source: &str) -> String {
+    format!("{}", run_forge(source))
+}
+
+#[test]
+fn in_place_push_keeps_value_semantics() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut a = [1]
+            let b = a
+            a.push(2)
+            push(a, 3)
+            a = push(a, 4)
+            [a, b]
+            "#
+        ),
+        "[[1, 2, 3, 4], [1]]"
+    );
+}
+
+#[test]
+fn in_place_push_still_evaluates_to_the_array() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut a = []
+            let r = a.push(1)
+            fn add_one(xs) {
+                let mut ys = xs
+                ys.push(9)
+            }
+            [r, add_one([5])]
+            "#
+        ),
+        "[[1], [5, 9]]"
+    );
+}
+
+#[test]
+fn trailing_push_in_loop_body_mutates() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut out = []
+            for x in [1, 2, 3] {
+                if x != 2 { out.push(x * 10) }
+            }
+            let mut i = 0
+            while i < 2 {
+                i = i + 1
+                out.push(i)
+            }
+            out
+            "#
+        ),
+        "[10, 30, 1, 2]"
+    );
+}
+
+#[test]
+fn push_argument_runs_before_mutation() {
+    // The mutating method applies to the variable's value after its
+    // argument is evaluated, so the inner push is not lost.
+    assert_eq!(
+        display_of(
+            r#"
+            let mut a = [1]
+            fn grow() {
+                a.push(2)
+                return 3
+            }
+            a.push(grow())
+            a
+            "#
+        ),
+        "[1, 2, 3]"
+    );
+}
+
+#[test]
+fn in_place_pop_add_remove() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut a = [1, 2, 3]
+            let last = a.pop()
+            let first_pop = pop(a)
+            let mut s = set([1, 2])
+            s.add(3)
+            s.add(2)
+            s.remove(1)
+            [last, first_pop, a, s.has(3), s.has(1), len(s)]
+            "#
+        ),
+        "[3, 2, [1], true, false, 2]"
+    );
+}
+
+#[test]
+fn self_concat_appends_and_converts() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut s = "a"
+            s = s + "b"
+            s += 1
+            s = s + str(2) + "!"
+            let t = s
+            s += "?"
+            [s, t]
+            "#
+        ),
+        "[ab12!?, ab12!]"
+    );
+}
+
+#[test]
+fn self_update_with_user_call_keeps_old_value() {
+    // `s = s + f()` where f reassigns s: the left operand is the value
+    // read before the call (not taken by the in-place path).
+    assert_eq!(
+        display_of(
+            r#"
+            let mut s = "x"
+            fn bump() {
+                s = "zzz"
+                return "y"
+            }
+            s = s + bump()
+            s
+            "#
+        ),
+        "xy"
+    );
+}
+
+#[test]
+fn self_update_respects_immutability_and_numbers() {
+    let err = try_run_forge("let s = \"a\"\ns = s + \"b\"\n").expect_err("immutable");
+    assert!(err.message.contains("immutable"), "{}", err.message);
+    assert_eq!(display_of("let mut n = 5\nn = n * 3\nn -= 1\nn"), "14");
+}
+
+#[test]
+fn in_place_index_and_field_assignment() {
+    assert_eq!(
+        display_of(
+            r#"
+            let mut grid = [[0, 0], [0, 0]]
+            let snapshot = grid
+            let mut row = grid[1]
+            row[0] = 7
+            grid[1] = row
+            grid[-1] = [grid[-1][0], 99]
+            let mut o = { a: 1 }
+            o.b = 2
+            o["c"] = 3
+            [grid, snapshot, o]
+            "#
+        ),
+        r#"[[[0, 0], [7, 99]], [[0, 0], [0, 0]], { "a": 1, "b": 2, "c": 3 }]"#
+    );
+}
+
+#[test]
+fn in_place_assignment_errors_keep_their_order() {
+    let frozen = try_run_forge("let mut a = freeze([1])\na[0] = 2\n").expect_err("frozen");
+    assert!(frozen.message.contains("frozen"), "{}", frozen.message);
+    let immutable = try_run_forge("let a = [1]\na[0] = 2\n").expect_err("immutable");
+    assert!(
+        immutable.message.contains("immutable"),
+        "{}",
+        immutable.message
+    );
+    let oob = try_run_forge("let a = [1]\na[5] = 2\n").expect_err("oob");
+    assert!(oob.message.contains("out of bounds"), "{}", oob.message);
+    let undefined = try_run_forge("nope[0] = 1\n").expect_err("undefined");
+    assert!(undefined.message.contains("nope"), "{}", undefined.message);
+}
+
+#[test]
+fn borrowed_reads_match_copying_reads() {
+    assert_eq!(
+        display_of(
+            r#"
+            let a = [10, 20, 30]
+            let o = { k: "v" }
+            let m = map([["x", 1]])
+            [a[1], a[-1], o.k, o["k"], len(a), contains(a, 20), m.get("x"), m.has("y"), m.len()]
+            "#
+        ),
+        "[20, 30, v, v, 3, true, 1, false, 1]"
+    );
+}
+
+#[test]
+fn shadowed_len_is_not_bypassed() {
+    assert_eq!(
+        display_of(
+            r#"
+            fn len(x) { return "mine" }
+            let a = [1, 2]
+            len(a)
+            "#
+        ),
+        "mine"
+    );
+}

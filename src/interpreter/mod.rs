@@ -1,4 +1,5 @@
 mod builtins; // call_builtin — extracted for readability
+mod places; // in-place reads and updates of variables
 use crate::parser::ast::*;
 /// Forge Tree-Walk Interpreter
 /// Walks the AST and executes it directly.
@@ -605,6 +606,25 @@ impl Environment {
             }
         }
         Err(RuntimeError::new(&format!("undefined variable: {}", name)))
+    }
+
+    /// Raw access to the innermost binding of `name` together with its
+    /// mutability, for callers that must order their own checks (index
+    /// assignment reports a frozen value before an immutable binding).
+    /// Returns `None` when `name` is unbound. `f` must not access this
+    /// environment.
+    pub(crate) fn with_binding_mut<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut Value, bool) -> R,
+    ) -> Option<R> {
+        for scope in self.scopes.iter().rev() {
+            let mut guard = lock_scope(scope);
+            if let Some(binding) = guard.get_mut(name) {
+                return Some(f(&mut binding.value, binding.mutable));
+            }
+        }
+        None
     }
 
     pub(crate) fn is_mutable(&self, name: &str) -> Option<bool> {
@@ -1420,77 +1440,21 @@ impl Interpreter {
             }
 
             Stmt::Assign { target, value } => {
+                // Variable, field and index targets are handled in place
+                // (see places.rs); this is the general path for `x = expr`
+                // and the error for anything else.
+                if let Some(result) = self.try_assign_in_place(target, value) {
+                    result?;
+                    return Ok(Signal::None);
+                }
                 let val = self.eval_expr(value)?;
                 match target {
                     Expr::Ident(name) => self.env.set(name, val)?,
-                    Expr::FieldAccess { object, field } => {
-                        let name = if let Expr::Ident(n) = object.as_ref() {
-                            n.clone()
-                        } else {
-                            return Err(RuntimeError::new("can only assign to variable fields"));
-                        };
-                        let obj = self
-                            .env
-                            .get(&name)
-                            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", name)))?;
-                        if obj.is_frozen() {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot modify frozen value '{}': field '{}'",
-                                name, field
-                            )));
-                        }
-                        let mut obj = obj;
-                        if let Value::Object(ref mut map) = obj {
-                            map.insert(field.clone(), val);
-                        }
-                        self.env.set(&name, obj)?;
+                    Expr::FieldAccess { .. } => {
+                        return Err(RuntimeError::new("can only assign to variable fields"))
                     }
-                    Expr::Index { object, index } => {
-                        let name = if let Expr::Ident(n) = object.as_ref() {
-                            n.clone()
-                        } else {
-                            return Err(RuntimeError::new("can only assign to variable indices"));
-                        };
-                        let idx = self.eval_expr(index)?;
-                        let existing = self
-                            .env
-                            .get(&name)
-                            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", name)))?;
-                        if existing.is_frozen() {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot modify frozen value '{}': index assignment",
-                                name
-                            )));
-                        }
-                        let mut container = existing;
-                        match (&mut container, &idx) {
-                            (Value::Array(items), Value::Int(i)) => {
-                                let len = items.len();
-                                let slot = crate::semantics::normalize_index(*i, len).ok_or_else(
-                                    || {
-                                        RuntimeError::new(&crate::semantics::index_out_of_bounds(
-                                            *i, "array", len,
-                                        ))
-                                    },
-                                )?;
-                                items[slot] = val;
-                            }
-                            (Value::Object(map), Value::String(key)) => {
-                                map.insert(key.clone(), val);
-                            }
-                            (Value::Array(_) | Value::Object(_), other) => {
-                                return Err(RuntimeError::new(&crate::semantics::invalid_index(
-                                    container.type_name(),
-                                    other.type_name(),
-                                )));
-                            }
-                            (other, _) => {
-                                return Err(RuntimeError::new(
-                                    &crate::semantics::invalid_index_assign(other.type_name()),
-                                ));
-                            }
-                        }
-                        self.env.set(&name, container)?;
+                    Expr::Index { .. } => {
+                        return Err(RuntimeError::new("can only assign to variable indices"))
                     }
                     _ => return Err(RuntimeError::new("invalid assignment target")),
                 }
@@ -1701,9 +1665,9 @@ impl Interpreter {
             } => {
                 let cond = self.eval_expr(condition)?;
                 if cond.is_truthy() {
-                    self.exec_block(then_body)
+                    self.exec_body(then_body)
                 } else if let Some(else_b) = else_body {
-                    self.exec_block(else_b)
+                    self.exec_body(else_b)
                 } else {
                     Ok(Signal::None)
                 }
@@ -1761,7 +1725,7 @@ impl Interpreter {
                     if self.match_pattern(&arm.pattern, &val) {
                         self.env.push_scope();
                         self.bind_pattern(&arm.pattern, &val);
-                        let result = self.exec_block(&arm.body);
+                        let result = self.exec_body(&arm.body);
                         self.env.pop_scope();
                         return result;
                     }
@@ -1781,7 +1745,7 @@ impl Interpreter {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
-                            match self.exec_block(body)? {
+                            match self.exec_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1807,7 +1771,7 @@ impl Interpreter {
                             if let Some(v2) = var2 {
                                 self.env.define(v2.clone(), val);
                             }
-                            match self.exec_block(body)? {
+                            match self.exec_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1835,7 +1799,7 @@ impl Interpreter {
                             } else {
                                 self.env.define(var.clone(), Value::Tuple(vec![key, val]));
                             }
-                            match self.exec_block(body)? {
+                            match self.exec_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1867,7 +1831,7 @@ impl Interpreter {
                         };
                         self.env.push_scope();
                         self.env.define(var.clone(), val);
-                        match self.exec_block(body)? {
+                        match self.exec_body(body)? {
                             Signal::Break => {
                                 self.env.pop_scope();
                                 break;
@@ -1900,7 +1864,7 @@ impl Interpreter {
                     if !cond.is_truthy() {
                         break;
                     }
-                    match self.exec_block(body)? {
+                    match self.exec_body(body)? {
                         Signal::Break => break,
                         Signal::Continue => continue,
                         Signal::Return(v) => return Ok(Signal::Return(v)),
@@ -1912,7 +1876,7 @@ impl Interpreter {
 
             Stmt::Loop { body } => {
                 loop {
-                    match self.exec_block(body)? {
+                    match self.exec_body(body)? {
                         Signal::Break => break,
                         Signal::Continue => continue,
                         Signal::Return(v) => return Ok(Signal::Return(v)),
@@ -1940,7 +1904,7 @@ impl Interpreter {
                 try_body,
                 catch_var,
                 catch_body,
-            } => match self.exec_block(try_body) {
+            } => match self.exec_body(try_body) {
                 Ok(signal) => Ok(signal),
                 Err(e) => {
                     self.env.push_scope();
@@ -1967,7 +1931,7 @@ impl Interpreter {
                     self.env.define(catch_var.clone(), Value::Object(err_obj));
                     // FIX: was `result.unwrap_or(Signal::None);` — the semicolon
                     // silently discarded errors from the catch body itself.
-                    let catch_result = self.exec_block(catch_body);
+                    let catch_result = self.exec_body(catch_body);
                     self.env.pop_scope();
                     match catch_result {
                         Ok(sig) => Ok(sig),
@@ -2267,7 +2231,7 @@ impl Interpreter {
                 };
                 let mut last_err = String::new();
                 for attempt in 0..max {
-                    match self.exec_block(body) {
+                    match self.exec_body(body) {
                         Ok(signal) => return Ok(signal),
                         Err(e) => {
                             last_err = e.message.clone();
@@ -2343,7 +2307,7 @@ impl Interpreter {
             }
 
             Stmt::Expression(expr) => {
-                self.eval_expr(expr)?;
+                self.eval_expr_stmt(expr, false)?;
                 Ok(Signal::None)
             }
         }
@@ -2414,10 +2378,35 @@ impl Interpreter {
         result
     }
 
+    /// Run the body of a statement (loop body, `if` branch, `match` arm,
+    /// `try`/`catch` block) in a new scope. Such bodies never produce a
+    /// value — `exec_stmts` and `eval_block_value` drop the
+    /// `ImplicitReturn` payload of every statement except `when`/`safe` —
+    /// so their final expression is evaluated for effect only, which lets
+    /// a trailing `out.push(x)` mutate in place without copying `out`.
+    fn exec_body(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        self.env.push_scope();
+        let result = self.exec_stmts_with(stmts, false);
+        self.env.pop_scope();
+        result
+    }
+
     fn exec_stmts(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        self.exec_stmts_with(stmts, true)
+    }
+
+    /// Execute statements, returning `ImplicitReturn(v)` where `v` is the
+    /// value of a trailing expression statement. With `keep_value == false`
+    /// the caller promises to ignore `v`, so it is not materialised.
+    fn exec_stmts_with(
+        &mut self,
+        stmts: &[SpannedStmt],
+        keep_value: bool,
+    ) -> Result<Signal, RuntimeError> {
         let mut result = Signal::None;
         let mut last_expr_value = Value::Null;
-        for s in stmts {
+        let last_index = stmts.len().saturating_sub(1);
+        for (index, s) in stmts.iter().enumerate() {
             self.current_line = s.line;
             if let Some(ref mut cov) = self.coverage {
                 if s.line > 0 {
@@ -2429,7 +2418,8 @@ impl Interpreter {
             }
             let stmt = &s.stmt;
             if let Stmt::Expression(expr) = stmt {
-                last_expr_value = self.eval_expr(expr).map_err(|mut e| {
+                let want_value = keep_value && index == last_index;
+                last_expr_value = self.eval_expr_stmt(expr, want_value).map_err(|mut e| {
                     if e.line == 0 {
                         e.line = s.line;
                         e.col = s.col;
@@ -2671,205 +2661,49 @@ impl Interpreter {
             }
 
             Expr::FieldAccess { object, field } => {
-                let obj = self.eval_expr(object)?;
-                // Unwrap Frozen for read access
-                let inner = match &obj {
-                    Value::Frozen(v) => v.as_ref(),
-                    other => other,
-                };
-                match inner {
-                    Value::Object(map) => {
-                        // Direct field access
-                        if let Some(val) = map.get(field) {
-                            return Ok(val.clone());
-                        }
-                        // Embedded field delegation: check embedded sub-objects
-                        if let Some(Value::String(type_name)) = map.get("__type__") {
-                            if let Some(embeds) = self.embedded_fields.get(type_name).cloned() {
-                                for (embed_field, _embed_type) in &embeds {
-                                    if let Some(Value::Object(sub)) = map.get(embed_field) {
-                                        if let Some(val) = sub.get(field) {
-                                            return Ok(val.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(RuntimeError::new(&format!(
-                            "no field '{}' on object",
-                            field
-                        )))
+                // Read a field of a variable in place instead of copying
+                // the whole object first.
+                if let Expr::Ident(name) = object.as_ref() {
+                    if let Some(result) = self.env.with_value(name, |obj| self.field_of(obj, field))
+                    {
+                        return result;
                     }
-                    Value::String(s) => match field.as_str() {
-                        "len" => Ok(Value::Int(s.chars().count() as i64)),
-                        "upper" => Ok(Value::String(s.to_uppercase())),
-                        "lower" => Ok(Value::String(s.to_lowercase())),
-                        "trim" => Ok(Value::String(s.trim().to_string())),
-                        "trim_start" => Ok(Value::String(s.trim_start().to_string())),
-                        "trim_end" => Ok(Value::String(s.trim_end().to_string())),
-                        "is_empty" => Ok(Value::Bool(s.is_empty())),
-                        "is_numeric" => Ok(Value::Bool(
-                            s.chars()
-                                .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
-                        )),
-                        "is_alpha" => Ok(Value::Bool(
-                            !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
-                        )),
-                        "is_alphanumeric" => Ok(Value::Bool(
-                            !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
-                        )),
-                        "chars" => Ok(Value::Array(
-                            s.chars().map(|c| Value::String(c.to_string())).collect(),
-                        )),
-                        "bytes" => Ok(Value::Array(
-                            s.bytes().map(|b| Value::Int(b as i64)).collect(),
-                        )),
-                        "words" => Ok(Value::Array(
-                            s.split_whitespace()
-                                .map(|w| Value::String(w.to_string()))
-                                .collect(),
-                        )),
-                        "lines" => Ok(Value::Array(
-                            s.lines().map(|l| Value::String(l.to_string())).collect(),
-                        )),
-                        "reverse" => Ok(Value::String(s.chars().rev().collect())),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on String",
-                            field
-                        ))),
-                    },
-                    Value::Array(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on Array",
-                            field
-                        ))),
-                    },
-                    Value::Tuple(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on Tuple",
-                            field
-                        ))),
-                    },
-                    Value::Set(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
-                    },
-                    _ => Err(RuntimeError::new(&format!(
-                        "cannot access field '{}' on {}",
-                        field,
-                        obj.type_name()
-                    ))),
                 }
+                let obj = self.eval_expr(object)?;
+                self.field_of(&obj, field)
             }
 
             Expr::Index { object, index } => {
-                let obj = self.eval_expr(object)?;
-                let idx = self.eval_expr(index)?;
-                // Unwrap Frozen for read access
-                let inner = match &obj {
-                    Value::Frozen(v) => v.as_ref(),
-                    other => other,
-                };
-                match (inner, &idx) {
-                    (Value::Array(items) | Value::Tuple(items), Value::Int(i)) => {
-                        // Negative indices count from the end (shared with the VM).
-                        match crate::semantics::normalize_index(*i, items.len()) {
-                            Some(slot) => Ok(items[slot].clone()),
-                            None => Err(RuntimeError::new(&crate::semantics::index_out_of_bounds(
-                                *i,
-                                if matches!(inner, Value::Tuple(_)) {
-                                    "tuple"
-                                } else {
-                                    "array"
-                                },
-                                items.len(),
-                            ))),
+                // `name[i]`: index the variable in place so only the element
+                // is copied. The index is evaluated before the variable is
+                // read, which is only unobservable when it cannot run code.
+                if let Expr::Ident(name) = object.as_ref() {
+                    if self.env.contains(name) && self.is_effect_free(index) {
+                        let idx = self.eval_expr(index)?;
+                        if let Some(result) =
+                            self.env.with_value(name, |obj| Self::index_of(obj, &idx))
+                        {
+                            return result;
                         }
                     }
-                    (Value::Object(map), Value::String(key)) => map
-                        .get(key)
-                        .cloned()
-                        .ok_or_else(|| RuntimeError::new(&crate::semantics::missing_key(key))),
-                    (container, index) => Err(RuntimeError::new(&crate::semantics::invalid_index(
-                        container.type_name(),
-                        index.type_name(),
-                    ))),
                 }
+                let obj = self.eval_expr(object)?;
+                let idx = self.eval_expr(index)?;
+                Self::index_of(&obj, &idx)
             }
 
             Expr::Call { function, args } => {
                 // Method call: obj.method(args) -> method(obj, args)
+                // In-place forms on variables: mutating collection methods
+                // (`a.push(x)`, `push(a, x)`, `s.add(x)`, ...) and cheap
+                // reads (`len(a)`, `s.has(x)`, `m.get(k)`, ...).
+                if let Some(result) = self.try_mutate_in_place(expr, true) {
+                    return result;
+                }
+                if let Some(result) = self.try_read_in_place(expr) {
+                    return result;
+                }
                 if let Expr::FieldAccess { object, field } = function.as_ref() {
-                    // In-place mutation for arr.push(x) / arr.pop() on mutable variables
-                    if let Expr::Ident(var_name) = object.as_ref() {
-                        if self.env.is_mutable(var_name) == Some(true) {
-                            if field == "push" && args.len() == 1 {
-                                let arr = self.eval_expr(object)?;
-                                let val = self.eval_expr(&args[0])?;
-                                if let Value::Array(mut items) = arr {
-                                    items.push(val);
-                                    let new_arr = Value::Array(items);
-                                    self.env.set(var_name, new_arr.clone())?;
-                                    return Ok(new_arr);
-                                }
-                                return Err(RuntimeError::new(
-                                    "push() first argument must be array",
-                                ));
-                            }
-                            if field == "pop" && args.is_empty() {
-                                let arr = self.eval_expr(object)?;
-                                if let Value::Array(mut items) = arr {
-                                    let popped = items.pop().unwrap_or(Value::Null);
-                                    self.env.set(var_name, Value::Array(items))?;
-                                    return Ok(popped);
-                                }
-                                return Err(RuntimeError::new("pop() requires array"));
-                            }
-                            // In-place set mutation: s.add(x) / s.remove(x) on a mutable set variable.
-                            // Peel Frozen so we can produce a useful error rather than a silent no-op.
-                            if field == "add" && args.len() == 1 {
-                                let s = self.eval_expr(object)?;
-                                let raw = match s {
-                                    Value::Frozen(_) => {
-                                        return Err(RuntimeError::new("cannot add to a frozen set"))
-                                    }
-                                    other => other,
-                                };
-                                if let Value::Set(mut items) = raw {
-                                    let val = self.eval_expr(&args[0])?;
-                                    if !items.iter().any(|v| Value::container_eq(v, &val)) {
-                                        items.push(val);
-                                    }
-                                    let new_set = Value::Set(items);
-                                    self.env.set(var_name, new_set.clone())?;
-                                    return Ok(new_set);
-                                }
-                            }
-                            if field == "remove" && args.len() == 1 {
-                                let s = self.eval_expr(object)?;
-                                let raw = match s {
-                                    Value::Frozen(_) => {
-                                        return Err(RuntimeError::new(
-                                            "cannot remove from a frozen set",
-                                        ))
-                                    }
-                                    other => other,
-                                };
-                                if let Value::Set(items) = raw {
-                                    let val = self.eval_expr(&args[0])?;
-                                    let filtered: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| !Value::container_eq(v, &val))
-                                        .collect();
-                                    let new_set = Value::Set(filtered);
-                                    self.env.set(var_name, new_set.clone())?;
-                                    return Ok(new_set);
-                                }
-                            }
-                        }
-                    }
                     let obj = self.eval_expr(object)?;
                     let method_name = field.as_str();
                     let known_methods = [
@@ -3489,40 +3323,6 @@ impl Interpreter {
                     return self.call_function(func, eval_args?);
                 }
 
-                // Special-case push/pop for in-place mutation when first arg is a mutable variable
-                if let Expr::Ident(fn_name) = function.as_ref() {
-                    if fn_name == "push" && args.len() == 2 {
-                        if let Expr::Ident(var_name) = &args[0] {
-                            if self.env.is_mutable(var_name) == Some(true) {
-                                let arr = self.eval_expr(&args[0])?;
-                                let val = self.eval_expr(&args[1])?;
-                                if let Value::Array(mut items) = arr {
-                                    items.push(val);
-                                    let new_arr = Value::Array(items);
-                                    self.env.set(var_name, new_arr.clone())?;
-                                    return Ok(new_arr);
-                                }
-                                return Err(RuntimeError::new(
-                                    "push() first argument must be array",
-                                ));
-                            }
-                        }
-                    }
-                    if fn_name == "pop" && args.len() == 1 {
-                        if let Expr::Ident(var_name) = &args[0] {
-                            if self.env.is_mutable(var_name) == Some(true) {
-                                let arr = self.eval_expr(&args[0])?;
-                                if let Value::Array(mut items) = arr {
-                                    let popped = items.pop().unwrap_or(Value::Null);
-                                    self.env.set(var_name, Value::Array(items))?;
-                                    return Ok(popped);
-                                }
-                                return Err(RuntimeError::new("pop() requires array"));
-                            }
-                        }
-                    }
-                }
-
                 let func = self.eval_expr(function)?;
                 let eval_args: Result<Vec<Value>, _> =
                     args.iter().map(|a| self.eval_expr(a)).collect();
@@ -3844,6 +3644,134 @@ impl Interpreter {
                     .ok_or_else(|| RuntimeError::new(&format!("unknown method: {}", method)))?;
                 self.call_function(func, full_args)
             }
+        }
+    }
+
+    /// `obj.field` for an already-evaluated receiver (see `Expr::FieldAccess`).
+    fn field_of(&self, obj: &Value, field: &str) -> Result<Value, RuntimeError> {
+        // Unwrap Frozen for read access
+        let inner = match &obj {
+            Value::Frozen(v) => v.as_ref(),
+            other => other,
+        };
+        match inner {
+            Value::Object(map) => {
+                // Direct field access
+                if let Some(val) = map.get(field) {
+                    return Ok(val.clone());
+                }
+                // Embedded field delegation: check embedded sub-objects
+                if let Some(Value::String(type_name)) = map.get("__type__") {
+                    if let Some(embeds) = self.embedded_fields.get(type_name).cloned() {
+                        for (embed_field, _embed_type) in &embeds {
+                            if let Some(Value::Object(sub)) = map.get(embed_field) {
+                                if let Some(val) = sub.get(field) {
+                                    return Ok(val.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(RuntimeError::new(&format!(
+                    "no field '{}' on object",
+                    field
+                )))
+            }
+            Value::String(s) => match field {
+                "len" => Ok(Value::Int(s.chars().count() as i64)),
+                "upper" => Ok(Value::String(s.to_uppercase())),
+                "lower" => Ok(Value::String(s.to_lowercase())),
+                "trim" => Ok(Value::String(s.trim().to_string())),
+                "trim_start" => Ok(Value::String(s.trim_start().to_string())),
+                "trim_end" => Ok(Value::String(s.trim_end().to_string())),
+                "is_empty" => Ok(Value::Bool(s.is_empty())),
+                "is_numeric" => Ok(Value::Bool(
+                    s.chars()
+                        .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
+                )),
+                "is_alpha" => Ok(Value::Bool(
+                    !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+                )),
+                "is_alphanumeric" => Ok(Value::Bool(
+                    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
+                )),
+                "chars" => Ok(Value::Array(
+                    s.chars().map(|c| Value::String(c.to_string())).collect(),
+                )),
+                "bytes" => Ok(Value::Array(
+                    s.bytes().map(|b| Value::Int(b as i64)).collect(),
+                )),
+                "words" => Ok(Value::Array(
+                    s.split_whitespace()
+                        .map(|w| Value::String(w.to_string()))
+                        .collect(),
+                )),
+                "lines" => Ok(Value::Array(
+                    s.lines().map(|l| Value::String(l.to_string())).collect(),
+                )),
+                "reverse" => Ok(Value::String(s.chars().rev().collect())),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on String",
+                    field
+                ))),
+            },
+            Value::Array(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on Array",
+                    field
+                ))),
+            },
+            Value::Tuple(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on Tuple",
+                    field
+                ))),
+            },
+            Value::Set(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
+            },
+            _ => Err(RuntimeError::new(&format!(
+                "cannot access field '{}' on {}",
+                field,
+                obj.type_name()
+            ))),
+        }
+    }
+
+    /// `obj[idx]` for already-evaluated operands (see `Expr::Index`).
+    fn index_of(obj: &Value, idx: &Value) -> Result<Value, RuntimeError> {
+        // Unwrap Frozen for read access
+        let inner = match &obj {
+            Value::Frozen(v) => v.as_ref(),
+            other => other,
+        };
+        match (inner, &idx) {
+            (Value::Array(items) | Value::Tuple(items), Value::Int(i)) => {
+                // Negative indices count from the end (shared with the VM).
+                match crate::semantics::normalize_index(*i, items.len()) {
+                    Some(slot) => Ok(items[slot].clone()),
+                    None => Err(RuntimeError::new(&crate::semantics::index_out_of_bounds(
+                        *i,
+                        if matches!(inner, Value::Tuple(_)) {
+                            "tuple"
+                        } else {
+                            "array"
+                        },
+                        items.len(),
+                    ))),
+                }
+            }
+            (Value::Object(map), Value::String(key)) => map
+                .get(key)
+                .cloned()
+                .ok_or_else(|| RuntimeError::new(&crate::semantics::missing_key(key))),
+            (container, index) => Err(RuntimeError::new(&crate::semantics::invalid_index(
+                container.type_name(),
+                index.type_name(),
+            ))),
         }
     }
 
