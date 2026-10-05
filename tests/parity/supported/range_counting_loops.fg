@@ -1,0 +1,88 @@
+// Counting loops (`for i in range(..)`, `repeat n times`) must behave
+// exactly like iterating the array `range(..)` returns, on both engines.
+
+// Basic shapes, empty and reversed ranges.
+let mut out = []
+for i in range(4) { out.push(i) }
+for i in range(2, 5) { out.push(i) }
+for i in range(5, 2) { out.push(i) }
+for i in range(-3, -1) { out.push(i) }
+for i in range(0) { out.push(i) }
+for i in range(-2) { out.push(i) }
+println(out)
+
+// A third argument is accepted and ignored by the builtin.
+let mut third = []
+for i in range(0, 4, 2) { third.push(i) }
+println(third)
+
+// Assigning to the loop variable does not change the iteration.
+let mut seen = []
+for i in range(5) {
+    seen.push(i)
+    i = i + 100
+}
+println(seen)
+
+// break / continue, nested loops.
+let mut acc = 0
+for i in range(100) {
+    if i % 3 == 0 { continue }
+    if i > 20 { break }
+    for j in range(i, i + 2) {
+        if j == 7 { continue }
+        acc = acc + j
+    }
+}
+println(acc)
+
+// Each iteration gets a fresh binding for closures.
+let mut fs = []
+for i in range(3) { fs.push(fn() { return i * 10 }) }
+let mut vals = []
+for f in fs { vals.push(f()) }
+println(vals)
+
+// repeat
+let mut n = 0
+repeat 7 times { n = n + 1 }
+let k = 3
+repeat k { n = n + 10 }
+repeat 0 times { n = n + 1000 }
+println(n)
+
+// Arguments are evaluated once, in order.
+let mut log = []
+fn lo() { log.push("lo")
+return 1 }
+fn hi() { log.push("hi")
+return 4 }
+let mut s = 0
+for i in range(lo(), hi()) { s = s + i }
+println("{s} {log}")
+
+// Extremes near i64::MAX do not overflow.
+let big = 9223372036854775807
+let mut c = 0
+for i in range(big - 2, big) { c = c + 1 }
+println(c)
+
+// A local named `range` is called like any function.
+fn with_local(range) {
+    let mut r = []
+    for i in range(3) { r.push(i) }
+    return r
+}
+println(with_local(fn(n) { return [n, n, n] }))
+
+// Errors match the builtin's.
+try {
+    for i in range("a") { println(i) }
+} catch e {
+    println(e.message)
+}
+try {
+    for i in range(1, 2.5) { println(i) }
+} catch e {
+    println(e.message)
+}

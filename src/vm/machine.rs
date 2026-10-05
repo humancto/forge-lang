@@ -1231,6 +1231,13 @@ impl VM {
                         };
                         self.registers[base + a as usize] = Value::bool_val(has);
                     }
+                    OpCode::ForRangePrep => self.for_range_prep(base, a, b, c),
+                    OpCode::ForRangeNext => {
+                        if self.for_range_next(base, a, b)? {
+                            // Skip the loop-exit jump that follows.
+                            self.frames[frame_idx].ip += 1;
+                        }
+                    }
                     OpCode::Len => {
                         let src = self.registers[base + b as usize];
                         let len = self.collection_len(src);
