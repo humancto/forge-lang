@@ -30,7 +30,7 @@ outside the sandbox (see SEC-15); side channels (timing).
 ## 2. Method
 
 1. Read the policy layer (`src/permissions.rs`), the embedding layer
-   (`src/sandbox.rs`, `src/mcp.rs`, `bindings/python/src/lib.rs`), runtime
+   (`src/sandbox.rs`, `src/mcp/`, `bindings/python/src/lib.rs`), runtime
    bridges (`src/runtime/{client,server,shell,imports,recursion,host}.rs`),
    every stdlib module that touches fs/net/env/process/db/time
    (`src/stdlib/**`), both engines' builtin dispatch
