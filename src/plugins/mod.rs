@@ -619,7 +619,11 @@ mod tests {
         let c = candidate_paths("dir/hello");
         assert_eq!(c[0], Path::new("dir").join(format!("hello{}", suffix)));
         // Unix also tries the `lib` prefix; Windows (empty DLL_PREFIX) does not.
-        let expected = if std::env::consts::DLL_PREFIX.is_empty() { 1 } else { 2 };
+        let expected = if std::env::consts::DLL_PREFIX.is_empty() {
+            1
+        } else {
+            2
+        };
         assert_eq!(c.len(), expected);
         let c = candidate_paths("dir/libhello.so");
         assert_eq!(c, vec![PathBuf::from("dir/libhello.so")]);

@@ -1929,10 +1929,16 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             )
         }
 
-        Stmt::DecoratorStmt(decorator) => Err(CompileError::unsupported(&format!(
-            "standalone decorator '@{}' (decorator-driven runtime features)",
-            decorator.name
-        ))),
+        // `@server(port: 8080, ...)` with literal arguments is pure metadata:
+        // the host runtime reads it from the AST (`runtime::metadata`) for
+        // both engines, so there is nothing to execute. Anything else keeps
+        // the program on the interpreter.
+        Stmt::DecoratorStmt(decorator) => {
+            match crate::runtime::metadata::vm_unsupported_decorator(decorator, true) {
+                None => Ok(()),
+                Some(issue) => Err(CompileError::unsupported(&issue)),
+            }
+        }
 
         Stmt::StructDef { name, fields, .. } => compile_hidden_stmt(
             c,
