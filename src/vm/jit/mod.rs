@@ -47,6 +47,21 @@
 //! deopts too often is disabled. Functions whose calls repeatedly fail the
 //! type guards are disabled too, so we stop paying for guard checks.
 //!
+//! # Loop tier-up
+//!
+//! Call counts alone never make a function hot if it is called once and
+//! spends its time in a loop. Each VM frame also counts backward jumps; at
+//! `LOOP_HOT_THRESHOLD` (`vm::machine`) the VM asks [`tier::JitState::select`]
+//! for a specialization with `force_hot` and the arguments the frame was
+//! entered with (`CallFrame::entry_args`), and on success *restarts the whole
+//! call natively*, using its result as the frame's result. Purity makes this
+//! the mirror image of deopt-by-re-execution: the VM work done so far had no
+//! observable effect. A deopt or failed guard leaves the frame running in the
+//! VM. True on-stack replacement (entering at the loop header with the
+//! frame's live registers) would avoid the bounded repeated work and could
+//! extend tier-up to impure callers; it needs a second entry block per loop
+//! header in [`ir_builder`] and is left as a follow-up.
+//!
 //! # Extending
 //!
 //! New tiers (floats, strings, calls to other functions, ...) are added by:

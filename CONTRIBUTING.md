@@ -244,6 +244,23 @@ changes surface even without pushes. `CARGO_PROFILE_DEV_DEBUG=0` matches CI and
 keeps the debug target directory (which includes the `libforge_lang.a` static
 runtime) small.
 
+### Performance benchmarks
+
+Report-only timing harnesses (use a release build; there are no thresholds):
+
+```bash
+cargo build --release
+tools/bench_vm.sh target/release/forge            # VM + JIT: loop, fib, string build, push, map/filter
+tools/bench_vm.sh target/release/forge -- --jit   # eager JIT
+tools/bench_interp.sh target/release/forge        # tree-walking interpreter hot paths
+```
+
+CI prints `tools/bench_vm.sh` results in the startup-benchmark job. A change
+that reintroduces per-instruction overhead or quadratic copying shows up there
+as seconds instead of milliseconds. VM fast paths that must stay unobservable
+are pinned by `src/vm/perf_tests.rs` and the loop tier-up tests in
+`src/vm/jit_tests.rs`.
+
 ### Writing tests
 
 Tests live in `#[cfg(test)]` modules at the bottom of each source file. Use the helper pattern:

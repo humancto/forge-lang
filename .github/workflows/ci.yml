@@ -227,3 +227,8 @@ jobs:
         env:
           FORGE_LIB_DIR: target/release
         run: ./target/startup_time --forge ./target/release/forge --warmups 2 --reps 20
+      - name: VM hot-path benchmarks (report-only)
+        continue-on-error: true
+        env:
+          BENCH_TIMEOUT: "60"
+        run: tools/bench_vm.sh target/release/forge
