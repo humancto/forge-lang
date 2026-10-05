@@ -12,6 +12,7 @@ pub mod nanbox;
 pub mod profiler;
 mod range_loop; // counting `for v in range(..)` / `repeat n times` loops
 pub mod serialize;
+#[cfg(feature = "host")]
 pub mod serve;
 pub mod value;
 pub mod verify;
@@ -60,7 +61,7 @@ mod perf_tests;
 mod runtime_safety_tests;
 #[cfg(test)]
 mod schedule_watch_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "host"))]
 mod serve_tests;
 #[cfg(test)]
 mod set_tests;

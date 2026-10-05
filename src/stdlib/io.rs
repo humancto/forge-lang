@@ -43,7 +43,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             }
             let prompt_text = args.first().map(|v| format!("{}", v)).unwrap_or_default();
             use std::io::Write;
-            print!("{}", prompt_text);
+            crate::runtime::stdio::out(&prompt_text);
             std::io::stdout().flush().ok();
             let mut input = String::new();
             std::io::stdin()
@@ -53,7 +53,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         }
         "io.print" => {
             let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
-            print!("{}", text.join(" "));
+            crate::runtime::stdio::out(&text.join(" "));
             Ok(Value::Null)
         }
         "io.args" => {

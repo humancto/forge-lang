@@ -61,6 +61,7 @@ struct Library {
     by_name: HashMap<String, usize>,
     free_value: unsafe extern "C" fn(*mut ForgeValue),
     /// Keeps the code mapped. Never dropped: see the module invariants.
+    #[cfg(feature = "host")]
     _handle: libloading::Library,
 }
 
@@ -216,6 +217,14 @@ fn load(path: &Path, display: &str) -> Result<usize, String> {
     Ok(id)
 }
 
+/// Without the host runtime (browser playground) there is no dynamic
+/// loader; `import native` fails after the usual resolution and `ffi` check.
+#[cfg(not(feature = "host"))]
+fn open_library(_path: &Path, _display: &str) -> Result<Library, String> {
+    Err(crate::runtime::unavailable_message("`import native`"))
+}
+
+#[cfg(feature = "host")]
 fn open_library(path: &Path, display: &str) -> Result<Library, String> {
     let fail = |msg: String| format!("cannot load native library '{}': {}", display, msg);
     // SAFETY: loading a library runs its initialisers. That is exactly the

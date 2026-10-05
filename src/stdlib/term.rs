@@ -291,7 +291,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             for i in (1..=secs).rev() {
                 crate::color::ceprint!("\r  {} ", i);
                 std::io::stderr().flush().ok();
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                crate::clock::sleep(std::time::Duration::from_secs(1));
             }
             crate::color::ceprintln!("\r  Go! 🚀");
             Ok(Value::Null)
@@ -325,7 +325,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             for ch in text.chars() {
                 crate::color::ceprint!("{}", ch);
                 std::io::stderr().flush().ok();
-                std::thread::sleep(std::time::Duration::from_millis(delay));
+                crate::clock::sleep(std::time::Duration::from_millis(delay));
             }
             crate::color::ceprintln!();
             Ok(Value::Null)

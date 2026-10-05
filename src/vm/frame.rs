@@ -1,6 +1,6 @@
 use super::value::{GcRef, Value};
+use crate::clock::Instant;
 use std::collections::HashMap;
-use std::time::Instant;
 
 #[derive(Clone, Copy)]
 pub struct ExceptionHandler {

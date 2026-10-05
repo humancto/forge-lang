@@ -1,5 +1,6 @@
 mod builtins_registry;
 mod chat;
+mod clock;
 mod color;
 mod dap;
 mod doc;

@@ -38,6 +38,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     // path also calls this on boot. Without this call, log.info from a
     // CLI-invoked script (where start_server never ran) would silently
     // drop because no subscriber is registered.
+    #[cfg(feature = "host")]
     crate::runtime::tracing_init::init_subscriber();
 
     // 1. Always emit the structured tracing event. This is what log
@@ -55,8 +56,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 
     // 2. On a TTY only, also print the original colored line. Keeps
     //    `forge run script.fg` scannable interactively. Skipped when
-    //    piped so escape codes never reach a log file.
-    if std::io::stderr().is_terminal() {
+    //    piped so escape codes never reach a log file. Without the host
+    //    runtime (browser playground) no subscriber exists, so this line
+    //    is the only output and is always written.
+    if std::io::stderr().is_terminal() || !cfg!(feature = "host") {
         let now = chrono::Local::now().format("%H:%M:%S");
         let (code, label, pad) = match name {
             "log.info" => ("32", "INFO", "  "),
@@ -71,7 +74,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             code,
             &format!("[{} {}]", now, label),
         );
-        eprintln!("{}{}{}", prefix, pad, message);
+        crate::runtime::stdio::err_line(&format!("{}{}{}", prefix, pad, message));
     }
 
     Ok(Value::Null)

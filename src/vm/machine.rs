@@ -1,7 +1,8 @@
+use crate::clock::Instant;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::bytecode::*;
 use super::frame::*;
@@ -82,7 +83,7 @@ impl SendableVM {
             vm.registers[0] = closure;
         }
         loop {
-            std::thread::sleep(interval);
+            crate::clock::sleep(interval);
             let _ = vm.call_value(closure, vec![]);
             // Re-root after call (call_value may have modified registers)
             if vm.registers.is_empty() {
@@ -103,7 +104,7 @@ impl SendableVM {
         }
         let mut last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            crate::clock::sleep(Duration::from_secs(1));
             let current = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             if current != last_modified {
                 last_modified = current;
@@ -860,6 +861,9 @@ impl VM {
             if let Some(v) = ready(WAIT_POLL) {
                 return Ok(v);
             }
+            if !crate::clock::HAS_THREADS {
+                return Err(VMError::new(crate::clock::WAITS_FOREVER));
+            }
         }
     }
 
@@ -892,7 +896,7 @@ impl VM {
             let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
                 None => Some(None),
-                Some(rx) => match rx.recv_timeout(slice) {
+                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
                     Ok(v) => Some(Some(v)),
                     Err(RecvTimeoutError::Disconnected) => Some(None),
                     Err(RecvTimeoutError::Timeout) => None,
@@ -912,7 +916,7 @@ impl VM {
                 )));
             }
             let chunk = std::cmp::min(50, total_ms - elapsed);
-            std::thread::sleep(Duration::from_millis(chunk));
+            crate::clock::sleep(Duration::from_millis(chunk));
             elapsed += chunk;
         }
         if let Some((_, guard)) = self.earliest_expired_timeout() {

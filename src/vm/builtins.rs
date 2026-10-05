@@ -285,7 +285,7 @@ impl VM {
                     .map(|n| n.max(0) as u64)
                     .unwrap_or(0);
                 if attempt > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+                    crate::clock::sleep(std::time::Duration::from_millis(100 * attempt));
                 }
                 Ok(Value::null())
             }
@@ -757,26 +757,26 @@ impl VM {
             "println" | "say" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ");
-                println!("{}", output);
+                crate::runtime::stdio::out_line(&output);
                 self.output.push(output);
                 Ok(Value::null())
             }
             "print" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
-                print!("{}", text.join(" "));
+                crate::runtime::stdio::out(&text.join(" "));
                 Ok(Value::null())
             }
             "yell" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ").to_uppercase();
-                println!("{}", output);
+                crate::runtime::stdio::out_line(&output);
                 self.output.push(output);
                 Ok(Value::null())
             }
             "whisper" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ").to_lowercase();
-                println!("{}", output);
+                crate::runtime::stdio::out_line(&output);
                 self.output.push(output);
                 Ok(Value::null())
             }
@@ -1910,7 +1910,7 @@ impl VM {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let json: serde_json::Value = serde_json::from_str(stdout.trim())
                     .map_err(|e| VMError::new(&format!("sh_json parse error: {}", e)))?;
-                let interp_val = crate::runtime::server::json_to_forge(json);
+                let interp_val = crate::stdlib::json_module::json_to_forge(json);
                 self.from_interp_checked(&interp_val)
             }
             "sh_ok" => {
@@ -2818,7 +2818,7 @@ impl VM {
                     let r = self.gc.alloc(ObjKind::Array(vec![]));
                     return Ok(Value::obj(r));
                 }
-                use std::time::{SystemTime, UNIX_EPOCH};
+                use crate::clock::{SystemTime, UNIX_EPOCH};
                 let seed = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -2846,7 +2846,7 @@ impl VM {
                         .ok_or_else(|| VMError::new("shuffle() requires an array"))?,
                     "shuffle() requires an array",
                 )?;
-                use std::time::{SystemTime, UNIX_EPOCH};
+                use crate::clock::{SystemTime, UNIX_EPOCH};
                 let mut seed = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -2981,10 +2981,10 @@ impl VM {
                 let val = &args[0];
                 let type_str = val.type_name(&self.gc);
                 let display = val.display(&self.gc);
-                eprintln!(
+                crate::runtime::stdio::err_line(&format!(
                     "\x1b[33m\u{1f50d} SUS CHECK:\x1b[0m {} \x1b[2m({})\x1b[0m",
                     display, type_str
-                );
+                ));
                 Ok(args.into_iter().next().unwrap_or(Value::null()))
             }
             "bruh" => {
@@ -3047,21 +3047,21 @@ impl VM {
                     ));
                 }
                 let func = args[0].clone();
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 let result = self.call_value(func, vec![])?;
                 let elapsed = start.elapsed();
                 let ms = elapsed.as_secs_f64() * 1000.0;
                 if ms < 1.0 {
-                    eprintln!(
+                    crate::runtime::stdio::err_line(&format!(
                         "\x1b[32m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}\u{00b5}s \u{2014} \x1b[2mspeed demon fr\x1b[0m",
                         elapsed.as_secs_f64() * 1_000_000.0
-                    );
+                    ));
                 } else if ms < 100.0 {
-                    eprintln!("\x1b[32m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}ms \u{2014} \x1b[2mno cap that was fast\x1b[0m", ms);
+                    crate::runtime::stdio::err_line(&format!("\x1b[32m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}ms \u{2014} \x1b[2mno cap that was fast\x1b[0m", ms));
                 } else if ms < 1000.0 {
-                    eprintln!("\x1b[33m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.0}ms \u{2014} \x1b[2mit's giving adequate\x1b[0m", ms);
+                    crate::runtime::stdio::err_line(&format!("\x1b[33m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.0}ms \u{2014} \x1b[2mit's giving adequate\x1b[0m", ms));
                 } else {
-                    eprintln!("\x1b[31m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}s \u{2014} \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64());
+                    crate::runtime::stdio::err_line(&format!("\x1b[31m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}s \u{2014} \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64()));
                 }
                 Ok(result)
             }
@@ -3099,7 +3099,7 @@ impl VM {
                     .map_err(|e| VMError::new(&e))?;
                 let mut last_result = Value::null();
                 for _ in 0..n {
-                    let start = std::time::Instant::now();
+                    let start = crate::clock::Instant::now();
                     last_result = self.call_value(func.clone(), vec![])?;
                     times.push(start.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -3119,10 +3119,10 @@ impl VM {
                 stats.insert("p99_ms".to_string(), Value::float(p99));
                 stats.insert("runs".to_string(), Value::int(n as i64, &mut self.gc));
                 stats.insert("result".to_string(), last_result);
-                eprintln!(
+                crate::runtime::stdio::err_line(&format!(
                     "\x1b[35m\u{1f485} SLAYED:\x1b[0m {}x runs \u{2014} avg {:.3}ms, min {:.3}ms, max {:.3}ms, p99 {:.3}ms",
                     n, avg, min_t, max_t, p99
-                );
+                ));
                 let r = self.gc.alloc(ObjKind::Object(stats));
                 Ok(Value::obj(r))
             }
@@ -3254,7 +3254,7 @@ impl VM {
                     Some(ValueKind::Float(ms)) => Some(ms.max(0.0) as u128),
                     _ => None,
                 };
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 let len = channels.len();
                 let mut offset = 0usize;
                 loop {
@@ -3292,7 +3292,7 @@ impl VM {
                     }
                     offset = (offset + 1) % len;
                     self.wait_interrupted()?;
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    crate::clock::sleep(std::time::Duration::from_millis(1));
                 }
             }
 
@@ -3431,7 +3431,7 @@ impl VM {
                         let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
                         if guard.is_none() {
                             let deadline = std::time::Duration::from_millis(timeout_ms);
-                            let start = std::time::Instant::now();
+                            let start = crate::clock::Instant::now();
                             loop {
                                 let remaining = deadline.saturating_sub(start.elapsed());
                                 if remaining.is_zero() {

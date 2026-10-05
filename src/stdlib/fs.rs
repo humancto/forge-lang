@@ -628,8 +628,8 @@ mod tests {
 
     fn unique_temp_dir(tag: &str) -> PathBuf {
         let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::clock::SystemTime::now()
+            .duration_since(crate::clock::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!("forge_confine_{}_{}_{}", tag, pid, nanos));
@@ -676,8 +676,8 @@ mod tests {
         let outside = std::env::temp_dir().join(format!(
             "forge_confine_outside_{}_{}.txt",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::clock::SystemTime::now()
+                .duration_since(crate::clock::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));

@@ -1286,6 +1286,9 @@ impl Interpreter {
             if let Some(v) = ready(CANCEL_POLL) {
                 return Ok(v);
             }
+            if !crate::clock::HAS_THREADS {
+                return Err(RuntimeError::new(crate::clock::WAITS_FOREVER));
+            }
         }
     }
 
@@ -1973,7 +1976,7 @@ impl Interpreter {
                         let next = self.wait_cancellable(|slice| {
                             let rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
                             match rx_guard.as_ref() {
-                                Some(rx) => match rx.recv_timeout(slice) {
+                                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
                                     Ok(v) => Some(Some(v)),
                                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -2407,14 +2410,14 @@ impl Interpreter {
                 // Wait for the body or the deadline, waking up regularly so
                 // a cancel of *this* program is not held up by a long limit.
                 let deadline =
-                    std::time::Instant::now().checked_add(std::time::Duration::from_secs(secs));
+                    crate::clock::Instant::now().checked_add(std::time::Duration::from_secs(secs));
                 let outcome = loop {
                     let slice = match deadline {
-                        Some(d) => d.saturating_duration_since(std::time::Instant::now()),
+                        Some(d) => d.saturating_duration_since(crate::clock::Instant::now()),
                         None => std::time::Duration::from_millis(50),
                     }
                     .min(std::time::Duration::from_millis(50));
-                    match rx.recv_timeout(slice) {
+                    match crate::clock::recv_timeout(&rx, slice) {
                         Ok(result) => break Ok(result),
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                             break Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
@@ -2424,7 +2427,7 @@ impl Interpreter {
                                 cancel_flag.store(true, std::sync::atomic::Ordering::Release);
                                 return Err(RuntimeError::new("cancelled"));
                             }
-                            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                            if deadline.is_some_and(|d| crate::clock::Instant::now() >= d) {
                                 break Err(std::sync::mpsc::RecvTimeoutError::Timeout);
                             }
                         }
@@ -2462,7 +2465,7 @@ impl Interpreter {
                         Err(e) => {
                             last_err = e.message.clone();
                             if attempt < max - 1 {
-                                std::thread::sleep(std::time::Duration::from_millis(
+                                crate::clock::sleep(std::time::Duration::from_millis(
                                     100 * (attempt as u64 + 1),
                                 ));
                             }
@@ -2882,9 +2885,9 @@ impl Interpreter {
             return;
         }
         if newline {
-            println!("{}", text);
+            crate::runtime::stdio::out_line(text);
         } else {
-            print!("{}", text);
+            crate::runtime::stdio::out(text);
         }
     }
 
