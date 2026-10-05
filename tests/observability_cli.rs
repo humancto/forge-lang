@@ -136,8 +136,18 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// The default engine (the VM serves `@server` programs).
 #[test]
-fn server_emits_request_span_and_on_response_event() {
+fn server_emits_request_span_and_on_response_event_vm() {
+    server_emits_request_span_and_on_response_event(&[]);
+}
+
+#[test]
+fn server_emits_request_span_and_on_response_event_interpreter() {
+    server_emits_request_span_and_on_response_event(&["--interp"]);
+}
+
+fn server_emits_request_span_and_on_response_event(engine_flags: &[&str]) {
     let port = pick_port();
     let path = script(
         "server",
@@ -152,6 +162,7 @@ fn server_emits_request_span_and_on_response_event() {
         ),
     );
     let mut child = forge()
+        .args(engine_flags)
         .arg("run")
         .arg(&path)
         .stdout(Stdio::null())
