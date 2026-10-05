@@ -1031,9 +1031,25 @@ fn try_compile_mutating_call(
     }
     let saved = c.next_register;
     let pair_reg = c.alloc_reg()?;
-    let mut lowered = vec![receiver.clone(), Expr::StringLit(method.to_string())];
-    lowered.extend(args.iter().cloned());
-    compile_hidden_call(c, "__forge_method_mut", lowered, pair_reg)?;
+    // Arguments first, receiver last (like the interpreter): an argument
+    // may itself update the variable (`out.push(f())` where `f` pushes to
+    // a captured `out`), and reading the receiver first would discard that
+    // update when the result is stored back (found by the differential
+    // fuzzer).
+    let mut arg_regs = Vec::with_capacity(args.len() + 2);
+    let recv_reg = c.alloc_reg()?;
+    let method_reg = c.alloc_reg()?;
+    arg_regs.push(recv_reg);
+    arg_regs.push(method_reg);
+    for arg in args {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+        arg_regs.push(r);
+    }
+    compile_expr(c, receiver, recv_reg)?;
+    let method_idx = c.const_str(method);
+    c.emit(encode_abx(OpCode::LoadConst, method_reg, method_idx), 0);
+    compile_hidden_call_from_regs(c, "__forge_method_mut", &arg_regs, pair_reg)?;
     let idx_reg = c.alloc_reg()?;
     let new_value_reg = c.alloc_reg()?;
     let zero = c.const_int(0);

@@ -87,6 +87,27 @@ define test_substring_with_start_after_end() {
 }
 
 @test
+define test_push_argument_that_mutates_the_receiver() {
+    let mut out = []
+    let add_inner = fn() {
+        out.push("inner")
+        return 1
+    }
+    out.push(add_inner())
+    assert_eq(out, ["inner", 1])
+}
+
+@test
+define test_function_values_compare_by_identity() {
+    let f = fn(x) { return x }
+    let g = f
+    let h = fn(x) { return x }
+    assert_eq(f == g, true)
+    assert_eq(f != f, false)
+    assert_eq(f == h, false)
+}
+
+@test
 define test_contains_argument_rules() {
     assert_eq(contains({ a: 1 }, "a"), true)
     assert_eq(contains({ a: 1 }, "b"), false)

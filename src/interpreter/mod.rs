@@ -268,6 +268,21 @@ impl Value {
             (Value::ResultOk(x), Value::ResultOk(y))
             | (Value::ResultErr(x), Value::ResultErr(y))
             | (Value::Some(x), Value::Some(y)) => Value::lang_eq(x, y),
+            // Functions compare by identity, like the VM's closure
+            // references: a function value is equal to its copies.
+            (Value::Function(x), Value::Function(y)) => Arc::ptr_eq(x, y),
+            (
+                Value::Lambda {
+                    body: bx,
+                    closure: cx,
+                    ..
+                },
+                Value::Lambda {
+                    body: by,
+                    closure: cy,
+                    ..
+                },
+            ) => Arc::ptr_eq(bx, by) && Arc::ptr_eq(cx, cy),
             _ => a == b,
         }
     }
