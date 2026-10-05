@@ -179,17 +179,35 @@ impl Gc {
         }
     }
 
+    /// Like [`Gc::alloc_string`] for a borrowed string: an intern-table hit
+    /// allocates nothing (no `String` is built just to be looked up), which
+    /// keeps `LoadConst` of a string constant allocation-free.
+    pub fn alloc_str(&mut self, s: &str) -> GcRef {
+        if s.len() <= INTERN_MAX_LEN {
+            if let Some(&existing) = self.interned.get(s) {
+                if self.pinning {
+                    self.pinned.push(existing);
+                }
+                return existing;
+            }
+        }
+        self.alloc_string(s.to_string())
+    }
+
     /// Check if GC should run.
+    #[inline]
     pub fn should_collect(&self) -> bool {
         self.alloc_count >= self.next_gc || (self.stress && self.allocs_since_collect > 0)
     }
 
     /// Get an object by ref (immutable).
+    #[inline]
     pub fn get(&self, r: GcRef) -> Option<&GcObject> {
         self.objects.get(r.0).and_then(|o| o.as_ref())
     }
 
     /// Get an object by ref (mutable).
+    #[inline]
     pub fn get_mut(&mut self, r: GcRef) -> Option<&mut GcObject> {
         self.objects.get_mut(r.0).and_then(|o| o.as_mut())
     }
@@ -234,8 +252,14 @@ impl Gc {
                 // Extract string content before destroying, to clean intern table
                 if let Some(obj) = &self.objects[i] {
                     if let ObjKind::String(ref s) = obj.kind {
-                        if s.len() <= INTERN_MAX_LEN {
-                            self.interned.remove(s);
+                        // Only drop the entry if it names *this* object: a
+                        // short string allocated outside the table (e.g. a
+                        // string built in place) must not evict the live
+                        // canonical copy of the same text.
+                        if s.len() <= INTERN_MAX_LEN
+                            && self.interned.get(s.as_str()) == Some(&GcRef(i))
+                        {
+                            self.interned.remove(s.as_str());
                         }
                     }
                 }

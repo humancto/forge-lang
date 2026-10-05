@@ -109,6 +109,14 @@ impl SendableVM {
     }
 }
 
+/// Instructions executed between two polls of `timeout` deadlines. Polling
+/// reads the clock and walks every frame, so it must not run per
+/// instruction; 1024 simple instructions take a few microseconds, far below
+/// the one-second resolution of `timeout` scopes. Cancellation (squads,
+/// HTTP cancel-on-drop) is a single atomic load and is still checked on
+/// every backward jump and call.
+pub(super) const SAFEPOINT_INTERVAL: u32 = 1024;
+
 /// Compiler intrinsics: natives the bytecode compiler emits calls to. They
 /// are not user-visible builtins (those live in `crate::builtins_registry`).
 const COMPILER_INTRINSICS: &[&str] = &[
@@ -160,7 +168,15 @@ pub struct VM {
     #[cfg(feature = "jit")]
     pub(crate) jit_bridge_error: Option<VMError>,
     pub profiler: Profiler,
-    skip_timeout_check_once: bool,
+    /// Instructions left before the next safe-point poll of `timeout`
+    /// deadlines (see [`SAFEPOINT_INTERVAL`]). Reading the clock and walking
+    /// every frame's timeout stack on each instruction dominated the cost of
+    /// simple loops, so deadlines are polled every `SAFEPOINT_INTERVAL`
+    /// instructions instead. `PushTimeout` zeroes it so a scope that is
+    /// already expired (`timeout 0 seconds`) fires before its body runs, and
+    /// a fired timeout refills it so the catch path's `PopTimeout` runs
+    /// before the next poll.
+    safepoint_countdown: u32,
     /// Set by the Stream arms of `convert_to_interp_val` / `convert_interp_value`
     /// / `value_to_shared` when a Stream is encountered at the VM↔interpreter
     /// boundary. Callers of those conversions must check this flag after each
@@ -290,7 +306,7 @@ impl VM {
             #[cfg(feature = "jit")]
             jit_bridge_error: None,
             profiler: Profiler::new(false),
-            skip_timeout_check_once: false,
+            safepoint_countdown: 0,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
@@ -316,7 +332,7 @@ impl VM {
             #[cfg(feature = "jit")]
             jit_bridge_error: None,
             profiler: Profiler::new(true),
-            skip_timeout_check_once: false,
+            safepoint_countdown: 0,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
@@ -382,7 +398,7 @@ impl VM {
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
-        let r = self.gc.alloc_string(s.to_string());
+        let r = self.gc.alloc_str(s);
         Value::obj(r)
     }
 
@@ -393,16 +409,14 @@ impl VM {
         Value::obj(native)
     }
 
+    #[inline]
     fn constant_to_value(&mut self, constant: &Constant) -> Value {
         match constant {
             Constant::Int(n) => Value::int(*n, &mut self.gc),
             Constant::Float(n) => Value::float(*n),
             Constant::Bool(b) => Value::bool_val(*b),
             Constant::Null => Value::null(),
-            Constant::Str(s) => {
-                let r = self.gc.alloc_string(s.clone());
-                Value::obj(r)
-            }
+            Constant::Str(s) => Value::obj(self.gc.alloc_str(s)),
         }
     }
 
@@ -660,7 +674,7 @@ impl VM {
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
         frame.ip = guard.catch_ip;
-        self.skip_timeout_check_once = true;
+        self.safepoint_countdown = SAFEPOINT_INTERVAL;
         Ok(frame_idx)
     }
 
@@ -690,29 +704,36 @@ impl VM {
                 };
                 cached_closure = Some((current_closure, c));
             }
-            let chunk = cached_closure
+            // Borrowed, not cloned: an `Arc` clone/drop pair per instruction
+            // showed up in the dispatch cost. The cache is only refreshed
+            // when the top frame's closure changes.
+            let chunk: &Arc<Chunk> = &cached_closure
                 .as_ref()
                 .expect("BUG: cached_closure is None after need_fetch guard always fills it")
-                .1
-                .clone();
+                .1;
 
             if self.frames[frame_idx].ip >= chunk.code.len() {
                 self.frames.pop();
                 continue;
             }
 
-            if self.skip_timeout_check_once {
-                self.skip_timeout_check_once = false;
-            } else if self.earliest_expired_timeout().is_some() {
-                match self.handle_timeout_expiry() {
-                    Ok(handler_frame_idx) => {
-                        if handler_frame_idx < boundary_frame_idx {
-                            return Err(VMError::unwound_to_handler());
+            // Safe point: poll `timeout` deadlines every SAFEPOINT_INTERVAL
+            // instructions (see `safepoint_countdown`).
+            if self.safepoint_countdown == 0 {
+                self.safepoint_countdown = SAFEPOINT_INTERVAL;
+                if self.earliest_expired_timeout().is_some() {
+                    match self.handle_timeout_expiry() {
+                        Ok(handler_frame_idx) => {
+                            if handler_frame_idx < boundary_frame_idx {
+                                return Err(VMError::unwound_to_handler());
+                            }
+                            continue;
                         }
-                        continue;
+                        Err(err) => return Err(err),
                     }
-                    Err(err) => return Err(err),
                 }
+            } else {
+                self.safepoint_countdown -= 1;
             }
 
             let frame = &mut self.frames[frame_idx];
@@ -1434,6 +1455,9 @@ impl VM {
                             error_register: a,
                             handler_base,
                         });
+                        // Poll at the next instruction, so an already
+                        // expired scope fires before its body runs.
+                        self.safepoint_countdown = 0;
                     }
                     OpCode::PopTimeout => {
                         self.frames[frame_idx].timeouts.pop();
