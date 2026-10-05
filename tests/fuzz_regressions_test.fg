@@ -74,7 +74,8 @@ define test_huge_counts_are_errors_not_crashes() {
     assert_throws(fn() { range(0, 9223372036854775807) })
     assert_throws(fn() { range(-9223372036854775807, 9223372036854775807) })
     assert_throws(fn() { repeat_str("ab", 9223372036854775807) })
-    assert_throws(fn() { pad_start("x", -1) })
+    // A negative width means "no padding" (like JS padStart / Python rjust).
+    assert_eq(pad_start("x", -1), "x")
     assert_throws(fn() { sample([1, 2], -1) })
     assert_eq(len(range(5, 2)), 0)
 }
