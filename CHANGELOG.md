@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Python package `forge-lang`** (`bindings/python`, PyO3 + maturin, abi3 wheels for CPython 3.9+ on Linux/macOS/Windows) — `forge_lang.Sandbox(allow=..., allow_read=..., allow_write=..., allow_net=..., max_time=..., max_output=...)` runs untrusted Forge code in-process under the deny-by-default sandbox. `run()` releases the GIL, is safe to call from many threads, honours Ctrl-C and a `CancelToken`, and raises typed exceptions (`ForgeSyntaxError`, `ForgePermissionError`, `ForgeRuntimeError`, `ForgeTimeoutError`, `ForgeOutputLimitError`, `ForgeCancelledError`, all `ForgeError`) carrying `kind`, `stdout`, `line`/`column` and `limit`; `check()` returns the same diagnostics as `forge mcp`'s `check_forge`. Ships type stubs and `py.typed`. A new `Python` workflow builds wheels and an sdist, runs pytest on Linux, and publishes to PyPI on `py-v*` tags via trusted publishing once enabled. A Node.js (napi-rs) design is in `bindings/node/README.md`.
+
 ## [0.9.0] - 2026-10-05
 
 Highlights: the default VM is now trustworthy (a guarded, verified JIT tier; GC rooting; full VM/interpreter parity on the test suite), much faster (VM and interpreter performance passes), and Forge gains a capability-based sandbox (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`) plus `forge mcp`, an MCP server that lets AI agents run sandboxed Forge code.
