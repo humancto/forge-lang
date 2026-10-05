@@ -40,7 +40,8 @@ fn error_snippets_name_the_file_relative_to_cwd() {
             let mut args = engine.to_vec();
             args.extend(["run", abs.as_str()]);
             let out = forge_in(&dir, &args, &[]);
-            let stderr = String::from_utf8_lossy(&out.stderr);
+            // Separator-neutral: Windows renders `src\bad.fg`.
+            let stderr = String::from_utf8_lossy(&out.stderr).replace('\\', "/");
             assert!(!out.status.success());
             assert!(!stderr.contains("<source>"), "{}", stderr);
             assert!(

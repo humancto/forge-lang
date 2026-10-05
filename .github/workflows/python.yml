@@ -1,0 +1,182 @@
+name: Python
+
+# Builds the `forge-lang` Python package (bindings/python) as abi3 wheels
+# (one wheel per platform, CPython 3.9+), tests it on Linux, and publishes to
+# PyPI on `py-v*` tags.
+#
+# Publishing uses PyPI trusted publishing (OIDC), so no API token is stored
+# in the repository. It stays OFF until both of these are done:
+#   1. On pypi.org, add a trusted publisher for project `forge-lang`:
+#      owner `humancto`, repository `forge-lang`, workflow `python.yml`,
+#      environment `pypi`.
+#   2. In the GitHub repository, create the `pypi` environment and set the
+#      repository variable PYPI_PUBLISH=true (Settings -> Variables).
+# Then push a tag matching the version in bindings/python/Cargo.toml, e.g.
+#   git tag py-v0.9.0 && git push origin py-v0.9.0
+# (`py-v*` tags do not match the CLI release workflow's `v*` trigger.)
+
+on:
+  push:
+    branches: [main]
+    tags: ["py-v*"]
+    paths:
+      - "bindings/python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/python.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "bindings/python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/python.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: bindings/python
+
+jobs:
+  lint:
+    name: Rust lint (bindings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    name: Test (Linux, Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported and newest: the wheel is abi3, so one build
+        # serves both; testing both catches stable-ABI mistakes.
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+      - name: Build and install the wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "maturin>=1.7,<2" pytest
+          maturin build --locked --out dist
+          python -m pip install dist/*.whl
+      - name: pytest (against the installed wheel)
+        # Run from a directory without the package source on sys.path, so
+        # the tests import the installed wheel.
+        working-directory: bindings/python/tests
+        run: python -m pytest -v .
+      - name: Type stubs match the extension (stubtest)
+        working-directory: bindings/python/tests
+        run: |
+          python -m pip install mypy
+          python -m mypy.stubtest forge_lang._native
+
+  wheels:
+    name: Wheel (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { name: linux-aarch64, runner: ubuntu-latest, target: aarch64, manylinux: "2_28" }
+          - { name: macos-x86_64, runner: macos-latest, target: x86_64-apple-darwin }
+          - { name: macos-arm64, runner: macos-latest, target: aarch64-apple-darwin }
+          - { name: windows-x64, runner: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          args: --release --locked --out dist
+          sccache: "true"
+      - name: Smoke-test the wheel
+        # Only where the wheel matches the runner's architecture.
+        if: matrix.platform.name != 'linux-aarch64' && matrix.platform.name != 'macos-x86_64'
+        shell: bash
+        run: |
+          python -m pip install --no-index --find-links dist forge-lang
+          cd "$RUNNER_TEMP"
+          python -c "import forge_lang; assert forge_lang.Sandbox().run('say 1 + 1').stdout == '2\n'; print(forge_lang.__version__, 'ok')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.name }}
+          path: bindings/python/dist
+          if-no-files-found: error
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: bindings/python/dist
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: [lint, test, wheels, sdist]
+    if: startsWith(github.ref, 'refs/tags/py-v') && vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/forge-lang/
+    permissions:
+      id-token: write # trusted publishing (OIDC); no token secret needed
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the package version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "py-v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match bindings/python version $version"
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

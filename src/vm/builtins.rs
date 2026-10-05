@@ -36,6 +36,13 @@ impl VM {
     }
 
     fn dispatch_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
+        // Native plugin functions (`import native`) run the shared
+        // implementation in `plugins`, converting values at the boundary.
+        if crate::plugins::is_plugin_fn(name) {
+            let interp_args = self.args_to_interp(&args)?;
+            let result = crate::plugins::call(name, interp_args).map_err(|e| VMError::new(&e))?;
+            return self.from_interp_checked(&result);
+        }
         match name {
             "__forge_register_struct" => {
                 if args.len() != 3 {
@@ -534,6 +541,45 @@ impl VM {
                 };
                 let pair = self.gc.alloc(ObjKind::Tuple(vec![new_receiver, result]));
                 Ok(Value::obj(pair))
+            }
+            "__forge_import_native" => {
+                // (path_as_written, base_dir | null, names | false)
+                if args.len() != 3 {
+                    return Err(VMError::new(
+                        "__forge_import_native() requires (path, base_dir, names)",
+                    ));
+                }
+                let path = self.get_string_arg(&args, 0)?;
+                // An empty base directory means "no importing file" (REPL, -e).
+                let base_dir = self
+                    .get_string(&args[1])
+                    .filter(|d| !d.is_empty())
+                    .map(std::path::PathBuf::from);
+                let names: Option<Vec<String>> = match args[2].classify(&self.gc) {
+                    ValueKind::Obj(r) => Some(
+                        self.gc
+                            .get(r)
+                            .and_then(|obj| match &obj.kind {
+                                ObjKind::Array(items) => Some(
+                                    items
+                                        .iter()
+                                        .filter_map(|item| self.get_string(item))
+                                        .collect::<Vec<_>>(),
+                                ),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                VMError::new(
+                                    "__forge_import_native() names must be an array of strings",
+                                )
+                            })?,
+                    ),
+                    _ => None,
+                };
+                let namespace =
+                    crate::plugins::import(&path, base_dir.as_deref(), names.as_deref())
+                        .map_err(|e| VMError::new(&e))?;
+                self.from_interp_checked(&namespace)
             }
             "__forge_import_module" => {
                 // (resolved_path, names | false, path_as_written)
@@ -1779,9 +1825,7 @@ impl VM {
             "shell" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let output = crate::runtime::shell::command(&cmd)
                     .output()
                     .map_err(|e| VMError::new(&format!("shell error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout)
@@ -1804,9 +1848,7 @@ impl VM {
             "sh" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let output = crate::runtime::shell::command(&cmd)
                     .output()
                     .map_err(|e| VMError::new(&format!("sh error: {}", e)))?;
                 Ok(self.alloc_string(
@@ -1818,9 +1860,7 @@ impl VM {
             "sh_lines" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let output = crate::runtime::shell::command(&cmd)
                     .output()
                     .map_err(|e| VMError::new(&format!("sh_lines error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1835,9 +1875,7 @@ impl VM {
             "sh_json" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let output = crate::runtime::shell::command(&cmd)
                     .output()
                     .map_err(|e| VMError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1849,9 +1887,7 @@ impl VM {
             "sh_ok" => {
                 crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let status = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let status = crate::runtime::shell::command(&cmd)
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
@@ -1893,9 +1929,7 @@ impl VM {
                 let input = self.get_string_arg(&args, 0)?;
                 let cmd = self.get_string_arg(&args, 1)?;
                 use std::io::Write;
-                let mut child = std::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                let mut child = crate::runtime::shell::command(&cmd)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -2790,6 +2824,9 @@ impl VM {
             }
             "input" => {
                 use std::io::Read as _;
+                if !crate::permissions::host_stdin_allowed() {
+                    return Ok(self.alloc_string(""));
+                }
                 let mut buffer = String::new();
                 std::io::stdin().read_to_string(&mut buffer).ok();
                 Ok(self.alloc_string(buffer.trim_end()))

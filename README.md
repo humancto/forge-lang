@@ -79,7 +79,7 @@ say crypto.sha256("password")
 | [📚 Standard Library](#-standard-library-22-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
 | [🔧 CLI](#-cli-commands)                             | [📂 Examples](#-examples)       | [🏛️ Architecture](#️-architecture)     |
 | [📕 Book](#-the-book)                                | [🗺️ Roadmap](#️-roadmap)         | [🤝 Contributing](#-contributing)     |
-| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) |                                 |                                       |
+| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) | [🐍 Python](#-use-forge-from-python) | [🦀 Calling Rust](#-calling-rust-from-forge) |
 
 ---
 
@@ -529,7 +529,7 @@ Three execution tiers — pick your tradeoff:
 | ---------------------- | ---------- | ---------------------------------------------------------------- |
 | ⚙️ Bytecode VM         | (default)  | General programs                                                 |
 | 🔥 VM + Cranelift JIT  | `--jit`    | Tight numeric leaf functions (Int/Float math, loops)             |
-| 📦 Tree-walking interp | `--interp` | Full feature surface; HTTP servers fall back to it automatically |
+| 📦 Tree-walking interp | `--interp` | Reference engine; programs the VM cannot run faithfully fall back to it automatically |
 
 Measured on one 4-vCPU x86_64 Linux VM (Intel Xeon @ 2.10GHz) with a release build, wall-clock including process startup. Numbers vary by machine — run them yourself.
 
@@ -552,9 +552,21 @@ The JIT compiles functions over `Int`/`Bool` values (arithmetic, comparisons, lo
 
 Forge's HTTP server is built on axum + tokio — the same stack powering production Rust services. For typical JSON API endpoints, Forge matches raw Rust throughput while giving you a 4-line handler instead of 40.
 
-Measured at v0.4 with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS. The server has since moved to a per-request fork model, so re-measure on your hardware:
+Measured at v0.4 with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS, when handlers ran on the interpreter.
+
+Since then handlers run on the bytecode VM, each request on its own fork (the interpreter still serves with `--interp`, with identical responses). `cargo bench --bench server_throughput` boots `forge run` on the example servers on both engines; one run on a shared, heavily loaded 4-core Linux VM (release build, closed-loop keep-alive clients):
+
+| Handler (`examples/`)                       | Clients | VM req/s | VM p99 | `--interp` req/s | `--interp` p99 |
+| ------------------------------------------- | ------: | -------: | -----: | ---------------: | -------------: |
+| `GET /ping` (`bench_server.fg`)             |      32 |   12,782 |  9.5 ms |            4,579 |        29.9 ms |
+| `GET /fib` — `fib(25)` (`bench_server_concurrent.fg`) | 8 |  1,030 |   47 ms |                5 |         1.83 s |
+| `GET /cpu` — 200k-iteration `repeat` loop   |       8 |       42 |  293 ms |               12 |         808 ms |
+
+Absolute numbers depend on the machine; compare the engines within one run. Re-measure on your hardware:
 
 ```bash
+cargo bench --bench server_throughput   # both engines, req/s + p50/p99
+
 # Terminal 1
 forge run examples/bench_server.fg
 
@@ -604,7 +616,7 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 | `forge build <file>`          | Compile to `.fgc` bytecode                           |
 | `forge build --native <file>` | Native executable embedding source (servers work)    |
 | `forge build --aot <file>`    | Native executable embedding bytecode (VM programs)   |
-| `forge install` / `add` / `update` / `search` / `publish` | Package management       |
+| `forge install` / `add` / `update` / `search` / `publish` / `yank` | Package management (sparse registry, [RFC 0007](rfcs/0007-package-registry.md)) |
 | `forge watch <file>`          | Re-run on file changes                               |
 | `forge doc [paths]`           | Generate documentation                               |
 | `forge lsp` / `forge dap`     | Language server / debug adapter                      |
@@ -615,6 +627,46 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 **Global flags go before the subcommand:** `forge --interp run app.fg`, `forge --jit run app.fg`, `forge --allow-run run deploy.fg`. Also `--profile` and `--strict`. `--vm` is accepted for compatibility and does nothing (the VM is already the default).
 
 Native builds are standalone when `libforge_lang.a` is available (set `FORGE_LIB_DIR`, or keep it next to the `forge` binary); otherwise Forge builds a launcher that runs the program through an installed `forge`.
+
+---
+
+## 🦀 Calling Rust from Forge
+
+Write the fast or system-specific part in Rust (or C), build it as a shared library, and import its functions with typed values — no shelling out, no parsing text.
+
+```rust
+// Cargo.toml: [lib] crate-type = ["cdylib"]
+//             [dependencies] forge-plugin = { path = "crates/forge-plugin" }
+use forge_plugin::{export, forge_fn};
+
+#[forge_fn]
+fn add(a: i64, b: i64) -> i64 { a + b }
+
+#[forge_fn]
+fn divide(a: f64, b: f64) -> Result<f64, String> {
+    if b == 0.0 { Err("division by zero".into()) } else { Ok(a / b) }
+}
+
+export!(name = "hello", functions = [add, divide]);
+```
+
+```forge
+import native "target/release/libhello" as hello   // .so / .dylib / .dll added for you
+import { add } from native "target/release/libhello"
+
+say add(1, 2)                  // 3
+say hello.divide(7, 2)         // 3.5
+try { hello.divide(1, 0) } catch e { say e.message }   // division by zero
+```
+
+```bash
+forge --allow-ffi run app.fg              # or --allow-ffi=target/release
+```
+
+- Ints, floats, bools, strings, arrays, objects, `Option` and bytes cross the boundary as values through a small, versioned C ABI ([`forge_plugin.h`](crates/forge-plugin/include/forge_plugin.h)); `Result::Err` and panics become catchable Forge errors. Works on both engines.
+- C (or anything that can export C functions) implements the same ABI: see [`examples/plugins/hello_c`](examples/plugins/hello_c/hello.c). Full Rust example: [`examples/plugins/hello_rust`](examples/plugins/hello_rust).
+- **Loading native code is full trust**: the library runs outside every Forge permission, so `forge run` needs `--allow-ffi`, and `--sandbox` / `forge mcp` deny it unless granted. See [SECURITY.md](SECURITY.md#native-plugins-are-full-trust---allow-ffi).
+- Design and ABI rules: [RFC 0006](rfcs/0006-native-plugins.md).
 
 ---
 
@@ -652,6 +704,34 @@ or `claude mcp add forge -- forge mcp --allow-net=api.example.com`.
 - Each call runs on its own thread: a stuck script times out while the server keeps answering, and `notifications/cancelled` stops it. `run` (shell) is never granted unless you pass `--allow-run`.
 - Nothing a script prints or reads can reach the protocol stream (stdin/stdout are moved off fds 0/1 on Unix).
 - Protocol: `2026-07-28` (stateless, `server/discover`) and the `initialize` handshake for `2025-11-25` back to `2024-11-05`. Rust hosts can embed the same server: `forge_lang::mcp::serve(reader, writer, config)`.
+
+---
+
+## 🐍 Use Forge from Python
+
+The same sandbox is available in-process to Python hosts (agent frameworks, notebooks, automation) as the `forge-lang` package: abi3 wheels for Linux, macOS and Windows, CPython 3.9+, no `forge` binary needed.
+
+```bash
+pip install forge-lang
+```
+
+```python
+from forge_lang import Sandbox, ForgeError
+
+sb = Sandbox(
+    allow_read=["./workspace"],          # everything else is denied
+    allow_net=["api.github.com"],
+    max_time=10,                         # seconds
+    max_output=32_000,                   # bytes
+)
+
+try:
+    print(sb.run('say "hello from Forge"').stdout)
+except ForgeError as e:                  # ForgeSyntaxError, ForgePermissionError,
+    print(e.kind, e, e.stdout)           # ForgeRuntimeError, ForgeTimeoutError, ...
+```
+
+`Sandbox` is immutable and thread-safe, `run()` releases the GIL, `check()` returns parse/type diagnostics without running anything, and a `CancelToken` (or Ctrl-C) stops a run. See [`bindings/python/README.md`](bindings/python/README.md) for the full API and an agent "code mode" tool handler. A Node.js package (napi-rs) is planned: [`bindings/node/README.md`](bindings/node/README.md).
 
 ---
 
@@ -801,14 +881,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the architecture guide and PR guideli
 
 ### Sandboxing and permissions
 
-Forge has a Deno-style capability model shared by both engines. Defaults are unchanged (`forge run` allows everything except subprocesses), and `--sandbox` turns it into default-deny:
+Forge has a Deno-style capability model shared by both engines. By default `forge run` allows everything except subprocesses and native plugins, and `--sandbox` turns it into default-deny:
 
 ```bash
 forge run --sandbox --allow-read=./data --allow-net=api.example.com agent.fg
 forge run --max-time 10 job.fg     # wall-clock limit (exit 124)
 ```
 
-Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`. Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
+Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`, `ffi` (native plugins, path-scoped, opt-in like `run`). Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
 
 Embedding Forge in a Rust host (for AI agents and automation) starts from deny-all:
 

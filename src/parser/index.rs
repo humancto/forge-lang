@@ -116,6 +116,11 @@ pub enum DefKind {
     Import {
         path: String,
     },
+    /// A name bound by `import native "lib" [as name]` or
+    /// `import { f } from native "lib"` (a plugin namespace or function).
+    NativeImport {
+        path: String,
+    },
     Struct,
     Interface,
     /// `type Name = ...` (an algebraic data type or a union alias).

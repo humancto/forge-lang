@@ -1,0 +1,3 @@
+// Startup benchmark: the cost of `forge run` on a trivial program
+// (process start, parse, compile, run, exit).
+println("ok")

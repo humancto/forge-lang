@@ -295,23 +295,21 @@ mod tests {
 
     #[test]
     fn display_path_is_relative_to_cwd() {
+        // Separator-neutral: on Windows the relative part is rendered with
+        // `\`, which is correct for that platform.
+        let rel =
+            |p: &str, cwd: Option<&std::path::Path>| display_path_from(p, cwd).replace('\\', "/");
         let cwd = std::path::Path::new("/home/me/proj");
         assert_eq!(
-            display_path_from("/home/me/proj/examples/x.fg", Some(cwd)),
+            rel("/home/me/proj/examples/x.fg", Some(cwd)),
             "examples/x.fg"
         );
-        assert_eq!(
-            display_path_from("./examples/x.fg", Some(cwd)),
-            "examples/x.fg"
-        );
-        assert_eq!(display_path_from("examples/../x.fg", Some(cwd)), "x.fg");
-        assert_eq!(
-            display_path_from("/elsewhere/y.fg", Some(cwd)),
-            "/elsewhere/y.fg"
-        );
-        assert_eq!(display_path_from("../sib/z.fg", Some(cwd)), "../sib/z.fg");
-        assert_eq!(display_path_from("<eval>", Some(cwd)), "<eval>");
-        assert_eq!(display_path_from("a.fg", None), "a.fg");
+        assert_eq!(rel("./examples/x.fg", Some(cwd)), "examples/x.fg");
+        assert_eq!(rel("examples/../x.fg", Some(cwd)), "x.fg");
+        assert_eq!(rel("/elsewhere/y.fg", Some(cwd)), "/elsewhere/y.fg");
+        assert_eq!(rel("../sib/z.fg", Some(cwd)), "../sib/z.fg");
+        assert_eq!(rel("<eval>", Some(cwd)), "<eval>");
+        assert_eq!(rel("a.fg", None), "a.fg");
     }
 
     #[test]

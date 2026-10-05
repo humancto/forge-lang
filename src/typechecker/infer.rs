@@ -1286,6 +1286,20 @@ impl<'a> Checker<'a> {
                 (self.cx.join(&t1, &t2), flow)
             }
             Stmt::Import { .. } => (Ty::Null, Flow::Normal),
+            Stmt::ImportNative { binding, .. } => {
+                // Plugin functions are untyped at the ABI: everything is Any.
+                match binding {
+                    NativeBinding::Namespace(name) => {
+                        self.bind(name, Ty::Any, None, BindKind::Immutable)
+                    }
+                    NativeBinding::Names(names) => {
+                        for n in names {
+                            self.bind(n, Ty::Any, None, BindKind::Immutable);
+                        }
+                    }
+                }
+                (Ty::Null, Flow::Normal)
+            }
             Stmt::YieldStmt(e) => {
                 self.infer(e, None);
                 (Ty::Null, Flow::Normal)

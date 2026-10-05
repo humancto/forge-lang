@@ -228,6 +228,7 @@ impl Instrumenter<'_> {
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Import { .. }
+            | Stmt::ImportNative { .. }
             | Stmt::PromptDef { .. }
             | Stmt::AgentDef { .. } => {}
         }

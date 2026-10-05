@@ -1231,3 +1231,13 @@ fn strict_makes_every_diagnostic_an_error() {
     assert_eq!(e.len(), 2);
     assert!(e.iter().all(|d| d.is_error()));
 }
+
+#[test]
+fn native_imports_bind_their_names() {
+    let src = "import native \"libs/libmath\" as m\nsay m.add(1, 2)\nimport { mul } from native \"libs/libmath\"\nsay mul(2, 3)";
+    assert!(codes(src).is_empty(), "{:?}", warnings_for(src));
+    assert_eq!(
+        codes("import { mul } from native \"libs/libmath\"\nsay mull(1)"),
+        vec![Code::UnknownName]
+    );
+}

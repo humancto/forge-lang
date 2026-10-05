@@ -143,6 +143,12 @@ impl Drop for McpServer {
     }
 }
 
+/// A path as the body of a Forge string literal (`\` is an escape in Forge,
+/// so Windows paths must be doubled).
+fn forge_lit(p: &std::path::Path) -> String {
+    p.display().to_string().replace('\\', "\\\\")
+}
+
 fn text(result: &Value) -> String {
     result["content"][0]["text"]
         .as_str()
@@ -295,12 +301,12 @@ fn mcp_grants_come_from_flags_and_forge_toml() {
 
     let inside = server.call(
         "run_forge",
-        json!({"code": format!("say fs.read(\"{}\")", data.join("in.txt").display())}),
+        json!({"code": format!("say fs.read(\"{}\")", forge_lit(&data.join("in.txt")))}),
     );
     assert_eq!(text(&inside), "granted\n", "{inside}");
     let outside = server.call(
         "run_forge",
-        json!({"code": format!("say fs.read(\"{}\")", dir.join("secret.txt").display())}),
+        json!({"code": format!("say fs.read(\"{}\")", forge_lit(&dir.join("secret.txt")))}),
     );
     assert_eq!(
         outside["structuredContent"]["error"]["kind"],

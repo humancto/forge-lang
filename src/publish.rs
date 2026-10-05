@@ -145,7 +145,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     hex
 }
 
-fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
+pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
     let name = &manifest.project.name;
     let version = &manifest.project.version;
 
@@ -204,7 +204,7 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_files(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_files_recursive(root, root, &mut files);
     files.sort();

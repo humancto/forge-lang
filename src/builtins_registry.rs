@@ -47,7 +47,7 @@ impl Arity {
         }
     }
 
-    fn describe(&self) -> String {
+    pub fn describe(&self) -> String {
         let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
         match *self {
             Arity::Range(min, max) if min == max => format!("{} {}", min, plural(min)),

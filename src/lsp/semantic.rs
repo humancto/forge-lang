@@ -637,6 +637,9 @@ fn describe_def(doc: &Doc, def: OccId) -> String {
         Some(DefKind::PatternBinding) => format!("(binding) {}: {}", o.name, ty_str),
         Some(DefKind::CatchVariable) => format!("(catch) {}", o.name),
         Some(DefKind::Import { path }) => format!("import {{ {} }} from \"{}\"", o.name, path),
+        Some(DefKind::NativeImport { path }) => {
+            format!("(native plugin) {} from \"{}\"", o.name, path)
+        }
         Some(DefKind::Struct) => {
             let fields: Vec<String> = a
                 .index
