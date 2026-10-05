@@ -27,8 +27,12 @@
 //!   is cancelled cooperatively at the next safe point, and if it does not
 //!   stop in time (e.g. blocked inside a native call) its worker thread is
 //!   detached and [`SandboxError::Timeout`] is returned anyway.
-//! * **Captured output.** `say`/`println`/`print` output is captured into
-//!   [`Output::stdout`] instead of the host's stdout.
+//! * **Captured output.** `say`/`println`/`print`/`io.print` output —
+//!   including from `spawn`ed tasks, `timeout` blocks and imported modules —
+//!   is captured into [`Output::stdout`] instead of the host's stdout.
+//!   [`Sandbox::max_output`] bounds how much a program may print.
+//! * **Cancellation.** [`Sandbox::run_source_cancellable`] takes a
+//!   [`CancelHandle`] the host can trigger from another thread.
 //!
 //! # Current limits (future work)
 //!
@@ -37,6 +41,8 @@
 //! * No memory limit yet; call depth is bounded by the engine's recursion
 //!   limit.
 //! * stderr output (`log`, `term`, warnings) is not captured.
+//! * stdin is the host's: `input()`/`io.prompt` read from it. Hosts that
+//!   use stdin for something else (like `forge mcp`) must redirect it.
 
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
@@ -45,7 +51,7 @@ use crate::permissions::{self, Capabilities, Capability};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Stack reserved for a sandbox worker thread. Only touched pages are
 /// committed; the recursion guard turns deep recursion into an error.
@@ -54,12 +60,39 @@ const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
 /// How long to wait for a cancelled program to unwind before detaching it.
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
 
+/// How often the host side checks the deadline, the output limit and the
+/// cancel handle while a program runs.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
 /// A configured, reusable sandbox.
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     caps: Capabilities,
     max_time: Option<Duration>,
+    max_output: Option<usize>,
     source_label: String,
+}
+
+/// Lets a host stop a running program from another thread. Cheap to clone;
+/// all clones control the same run.
+#[derive(Debug, Clone, Default)]
+pub struct CancelHandle(Arc<AtomicBool>);
+
+impl CancelHandle {
+    pub fn new() -> Self {
+        CancelHandle::default()
+    }
+
+    /// Ask the program to stop. It is cancelled cooperatively at the next
+    /// safe point; the run returns [`SandboxError::Cancelled`] promptly
+    /// either way.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 /// What a successful run produced.
@@ -86,6 +119,38 @@ pub enum SandboxError {
     },
     /// The program exceeded [`Sandbox::max_time`].
     Timeout { limit: Duration, stdout: String },
+    /// The program printed more than [`Sandbox::max_output`] bytes and was
+    /// stopped. `stdout` holds the first `limit` bytes.
+    OutputLimit { limit: usize, stdout: String },
+    /// The host cancelled the run through its [`CancelHandle`].
+    Cancelled { stdout: String },
+}
+
+impl SandboxError {
+    /// Output printed before the failure (empty for syntax errors).
+    pub fn stdout(&self) -> &str {
+        match self {
+            SandboxError::Syntax { .. } => "",
+            SandboxError::PermissionDenied { stdout, .. }
+            | SandboxError::Runtime { stdout, .. }
+            | SandboxError::Timeout { stdout, .. }
+            | SandboxError::OutputLimit { stdout, .. }
+            | SandboxError::Cancelled { stdout } => stdout,
+        }
+    }
+
+    /// Stable machine-readable kind: `syntax`, `permission_denied`,
+    /// `runtime`, `timeout`, `output_limit` or `cancelled`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SandboxError::Syntax { .. } => "syntax",
+            SandboxError::PermissionDenied { .. } => "permission_denied",
+            SandboxError::Runtime { .. } => "runtime",
+            SandboxError::Timeout { .. } => "timeout",
+            SandboxError::OutputLimit { .. } => "output_limit",
+            SandboxError::Cancelled { .. } => "cancelled",
+        }
+    }
 }
 
 impl std::fmt::Display for SandboxError {
@@ -100,6 +165,10 @@ impl std::fmt::Display for SandboxError {
             SandboxError::Timeout { limit, .. } => {
                 write!(f, "execution exceeded max time of {:?}", limit)
             }
+            SandboxError::OutputLimit { limit, .. } => {
+                write!(f, "output exceeded the limit of {} bytes", limit)
+            }
+            SandboxError::Cancelled { .. } => f.write_str("execution cancelled by the host"),
         }
     }
 }
@@ -118,6 +187,7 @@ impl Sandbox {
         Sandbox {
             caps: Capabilities::deny_all(),
             max_time: None,
+            max_output: None,
             source_label: "<sandbox>".to_string(),
         }
     }
@@ -173,6 +243,13 @@ impl Sandbox {
         self
     }
 
+    /// Stop the program once it has printed more than `bytes` bytes, so a
+    /// runaway print loop cannot exhaust host memory.
+    pub fn max_output(mut self, bytes: usize) -> Self {
+        self.max_output = Some(bytes);
+        self
+    }
+
     /// Label used in error messages (e.g. the agent tool name).
     pub fn source_label(mut self, label: impl Into<String>) -> Self {
         self.source_label = label.into();
@@ -186,6 +263,16 @@ impl Sandbox {
 
     /// Run Forge source to completion under this sandbox's policy.
     pub fn run_source(&self, source: &str) -> Result<Output, SandboxError> {
+        self.run_source_cancellable(source, &CancelHandle::new())
+    }
+
+    /// Like [`Sandbox::run_source`], but the host can stop the run early
+    /// with `cancel` (e.g. when the agent that asked for it goes away).
+    pub fn run_source_cancellable(
+        &self,
+        source: &str,
+        cancel: &CancelHandle,
+    ) -> Result<Output, SandboxError> {
         let tokens = Lexer::new(source)
             .tokenize()
             .map_err(|e| SandboxError::Syntax {
@@ -198,6 +285,14 @@ impl Sandbox {
             })?;
 
         let sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let host_cancel = cancel;
+        if host_cancel.is_cancelled() {
+            return Err(SandboxError::Cancelled {
+                stdout: String::new(),
+            });
+        }
+        // The flag the interpreter polls. Separate from the host's handle,
+        // so a timeout or output-limit stop is not reported as a cancel.
         let cancel = Arc::new(AtomicBool::new(false));
         let caps = Arc::new(self.caps.clone());
         let (tx, rx) = mpsc::channel();
@@ -234,25 +329,63 @@ impl Sandbox {
                 .map(|b| b.concat())
                 .unwrap_or_else(|e| e.into_inner().concat())
         };
+        let printed = |sink: &Arc<Mutex<Vec<String>>>| -> usize {
+            let count = |b: &Vec<String>| b.iter().map(String::len).sum();
+            sink.lock()
+                .map(|b| count(&b))
+                .unwrap_or_else(|e| count(&e.into_inner()))
+        };
+        // Stop the worker cooperatively and give it a moment to unwind;
+        // either way the host gets control back now.
+        let stop = |cancel: &AtomicBool| {
+            cancel.store(true, Ordering::Release);
+            let _ = rx.recv_timeout(CANCEL_GRACE);
+        };
 
-        let outcome = match self.max_time {
-            None => rx.recv().ok(),
-            Some(limit) => match rx.recv_timeout(limit) {
-                Ok(r) => Some(r),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    cancel.store(true, Ordering::Release);
-                    // Give the program a moment to unwind cleanly; either
-                    // way the host gets control back now.
-                    let _ = rx.recv_timeout(CANCEL_GRACE);
+        let deadline = self.max_time.map(|limit| (limit, Instant::now() + limit));
+        let outcome = loop {
+            match rx.recv_timeout(POLL_INTERVAL) {
+                Ok(r) => break Some(r),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if host_cancel.is_cancelled() {
+                stop(&cancel);
+                return Err(SandboxError::Cancelled {
+                    stdout: collect(&sink),
+                });
+            }
+            if let Some((limit, at)) = deadline {
+                if Instant::now() >= at {
+                    stop(&cancel);
                     return Err(SandboxError::Timeout {
                         limit,
                         stdout: collect(&sink),
                     });
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => None,
-            },
+            }
+            if let Some(limit) = self.max_output {
+                if printed(&sink) > limit {
+                    stop(&cancel);
+                    return Err(SandboxError::OutputLimit {
+                        limit,
+                        stdout: truncate_utf8(collect(&sink), limit),
+                    });
+                }
+            }
         };
         let stdout = collect(&sink);
+        if let Some(limit) = self.max_output {
+            if stdout.len() > limit {
+                return Err(SandboxError::OutputLimit {
+                    limit,
+                    stdout: truncate_utf8(stdout, limit),
+                });
+            }
+        }
+        if host_cancel.is_cancelled() && outcome.as_ref().is_some_and(|r| r.is_err()) {
+            return Err(SandboxError::Cancelled { stdout });
+        }
         match outcome {
             Some(Ok(())) => Ok(Output { stdout }),
             Some(Err((message, line))) => {
@@ -273,6 +406,18 @@ impl Sandbox {
             }),
         }
     }
+}
+
+/// Cut `s` to at most `limit` bytes on a character boundary.
+pub(crate) fn truncate_utf8(mut s: String, limit: usize) -> String {
+    if s.len() > limit {
+        let mut end = limit;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+    }
+    s
 }
 
 #[cfg(test)]
@@ -427,6 +572,73 @@ mod tests {
             .run_source("wait(30)");
         assert!(matches!(r, Err(SandboxError::Timeout { .. })), "{r:?}");
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn output_from_tasks_timeouts_and_io_print_is_captured() {
+        let out = Sandbox::new()
+            .run_source(
+                "io.print(\"a\")\nlet h = spawn { say \"from task\" }\nawait h\ntimeout 5 seconds { say \"in timeout\" }",
+            )
+            .expect("runs");
+        assert_eq!(out.stdout, "afrom task\nin timeout\n");
+    }
+
+    #[test]
+    fn max_output_stops_runaway_printing() {
+        let start = std::time::Instant::now();
+        let r = Sandbox::new()
+            .max_output(1000)
+            .max_time(Duration::from_secs(20))
+            .run_source("while true { say \"spam spam spam\" }");
+        match r {
+            Err(SandboxError::OutputLimit { limit, stdout }) => {
+                assert_eq!(limit, 1000);
+                assert!(
+                    stdout.len() <= 1000 && stdout.starts_with("spam"),
+                    "{stdout}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        // Under the limit is fine.
+        assert!(Sandbox::new()
+            .max_output(10)
+            .run_source("say \"ok\"")
+            .is_ok());
+    }
+
+    #[test]
+    fn cancel_handle_stops_a_run() {
+        let handle = CancelHandle::new();
+        let remote = handle.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            remote.cancel();
+        });
+        let start = std::time::Instant::now();
+        let r = Sandbox::new().run_source_cancellable("say \"started\"\nwhile true { }", &handle);
+        t.join().expect("canceller");
+        match r {
+            Err(e @ SandboxError::Cancelled { .. }) => {
+                assert_eq!(e.kind(), "cancelled");
+                assert_eq!(e.stdout(), "started\n");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        // An already-cancelled handle never starts the program.
+        assert!(matches!(
+            Sandbox::new().run_source_cancellable("say 1", &handle),
+            Err(SandboxError::Cancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn truncate_utf8_respects_char_boundaries() {
+        assert_eq!(truncate_utf8("héllo".to_string(), 2), "h");
+        assert_eq!(truncate_utf8("abc".to_string(), 10), "abc");
     }
 
     #[test]
