@@ -3640,6 +3640,32 @@ impl VM {
         }
     }
 
+    /// Arity check for a user-defined function reached through
+    /// `receiver.m(args)` (shared rules in `crate::semantics`).
+    /// `receiver_param` is true for instance methods, whose first parameter
+    /// receives `receiver`; `argc` counts the explicit arguments, and
+    /// errors name the method as written at the call site.
+    fn check_user_method_arity(
+        &self,
+        func: Value,
+        name: &str,
+        argc: usize,
+        receiver_param: bool,
+    ) -> Result<(), VMError> {
+        let kind = func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
+        let Some(ObjKind::Closure(closure)) = kind else {
+            return Ok(());
+        };
+        let chunk = &closure.function.chunk;
+        let (params, required) = (chunk.arity as usize, chunk.min_arity as usize);
+        if receiver_param {
+            crate::semantics::check_method_arity(name, params, required, argc)
+        } else {
+            crate::semantics::check_call_arity(name, params, required, argc)
+        }
+        .map_err(|e| VMError::new(&e))
+    }
+
     fn call_forge_method(
         &mut self,
         receiver: Value,
@@ -3680,6 +3706,7 @@ impl VM {
 
         if let Some(fields) = self.get_object_fields(&receiver) {
             if let Some(func) = fields.get(method_name).cloned() {
+                self.check_user_method_arity(func, method_name, extra_args.len(), false)?;
                 return self.call_value(func, extra_args.to_vec());
             }
         }
@@ -3691,6 +3718,7 @@ impl VM {
                 .and_then(|methods| methods.get(method_name))
                 .cloned()
             {
+                self.check_user_method_arity(func, method_name, extra_args.len(), false)?;
                 return self.call_value(func, extra_args.to_vec());
             }
             return Err(VMError::new(&format!(
@@ -3706,6 +3734,7 @@ impl VM {
                 .and_then(|methods| methods.get(method_name))
                 .cloned()
             {
+                self.check_user_method_arity(func, method_name, extra_args.len(), true)?;
                 let mut full_args = Vec::with_capacity(extra_args.len() + 1);
                 full_args.push(receiver.clone());
                 full_args.extend(extra_args.iter().cloned());
@@ -3726,6 +3755,7 @@ impl VM {
                         let Some(embed_value) = fields.get(&embed_field).cloned() else {
                             continue;
                         };
+                        self.check_user_method_arity(func, method_name, extra_args.len(), true)?;
                         let mut full_args = Vec::with_capacity(extra_args.len() + 1);
                         full_args.push(embed_value);
                         full_args.extend(extra_args.iter().cloned());

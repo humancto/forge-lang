@@ -77,12 +77,12 @@ impl Watchdog {
                 Err(_) => None,
             };
             if let Some(label) = expired {
-                println!(
+                crate::color::cprintln!(
                     "    \x1B[31mFAIL\x1B[0m  {} — timed out after {}s; aborting the test run",
                     label,
                     limit.as_secs_f64()
                 );
-                eprintln!(
+                crate::color::ceprintln!(
                     "error: test '{}' exceeded the {}s limit (raise it with --timeout <secs>, 0 disables)",
                     label,
                     limit.as_secs_f64()
@@ -215,7 +215,7 @@ fn backends_for(
 pub fn run_tests(test_dir: &str, opts: &TestOptions) {
     let dir = Path::new(test_dir);
     if !dir.exists() {
-        eprintln!(
+        crate::color::ceprintln!(
             "{}",
             errors::format_simple_error(&format!(
                 "test directory '{}' not found. Create it with test files.",
@@ -227,7 +227,7 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
 
     let coverage = opts.coverage;
     if coverage && opts.engine == Engine::Vm {
-        eprintln!("  Info: --coverage is only supported on the interpreter; collecting coverage with --engine interp");
+        crate::color::ceprintln!("  Info: --coverage is only supported on the interpreter; collecting coverage with --engine interp");
     }
     let engine = if coverage && opts.engine == Engine::Vm {
         Engine::Interp
@@ -239,12 +239,12 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
     let mut tallies: Vec<(Backend, Tally)> = Vec::new();
     let mut coverage_data: Vec<(String, usize, usize)> = Vec::new();
 
-    println!();
+    crate::color::cprintln!();
 
     let dir_entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
-            eprintln!(
+            crate::color::ceprintln!(
                 "{}",
                 errors::format_simple_error(&format!(
                     "could not read test directory '{}': {}",
@@ -261,9 +261,9 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
     entries.sort_by_key(|e| e.path());
 
     if entries.is_empty() {
-        println!("  No test files found in '{}'", test_dir);
-        println!("  Create .fg files with @test functions");
-        println!();
+        crate::color::cprintln!("  No test files found in '{}'", test_dir);
+        crate::color::cprintln!("  Create .fg files with @test functions");
+        crate::color::cprintln!();
         return;
     }
 
@@ -283,7 +283,7 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("  Could not read {}: {}", path_str, e);
+                crate::color::ceprintln!("  Could not read {}: {}", path_str, e);
                 continue;
             }
         };
@@ -291,7 +291,7 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
         let program = match parse_source(&source) {
             Ok(p) => p,
             Err(message) => {
-                eprintln!("  \x1B[31mERROR\x1B[0m  {} — {}", path_str, message);
+                crate::color::ceprintln!("  \x1B[31mERROR\x1B[0m  {} — {}", path_str, message);
                 let backend = if engine == Engine::Interp {
                     Backend::Interp
                 } else {
@@ -327,16 +327,16 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
 
         for backend in backends {
             if show_label {
-                println!(
+                crate::color::cprintln!(
                     "  \x1B[1m{}\x1B[0m \x1B[90m[{}]\x1B[0m",
                     path_str,
                     backend.label()
                 );
             } else {
-                println!("  \x1B[1m{}\x1B[0m", path_str);
+                crate::color::cprintln!("  \x1B[1m{}\x1B[0m", path_str);
             }
             if let Some(ref note) = note {
-                println!("    \x1B[90mInfo: {}\x1B[0m", note);
+                crate::color::cprintln!("    \x1B[90mInfo: {}\x1B[0m", note);
             }
 
             let collect_coverage = coverage && backend == Backend::Interp;
@@ -355,7 +355,7 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
                 let executed = cov.intersection(&executable_set).count();
                 coverage_data.push((path_str.clone(), executable_set.len(), executed));
             }
-            println!();
+            crate::color::cprintln!();
         }
     }
 
@@ -372,15 +372,19 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
         } else {
             String::new()
         };
-        println!(
+        crate::color::cprintln!(
             "  \x1B[1m{}{} passed, {} failed{}, {} total\x1B[0m",
-            prefix, tally.passed, tally.failed, skip_msg, tally.total
+            prefix,
+            tally.passed,
+            tally.failed,
+            skip_msg,
+            tally.total
         );
     }
     if tallies.is_empty() {
-        println!("  \x1B[1m0 passed, 0 failed, 0 total\x1B[0m");
+        crate::color::cprintln!("  \x1B[1m0 passed, 0 failed, 0 total\x1B[0m");
     }
-    println!();
+    crate::color::cprintln!();
 
     if coverage && !coverage_data.is_empty() {
         print_coverage(&coverage_data);
@@ -416,7 +420,7 @@ fn run_file_on(
     let mut session = match started {
         Ok(s) => s,
         Err(message) => {
-            eprintln!("    \x1B[31mERROR\x1B[0m  setup — {}", message);
+            crate::color::ceprintln!("    \x1B[31mERROR\x1B[0m  setup — {}", message);
             tally.failed += 1;
             tally.total += 1;
             return (tally, None);
@@ -428,7 +432,7 @@ fn run_file_on(
 
         if test.skip {
             tally.skipped += 1;
-            println!("    \x1B[33mSKIP\x1B[0m  {}", test.name);
+            crate::color::cprintln!("    \x1B[33mSKIP\x1B[0m  {}", test.name);
             continue;
         }
 
@@ -442,9 +446,10 @@ fn run_file_on(
             if let Some(Err(message)) = session.call(before_name) {
                 Watchdog::disarm(watchdog);
                 tally.failed += 1;
-                println!(
+                crate::color::cprintln!(
                     "    \x1B[31mFAIL\x1B[0m  {} — @before hook failed: {}",
-                    test.name, message
+                    test.name,
+                    message
                 );
                 continue;
             }
@@ -463,25 +468,27 @@ fn run_file_on(
         match result {
             None => {
                 tally.failed += 1;
-                println!(
+                crate::color::cprintln!(
                     "    \x1B[31mFAIL\x1B[0m  {} — function not found",
                     test.name
                 );
             }
             Some(Ok(())) => {
                 tally.passed += 1;
-                println!(
+                crate::color::cprintln!(
                     "    \x1B[32mok\x1B[0m    {} \x1B[90m({}ms)\x1B[0m",
-                    test.name, duration
+                    test.name,
+                    duration
                 );
             }
             Some(Err(message)) => {
                 tally.failed += 1;
-                println!(
+                crate::color::cprintln!(
                     "    \x1B[31mFAIL\x1B[0m  {} \x1B[90m({}ms)\x1B[0m",
-                    test.name, duration
+                    test.name,
+                    duration
                 );
-                println!("          {}", message);
+                crate::color::cprintln!("          {}", message);
             }
         }
     }
@@ -490,8 +497,8 @@ fn run_file_on(
 }
 
 fn print_coverage(coverage_data: &[(String, usize, usize)]) {
-    println!("  \x1B[1mCoverage\x1B[0m");
-    println!();
+    crate::color::cprintln!("  \x1B[1mCoverage\x1B[0m");
+    crate::color::cprintln!();
     let mut total_executable = 0usize;
     let mut total_executed = 0usize;
     for (file, executable, executed) in coverage_data {
@@ -509,9 +516,13 @@ fn print_coverage(coverage_data: &[(String, usize, usize)]) {
         } else {
             "\x1B[31m"
         };
-        println!(
+        crate::color::cprintln!(
             "    {}{:5.1}%\x1B[0m  {} ({}/{})",
-            color, pct, file, executed, executable
+            color,
+            pct,
+            file,
+            executed,
+            executable
         );
     }
     let overall = if total_executable > 0 {
@@ -519,7 +530,7 @@ fn print_coverage(coverage_data: &[(String, usize, usize)]) {
     } else {
         100.0
     };
-    println!();
+    crate::color::cprintln!();
     let overall_color = if overall >= 80.0 {
         "\x1B[32m"
     } else if overall >= 50.0 {
@@ -527,11 +538,14 @@ fn print_coverage(coverage_data: &[(String, usize, usize)]) {
     } else {
         "\x1B[31m"
     };
-    println!(
+    crate::color::cprintln!(
         "  {}Overall: {:.1}%\x1B[0m ({}/{})",
-        overall_color, overall, total_executed, total_executable
+        overall_color,
+        overall,
+        total_executed,
+        total_executable
     );
-    println!();
+    crate::color::cprintln!();
 }
 
 struct TestInfo {

@@ -113,7 +113,7 @@ pub fn run_dap() {
                 }
 
                 "setBreakpoints" => {
-                    let source_path = args["source"]["path"].as_str().unwrap_or("").to_string();
+                    let source_path = breakpoint_key(args["source"]["path"].as_str().unwrap_or(""));
                     let lines: Vec<usize> = args["breakpoints"]
                         .as_array()
                         .map(|arr| {
@@ -349,6 +349,15 @@ pub fn run_dap() {
     }
 }
 
+/// The key breakpoints are stored under: the canonical form of a client
+/// path, so `./a.fg`, `a.fg` and `/abs/a.fg` name the same file. Paths that
+/// do not exist are kept as given.
+fn breakpoint_key(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 /// Start a launched program and apply breakpoints collected before launch.
 /// On failure, reports the error to the client and ends the session.
 fn start_program(
@@ -439,6 +448,7 @@ fn launch_interpreter(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| program_path.to_string());
     let source_path = program_path.to_string();
+    let program_file = std::path::PathBuf::from(breakpoint_key(program_path));
 
     let thread = {
         let ds = debug_state.clone();
@@ -449,6 +459,10 @@ fn launch_interpreter(
             interp.debug_state = Some(ds);
             interp.output_sink = Some(sink);
             interp.source = Some(source);
+            // Breakpoints are keyed by canonical path (see `breakpoint_key`);
+            // with `source_file` set the interpreter only stops on lines of
+            // this file instead of on that line number in any file.
+            interp.source_file = Some(program_file);
 
             let error = interp
                 .run(&program)
@@ -712,6 +726,19 @@ mod tests {
         assert!(file_bps.contains(&5));
         assert!(file_bps.contains(&10));
         assert!(!file_bps.contains(&7));
+    }
+
+    #[test]
+    fn breakpoint_key_canonicalizes_existing_paths() {
+        let dir = std::env::temp_dir().join(format!("forge-dap-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.fg");
+        std::fs::write(&file, "say 1\n").unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        let via_dot = dir.join(".").join("main.fg").to_string_lossy().into_owned();
+        assert_eq!(breakpoint_key(&via_dot), canonical.to_string_lossy());
+        assert_eq!(breakpoint_key("no/such/file.fg"), "no/such/file.fg");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

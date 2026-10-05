@@ -58,13 +58,20 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     //    piped so escape codes never reach a log file.
     if std::io::stderr().is_terminal() {
         let now = chrono::Local::now().format("%H:%M:%S");
-        match name {
-            "log.info" => eprintln!("\x1B[32m[{} INFO]\x1B[0m  {}", now, message),
-            "log.warn" => eprintln!("\x1B[33m[{} WARN]\x1B[0m  {}", now, message),
-            "log.error" => eprintln!("\x1B[31m[{} ERROR]\x1B[0m {}", now, message),
-            "log.debug" => eprintln!("\x1B[90m[{} DEBUG]\x1B[0m {}", now, message),
-            _ => {}
-        }
+        let (code, label, pad) = match name {
+            "log.info" => ("32", "INFO", "  "),
+            "log.warn" => ("33", "WARN", "  "),
+            "log.error" => ("31", "ERROR", " "),
+            _ => ("90", "DEBUG", " "),
+        };
+        // Only the prefix is chrome; the message is the program's data and
+        // is printed untouched.
+        let prefix = crate::color::paint(
+            crate::color::Stream::Stderr,
+            code,
+            &format!("[{} {}]", now, label),
+        );
+        eprintln!("{}{}{}", prefix, pad, message);
     }
 
     Ok(Value::Null)

@@ -5,26 +5,26 @@ pub fn run_chat() {
         .or_else(|_| std::env::var("OPENAI_API_KEY"))
         .unwrap_or_default();
 
-    println!();
-    println!("  \x1B[1;35m╔══════════════════════════════════════╗\x1B[0m");
-    println!("  \x1B[1;35m║        Forge AI Chat                 ║\x1B[0m");
-    println!("  \x1B[1;35m╚══════════════════════════════════════╝\x1B[0m");
-    println!();
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[1;35m╔══════════════════════════════════════╗\x1B[0m");
+    crate::color::cprintln!("  \x1B[1;35m║        Forge AI Chat                 ║\x1B[0m");
+    crate::color::cprintln!("  \x1B[1;35m╚══════════════════════════════════════╝\x1B[0m");
+    crate::color::cprintln!();
 
     if api_key.is_empty() {
-        println!("  \x1B[33mNo API key found.\x1B[0m");
-        println!("  Set FORGE_AI_KEY or OPENAI_API_KEY environment variable.");
-        println!();
-        println!("  Example:");
-        println!("    export FORGE_AI_KEY=your-api-key-here");
-        println!("    forge chat");
-        println!();
+        crate::color::cprintln!("  \x1B[33mNo API key found.\x1B[0m");
+        crate::color::cprintln!("  Set FORGE_AI_KEY or OPENAI_API_KEY environment variable.");
+        crate::color::cprintln!();
+        crate::color::cprintln!("  Example:");
+        crate::color::cprintln!("    export FORGE_AI_KEY=your-api-key-here");
+        crate::color::cprintln!("    forge chat");
+        crate::color::cprintln!();
         return;
     }
 
-    println!("  Connected! Type your message, or 'exit' to quit.");
-    println!("  Type '/forge <code>' to run Forge code inline.");
-    println!();
+    crate::color::cprintln!("  Connected! Type your message, or 'exit' to quit.");
+    crate::color::cprintln!("  Type '/forge <code>' to run Forge code inline.");
+    crate::color::cprintln!();
 
     let model = std::env::var("FORGE_AI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
     let url = std::env::var("FORGE_AI_URL")
@@ -36,7 +36,7 @@ pub fn run_chat() {
     })];
 
     loop {
-        print!("  \x1B[1;35myou>\x1B[0m ");
+        crate::color::cprint!("  \x1B[1;35myou>\x1B[0m ");
         io::stdout().flush().ok();
 
         let mut input = String::new();
@@ -51,12 +51,12 @@ pub fn run_chat() {
             continue;
         }
         if trimmed == "exit" || trimmed == "quit" {
-            println!("  Goodbye!");
+            crate::color::cprintln!("  Goodbye!");
             break;
         }
 
         if let Some(code) = trimmed.strip_prefix("/forge ") {
-            println!();
+            crate::color::cprintln!();
             let mut lexer = crate::lexer::Lexer::new(code);
             if let Ok(tokens) = lexer.tokenize() {
                 let mut parser = crate::parser::Parser::new(tokens);
@@ -64,11 +64,11 @@ pub fn run_chat() {
                     let mut interp = crate::interpreter::Interpreter::new();
                     match interp.run(&program) {
                         Ok(_) => {}
-                        Err(e) => eprintln!("  \x1B[31m{}\x1B[0m", e),
+                        Err(e) => crate::color::ceprintln!("  \x1B[31m{}\x1B[0m", e),
                     }
                 }
             }
-            println!();
+            crate::color::cprintln!();
             continue;
         }
 
@@ -87,7 +87,7 @@ pub fn run_chat() {
         headers.insert("Authorization".to_string(), format!("Bearer {}", api_key));
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 
-        print!("  \x1B[1;36mai>\x1B[0m ");
+        crate::color::cprint!("  \x1B[1;36mai>\x1B[0m ");
         io::stdout().flush().ok();
 
         match crate::runtime::client::fetch_blocking(
@@ -111,24 +111,24 @@ pub fn run_chat() {
                                 if let Some(crate::interpreter::Value::String(content)) =
                                     msg.get("content")
                                 {
-                                    println!("{}", content);
+                                    crate::color::cprintln!("{}", content);
                                     history.push(serde_json::json!({
                                         "role": "assistant",
                                         "content": content
                                     }));
-                                    println!();
+                                    crate::color::cprintln!();
                                     continue;
                                 }
                             }
                         }
                     }
                 }
-                println!("\x1B[31mFailed to parse response\x1B[0m");
+                crate::color::cprintln!("\x1B[31mFailed to parse response\x1B[0m");
             }
             _ => {
-                println!("\x1B[31mFailed to reach AI API\x1B[0m");
+                crate::color::cprintln!("\x1B[31mFailed to reach AI API\x1B[0m");
             }
         }
-        println!();
+        crate::color::cprintln!();
     }
 }

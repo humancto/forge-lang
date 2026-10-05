@@ -1075,10 +1075,131 @@ fn compile_stmt_value(c: &mut Compiler, stmt: &Stmt, dst: u8) -> Result<(), Comp
             Ok(())
         }
         Stmt::When { subject, arms } => compile_when(c, subject, arms, dst),
+        Stmt::Match { subject, arms } => compile_match(c, subject, arms, Some(dst)),
         Stmt::SafeBlock { body } => compile_safe_block(c, body, Some(dst)),
         other => {
             compile_stmt(c, other)?;
             c.emit(encode_abc(OpCode::LoadNull, dst, 0, 0), 0);
+            Ok(())
+        }
+    }
+}
+
+/// `match subject { pattern => body, ... }`. With `dst`, the taken arm's
+/// body is compiled as a block value into `dst` (null when no arm matches),
+/// so a `match` that ends a function body is its return value.
+fn compile_match(
+    c: &mut Compiler,
+    subject: &Expr,
+    arms: &[MatchArm],
+    dst: Option<u8>,
+) -> Result<(), CompileError> {
+    let saved = c.next_register;
+    let subj = c.alloc_reg()?;
+    compile_expr(c, subject, subj)?;
+    if let Some(dst) = dst {
+        c.emit(encode_abc(OpCode::LoadNull, dst, 0, 0), 0);
+    }
+    let mut end_jumps = Vec::new();
+
+    for arm in arms {
+        match &arm.pattern {
+            Pattern::Wildcard => {
+                c.begin_scope();
+                compile_arm_body(c, &arm.body, dst)?;
+                c.end_scope();
+                break;
+            }
+            Pattern::Binding(name) => {
+                let saved = c.next_register;
+                let fn_reg = c.alloc_reg()?;
+                let fn_idx = c.const_str("__forge_binding_matches");
+                c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
+
+                let name_reg = c.alloc_reg()?;
+                let name_idx = c.const_str(&c.global_name(name));
+                c.emit(encode_abx(OpCode::LoadConst, name_reg, name_idx), 0);
+
+                let value_reg = c.alloc_reg()?;
+                c.emit(encode_abc(OpCode::Move, value_reg, subj, 0), 0);
+
+                let check_reg = c.alloc_reg()?;
+                c.emit(encode_abc(OpCode::Call, fn_reg, 2, check_reg), 0);
+                let skip = c.emit_jump(OpCode::JumpIfFalse, check_reg, 0);
+                c.free_to(saved);
+
+                c.begin_scope();
+                let vr = c.add_local(name, false)?;
+                c.emit(encode_abc(OpCode::Move, vr, subj, 0), 0);
+                compile_arm_body(c, &arm.body, dst)?;
+                c.end_scope();
+
+                let ej = c.emit_jump(OpCode::Jump, 0, 0);
+                end_jumps.push(ej);
+                c.patch_jump(skip);
+            }
+            Pattern::Literal(lit) => {
+                let lr = c.alloc_reg()?;
+                compile_expr(c, lit, lr)?;
+                let cr = c.alloc_reg()?;
+                c.emit(encode_abc(OpCode::Eq, cr, subj, lr), 0);
+                let skip = c.emit_jump(OpCode::JumpIfFalse, cr, 0);
+                c.free_to(lr);
+
+                c.begin_scope();
+                compile_arm_body(c, &arm.body, dst)?;
+                c.end_scope();
+
+                let ej = c.emit_jump(OpCode::Jump, 0, 0);
+                end_jumps.push(ej);
+                c.patch_jump(skip);
+            }
+            Pattern::Constructor { name, fields } => {
+                let variant_idx = c.const_str(name);
+                let vr = c.alloc_reg()?;
+                emit_get_field(c, vr, subj, "__variant__")?;
+                let nr = c.alloc_reg()?;
+                c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
+                let cr = c.alloc_reg()?;
+                c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
+                let skip = c.emit_jump(OpCode::JumpIfFalse, cr, 0);
+                c.free_to(vr);
+
+                c.begin_scope();
+                for (i, fp) in fields.iter().enumerate() {
+                    if let Pattern::Binding(bname) = fp {
+                        let fr = c.add_local(bname, false)?;
+                        c.emit(encode_abc(OpCode::ExtractField, fr, subj, i as u8), 0);
+                    }
+                }
+                compile_arm_body(c, &arm.body, dst)?;
+                c.end_scope();
+
+                let ej = c.emit_jump(OpCode::Jump, 0, 0);
+                end_jumps.push(ej);
+                c.patch_jump(skip);
+            }
+        }
+    }
+    for ej in end_jumps {
+        c.patch_jump(ej);
+    }
+    c.free_to(saved);
+    Ok(())
+}
+
+fn compile_arm_body(
+    c: &mut Compiler,
+    body: &[SpannedStmt],
+    dst: Option<u8>,
+) -> Result<(), CompileError> {
+    match dst {
+        Some(dst) => compile_block_value(c, body, dst),
+        None => {
+            for s in body {
+                c.set_span(s);
+                compile_stmt(c, &s.stmt)?;
+            }
             Ok(())
         }
     }
@@ -1221,6 +1342,13 @@ fn compile_function_body(
                 compile_expr(fc, expr, dst)?;
                 fc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
                 fc.free_to(dst);
+            } else if crate::semantics::is_value_tail(&s.stmt) {
+                // `if`/`when`/`match`/`safe` ending a body yield the value
+                // of the branch taken (shared rule: semantics::is_value_tail).
+                let dst = fc.alloc_reg()?;
+                compile_stmt_value(fc, &s.stmt, dst)?;
+                fc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
+                fc.free_to(dst);
             } else {
                 compile_stmt(fc, &s.stmt)?;
                 fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
@@ -1258,6 +1386,12 @@ fn compile_spawn_body(sc: &mut Compiler, body: &[SpannedStmt]) -> Result<(), Com
         Stmt::Return(Some(expr)) => {
             let dst = sc.alloc_reg()?;
             compile_expr(sc, expr, dst)?;
+            sc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
+            sc.free_to(dst);
+        }
+        tail if crate::semantics::is_value_tail(tail) => {
+            let dst = sc.alloc_reg()?;
+            compile_stmt_value(sc, tail, dst)?;
             sc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
             sc.free_to(dst);
         }
@@ -1537,109 +1671,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             Ok(())
         }
 
-        Stmt::Match { subject, arms } => {
-            let saved = c.next_register;
-            let subj = c.alloc_reg()?;
-            compile_expr(c, subject, subj)?;
-            let mut end_jumps = Vec::new();
-
-            for arm in arms {
-                match &arm.pattern {
-                    Pattern::Wildcard => {
-                        c.begin_scope();
-                        for s in &arm.body {
-                            c.set_span(s);
-                            compile_stmt(c, &s.stmt)?;
-                        }
-                        c.end_scope();
-                        break;
-                    }
-                    Pattern::Binding(name) => {
-                        let saved = c.next_register;
-                        let fn_reg = c.alloc_reg()?;
-                        let fn_idx = c.const_str("__forge_binding_matches");
-                        c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
-
-                        let name_reg = c.alloc_reg()?;
-                        let name_idx = c.const_str(&c.global_name(name));
-                        c.emit(encode_abx(OpCode::LoadConst, name_reg, name_idx), 0);
-
-                        let value_reg = c.alloc_reg()?;
-                        c.emit(encode_abc(OpCode::Move, value_reg, subj, 0), 0);
-
-                        let check_reg = c.alloc_reg()?;
-                        c.emit(encode_abc(OpCode::Call, fn_reg, 2, check_reg), 0);
-                        let skip = c.emit_jump(OpCode::JumpIfFalse, check_reg, 0);
-                        c.free_to(saved);
-
-                        c.begin_scope();
-                        let vr = c.add_local(name, false)?;
-                        c.emit(encode_abc(OpCode::Move, vr, subj, 0), 0);
-                        for s in &arm.body {
-                            c.set_span(s);
-                            compile_stmt(c, &s.stmt)?;
-                        }
-                        c.end_scope();
-
-                        let ej = c.emit_jump(OpCode::Jump, 0, 0);
-                        end_jumps.push(ej);
-                        c.patch_jump(skip);
-                    }
-                    Pattern::Literal(lit) => {
-                        let lr = c.alloc_reg()?;
-                        compile_expr(c, lit, lr)?;
-                        let cr = c.alloc_reg()?;
-                        c.emit(encode_abc(OpCode::Eq, cr, subj, lr), 0);
-                        let skip = c.emit_jump(OpCode::JumpIfFalse, cr, 0);
-                        c.free_to(lr);
-
-                        c.begin_scope();
-                        for s in &arm.body {
-                            c.set_span(s);
-                            compile_stmt(c, &s.stmt)?;
-                        }
-                        c.end_scope();
-
-                        let ej = c.emit_jump(OpCode::Jump, 0, 0);
-                        end_jumps.push(ej);
-                        c.patch_jump(skip);
-                    }
-                    Pattern::Constructor { name, fields } => {
-                        let variant_idx = c.const_str(name);
-                        let vr = c.alloc_reg()?;
-                        emit_get_field(c, vr, subj, "__variant__")?;
-                        let nr = c.alloc_reg()?;
-                        c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
-                        let cr = c.alloc_reg()?;
-                        c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
-                        let skip = c.emit_jump(OpCode::JumpIfFalse, cr, 0);
-                        c.free_to(vr);
-
-                        c.begin_scope();
-                        for (i, fp) in fields.iter().enumerate() {
-                            if let Pattern::Binding(bname) = fp {
-                                let fr = c.add_local(bname, false)?;
-                                c.emit(encode_abc(OpCode::ExtractField, fr, subj, i as u8), 0);
-                            }
-                        }
-                        for s in &arm.body {
-                            c.set_span(s);
-                            compile_stmt(c, &s.stmt)?;
-                        }
-                        c.end_scope();
-
-                        let ej = c.emit_jump(OpCode::Jump, 0, 0);
-                        end_jumps.push(ej);
-                        c.patch_jump(skip);
-                    }
-                }
-            }
-            for ej in end_jumps {
-                c.patch_jump(ej);
-            }
-            c.free_to(saved);
-            Ok(())
-        }
+        Stmt::Match { subject, arms } => compile_match(c, subject, arms, None),
 
         Stmt::Expression(expr) => {
             let saved = c.next_register;

@@ -68,24 +68,26 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 } else {
                     "31"
                 };
-                eprintln!();
-                eprintln!("  \x1B[1m{} {}\x1B[0m", method, url);
-                eprintln!(
+                crate::color::ceprintln!();
+                crate::color::ceprintln!("  \x1B[1m{} {}\x1B[0m", method, url);
+                crate::color::ceprintln!(
                     "  \x1B[{}mStatus: {}\x1B[0m  \x1B[90mTime: {}ms\x1B[0m",
-                    status_color, status, time
+                    status_color,
+                    status,
+                    time
                 );
                 if let Some(body) = resp.get("json") {
                     let pretty =
                         crate::stdlib::json_module::call("json.pretty", vec![body.clone()])
                             .unwrap_or_else(|_| Value::String("(no body)".to_string()));
                     if let Value::String(s) = pretty {
-                        eprintln!();
+                        crate::color::ceprintln!();
                         for line in s.lines() {
-                            eprintln!("  {}", line);
+                            crate::color::ceprintln!("  {}", line);
                         }
                     }
                 }
-                eprintln!();
+                crate::color::ceprintln!();
                 Ok(Value::Null)
             }
             _ => Err("http.pretty() requires a response object".to_string()),
@@ -290,7 +292,7 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
     crate::stdlib::fs::confine_write(&dest)?;
     let validated = crate::runtime::client::validate_url_full(&url)?;
 
-    eprintln!("  Downloading {}...", url);
+    crate::color::ceprintln!("  Downloading {}...", url);
 
     let url_string = validated.url.as_str().to_string();
     let pinned = validated.pinned.clone();
@@ -317,7 +319,7 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
 
         std::fs::write(&dest_clone, &bytes).map_err(|e| format!("write error: {}", e))?;
 
-        eprintln!("  Saved to {} ({} bytes)", dest_clone, bytes.len());
+        crate::color::ceprintln!("  Saved to {} ({} bytes)", dest_clone, bytes.len());
 
         let mut result = IndexMap::new();
         result.insert("path".to_string(), Value::String(dest_clone));

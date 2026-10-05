@@ -1,5 +1,6 @@
 mod builtins_registry;
 mod chat;
+mod color;
 mod dap;
 mod doc;
 mod errors;
@@ -806,11 +807,12 @@ fn prepare_program(
 }
 
 fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
+    let filename = &errors::display_path(filename);
     match err {
         FrontendError::Lex { line, col, message } | FrontendError::Parse { line, col, message } => {
             eprintln!(
                 "{}",
-                errors::format_error(source, line, col, &format!("[{}] {}", filename, message))
+                errors::format_error(filename, source, line, col, &message)
             );
         }
         FrontendError::Type(warnings) => {
@@ -1099,6 +1101,7 @@ fn ensure_vm_compatible(program: &Program, mode: &str) -> Result<(), String> {
 /// shows (anchored at the failing statement of the main program), followed
 /// by the VM stack trace.
 fn report_vm_error(source: &str, filename: &str, error: &vm::machine::VMError) {
+    let filename = &errors::display_path(filename);
     let main_frame = error
         .stack_trace
         .iter()
@@ -1109,10 +1112,11 @@ fn report_vm_error(source: &str, filename: &str, error: &vm::machine::VMError) {
             eprintln!(
                 "{}",
                 errors::format_error(
+                    filename,
                     source,
                     frame.line,
                     frame.col.max(1),
-                    &format!("[{}] {}", filename, error.message)
+                    &error.message
                 )
             );
             if error.stack_trace.len() > 1 {
@@ -1193,14 +1197,16 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
         match interpreter.run(&program) {
             Ok(_) => {}
             Err(e) => {
+                let filename = &errors::display_path(filename);
                 if e.line > 0 {
                     eprintln!(
                         "{}",
                         errors::format_error(
+                            filename,
                             source,
                             e.line,
                             if e.col > 0 { e.col } else { 1 },
-                            &format!("[{}] {}", filename, e.message)
+                            &e.message
                         )
                     );
                 } else {
