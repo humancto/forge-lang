@@ -1909,7 +1909,7 @@ impl Interpreter {
             "cook" => {
                 // cook(fn) — time execution with personality
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("cook() needs a function — let him cook!")),
                 };
                 let start = std::time::Instant::now();
@@ -1933,7 +1933,7 @@ impl Interpreter {
             "yolo" => {
                 // yolo(fn) — swallow ALL errors, return None on failure
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("yolo() needs a function to send it on")),
                 };
                 match self.call_function(func, vec![]) {
@@ -1946,7 +1946,7 @@ impl Interpreter {
                 // Note: In a real implementation this would redirect stdout.
                 // For now, we execute and return the result silently.
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("ghost() needs a function to haunt")),
                 };
                 // Execute the function, capturing its return value
@@ -1956,7 +1956,7 @@ impl Interpreter {
             "slay" => {
                 // slay(fn, n?) — benchmark function n times, return stats
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("slay() needs a function to benchmark")),
                 };
                 let n = match args.get(1) {

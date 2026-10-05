@@ -206,8 +206,8 @@ fn call_handler(
     };
 
     let mut args: Vec<Value> = Vec::new();
-    if let Value::Function { ref params, .. } = handler {
-        for param in params {
+    if let Value::Function(ref func) = handler {
+        for param in &func.params {
             if let Some(val) = path_params.get(&param.name) {
                 args.push(Value::String(val.clone()));
             } else if param.name == "body" || param.name == "data" {

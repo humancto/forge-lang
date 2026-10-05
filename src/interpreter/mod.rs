@@ -132,6 +132,17 @@ impl StreamKind {
     }
 }
 
+/// A named function: its definition plus the environment it closes over.
+/// Immutable once created; see [`Value::Function`].
+#[derive(Debug)]
+pub struct FunctionValue {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub body: Vec<SpannedStmt>,
+    pub closure: Environment,
+    pub decorators: Vec<Decorator>,
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -150,16 +161,12 @@ pub enum Value {
     /// combinators can wrap upstreams without cloning cursor state.
     Stream(Arc<Mutex<StreamCell>>),
     Object(IndexMap<String, Value>),
-    Function {
-        name: String,
-        params: Vec<Param>,
-        body: Vec<SpannedStmt>,
-        closure: Environment,
-        decorators: Vec<Decorator>,
-    },
+    /// Named function. Shared by `Arc`: reading a function variable (every
+    /// call does) is a refcount bump, never a copy of its body.
+    Function(Arc<FunctionValue>),
     Lambda {
-        params: Vec<Param>,
-        body: Vec<SpannedStmt>,
+        params: Arc<[Param]>,
+        body: Arc<[SpannedStmt]>,
         closure: Arc<std::sync::Mutex<Environment>>,
     },
     ResultOk(Box<Value>),
@@ -292,7 +299,7 @@ impl Value {
             Value::Map(_) => "Map",
             Value::Object(_) => "Object",
             Value::Stream(_) => "Stream",
-            Value::Function { .. } => "Function",
+            Value::Function(_) => "Function",
             Value::Lambda { .. } => "Lambda",
             Value::ResultOk(_) | Value::ResultErr(_) => "Result",
             Value::Some(_) | Value::None => "Option",
@@ -402,7 +409,7 @@ impl fmt::Display for Value {
                 write!(f, "Stream({})", name)
             }
             Value::Object(_) => write!(f, "{}", self.to_json_string()),
-            Value::Function { name, .. } => write!(f, "<fn {}>", name),
+            Value::Function(func) => write!(f, "<fn {}>", func.name),
             Value::Lambda { .. } => write!(f, "<lambda>"),
             Value::ResultOk(v) => write!(f, "Ok({})", v),
             Value::ResultErr(v) => write!(f, "Err({})", v),
@@ -640,19 +647,16 @@ impl Environment {
 
     fn dup_value(v: Value, scope_map: &mut ScopeMap) -> Value {
         match v {
-            Value::Function {
-                name,
-                params,
-                body,
-                closure,
-                decorators,
-            } => Value::Function {
-                name,
-                params,
-                body,
-                decorators,
-                closure: Self::deep_clone_env(&closure, scope_map),
-            },
+            Value::Function(func) => {
+                let closure = Self::deep_clone_env(&func.closure, scope_map);
+                Value::Function(Arc::new(FunctionValue {
+                    name: func.name.clone(),
+                    params: func.params.clone(),
+                    body: func.body.clone(),
+                    decorators: func.decorators.clone(),
+                    closure,
+                }))
+            }
             Value::Lambda {
                 params,
                 body,
@@ -1370,31 +1374,16 @@ impl Interpreter {
                 decorators,
                 ..
             } => {
-                let func = Value::Function {
+                // The closure shares the current scope's Arc, so the function
+                // sees its own binding (recursion) once it is defined below.
+                let func = Value::Function(Arc::new(FunctionValue {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
                     closure: self.env.clone(),
                     decorators: decorators.clone(),
-                };
-                self.env.define(name.clone(), func.clone());
-                if let Value::Function {
-                    name: n,
-                    params: p,
-                    body: b,
-                    decorators: d,
-                    ..
-                } = func
-                {
-                    let recursive_func = Value::Function {
-                        name: n,
-                        params: p,
-                        body: b,
-                        closure: self.env.clone(),
-                        decorators: d,
-                    };
-                    self.env.define(name.clone(), recursive_func);
-                }
+                }));
+                self.env.define(name.clone(), func);
                 Ok(Signal::None)
             }
 
@@ -1515,13 +1504,13 @@ impl Interpreter {
                             format!("{}::{}", type_name, method_name)
                         };
 
-                        let func_val = Value::Function {
+                        let func_val = Value::Function(Arc::new(FunctionValue {
                             name: qualified_name.clone(),
                             params: params.clone(),
                             body: body.clone(),
                             closure: self.env.clone(),
                             decorators: Vec::new(),
-                        };
+                        }));
 
                         // Register in method tables
                         let type_methods = self
@@ -2385,7 +2374,7 @@ impl Interpreter {
                 }
                 let val = self.env.get(&name)?;
                 match val {
-                    Value::BuiltIn(_) | Value::Function { .. } | Value::Lambda { .. } => None,
+                    Value::BuiltIn(_) | Value::Function(_) | Value::Lambda { .. } => None,
                     Value::Object(ref map) if map.contains_key("__module__") => None,
                     _ => Some((name, format!("{}", val))),
                 }
@@ -3385,8 +3374,8 @@ impl Interpreter {
             }
 
             Expr::Lambda { params, body } => Ok(Value::Lambda {
-                params: params.clone(),
-                body: body.clone(),
+                params: Arc::from(params.as_slice()),
+                body: Arc::from(body.as_slice()),
                 closure: Arc::new(std::sync::Mutex::new(self.env.clone())),
             }),
 
@@ -4443,6 +4432,24 @@ impl Interpreter {
         }
     }
 
+    /// Bind call arguments to parameters in the current (fresh) scope.
+    /// Missing arguments take the parameter default (evaluated in the
+    /// callee scope, so earlier parameters are visible) or `null`.
+    fn bind_params(&mut self, params: &[Param], args: Vec<Value>) {
+        let mut args = args.into_iter();
+        for param in params {
+            let val = match args.next() {
+                Some(v) => v,
+                None => param
+                    .default
+                    .as_ref()
+                    .and_then(|d| self.eval_expr(d).ok())
+                    .unwrap_or(Value::Null),
+            };
+            self.env.define(param.name.clone(), val);
+        }
+    }
+
     pub fn call_function(&mut self, func: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
         // Shared depth limit + native stack guard (runtime/recursion.rs):
         // runaway recursion is a catchable error, never a process abort.
@@ -4450,19 +4457,19 @@ impl Interpreter {
             return Err(RuntimeError::new(&msg));
         }
         self.call_depth += 1;
-        let frame_name = match &func {
-            Value::Function { name, .. } => {
-                if name.is_empty() {
-                    "<anonymous>".to_string()
-                } else {
-                    name.clone()
-                }
-            }
-            Value::Lambda { .. } => "<lambda>".to_string(),
-            Value::BuiltIn(n) => n.clone(),
-            _ => "<call>".to_string(),
-        };
         if self.debug_state.is_some() {
+            let frame_name = match &func {
+                Value::Function(func) => {
+                    if func.name.is_empty() {
+                        "<anonymous>".to_string()
+                    } else {
+                        func.name.clone()
+                    }
+                }
+                Value::Lambda { .. } => "<lambda>".to_string(),
+                Value::BuiltIn(n) => n.clone(),
+                _ => "<call>".to_string(),
+            };
             self.call_stack.push(DebugFrame {
                 name: frame_name,
                 line: self.current_line,
@@ -4483,47 +4490,32 @@ impl Interpreter {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         match func {
-            Value::Function {
-                name,
-                params,
-                body,
-                closure,
-                ..
-            } => {
+            Value::Function(func) => {
+                let FunctionValue {
+                    name,
+                    params,
+                    body,
+                    closure,
+                    ..
+                } = &*func;
                 let is_global_fn = !name.is_empty() && closure.scopes.len() == 1;
 
                 let result = if is_global_fn {
                     self.env.push_scope();
-                    for (i, param) in params.iter().enumerate() {
-                        let val = args
-                            .get(i)
-                            .cloned()
-                            .or_else(|| param.default.as_ref().and_then(|d| self.eval_expr(d).ok()))
-                            .unwrap_or(Value::Null);
-                        self.env.define(param.name.clone(), val);
-                    }
-                    let result = self.exec_stmts(&body);
+                    self.bind_params(params, args);
+                    let result = self.exec_stmts(body);
                     self.env.pop_scope();
                     result
                 } else {
-                    let saved_env = self.env.clone();
-                    self.env = closure;
+                    let saved_env = std::mem::replace(&mut self.env, closure.clone());
                     self.env.push_scope();
                     if !name.is_empty() {
-                        if let Some(func_val) = saved_env.get(&name) {
-                            self.env.define(name.clone(), func_val.clone());
+                        if let Some(func_val) = saved_env.get(name) {
+                            self.env.define(name.clone(), func_val);
                         }
                     }
-                    for (i, param) in params.iter().enumerate() {
-                        let val = args
-                            .get(i)
-                            .cloned()
-                            .or_else(|| param.default.as_ref().and_then(|d| self.eval_expr(d).ok()))
-                            .unwrap_or(Value::Null);
-                        self.env.define(param.name.clone(), val);
-                    }
-                    let result = self.exec_stmts(&body);
-                    self.env.pop_scope();
+                    self.bind_params(params, args);
+                    let result = self.exec_stmts(body);
                     self.env = saved_env;
                     result
                 };
@@ -4547,7 +4539,6 @@ impl Interpreter {
                 body,
                 closure,
             } => {
-                let saved_env = self.env.clone();
                 // Lock the shared closure to get the current captured state.
                 // Using Arc<Mutex<Environment>> means mutations inside the lambda
                 // persist across calls (fixes BUG-005: mutable closure capture).
@@ -4555,11 +4546,14 @@ impl Interpreter {
                     .lock()
                     .map_err(|_| RuntimeError::new("closure lock poisoned"))?
                     .clone();
-                self.env = captured_env;
+                let saved_env = std::mem::replace(&mut self.env, captured_env);
                 self.env.push_scope();
 
-                for (i, param) in params.iter().enumerate() {
-                    let val = args.get(i).cloned().unwrap_or(Value::Null);
+                // Lambdas do not evaluate parameter defaults; missing
+                // arguments are null.
+                let mut args = args.into_iter();
+                for param in params.iter() {
+                    let val = args.next().unwrap_or(Value::Null);
                     self.env.define(param.name.clone(), val);
                 }
 
