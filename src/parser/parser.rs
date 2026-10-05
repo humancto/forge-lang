@@ -1616,24 +1616,21 @@ impl Parser {
             self.advance();
             let mut args = Vec::new();
             while !self.check(&Token::RParen) {
-                // Try named arg: key: value
-                if let Token::Ident(ref key) = self.current_token() {
-                    let key = key.clone();
-                    let saved_pos = self.pos;
-                    self.advance();
-                    if self.check(&Token::Colon) {
+                // Try named arg: key: value. Keys follow the object-literal
+                // rule, so soft keywords work too (`@tool(timeout: 5)`).
+                let saved_pos = self.pos;
+                match self.expect_ident() {
+                    Ok(key) if self.check(&Token::Colon) => {
                         self.advance();
                         let value = self.parse_expr()?;
                         args.push(DecoratorArg::Named(key, value));
-                    } else {
+                    }
+                    _ => {
                         // Not a named arg, backtrack
                         self.pos = saved_pos;
                         let expr = self.parse_expr()?;
                         args.push(DecoratorArg::Positional(expr));
                     }
-                } else {
-                    let expr = self.parse_expr()?;
-                    args.push(DecoratorArg::Positional(expr));
                 }
 
                 if self.check(&Token::Comma) {
@@ -2861,6 +2858,23 @@ mod tests {
             Ok(_) => panic!("expected a parse error for {input:.40}"),
             Err(e) => e,
         }
+    }
+
+    #[test]
+    fn decorator_named_args_accept_soft_keywords() {
+        let program = parse_program("@tool(\"d\", timeout: 5, to: x)\nfn f() {}");
+        let Stmt::FnDef { decorators, .. } = &program.statements[0].stmt else {
+            panic!("expected a function");
+        };
+        let keys: Vec<Option<&str>> = decorators[0]
+            .args
+            .iter()
+            .map(|a| match a {
+                DecoratorArg::Named(k, _) => Some(k.as_str()),
+                DecoratorArg::Positional(_) => None,
+            })
+            .collect();
+        assert_eq!(keys, [None, Some("timeout"), Some("to")]);
     }
 
     #[test]
