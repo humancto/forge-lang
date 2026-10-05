@@ -10,8 +10,8 @@ use cranelift_module::FuncId;
 
 use crate::vm::bytecode::Chunk;
 use crate::vm::jit::ir_builder::{self, CalleeBodies};
-use crate::vm::jit::{math_bridges, runtime};
 use crate::vm::jit::verifier::VerifiedFn;
+use crate::vm::jit::{math_bridges, runtime};
 
 pub struct JitCompiler {
     module: JITModule,

@@ -44,6 +44,7 @@
 //! | `Not`/`And`/`Or` | any value (truthiness) | Bool | — |
 //! | `Jump`/`Loop`/`JumpIf*` | cond any value | — | `Loop`: task cancelled |
 //! | `GetGlobal` | self, a verified function, `float`/`int`/`range`/`math`, the method-call intrinsic | reference | — (guards) |
+//! | `GetUpvalue` | a captured closure (called only) | reference | — (guard) |
 //! | `GetField` | `math` Float constant | Float | — (guard) |
 //! | `Call` | self / callee with `arity` args (callee specialized for their kinds), pure builtin | its result | stack depth, cancelled, builtin-specific |
 //! | `ForRangePrep`/`ForRangeNext` | `range` with Int args | Int counters | — |
@@ -54,6 +55,7 @@ use std::sync::Arc;
 
 use crate::vm::bytecode::*;
 use crate::vm::jit::types::{FnId, JitType, TypeSig};
+use crate::vm::value::GcRef;
 
 /// A builtin global the JIT implements natively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -195,11 +197,12 @@ pub enum PureOp {
     ToInt,
 }
 
-/// What a global name is bound to right now (see [`Env::global`]).
+/// What a global name or captured variable holds right now (see
+/// [`Env::global`], [`Env::upvalue`]).
 #[derive(Debug, Clone)]
 pub enum GlobalView {
-    /// A closure over this function prototype.
-    Closure(Arc<Chunk>),
+    /// A closure (`closure`) over this function prototype.
+    Closure { chunk: Arc<Chunk>, closure: GcRef },
     /// A builtin `NativeFunction` with this name.
     Native(String),
     /// Anything else (or unbound).
@@ -218,11 +221,20 @@ pub enum MemberView {
 pub trait Env {
     /// Current binding of global `name`.
     fn global(&self, name: &str) -> GlobalView;
+    /// Current value of captured variable `index` of the closure whose code
+    /// is being verified.
+    fn upvalue(&self, index: u8) -> GlobalView;
     /// Current value of `object.field` for the global object `object`.
     fn member(&self, object: &str, field: &str) -> MemberView;
-    /// Ensure `chunk` has a compiled specialization for `sig` (verifying
-    /// and compiling it if needed) and return its return kind.
-    fn callee(&mut self, chunk: &Arc<Chunk>, sig: &TypeSig) -> Result<JitType, String>;
+    /// Ensure `chunk` (the code of `closure`) has a compiled specialization
+    /// for `sig` (verifying and compiling it if needed) and return its
+    /// return kind.
+    fn callee(
+        &mut self,
+        closure: GcRef,
+        chunk: &Arc<Chunk>,
+        sig: &TypeSig,
+    ) -> Result<JitType, String>;
 }
 
 /// An environment with no usable globals (unit tests, self-contained code).
@@ -232,20 +244,67 @@ impl Env for NoGlobals {
     fn global(&self, _: &str) -> GlobalView {
         GlobalView::Other
     }
+    fn upvalue(&self, _: u8) -> GlobalView {
+        GlobalView::Other
+    }
     fn member(&self, _: &str, _: &str) -> MemberView {
         MemberView::Other
     }
-    fn callee(&mut self, _: &Arc<Chunk>, _: &TypeSig) -> Result<JitType, String> {
+    fn callee(&mut self, _: GcRef, _: &Arc<Chunk>, _: &TypeSig) -> Result<JitType, String> {
         Err("no callee environment".into())
     }
 }
 
-/// An assumption about the VM's globals that native code relies on.
+/// Where a called closure is found, starting from the closure being
+/// entered or from a global, then following captured variables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosurePath {
+    /// `None`: the closure being entered; `Some(name)`: global `name`.
+    pub global: Option<String>,
+    /// Captured-variable indices to follow, each from the closure reached
+    /// so far.
+    pub upvalues: Vec<u8>,
+}
+
+impl ClosurePath {
+    /// The path `rest` relative to the closure this path reaches.
+    pub fn join(&self, rest: &ClosurePath) -> ClosurePath {
+        match &rest.global {
+            Some(_) => rest.clone(),
+            None => ClosurePath {
+                global: self.global.clone(),
+                upvalues: self
+                    .upvalues
+                    .iter()
+                    .chain(rest.upvalues.iter())
+                    .copied()
+                    .collect(),
+            },
+        }
+    }
+}
+
+impl fmt::Display for ClosurePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.global {
+            Some(g) => write!(f, "{}", g)?,
+            None => write!(f, "<self>")?,
+        }
+        for i in &self.upvalues {
+            write!(f, ".^{}", i)?;
+        }
+        Ok(())
+    }
+}
+
+/// An assumption about the VM's globals (and captured variables) that
+/// native code relies on.
 #[derive(Debug, Clone)]
 pub enum Guard {
-    /// Global `name` is a closure over code identical to `chunk`
-    /// (`tier::same_code`). Covers self-calls and calls of other functions.
-    Closure { name: String, chunk: Arc<Chunk> },
+    /// The closure at `at` is over code identical to `chunk`
+    /// (`tier::same_code`). Covers self-calls and calls of other functions,
+    /// whether reached through a global or a captured variable.
+    Closure { at: ClosurePath, chunk: Arc<Chunk> },
     /// Global `name` is the builtin `NativeFunction` of the same name.
     Native(Builtin),
     /// Global object `object` has member `field` equal to `expect`.
@@ -269,7 +328,7 @@ impl Guard {
     /// Same assumption (used to deduplicate transitive guard lists).
     pub fn same(&self, other: &Guard) -> bool {
         match (self, other) {
-            (Guard::Closure { name: a, chunk: x }, Guard::Closure { name: b, chunk: y }) => {
+            (Guard::Closure { at: a, chunk: x }, Guard::Closure { at: b, chunk: y }) => {
                 a == b && (Arc::ptr_eq(x, y) || x.proto_id == y.proto_id)
             }
             (Guard::Native(a), Guard::Native(b)) => a == b,
@@ -496,6 +555,9 @@ pub enum CallInfo {
         id: FnId,
         sig: TypeSig,
         ret: JitType,
+        /// How the callee is reached from this function (its guards are
+        /// rebased onto this path).
+        via: ClosurePath,
     },
     /// A pure builtin computed inline (or through a pure bridge).
     Pure {
@@ -580,6 +642,33 @@ fn self_name(chunk: &Chunk) -> Option<&str> {
     }
 }
 
+/// Record a function this one reads in order to call it, with the guard on
+/// its binding. Returns its index in `callees`.
+fn add_callee(
+    callees: &mut Vec<(String, Arc<Chunk>, GcRef, ClosurePath)>,
+    guards: &mut Vec<Guard>,
+    label: &str,
+    chunk: Arc<Chunk>,
+    closure: GcRef,
+    at: ClosurePath,
+) -> Option<u16> {
+    push_guard(
+        guards,
+        Guard::Closure {
+            at: at.clone(),
+            chunk: chunk.clone(),
+        },
+    );
+    let idx = match callees.iter().position(|c| c.3 == at) {
+        Some(i) => i,
+        None => {
+            callees.push((label.to_string(), chunk, closure, at));
+            callees.len() - 1
+        }
+    };
+    u16::try_from(idx).ok()
+}
+
 /// Result kind of a binary arithmetic opcode (`semantics::binary`).
 fn arith_result(l: JitType, r: JitType) -> JitType {
     if l == JitType::Int && r == JitType::Int {
@@ -623,7 +712,8 @@ fn verify_with_ret(
     let mut states: Vec<Option<Vec<RegState>>> = vec![None; len];
     let mut ops: Vec<Option<OpInfo>> = vec![None; len];
     let mut guards: Vec<Guard> = Vec::new();
-    let mut callees: Vec<(String, Arc<Chunk>)> = Vec::new();
+    // Functions this one reads to call: (label, code, closure, path).
+    let mut callees: Vec<(String, Arc<Chunk>, GcRef, ClosurePath)> = Vec::new();
     states[0] = Some(entry);
     let mut worklist: Vec<usize> = vec![0];
     let mut on_list = vec![false; len];
@@ -651,6 +741,10 @@ fn verify_with_ret(
             Ok(s[reg])
         };
         let operand_err = |reg: usize, found: RegState| {
+            if let RegState::Str(_) = found {
+                // A string constant used as a value (not as a method name).
+                return Reject::at(ip, RejectKind::UnsupportedConstant("string"));
+            }
             Reject::at(
                 ip,
                 RejectKind::OperandType {
@@ -814,27 +908,42 @@ fn verify_with_ret(
                     // Guarded per member at the use site.
                     RegState::Ref(Ref::Math)
                 } else {
-                    let GlobalView::Closure(callee) = env.global(name) else {
+                    let GlobalView::Closure {
+                        chunk: callee,
+                        closure,
+                    } = env.global(name)
+                    else {
                         return Err(Reject::at(ip, RejectKind::NonSelfGlobal(name.clone())));
                     };
-                    push_guard(
-                        &mut guards,
-                        Guard::Closure {
-                            name: name.clone(),
-                            chunk: callee.clone(),
-                        },
-                    );
-                    let idx = match callees.iter().position(|(n, _)| n == name) {
-                        Some(i) => i,
-                        None => {
-                            callees.push((name.clone(), callee));
-                            callees.len() - 1
-                        }
+                    let at = ClosurePath {
+                        global: Some(name.clone()),
+                        upvalues: Vec::new(),
                     };
-                    let idx = u16::try_from(idx)
-                        .map_err(|_| Reject::at(ip, RejectKind::NonSelfGlobal(name.clone())))?;
+                    let idx = add_callee(&mut callees, &mut guards, name, callee, closure, at)
+                        .ok_or_else(|| Reject::at(ip, RejectKind::NonSelfGlobal(name.clone())))?;
                     RegState::Ref(Ref::Callee(idx))
                 };
+            }
+            OpCode::GetUpvalue => {
+                // A captured function (e.g. a top-level `fn` referenced from
+                // another function): callable like a global one, guarded on
+                // the entered closure's captured value.
+                let dst = reg_in_range(ip, a, num_regs)?;
+                let GlobalView::Closure {
+                    chunk: callee,
+                    closure,
+                } = env.upvalue(b as u8)
+                else {
+                    return Err(Reject::at(ip, RejectKind::UnsupportedOpcode(opcode)));
+                };
+                let at = ClosurePath {
+                    global: None,
+                    upvalues: vec![b as u8],
+                };
+                let label = callee.name.clone();
+                let idx = add_callee(&mut callees, &mut guards, &label, callee, closure, at)
+                    .ok_or_else(|| Reject::at(ip, RejectKind::UnsupportedOpcode(opcode)))?;
+                s[dst] = RegState::Ref(Ref::Callee(idx));
             }
             OpCode::GetField => {
                 let dst = reg_in_range(ip, a, num_regs)?;
@@ -905,7 +1014,7 @@ fn verify_with_ret(
                         CallInfo::SelfCall
                     }
                     RegState::Ref(Ref::Callee(idx)) => {
-                        let (name, callee) = callees[idx as usize].clone();
+                        let (name, callee, closure, via) = callees[idx as usize].clone();
                         if b != callee.arity as usize {
                             return Err(Reject::at(
                                 ip,
@@ -917,7 +1026,7 @@ fn verify_with_ret(
                             ));
                         }
                         let csig = TypeSig(kinds(&s, a + 1, b)?);
-                        let ret = env.callee(&callee, &csig).map_err(|reason| {
+                        let ret = env.callee(closure, &callee, &csig).map_err(|reason| {
                             Reject::at(
                                 ip,
                                 RejectKind::Callee {
@@ -930,15 +1039,15 @@ fn verify_with_ret(
                             id: FnId::of(&callee),
                             sig: csig,
                             ret,
+                            via,
                         }
                     }
                     RegState::Ref(Ref::Builtin(builtin @ (Builtin::Float | Builtin::Int))) => {
                         let args = kinds(&s, a + 1, b)?;
                         let (op, ok) = match builtin {
-                            Builtin::Float => (
-                                PureOp::ToFloat,
-                                args.len() == 1 && args[0].is_numeric(),
-                            ),
+                            Builtin::Float => {
+                                (PureOp::ToFloat, args.len() == 1 && args[0].is_numeric())
+                            }
                             _ => (PureOp::ToInt, args.len() == 1),
                         };
                         if !ok {
@@ -1014,7 +1123,8 @@ fn verify_with_ret(
                 s[dst] = RegState::Val(ret);
             }
             OpCode::ForRangePrep => {
-                if read(&s, a)? != RegState::Ref(Ref::Builtin(Builtin::Range)) || !(1..=2).contains(&b)
+                if read(&s, a)? != RegState::Ref(Ref::Builtin(Builtin::Range))
+                    || !(1..=2).contains(&b)
                 {
                     return Err(Reject::at(ip, RejectKind::UnsupportedOpcode(opcode)));
                 }

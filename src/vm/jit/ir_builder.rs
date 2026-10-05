@@ -371,7 +371,13 @@ fn build_body<M: Module>(
         }
         // Int overflow-checked add/sub/mul; deopts where the VM would
         // promote to Float.
-        fn checked_int(b: &mut FunctionBuilder, op: OpCode, x: Value, y: Value, deopt: Block) -> Value {
+        fn checked_int(
+            b: &mut FunctionBuilder,
+            op: OpCode,
+            x: Value,
+            y: Value,
+            deopt: Block,
+        ) -> Value {
             let (r, overflow) = match op {
                 OpCode::Add | OpCode::AddLocal => {
                     let r = b.ins().iadd(x, y);
@@ -625,7 +631,13 @@ fn build_body<M: Module>(
                             b.ins().jump(n, &[]);
                         }
                     } else {
-                        let cond = regs.truthy(&mut b, a, k(a)?);
+                        // `brif` tests an integer for non-zero, which is
+                        // exactly Int/Bool truthiness; only a Float needs
+                        // a compare.
+                        let cond = match k(a)? {
+                            JitType::Float => regs.truthy(&mut b, a, JitType::Float),
+                            t => regs.get(&mut b, a, t),
+                        };
                         if opcode == OpCode::JumpIfFalse {
                             b.ins().brif(cond, n, &[], jump_target(), &[]);
                         } else {
@@ -633,7 +645,7 @@ fn build_body<M: Module>(
                         }
                     }
                 }
-                OpCode::GetGlobal => {
+                OpCode::GetGlobal | OpCode::GetUpvalue => {
                     // A guarded reference (self, callee, builtin, module):
                     // compile-time only.
                     fall(&mut b)?;
@@ -653,10 +665,11 @@ fn build_body<M: Module>(
                     match info {
                         CallInfo::SelfCall | CallInfo::Callee { .. } => {
                             let (target, csig, ret) = match info {
-                                CallInfo::Callee { id, sig, ret } => {
-                                    let body_id = callees.get(&(*id, sig.clone())).ok_or_else(
-                                        || format!("BUG: callee at ip {} was not compiled", ip),
-                                    )?;
+                                CallInfo::Callee { id, sig, ret, .. } => {
+                                    let body_id =
+                                        callees.get(&(*id, sig.clone())).ok_or_else(|| {
+                                            format!("BUG: callee at ip {} was not compiled", ip)
+                                        })?;
                                     (imports.body(module, &mut b, *body_id), sig, *ret)
                                 }
                                 _ => (self_ref, &vf.sig, vf.ret),
@@ -699,7 +712,10 @@ fn build_body<M: Module>(
                 }
                 OpCode::ForRangePrep => {
                     let (start, end) = if rb == 1 {
-                        (b.ins().iconst(I64, 0), regs.get(&mut b, a + 1, JitType::Int))
+                        (
+                            b.ins().iconst(I64, 0),
+                            regs.get(&mut b, a + 1, JitType::Int),
+                        )
                     } else {
                         (
                             regs.get(&mut b, a + 1, JitType::Int),
@@ -797,11 +813,12 @@ fn lower_pure<M: Module>(
     let all_int = args.iter().all(|t| *t == JitType::Int);
     let f64_arg = |b: &mut FunctionBuilder, i: usize| regs.as_f64(b, base + i, args[i]);
     let int_arg = |b: &mut FunctionBuilder, i: usize| regs.get(b, base + i, JitType::Int);
-    let mut call = |b: &mut FunctionBuilder, which: Bridge, xs: &[Value]| -> Result<Value, String> {
-        let f = imports.bridge(module, b, which)?;
-        let inst = b.ins().call(f, xs);
-        Ok(b.inst_results(inst)[0])
-    };
+    let mut call =
+        |b: &mut FunctionBuilder, which: Bridge, xs: &[Value]| -> Result<Value, String> {
+            let f = imports.bridge(module, b, which)?;
+            let inst = b.ins().call(f, xs);
+            Ok(b.inst_results(inst)[0])
+        };
     Ok(match op {
         PureOp::ToFloat => f64_arg(b, 0),
         PureOp::ToInt => match args[0] {

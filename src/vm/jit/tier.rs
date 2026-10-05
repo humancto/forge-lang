@@ -18,9 +18,9 @@ use crate::vm::jit::ir_builder::CalleeBodies;
 use crate::vm::jit::jit_module::JitCompiler;
 use crate::vm::jit::types::{FnId, JitType, TypeSig};
 use crate::vm::jit::verifier::{
-    self, push_guard, CallInfo, Env, GlobalView, Guard, MemberView, OpInfo, Reject,
+    self, push_guard, CallInfo, ClosurePath, Env, GlobalView, Guard, MemberView, OpInfo, Reject,
 };
-use crate::vm::value::Value;
+use crate::vm::value::{GcRef, Value};
 
 /// Calls before a function is considered hot in [`JitMode::Auto`].
 pub const HOT_THRESHOLD: u32 = 100;
@@ -33,10 +33,15 @@ pub const GUARD_FAILURE_LIMIT: u32 = 256;
 /// `g` calls `h` ...). Bounds compile-time recursion.
 pub const MAX_CALLEE_CHAIN: usize = 8;
 
-/// Read access to the VM's globals for the verifier. Implemented by the VM.
+/// Read access to the VM's globals (and closures' captured variables) for
+/// the verifier. Implemented by the VM.
 pub trait Globals {
     fn global(&self, name: &str) -> GlobalView;
+    /// Captured variable `index` of `closure`.
+    fn upvalue(&self, closure: GcRef, index: u8) -> GlobalView;
     fn member(&self, object: &str, field: &str) -> MemberView;
+    /// Does guard `g` hold now for a call of the closure `entry`?
+    fn holds(&self, entry: GcRef, g: &Guard) -> bool;
 }
 
 /// When the VM compiles functions.
@@ -162,15 +167,13 @@ impl FnJitState {
     }
 }
 
-/// A specialization chosen for one call.
-#[derive(Debug, Clone)]
+/// A specialization chosen for one call (its guards already passed).
+#[derive(Debug, Clone, Copy)]
 pub struct Selected {
     pub id: FnId,
     pub spec: usize,
     pub entry: *const u8,
     pub ret: JitType,
-    /// Entry guards (see [`CompiledSpec::guards`]).
-    pub guards: Arc<Vec<Guard>>,
 }
 
 /// All JIT state owned by one VM.
@@ -284,15 +287,17 @@ impl JitState {
     }
 
     /// Choose (compiling if needed) a specialization for this call, or
-    /// `None` to run in the VM. Covers the guards that depend only on the
-    /// function and its arguments: identity/code validation, arity and
-    /// argument kinds.
+    /// `None` to run in the VM. Covers the guards that depend on the
+    /// function, its arguments and the globals: identity/code validation,
+    /// arity, argument kinds and the specialization's [`Guard`]s (checked
+    /// against `closure`, the closure being called).
     ///
     /// `force_hot` treats the function as hot regardless of its call count
     /// (a loop in it is hot, see `VM::try_jit_loop_restart`); the attempt is
     /// not counted as a call.
     pub fn select(
         &mut self,
+        closure: GcRef,
         chunk: &Arc<Chunk>,
         args: &[Value],
         gc: &Gc,
@@ -335,32 +340,38 @@ impl JitState {
             return None;
         };
 
-        let idx = match state.specs.iter().position(|(s, _)| *s == sig) {
-            Some(i) => i,
-            None => match self.ensure_spec(chunk, &sig, globals, &mut Vec::new()) {
-                Ok(i) => i,
-                Err(_) => {
-                    if let Some(state) = self.fns.get_mut(&id) {
+        let (state, idx) = match state.specs.iter().position(|(s, _)| *s == sig) {
+            Some(i) => (state, i),
+            None => {
+                let compiled = self.ensure_spec(closure, chunk, &sig, globals, &mut Vec::new());
+                let state = self.fns.get_mut(&id)?;
+                match compiled {
+                    Ok(i) => (state, i),
+                    Err(_) => {
                         Self::guard_failed(state);
+                        return None;
                     }
-                    return None;
                 }
-            },
-        };
-        let state = self.fns.get_mut(&id)?;
-        match &state.specs[idx].1 {
-            SpecState::Compiled(c) => Some(Selected {
-                id,
-                spec: idx,
-                entry: c.entry,
-                ret: c.ret,
-                guards: c.guards.clone(),
-            }),
-            _ => {
-                Self::guard_failed(state);
-                None
             }
+        };
+        // Entry guards on globals and captured variables. Native code
+        // cannot assign either, so guards that hold here hold for the whole
+        // native call.
+        let selected = match &state.specs[idx].1 {
+            SpecState::Compiled(c) if c.guards.iter().all(|g| globals.holds(closure, g)) => {
+                Some(Selected {
+                    id,
+                    spec: idx,
+                    entry: c.entry,
+                    ret: c.ret,
+                })
+            }
+            _ => None,
+        };
+        if selected.is_none() {
+            Self::guard_failed(state);
         }
+        selected
     }
 
     /// Identity is the prototype id; additionally confirm the bytecode is
@@ -396,6 +407,7 @@ impl JitState {
     /// is in progress (the callers of this one).
     fn ensure_spec(
         &mut self,
+        closure: GcRef,
         chunk: &Arc<Chunk>,
         sig: &TypeSig,
         globals: &dyn Globals,
@@ -415,7 +427,7 @@ impl JitState {
             }
         }
         stack.push(id);
-        let outcome = self.compile_spec(chunk, sig, globals, stack);
+        let outcome = self.compile_spec(closure, chunk, sig, globals, stack);
         stack.pop();
         if self.verbose {
             match &outcome {
@@ -437,10 +449,14 @@ impl JitState {
     }
 
     fn compiled(&self, id: FnId, sig: &TypeSig) -> Option<&CompiledSpec> {
-        self.fns.get(&id)?.specs.iter().find_map(|(s, st)| match st {
-            SpecState::Compiled(c) if s == sig => Some(c),
-            _ => None,
-        })
+        self.fns
+            .get(&id)?
+            .specs
+            .iter()
+            .find_map(|(s, st)| match st {
+                SpecState::Compiled(c) if s == sig => Some(c),
+                _ => None,
+            })
     }
 
     fn guard_failed(state: &mut FnJitState) {
@@ -450,8 +466,12 @@ impl JitState {
         }
     }
 
+    /// Verify and compile `chunk` for `sig`. `closure` is the closure being
+    /// entered (its captured variables resolve `GetUpvalue`); the result is
+    /// valid for every closure of the prototype that passes the guards.
     fn compile_spec(
         &mut self,
+        closure: GcRef,
         chunk: &Arc<Chunk>,
         sig: &TypeSig,
         globals: &dyn Globals,
@@ -462,6 +482,7 @@ impl JitState {
                 tier: self,
                 globals,
                 stack,
+                closure,
             };
             verifier::verify_in(chunk, sig, &mut env)
         };
@@ -477,22 +498,34 @@ impl JitState {
             push_guard(
                 &mut guards,
                 Guard::Closure {
-                    name: chunk.name.clone(),
+                    at: ClosurePath {
+                        global: Some(chunk.name.clone()),
+                        upvalues: Vec::new(),
+                    },
                     chunk: chunk.clone(),
                 },
             );
         }
         let mut bodies = CalleeBodies::new();
         for op in vf.ops.iter().flatten() {
-            let OpInfo::Call(CallInfo::Callee { id, sig, .. }) = op else {
+            let OpInfo::Call(CallInfo::Callee { id, sig, via, .. }) = op else {
                 continue;
             };
             let Some(callee) = self.compiled(*id, sig) else {
                 return SpecState::Rejected("BUG: verified callee is not compiled".into());
             };
             bodies.insert((*id, sig.clone()), callee.body);
+            // The callee's guards are relative to the callee's closure;
+            // rebase them onto the path by which this function reaches it.
             for g in callee.guards.iter() {
-                push_guard(&mut guards, g.clone());
+                let g = match g {
+                    Guard::Closure { at, chunk } => Guard::Closure {
+                        at: via.join(at),
+                        chunk: chunk.clone(),
+                    },
+                    other => other.clone(),
+                };
+                push_guard(&mut guards, g);
             }
         }
 
@@ -565,6 +598,8 @@ struct TierEnv<'a> {
     tier: &'a mut JitState,
     globals: &'a dyn Globals,
     stack: &'a mut Vec<FnId>,
+    /// The closure whose code is being verified.
+    closure: GcRef,
 }
 
 impl Env for TierEnv<'_> {
@@ -572,11 +607,20 @@ impl Env for TierEnv<'_> {
         self.globals.global(name)
     }
 
+    fn upvalue(&self, index: u8) -> GlobalView {
+        self.globals.upvalue(self.closure, index)
+    }
+
     fn member(&self, object: &str, field: &str) -> MemberView {
         self.globals.member(object, field)
     }
 
-    fn callee(&mut self, chunk: &Arc<Chunk>, sig: &TypeSig) -> Result<JitType, String> {
+    fn callee(
+        &mut self,
+        closure: GcRef,
+        chunk: &Arc<Chunk>,
+        sig: &TypeSig,
+    ) -> Result<JitType, String> {
         let id = FnId::of(chunk);
         if self.stack.contains(&id) {
             // Mutual recursion: the callee's return kind would depend on
@@ -587,7 +631,9 @@ impl Env for TierEnv<'_> {
         if self.stack.len() >= MAX_CALLEE_CHAIN {
             return Err("call chain too deep".into());
         }
-        let idx = self.tier.ensure_spec(chunk, sig, self.globals, self.stack)?;
+        let idx = self
+            .tier
+            .ensure_spec(closure, chunk, sig, self.globals, self.stack)?;
         let spec = self
             .tier
             .fns
