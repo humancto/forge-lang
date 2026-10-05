@@ -26,6 +26,7 @@ pub struct Manifest {
 /// allow-write = ["./out"]
 /// allow-net = ["api.example.com"]
 /// allow-env = true
+/// allow-ffi = ["./plugins"]      # native libraries (full trust!)
 /// max-time = 30                  # seconds
 /// ```
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
@@ -40,6 +41,7 @@ pub struct PermissionsConfig {
     pub allow_db: Option<bool>,
     pub allow_ai: Option<bool>,
     pub allow_run: Option<bool>,
+    pub allow_ffi: Option<GrantSpec>,
     pub max_time: Option<f64>,
 }
 

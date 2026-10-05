@@ -119,6 +119,8 @@ cranelift-module = { version = "0.129", optional = true }
 cranelift-native = { version = "0.129", optional = true }
 gethostname = "1.1.0"
 semver = "1"
+# Native plugins (`import native`, src/plugins). dlopen/LoadLibrary wrapper.
+libloading = "0.8"
 tar = "0.4"
 
 # `forge mcp` moves the protocol off fds 0/1 so scripts cannot touch it.
