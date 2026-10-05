@@ -209,6 +209,12 @@ pub struct Chunk {
     /// shares it. The JIT keys its caches by this id (never by name); see
     /// `vm::jit::types::FnId`.
     pub proto_id: u64,
+    /// Debug-only "did you mean" data: for a `GetGlobal` at `pc` whose name
+    /// is close to a local or captured variable visible there, that name
+    /// (see `Compiler::visible_name_hint`). Consulted only when the global
+    /// turns out to be undefined. Not serialized: `.fgc` files carry no
+    /// local names, so their errors suggest globals only.
+    pub global_hints: Vec<(usize, String)>,
 }
 
 /// Allocate a fresh, process-unique `Chunk::proto_id`.
@@ -232,6 +238,7 @@ impl Chunk {
             arity: 0,
             min_arity: 0,
             upvalue_sources: Vec::new(),
+            global_hints: Vec::new(),
         }
     }
 

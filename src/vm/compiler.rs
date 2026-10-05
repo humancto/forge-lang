@@ -454,6 +454,41 @@ impl Compiler {
         None
     }
 
+    /// For a name compiled as a global read: the closest local or captured
+    /// variable visible here (innermost block first, then enclosing
+    /// functions), recorded in `Chunk::global_hints` so an "undefined
+    /// variable" error can say "did you mean ...?" like the interpreter,
+    /// whose environment still holds those names at run time. Builtins and
+    /// stdlib modules always exist, so they need no hint.
+    fn visible_name_hint(&self, name: &str) -> Option<String> {
+        if crate::builtins_registry::global(name).is_some()
+            || crate::semantics::BUILTIN_MODULES.contains(&name)
+        {
+            return None;
+        }
+        let mut depths: Vec<usize> = self.locals.iter().map(|l| l.depth).collect();
+        depths.sort_unstable_by(|a, b| b.cmp(a));
+        depths.dedup();
+        let mut groups: Vec<Vec<&str>> = depths
+            .iter()
+            .map(|d| {
+                self.locals
+                    .iter()
+                    .filter(|l| l.depth == *d)
+                    .map(|l| l.name.as_str())
+                    .collect()
+            })
+            .collect();
+        let mut enclosing: Vec<&str> = self.upvalues.iter().map(|u| u.name.as_str()).collect();
+        enclosing.extend(self.parent_locals.iter().map(|(n, _, _)| n.as_str()));
+        enclosing.extend(self.parent_upvalues.iter().map(|(n, _, _)| n.as_str()));
+        enclosing.extend(self.outer_names.iter().map(String::as_str));
+        enclosing.sort_unstable();
+        enclosing.dedup();
+        groups.push(enclosing);
+        crate::semantics::errors::suggest_name(name, groups)
+    }
+
     fn resolve_upvalue(&self, name: &str) -> Option<u8> {
         for (i, uv) in self.upvalues.iter().enumerate() {
             if uv.name == name {
@@ -1197,6 +1232,7 @@ fn compile_match(
         c.emit(encode_abc(OpCode::LoadNull, dst, 0, 0), 0);
     }
     let mut end_jumps = Vec::new();
+    let mut has_wildcard = false;
 
     for arm in arms {
         match &arm.pattern {
@@ -1204,6 +1240,7 @@ fn compile_match(
                 c.begin_scope();
                 compile_arm_body(c, &arm.body, dst)?;
                 c.end_scope();
+                has_wildcard = true;
                 break;
             }
             Pattern::Binding(name) => {
@@ -1276,6 +1313,13 @@ fn compile_match(
                 c.patch_jump(skip);
             }
         }
+    }
+    if !has_wildcard {
+        // Every arm's test failed: same error as the interpreter (E0026).
+        let msg = c.alloc_reg()?;
+        let idx = c.const_str(crate::semantics::NON_EXHAUSTIVE_MATCH);
+        c.emit(encode_abx(OpCode::LoadConst, msg, idx), 0);
+        compile_hidden_call_from_regs(c, "__forge_raise_error", &[msg], msg)?;
     }
     for ej in end_jumps {
         c.patch_jump(ej);
@@ -2373,7 +2417,11 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 c.emit(encode_abc(OpCode::GetUpvalue, dst, uv_idx, 0), 0);
             } else {
                 let idx = c.const_str(&c.global_name(name));
+                let pc = c.chunk.code.len();
                 c.emit(encode_abx(OpCode::GetGlobal, dst, idx), 0);
+                if let Some(hint) = c.visible_name_hint(name) {
+                    c.chunk.global_hints.push((pc, hint));
+                }
             }
         }
         Expr::BinOp { left, op, right } => {

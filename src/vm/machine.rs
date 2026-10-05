@@ -927,9 +927,10 @@ impl VM {
                     OpCode::GetGlobal => {
                         let name_const = &chunk.constants[bx as usize];
                         if let Constant::Str(name) = name_const {
-                            let val = self.globals.get(name).cloned().ok_or_else(|| {
-                                VMError::new(&crate::semantics::undefined_variable(name, None))
-                            })?;
+                            let Some(val) = self.globals.get(name).cloned() else {
+                                let pc = self.frames[frame_idx].ip - 1;
+                                return Err(self.undefined_global(chunk, pc, name));
+                            };
                             self.registers[base + a as usize] = val;
                         }
                     }
@@ -1330,20 +1331,29 @@ impl VM {
                                     ObjKind::ResultOk(v) => {
                                         self.registers[base + a as usize] = *v;
                                     }
-                                    ObjKind::ResultErr(_) => {
+                                    ObjKind::ResultErr(inner) => {
+                                        // `?` at the top level of the program has
+                                        // no caller to propagate to: like the
+                                        // interpreter, stop with the error.
+                                        if chunk.name == "<main>" {
+                                            let shown = inner.display(&self.gc);
+                                            return Err(VMError::new(
+                                                &crate::semantics::unhandled_error(&shown),
+                                            ));
+                                        }
                                         let val = self.registers[base + b as usize];
                                         self.frames.pop();
                                         return Ok(Some(val));
                                     }
                                     _ => {
                                         return Err(VMError::new(
-                                            "? operator requires Result value",
+                                            crate::semantics::TRY_REQUIRES_RESULT,
                                         ))
                                     }
                                 }
                             }
                         } else {
-                            return Err(VMError::new("? operator requires Result value"));
+                            return Err(VMError::new(crate::semantics::TRY_REQUIRES_RESULT));
                         }
                     }
                     OpCode::Spawn => {
@@ -2016,14 +2026,18 @@ impl VM {
                         if let Some(call_fn) = map.get("__call__").copied() {
                             self.call_value(call_fn, args)
                         } else {
-                            Err(VMError::new("cannot call non-function"))
+                            Err(VMError::new(&crate::semantics::not_callable("Object")))
                         }
                     }
-                    _ => Err(VMError::new("cannot call non-function")),
+                    _ => Err(VMError::new(&crate::semantics::not_callable(
+                        obj.type_name(),
+                    ))),
                 }
             }
         } else {
-            Err(VMError::new("cannot call non-function"))
+            Err(VMError::new(&crate::semantics::not_callable(
+                func.type_name(&self.gc),
+            )))
         }
     }
 
@@ -2080,30 +2094,42 @@ impl VM {
         VMError::with_trace(msg, self.collect_stack_trace())
     }
 
-    fn classify_error_type(message: &str) -> &'static str {
-        if message.contains("type") || message.contains("Type") {
-            "TypeError"
-        } else if message.contains("division by zero") || message.contains("modulo by zero") {
-            "ArithmeticError"
-        } else if message.contains("assertion") {
-            "AssertionError"
-        } else if message.contains("index") || message.contains("out of bounds") {
-            "IndexError"
-        } else if message.contains("not found") || message.contains("undefined") {
-            "ReferenceError"
-        } else if message.contains("immutable") || message.contains("cannot reassign") {
-            "TypeError"
-        } else {
-            "RuntimeError"
-        }
+    /// "undefined variable" for a failed `GetGlobal` at `pc`, with the
+    /// same did-you-mean rule as the interpreter: locals visible at that
+    /// point (recorded by the compiler) beat globals at equal distance.
+    fn undefined_global(&self, chunk: &Chunk, pc: usize, name: &str) -> VMError {
+        let local = chunk
+            .global_hints
+            .iter()
+            .find(|(at, _)| *at == pc)
+            .map(|(_, hint)| hint.as_str());
+        let suggestion = crate::semantics::errors::suggest_name(
+            name,
+            [
+                local.into_iter().collect::<Vec<_>>(),
+                self.globals.keys().map(String::as_str).collect(),
+            ],
+        );
+        VMError::new(&crate::semantics::undefined_variable(
+            name,
+            suggestion.as_deref(),
+        ))
     }
 
+    /// The object a `catch e { }` block receives: `message`, the legacy
+    /// `type` and the stable `code` (shared with the interpreter through
+    /// `semantics::errors`).
     fn runtime_error_value(&mut self, err: &VMError) -> Value {
+        use crate::semantics::errors;
         let mut err_obj = IndexMap::new();
         err_obj.insert("message".to_string(), self.alloc_string(&err.message));
         err_obj.insert(
             "type".to_string(),
-            self.alloc_string(Self::classify_error_type(&err.message)),
+            self.alloc_string(errors::legacy_error_type(&err.message)),
+        );
+        err_obj.insert(
+            "code".to_string(),
+            self.alloc_string(errors::classify(&err.message).code),
         );
         let err_ref = self.gc.alloc(ObjKind::Object(err_obj));
         Value::obj(err_ref)
@@ -2356,10 +2382,9 @@ impl VM {
 
     fn get_field_strict(&mut self, obj_val: Value, field: &str) -> Result<Value, VMError> {
         let Some(r) = obj_val.as_obj() else {
-            return Err(VMError::new(&format!(
-                "cannot access field '{}' on {}",
+            return Err(VMError::new(&crate::semantics::field_access(
                 field,
-                obj_val.type_name(&self.gc)
+                obj_val.type_name(&self.gc),
             )));
         };
         let needs_alloc: Option<String>;
@@ -2404,12 +2429,17 @@ impl VM {
                             }
                         }
                     }
-                    direct_result =
-                        Some(delegated.ok_or_else(|| {
-                            VMError::new(&format!("no field '{}' on object", field))
-                        })?);
+                    direct_result = Some(delegated.ok_or_else(|| {
+                        VMError::new(&crate::semantics::no_field(
+                            field,
+                            map.keys().map(String::as_str),
+                        ))
+                    })?);
                 } else {
-                    return Err(VMError::new(&format!("no field '{}' on object", field)));
+                    return Err(VMError::new(&crate::semantics::no_field(
+                        field,
+                        map.keys().map(String::as_str),
+                    )));
                 }
                 needs_alloc = None;
             }
@@ -2454,10 +2484,9 @@ impl VM {
                 return self.get_field(inner, field);
             }
             _ => {
-                return Err(VMError::new(&format!(
-                    "cannot access field '{}' on {}",
+                return Err(VMError::new(&crate::semantics::field_access(
                     field,
-                    obj.type_name()
+                    obj.type_name(),
                 )))
             }
         }
