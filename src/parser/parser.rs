@@ -447,9 +447,54 @@ impl Parser {
         })
     }
 
+    /// Whether the cursor is at the contextual `native "<path>"` of a native
+    /// import (`native` is not a keyword, so `import native` alone still
+    /// names a module).
+    fn at_native_path(&self) -> bool {
+        matches!(self.current_token(), Token::Ident(ref s) if s == "native")
+            && matches!(self.peek_token(1), Token::StringLit(_))
+    }
+
+    /// Parses the string path after `native` in a native import.
+    fn parse_native_path(&mut self) -> Result<String, ParseError> {
+        self.advance(); // contextual `native`
+        match self.current_token() {
+            Token::StringLit(s) => {
+                self.advance();
+                Ok(s)
+            }
+            _ => Err(self.error("expected a library path string after 'native'")),
+        }
+    }
+
     /// Parses: import "path" / import { name, name } from "path"
+    /// and the native forms: import native "path" [as name] /
+    /// import { name, name } from native "path"
     fn parse_import(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Import)?;
+
+        if self.at_native_path() {
+            let path = self.parse_native_path()?;
+            let alias = if matches!(self.current_token(), Token::Ident(ref s) if s == "as") {
+                self.advance();
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            let name = match alias.or_else(|| crate::plugins::default_namespace(&path)) {
+                Some(name) => name,
+                None => {
+                    return Err(self.error(&format!(
+                        "cannot derive a name from native library \"{}\"; write: import native \"{}\" as name",
+                        path, path
+                    )))
+                }
+            };
+            return Ok(Stmt::ImportNative {
+                path,
+                binding: NativeBinding::Namespace(name),
+            });
+        }
 
         if self.check(&Token::LBrace) {
             // import { name1, name2 } from "path"
@@ -463,6 +508,13 @@ impl Parser {
             }
             self.expect(Token::RBrace)?;
             self.expect(Token::From)?;
+            if self.at_native_path() {
+                let path = self.parse_native_path()?;
+                return Ok(Stmt::ImportNative {
+                    path,
+                    binding: NativeBinding::Names(names),
+                });
+            }
             let path = match self.current_token() {
                 Token::StringLit(s) => {
                     self.advance();

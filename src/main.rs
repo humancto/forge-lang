@@ -17,6 +17,7 @@ mod native;
 mod package;
 mod parser;
 mod permissions;
+mod plugins;
 mod publish;
 mod registry;
 mod repl;
@@ -160,6 +161,13 @@ struct PermissionFlags {
     #[arg(long = "allow-ai", global = true)]
     allow_ai: bool,
 
+    /// Allow loading native plugins (`import native`); with =PATHS, only
+    /// libraries at or under those paths. Native code runs with full trust.
+    #[arg(long = "allow-ffi", value_name = "PATHS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_ffi: Option<Vec<String>>,
+
     /// Stop the program after SECS seconds of wall-clock time (exit code 124)
     #[arg(long = "max-time", value_name = "SECS", global = true)]
     max_time: Option<f64>,
@@ -195,6 +203,7 @@ fn apply_scoped_grant(
         Capability::Read => caps.grant_read_paths(items),
         Capability::Write => caps.grant_write_paths(items),
         Capability::Net => caps.grant_net_hosts(items),
+        Capability::Ffi => caps.grant_ffi_paths(items),
         _ => caps.grant(cap),
     }
 }
@@ -222,6 +231,12 @@ fn build_policy(
     // there unless the user explicitly asked for a sandbox.
     let run = allow_run || toml.allow_run.unwrap_or(false) || (is_interactive && !sandboxed);
     caps.set(Capability::Run, run);
+    // Native plugins follow `run`: opt-in for scripts, available when a
+    // person is typing (REPL, -e) unless sandboxed. An explicit grant
+    // (`--allow-ffi[=PATHS]`, `allow-ffi`) was applied above and wins.
+    if is_interactive && !sandboxed && flags.allow_ffi.is_none() && toml.allow_ffi.is_none() {
+        caps.set(Capability::Ffi, true);
+    }
     // Modules next to the entry script (and installed packages) stay
     // importable even when fs.read is scoped elsewhere.
     if let Some(root) = import_root {
@@ -246,7 +261,7 @@ fn build_mcp_policy(
     caps
 }
 
-/// Apply the fs/net/env/db/ai grants from CLI flags and forge.toml (flags
+/// Apply the fs/net/ffi/env/db/ai grants from CLI flags and forge.toml (flags
 /// win per capability). `run` and `process` are left to the caller.
 fn apply_grants(
     mut caps: permissions::Capabilities,
@@ -270,6 +285,11 @@ fn apply_grants(
         caps,
         Capability::Net,
         cli_list(&flags.allow_net).or(toml.allow_net),
+    );
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Ffi,
+        cli_list(&flags.allow_ffi).or(toml.allow_ffi),
     );
     for (cap, flag, from_toml) in [
         (Capability::Env, flags.allow_env, toml.allow_env),
@@ -903,7 +923,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         Stmt::DecoratorStmt(_) => {
             issues.insert("decorator-driven runtime features");
         }
-        Stmt::Import { .. } => {}
+        Stmt::Import { .. } | Stmt::ImportNative { .. } => {}
         Stmt::FnDef {
             body, decorators, ..
         } => {
@@ -1472,6 +1492,32 @@ mod tests {
         assert!(help.contains("--jit"));
         assert!(help.contains("JIT-compile numeric leaf functions"));
         assert!(help.contains("falls back to the bytecode interpreter automatically"));
+    }
+
+    #[test]
+    fn ffi_is_opt_in_everywhere_but_interactive_use() {
+        use permissions::Capability::Ffi;
+        let parse = |args: &[&str]| Cli::try_parse_from(args).expect("parse").perms;
+        let plain = parse(&["forge", "run", "a.fg"]);
+        // `forge run`: denied unless granted.
+        assert!(!build_policy(&plain, None, false, false, None).is_granted(Ffi));
+        // REPL / -e: allowed, unless sandboxed.
+        assert!(build_policy(&plain, None, false, true, None).is_granted(Ffi));
+        let sandboxed = parse(&["forge", "--sandbox", "run", "a.fg"]);
+        assert!(!build_policy(&sandboxed, None, false, true, None).is_granted(Ffi));
+        // An explicit grant wins, including a scoped one under --sandbox.
+        let granted = parse(&["forge", "--sandbox", "--allow-ffi=./plugins", "run", "a.fg"]);
+        assert!(build_policy(&granted, None, false, false, None).is_granted(Ffi));
+        // forge.toml can grant it too.
+        let toml = manifest::PermissionsConfig {
+            allow_ffi: Some(manifest::GrantSpec::Flag(true)),
+            ..Default::default()
+        };
+        assert!(build_policy(&plain, Some(toml), false, false, None).is_granted(Ffi));
+        // forge mcp: deny-all unless --allow-ffi.
+        assert!(!build_mcp_policy(&plain, None, false).is_granted(Ffi));
+        let mcp = parse(&["forge", "--allow-ffi", "mcp"]);
+        assert!(build_mcp_policy(&mcp, None, false).is_granted(Ffi));
     }
 
     #[test]

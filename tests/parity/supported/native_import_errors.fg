@@ -1,0 +1,16 @@
+// expect: [native library 'no_such_dir/libnothing.so' not found (looked for libnothing.so next to the importing file and in the working directory), native library 'no_such_dir/libnothing.so' not found (looked for libnothing.so next to the importing file and in the working directory)]
+// `import native` failures are ordinary runtime errors with the same text on
+// every engine (the successful paths are covered by tests/native_plugins.rs,
+// which builds real plugins).
+let mut errors = []
+try {
+    import native "no_such_dir/libnothing.so" as nothing
+} catch e {
+    errors.push(e.message)
+}
+try {
+    import { add } from native "no_such_dir/libnothing.so"
+} catch e {
+    errors.push(e.message)
+}
+errors

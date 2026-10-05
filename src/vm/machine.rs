@@ -144,6 +144,7 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_register_agent",
     "__forge_raise_error",
     "__forge_import_module",
+    "__forge_import_native",
     "__forge_get_field",
     "__forge_set_field",
     "__forge_destructure",
@@ -2219,6 +2220,9 @@ impl VM {
                 let r = self.gc.alloc(ObjKind::Map(vm_pairs));
                 Value::obj(r)
             }
+            // Callable builtins returned by shared code (native plugin
+            // namespaces from `plugins::import`).
+            crate::interpreter::Value::BuiltIn(name) => self.alloc_builtin(name),
             crate::interpreter::Value::Stream(_) => {
                 // Streams cannot cross the interpreter/VM boundary.
                 // See `stream_boundary_error` docs on the VM struct.

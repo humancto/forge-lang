@@ -79,7 +79,7 @@ say crypto.sha256("password")
 | [📚 Standard Library](#-standard-library-22-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
 | [🔧 CLI](#-cli-commands)                             | [📂 Examples](#-examples)       | [🏛️ Architecture](#️-architecture)     |
 | [📕 Book](#-the-book)                                | [🗺️ Roadmap](#️-roadmap)         | [🤝 Contributing](#-contributing)     |
-| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) | [🐍 Python](#-use-forge-from-python) |                                       |
+| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) | [🐍 Python](#-use-forge-from-python) | [🦀 Calling Rust](#-calling-rust-from-forge) |
 
 ---
 
@@ -618,6 +618,46 @@ Native builds are standalone when `libforge_lang.a` is available (set `FORGE_LIB
 
 ---
 
+## 🦀 Calling Rust from Forge
+
+Write the fast or system-specific part in Rust (or C), build it as a shared library, and import its functions with typed values — no shelling out, no parsing text.
+
+```rust
+// Cargo.toml: [lib] crate-type = ["cdylib"]
+//             [dependencies] forge-plugin = { path = "crates/forge-plugin" }
+use forge_plugin::{export, forge_fn};
+
+#[forge_fn]
+fn add(a: i64, b: i64) -> i64 { a + b }
+
+#[forge_fn]
+fn divide(a: f64, b: f64) -> Result<f64, String> {
+    if b == 0.0 { Err("division by zero".into()) } else { Ok(a / b) }
+}
+
+export!(name = "hello", functions = [add, divide]);
+```
+
+```forge
+import native "target/release/libhello" as hello   // .so / .dylib / .dll added for you
+import { add } from native "target/release/libhello"
+
+say add(1, 2)                  // 3
+say hello.divide(7, 2)         // 3.5
+try { hello.divide(1, 0) } catch e { say e.message }   // division by zero
+```
+
+```bash
+forge --allow-ffi run app.fg              # or --allow-ffi=target/release
+```
+
+- Ints, floats, bools, strings, arrays, objects, `Option` and bytes cross the boundary as values through a small, versioned C ABI ([`forge_plugin.h`](crates/forge-plugin/include/forge_plugin.h)); `Result::Err` and panics become catchable Forge errors. Works on both engines.
+- C (or anything that can export C functions) implements the same ABI: see [`examples/plugins/hello_c`](examples/plugins/hello_c/hello.c). Full Rust example: [`examples/plugins/hello_rust`](examples/plugins/hello_rust).
+- **Loading native code is full trust**: the library runs outside every Forge permission, so `forge run` needs `--allow-ffi`, and `--sandbox` / `forge mcp` deny it unless granted. See [SECURITY.md](SECURITY.md#native-plugins-are-full-trust---allow-ffi).
+- Design and ABI rules: [RFC 0006](rfcs/0006-native-plugins.md).
+
+---
+
 ## 🤖 Use Forge from an AI agent (MCP)
 
 `forge mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. It gives an agent a sandboxed Forge runtime ("code mode"): instead of many tool calls, the agent writes one short script — fetch, filter, compute, print — and runs it.
@@ -829,14 +869,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the architecture guide and PR guideli
 
 ### Sandboxing and permissions
 
-Forge has a Deno-style capability model shared by both engines. Defaults are unchanged (`forge run` allows everything except subprocesses), and `--sandbox` turns it into default-deny:
+Forge has a Deno-style capability model shared by both engines. By default `forge run` allows everything except subprocesses and native plugins, and `--sandbox` turns it into default-deny:
 
 ```bash
 forge run --sandbox --allow-read=./data --allow-net=api.example.com agent.fg
 forge run --max-time 10 job.fg     # wall-clock limit (exit 124)
 ```
 
-Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`. Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
+Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`, `ffi` (native plugins, path-scoped, opt-in like `run`). Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
 
 Embedding Forge in a Rust host (for AI agents and automation) starts from deny-all:
 

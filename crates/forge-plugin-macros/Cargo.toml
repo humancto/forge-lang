@@ -1,0 +1,20 @@
+[package]
+name = "forge-plugin-macros"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Procedural macros for forge-plugin (#[forge_fn]); use the forge-plugin crate instead"
+license = "MIT"
+repository = "https://github.com/humancto/forge-lang"
+homepage = "https://github.com/humancto/forge-lang"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+# Standalone: see crates/forge-plugin/Cargo.toml.
+[workspace]

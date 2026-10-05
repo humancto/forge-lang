@@ -18,6 +18,7 @@ pub mod mcp;
 mod package;
 pub mod parser;
 pub mod permissions;
+mod plugins;
 mod registry;
 pub mod runtime;
 mod sandbox;
