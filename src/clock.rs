@@ -39,8 +39,8 @@ pub fn sleep(duration: Duration) {
 
 /// `rx.recv_timeout(timeout)`. On `wasm32-unknown-unknown` (one thread, no
 /// std clock) nothing can arrive while we wait, so it is a non-blocking
-/// poll that reports `Timeout` when the channel is empty; callers loop
-/// through a cancellable wait, which the playground's step budget ends.
+/// poll that reports `Timeout` when the channel is empty (cancellable waits
+/// then stop, see [`HAS_THREADS`]).
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[inline]
 pub fn recv_timeout<T>(
@@ -62,36 +62,15 @@ pub fn recv_timeout<T>(
     })
 }
 
-/// Why [`recv`] returned without a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecvFailure {
-    /// Every sender is gone.
-    Closed,
-    /// The channel is empty and nothing else can ever send (no threads:
-    /// `wasm32-unknown-unknown`). Blocking would hang forever.
-    WouldBlockForever,
-}
+/// Whether another thread can ever complete a blocking wait. False on
+/// `wasm32-unknown-unknown` (one thread): a wait that is not ready on its
+/// first poll would wait forever, so cancellable waits fail with
+/// [`WAITS_FOREVER`] instead of spinning.
+pub const HAS_THREADS: bool = !cfg!(all(target_arch = "wasm32", target_os = "unknown"));
 
-/// Error text for [`RecvFailure::WouldBlockForever`].
-pub const RECV_BLOCKS_FOREVER: &str =
-    "receive() on an empty channel would wait forever: there are no other tasks to send in the browser playground";
-
-/// `rx.recv()`: block until a value arrives or every sender is gone.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-#[inline]
-pub fn recv<T>(rx: &std::sync::mpsc::Receiver<T>) -> Result<T, RecvFailure> {
-    rx.recv().map_err(|_| RecvFailure::Closed)
-}
-
-/// `rx.recv()` without threads: a value already queued, or an error.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub fn recv<T>(rx: &std::sync::mpsc::Receiver<T>) -> Result<T, RecvFailure> {
-    use std::sync::mpsc::TryRecvError;
-    rx.try_recv().map_err(|e| match e {
-        TryRecvError::Empty => RecvFailure::WouldBlockForever,
-        TryRecvError::Disconnected => RecvFailure::Closed,
-    })
-}
+/// Error text for a wait that can never complete (see [`HAS_THREADS`]).
+pub const WAITS_FOREVER: &str =
+    "this would wait forever: there are no other tasks to wake it in the browser playground";
 
 #[cfg(test)]
 mod tests {

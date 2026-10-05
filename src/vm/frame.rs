@@ -15,6 +15,10 @@ pub struct TimeoutGuard {
     pub catch_ip: usize,
     pub error_register: u8,
     pub handler_base: usize,
+    /// Length of `VM::scope_cancels` before this scope pushed its own flag.
+    /// When the deadline fires, every flag from here on is set (cancelling
+    /// tasks the block started, including squad tasks) and dropped.
+    pub scope_depth: usize,
 }
 
 /// A call frame representing one function invocation in the VM.

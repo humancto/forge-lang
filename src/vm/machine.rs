@@ -17,14 +17,16 @@ use super::value::*;
 struct SendableVM(VM);
 unsafe impl Send for SendableVM {}
 
-/// Run a spawned closure on a forked VM in a new OS thread.
+/// Run a spawned closure on a forked VM in a new OS thread. `task` is the
+/// run's task slot (`runtime::limits`), held until the task finishes.
 fn spawn_thread(
     sendable: SendableVM,
     closure: Value,
     slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>,
+    task: crate::runtime::limits::Slot,
 ) {
     crate::permissions::spawn(move || {
-        sendable.run(closure, slot);
+        sendable.run(closure, slot, task);
     });
 }
 
@@ -43,7 +45,12 @@ fn spawn_watch_thread(sendable: SendableVM, closure: Value, path: String) {
 }
 
 impl SendableVM {
-    fn run(mut self, closure: Value, slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>) {
+    fn run(
+        mut self,
+        closure: Value,
+        slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>,
+        task: crate::runtime::limits::Slot,
+    ) {
         let vm = &mut self.0;
         let val = match vm.call_value(closure, vec![]) {
             Ok(v) => {
@@ -58,6 +65,9 @@ impl SendableVM {
             }
             Err(e) => SharedValue::ResultErr(Box::new(SharedValue::String(e.message.clone()))),
         };
+        // Free the task slot before anyone can observe the result, so a
+        // caller that awaits and immediately spawns again is not refused.
+        drop(task);
         if let Ok(mut guard) = slot.0.lock() {
             *guard = Some(val);
             slot.1.notify_all();
@@ -186,6 +196,15 @@ pub struct VM {
     /// a fired timeout refills it so the catch path's `PopTimeout` runs
     /// before the next poll.
     safepoint_countdown: u32,
+    /// Instructions in the current safe-point window (the countdown it
+    /// started with + 1). `fuel_window - safepoint_countdown` is the number
+    /// executed so far, which the next safe point charges to the fuel budget
+    /// (see `runtime::limits::Meter`).
+    fuel_window: u64,
+    /// Fuel / fatal-limit accounting against the run's resource budget.
+    meter: crate::runtime::limits::Meter,
+    /// Size caps for strings and collections the VM builds.
+    pub(super) caps: crate::runtime::limits::Caps,
     /// Set by the Stream arms of `convert_to_interp_val` / `convert_interp_value`
     /// / `value_to_shared` when a Stream is encountered at the VM↔interpreter
     /// boundary. Callers of those conversions must check this flag after each
@@ -194,7 +213,9 @@ pub struct VM {
     /// `.collect()` first to materialize. (M9.4 bug #6.)
     pub(super) stream_boundary_error: std::cell::Cell<bool>,
     /// Squad handle collector stack: when non-empty, Spawn registers handles here.
-    /// Each entry is (dst_register, cancel_flag, handles, saved_outer_cancelled).
+    /// Each entry is (dst_register, cancel_flag, handles, scope_depth): the
+    /// squad's cancel flag is also pushed on `scope_cancels`, which held
+    /// `scope_depth` flags before.
     /// Values received by `IterHas` from a channel being iterated by a
     /// `for` loop, consumed by the `IterGet` that immediately follows.
     iter_prefetch: Vec<SharedValue>,
@@ -202,10 +223,18 @@ pub struct VM {
         u8,
         Arc<std::sync::atomic::AtomicBool>,
         Vec<Arc<(Mutex<Option<SharedValue>>, Condvar)>>,
-        Arc<std::sync::atomic::AtomicBool>,
+        usize,
     )>,
-    /// Cooperative cancellation flag — shared with squad parent, checked at safe points.
+    /// Cooperative cancellation flag — the run's (or the HTTP request's)
+    /// token, checked at safe points.
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancellation of the enclosing `squad` / `timeout` scopes, innermost
+    /// last. Containment invariant (mirrors `Interpreter::child_context`):
+    /// a task forked by `spawn` inherits `cancelled` *and* these flags, so
+    /// cancelling a scope — a squad whose task failed, a `timeout` whose
+    /// deadline passed — stops every task started inside it, at their next
+    /// safe point or blocking-wait poll. See [`VM::is_cancelled`].
+    scope_cancels: Vec<Arc<std::sync::atomic::AtomicBool>>,
     /// `Some` while `schedule` / `watch` start-up is deferred (see
     /// [`VM::defer_host_runtime`]). The queued closures are GC roots.
     deferred_host_tasks: Option<Vec<HostTask>>,
@@ -229,6 +258,8 @@ impl HostTask {
 enum ErrorControl {
     Runtime,
     UnwoundToHandler,
+    /// A fatal resource limit (fuel, memory): never caught by `try`/`safe`.
+    Fatal,
 }
 
 #[derive(Debug)]
@@ -273,6 +304,20 @@ impl VMError {
 
     pub fn is_unwound_to_handler(&self) -> bool {
         self.control == ErrorControl::UnwoundToHandler
+    }
+
+    /// A fatal resource-limit error (`runtime::limits`): it unwinds past
+    /// every handler.
+    pub fn fatal(msg: &str) -> Self {
+        Self {
+            message: msg.to_string(),
+            stack_trace: Vec::new(),
+            control: ErrorControl::Fatal,
+        }
+    }
+
+    pub fn is_fatal(&self) -> bool {
+        self.control == ErrorControl::Fatal
     }
 }
 
@@ -341,8 +386,20 @@ impl VM {
     /// A VM with no globals registered. Callers install a complete global
     /// environment themselves; the HTTP server's per-request fork
     /// (`vm::serve`) copies one from its template instead of re-registering
-    /// every builtin and stdlib module per request.
+    /// every builtin and stdlib module per request. Every VM, forks
+    /// included, charges the resource budget active on the creating thread
+    /// (`limits_state`).
     pub(super) fn bare(profiler: Profiler) -> Self {
+        Self::bare_with_budget(profiler, crate::runtime::limits::current())
+    }
+
+    /// [`VM::bare`] charging `budget` instead of the thread's active one
+    /// (the HTTP server gives every request fork its own budget).
+    pub(super) fn bare_with_budget(
+        profiler: Profiler,
+        budget: Option<Arc<crate::runtime::limits::Budget>>,
+    ) -> Self {
+        let (meter, caps, gc) = Self::limits_state(budget);
         Self {
             registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
@@ -351,7 +408,7 @@ impl VM {
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
-            gc: Gc::new(),
+            gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
             jit: super::jit::tier::JitState::default(),
@@ -359,10 +416,14 @@ impl VM {
             jit_bridge_error: None,
             profiler,
             safepoint_countdown: 0,
+            fuel_window: 0,
+            meter,
+            caps,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            scope_cancels: Vec::new(),
             deferred_host_tasks: None,
         }
     }
@@ -415,6 +476,38 @@ impl VM {
                 spawn_schedule_thread(sendable, child_closure, interval)
             }
             HostTask::Watch { path, .. } => spawn_watch_thread(sendable, child_closure, path),
+        }
+    }
+
+    /// Resource-limit state for a new VM: the budget active on this thread
+    /// (`runtime::limits`) decides the fuel meter, the size caps and the GC
+    /// heap's memory limit.
+    fn limits_state(
+        budget: Option<Arc<crate::runtime::limits::Budget>>,
+    ) -> (
+        crate::runtime::limits::Meter,
+        crate::runtime::limits::Caps,
+        Gc,
+    ) {
+        let meter = crate::runtime::limits::Meter::for_budget(budget);
+        let limits = meter
+            .budget()
+            .map(|b| b.limits().clone())
+            .unwrap_or_default();
+        let gc = Gc::with_memory_limit(limits.max_memory);
+        (meter, limits.caps(), gc)
+    }
+
+    /// Fail the run with a fatal resource-limit error: it skips every
+    /// `try`/`safe` handler and unwinds this `run_until` invocation.
+    fn raise_fatal(&mut self, message: &str, boundary_frame_idx: usize) -> VMError {
+        // The countdown stays at 0, so every later instruction goes back
+        // through the safe point and fails again (the trip is sticky).
+        self.safepoint_countdown = 0;
+        self.fuel_window = 0;
+        match self.handle_runtime_error(VMError::fatal(message), boundary_frame_idx) {
+            Err(e) => e,
+            Ok(_) => VMError::fatal(message),
         }
     }
 
@@ -562,8 +655,10 @@ impl VM {
             child.struct_defaults.insert(name.clone(), child_defaults);
         }
 
-        // Propagate cancellation flag so squad can cancel spawned tasks
+        // Containment: the task stops when the run, or any enclosing squad
+        // or timeout scope, is cancelled.
         child.cancelled = self.cancelled.clone();
+        child.scope_cancels = self.scope_cancels.clone();
 
         #[cfg(feature = "jit")]
         assert!(
@@ -706,6 +801,110 @@ impl VM {
             .min_by_key(|(_, guard)| guard.deadline)
     }
 
+    /// True when the run, or any enclosing squad / timeout scope, has been
+    /// cancelled (see `scope_cancels`).
+    #[inline]
+    pub(super) fn is_cancelled(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.cancelled.load(Ordering::Acquire)
+            || self
+                .scope_cancels
+                .iter()
+                .any(|flag| flag.load(Ordering::Acquire))
+    }
+
+    /// Set and drop every scope flag from `depth` on: tasks started inside
+    /// those scopes stop at their next safe point.
+    fn cancel_scopes_from(&mut self, depth: usize) {
+        for flag in self.scope_cancels.iter().skip(depth) {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.scope_cancels.truncate(depth);
+        // Squads opened inside those scopes are abandoned with them.
+        while self
+            .squad_stack
+            .last()
+            .is_some_and(|squad| squad.3 >= depth)
+        {
+            self.squad_stack.pop();
+        }
+    }
+
+    /// Why a blocking wait must stop now, if it must: the run or an
+    /// enclosing scope was cancelled, or a `timeout` deadline passed (whose
+    /// scope is cancelled first, so the tasks it started stop too).
+    pub(super) fn wait_interrupted(&mut self) -> Result<(), VMError> {
+        if let Some((_, guard)) = self.earliest_expired_timeout() {
+            self.cancel_scopes_from(guard.scope_depth);
+            return Err(VMError::new(&format!(
+                "timeout: operation exceeded {} second limit",
+                guard.seconds
+            )));
+        }
+        if self.is_cancelled() {
+            return Err(VMError::new("task cancelled"));
+        }
+        Ok(())
+    }
+
+    /// Block until `ready` yields a value, waking every `WAIT_POLL` to
+    /// honour cancellation and `timeout` deadlines (`wait_interrupted`).
+    /// Every blocking wait of the VM (task results, channel receives) goes
+    /// through here, so no wait can outlive the scope that started it.
+    pub(super) fn wait_cancellable<T>(
+        &mut self,
+        mut ready: impl FnMut(Duration) -> Option<T>,
+    ) -> Result<T, VMError> {
+        const WAIT_POLL: Duration = Duration::from_millis(50);
+        loop {
+            self.wait_interrupted()?;
+            if let Some(v) = ready(WAIT_POLL) {
+                return Ok(v);
+            }
+            if !crate::clock::HAS_THREADS {
+                return Err(VMError::new(crate::clock::WAITS_FOREVER));
+            }
+        }
+    }
+
+    /// Wait (cancellably) for a spawned task's result.
+    pub(super) fn wait_task_result(
+        &mut self,
+        slot: &Arc<(Mutex<Option<SharedValue>>, Condvar)>,
+    ) -> Result<SharedValue, VMError> {
+        let (lock, cvar) = &**slot;
+        self.wait_cancellable(|slice| {
+            let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = if guard.is_none() {
+                cvar.wait_timeout(guard, slice)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
+            } else {
+                guard
+            };
+            guard.as_ref().cloned()
+        })
+    }
+
+    /// Receive from a channel (cancellably). `None` = closed and drained.
+    pub(super) fn receive_cancellable(
+        &mut self,
+        ch: &Arc<VmChannelInner>,
+    ) -> Result<Option<SharedValue>, VMError> {
+        use std::sync::mpsc::RecvTimeoutError;
+        self.wait_cancellable(|slice| {
+            let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                None => Some(None),
+                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
+                    Ok(v) => Some(Some(v)),
+                    Err(RecvTimeoutError::Disconnected) => Some(None),
+                    Err(RecvTimeoutError::Timeout) => None,
+                },
+            }
+        })
+    }
+
     pub(super) fn sleep_with_timeout_checks(&self, duration: Duration) -> Result<(), VMError> {
         let total_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         let mut elapsed = 0u64;
@@ -747,10 +946,13 @@ impl VM {
         let base = self.frames[frame_idx].base;
         self.registers[base + guard.error_register as usize] = err_value;
 
+        // Stop everything the block started (tasks, squads, nested scopes).
+        self.cancel_scopes_from(guard.scope_depth);
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
         frame.ip = guard.catch_ip;
-        self.safepoint_countdown = SAFEPOINT_INTERVAL;
+        // The safe point that called us has already refilled the countdown,
+        // so the catch path's `PopTimeout` runs before the next poll.
         Ok(frame_idx)
     }
 
@@ -793,10 +995,16 @@ impl VM {
                 continue;
             }
 
-            // Safe point: poll `timeout` deadlines every SAFEPOINT_INTERVAL
-            // instructions (see `safepoint_countdown`).
+            // Safe point: settle fuel and poll `timeout` deadlines every
+            // SAFEPOINT_INTERVAL instructions (see `safepoint_countdown`).
             if self.safepoint_countdown == 0 {
-                self.safepoint_countdown = SAFEPOINT_INTERVAL;
+                match self.meter.safepoint(self.fuel_window, SAFEPOINT_INTERVAL) {
+                    Ok(next) => {
+                        self.safepoint_countdown = next;
+                        self.fuel_window = u64::from(next) + 1;
+                    }
+                    Err(message) => return Err(self.raise_fatal(&message, boundary_frame_idx)),
+                }
                 if self.earliest_expired_timeout().is_some() {
                     let handler_frame_idx = self.handle_timeout_expiry()?;
                     if handler_frame_idx < boundary_frame_idx {
@@ -938,9 +1146,10 @@ impl VM {
                     OpCode::GetGlobal => {
                         let name_const = &chunk.constants[bx as usize];
                         if let Constant::Str(name) = name_const {
-                            let val = self.globals.get(name).cloned().ok_or_else(|| {
-                                VMError::new(&crate::semantics::undefined_variable(name, None))
-                            })?;
+                            let Some(val) = self.globals.get(name).cloned() else {
+                                let pc = self.frames[frame_idx].ip - 1;
+                                return Err(self.undefined_global(chunk, pc, name));
+                            };
                             self.registers[base + a as usize] = val;
                         }
                     }
@@ -994,7 +1203,7 @@ impl VM {
                     }
                     OpCode::Loop => {
                         // Cooperative cancellation check at backward jump
-                        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        if self.is_cancelled() {
                             return Err(VMError::new("task cancelled"));
                         }
                         let frame = &mut self.frames[frame_idx];
@@ -1012,7 +1221,7 @@ impl VM {
                     }
                     OpCode::Call => {
                         // Cooperative cancellation check at function call
-                        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        if self.is_cancelled() {
                             return Err(VMError::new("task cancelled"));
                         }
                         let func_val = self.registers[base + a as usize];
@@ -1285,22 +1494,25 @@ impl VM {
                             None => None,
                         });
                         let has = if let Some(ch) = channel {
-                            let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
-                            match guard.as_ref().map(crate::clock::recv) {
-                                Some(Ok(shared)) => {
+                            match self.receive_cancellable(&ch)? {
+                                Some(shared) => {
                                     self.iter_prefetch.push(shared);
                                     true
                                 }
-                                Some(Err(crate::clock::RecvFailure::WouldBlockForever)) => {
-                                    return Err(VMError::new(crate::clock::RECV_BLOCKS_FOREVER));
-                                }
-                                _ => false,
+                                None => false,
                             }
                         } else {
                             let idx = self.registers[base + c as usize].as_int(&self.gc);
                             idx.is_some_and(|i| i < self.collection_len(src))
                         };
                         self.registers[base + a as usize] = Value::bool_val(has);
+                    }
+                    OpCode::ForRangePrep => self.for_range_prep(base, a, b, c),
+                    OpCode::ForRangeNext => {
+                        if self.for_range_next(base, a, b)? {
+                            // Skip the loop-exit jump that follows.
+                            self.frames[frame_idx].ip += 1;
+                        }
                     }
                     OpCode::Len => {
                         let src = self.registers[base + b as usize];
@@ -1344,23 +1556,36 @@ impl VM {
                                     ObjKind::ResultOk(v) => {
                                         self.registers[base + a as usize] = *v;
                                     }
-                                    ObjKind::ResultErr(_) => {
+                                    ObjKind::ResultErr(inner) => {
+                                        // `?` at the top level of the program has
+                                        // no caller to propagate to: like the
+                                        // interpreter, stop with the error.
+                                        if chunk.name == "<main>" {
+                                            let shown = inner.display(&self.gc);
+                                            return Err(VMError::new(
+                                                &crate::semantics::unhandled_error(&shown),
+                                            ));
+                                        }
                                         let val = self.registers[base + b as usize];
                                         self.frames.pop();
                                         return Ok(Some(val));
                                     }
                                     _ => {
                                         return Err(VMError::new(
-                                            "? operator requires Result value",
+                                            crate::semantics::TRY_REQUIRES_RESULT,
                                         ))
                                     }
                                 }
                             }
                         } else {
-                            return Err(VMError::new("? operator requires Result value"));
+                            return Err(VMError::new(crate::semantics::TRY_REQUIRES_RESULT));
                         }
                     }
                     OpCode::Spawn => {
+                        let task = crate::runtime::limits::acquire(
+                            crate::runtime::limits::Resource::Tasks,
+                        )
+                        .map_err(|m| VMError::new(&m))?;
                         let closure_val = self.registers[base + a as usize];
                         let result_slot: Arc<(Mutex<Option<SharedValue>>, Condvar)> =
                             Arc::new((Mutex::new(None), Condvar::new()));
@@ -1373,7 +1598,7 @@ impl VM {
                             Value::null()
                         };
 
-                        spawn_thread(sendable, child_closure, slot_clone);
+                        spawn_thread(sendable, child_closure, slot_clone, task);
                         self.drain_stream_boundary_flags();
 
                         // Register handle with squad if active
@@ -1386,9 +1611,9 @@ impl VM {
                     }
                     OpCode::SquadBegin => {
                         let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        let saved = self.cancelled.clone();
-                        self.cancelled = cancel_flag.clone();
-                        self.squad_stack.push((a, cancel_flag, Vec::new(), saved));
+                        let depth = self.scope_cancels.len();
+                        self.scope_cancels.push(cancel_flag.clone());
+                        self.squad_stack.push((a, cancel_flag, Vec::new(), depth));
                     }
                     OpCode::CloseUpvalues => {
                         let frame = &mut self.frames[frame_idx];
@@ -1399,42 +1624,46 @@ impl VM {
                         }
                     }
                     OpCode::SquadEnd => {
-                        let (dst_reg, cancel_flag, handles, saved_cancelled) =
+                        let (dst_reg, cancel_flag, handles, depth) =
                             self.squad_stack.pop().unwrap_or_else(|| {
                                 let dummy = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                (a, dummy.clone(), Vec::new(), dummy)
+                                (a, dummy, Vec::new(), self.scope_cancels.len())
                             });
-                        // Restore outer cancellation flag
-                        self.cancelled = saved_cancelled;
+                        // The body is done: leave the squad's scope. Its tasks
+                        // keep the flag, so a failure below still cancels
+                        // them, but this wait is not cancelled by it.
+                        self.scope_cancels.truncate(depth);
 
                         let mut results = Vec::with_capacity(handles.len());
                         let mut first_error: Option<String> = None;
 
                         for slot in &handles {
-                            let (lock, cvar) = &**slot;
-                            let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                            while guard.is_none() {
-                                guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
-                            }
-                            if let Some(ref shared) = *guard {
-                                match shared {
-                                    SharedValue::ResultOk(inner) => {
-                                        results.push(shared_to_value(&mut self.gc, inner));
+                            // Cancellable: a deadline or the host's cancel
+                            // stops the squad's tasks and this wait.
+                            let shared = match self.wait_task_result(slot) {
+                                Ok(shared) => shared,
+                                Err(e) => {
+                                    cancel_flag.store(true, std::sync::atomic::Ordering::Release);
+                                    return Err(e);
+                                }
+                            };
+                            match &shared {
+                                SharedValue::ResultOk(inner) => {
+                                    results.push(shared_to_value(&mut self.gc, inner));
+                                }
+                                SharedValue::ResultErr(inner) => {
+                                    if first_error.is_none() {
+                                        let msg = match inner.as_ref() {
+                                            SharedValue::String(s) => s.clone(),
+                                            _ => "task error".to_string(),
+                                        };
+                                        first_error = Some(msg);
+                                        cancel_flag
+                                            .store(true, std::sync::atomic::Ordering::Release);
                                     }
-                                    SharedValue::ResultErr(inner) => {
-                                        if first_error.is_none() {
-                                            let msg = match inner.as_ref() {
-                                                SharedValue::String(s) => s.clone(),
-                                                _ => "task error".to_string(),
-                                            };
-                                            first_error = Some(msg);
-                                            cancel_flag
-                                                .store(true, std::sync::atomic::Ordering::Release);
-                                        }
-                                    }
-                                    other => {
-                                        results.push(shared_to_value(&mut self.gc, other));
-                                    }
+                                }
+                                other => {
+                                    results.push(shared_to_value(&mut self.gc, other));
                                 }
                             }
                         }
@@ -1464,16 +1693,7 @@ impl VM {
                         };
                         // GC borrow released — safe to call shared_to_value
                         let result = if let Some(slot) = maybe_slot {
-                            let (lock, cvar) = &*slot;
-                            let mut guard = lock
-                                .lock()
-                                .map_err(|_| VMError::new("await: spawned task panicked"))?;
-                            while guard.is_none() {
-                                guard = cvar
-                                    .wait(guard)
-                                    .map_err(|_| VMError::new("await: wait interrupted"))?;
-                            }
-                            let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
+                            let shared = self.wait_task_result(&slot)?;
                             let val = shared_to_value(&mut self.gc, &shared);
                             // Unwrap ResultOk, propagate ResultErr
                             match val.classify(&self.gc) {
@@ -1529,19 +1749,30 @@ impl VM {
                             (frame.ip as i64 + sbx as i64) as usize
                         };
                         let handler_base = self.frames[frame_idx].handlers.len().saturating_sub(1);
+                        // The scope's own cancel flag: tasks started inside
+                        // the block inherit it, and the deadline sets it.
+                        let scope_depth = self.scope_cancels.len();
+                        self.scope_cancels
+                            .push(Arc::new(std::sync::atomic::AtomicBool::new(false)));
                         self.frames[frame_idx].timeouts.push(TimeoutGuard {
                             deadline: crate::semantics::timeout_deadline(Instant::now(), seconds),
                             seconds,
                             catch_ip,
                             error_register: a,
                             handler_base,
+                            scope_depth,
                         });
                         // Poll at the next instruction, so an already
-                        // expired scope fires before its body runs.
+                        // expired scope fires before its body runs. The
+                        // window shrinks to what actually ran, keeping the
+                        // fuel count exact.
+                        self.fuel_window -= u64::from(self.safepoint_countdown);
                         self.safepoint_countdown = 0;
                     }
                     OpCode::PopTimeout => {
-                        self.frames[frame_idx].timeouts.pop();
+                        if let Some(guard) = self.frames[frame_idx].timeouts.pop() {
+                            self.scope_cancels.truncate(guard.scope_depth);
+                        }
                     }
                     OpCode::Schedule => {
                         let closure_val = self.registers[base + a as usize];
@@ -1784,6 +2015,14 @@ impl VM {
                     roots.extend(task.closure().as_obj());
                 }
                 self.gc.collect(&roots);
+                if self.gc.memory_exceeded() {
+                    let limit = self.gc.memory_limit().unwrap_or(0);
+                    let message = match self.meter.budget() {
+                        Some(b) => b.trip(crate::runtime::limits::Trip::Memory),
+                        None => crate::runtime::limits::memory_exceeded_message(limit),
+                    };
+                    return Err(self.raise_fatal(&message, boundary_frame_idx));
+                }
             }
         }
     }
@@ -1802,10 +2041,11 @@ impl VM {
     #[cfg(feature = "jit")]
     fn try_jit_call(
         &mut self,
+        closure: GcRef,
         chunk: &Arc<Chunk>,
         args: &[Value],
     ) -> Result<Option<Value>, VMError> {
-        self.try_jit_native(chunk, args, self.frames.len(), false)
+        self.try_jit_native(closure, chunk, args, self.frames.len(), false)
     }
 
     /// Loop tier-up ("restart in native code"). Called when the frame at
@@ -1823,8 +2063,8 @@ impl VM {
     /// failure, rejection or deopt the frame simply continues in the VM.
     ///
     /// True on-stack replacement (entering native code at the loop header
-    /// with the frame's live registers) is a possible follow-up; restarting
-    /// needs no new entry points or state mapping in the JIT.
+    /// with the frame's live registers) was evaluated and deferred; see
+    /// "Why restart and not on-stack replacement" in `vm::jit`.
     #[cfg(feature = "jit")]
     fn try_jit_loop_restart(
         &mut self,
@@ -1842,8 +2082,9 @@ impl VM {
             return Ok(None);
         }
         let args = frame.entry_args.clone();
+        let closure = frame.closure;
         // The native call replaces this frame, so it starts at its depth.
-        self.try_jit_native(chunk, &args, frame_idx, true)
+        self.try_jit_native(closure, chunk, &args, frame_idx, true)
     }
 
     /// Shared native-call path. `depth_below` is the number of VM frames
@@ -1852,6 +2093,7 @@ impl VM {
     #[cfg(feature = "jit")]
     fn try_jit_native(
         &mut self,
+        closure: GcRef,
         chunk: &Arc<Chunk>,
         args: &[Value],
         depth_below: usize,
@@ -1859,18 +2101,30 @@ impl VM {
     ) -> Result<Option<Value>, VMError> {
         use super::jit::tier::{invoke, Invoke};
 
-        let Some(sel) = self.jit.select(chunk, args, &self.gc, force_hot) else {
+        let globals = JitGlobals {
+            globals: &self.globals,
+            gc: &self.gc,
+        };
+        let Some(sel) = self
+            .jit
+            .select(closure, chunk, args, &self.gc, force_hot, &globals)
+        else {
             return Ok(None);
         };
 
-        // VM-state guards: the VM itself would refuse the call (stack
-        // overflow), a `timeout` is active (the VM checks deadlines between
-        // instructions; native code does not), or the global the code calls
-        // itself through no longer names this function.
+        // VM-state guards (`select` checked the globals the code relies
+        // on): the VM itself would refuse the call (stack overflow), or a
+        // `timeout` is active (the VM checks deadlines between
+        // instructions; native code does not).
         let depth_limit = crate::runtime::recursion::max_depth();
+        // Native code has no fuel counter: with a fuel budget every call
+        // stays in the VM, so exhaustion is exact and deterministic.
+        // Likewise the JIT polls only the run's own cancel flag, so code
+        // inside a squad / timeout scope stays in the VM.
         let guards_ok = depth_below < depth_limit
-            && self.frames.iter().all(|f| f.timeouts.is_empty())
-            && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
+            && !self.meter.fuel_limited()
+            && self.scope_cancels.is_empty()
+            && self.frames.iter().all(|f| f.timeouts.is_empty());
         if !guards_ok {
             self.jit.record_guard_failure(&sel);
             return Ok(None);
@@ -1927,23 +2181,6 @@ impl VM {
         self.jit_bridge_error.take()
     }
 
-    /// True when the global named like `chunk` is a closure over the same
-    /// prototype code, so native self-calls behave like the VM's
-    /// `GetGlobal` + `Call`.
-    #[cfg(feature = "jit")]
-    fn jit_self_binding_matches(&self, chunk: &Arc<Chunk>) -> bool {
-        let Some(r) = self.globals.get(&chunk.name).and_then(|v| v.as_obj()) else {
-            return false;
-        };
-        match self.gc.get(r).map(|o| &o.kind) {
-            Some(ObjKind::Closure(c)) => {
-                Arc::ptr_eq(&c.function.chunk, chunk)
-                    || super::jit::tier::same_code(&c.function.chunk, chunk)
-            }
-            _ => false,
-        }
-    }
-
     /// Call any callable value (closure, function, native, `__call__`
     /// object).
     ///
@@ -1977,7 +2214,7 @@ impl VM {
                         // version runs when its entry guards pass; otherwise
                         // (or on deopt) the call runs in the VM below.
                         #[cfg(feature = "jit")]
-                        if let Some(result) = self.try_jit_call(&chunk, &args)? {
+                        if let Some(result) = self.try_jit_call(r, &chunk, &args)? {
                             if self.profiler.is_enabled()
                                 && !func_name.is_empty()
                                 && func_name != "<lambda>"
@@ -2029,14 +2266,18 @@ impl VM {
                         if let Some(call_fn) = map.get("__call__").copied() {
                             self.call_value(call_fn, args)
                         } else {
-                            Err(VMError::new("cannot call non-function"))
+                            Err(VMError::new(&crate::semantics::not_callable("Object")))
                         }
                     }
-                    _ => Err(VMError::new("cannot call non-function")),
+                    _ => Err(VMError::new(&crate::semantics::not_callable(
+                        obj.type_name(),
+                    ))),
                 }
             }
         } else {
-            Err(VMError::new("cannot call non-function"))
+            Err(VMError::new(&crate::semantics::not_callable(
+                func.type_name(&self.gc),
+            )))
         }
     }
 
@@ -2093,30 +2334,42 @@ impl VM {
         VMError::with_trace(msg, self.collect_stack_trace())
     }
 
-    fn classify_error_type(message: &str) -> &'static str {
-        if message.contains("type") || message.contains("Type") {
-            "TypeError"
-        } else if message.contains("division by zero") || message.contains("modulo by zero") {
-            "ArithmeticError"
-        } else if message.contains("assertion") {
-            "AssertionError"
-        } else if message.contains("index") || message.contains("out of bounds") {
-            "IndexError"
-        } else if message.contains("not found") || message.contains("undefined") {
-            "ReferenceError"
-        } else if message.contains("immutable") || message.contains("cannot reassign") {
-            "TypeError"
-        } else {
-            "RuntimeError"
-        }
+    /// "undefined variable" for a failed `GetGlobal` at `pc`, with the
+    /// same did-you-mean rule as the interpreter: locals visible at that
+    /// point (recorded by the compiler) beat globals at equal distance.
+    fn undefined_global(&self, chunk: &Chunk, pc: usize, name: &str) -> VMError {
+        let local = chunk
+            .global_hints
+            .iter()
+            .find(|(at, _)| *at == pc)
+            .map(|(_, hint)| hint.as_str());
+        let suggestion = crate::semantics::errors::suggest_name(
+            name,
+            [
+                local.into_iter().collect::<Vec<_>>(),
+                self.globals.keys().map(String::as_str).collect(),
+            ],
+        );
+        VMError::new(&crate::semantics::undefined_variable(
+            name,
+            suggestion.as_deref(),
+        ))
     }
 
+    /// The object a `catch e { }` block receives: `message`, the legacy
+    /// `type` and the stable `code` (shared with the interpreter through
+    /// `semantics::errors`).
     fn runtime_error_value(&mut self, err: &VMError) -> Value {
+        use crate::semantics::errors;
         let mut err_obj = IndexMap::new();
         err_obj.insert("message".to_string(), self.alloc_string(&err.message));
         err_obj.insert(
             "type".to_string(),
-            self.alloc_string(Self::classify_error_type(&err.message)),
+            self.alloc_string(errors::legacy_error_type(&err.message)),
+        );
+        err_obj.insert(
+            "code".to_string(),
+            self.alloc_string(errors::classify(&err.message).code),
         );
         let err_ref = self.gc.alloc(ObjKind::Object(err_obj));
         Value::obj(err_ref)
@@ -2138,7 +2391,13 @@ impl VM {
             return Err(err);
         }
 
-        for frame_idx in (boundary_frame_idx.min(self.frames.len())..self.frames.len()).rev() {
+        // Fatal resource-limit errors skip every handler.
+        let handler_frames = if err.is_fatal() {
+            0..0
+        } else {
+            boundary_frame_idx.min(self.frames.len())..self.frames.len()
+        };
+        for frame_idx in handler_frames.rev() {
             let handler = {
                 let frame = &mut self.frames[frame_idx];
                 frame.handlers.pop()
@@ -2159,7 +2418,10 @@ impl VM {
         }
 
         let err = if err.stack_trace.is_empty() {
-            self.error_with_trace(&err.message)
+            VMError {
+                stack_trace: self.collect_stack_trace(),
+                ..err
+            }
         } else {
             err
         };
@@ -2171,6 +2433,10 @@ impl VM {
     }
 
     pub(super) fn convert_to_interp_val(&self, v: &Value) -> crate::interpreter::Value {
+        // Too deep: Null placeholder, reported by `check_stream_boundary`.
+        let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+            return crate::interpreter::Value::Null;
+        };
         match v.classify(&self.gc) {
             ValueKind::Int(n) => crate::interpreter::Value::Int(n),
             ValueKind::Float(n) => crate::interpreter::Value::Float(n),
@@ -2245,6 +2511,9 @@ impl VM {
     }
 
     pub(super) fn convert_interp_value(&mut self, v: &crate::interpreter::Value) -> Value {
+        let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+            return Value::null();
+        };
         match v {
             crate::interpreter::Value::Int(n) => Value::int(*n, &mut self.gc),
             crate::interpreter::Value::Float(n) => Value::float(*n),
@@ -2323,6 +2592,11 @@ impl VM {
     pub(super) fn check_stream_boundary(&self) -> Result<(), VMError> {
         let cell_hit = self.stream_boundary_error.replace(false);
         let tls_hit = super::value::take_stream_boundary_error();
+        if crate::runtime::recursion::take_value_too_deep() {
+            return Err(VMError::new(
+                &crate::runtime::recursion::value_too_deep_message(),
+            ));
+        }
         if cell_hit || tls_hit {
             Err(VMError::new(
                 "Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize",
@@ -2369,10 +2643,9 @@ impl VM {
 
     fn get_field_strict(&mut self, obj_val: Value, field: &str) -> Result<Value, VMError> {
         let Some(r) = obj_val.as_obj() else {
-            return Err(VMError::new(&format!(
-                "cannot access field '{}' on {}",
+            return Err(VMError::new(&crate::semantics::field_access(
                 field,
-                obj_val.type_name(&self.gc)
+                obj_val.type_name(&self.gc),
             )));
         };
         let needs_alloc: Option<String>;
@@ -2417,12 +2690,17 @@ impl VM {
                             }
                         }
                     }
-                    direct_result =
-                        Some(delegated.ok_or_else(|| {
-                            VMError::new(&format!("no field '{}' on object", field))
-                        })?);
+                    direct_result = Some(delegated.ok_or_else(|| {
+                        VMError::new(&crate::semantics::no_field(
+                            field,
+                            map.keys().map(String::as_str),
+                        ))
+                    })?);
                 } else {
-                    return Err(VMError::new(&format!("no field '{}' on object", field)));
+                    return Err(VMError::new(&crate::semantics::no_field(
+                        field,
+                        map.keys().map(String::as_str),
+                    )));
                 }
                 needs_alloc = None;
             }
@@ -2467,10 +2745,9 @@ impl VM {
                 return self.get_field(inner, field);
             }
             _ => {
-                return Err(VMError::new(&format!(
-                    "cannot access field '{}' on {}",
+                return Err(VMError::new(&crate::semantics::field_access(
                     field,
-                    obj.type_name()
+                    obj.type_name(),
                 )))
             }
         }
@@ -2671,8 +2948,11 @@ impl VM {
             Outcome::Float(f) => Value::float(f),
             Outcome::Bool(b) => Value::bool_val(b),
             Outcome::Concat => {
-                let text = format!("{}{}", left.display(&self.gc), right.display(&self.gc));
-                Value::obj(self.gc.alloc_string(text))
+                let (l, r) = (left.display(&self.gc), right.display(&self.gc));
+                self.caps
+                    .check_string(l.len() + r.len())
+                    .map_err(|m| VMError::new(&m))?;
+                Value::obj(self.gc.alloc_string(l + &r))
             }
         })
     }
@@ -2730,5 +3010,135 @@ impl VM {
             _ => return Err(VMError::new("invalid comparison")),
         };
         self.binary_op(left, right, shared)
+    }
+}
+
+/// The VM's globals as seen by the JIT verifier and entry guards.
+#[cfg(feature = "jit")]
+struct JitGlobals<'a> {
+    globals: &'a HashMap<String, Value>,
+    gc: &'a super::gc::Gc,
+}
+
+#[cfg(feature = "jit")]
+impl JitGlobals<'_> {
+    fn kind(&self, v: &Value) -> Option<&ObjKind> {
+        v.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind)
+    }
+
+    /// The closure captured as variable `index` of `closure`, if any.
+    fn upvalue_closure(&self, closure: GcRef, index: u8) -> Option<GcRef> {
+        let Some(ObjKind::Closure(c)) = self.gc.get(closure).map(|o| &o.kind) else {
+            return None;
+        };
+        let cell = *c.upvalues.get(index as usize)?;
+        let Some(ObjKind::Upvalue(uv)) = self.gc.get(cell).map(|o| &o.kind) else {
+            return None;
+        };
+        let r = uv.value.as_obj()?;
+        matches!(self.gc.get(r).map(|o| &o.kind), Some(ObjKind::Closure(_))).then_some(r)
+    }
+
+    /// Follow `path` from `entry` (the closure being called).
+    fn resolve(&self, entry: GcRef, path: &super::jit::verifier::ClosurePath) -> Option<GcRef> {
+        let mut at = match &path.global {
+            None => entry,
+            Some(name) => self.globals.get(name)?.as_obj()?,
+        };
+        for i in &path.upvalues {
+            at = self.upvalue_closure(at, *i)?;
+        }
+        Some(at)
+    }
+
+    /// Does the assumption `g` hold now, for a call of `entry`?
+    fn guard_holds(&self, entry: GcRef, g: &super::jit::verifier::Guard) -> bool {
+        use super::jit::verifier::{Guard, MemberExpect};
+        if let Guard::Closure { at, chunk } = g {
+            return match self
+                .resolve(entry, at)
+                .and_then(|r| self.gc.get(r))
+                .map(|o| &o.kind)
+            {
+                Some(ObjKind::Closure(c)) => {
+                    Arc::ptr_eq(&c.function.chunk, chunk)
+                        || super::jit::tier::same_code(&c.function.chunk, chunk)
+                }
+                _ => false,
+            };
+        }
+        let Some(v) = self.globals.get(match g {
+            Guard::Native(b) => b.name(),
+            Guard::Member { object, .. } => object,
+            Guard::Closure { .. } => return false,
+        }) else {
+            return false;
+        };
+        match (g, self.kind(v)) {
+            (Guard::Native(b), Some(ObjKind::NativeFunction(nf))) => nf.name == b.name(),
+            (
+                Guard::Member {
+                    object,
+                    field,
+                    expect,
+                },
+                Some(ObjKind::Object(fields)),
+            ) => match (expect, fields.get(*field)) {
+                (MemberExpect::Native, Some(m)) => matches!(
+                    self.kind(m),
+                    Some(ObjKind::NativeFunction(nf))
+                        if nf.name.strip_prefix(*object).and_then(|r| r.strip_prefix('.'))
+                            == Some(*field)
+                ),
+                (MemberExpect::FloatBits(bits), Some(m)) => {
+                    m.as_float().is_some_and(|f| f.to_bits() == *bits)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn view(&self, r: Option<GcRef>) -> super::jit::verifier::GlobalView {
+        use super::jit::verifier::GlobalView;
+        match r.map(|r| (r, self.gc.get(r).map(|o| &o.kind))) {
+            Some((r, Some(ObjKind::Closure(c)))) => GlobalView::Closure {
+                chunk: c.function.chunk.clone(),
+                closure: r,
+            },
+            Some((_, Some(ObjKind::NativeFunction(nf)))) => GlobalView::Native(nf.name.clone()),
+            _ => GlobalView::Other,
+        }
+    }
+}
+
+#[cfg(feature = "jit")]
+impl super::jit::tier::Globals for JitGlobals<'_> {
+    fn global(&self, name: &str) -> super::jit::verifier::GlobalView {
+        self.view(self.globals.get(name).and_then(|v| v.as_obj()))
+    }
+
+    fn upvalue(&self, closure: GcRef, index: u8) -> super::jit::verifier::GlobalView {
+        self.view(self.upvalue_closure(closure, index))
+    }
+
+    fn holds(&self, entry: GcRef, g: &super::jit::verifier::Guard) -> bool {
+        self.guard_holds(entry, g)
+    }
+
+    fn member(&self, object: &str, field: &str) -> super::jit::verifier::MemberView {
+        use super::jit::verifier::MemberView;
+        let Some(Some(ObjKind::Object(fields))) = self.globals.get(object).map(|v| self.kind(v))
+        else {
+            return MemberView::Other;
+        };
+        match fields.get(field) {
+            Some(m) => match (self.kind(m), m.as_float()) {
+                (Some(ObjKind::NativeFunction(nf)), _) => MemberView::Native(nf.name.clone()),
+                (_, Some(f)) => MemberView::Float(f),
+                _ => MemberView::Other,
+            },
+            None => MemberView::Other,
+        }
     }
 }

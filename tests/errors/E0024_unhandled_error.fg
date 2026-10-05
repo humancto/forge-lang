@@ -1,0 +1,2 @@
+fn load() { return Err("no config") }
+let cfg = load()?

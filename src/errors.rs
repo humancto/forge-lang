@@ -229,6 +229,203 @@ fn format_diagnostic_with_color(
     }
 }
 
+/// How program diagnostics (syntax, type and runtime errors) are written to
+/// stderr: `forge run --error-format json` / `forge check --format json`
+/// emit one JSON object per line for editors and agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)]
+pub enum ErrorFormat {
+    #[default]
+    Human,
+    Json,
+}
+
+static ERROR_FORMAT: std::sync::OnceLock<ErrorFormat> = std::sync::OnceLock::new();
+
+/// Select the diagnostic format for this process (first call wins).
+#[allow(dead_code)]
+pub fn set_error_format(format: ErrorFormat) {
+    let _ = ERROR_FORMAT.set(format);
+}
+
+#[allow(dead_code)]
+pub fn error_format() -> ErrorFormat {
+    ERROR_FORMAT.get().copied().unwrap_or_default()
+}
+
+/// Which stage of running a program produced a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum Phase {
+    Syntax,
+    Type,
+    Runtime,
+}
+
+impl Phase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Phase::Syntax => "syntax",
+            Phase::Type => "type",
+            Phase::Runtime => "runtime",
+        }
+    }
+}
+
+/// One program diagnostic, independent of how it is rendered.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub struct ProgramDiagnostic {
+    /// `E0009` / `T0006`.
+    pub code: String,
+    pub is_error: bool,
+    /// Headline (first line of the message, without the hint).
+    pub message: String,
+    /// The file as shown to the user (see [`display_path`]).
+    pub file: String,
+    /// 1-based; 0 when the position is unknown.
+    pub line: usize,
+    pub col: usize,
+    /// Highlighted width in chars (at least 1).
+    pub len: usize,
+    pub hint: Option<String>,
+    pub phase: Phase,
+}
+
+#[allow(dead_code)]
+impl ProgramDiagnostic {
+    /// A runtime error message (as raised by either engine) at `line:col`.
+    /// The code comes from the shared table (`semantics::errors`); the hint
+    /// is the message's own `hint:` line, else the code's default hint.
+    pub fn runtime(message: &str, file: &str, line: usize, col: usize) -> Self {
+        use crate::semantics::errors;
+        let class = errors::classify(message);
+        Self {
+            code: class.code.to_string(),
+            is_error: true,
+            message: errors::headline(message).to_string(),
+            file: file.to_string(),
+            line,
+            col,
+            len: 1,
+            hint: Some(errors::hint_for(message).to_string()),
+            phase: Phase::Runtime,
+        }
+    }
+
+    /// A lexer (`E0001`) or parser (`E0002`) error.
+    pub fn syntax(lexer: bool, message: &str, file: &str, line: usize, col: usize) -> Self {
+        use crate::semantics::errors;
+        let class = errors::lookup(if lexer { "E0001" } else { "E0002" })
+            .expect("BUG: syntax codes are in the table");
+        Self {
+            code: class.code.to_string(),
+            is_error: true,
+            message: errors::headline(message).to_string(),
+            file: file.to_string(),
+            line,
+            col,
+            len: 1,
+            hint: Some(
+                errors::message_hint(message)
+                    .unwrap_or(class.hint)
+                    .to_string(),
+            ),
+            phase: Phase::Syntax,
+        }
+    }
+
+    /// The JSON object emitted by `--error-format json` (one per line):
+    /// `{code, severity, message, file, line, col, hint, phase}`. `line`
+    /// and `col` are null when the position is unknown.
+    pub fn to_json(&self) -> String {
+        let position = |n: usize| {
+            if n == 0 {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::from(n)
+            }
+        };
+        serde_json::json!({
+            "code": self.code,
+            "severity": if self.is_error { "error" } else { "warning" },
+            "message": self.message,
+            "file": self.file,
+            "line": position(self.line),
+            "col": position(if self.line == 0 { 0 } else { self.col }),
+            "hint": self.hint,
+            "phase": self.phase.as_str(),
+        })
+        .to_string()
+    }
+
+    /// Human rendering: a source snippet headed `[code] message`, with the
+    /// hint as help and, for errors, a pointer to `forge explain`.
+    pub fn to_human(&self, source: &str) -> String {
+        self.to_human_with_color(source, color_enabled())
+    }
+
+    fn to_human_with_color(&self, source: &str, color: bool) -> String {
+        let explain = self
+            .is_error
+            .then(|| format!("run `forge explain {}` for details", self.code));
+        if self.line == 0 || source.lines().count() < self.line {
+            let mut text = format!("[{}] {}", self.code, self.message);
+            if let Some(hint) = &self.hint {
+                text.push_str(&format!("\n  help: {}", hint));
+            }
+            if let Some(explain) = &explain {
+                text.push_str(&format!("\n  note: {}", explain));
+            }
+            return if self.is_error {
+                format_simple_error(&text)
+            } else {
+                format_warning(&text)
+            };
+        }
+        let origin = self.file.as_str();
+        let offset = line_col_to_offset(source, self.line, self.col.max(1));
+        let (kind, label_color) = if self.is_error {
+            (ReportKind::Error, Color::Red)
+        } else {
+            (ReportKind::Warning, Color::Yellow)
+        };
+        let mut report = Report::build(kind, origin, offset)
+            .with_config(Config::default().with_color(color))
+            .with_code(&self.code)
+            .with_message(&self.message)
+            .with_label(
+                Label::new((origin, offset..offset + self.len.max(1)))
+                    .with_message(&self.message)
+                    .with_color(label_color),
+            );
+        if let Some(hint) = &self.hint {
+            report = report.with_help(hint);
+        }
+        if let Some(explain) = explain {
+            report = report.with_note(explain);
+        }
+        let mut buf = Vec::new();
+        report
+            .finish()
+            .write((origin, Source::from(source)), &mut buf)
+            .ok();
+        match String::from_utf8(buf) {
+            Ok(rendered) if color => coalesce_ansi(&rendered),
+            Ok(rendered) => rendered,
+            Err(_) => format!("error[{}]: {}", self.code, self.message),
+        }
+    }
+
+    /// Render in the process's [`error_format`].
+    pub fn render(&self, source: &str) -> String {
+        match error_format() {
+            ErrorFormat::Json => self.to_json(),
+            ErrorFormat::Human => self.to_human(source),
+        }
+    }
+}
+
 fn line_col_to_offset(source: &str, line: usize, col: usize) -> usize {
     let total = source.chars().count();
     let mut current_line = 1;
@@ -353,6 +550,48 @@ mod tests {
     fn coalesce_merges_identical_adjacent_spans() {
         let input = "\x1B[31ma\x1B[0m\x1B[31mb\x1B[0m\x1B[32mc\x1B[0m d";
         assert_eq!(coalesce_ansi(input), "\x1B[31mab\x1B[0m\x1B[32mc\x1B[0m d");
+    }
+
+    #[test]
+    fn runtime_diagnostics_carry_code_and_hint() {
+        let d = ProgramDiagnostic::runtime(
+            &crate::semantics::index_out_of_bounds(5, "array", 3),
+            "t.fg",
+            2,
+            5,
+        );
+        assert_eq!(d.code, "E0009");
+        assert_eq!(
+            d.message,
+            "index out of bounds: index 5 on array of length 3"
+        );
+        assert_eq!(
+            d.hint.as_deref(),
+            Some("valid indices are 0 to 2 (or -3 to -1 from the end)")
+        );
+        let json: serde_json::Value = serde_json::from_str(&d.to_json()).unwrap();
+        assert_eq!(json["code"], "E0009");
+        assert_eq!(json["severity"], "error");
+        assert_eq!(json["file"], "t.fg");
+        assert_eq!(json["line"], 2);
+        assert_eq!(json["col"], 5);
+        assert_eq!(json["phase"], "runtime");
+        assert!(json["hint"].as_str().unwrap().starts_with("valid indices"));
+
+        let human = d.to_human_with_color("let a = [1,2,3]\nsay a[5]\n", false);
+        assert!(human.contains("[E0009]"), "{}", human);
+        assert!(human.contains("t.fg:2:5"), "{}", human);
+        assert!(human.contains("valid indices are 0 to 2"), "{}", human);
+        assert!(human.contains("forge explain E0009"), "{}", human);
+
+        // Unknown position: null line/col, plain rendering.
+        let d = ProgramDiagnostic::runtime("key 'b' not found", "t.fg", 0, 0);
+        let json: serde_json::Value = serde_json::from_str(&d.to_json()).unwrap();
+        assert!(json["line"].is_null() && json["col"].is_null());
+        assert_eq!(json["code"], "E0010");
+        assert!(d
+            .to_human_with_color("", false)
+            .contains("[E0010] key 'b' not found"));
     }
 
     #[test]

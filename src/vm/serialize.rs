@@ -410,6 +410,7 @@ fn read_chunk_inner(
         min_arity,
         upvalue_sources,
         proto_id: crate::vm::bytecode::next_proto_id(),
+        global_hints: Vec::new(),
     })
 }
 

@@ -50,7 +50,40 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
 }
 
 impl Interpreter {
+    /// `range(start, end)` must not build more elements than the size cap
+    /// allows (`runtime::limits`); checked before allocating anything.
+    fn check_range_len(&self, start: i64, end: i64) -> Result<(), RuntimeError> {
+        let len = (end as i128 - start as i128).max(0);
+        self.caps
+            .check_collection(usize::try_from(len).unwrap_or(usize::MAX))
+            .map_err(|m| RuntimeError::new(&m))
+    }
+
+    /// Call builtin `name`. Argument errors raised by the builtin itself
+    /// are annotated with the argument types (`len() requires ... (got
+    /// Int)`), exactly as the VM does (`semantics::errors`).
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        crate::builtins_registry::warn_if_deprecated(name);
+        let mut types = [""; crate::semantics::errors::MAX_ANNOTATED_ARGS];
+        let argc = args.len().min(crate::semantics::errors::MAX_ANNOTATED_ARGS);
+        for (slot, arg) in types.iter_mut().zip(&args) {
+            *slot = crate::semantics::errors::user_type_name(arg.type_name());
+        }
+        self.call_builtin_unannotated(name, args).map_err(|mut e| {
+            if let Some(message) =
+                crate::semantics::errors::annotate_builtin_error(name, &e.message, &types[..argc])
+            {
+                e.message = message;
+            }
+            e
+        })
+    }
+
+    fn call_builtin_unannotated(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
         crate::builtins_registry::check_arity(name, args.len())
             .map_err(|e| RuntimeError::new(&e))?;
         // Native plugin functions (`import native`) share one implementation
@@ -285,14 +318,20 @@ impl Interpreter {
                 )),
             },
             "range" => match (args.first(), args.get(1)) {
-                (Some(Value::Int(start)), Some(Value::Int(end))) => Ok(Value::Array(
-                    crate::semantics::alloc::int_range(*start, *end, "range()", Value::Int)
-                        .map_err(|e| RuntimeError::new(&e))?,
-                )),
-                (Some(Value::Int(end)), None) => Ok(Value::Array(
-                    crate::semantics::alloc::int_range(0, *end, "range()", Value::Int)
-                        .map_err(|e| RuntimeError::new(&e))?,
-                )),
+                (Some(Value::Int(start)), Some(Value::Int(end))) => {
+                    self.check_range_len(*start, *end)?;
+                    Ok(Value::Array(
+                        crate::semantics::alloc::int_range(*start, *end, "range()", Value::Int)
+                            .map_err(|e| RuntimeError::new(&e))?,
+                    ))
+                }
+                (Some(Value::Int(end)), None) => {
+                    self.check_range_len(0, *end)?;
+                    Ok(Value::Array(
+                        crate::semantics::alloc::int_range(0, *end, "range()", Value::Int)
+                            .map_err(|e| RuntimeError::new(&e))?,
+                    ))
+                }
                 _ => Err(RuntimeError::new("range() requires integer arguments")),
             },
             "set" => {
@@ -1015,6 +1054,9 @@ impl Interpreter {
                     // A negative length pads nothing (it used to wrap to a
                     // huge usize and abort the process).
                     let target = usize::try_from(*target_len).unwrap_or(0);
+                    self.caps
+                        .check_string(target)
+                        .map_err(|m| RuntimeError::new(&m))?;
                     let char_count = s.chars().count();
                     if char_count >= target {
                         Ok(Value::String(s.clone()))
@@ -1039,6 +1081,9 @@ impl Interpreter {
                     // A negative length pads nothing (it used to wrap to a
                     // huge usize and abort the process).
                     let target = usize::try_from(*target_len).unwrap_or(0);
+                    self.caps
+                        .check_string(target)
+                        .map_err(|m| RuntimeError::new(&m))?;
                     let char_count = s.chars().count();
                     if char_count >= target {
                         Ok(Value::String(s.clone()))
@@ -1095,6 +1140,9 @@ impl Interpreter {
                     if *n < 0 {
                         return Err(RuntimeError::new("repeat_str() count must be non-negative"));
                     }
+                    self.caps
+                        .check_string(s.len().saturating_mul(*n as usize))
+                        .map_err(|m| RuntimeError::new(&m))?;
                     crate::semantics::alloc::repeat_str(s, *n as usize, "repeat_str()")
                         .map(Value::String)
                         .map_err(|e| RuntimeError::new(&e))
@@ -1611,7 +1659,8 @@ impl Interpreter {
                 crate::stdlib::exec_module::call(args).map_err(|e| RuntimeError::new(&e))
             }
             "shell" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("shell() requires a command string")),
@@ -1635,7 +1684,8 @@ impl Interpreter {
                 Ok(Value::Object(result))
             }
             "sh" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh() requires a command string")),
@@ -1649,7 +1699,8 @@ impl Interpreter {
                 ))
             }
             "sh_lines" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_lines() requires a command string")),
@@ -1665,7 +1716,8 @@ impl Interpreter {
                 Ok(Value::Array(lines))
             }
             "sh_json" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_json() requires a command string")),
@@ -1678,7 +1730,8 @@ impl Interpreter {
                 Ok(crate::stdlib::json_module::json_to_forge(json))
             }
             "sh_ok" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_ok() requires a command string")),
@@ -1725,7 +1778,8 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("lines() requires a string")),
             },
             "pipe_to" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let (input, cmd) = match (args.first(), args.get(1)) {
                     (Some(Value::String(data)), Some(Value::String(cmd))) => {
                         (data.clone(), cmd.clone())

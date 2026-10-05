@@ -440,6 +440,26 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                 self.name_constant(ip, b as usize)?;
                 self.reg(ip, "value", c)?;
             }
+            ForRangePrep => {
+                // Counting loop (vm/range_loop.rs): reads the callee in R(A)
+                // and its B arguments, writes the bounds to R(A), R(A+1)
+                // and the fast-path flag to R(C).
+                self.reg(ip, "callee", a)?;
+                self.reg_range(ip, "argument", a as usize + 1, (b as usize).max(1))?;
+                self.reg(ip, "mode", c)?;
+            }
+            ForRangeNext => {
+                // Reads/writes the bounds R(A), R(A+1), writes the loop
+                // variable R(B), and on success skips the exit jump at ip+1.
+                self.reg_range(ip, "bounds", a as usize, 2)?;
+                self.reg(ip, "loop variable", b)?;
+                if ip + 1 >= self.chunk.code.len() {
+                    return Err(self.fail(
+                        Some(ip),
+                        "ForRangeNext must be followed by its exit jump".to_string(),
+                    ));
+                }
+            }
             Jump => self.target(ip, sbx, false)?,
             Loop => self.target(ip, sbx, true)?,
             JumpIfFalse | JumpIfTrue | PushHandler | PushTimeout => {
@@ -597,7 +617,12 @@ mod tests {
     #[test]
     fn rejects_invalid_opcode() {
         rejects(&with(0xFF00_0000), "invalid opcode 255");
-        rejects(&with((OpCode::PopLocal as u32 + 1) << 24), "invalid opcode");
+        // The first byte that is not an opcode (stays correct as opcodes
+        // are added).
+        let first_invalid = (0u8..=255)
+            .find(|b| OpCode::try_from(*b).is_err())
+            .expect("some byte is not an opcode");
+        rejects(&with((first_invalid as u32) << 24), "invalid opcode");
     }
 
     #[test]

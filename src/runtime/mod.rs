@@ -10,6 +10,7 @@ pub mod embedded;
 #[cfg(feature = "host")]
 pub mod host;
 pub mod imports;
+pub mod limits;
 pub mod metadata;
 #[cfg(not(feature = "host"))]
 mod no_host;

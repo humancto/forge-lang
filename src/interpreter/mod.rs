@@ -1,4 +1,5 @@
 mod builtins; // call_builtin — extracted for readability
+mod heap; // cycle collection of closure-captured scopes
 mod places; // in-place reads and updates of variables
 use crate::parser::ast::*;
 /// Forge Tree-Walk Interpreter
@@ -499,10 +500,31 @@ const SCOPE_INDEX_THRESHOLD: usize = 12;
 /// Value and mutability live in the same entry so a lookup touches one
 /// lock and one table. Bindings are never removed from a scope (a scope is
 /// dropped as a whole), so positions stay valid for the lazily built index.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct Scope {
     bindings: Vec<Binding>,
     index: Option<HashMap<String, usize>>,
+    /// Id of the [`heap::ScopeHeap`] this scope is registered with as a
+    /// cycle-collection candidate (0: none). Set when a closure captures it.
+    tracked_by: u64,
+    /// Counts live scopes for the leak tests; only its `Drop` matters.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    probe: heap::probe::ScopeProbe,
+}
+
+/// A copy is a new scope: it starts unregistered (the heap's registry
+/// holds the original, not the copy).
+impl Clone for Scope {
+    fn clone(&self) -> Self {
+        Scope {
+            bindings: self.bindings.clone(),
+            index: self.index.clone(),
+            tracked_by: 0,
+            #[cfg(test)]
+            probe: Default::default(),
+        }
+    }
 }
 
 impl Scope {
@@ -766,6 +788,16 @@ impl Environment {
         Self::deep_clone_env(self, &mut scope_map)
     }
 
+    /// [`deep_clone_isolated`](Self::deep_clone_isolated), registering
+    /// every new scope with `heap` so the copy's function cycles are
+    /// collected when the fork that owns it is dropped.
+    fn deep_clone_isolated_into(&self, heap: &heap::ScopeHeap) -> Self {
+        let mut scope_map = ScopeMap::new();
+        let env = Self::deep_clone_env(self, &mut scope_map);
+        heap.track_cells(scope_map.values());
+        env
+    }
+
     fn deep_clone_env(env: &Environment, scope_map: &mut ScopeMap) -> Self {
         Self {
             scopes: env
@@ -873,44 +905,21 @@ impl Environment {
         }
     }
 
+    /// "Did you mean ...?" for an undefined `name`: the closest visible
+    /// name, innermost scope first (`semantics::errors::suggest_name`, the
+    /// rule the VM uses too).
     pub fn suggest_similar(&self, name: &str) -> Option<String> {
-        let mut best: Option<(String, usize)> = None;
-        for scope in &self.scopes {
-            let guard = lock_scope(scope);
-            for key in guard.names() {
-                let dist = levenshtein(name, key);
-                if dist <= 2 && dist < name.len() {
-                    match &best {
-                        Some((_, d)) if dist < *d => best = Some((key.to_string(), dist)),
-                        None => best = Some((key.to_string(), dist)),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        best.map(|(s, _)| s)
+        let groups: Vec<Vec<String>> = self
+            .scopes
+            .iter()
+            .rev()
+            .map(|scope| lock_scope(scope).names().map(str::to_string).collect())
+            .collect();
+        crate::semantics::errors::suggest_name(
+            name,
+            groups.iter().map(|g| g.iter().map(String::as_str)),
+        )
     }
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut matrix = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for i in 0..=a.len() {
-        matrix[i][0] = i;
-    }
-    for j in 0..=b.len() {
-        matrix[0][j] = j;
-    }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            matrix[i][j] = (matrix[i - 1][j] + 1)
-                .min(matrix[i][j - 1] + 1)
-                .min(matrix[i - 1][j - 1] + cost);
-        }
-    }
-    matrix[a.len()][b.len()]
 }
 
 /// Map an AST operator onto the shared arithmetic/ordering rules.
@@ -1081,11 +1090,59 @@ pub struct Interpreter {
     pub call_stack: Vec<DebugFrame>,
     /// Squad handle collector: when Some, spawn_task pushes handles here
     squad_handles: Option<Vec<Value>>,
+    /// Steps (statements, calls, loop iterations) left before the next
+    /// resource-limit safe point; see [`Interpreter::tick`].
+    poll_countdown: u32,
+    /// Steps in the current safe-point window (`poll_countdown` it started
+    /// with + 1), charged to the fuel budget at the next safe point.
+    fuel_window: u64,
+    /// Fuel, memory and fatal-trip accounting against the run's budget
+    /// (`runtime::limits`).
+    meter: crate::runtime::limits::Meter,
+    /// Size caps for strings and collections this interpreter builds.
+    pub(crate) caps: crate::runtime::limits::Caps,
+    /// Cycle collector shared by every interpreter that can reach the same
+    /// scopes (see `heap.rs`). Imports, `timeout` bodies, spawned tasks
+    /// and background forks share their creator's heap; an HTTP request
+    /// fork gets its own.
+    heap: Arc<heap::ScopeHeap>,
 }
+
+/// Teardown: release this interpreter's own roots, and if it was the last
+/// interpreter on its heap, reclaim the scope cycles nothing else holds
+/// (recursive functions and the global scope they capture, closures
+/// stored where they were defined). Values that escaped — returned to a
+/// host, moved into an importer, held by a running task — are still
+/// referenced from outside the cycles and survive. See `heap.rs`.
+impl Drop for Interpreter {
+    fn drop(&mut self) {
+        self.env.scopes.clear();
+        self.method_tables.clear();
+        self.static_methods.clear();
+        self.struct_defaults.clear();
+        self.squad_handles = None;
+        if self.heap.detach() {
+            self.heap.collect(&[]);
+        }
+    }
+}
+
+/// Steps between two resource-limit safe points when only fuel (or
+/// nothing) is limited. With a memory limit the interpreter polls at every
+/// step.
+const INTERP_SAFEPOINT_INTERVAL: u32 = 1024;
 
 impl Interpreter {
     pub fn new() -> Self {
+        Self::new_in(heap::ScopeHeap::new())
+    }
+
+    /// A fresh interpreter attached to `heap` (its creator's, for children
+    /// that share scopes with it).
+    fn new_in(heap: Arc<heap::ScopeHeap>) -> Self {
+        heap.attach();
         let mut interp = Self {
+            heap,
             env: Environment::new(),
             call_depth: 0,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1104,9 +1161,54 @@ impl Interpreter {
             output_sink: None,
             call_stack: Vec::new(),
             squad_handles: None,
+            poll_countdown: 0,
+            fuel_window: 0,
+            meter: crate::runtime::limits::Meter::current().with_memory_polling(),
+            caps: crate::runtime::limits::Caps::current(),
         };
         interp.register_builtins();
         interp
+    }
+
+    /// Count one step (statement, call or loop iteration) against the
+    /// run's resource budget. The hot path is a decrement and a branch;
+    /// every `INTERP_SAFEPOINT_INTERVAL` steps (every step under a memory
+    /// limit) it settles fuel and polls memory in [`Interpreter::safepoint`].
+    #[inline]
+    fn tick(&mut self) -> Result<(), RuntimeError> {
+        if self.poll_countdown == 0 {
+            return self.safepoint();
+        }
+        self.poll_countdown -= 1;
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn safepoint(&mut self) -> Result<(), RuntimeError> {
+        match self
+            .meter
+            .safepoint(self.fuel_window, INTERP_SAFEPOINT_INTERVAL)
+        {
+            Ok(next) => {
+                self.poll_countdown = next;
+                self.fuel_window = u64::from(next) + 1;
+                Ok(())
+            }
+            Err(message) => {
+                // The countdown stays at 0: every later step fails too.
+                self.fuel_window = 0;
+                Err(RuntimeError::fatal(&message))
+            }
+        }
+    }
+
+    /// The environment a new closure captures. Registers its scopes as
+    /// cycle-collection candidates (a closure stored in a scope it captures
+    /// is a reference cycle) and may run a collection; see `heap.rs`.
+    fn capture_env(&self) -> Environment {
+        self.heap.track(&self.env);
+        self.env.clone()
     }
 
     pub(crate) fn set_defer_host_runtime(&mut self, defer: bool) {
@@ -1136,12 +1238,17 @@ impl Interpreter {
     /// `schedule`/`watch` threads, even from an import or a task). A bare
     /// `Interpreter::new()` would escape all three.
     pub(crate) fn child_context(&self) -> Interpreter {
-        let mut child = Interpreter::new();
+        let mut child = Interpreter::new_in(self.heap.clone());
         child.cancelled = self.cancelled.clone();
         child.ancestor_cancels = self.ancestor_cancels.clone();
         child.defer_host_runtime = self.defer_host_runtime;
         child.output_sink = self.output_sink.clone();
         child.output_budget = self.output_budget.clone();
+        // The same resource budget (`runtime::limits`), even when this
+        // interpreter's budget is not the thread's (a server request fork).
+        child.meter = crate::runtime::limits::Meter::for_budget(self.meter.budget().cloned())
+            .with_memory_polling();
+        child.caps = self.caps;
         child
     }
 
@@ -1178,6 +1285,9 @@ impl Interpreter {
             }
             if let Some(v) = ready(CANCEL_POLL) {
                 return Ok(v);
+            }
+            if !crate::clock::HAS_THREADS {
+                return Err(RuntimeError::new(crate::clock::WAITS_FOREVER));
             }
         }
     }
@@ -1320,7 +1430,7 @@ impl Interpreter {
         // The isolated variant walks values and gives every closure
         // its own scope graph, with cycle handling for the recursive
         // function pattern. See Environment::deep_clone_isolated.
-        interp.env = self.env.deep_clone_isolated();
+        interp.env = self.env.deep_clone_isolated_into(&interp.heap);
         interp.method_tables = self.method_tables.clone();
         interp.static_methods = self.static_methods.clone();
         interp.embedded_fields = self.embedded_fields.clone();
@@ -1339,11 +1449,23 @@ impl Interpreter {
         interp.output_sink = None;
         // DAP can attach across requests; keep the shared state.
         interp.debug_state = self.debug_state.clone();
+        // A fresh resource budget per request, with the template's limits:
+        // one request cannot spend another's fuel, and a long-running
+        // server never runs dry (`runtime::limits`).
+        if let Some(limits) = self.meter.budget().map(|b| b.limits().clone()) {
+            let budget = crate::runtime::limits::Budget::new(limits);
+            interp.caps = budget.limits().caps();
+            interp.meter =
+                crate::runtime::limits::Meter::for_budget(Some(budget)).with_memory_polling();
+            interp.poll_countdown = 0;
+            interp.fuel_window = 0;
+        }
         interp
     }
 
     pub(crate) fn fork_for_background_runtime(&self) -> Self {
-        let mut interp = Interpreter::new();
+        // Shares closure scopes with `self`, so it shares the heap too.
+        let mut interp = Interpreter::new_in(self.heap.clone());
         // CRITICAL: env.deep_clone(), not env.clone(). Environment is
         // Vec<Arc<Mutex<HashMap>>>, so a derived Clone shares the scope
         // storage by Arc. Two background tasks (or a background task +
@@ -1500,6 +1622,7 @@ impl Interpreter {
         if self.is_cancelled() {
             return Err(RuntimeError::new("cancelled"));
         }
+        self.tick()?;
         match stmt {
             Stmt::Let {
                 name,
@@ -1547,7 +1670,7 @@ impl Interpreter {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
-                    closure: self.env.clone(),
+                    closure: self.capture_env(),
                     decorators: decorators.clone(),
                 }));
                 self.env.define(name.clone(), func);
@@ -1675,7 +1798,7 @@ impl Interpreter {
                             name: qualified_name.clone(),
                             params: params.clone(),
                             body: body.clone(),
-                            closure: self.env.clone(),
+                            closure: self.capture_env(),
                             decorators: Vec::new(),
                         }));
 
@@ -1760,7 +1883,7 @@ impl Interpreter {
                         return result;
                     }
                 }
-                Err(RuntimeError::new("non-exhaustive match"))
+                Err(RuntimeError::new(crate::semantics::NON_EXHAUSTIVE_MATCH))
             }
 
             Stmt::For {
@@ -1946,24 +2069,17 @@ impl Interpreter {
                     self.env.push_scope();
                     let mut err_obj = IndexMap::new();
                     err_obj.insert("message".to_string(), Value::String(e.message.clone()));
-                    let error_type = if e.message.contains("type") || e.message.contains("Type") {
-                        "TypeError"
-                    } else if e.message.contains("division by zero") {
-                        "ArithmeticError"
-                    } else if e.message.contains("assertion") {
-                        "AssertionError"
-                    } else if e.message.contains("index") || e.message.contains("out of bounds") {
-                        "IndexError"
-                    } else if e.message.contains("not found") || e.message.contains("undefined") {
-                        "ReferenceError"
-                    } else if e.message.contains("immutable")
-                        || e.message.contains("cannot reassign")
-                    {
-                        "TypeError"
-                    } else {
-                        "RuntimeError"
-                    };
-                    err_obj.insert("type".to_string(), Value::String(error_type.to_string()));
+                    // `type` (legacy) and `code` come from the shared table,
+                    // so both engines hand `catch` the same object.
+                    use crate::semantics::errors;
+                    err_obj.insert(
+                        "type".to_string(),
+                        Value::String(errors::legacy_error_type(&e.message).to_string()),
+                    );
+                    err_obj.insert(
+                        "code".to_string(),
+                        Value::String(errors::classify(&e.message).code.to_string()),
+                    );
                     self.env.define(catch_var.clone(), Value::Object(err_obj));
                     // FIX: was `result.unwrap_or(Signal::None);` — the semicolon
                     // silently discarded errors from the catch body itself.
@@ -2273,6 +2389,8 @@ impl Interpreter {
                     _ => 5,
                 };
                 let body = body.clone();
+                let task = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Tasks)
+                    .map_err(|m| RuntimeError::new(&m))?;
                 let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 // The body gets its own flag (the deadline below) *and* ours
                 // as an ancestor, so cancelling this program stops it too.
@@ -2283,6 +2401,7 @@ impl Interpreter {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let handle = crate::runtime::recursion::spawn_worker(move || {
                     let result = timeout_interp.exec_block(&body);
+                    drop(task);
                     let _ = tx.send(result);
                 })
                 .map_err(|e| {
@@ -2557,7 +2676,9 @@ impl Interpreter {
                         return result;
                     }
                 }
-                Err(patch_err(RuntimeError::new("non-exhaustive match")))
+                Err(patch_err(RuntimeError::new(
+                    crate::semantics::NON_EXHAUSTIVE_MATCH,
+                )))
             }
             stmt => Ok(match self.exec_stmt(stmt).map_err(patch_err)? {
                 Signal::Return(v) => BlockExit::Return(v),
@@ -2602,6 +2723,8 @@ impl Interpreter {
         if self.is_cancelled() {
             return Err(RuntimeError::new("cancelled"));
         }
+        // One step per iteration, so even `while true { }` spends fuel.
+        self.tick()?;
         match self.exec_body(stmts) {
             Err(e) => match e.loop_escape {
                 Some(LoopEscape::Break) => Ok(Signal::Break),
@@ -3464,10 +3587,9 @@ impl Interpreter {
                             )));
                         }
                         _ => {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot call '{}' on {}",
+                            return Err(RuntimeError::new(&crate::semantics::no_method(
                                 field,
-                                obj.type_name()
+                                obj.type_name(),
                             )))
                         }
                     };
@@ -3500,16 +3622,14 @@ impl Interpreter {
                 match result {
                     Value::ResultOk(value) => Ok(*value),
                     Value::ResultErr(err) => Err(RuntimeError::propagate(Value::ResultErr(err))),
-                    _ => Err(RuntimeError::new(
-                        "`?` expects Result value (Ok(...) or Err(...))",
-                    )),
+                    _ => Err(RuntimeError::new(crate::semantics::TRY_REQUIRES_RESULT)),
                 }
             }
 
             Expr::Lambda { params, body } => Ok(Value::Lambda {
                 params: Arc::from(params.as_slice()),
                 body: Arc::from(body.as_slice()),
-                closure: Arc::new(std::sync::Mutex::new(self.env.clone())),
+                closure: Arc::new(std::sync::Mutex::new(self.capture_env())),
             }),
 
             Expr::StructInit { name, fields } => {
@@ -3833,9 +3953,9 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(RuntimeError::new(&format!(
-                    "no field '{}' on object",
-                    field
+                Err(RuntimeError::new(&crate::semantics::no_field(
+                    field,
+                    map.keys().map(String::as_str),
                 )))
             }
             Value::String(s) => match field {
@@ -3894,10 +4014,9 @@ impl Interpreter {
                 "len" => Ok(Value::Int(items.len() as i64)),
                 _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
             },
-            _ => Err(RuntimeError::new(&format!(
-                "cannot access field '{}' on {}",
+            _ => Err(RuntimeError::new(&crate::semantics::field_access(
                 field,
-                obj.type_name()
+                obj.type_name(),
             ))),
         }
     }
@@ -3936,6 +4055,21 @@ impl Interpreter {
         }
     }
 
+    /// `left + right` as string concatenation, within the string size cap
+    /// (`runtime::limits`). Two strings are checked before allocating.
+    fn concat(&self, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
+        if let (Value::String(a), Value::String(b)) = (left, right) {
+            self.caps
+                .check_string(a.len() + b.len())
+                .map_err(|m| RuntimeError::new(&m))?;
+        }
+        let text = format!("{}{}", left, right);
+        self.caps
+            .check_string(text.len())
+            .map_err(|m| RuntimeError::new(&m))?;
+        Ok(Value::String(text))
+    }
+
     fn eval_binop(&self, left: &Value, op: &BinOp, right: &Value) -> Result<Value, RuntimeError> {
         // `==` / `!=` are total: values of different types are unequal,
         // never an error (same rule as the VM's `Value::equals`).
@@ -3954,9 +4088,7 @@ impl Interpreter {
                 Ok(crate::semantics::Outcome::Int(n)) => Ok(Value::Int(n)),
                 Ok(crate::semantics::Outcome::Float(f)) => Ok(Value::Float(f)),
                 Ok(crate::semantics::Outcome::Bool(b)) => Ok(Value::Bool(b)),
-                Ok(crate::semantics::Outcome::Concat) => {
-                    Ok(Value::String(format!("{}{}", left, right)))
-                }
+                Ok(crate::semantics::Outcome::Concat) => self.concat(left, right),
                 Err(message) => Err(RuntimeError::new(&message)),
             };
         }
@@ -4018,7 +4150,7 @@ impl Interpreter {
             }
 
             (Value::String(a), Value::String(b)) => match op {
-                BinOp::Add => Ok(Value::String(format!("{}{}", a, b))),
+                BinOp::Add => self.concat(left, right),
                 BinOp::Eq => Ok(Value::Bool(a == b)),
                 BinOp::NotEq => Ok(Value::Bool(a != b)),
                 BinOp::Lt => Ok(Value::Bool(a < b)),
@@ -4036,12 +4168,12 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("invalid operator for Bool")),
             },
 
-            (Value::String(a), b) => match op {
-                BinOp::Add => Ok(Value::String(format!("{}{}", a, b))),
+            (Value::String(_), _) => match op {
+                BinOp::Add => self.concat(left, right),
                 _ => Err(RuntimeError::new("invalid operator")),
             },
-            (a, Value::String(b)) => match op {
-                BinOp::Add => Ok(Value::String(format!("{}{}", a, b))),
+            (_, Value::String(_)) => match op {
+                BinOp::Add => self.concat(left, right),
                 _ => Err(RuntimeError::new("invalid operator")),
             },
 
@@ -4688,6 +4820,7 @@ impl Interpreter {
         if let Err(msg) = crate::runtime::recursion::check_call_depth(self.call_depth + 1) {
             return Err(RuntimeError::new(&msg));
         }
+        self.tick()?;
         self.call_depth += 1;
         if self.debug_state.is_some() {
             let frame_name = match &func {
@@ -4799,15 +4932,16 @@ impl Interpreter {
 
             Value::BuiltIn(name) => self.call_builtin(&name, args),
 
-            _ => Err(RuntimeError::new(&format!(
-                "cannot call {}",
-                func.type_name()
+            _ => Err(RuntimeError::new(&crate::semantics::not_callable(
+                func.type_name(),
             ))),
         }
     }
 
     /// Spawn a block as a concurrent task, returning a TaskHandle.
     fn spawn_task(&mut self, body: &[SpannedStmt]) -> Result<Value, RuntimeError> {
+        let task = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Tasks)
+            .map_err(|m| RuntimeError::new(&m))?;
         let body = body.to_vec();
         let result_slot: Arc<(std::sync::Mutex<Option<Value>>, std::sync::Condvar)> =
             Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
@@ -4830,6 +4964,8 @@ impl Interpreter {
                 Ok(_) => Value::ResultOk(Box::new(Value::Null)),
                 Err(e) => Value::ResultErr(Box::new(Value::String(e.message))),
             };
+            // Free the task slot before the result is observable.
+            drop(task);
             let (lock, cvar) = &*slot_clone;
             if let Ok(mut guard) = lock.lock() {
                 *guard = Some(val);
@@ -5131,6 +5267,10 @@ pub struct RuntimeError {
     /// like `early_return`, and becomes a plain "outside of loop" error at
     /// a function boundary (`outside_function_boundary`).
     loop_escape: Option<LoopEscape>,
+    /// A fatal resource limit (fuel, memory; see `runtime::limits`): it
+    /// passes through `try`/`safe`/`retry` like the control escapes above,
+    /// and through function boundaries, up to the host.
+    fatal: bool,
 }
 
 /// Which loop control a `RuntimeError::loop_escape` carries.
@@ -5149,12 +5289,24 @@ impl RuntimeError {
             propagated: None,
             early_return: false,
             loop_escape: None,
+            fatal: false,
         }
+    }
+
+    /// A fatal resource-limit error; see the `fatal` field.
+    pub fn fatal(msg: &str) -> Self {
+        let mut err = Self::new(msg);
+        err.fatal = true;
+        err
+    }
+
+    pub fn is_fatal(&self) -> bool {
+        self.fatal
     }
 
     pub fn propagate(value: Value) -> Self {
         let message = match &value {
-            Value::ResultErr(err) => format!("unhandled error: {}", err),
+            Value::ResultErr(err) => crate::semantics::unhandled_error(&err.to_string()),
             _ => format!("unhandled propagated value: {}", value),
         };
         Self {
@@ -5164,6 +5316,7 @@ impl RuntimeError {
             propagated: Some(value),
             early_return: false,
             loop_escape: None,
+            fatal: false,
         }
     }
 
@@ -5189,9 +5342,10 @@ impl RuntimeError {
     }
 
     /// True for control flow that unwinds through errors (`return`, `break`,
-    /// `continue` inside block expressions); `try`/`safe` must not catch it.
+    /// `continue` inside block expressions) and for fatal resource-limit
+    /// errors; `try`/`safe` must not catch it.
     pub fn is_control_escape(&self) -> bool {
-        self.early_return || self.loop_escape.is_some()
+        self.early_return || self.loop_escape.is_some() || self.is_fatal()
     }
 
     /// A loop escape that reaches a function boundary did not come from a
@@ -5213,5 +5367,7 @@ impl fmt::Display for RuntimeError {
     }
 }
 
+#[cfg(test)]
+mod leak_tests;
 #[cfg(test)]
 mod tests;

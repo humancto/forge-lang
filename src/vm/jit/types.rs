@@ -27,13 +27,16 @@ impl FnId {
 /// A value kind a specialization may assume for a register or argument.
 ///
 /// Only kinds whose VM semantics are fully implemented by the verifier and
-/// IR builder appear here. Future tiers (Float, Str, ...) extend this enum.
+/// IR builder appear here. Future tiers (Str, ...) extend this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JitType {
     /// A signed 64-bit integer (inline or `BoxedInt` in the VM).
     Int,
     /// A boolean, represented natively as 0 / 1.
     Bool,
+    /// An IEEE-754 double, represented natively as an `f64` (and as its bit
+    /// pattern where the ABI passes `i64`s).
+    Float,
 }
 
 impl JitType {
@@ -46,7 +49,15 @@ impl JitType {
         if v.as_int(gc).is_some() {
             return Some(JitType::Int);
         }
+        if v.as_float().is_some() {
+            return Some(JitType::Float);
+        }
         None
+    }
+
+    /// Int or Float: an operand of arithmetic and ordering.
+    pub fn is_numeric(self) -> bool {
+        matches!(self, JitType::Int | JitType::Float)
     }
 
     /// Native (i64) encoding of a value already known to be of this kind.
@@ -54,6 +65,7 @@ impl JitType {
         match self {
             JitType::Int => v.as_int(gc),
             JitType::Bool => v.as_bool().map(i64::from),
+            JitType::Float => v.as_float().map(|f| f.to_bits() as i64),
         }
     }
 
@@ -62,6 +74,9 @@ impl JitType {
         match self {
             JitType::Int => Value::int(raw, gc),
             JitType::Bool => Value::bool_val(raw != 0),
+            // `Value::float` canonicalizes NaNs exactly as the VM's own
+            // arithmetic results are boxed.
+            JitType::Float => Value::float(f64::from_bits(raw as u64)),
         }
     }
 }
@@ -71,6 +86,7 @@ impl fmt::Display for JitType {
         match self {
             JitType::Int => write!(f, "Int"),
             JitType::Bool => write!(f, "Bool"),
+            JitType::Float => write!(f, "Float"),
         }
     }
 }

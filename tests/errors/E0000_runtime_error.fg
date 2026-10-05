@@ -1,0 +1,2 @@
+// A malformed JSON document: json.parse reports a parse failure
+let data = json.parse("{not json")

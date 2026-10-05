@@ -10,6 +10,7 @@ mod local_ops; // local-variable access and in-place update opcodes
 pub mod machine;
 pub mod nanbox;
 pub mod profiler;
+mod range_loop; // counting `for v in range(..)` / `repeat n times` loops
 pub mod serialize;
 #[cfg(feature = "host")]
 pub mod serve;
@@ -46,6 +47,8 @@ mod async_tests;
 mod enum_methods_tests;
 #[cfg(all(test, feature = "jit"))]
 mod jit_tests;
+#[cfg(test)]
+mod limits_tests;
 #[cfg(test)]
 mod map_tests;
 #[cfg(test)]

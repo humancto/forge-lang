@@ -10,6 +10,15 @@ use super::machine::{VMError, VM};
 use super::value::*;
 
 impl VM {
+    /// `range(start, end)` must not build more elements than the size cap
+    /// allows (`runtime::limits`); checked before allocating anything.
+    fn check_range_len(&self, start: i64, end: i64) -> Result<(), VMError> {
+        let len = (end as i128 - start as i128).max(0);
+        self.caps
+            .check_collection(usize::try_from(len).unwrap_or(usize::MAX))
+            .map_err(|m| VMError::new(&m))
+    }
+
     /// Call a native builtin inside a GC native scope (see the rooting
     /// invariants in `vm/gc.rs`): the arguments and everything the builtin
     /// allocates are pinned until it returns, so a GC triggered by a Forge
@@ -18,11 +27,58 @@ impl VM {
     /// native call goes through this wrapper.
     pub(super) fn call_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
         crate::builtins_registry::check_arity(name, args.len()).map_err(|e| VMError::new(&e))?;
+        crate::builtins_registry::warn_if_deprecated(name);
+        // Values are `Copy`; keep the leading arguments (pinned below until
+        // `exit_native`) to describe them if the builtin rejects them.
+        let mut leading = [Value::null(); crate::semantics::errors::MAX_ANNOTATED_ARGS];
+        let argc = args.len().min(leading.len());
+        leading[..argc].copy_from_slice(&args[..argc]);
         let scope = self.gc.enter_native();
         self.gc.pin_values(&args);
-        let result = self.dispatch_native(name, args);
+        let mut result = self.dispatch_native(name, args);
+        if let Err(e) = &mut result {
+            // `get_string_arg` does not know which builtin called it; name
+            // it the way the interpreter's builtins do.
+            if e.message == "expected string argument" {
+                e.message = format!("{}() requires a string", name);
+            }
+            let mut types = [""; crate::semantics::errors::MAX_ANNOTATED_ARGS];
+            for (slot, value) in types.iter_mut().zip(&leading[..argc]) {
+                *slot = self.user_type_name(*value);
+            }
+            if let Some(message) =
+                crate::semantics::errors::annotate_builtin_error(name, &e.message, &types[..argc])
+            {
+                e.message = message;
+            }
+        }
         self.gc.exit_native(scope);
         result
+    }
+
+    /// The user-facing type name of `value` in error messages, matching the
+    /// interpreter's (`Option` values are ADT objects here, frozen values
+    /// are described by their contents).
+    fn user_type_name(&self, value: Value) -> &'static str {
+        if let Some(obj) = value.as_obj().and_then(|r| self.gc.get(r)) {
+            match &obj.kind {
+                ObjKind::Frozen(inner) => return self.user_type_name(*inner),
+                ObjKind::Object(map) => {
+                    let is_option = map
+                        .get("__type__")
+                        .and_then(|t| t.as_obj())
+                        .and_then(|r| self.gc.get(r))
+                        .is_some_and(
+                            |o| matches!(&o.kind, ObjKind::String(s) if s.as_str() == "Option"),
+                        );
+                    if is_option {
+                        return "Option";
+                    }
+                }
+                _ => {}
+            }
+        }
+        crate::semantics::errors::user_type_name(value.type_name(&self.gc))
     }
 
     /// Run a stdlib module member through the shared implementation in
@@ -657,7 +713,11 @@ impl VM {
                     VMError::new(&format!("import '{}' compile error: {}", path, e.message))
                 })?;
                 self.execute_module(&chunk).map_err(|e| {
-                    if e.message.starts_with("circular import: ") {
+                    if e.is_unwound_to_handler() || e.is_fatal() {
+                        // Control transfer (a `timeout` around the import
+                        // fired inside it) or a fatal limit: propagate as is.
+                        e
+                    } else if e.message.starts_with("circular import: ") {
                         // Propagate the cycle report unwrapped.
                         VMError::new(&e.message)
                     } else {
@@ -804,12 +864,14 @@ impl VM {
                 }
                 _ => Err(VMError::new("float() requires a number or numeric string")),
             },
+            // Like the interpreter: a second argument must be an Int too
+            // (a non-Int one used to be ignored, so `range(1, 2.5)` gave [0]).
             "range" => match (
                 args.first().and_then(|v| v.as_int(&self.gc)),
-                args.get(1).and_then(|v| v.as_int(&self.gc)),
+                args.get(1).map(|v| v.as_int(&self.gc)),
             ) {
-                (Some(start), Some(end)) => {
-                    // Fallible: an impossible size is an error, not an abort.
+                (Some(start), Some(Some(end))) => {
+                    self.check_range_len(start, end)?;
                     let items: Vec<Value> =
                         crate::semantics::alloc::int_range(start, end, "range()", |n| {
                             Value::int(n, &mut self.gc)
@@ -819,6 +881,7 @@ impl VM {
                     Ok(Value::obj(r))
                 }
                 (Some(end_val), None) => {
+                    self.check_range_len(0, end_val)?;
                     let items: Vec<Value> =
                         crate::semantics::alloc::int_range(0, end_val, "range()", |n| {
                             Value::int(n, &mut self.gc)
@@ -1789,7 +1852,8 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             "shell" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("shell error: {}", e)))?;
@@ -1811,7 +1875,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "sh" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh error: {}", e)))?;
@@ -1822,7 +1887,8 @@ impl VM {
                 ))
             }
             "sh_lines" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_lines error: {}", e)))?;
@@ -1836,7 +1902,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "sh_json" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_json error: {}", e)))?;
@@ -1847,7 +1914,8 @@ impl VM {
                 self.from_interp_checked(&interp_val)
             }
             "sh_ok" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let ok = crate::runtime::shell::succeeds(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_ok error: {}", e)))?;
@@ -1883,7 +1951,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "pipe_to" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let input = self.get_string_arg(&args, 0)?;
                 let cmd = self.get_string_arg(&args, 1)?;
                 let output = crate::runtime::shell::pipe(&cmd, input.as_bytes())
@@ -2586,6 +2655,9 @@ impl VM {
                     ValueKind::Int(n) => usize::try_from(n).unwrap_or(0),
                     _ => return Err(VMError::new("pad_start() second arg must be int")),
                 };
+                self.caps
+                    .check_string(target)
+                    .map_err(|m| VMError::new(&m))?;
                 let pad_char = match args.get(2) {
                     Some(v) => self
                         .get_string(v)
@@ -2616,6 +2688,9 @@ impl VM {
                     ValueKind::Int(n) => usize::try_from(n).unwrap_or(0),
                     _ => return Err(VMError::new("pad_end() second arg must be int")),
                 };
+                self.caps
+                    .check_string(target)
+                    .map_err(|m| VMError::new(&m))?;
                 let pad_char = match args.get(2) {
                     Some(v) => self
                         .get_string(v)
@@ -2648,6 +2723,9 @@ impl VM {
                     }
                     _ => return Err(VMError::new("repeat_str() second arg must be int")),
                 };
+                self.caps
+                    .check_string(s.len().saturating_mul(n))
+                    .map_err(|m| VMError::new(&m))?;
                 let out = crate::semantics::alloc::repeat_str(&s, n, "repeat_str()")
                     .map_err(|e| VMError::new(&e))?;
                 Ok(self.alloc_string(&out))
@@ -3097,15 +3175,8 @@ impl VM {
                     return Err(VMError::new("receive() requires (channel)"));
                 }
                 let ch_arc = self.extract_channel(&args[0])?;
-                let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
-                match &*guard {
-                    Some(rx) => match crate::clock::recv(rx) {
-                        Ok(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
-                        Err(crate::clock::RecvFailure::Closed) => Ok(Value::null()),
-                        Err(crate::clock::RecvFailure::WouldBlockForever) => {
-                            Err(VMError::new(crate::clock::RECV_BLOCKS_FOREVER))
-                        }
-                    },
+                match self.receive_cancellable(&ch_arc)? {
+                    Some(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
                     None => Ok(Value::null()),
                 }
             }
@@ -3220,6 +3291,7 @@ impl VM {
                         }
                     }
                     offset = (offset + 1) % len;
+                    self.wait_interrupted()?;
                     crate::clock::sleep(std::time::Duration::from_millis(1));
                 }
             }
@@ -3309,12 +3381,7 @@ impl VM {
                 for item in &items {
                     let maybe_slot = self.extract_task_handle(item);
                     if let Some(slot) = maybe_slot {
-                        let (lock, cvar) = &*slot;
-                        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        while guard.is_none() {
-                            guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
-                        }
-                        let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
+                        let shared = self.wait_task_result(&slot)?;
                         let val = shared_to_value(&mut self.gc, &shared);
                         // Fail-fast: propagate ResultErr immediately
                         match val.classify(&self.gc) {

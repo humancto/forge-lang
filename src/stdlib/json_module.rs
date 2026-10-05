@@ -141,6 +141,15 @@ fn escape_json_string(s: &str) -> String {
 /// Map contains a non-string key — JSON objects require string keys and
 /// we refuse to silently coerce.
 fn validate_json_value(v: &Value) -> Result<(), String> {
+    // Checked before serializing, so the (recursive) writers below never
+    // see a value nested deeper than this.
+    let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+        crate::runtime::recursion::take_value_too_deep();
+        return Err(format!(
+            "json: {}",
+            crate::runtime::recursion::value_too_deep_message()
+        ));
+    };
     match v {
         Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
             for item in items {
