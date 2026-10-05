@@ -425,40 +425,134 @@ impl fmt::Display for Value {
     }
 }
 
-/// Variable environment (scope chain) — uses Arc for O(1) cloning
+/// One variable binding inside a [`Scope`].
+#[derive(Debug, Clone)]
+struct Binding {
+    name: String,
+    value: Value,
+    mutable: bool,
+}
+
+/// Scopes with more bindings than this get a hash index; smaller ones
+/// (function frames, loop bodies, blocks) are scanned linearly, which is
+/// faster than hashing for a handful of short names.
+const SCOPE_INDEX_THRESHOLD: usize = 12;
+
+/// The bindings of one lexical scope, in definition order.
+///
+/// Value and mutability live in the same entry so a lookup touches one
+/// lock and one table. Bindings are never removed from a scope (a scope is
+/// dropped as a whole), so positions stay valid for the lazily built index.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    bindings: Vec<Binding>,
+    index: Option<HashMap<String, usize>>,
+}
+
+impl Scope {
+    fn position(&self, name: &str) -> Option<usize> {
+        match &self.index {
+            Some(index) => index.get(name).copied(),
+            None => self.bindings.iter().position(|b| b.name == name),
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&Binding> {
+        self.position(name).map(|i| &self.bindings[i])
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        self.position(name).map(move |i| &mut self.bindings[i])
+    }
+
+    /// Define or redefine `name` in this scope.
+    fn insert(&mut self, name: String, value: Value, mutable: bool) {
+        if let Some(binding) = self.get_mut(&name) {
+            binding.value = value;
+            binding.mutable = mutable;
+            return;
+        }
+        let pos = self.bindings.len();
+        if let Some(index) = &mut self.index {
+            index.insert(name.clone(), pos);
+        }
+        self.bindings.push(Binding {
+            name,
+            value,
+            mutable,
+        });
+        if self.index.is_none() && self.bindings.len() > SCOPE_INDEX_THRESHOLD {
+            self.index = Some(
+                self.bindings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (b.name.clone(), i))
+                    .collect(),
+            );
+        }
+    }
+
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.bindings.iter().map(|b| b.name.as_str())
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Value> {
+        self.bindings.iter().map(|b| &b.value)
+    }
+}
+
+/// Shared, lockable scope. Closures capture scopes by `Arc`, so a write
+/// through one handle is visible through every other handle to the same
+/// scope (that is how captured variables and recursion work).
+type ScopeCell = Arc<std::sync::Mutex<Scope>>;
+
+/// Lock a scope, recovering from poisoning: a panic on another thread that
+/// held the lock must not take this interpreter down with it.
+fn lock_scope(cell: &ScopeCell) -> std::sync::MutexGuard<'_, Scope> {
+    cell.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Variable environment: a chain of scopes, innermost last.
+///
+/// `Clone` is shallow (it shares the scope `Arc`s) and is what closures
+/// use to capture their defining environment. Use [`deep_clone`] or
+/// [`deep_clone_isolated`] to get independent storage.
+///
+/// # Reading without copying
+///
+/// [`get`](Self::get) returns an owned `Value`, which deep-copies strings,
+/// arrays and objects. Hot paths that only need to look at a value use
+/// [`with_value`](Self::with_value), and in-place updates use
+/// [`with_value_mut`](Self::with_value_mut). The callbacks run while the
+/// scope lock is held, so they must not touch the environment again
+/// (the lock is not re-entrant).
+///
+/// [`deep_clone`]: Self::deep_clone
+/// [`deep_clone_isolated`]: Self::deep_clone_isolated
 #[derive(Debug, Clone)]
 pub struct Environment {
-    scopes: Vec<Arc<std::sync::Mutex<HashMap<String, Value>>>>,
-    mutability: Vec<Arc<std::sync::Mutex<HashMap<String, bool>>>>,
+    scopes: Vec<ScopeCell>,
 }
 
 /// Map from old scope `Arc` pointer to its newly allocated counterpart.
 /// Used by [`Environment::deep_clone_isolated`] to memoize Arc identity
 /// during the recursive value-walk so cycles (recursive functions whose
 /// closure captures the env that holds them) terminate.
-type ScopeMap = HashMap<
-    *const std::sync::Mutex<HashMap<String, Value>>,
-    Arc<std::sync::Mutex<HashMap<String, Value>>>,
->;
+type ScopeMap = HashMap<*const std::sync::Mutex<Scope>, ScopeCell>;
 
 impl Environment {
     pub fn new() -> Self {
         Self {
-            scopes: vec![Arc::new(std::sync::Mutex::new(HashMap::new()))],
-            mutability: vec![Arc::new(std::sync::Mutex::new(HashMap::new()))],
+            scopes: vec![ScopeCell::default()],
         }
     }
 
     pub fn push_scope(&mut self) {
-        self.scopes
-            .push(Arc::new(std::sync::Mutex::new(HashMap::new())));
-        self.mutability
-            .push(Arc::new(std::sync::Mutex::new(HashMap::new())));
+        self.scopes.push(ScopeCell::default());
     }
 
     pub fn pop_scope(&mut self) {
         self.scopes.pop();
-        self.mutability.pop();
     }
 
     pub fn define(&mut self, name: String, value: Value) {
@@ -466,63 +560,77 @@ impl Environment {
     }
 
     pub fn define_with_mutability(&mut self, name: String, value: Value, mutable: bool) {
-        // Use poison-recovery: if another thread panicked while holding the lock,
-        // we still get a usable guard rather than propagating the panic.
         if let Some(scope) = self.scopes.last() {
-            scope
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(name.clone(), value);
-        }
-        if let Some(muts) = self.mutability.last() {
-            muts.lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(name, mutable);
+            lock_scope(scope).insert(name, value, mutable);
         }
     }
 
+    /// Owned copy of the innermost binding of `name`.
     pub fn get(&self, name: &str) -> Option<Value> {
+        self.with_value(name, Value::clone)
+    }
+
+    /// True when `name` is bound in any enclosing scope.
+    pub fn contains(&self, name: &str) -> bool {
+        self.with_value(name, |_| ()).is_some()
+    }
+
+    /// Run `f` on a reference to the innermost binding of `name` without
+    /// copying it. `f` must not access this environment (see type docs).
+    pub fn with_value<R>(&self, name: &str, f: impl FnOnce(&Value) -> R) -> Option<R> {
         for scope in self.scopes.iter().rev() {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(val) = guard.get(name) {
-                return Some(val.clone());
+            let guard = lock_scope(scope);
+            if let Some(binding) = guard.get(name) {
+                return Some(f(&binding.value));
             }
         }
         None
     }
 
-    fn is_mutable(&self, name: &str) -> Option<bool> {
-        for muts in self.mutability.iter().rev() {
-            let guard = muts.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(m) = guard.get(name) {
-                return Some(*m);
-            }
-        }
-        None
-    }
-
-    pub fn set(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
-        if let Some(false) = self.is_mutable(name) {
-            return Err(RuntimeError::new(&crate::semantics::immutable_reassign(
-                name,
-            )));
-        }
+    /// Run `f` on a mutable reference to the innermost binding of `name`,
+    /// with the same checks as [`set`](Self::set): the variable must exist
+    /// and be mutable. `f` must not access this environment.
+    pub fn with_value_mut<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut Value) -> R,
+    ) -> Result<R, RuntimeError> {
         for scope in self.scopes.iter().rev() {
-            let mut guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            if guard.contains_key(name) {
-                guard.insert(name.to_string(), value);
-                return Ok(());
+            let mut guard = lock_scope(scope);
+            if let Some(binding) = guard.get_mut(name) {
+                if !binding.mutable {
+                    return Err(Self::immutable_error(name));
+                }
+                return Ok(f(&mut binding.value));
             }
         }
         Err(RuntimeError::new(&format!("undefined variable: {}", name)))
+    }
+
+    pub(crate) fn is_mutable(&self, name: &str) -> Option<bool> {
+        for scope in self.scopes.iter().rev() {
+            let guard = lock_scope(scope);
+            if let Some(binding) = guard.get(name) {
+                return Some(binding.mutable);
+            }
+        }
+        None
+    }
+
+    fn immutable_error(name: &str) -> RuntimeError {
+        RuntimeError::new(&crate::semantics::immutable_reassign(name))
+    }
+
+    pub fn set(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
+        self.with_value_mut(name, |slot| *slot = value)
     }
 
     /// Collect all defined variable names across all scopes (for REPL tab completion).
     pub fn all_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for scope in &self.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            names.extend(guard.keys().cloned());
+            let guard = lock_scope(scope);
+            names.extend(guard.names().map(str::to_string));
         }
         names.sort();
         names.dedup();
@@ -531,14 +639,14 @@ impl Environment {
 
     /// Deep clone for spawn — breaks sharing so thread gets independent copy.
     ///
-    /// "Deep" only at the scope-storage layer: scope `Arc<Mutex<HashMap>>`s
+    /// "Deep" only at the scope-storage layer: scope `Arc<Mutex<Scope>>`s
     /// are duplicated, but the `Value`s inside are cloned by `Value::clone`,
-    /// which is shallow on `Value::Function::closure: Environment` and
-    /// `Value::Lambda::closure: Arc<Mutex<Environment>>`. That is the
-    /// intended semantics for `spawn_task` and `fork_for_background_runtime`:
-    /// their callers want spawned/scheduled tasks to share captured closure
-    /// state with the parent (so a counter captured by a Lambda accumulates
-    /// across spawns).
+    /// which is shallow on `Value::Function`'s closure (an `Environment`
+    /// inside the shared function `Arc`) and `Value::Lambda::closure:
+    /// Arc<Mutex<Environment>>`. That is the intended semantics for
+    /// `spawn_task` and `fork_for_background_runtime`: their callers want
+    /// spawned/scheduled tasks to share captured closure state with the
+    /// parent (so a counter captured by a Lambda accumulates across spawns).
     ///
     /// The HTTP server uses [`deep_clone_isolated`](Self::deep_clone_isolated)
     /// instead — it requires per-request closure isolation as well.
@@ -547,20 +655,7 @@ impl Environment {
             scopes: self
                 .scopes
                 .iter()
-                .map(|s| {
-                    Arc::new(std::sync::Mutex::new(
-                        s.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                    ))
-                })
-                .collect(),
-            mutability: self
-                .mutability
-                .iter()
-                .map(|m| {
-                    Arc::new(std::sync::Mutex::new(
-                        m.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                    ))
-                })
+                .map(|s| Arc::new(std::sync::Mutex::new(lock_scope(s).clone())))
                 .collect(),
         }
     }
@@ -568,26 +663,25 @@ impl Environment {
     /// Deep clone with **closure isolation** — used by `fork_for_serving`
     /// to give each HTTP request a fully independent interpreter graph.
     ///
-    /// Walks every reachable `Value` and rewrites
-    /// `Value::Function::closure` and `Value::Lambda::closure` so the
-    /// returned `Environment` shares **no** scope `Arc<Mutex<...>>` with
-    /// the original. After this call, mutations made by code running
-    /// against the cloned env (including writes through captured
-    /// closures and the Lambda writeback path at
-    /// `call_function_inner` line ~4317) are invisible to the original
-    /// or any other isolated clone.
+    /// Walks every reachable `Value` and rewrites the closures of
+    /// `Value::Function` and `Value::Lambda` so the returned `Environment`
+    /// shares **no** scope `Arc<Mutex<...>>` with the original. After this
+    /// call, mutations made by code running against the cloned env
+    /// (including writes through captured closures and the Lambda
+    /// writeback path in `call_function_inner`) are invisible to the
+    /// original or any other isolated clone.
     ///
     /// # Cycle handling
     ///
-    /// Forge's `Stmt::FnDef` (lines 1130–1153) installs a function whose
-    /// closure scope vec contains the same `Arc` as the env that holds
-    /// the function — a cycle. We tie the knot via Arc-pointer-keyed
-    /// memoization (`ScopeMap`): the first time we see a scope `Arc`,
-    /// we install an empty placeholder in the map and recurse; any
-    /// re-entry resolves to the placeholder and returns immediately.
-    /// After the recursion, we fill the placeholder with the populated
-    /// `HashMap`. Topological identity is preserved: every reference
-    /// to the original scope resolves to a single new `Arc`.
+    /// Forge's `Stmt::FnDef` installs a function whose closure scope vec
+    /// contains the same `Arc` as the env that holds the function — a
+    /// cycle. We tie the knot via Arc-pointer-keyed memoization
+    /// (`ScopeMap`): the first time we see a scope `Arc`, we install an
+    /// empty placeholder in the map and recurse; any re-entry resolves to
+    /// the placeholder and returns immediately. After the recursion, we
+    /// fill the placeholder with the populated scope. Topological identity
+    /// is preserved: every reference to the original scope resolves to a
+    /// single new `Arc`.
     ///
     /// # Performance
     ///
@@ -602,28 +696,16 @@ impl Environment {
     }
 
     fn deep_clone_env(env: &Environment, scope_map: &mut ScopeMap) -> Self {
-        let scopes = env
-            .scopes
-            .iter()
-            .map(|s| Self::dup_scope(s, scope_map))
-            .collect();
-        // mutability table is just String -> bool; no Values to walk.
-        let mutability = env
-            .mutability
-            .iter()
-            .map(|m| {
-                Arc::new(std::sync::Mutex::new(
-                    m.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                ))
-            })
-            .collect();
-        Self { scopes, mutability }
+        Self {
+            scopes: env
+                .scopes
+                .iter()
+                .map(|s| Self::dup_scope(s, scope_map))
+                .collect(),
+        }
     }
 
-    fn dup_scope(
-        s: &Arc<std::sync::Mutex<HashMap<String, Value>>>,
-        scope_map: &mut ScopeMap,
-    ) -> Arc<std::sync::Mutex<HashMap<String, Value>>> {
+    fn dup_scope(s: &ScopeCell, scope_map: &mut ScopeMap) -> ScopeCell {
         let key = Arc::as_ptr(s);
         if let Some(existing) = scope_map.get(&key) {
             // Cycle: this scope is already being cloned. Return the
@@ -634,15 +716,15 @@ impl Environment {
         }
         // Tie the knot: install the placeholder before we recurse so
         // any self-reference resolves to it.
-        let new_arc = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let new_arc = ScopeCell::default();
         scope_map.insert(key, new_arc.clone());
 
-        let original = s.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let mut new_map = HashMap::with_capacity(original.len());
-        for (k, v) in original {
-            new_map.insert(k, Self::dup_value(v, scope_map));
+        let mut copy = lock_scope(s).clone();
+        for binding in &mut copy.bindings {
+            let value = std::mem::replace(&mut binding.value, Value::Null);
+            binding.value = Self::dup_value(value, scope_map);
         }
-        *new_arc.lock().unwrap_or_else(|p| p.into_inner()) = new_map;
+        *lock_scope(&new_arc) = copy;
         new_arc
     }
 
@@ -723,13 +805,13 @@ impl Environment {
     pub fn suggest_similar(&self, name: &str) -> Option<String> {
         let mut best: Option<(String, usize)> = None;
         for scope in &self.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            for key in guard.keys() {
+            let guard = lock_scope(scope);
+            for key in guard.names() {
                 let dist = levenshtein(name, key);
                 if dist <= 2 && dist < name.len() {
                     match &best {
-                        Some((_, d)) if dist < *d => best = Some((key.clone(), dist)),
-                        None => best = Some((key.clone(), dist)),
+                        Some((_, d)) if dist < *d => best = Some((key.to_string(), dist)),
+                        None => best = Some((key.to_string(), dist)),
                         _ => {}
                     }
                 }
@@ -958,10 +1040,7 @@ impl Interpreter {
             }
         }
         for scope in &env.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            for v in guard.values() {
-                walk(v);
-            }
+            lock_scope(scope).values().for_each(walk);
         }
     }
 
