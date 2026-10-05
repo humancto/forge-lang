@@ -33,6 +33,8 @@ struct WsConnection {
     write: Arc<Mutex<WsSink>>,
     read: Arc<Mutex<WsStream>>,
     url: String,
+    /// The run's socket slot (`runtime::limits`), released on `ws.close`.
+    socket: crate::runtime::limits::Slot,
 }
 
 fn ws_pool() -> &'static Mutex<HashMap<String, WsConnection>> {
@@ -91,6 +93,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 
 fn ws_connect(url: &str) -> Result<Value, String> {
     let url = url.to_string();
+    let socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
 
     // Generate ID before entering async block (std::sync::Mutex isn't Send)
     let id = {
@@ -116,6 +119,7 @@ fn ws_connect(url: &str) -> Result<Value, String> {
             write: Arc::new(Mutex::new(write)),
             read: Arc::new(Mutex::new(read)),
             url: url.clone(),
+            socket,
         };
 
         ws_pool().lock().await.insert(id.clone(), conn);

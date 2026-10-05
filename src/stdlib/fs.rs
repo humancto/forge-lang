@@ -137,6 +137,8 @@ pub fn create_module() -> Value {
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
+    // Every fs call may hold a file open while it runs (`runtime::limits`).
+    let _file = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Files)?;
     match name {
         "fs.read" => match args.first() {
             Some(Value::String(path)) => {
@@ -366,6 +368,7 @@ pub fn call_vm(
     args: &[crate::vm::value::Value],
     gc: &crate::vm::gc::Gc,
 ) -> Result<FsResult, String> {
+    let _file = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Files)?;
     let get_str = |v: &crate::vm::value::Value| -> Option<String> {
         if let Some(r) = v.as_obj() {
             if let Some(obj) = gc.get(r) {

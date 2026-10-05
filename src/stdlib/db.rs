@@ -30,6 +30,8 @@ pub fn create_module() -> Value {
 
 thread_local! {
     static DB_CONN: std::cell::RefCell<Option<Arc<Mutex<Connection>>>> = const { std::cell::RefCell::new(None) };
+    /// Open-file slot (`runtime::limits`) of the open connection.
+    static DB_SLOT: std::cell::RefCell<Option<crate::runtime::limits::Slot>> = const { std::cell::RefCell::new(None) };
 }
 
 fn get_conn() -> Result<Arc<Mutex<Connection>>, String> {
@@ -108,6 +110,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "db.open" => match args.first() {
             Some(Value::String(path)) => {
+                // Reopening replaces the connection: give its slot back first.
+                DB_SLOT.with(|cell| *cell.borrow_mut() = None);
+                let file =
+                    crate::runtime::limits::acquire(crate::runtime::limits::Resource::Files)?;
                 let conn = if path == ":memory:" {
                     Connection::open_in_memory()
                 } else {
@@ -120,6 +126,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         DB_CONN.with(|cell| {
                             *cell.borrow_mut() = Some(arc);
                         });
+                        DB_SLOT.with(|cell| *cell.borrow_mut() = Some(file));
                         Ok(Value::Bool(true))
                     }
                     Err(e) => Err(format!("db.open error: {}", e)),
@@ -168,6 +175,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             DB_CONN.with(|cell| {
                 *cell.borrow_mut() = None;
             });
+            DB_SLOT.with(|cell| *cell.borrow_mut() = None);
             Ok(Value::Null)
         }
 

@@ -335,6 +335,9 @@ pub fn fetch_blocking(
     max_redirects: Option<usize>,
     max_bytes: Option<u64>,
 ) -> Result<Value, String> {
+    // One socket of the run's budget (`runtime::limits`) while the request
+    // is in flight.
+    let _socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
     // Use the existing tokio runtime handle
     let handle = tokio::runtime::Handle::try_current();
 

@@ -186,9 +186,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 
                 let handle = tokio::runtime::Handle::try_current()
                     .map_err(|_| "pg.connect requires async runtime".to_string())?;
+                let socket =
+                    crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
 
                 let conn_str = conn_str.clone();
-                tokio::task::block_in_place(|| {
+                let connected = tokio::task::block_in_place(|| {
                     handle.block_on(async {
                         match tls_mode {
                             PgTlsMode::NoTls => {
@@ -231,7 +233,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         }
                         Ok::<Value, String>(Value::Bool(true))
                     })
-                })
+                })?;
+                PG_SLOT.with(|cell| *cell.borrow_mut() = Some(socket));
+                Ok(connected)
             }
             _ => Err("pg.connect() requires a connection string".to_string()),
         },
@@ -338,6 +342,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             PG_CLIENT.with(|cell| {
                 *cell.borrow_mut() = None;
             });
+            PG_SLOT.with(|cell| *cell.borrow_mut() = None);
             Ok(Value::Null)
         }
 
@@ -351,6 +356,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 
 thread_local! {
     static PG_CLIENT: std::cell::RefCell<Option<Arc<tokio_postgres::Client>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Socket slot (`runtime::limits`) of the open connection.
+    static PG_SLOT: std::cell::RefCell<Option<crate::runtime::limits::Slot>> =
         const { std::cell::RefCell::new(None) };
 }
 
