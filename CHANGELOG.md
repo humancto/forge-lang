@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Documentation refreshed for v0.8.x and `llms.txt` added** — README, CLAUDE.md, ROADMAP.md (new Phase 0 hardening section), SECURITY.md (0.8.x support, `--allow-run`, SSRF guard, `FORGE_FS_BASE`) and the book's CLI sections now match current behavior: VM is the default engine, engine flags go before the subcommand, native builds are standalone when `libforge_lang.a` is available, and performance numbers are re-measured. New `llms.txt` is a compact, verified guide to canonical Forge for AI models.
 - **Public library surface expanded** — `forge_lang::interpreter`, `forge_lang::lexer`, `forge_lang::parser`, and `forge_lang::runtime` are now `pub` (previously private modules behind the C ABI entry point). Embedders can now drive the language end-to-end from Rust. Required by the new `tests/server_concurrency.rs` integration test; also matches the AOT-binary embedding story.
 - **New direct dependency: `parking_lot = "0.12"`** — used by the WS handler for per-connection state (no poisoning, no Send-across-await hazard with the way the lock is held). Already a transitive dep via `tokio-postgres`, now promoted to direct.
 
