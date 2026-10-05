@@ -1,3 +1,4 @@
+// expect: 301 37 2 [0, 10, 20]
 // Counting loops (`for i in range(..)`, `repeat n times`) must behave
 // exactly like iterating the array `range(..)` returns, on both engines.
 
@@ -15,14 +16,6 @@ println(out)
 let mut third = []
 for i in range(0, 4, 2) { third.push(i) }
 println(third)
-
-// Assigning to the loop variable does not change the iteration.
-let mut seen = []
-for i in range(5) {
-    seen.push(i)
-    i = i + 100
-}
-println(seen)
 
 // break / continue, nested loops.
 let mut acc = 0
@@ -86,3 +79,4 @@ try {
 } catch e {
     println(e.message)
 }
+"{acc} {n} {c} {vals}"

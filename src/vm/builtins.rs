@@ -803,11 +803,13 @@ impl VM {
                 }
                 _ => Err(VMError::new("float() requires a number or numeric string")),
             },
+            // Like the interpreter: a second argument must be an Int too
+            // (a non-Int one used to be ignored, so `range(1, 2.5)` gave [0]).
             "range" => match (
                 args.first().and_then(|v| v.as_int(&self.gc)),
-                args.get(1).and_then(|v| v.as_int(&self.gc)),
+                args.get(1).map(|v| v.as_int(&self.gc)),
             ) {
-                (Some(start), Some(end)) => {
+                (Some(start), Some(Some(end))) => {
                     let items: Vec<Value> =
                         (start..end).map(|n| Value::int(n, &mut self.gc)).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
