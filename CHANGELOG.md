@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Deterministic resource limits for untrusted code** (`src/runtime/limits.rs`) — `--max-fuel <n>` / `Sandbox::max_fuel` is a step budget (VM: bytecode instructions; interpreter: statements, calls and loop iterations) that runs out at exactly the same step on every run; `--max-memory <bytes|K|M|G>` / `Sandbox::max_memory` caps memory (VM: GC-heap accounting with a collection before failing; interpreter: the new `forge_lang::CountingAllocator`, scoped per run). Both fail with a fatal, uncatchable error (`fuel exhausted` / `memory limit exceeded`; `SandboxError::{FuelExhausted, MemoryLimit}`) and the host keeps running. `forge_lang::Limits` adds caps on concurrently open files, sockets, subprocesses and tasks, on the size of one string or collection (checked before allocating, so `repeat_str("x", 1e12)` or `range(1e12)` fail fast), and on imports (`SandboxError::ResourceLimit`). Budgets are per run and inherited by forked threads. Fuel limits keep the VM out of JIT code. Overhead with no limits set is within noise (see the PR for `tools/bench_vm.sh` / `tools/bench_interp.sh` numbers).
+- **`forge mcp` resource limits** — every `run_forge` call runs under 200M steps of fuel, 256 MiB of memory and handle/size/import caps by default (`--max-fuel`, `--max-memory` to change; an agent's `max_fuel` argument can only lower the fuel); new error kinds `fuel_exhausted`, `memory_limit`, `resource_limit`.
+
+### Fixed
+
+- `pad_start`/`pad_end` with a negative width no longer try to allocate an astronomically large string (the width is treated as 0).
+
 ## [0.9.0] - 2026-10-05
 
 Highlights: the default VM is now trustworthy (a guarded, verified JIT tier; GC rooting; full VM/interpreter parity on the test suite), much faster (VM and interpreter performance passes), and Forge gains a capability-based sandbox (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`) plus `forge mcp`, an MCP server that lets AI agents run sandboxed Forge code.

@@ -624,7 +624,7 @@ Native builds are standalone when `libforge_lang.a` is available (set `FORGE_LIB
 
 | Tool              | What it does                                                                                                    |
 | ----------------- | --------------------------------------------------------------------------------------------------------------- |
-| `run_forge`       | Runs `{code, timeout_secs?}` in the sandbox; returns what the script printed, or `isError` with a typed error (`syntax`, `permission_denied`, `runtime`, `timeout`, `output_limit`) and the output so far |
+| `run_forge`       | Runs `{code, timeout_secs?, max_fuel?}` in the sandbox; returns what the script printed, or `isError` with a typed error (`syntax`, `permission_denied`, `runtime`, `timeout`, `output_limit`, `fuel_exhausted`, `memory_limit`, `resource_limit`) and the output so far |
 | `check_forge`     | Parses and type-checks `{code}` without running it; returns diagnostics with line numbers                      |
 | `forge_reference` | The compact language guide ([`llms.txt`](llms.txt)) so the agent can learn Forge                                |
 
@@ -634,6 +634,7 @@ Scripts are **denied everything by default** — files, network, environment, da
 forge mcp                                         # pure computation only
 forge mcp --allow-net=api.example.com             # HTTP to one host
 forge mcp --allow-read=./data --allow-write=./out --max-time 10
+forge mcp --max-fuel 50000000 --max-memory 128MB  # tighter per-call resource limits
 ```
 
 Claude Desktop (`claude_desktop_config.json`) or a project `.mcp.json` for Claude Code:
@@ -649,6 +650,7 @@ Claude Desktop (`claude_desktop_config.json`) or a project `.mcp.json` for Claud
 or `claude mcp add forge -- forge mcp --allow-net=api.example.com`.
 
 - `--max-time` (default 30s) is the per-call limit; an agent's `timeout_secs` can only lower it. Output returned to the agent is capped at 64 KiB (a script printing over 1 MiB is stopped).
+- Each call also runs under deterministic resource limits: 200M steps of fuel (`--max-fuel`; an agent's `max_fuel` can only lower it), 256 MiB of memory (`--max-memory`), and caps on open files, sockets, subprocesses, tasks, value sizes and imports. A runaway loop fails with `fuel exhausted` at the same step every time; the server keeps serving. Details: [SECURITY.md — Resource limits](SECURITY.md#resource-limits).
 - Each call runs on its own thread: a stuck script times out while the server keeps answering, and `notifications/cancelled` stops it. `run` (shell) is never granted unless you pass `--allow-run`.
 - Nothing a script prints or reads can reach the protocol stream (stdin/stdout are moved off fds 0/1 on Unix).
 - Protocol: `2026-07-28` (stateless, `server/discover`) and the `initialize` handshake for `2025-11-25` back to `2024-11-05`. Rust hosts can embed the same server: `forge_lang::mcp::serve(reader, writer, config)`.
@@ -806,6 +808,7 @@ Forge has a Deno-style capability model shared by both engines. Defaults are unc
 ```bash
 forge run --sandbox --allow-read=./data --allow-net=api.example.com agent.fg
 forge run --max-time 10 job.fg     # wall-clock limit (exit 124)
+forge run --max-fuel 50000000 --max-memory 256MB job.fg   # deterministic step budget + memory cap
 ```
 
 Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`. Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
