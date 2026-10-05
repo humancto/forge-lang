@@ -375,6 +375,30 @@ pub fn check_call_arity(
     Err(format!("{} expects {}, got {}", name, expected, got))
 }
 
+/// Arity rule for `receiver.method(args)` dispatching to a user-defined
+/// instance method (`impl` / `give` blocks), whose first parameter receives
+/// `receiver`. `params`/`required` describe the declared parameters
+/// *including* the receiver; `got` counts only the explicit arguments, and
+/// so does the message: `fn area(self)` called as `c.area(5)` reports
+/// "method area expects 0 arguments, got 1".
+pub fn check_method_arity(
+    method: &str,
+    params: usize,
+    required: usize,
+    got: usize,
+) -> Result<(), String> {
+    check_call_arity(
+        method,
+        params.saturating_sub(1),
+        required.saturating_sub(1),
+        got,
+    )
+    .map_err(|e| match e.strip_prefix("fn ") {
+        Some(rest) => format!("method {}", rest),
+        None => e,
+    })
+}
+
 /// Implicit-return rule for the *last* statement of a function, lambda or
 /// `spawn` body: an expression statement yields its value (handled by each
 /// engine directly), and so do these block statements — the value of the
@@ -599,6 +623,21 @@ mod tests {
         assert!(!is_truthy(Shape::ResultErr));
         assert!(!is_truthy(Shape::OptionNone));
         assert!(is_truthy(Shape::Other));
+    }
+
+    #[test]
+    fn method_arity_excludes_the_receiver() {
+        assert_eq!(check_method_arity("area", 1, 1, 0), Ok(()));
+        assert_eq!(
+            check_method_arity("area", 1, 1, 1).unwrap_err(),
+            "method area expects 0 arguments, got 1"
+        );
+        assert_eq!(
+            check_method_arity("scale", 2, 2, 0).unwrap_err(),
+            "method scale expects 1 argument, got 0"
+        );
+        assert_eq!(check_method_arity("opt", 3, 2, 1), Ok(()));
+        assert_eq!(check_method_arity("opt", 3, 2, 2), Ok(()));
     }
 
     #[test]

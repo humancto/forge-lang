@@ -906,6 +906,31 @@ fn check_direct_call_arity(func: &Value, argc: usize) -> Result<(), RuntimeError
         .map_err(|e| RuntimeError::new(&e))
 }
 
+/// Arity rule for `receiver.method(args)` reaching a user-defined function
+/// (an object field, a static method, or an instance method whose first
+/// parameter receives `receiver` when `receiver_param`). `argc` counts the
+/// explicit arguments; errors name the method as written at the call site.
+/// The VM applies the same rule (`check_user_method_arity`).
+fn check_method_call_arity(
+    func: &Value,
+    method: &str,
+    argc: usize,
+    receiver_param: bool,
+) -> Result<(), RuntimeError> {
+    let params: &[Param] = match func {
+        Value::Function(f) => &f.params,
+        Value::Lambda { params, .. } => params,
+        _ => return Ok(()),
+    };
+    let required = crate::semantics::required_params(params.iter().map(|p| p.default.is_some()));
+    if receiver_param {
+        crate::semantics::check_method_arity(method, params.len(), required, argc)
+    } else {
+        crate::semantics::check_call_arity(method, params.len(), required, argc)
+    }
+    .map_err(|e| RuntimeError::new(&e))
+}
+
 /// How a block expression (or a body's value-producing tail) finished.
 enum BlockExit {
     Value(Value),
@@ -2721,7 +2746,14 @@ impl Interpreter {
                             if let Some(func) = func_opt {
                                 let eval_args: Result<Vec<Value>, _> =
                                     args.iter().map(|a| self.eval_expr(a)).collect();
-                                return self.call_function(func, eval_args?);
+                                let eval_args = eval_args?;
+                                check_method_call_arity(
+                                    &func,
+                                    method_name,
+                                    eval_args.len(),
+                                    false,
+                                )?;
+                                return self.call_function(func, eval_args);
                             }
                             return Err(RuntimeError::new(&format!(
                                 "no static method '{}' on {}",
@@ -2745,6 +2777,7 @@ impl Interpreter {
                                 for arg in args {
                                     full_args.push(self.eval_expr(arg)?);
                                 }
+                                check_method_call_arity(&func, method_name, args.len(), true)?;
                                 return self.call_function(func, full_args);
                             }
                             // Check embedded fields for delegation
@@ -2763,6 +2796,12 @@ impl Interpreter {
                                         for arg in args {
                                             full_args.push(self.eval_expr(arg)?);
                                         }
+                                        check_method_call_arity(
+                                            &func,
+                                            method_name,
+                                            args.len(),
+                                            true,
+                                        )?;
                                         return self.call_function(func, full_args);
                                     }
                                 }
@@ -3238,9 +3277,13 @@ impl Interpreter {
                             )))
                         }
                     };
+                    // A function stored in an object field is called
+                    // directly: same arity rule as `f(args)`.
                     let eval_args: Result<Vec<Value>, _> =
                         args.iter().map(|a| self.eval_expr(a)).collect();
-                    return self.call_function(func, eval_args?);
+                    let eval_args = eval_args?;
+                    check_method_call_arity(&func, method_name, eval_args.len(), false)?;
+                    return self.call_function(func, eval_args);
                 }
 
                 let func = self.eval_expr(function)?;
