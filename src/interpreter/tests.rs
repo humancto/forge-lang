@@ -7137,24 +7137,68 @@ fn spawn_task_still_shares_lambda_closure_with_parent() {
     // today spawn_task uses env.deep_clone() which preserves
     // closure-Arc sharing. PR #110 must NOT change that.
     //
-    // We assert `count >= 1` instead of `== 3` because count = count + 1
-    // is not atomic across concurrent spawns: each Forge expression
-    // takes the scope mutex separately, so two threads can interleave
-    // get/set and lose updates. A lost update is a separate concern
-    // (tracked as a "future shared{} block needs proper atomics" follow-
-    // up); for *this* test what we need to prove is that the parent
-    // sees the closure state at all -- and `count >= 1` proves that
-    // unambiguously.
-    let count = interp.env.get("count").expect("count is defined");
-    let got = match count {
-        Value::Int(n) => n,
-        other => panic!("count should be Int, got {:?}", other),
-    };
-    assert!(
-        (1..=3).contains(&got),
-        "spawn_task should share closure state with parent: count must be 1..=3, got {}",
-        got
+    // `count = count + 1` with an effect-free right operand is one atomic
+    // read-modify-write under the scope lock (issue #128), so all three
+    // increments land.
+    assert_eq!(interp.env.get("count"), Some(Value::Int(3)));
+}
+
+/// Issue #128: concurrent read-modify-writes of state shared through a
+/// captured closure must not lose updates. Each form below is applied
+/// `PER_TASK` times by each of `TASKS` squad spawns; with the update done
+/// as separate read and write steps, interleavings drop increments and the
+/// totals come up short (reliably so at these counts).
+#[test]
+fn squad_shared_closure_updates_are_atomic() {
+    const TASKS: i64 = 8;
+    const PER_TASK: i64 = 400;
+    let source = format!(
+        "let mut count = 0\n\
+         let mut total = 0\n\
+         let mut stats = {{ hits: 0, nested: {{ n: 0 }} }}\n\
+         let mut slots = [0, 0]\n\
+         let mut text = \"\"\n\
+         let step = 2\n\
+         let work = fn() {{\n\
+             repeat {per} times {{\n\
+                 count = count + 1\n\
+                 total += step\n\
+                 stats.hits = stats.hits + 1\n\
+                 stats.nested.n += 1\n\
+                 slots[1] = slots[1] + 1\n\
+                 text += \"x\"\n\
+             }}\n\
+         }}\n\
+         squad {{\n{spawns}}}\n",
+        per = PER_TASK,
+        spawns = "    spawn { work() }\n".repeat(TASKS as usize),
     );
+    let interp = template_from(&source);
+    let n = TASKS * PER_TASK;
+    let get = |name: &str| interp.env.get(name).expect(name);
+    assert_eq!(get("count"), Value::Int(n), "count = count + 1");
+    assert_eq!(get("total"), Value::Int(2 * n), "total += step");
+    let Value::Object(stats) = get("stats") else {
+        panic!("stats should be an object")
+    };
+    assert_eq!(
+        stats.get("hits"),
+        Some(&Value::Int(n)),
+        "stats.hits = stats.hits + 1"
+    );
+    let Some(Value::Object(nested)) = stats.get("nested") else {
+        panic!("stats.nested should be an object")
+    };
+    assert_eq!(nested.get("n"), Some(&Value::Int(n)), "stats.nested.n += 1");
+    assert_eq!(
+        get("slots"),
+        Value::Array(vec![Value::Int(0), Value::Int(n)]),
+        "slots[1] = slots[1] + 1"
+    );
+    let Value::String(text) = get("text") else {
+        panic!("text should be a string")
+    };
+    assert_eq!(text.len() as i64, n, "text += \"x\"");
 }
 
 /// Debug-only: a Stream in the template env must trip the assert when
