@@ -312,6 +312,27 @@ pub fn check_failed(displayed_value: &str) -> String {
     format!("check failed: {} did not pass validation", displayed_value)
 }
 
+/// `check value between lo and hi`: inclusive range check. Ints and floats
+/// may be mixed (compared as floats); strings compare lexicographically.
+/// Any other combination fails the check.
+pub fn between(value: Operand<'_>, lo: Operand<'_>, hi: Operand<'_>) -> bool {
+    fn num(o: &Operand<'_>) -> Option<f64> {
+        match *o {
+            Operand::Int(n) => Some(n as f64),
+            Operand::Float(f) => Some(f),
+            _ => None,
+        }
+    }
+    match (value, lo, hi) {
+        (Operand::Int(v), Operand::Int(l), Operand::Int(h)) => l <= v && v <= h,
+        (Operand::Str(v), Operand::Str(l), Operand::Str(h)) => l <= v && v <= h,
+        (v, l, h) => match (num(&v), num(&l), num(&h)) {
+            (Some(v), Some(l), Some(h)) => l <= v && v <= h,
+            _ => false,
+        },
+    }
+}
+
 /// Built-in module names that `import "<name>"` accepts as a no-op because
 /// the module is always in scope.
 pub const BUILTIN_MODULES: &[&str] = &[
@@ -337,6 +358,18 @@ pub fn import_not_found(path: &str) -> String {
 mod tests {
     use super::*;
     use Operand::*;
+
+    #[test]
+    fn between_table() {
+        assert!(between(Int(5), Int(1), Int(10)));
+        assert!(between(Int(1), Int(1), Int(10)));
+        assert!(!between(Int(11), Int(1), Int(10)));
+        assert!(between(Int(5), Float(1.0), Float(10.0)));
+        assert!(between(Float(2.5), Int(1), Int(10)));
+        assert!(between(Str("b"), Str("a"), Str("c")));
+        assert!(!between(Str("b"), Int(1), Int(10)));
+        assert!(!between(Null, Int(1), Int(10)));
+    }
 
     #[test]
     fn binary_table() {

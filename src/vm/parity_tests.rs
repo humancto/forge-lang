@@ -1147,6 +1147,18 @@ fn parity_yield_is_a_runtime_error_not_dropped() {
     );
 }
 
+// ----- `check ... between` -----
+
+#[test]
+fn parity_check_between_bounds() {
+    assert_cross_backend_value(
+        "let x = 5\ncheck x between 1 && 10\ncheck x between 1 and 10\ncheck x between 1.0 and 10.0\ncheck 2.5 between 1 and 10\ncheck x between 0 - 1 and 2 * 5\n\"ok\"",
+        "ok",
+    );
+    assert_cross_backend_error_contains("let x = 50\ncheck x between 1 and 10\n1", "check failed");
+    assert_cross_backend_error_contains("let x = 0\ncheck x between 1 && 10\n1", "check failed");
+}
+
 #[test]
 fn parity_check_statement_is_enforced() {
     assert_cross_backend_error_contains(

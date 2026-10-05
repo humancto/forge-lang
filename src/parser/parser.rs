@@ -613,13 +613,22 @@ impl Parser {
                 }
                 Token::Ident(ref s) if s == "between" => {
                     self.advance();
-                    let lo = self.parse_expr()?;
-                    if let Token::Ident(ref w) = self.current_token() {
-                        if w == "and" {
-                            self.advance();
+                    // Bounds are parsed below the logical operators so the
+                    // separator `and` (or `&&`) is never folded into the
+                    // lower bound: `check x between 1 && 10` has bounds
+                    // 1 and 10, not `1 && 10`.
+                    let lo = self.parse_addition()?;
+                    match self.current_token() {
+                        Token::Ident(ref w) if w == "and" => self.advance(),
+                        Token::And => self.advance(),
+                        other => {
+                            return Err(self.error(&format!(
+                            "expected 'and' between the bounds of `check ... between`, found {:?}",
+                            other
+                        )))
                         }
                     }
-                    let hi = self.parse_expr()?;
+                    let hi = self.parse_addition()?;
                     CheckKind::Between(lo, hi)
                 }
                 _ => CheckKind::IsTrue,
@@ -2258,6 +2267,53 @@ mod tests {
         let tokens = lexer.tokenize().expect("lexing should succeed");
         let mut parser = Parser::new(tokens);
         parser.parse_program().expect("parsing should succeed")
+    }
+
+    #[test]
+    fn check_between_bounds_are_not_a_logical_expression() {
+        for src in [
+            "check x between 1 and 10",
+            "check x between 1 && 10",
+            "check x between lo and hi + 1",
+        ] {
+            let program = parse_program(src);
+            match &program.statements[0].stmt {
+                Stmt::CheckStmt {
+                    check_kind: CheckKind::Between(lo, hi),
+                    ..
+                } => {
+                    assert!(
+                        !matches!(lo, Expr::BinOp { op: BinOp::And, .. }),
+                        "{}: lower bound swallowed the separator: {:?}",
+                        src,
+                        lo
+                    );
+                    assert!(
+                        matches!(lo, Expr::Int(1) | Expr::Ident(_)),
+                        "{}: {:?}",
+                        src,
+                        lo
+                    );
+                    assert!(
+                        matches!(hi, Expr::Int(10) | Expr::BinOp { op: BinOp::Add, .. }),
+                        "{}: {:?}",
+                        src,
+                        hi
+                    );
+                }
+                other => panic!("{}: expected check between, got {:?}", src, other),
+            }
+        }
+    }
+
+    #[test]
+    fn check_between_requires_and() {
+        let mut lexer = Lexer::new("check x between 1 10");
+        let tokens = lexer.tokenize().expect("lexing should succeed");
+        let err = Parser::new(tokens)
+            .parse_program()
+            .expect_err("missing `and` must be a parse error");
+        assert!(err.message.contains("expected 'and'"), "{}", err.message);
     }
 
     #[test]

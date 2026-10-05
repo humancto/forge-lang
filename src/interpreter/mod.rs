@@ -1995,11 +1995,11 @@ impl Interpreter {
                     CheckKind::Between(lo_expr, hi_expr) => {
                         let lo = self.eval_expr(lo_expr)?;
                         let hi = self.eval_expr(hi_expr)?;
-                        match (&val, &lo, &hi) {
-                            (Value::Int(v), Value::Int(l), Value::Int(h)) => v >= l && v <= h,
-                            (Value::Float(v), Value::Float(l), Value::Float(h)) => v >= l && v <= h,
-                            _ => false,
-                        }
+                        crate::semantics::between(
+                            semantic_operand(&val),
+                            semantic_operand(&lo),
+                            semantic_operand(&hi),
+                        )
                     }
                     CheckKind::IsTrue => val.is_truthy(),
                 };

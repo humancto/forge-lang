@@ -435,19 +435,11 @@ impl VM {
                     "between" => {
                         let lo = args.get(2).copied().unwrap_or(Value::null());
                         let hi = args.get(3).copied().unwrap_or(Value::null());
-                        match (
-                            value.classify(&self.gc),
-                            lo.classify(&self.gc),
-                            hi.classify(&self.gc),
-                        ) {
-                            (ValueKind::Int(v), ValueKind::Int(l), ValueKind::Int(h)) => {
-                                v >= l && v <= h
-                            }
-                            (ValueKind::Float(v), ValueKind::Float(l), ValueKind::Float(h)) => {
-                                v >= l && v <= h
-                            }
-                            _ => false,
-                        }
+                        crate::semantics::between(
+                            Self::semantic_operand(&self.gc, &value),
+                            Self::semantic_operand(&self.gc, &lo),
+                            Self::semantic_operand(&self.gc, &hi),
+                        )
                     }
                     _ => value.is_truthy(&self.gc),
                 };
