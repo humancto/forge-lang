@@ -1147,6 +1147,70 @@ fn parity_yield_is_a_runtime_error_not_dropped() {
     );
 }
 
+// ----- Value semantics: collections are values on both engines -----
+
+#[test]
+fn parity_assignment_copies_collections() {
+    assert_cross_backend_value(
+        "let mut z = [1, 2]\nlet w = z\nz[0] = 9\n[w, z]",
+        "[[1, 2], [9, 2]]",
+    );
+    assert_cross_backend_value(
+        "let mut o = {a: 1}\nlet p = o\no.a = 5\n[p.a, o.a]",
+        "[1, 5]",
+    );
+}
+
+#[test]
+fn parity_function_arguments_are_copies() {
+    assert_cross_backend_value(
+        "fn f(a) {\n    let mut b = a\n    b[0] = 100\n    return b\n}\nlet q = [1]\nlet r = f(q)\n[q, r]",
+        "[[1], [100]]",
+    );
+    assert_cross_backend_value(
+        "fn setx(o) {\n    o.x = 99\n    return o.x\n}\nlet mut obj = {x: 1}\nlet r = setx(obj)\n[obj.x, r]",
+        "[1, 99]",
+    );
+}
+
+#[test]
+fn parity_methods_do_not_mutate_receiver() {
+    assert_cross_backend_value(
+        "struct Counter { n: Int }\ngive Counter {\n    fn bump(it) {\n        it.n = it.n + 1\n        return it.n\n    }\n}\nlet mut c = Counter { n: 0 }\nlet a = c.bump()\nlet b = c.bump()\n[a, b, c.n]",
+        "[1, 1, 0]",
+    );
+}
+
+#[test]
+fn parity_index_assign_on_immutable_binding_errors() {
+    assert_cross_backend_error_contains(
+        "let imm = [1]\nimm[0] = 2\nimm",
+        "cannot reassign immutable variable 'imm'",
+    );
+    assert_cross_backend_error_contains(
+        "let o = {a: 1}\no.a = 2\no",
+        "cannot reassign immutable variable 'o'",
+    );
+}
+
+#[test]
+fn parity_global_collection_updated_from_function() {
+    assert_cross_backend_value(
+        "let mut cnt = [0]\nfn bump() {\n    cnt[0] = cnt[0] + 1\n}\nbump()\nbump()\ncnt",
+        "[2]",
+    );
+}
+
+#[test]
+fn vm_nested_index_assign_has_value_semantics() {
+    // The interpreter only supports `name[i] = v`; the VM also supports
+    // nested places and rebuilds each level instead of mutating shared rows.
+    assert_eq!(
+        run_on_vm_value("let mut g = [[1, 2], [3]]\nlet snap = g\ng[0][1] = 7\n[g, snap]"),
+        "[[[1, 7], [3]], [[1, 2], [3]]]"
+    );
+}
+
 // ----- `return` inside an if-expression returns from the function -----
 
 #[test]

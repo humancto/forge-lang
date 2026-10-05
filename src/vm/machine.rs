@@ -1073,7 +1073,7 @@ impl VM {
                         let Constant::Str(field) = &chunk.constants[b as usize] else {
                             return Err(VMError::new("BUG: SetField constant is not a string"));
                         };
-                        self.set_field(target, field, val)?;
+                        self.registers[base + a as usize] = self.set_field(target, field, val)?;
                     }
                     OpCode::GetIndex => {
                         let obj = self.registers[base + b as usize];
@@ -1143,7 +1143,7 @@ impl VM {
                         let target = self.registers[base + a as usize];
                         let idx = self.registers[base + b as usize];
                         let val = self.registers[base + c as usize];
-                        self.index_set(target, idx, val)?;
+                        self.registers[base + a as usize] = self.index_set(target, idx, val)?;
                     }
                     OpCode::Len => {
                         let src = self.registers[base + b as usize];
@@ -2284,23 +2284,24 @@ impl VM {
     }
 
     /// `object.field = value`. Shared by `SetField` and `__forge_set_field`.
+    /// Returns an updated copy; the original object is never modified
+    /// (value semantics, see `compile_store` in the compiler).
     pub(super) fn set_field(
         &mut self,
         target: Value,
         field: &str,
         val: Value,
-    ) -> Result<(), VMError> {
+    ) -> Result<Value, VMError> {
         let Some(obj_ref) = target.as_obj() else {
             return Err(VMError::new("cannot set field on non-object"));
         };
-        match self.gc.get_mut(obj_ref).map(|obj| &mut obj.kind) {
-            Some(ObjKind::Object(map)) => {
-                map.insert(field.to_string(), val);
-                Ok(())
-            }
-            Some(ObjKind::Frozen(_)) => Err(VMError::new("cannot mutate a frozen value")),
-            _ => Err(VMError::new("cannot set field on non-object")),
-        }
+        let mut map = match self.gc.get(obj_ref).map(|obj| &obj.kind) {
+            Some(ObjKind::Object(map)) => map.clone(),
+            Some(ObjKind::Frozen(_)) => return Err(VMError::new("cannot mutate a frozen value")),
+            _ => return Err(VMError::new("cannot set field on non-object")),
+        };
+        map.insert(field.to_string(), val);
+        Ok(Value::obj(self.gc.alloc(ObjKind::Object(map))))
     }
 
     /// `container[index]` — shares negative-index and error-message rules
@@ -2348,46 +2349,56 @@ impl VM {
         }
     }
 
-    /// `container[index] = value` — same rules as `index_get`.
+    /// `container[index] = value` — same rules as `index_get`. Returns an
+    /// updated copy; the original container is never modified (value
+    /// semantics, see `compile_store` in the compiler).
     pub(super) fn index_set(
         &mut self,
         container: Value,
         index: Value,
         value: Value,
-    ) -> Result<(), VMError> {
+    ) -> Result<Value, VMError> {
         use crate::semantics;
         let key = self.get_string(&index);
         let index_int = index.as_int(&self.gc);
         let index_type = index.type_name(&self.gc);
         let container_type = container.type_name(&self.gc);
-        let Some(obj) = container.as_obj().and_then(|r| self.gc.get_mut(r)) else {
+        let Some(obj) = container.as_obj().and_then(|r| self.gc.get(r)) else {
             return Err(VMError::new(&semantics::invalid_index_assign(
                 container_type,
             )));
         };
-        match (&mut obj.kind, index_int, key) {
+        let updated = match (&obj.kind, index_int, key) {
             (ObjKind::Array(items), Some(i), _) => {
                 let len = items.len();
                 let slot = semantics::normalize_index(i, len).ok_or_else(|| {
                     VMError::new(&semantics::index_out_of_bounds(i, "array", len))
                 })?;
+                let mut items = items.clone();
                 items[slot] = value;
-                Ok(())
+                ObjKind::Array(items)
             }
             (ObjKind::Object(map), _, Some(key)) => {
+                let mut map = map.clone();
                 map.insert(key, value);
-                Ok(())
+                ObjKind::Object(map)
             }
-            (ObjKind::Array(_) | ObjKind::Object(_), _, _) => Err(VMError::new(
-                &semantics::invalid_index(container_type, index_type),
-            )),
+            (ObjKind::Array(_) | ObjKind::Object(_), _, _) => {
+                return Err(VMError::new(&semantics::invalid_index(
+                    container_type,
+                    index_type,
+                )))
+            }
             (ObjKind::Frozen(_), _, _) => {
-                Err(VMError::new("cannot modify frozen value: index assignment"))
+                return Err(VMError::new("cannot modify frozen value: index assignment"))
             }
-            _ => Err(VMError::new(&semantics::invalid_index_assign(
-                container_type,
-            ))),
-        }
+            _ => {
+                return Err(VMError::new(&semantics::invalid_index_assign(
+                    container_type,
+                )))
+            }
+        };
+        Ok(Value::obj(self.gc.alloc(updated)))
     }
 
     fn get_str_ref<'a>(&'a self, val: &Value) -> Option<&'a str> {

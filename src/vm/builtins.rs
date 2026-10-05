@@ -346,8 +346,7 @@ impl VM {
                     ));
                 }
                 let field = self.get_string_arg(&args, 1)?;
-                self.set_field(args[0], &field, args[2])?;
-                Ok(Value::null())
+                self.set_field(args[0], &field, args[2])
             }
             "__forge_destructure" => {
                 // (value, kind, names, has_rest) -> [bound values...]

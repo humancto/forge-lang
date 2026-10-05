@@ -707,10 +707,83 @@ fn emit_set_field(c: &mut Compiler, obj: u8, field: &str, value: u8) -> Result<(
     let saved = c.next_register;
     let name_reg = c.alloc_reg()?;
     c.emit(encode_abx(OpCode::LoadConst, name_reg, idx), 0);
-    let dst = c.alloc_reg()?;
-    compile_hidden_call_from_regs(c, "__forge_set_field", &[obj, name_reg, value], dst)?;
+    // The native returns the updated copy; it replaces `obj` like SetField.
+    compile_hidden_call_from_regs(c, "__forge_set_field", &[obj, name_reg, value], obj)?;
     c.free_to(saved);
     Ok(())
+}
+
+/// Store `src` into a variable, enforcing `let` immutability.
+fn compile_store_variable(c: &mut Compiler, name: &str, src: u8) -> Result<(), CompileError> {
+    if let Some((reg, mutable)) = c.resolve_local(name) {
+        if !mutable {
+            return compile_hidden_stmt(
+                c,
+                "__forge_raise_error",
+                vec![Expr::StringLit(crate::semantics::immutable_reassign(name))],
+            );
+        }
+        c.emit(encode_abc(OpCode::SetLocal, reg, src, 0), 0);
+    } else if c.binding_mutability(name) == Some(false) {
+        return compile_hidden_stmt(
+            c,
+            "__forge_raise_error",
+            vec![Expr::StringLit(crate::semantics::immutable_reassign(name))],
+        );
+    } else if let Some(uv_idx) = c.resolve_capture(name) {
+        c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, src, 0), 0);
+    } else {
+        let name_idx = c.const_str(&c.global_name(name));
+        c.emit(encode_abx(OpCode::SetGlobal, src, name_idx), 0);
+    }
+    Ok(())
+}
+
+/// Store `src` into an assignment target.
+///
+/// Collections have value semantics (as in the interpreter): `SetIndex` and
+/// `SetField` never mutate the container in place. They replace the
+/// container register with an updated copy, which is then stored back into
+/// the place it was read from — recursively, so `grid[0][1] = v` rebuilds
+/// `grid[0]` and then `grid`. Other bindings that refer to the old
+/// container (`let w = z`, function arguments, captured values) are
+/// unaffected.
+fn compile_store(c: &mut Compiler, target: &Expr, src: u8) -> Result<(), CompileError> {
+    match target {
+        Expr::Ident(name) => compile_store_variable(c, name, src),
+        Expr::FieldAccess { object, field } => {
+            let saved = c.next_register;
+            let obj_reg = c.alloc_reg()?;
+            compile_expr(c, object, obj_reg)?;
+            emit_set_field(c, obj_reg, field, src)?;
+            store_back(c, object, obj_reg)?;
+            c.free_to(saved);
+            Ok(())
+        }
+        Expr::Index { object, index } => {
+            let saved = c.next_register;
+            let obj_reg = c.alloc_reg()?;
+            compile_expr(c, object, obj_reg)?;
+            let idx_reg = c.alloc_reg()?;
+            compile_expr(c, index, idx_reg)?;
+            c.emit(encode_abc(OpCode::SetIndex, obj_reg, idx_reg, src), 0);
+            store_back(c, object, obj_reg)?;
+            c.free_to(saved);
+            Ok(())
+        }
+        _ => Err(CompileError::new("invalid assignment target")),
+    }
+}
+
+/// After updating a container read from `place`, store the updated copy
+/// back. Temporaries (`f()[0] = 1`) have nowhere to go.
+fn store_back(c: &mut Compiler, place: &Expr, src: u8) -> Result<(), CompileError> {
+    match place {
+        Expr::Ident(_) | Expr::FieldAccess { .. } | Expr::Index { .. } => {
+            compile_store(c, place, src)
+        }
+        _ => Ok(()),
+    }
 }
 
 fn query_op_name(op: &BinOp) -> &'static str {
@@ -1219,63 +1292,12 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::Assign { target, value } => {
-            match target {
-                Expr::Ident(name) => {
-                    if let Some((reg, mutable)) = c.resolve_local(name) {
-                        if !mutable {
-                            return compile_hidden_stmt(
-                                c,
-                                "__forge_raise_error",
-                                vec![Expr::StringLit(crate::semantics::immutable_reassign(name))],
-                            );
-                        }
-                        let saved = c.next_register;
-                        let tmp = c.alloc_reg()?;
-                        compile_expr(c, value, tmp)?;
-                        c.emit(encode_abc(OpCode::SetLocal, reg, tmp, 0), 0);
-                        c.free_to(saved);
-                    } else if c.binding_mutability(name) == Some(false) {
-                        return compile_hidden_stmt(
-                            c,
-                            "__forge_raise_error",
-                            vec![Expr::StringLit(crate::semantics::immutable_reassign(name))],
-                        );
-                    } else if let Some(uv_idx) = c.resolve_capture(name) {
-                        let saved = c.next_register;
-                        let tmp = c.alloc_reg()?;
-                        compile_expr(c, value, tmp)?;
-                        c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, tmp, 0), 0);
-                        c.free_to(saved);
-                    } else {
-                        let tmp = c.alloc_reg()?;
-                        compile_expr(c, value, tmp)?;
-                        let name_idx = c.const_str(&c.global_name(name));
-                        c.emit(encode_abx(OpCode::SetGlobal, tmp, name_idx), 0);
-                        c.free_to(tmp);
-                    }
-                }
-                Expr::FieldAccess { object, field } => {
-                    let saved = c.next_register;
-                    let obj_reg = c.alloc_reg()?;
-                    compile_expr(c, object, obj_reg)?;
-                    let val_reg = c.alloc_reg()?;
-                    compile_expr(c, value, val_reg)?;
-                    emit_set_field(c, obj_reg, field, val_reg)?;
-                    c.free_to(saved);
-                }
-                Expr::Index { object, index } => {
-                    let saved = c.next_register;
-                    let obj_reg = c.alloc_reg()?;
-                    compile_expr(c, object, obj_reg)?;
-                    let idx_reg = c.alloc_reg()?;
-                    compile_expr(c, index, idx_reg)?;
-                    let val_reg = c.alloc_reg()?;
-                    compile_expr(c, value, val_reg)?;
-                    c.emit(encode_abc(OpCode::SetIndex, obj_reg, idx_reg, val_reg), 0);
-                    c.free_to(saved);
-                }
-                _ => return Err(CompileError::new("invalid assignment target")),
-            }
+            // Like the interpreter: evaluate the value, then store it.
+            let saved = c.next_register;
+            let val_reg = c.alloc_reg()?;
+            compile_expr(c, value, val_reg)?;
+            compile_store(c, target, val_reg)?;
+            c.free_to(saved);
             Ok(())
         }
 
