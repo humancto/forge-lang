@@ -1,0 +1,4 @@
+// forge-args: --strict
+fn double(x: Int) -> Int { return x * 2 }
+let input: Any = "2"
+say double(input)

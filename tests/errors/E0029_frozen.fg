@@ -1,0 +1,2 @@
+let mut config = freeze({debug: false})
+config.debug = true

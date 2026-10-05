@@ -1,0 +1,3 @@
+// forge-args: --max-depth 100
+fn down(n) { return down(n + 1) }
+down(0)
