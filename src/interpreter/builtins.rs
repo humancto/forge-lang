@@ -1687,6 +1687,9 @@ impl Interpreter {
                 match result {
                     Ok(output) if output.status.success() => Ok(Value::String(
                         String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                // Spawns `which` and reveals the host's PATH/installed tools:
+                // a subprocess, so it needs `run` like the other shell helpers.
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                     )),
                     _ => Ok(Value::Null),
                 }

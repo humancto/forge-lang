@@ -1857,6 +1857,8 @@ impl VM {
                 Ok(Value::bool_val(status.success()))
             }
             "which" => {
+                // Spawns a subprocess: needs `run` (same as the interpreter).
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let result = std::process::Command::new("/usr/bin/which")
                     .arg(&cmd)

@@ -199,6 +199,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         }
 
         "term.confirm" => {
+            // Like input()/io.prompt: without `process` the host's stdin is
+            // an empty stream (no prompt, no read), so a sandboxed script can
+            // never block on or consume it.
+            if !crate::permissions::host_stdin_allowed() {
+                return Ok(Value::Bool(false));
+            }
             let prompt = args
                 .first()
                 .map(|v| format!("{}", v))
@@ -326,6 +332,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         }
 
         "term.menu" => match args.first() {
+            Some(Value::Array(_)) if !crate::permissions::host_stdin_allowed() => Ok(Value::Null),
             Some(Value::Array(options)) => {
                 let prompt = args
                     .get(1)
