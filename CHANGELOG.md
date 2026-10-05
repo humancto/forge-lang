@@ -17,12 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`forge publish --registry <index-clone>`** — builds a deterministic `dist/<name>-<version>.tar.gz`, appends the entry (deps, checksum, URL, signature) and commits it on a `publish/<name>-<version>` branch, ready for a pull request (`--download-url`, `--out-dir`, `--no-commit`). It enforces name rules (lowercase, reserved and look-alike names), immutable versions, `owners.toml` namespace/key ownership and signing-key continuity.
 - **`forge yank <name@version> --registry <index-clone> [--undo]`** — yanked versions are skipped by new resolutions but stay installable from a lockfile, and `forge install` keeps lockfile versions that still match the manifest.
 - **Benchmark regression gate** — `tools/bench.sh` is the single benchmark runner (suites `vm`, `interp`, `startup`, plus `peers` for Python/Node/Lua ports; human table or `--json`). `tools/bench_compare.py` runs it against two binaries in interleaved A/B rounds and compares medians. The new `Performance` workflow builds the PR base and head in release mode on one runner and fails when a benchmark is more than 15% slower, with the table in the job summary. The `perf-regression-ok` label accepts an intended slowdown. `tools/bench_vm.sh` / `bench_interp.sh` are now wrappers. Methodology and current numbers: `docs/BENCHMARKS.md`.
+- **JIT Float tier** — functions over Float (and mixed Int/Float, with the language's promotion rules) now compile: arithmetic, comparisons, equality and truthiness with the VM's exact IEEE semantics (NaN, infinities, signed zero), plus pure builtins `math.sqrt/abs/floor/ceil/round/sin/cos/tan/log/pow/min/max/clamp`, `math.pi/e/inf`, `float()` and `int()`. Int overflow and results the VM would box differently (e.g. `math.floor(1e30)`) still deopt to the VM. `benchmarks/vm/mandelbrot.fg`: 0.55 s → 0.03 s; `spectral_norm`: 0.41 s → 0.18 s (release, whole process).
+- **JIT calls between compiled functions** — a hot function that calls another pure function (through a global or a captured top-level `fn`) compiles to a direct native call of the callee's specialization instead of staying in the VM. Every global or captured binding the code relies on is a guard re-checked at each native entry, so rebinding it sends the next call to the VM.
+- **Benchmarks** — `mandelbrot`, `spectral_norm`, `nbody`, `repeat_loop` and `range_loop` in `benchmarks/vm` (Python/Node/Lua ports in `benchmarks/peers`).
 - **`tools/registry-template/`** — seed for the hosted index repository: README, `config.json`, `owners.toml`, CODEOWNERS placeholder and a CI validator (`scripts/validate_index.py`: format, names, semver, ownership, signatures, append-only history, archive checksums), cross-checked against `forge publish` output in `tests/registry_index.rs`.
 
 ### Changed
 
 - The default registry is now `humancto/forge-registry` (the old `forge-lang/registry` URL never existed). A registry without `config.json` is reported as "not a Forge registry" with guidance, instead of every package looking missing.
 - Registry archive extraction rejects symlinks, hard links and device entries as well as absolute and `..` paths.
+- **`repeat n times` and `for i in range(..)` no longer allocate the range** on the VM: they compile to a counting loop (falling back to the old path when `range` is not the builtin or the arguments are not Ints) and are JIT-eligible. A function running `repeat 2000000 times` went from 0.29 s to 0.02 s; top-level `repeat`/`range` loops (never JIT-compiled) are 1.5-1.8x faster.
+
+### Fixed
+
+- VM: `range(1, 2.5)` raised no error and returned `[0]`; it now fails with "range() requires integer arguments", like the interpreter.
 
 ### Security
 
