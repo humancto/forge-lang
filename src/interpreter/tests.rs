@@ -6343,13 +6343,8 @@ fn enum_method_closure_captures_it() {
 #[test]
 fn enum_method_recursive_on_nested_adt() {
     // Per M1: constructor-recursive fields, not flat self-recursion.
-    // NOTE: This tests only 2-level (flat) recursion. Deeper recursion
-    // hits a preexisting interpreter bug where match_pattern's
-    // Binding(name) peeks at env and treats field captures as type
-    // checks — when l/r are bound in an outer frame, the inner match
-    // compares variants of outer-l vs inner-l and rejects. Fix is
-    // orthogonal to M9.5. See enum_method_pin_deep_recursion_quirk
-    // below for a pin of the broken case.
+    // 2-level (flat) recursion; see enum_method_deep_recursion_on_nested_adt
+    // for the 3-level case.
     assert_eq!(
         enum_display(
             r#"
@@ -6370,30 +6365,28 @@ fn enum_method_recursive_on_nested_adt() {
 }
 
 #[test]
-fn enum_method_pin_deep_recursion_quirk() {
-    // Pin: 3+ level recursion through ADT methods errors with
-    // non-exhaustive match because match_pattern's Binding(name)
-    // smart-check incorrectly uses outer-scope bindings. Once that
-    // interpreter bug is fixed, this test will start passing, which is
-    // the signal to flip it to a success assertion.
-    let res = try_run_forge(
-        r#"
-        type Tree = Leaf(int) | Node(Tree, Tree)
-        impl Tree {
-            fn sum(it) {
-                match it {
-                    Leaf(n) => return n
-                    Node(l, r) => return l.sum() + r.sum()
+fn enum_method_deep_recursion_on_nested_adt() {
+    // Formerly a pin of a bug: 3+ level recursion through ADT methods
+    // failed with "non-exhaustive match" because calls to top-level
+    // functions ran on top of the caller's scopes (dynamic scoping), so
+    // match_pattern's Binding(name) check saw the outer frame's `l`/`r`.
+    // Calls are now lexically scoped and the deep case works.
+    assert_eq!(
+        enum_display(
+            r#"
+            type Tree = Leaf(int) | Node(Tree, Tree)
+            impl Tree {
+                fn sum(it) {
+                    match it {
+                        Leaf(n) => return n
+                        Node(l, r) => return l.sum() + r.sum()
+                    }
                 }
             }
-        }
-        Node(Leaf(1), Node(Leaf(2), Leaf(3))).sum()
-        "#,
-    );
-    assert!(
-        res.is_err(),
-        "deep recursion was expected to fail (pin) but returned {:?}",
-        res
+            Node(Leaf(1), Node(Leaf(2), Leaf(3))).sum()
+            "#
+        ),
+        "6"
     );
 }
 
@@ -7253,4 +7246,82 @@ fn import_cycle_reports_chain() {
     );
     assert!(err.message.contains("a.fg -> "), "{}", err.message);
     assert!(err.message.ends_with("a.fg"), "{}", err.message);
+}
+
+// ----- Lexical scoping of calls ---------------------------------------------
+
+#[test]
+fn top_level_function_does_not_see_caller_locals() {
+    let res = try_run_forge(
+        r#"
+        fn peek() { return secret }
+        fn caller() {
+            let secret = 42
+            return peek()
+        }
+        caller()
+        "#,
+    );
+    let err = res.expect_err("callee must not see the caller's locals");
+    assert!(
+        err.message.contains("secret"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn top_level_function_sees_globals_defined_after_it() {
+    assert_eq!(
+        run_forge(
+            r#"
+            fn read_cap() { return cap_value }
+            let cap_value = 7
+            read_cap()
+            "#
+        ),
+        Value::Int(7)
+    );
+}
+
+#[test]
+fn call_cost_does_not_grow_with_recursion_depth() {
+    // Before lexical scoping every frame was pushed on top of the
+    // caller's scopes, so a global lookup at depth d walked d scopes.
+    // Compare the cost of the same number of calls at two depths.
+    fn time_depth(depth: usize, reps: usize) -> std::time::Duration {
+        let src = format!(
+            "fn down(n) {{ if n == 0 {{ return 0 }} return 1 + down(n - 1) }}\n\
+             let mut k = 0\nwhile k < {reps} {{ down({depth})\nk = k + 1 }}\n"
+        );
+        let stack = crate::runtime::recursion::MAIN_STACK_SIZE;
+        let start = std::time::Instant::now();
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(move || {
+                crate::runtime::recursion::register_thread_stack(stack);
+                try_run_forge(&src).expect("recursion should succeed");
+            })
+            .expect("spawn")
+            .join()
+            .expect("join");
+        start.elapsed()
+    }
+    // 20k calls either way; best of three to damp scheduler noise. With
+    // depth-proportional lookups the ratio was ~40x; cache and page
+    // effects alone stay well under the bound.
+    let best = |depth, reps| {
+        (0..3)
+            .map(|_| time_depth(depth, reps))
+            .min()
+            .expect("3 runs")
+    };
+    let shallow = best(100, 200);
+    let deep = best(4000, 5);
+    assert!(
+        deep < shallow * 15,
+        "deep recursion is disproportionately slow: shallow {:?}, deep {:?}",
+        shallow,
+        deep
+    );
 }

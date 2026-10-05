@@ -842,29 +842,6 @@ fn levenshtein(a: &str, b: &str) -> usize {
     matrix[a.len()][b.len()]
 }
 
-/// An imported top-level function must keep resolving names in its own
-/// module (e.g. private helpers it calls), not in the importer. Top-level
-/// functions normally take the "global function" fast path in
-/// `call_function_inner`, which runs them in the caller's environment; an
-/// extra (empty) closure scope routes imported ones through their module
-/// environment instead.
-fn bind_to_module_scope(value: Value) -> Value {
-    match value {
-        Value::Function(func) if func.closure.scopes.len() == 1 => {
-            let mut closure = func.closure.clone();
-            closure.push_scope();
-            Value::Function(Arc::new(FunctionValue {
-                name: func.name.clone(),
-                params: func.params.clone(),
-                body: func.body.clone(),
-                closure,
-                decorators: func.decorators.clone(),
-            }))
-        }
-        other => other,
-    }
-}
-
 /// Map an AST operator onto the shared arithmetic/ordering rules.
 fn shared_binary_op(op: &BinOp) -> Option<crate::semantics::BinaryOp> {
     use crate::semantics::BinaryOp as S;
@@ -2045,7 +2022,7 @@ impl Interpreter {
                         let val = import_interp.env.get(name).ok_or_else(|| {
                             RuntimeError::new(&crate::semantics::import_missing_name(path, name))
                         })?;
-                        self.env.define(name.to_string(), bind_to_module_scope(val));
+                        self.env.define(name.to_string(), val);
                     }
                 } else {
                     // Import all top-level definitions
@@ -2053,7 +2030,7 @@ impl Interpreter {
                         match &spanned.stmt {
                             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
                                 if let Some(val) = import_interp.env.get(name) {
-                                    self.env.define(name.clone(), bind_to_module_scope(val));
+                                    self.env.define(name.clone(), val);
                                 }
                             }
                             Stmt::StructDef { name, .. } => {
@@ -4651,33 +4628,21 @@ impl Interpreter {
         match func {
             Value::Function(func) => {
                 let FunctionValue {
-                    name,
                     params,
                     body,
                     closure,
                     ..
                 } = &*func;
-                let is_global_fn = !name.is_empty() && closure.scopes.len() == 1;
-
-                let result = if is_global_fn {
-                    self.env.push_scope();
-                    self.bind_params(params, args);
-                    let result = self.exec_stmts(body);
-                    self.env.pop_scope();
-                    result
-                } else {
-                    let saved_env = std::mem::replace(&mut self.env, closure.clone());
-                    self.env.push_scope();
-                    if !name.is_empty() {
-                        if let Some(func_val) = saved_env.get(name) {
-                            self.env.define(name.clone(), func_val);
-                        }
-                    }
-                    self.bind_params(params, args);
-                    let result = self.exec_stmts(body);
-                    self.env = saved_env;
-                    result
-                };
+                // Lexical scoping: the body runs in the environment the
+                // function closed over plus one fresh scope for its
+                // parameters — never on top of the caller's scopes. That
+                // keeps lookups O(lexical depth) instead of O(call depth)
+                // and means a function cannot see its caller's locals.
+                let saved_env = std::mem::replace(&mut self.env, closure.clone());
+                self.env.push_scope();
+                self.bind_params(params, args);
+                let result = self.exec_stmts(body);
+                self.env = saved_env;
 
                 match result {
                     Ok(Signal::Return(v)) => Ok(v),
