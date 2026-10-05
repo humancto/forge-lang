@@ -15,20 +15,17 @@ pub mod value;
 use crate::parser::ast::Program;
 use machine::{VMError, VM};
 
-/// Compile and execute a Forge program using the bytecode VM.
-pub fn run(program: &Program) -> Result<(), VMError> {
-    let chunk = compiler::compile(program).map_err(|e| VMError::new(&e.message))?;
-    let mut vm = VM::new();
-    vm.execute(&chunk)?;
-    Ok(())
-}
-
-/// Compile and execute with profiling enabled. Prints a report after execution.
-pub fn run_with_profiling(program: &Program) -> Result<(), VMError> {
-    let chunk = compiler::compile(program).map_err(|e| VMError::new(&e.message))?;
-    let mut vm = VM::with_profiling();
-    vm.execute(&chunk)?;
-    vm.profiler.print_report();
+/// Execute an already-compiled program, optionally printing a profile.
+pub fn run_chunk(chunk: &bytecode::Chunk, profile: bool) -> Result<(), VMError> {
+    let mut vm = if profile {
+        VM::with_profiling()
+    } else {
+        VM::new()
+    };
+    vm.execute(chunk)?;
+    if profile {
+        vm.profiler.print_report();
+    }
     Ok(())
 }
 

@@ -187,6 +187,25 @@ cargo test test_name
 ./target/debug/forge test tests/ --engine both    # every file on both engines
 ```
 
+### Interpreter/VM differential test
+
+The interpreter and the bytecode VM must behave identically. `tests/engine_diff.rs`
+runs every program in `examples/`, `tests/parity/supported/` and every `tests/*.fg`
+suite (each `@test` function is called with its hooks, printing `PASS`/`FAIL`) on
+both engines and compares stdout and exit status:
+
+```bash
+cargo test --test engine_diff -- --nocapture
+FORGE_ENGINE_DIFF_FILTER=closure FORGE_ENGINE_DIFF_VERBOSE=1 cargo test --test engine_diff
+```
+
+Programs that cannot be compared (servers, network, databases) and known,
+not-yet-fixed divergences are listed in `tests/engine_diff_known.txt`. The test
+fails on any new divergence, and also when a listed divergence disappears, so the
+list only ever shrinks. Rules both engines share (operators, comparisons,
+indexing, truthiness, error messages) live in `src/semantics/` — change them there,
+not in one engine.
+
 ### Run the CI gates locally
 
 Every required CI job can be reproduced from a checkout. Run them before

@@ -305,22 +305,24 @@ impl Value {
     }
 
     pub fn is_truthy(&self) -> bool {
-        match self {
-            Value::Bool(b) => *b,
-            Value::Int(n) => *n != 0,
-            Value::Float(n) => *n != 0.0,
-            Value::String(s) => !s.is_empty(),
-            Value::Null => false,
-            Value::Array(a) | Value::Tuple(a) | Value::Set(a) => !a.is_empty(),
-            Value::Map(m) => !m.is_empty(),
-            Value::Object(o) => !o.is_empty(),
-            Value::ResultOk(_) => true,
-            Value::ResultErr(_) => false,
-            Value::Some(_) => true,
-            Value::None => false,
-            Value::Frozen(inner) => inner.is_truthy(),
-            _ => true,
-        }
+        use crate::semantics::Shape;
+        let shape = match self {
+            Value::Bool(b) => Shape::Bool(*b),
+            Value::Int(n) => Shape::Int(*n),
+            Value::Float(n) => Shape::Float(*n),
+            Value::String(s) => Shape::Sized(s.len()),
+            Value::Null => Shape::Null,
+            Value::Array(a) | Value::Tuple(a) | Value::Set(a) => Shape::Sized(a.len()),
+            Value::Map(m) => Shape::Sized(m.len()),
+            Value::Object(o) => Shape::Sized(o.len()),
+            Value::ResultOk(_) => Shape::ResultOk,
+            Value::ResultErr(_) => Shape::ResultErr,
+            Value::Some(_) => Shape::OptionSome,
+            Value::None => Shape::OptionNone,
+            Value::Frozen(inner) => return inner.is_truthy(),
+            _ => Shape::Other,
+        };
+        crate::semantics::is_truthy(shape)
     }
 
     /// Check if this value is frozen (immutable)
@@ -494,9 +496,8 @@ impl Environment {
 
     pub fn set(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
         if let Some(false) = self.is_mutable(name) {
-            return Err(RuntimeError::new(&format!(
-                "cannot reassign immutable variable '{}' (use 'let mut' to make it mutable)",
-                name
+            return Err(RuntimeError::new(&crate::semantics::immutable_reassign(
+                name,
             )));
         }
         for scope in self.scopes.iter().rev() {
@@ -753,6 +754,70 @@ fn levenshtein(a: &str, b: &str) -> usize {
         }
     }
     matrix[a.len()][b.len()]
+}
+
+/// An imported top-level function must keep resolving names in its own
+/// module (e.g. private helpers it calls), not in the importer. Top-level
+/// functions normally take the "global function" fast path in
+/// `call_function_inner`, which runs them in the caller's environment; an
+/// extra (empty) closure scope routes imported ones through their module
+/// environment instead.
+fn bind_to_module_scope(value: Value) -> Value {
+    match value {
+        Value::Function {
+            name,
+            params,
+            body,
+            mut closure,
+            decorators,
+        } if closure.scopes.len() == 1 => {
+            closure.push_scope();
+            Value::Function {
+                name,
+                params,
+                body,
+                closure,
+                decorators,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Map an AST operator onto the shared arithmetic/ordering rules.
+fn shared_binary_op(op: &BinOp) -> Option<crate::semantics::BinaryOp> {
+    use crate::semantics::BinaryOp as S;
+    Some(match op {
+        BinOp::Add => S::Add,
+        BinOp::Sub => S::Sub,
+        BinOp::Mul => S::Mul,
+        BinOp::Div => S::Div,
+        BinOp::Mod => S::Mod,
+        BinOp::Lt => S::Lt,
+        BinOp::Gt => S::Gt,
+        BinOp::LtEq => S::LtEq,
+        BinOp::GtEq => S::GtEq,
+        _ => return None,
+    })
+}
+
+/// Project an interpreter value onto the shared operand view.
+fn semantic_operand(value: &Value) -> crate::semantics::Operand<'_> {
+    use crate::semantics::Operand;
+    match value {
+        Value::Int(n) => Operand::Int(*n),
+        Value::Float(f) => Operand::Float(*f),
+        Value::String(s) => Operand::Str(s),
+        Value::Bool(_) => Operand::Bool,
+        Value::Null => Operand::Null,
+        other => Operand::Other(other.type_name()),
+    }
+}
+
+/// How a block expression finished.
+enum BlockExit {
+    Value(Value),
+    Return(Value),
 }
 
 /// Control flow signals
@@ -1244,36 +1309,39 @@ impl Interpreter {
         let mut last = Value::Null;
         for spanned in &program.statements {
             self.current_line = spanned.line;
-            match self.exec_stmt(&spanned.stmt).map_err(|mut e| {
+            let patch = |mut e: RuntimeError| {
                 if e.line == 0 {
                     e.line = spanned.line;
                     e.col = spanned.col;
                 }
                 e
-            })? {
+            };
+            // Expression statements are evaluated exactly once; their value
+            // (unless it is an output call) is the REPL result.
+            if let Stmt::Expression(ref expr) = spanned.stmt {
+                let value = self.eval_expr(expr).map_err(patch)?;
+                let is_output = matches!(
+                    expr,
+                    Expr::Call { function, .. }
+                        if matches!(
+                            function.as_ref(),
+                            Expr::Ident(name)
+                                if matches!(
+                                    name.as_str(),
+                                    "print" | "println" | "say" | "yell" | "whisper"
+                                )
+                        )
+                );
+                if !is_output {
+                    last = value;
+                }
+                continue;
+            }
+            match self.exec_stmt(&spanned.stmt).map_err(patch)? {
                 Signal::Return(v) => return Ok(v),
                 Signal::Break => return Err(RuntimeError::new("break outside of loop")),
                 Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
                 Signal::None | Signal::ImplicitReturn(_) => {}
-            }
-            if let Stmt::Expression(ref expr) = spanned.stmt {
-                match expr {
-                    Expr::Call { function, .. } => {
-                        if let Expr::Ident(name) = function.as_ref() {
-                            let is_output = matches!(
-                                name.as_str(),
-                                "print" | "println" | "say" | "yell" | "whisper"
-                            );
-                            if is_output {
-                                continue;
-                            }
-                        }
-                        last = self.eval_expr(expr)?;
-                    }
-                    _ => {
-                        last = self.eval_expr(expr)?;
-                    }
-                }
             }
         }
         Ok(last)
@@ -1339,24 +1407,35 @@ impl Interpreter {
                                 name
                             )));
                         }
-                        if matches!(existing, Value::Tuple(_)) {
-                            return Err(RuntimeError::new("cannot mutate a tuple"));
-                        }
-                        if matches!(existing, Value::Set(_)) {
-                            return Err(RuntimeError::new(
-                                "cannot index-assign a set; use .add() and .remove()",
-                            ));
-                        }
-                        let mut arr = existing;
-                        if let (Value::Array(ref mut items), Value::Int(i)) = (&mut arr, &idx) {
-                            let i = *i as usize;
-                            if i < items.len() {
-                                items[i] = val;
-                            } else {
-                                return Err(RuntimeError::new("index out of bounds"));
+                        let mut container = existing;
+                        match (&mut container, &idx) {
+                            (Value::Array(items), Value::Int(i)) => {
+                                let len = items.len();
+                                let slot = crate::semantics::normalize_index(*i, len).ok_or_else(
+                                    || {
+                                        RuntimeError::new(&crate::semantics::index_out_of_bounds(
+                                            *i, "array", len,
+                                        ))
+                                    },
+                                )?;
+                                items[slot] = val;
+                            }
+                            (Value::Object(map), Value::String(key)) => {
+                                map.insert(key.clone(), val);
+                            }
+                            (Value::Array(_) | Value::Object(_), other) => {
+                                return Err(RuntimeError::new(&crate::semantics::invalid_index(
+                                    container.type_name(),
+                                    other.type_name(),
+                                )));
+                            }
+                            (other, _) => {
+                                return Err(RuntimeError::new(
+                                    &crate::semantics::invalid_index_assign(other.type_name()),
+                                ));
                             }
                         }
-                        self.env.set(&name, arr)?;
+                        self.env.set(&name, container)?;
                     }
                     _ => return Err(RuntimeError::new("invalid assignment target")),
                 }
@@ -1858,12 +1937,7 @@ impl Interpreter {
             },
 
             Stmt::Import { path, names } => {
-                let builtin_modules = [
-                    "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log",
-                    "term", "http", "csv", "exec", "time", "url", "toml", "npc", "ws", "jwt",
-                    "mysql",
-                ];
-                if builtin_modules.contains(&path.as_str()) {
+                if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
                     if self.env.get(path).is_some() {
                         return Ok(Signal::None);
                     }
@@ -1881,10 +1955,7 @@ impl Interpreter {
                 {
                     Some(p) => p,
                     None => {
-                        return Err(RuntimeError::new(&format!(
-                            "cannot import '{}': file not found (checked {0}.fg, forge_modules/{0}/main.fg)",
-                            path
-                        )));
+                        return Err(RuntimeError::new(&crate::semantics::import_not_found(path)));
                     }
                 };
                 let source = std::fs::read_to_string(&file_path)
@@ -1908,9 +1979,10 @@ impl Interpreter {
 
                 if let Some(name_list) = names {
                     for name in name_list {
-                        if let Some(val) = import_interp.env.get(name) {
-                            self.env.define(name.to_string(), val);
-                        }
+                        let val = import_interp.env.get(name).ok_or_else(|| {
+                            RuntimeError::new(&crate::semantics::import_missing_name(path, name))
+                        })?;
+                        self.env.define(name.to_string(), bind_to_module_scope(val));
                     }
                 } else {
                     // Import all top-level definitions
@@ -1918,7 +1990,7 @@ impl Interpreter {
                         match &spanned.stmt {
                             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
                                 if let Some(val) = import_interp.env.get(name) {
-                                    self.env.define(name.clone(), val);
+                                    self.env.define(name.clone(), bind_to_module_scope(val));
                                 }
                             }
                             Stmt::StructDef { name, .. } => {
@@ -2038,7 +2110,7 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
-            Stmt::YieldStmt(_expr) => Ok(Signal::None),
+            Stmt::YieldStmt(_expr) => Err(RuntimeError::new(crate::semantics::YIELD_UNSUPPORTED)),
 
             Stmt::When { subject, arms } => {
                 let val = self.eval_expr(subject)?;
@@ -2049,23 +2121,21 @@ impl Interpreter {
                     }
                     if let (Some(op), Some(cmp_val)) = (&arm.op, &arm.value) {
                         let cmp = self.eval_expr(cmp_val)?;
-                        let matches = match (op, &val, &cmp) {
-                            (BinOp::Lt, Value::Int(a), Value::Int(b)) => a < b,
-                            (BinOp::Gt, Value::Int(a), Value::Int(b)) => a > b,
-                            (BinOp::LtEq, Value::Int(a), Value::Int(b)) => a <= b,
-                            (BinOp::GtEq, Value::Int(a), Value::Int(b)) => a >= b,
-                            (BinOp::Eq, _, _) => format!("{}", val) == format!("{}", cmp),
-                            (BinOp::NotEq, _, _) => format!("{}", val) != format!("{}", cmp),
-                            (BinOp::Lt, Value::Float(a), Value::Float(b)) => a < b,
-                            (BinOp::Gt, Value::Float(a), Value::Float(b)) => a > b,
-                            (BinOp::LtEq, Value::Float(a), Value::Float(b)) => a <= b,
-                            (BinOp::GtEq, Value::Float(a), Value::Float(b)) => a >= b,
-                            (BinOp::Lt, Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
-                            (BinOp::Gt, Value::Int(a), Value::Float(b)) => (*a as f64) > *b,
-                            (BinOp::Lt, Value::Float(a), Value::Int(b)) => *a < (*b as f64),
-                            (BinOp::Gt, Value::Float(a), Value::Int(b)) => *a > (*b as f64),
-                            _ => false,
+                        let op_text = match op {
+                            BinOp::Eq => "==",
+                            BinOp::NotEq => "!=",
+                            BinOp::Lt => "<",
+                            BinOp::Gt => ">",
+                            BinOp::LtEq => "<=",
+                            BinOp::GtEq => ">=",
+                            _ => "",
                         };
+                        let matches = crate::semantics::when_matches(
+                            op_text,
+                            semantic_operand(&val),
+                            semantic_operand(&cmp),
+                            format!("{}", val) == format!("{}", cmp),
+                        );
                         if matches {
                             let result = self.eval_expr(&arm.result)?;
                             return Ok(Signal::ImplicitReturn(result));
@@ -2103,9 +2173,8 @@ impl Interpreter {
                     CheckKind::IsTrue => val.is_truthy(),
                 };
                 if !valid {
-                    return Err(RuntimeError::new(&format!(
-                        "check failed: {} did not pass validation",
-                        val
+                    return Err(RuntimeError::new(&crate::semantics::check_failed(
+                        &val.to_string(),
                     )));
                 }
                 Ok(Signal::None)
@@ -2238,6 +2307,64 @@ impl Interpreter {
                 Ok(Signal::None)
             }
         }
+    }
+
+    /// Value of a block expression (`if`/`when`/`safe` expressions and
+    /// `{ ... }` blocks): the value of the final statement — an expression's
+    /// value, the taken branch of an `if`, the matched arm of a `when`, the
+    /// result of a `safe` block — or null for any other statement. The VM
+    /// compiler implements the same rule (`compile_block_value`).
+    fn eval_block_value(&mut self, stmts: &[SpannedStmt]) -> Result<BlockExit, RuntimeError> {
+        let patch_err = |mut e: RuntimeError, s: &SpannedStmt| -> RuntimeError {
+            if e.line == 0 {
+                e.line = s.line;
+                e.col = s.col;
+            }
+            e
+        };
+        let mut last = Value::Null;
+        for spanned in stmts {
+            self.current_line = spanned.line;
+            last = Value::Null;
+            match &spanned.stmt {
+                Stmt::Expression(expr) => {
+                    last = self.eval_expr(expr).map_err(|e| patch_err(e, spanned))?;
+                }
+                Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    let cond = self
+                        .eval_expr(condition)
+                        .map_err(|e| patch_err(e, spanned))?;
+                    let branch = if cond.is_truthy() {
+                        Some(then_body)
+                    } else {
+                        else_body.as_ref()
+                    };
+                    if let Some(branch) = branch {
+                        self.env.push_scope();
+                        let result = self.eval_block_value(branch);
+                        self.env.pop_scope();
+                        match result? {
+                            BlockExit::Value(v) => last = v,
+                            exit @ BlockExit::Return(_) => return Ok(exit),
+                        }
+                    }
+                }
+                stmt => match self.exec_stmt(stmt).map_err(|e| patch_err(e, spanned))? {
+                    Signal::Return(v) => return Ok(BlockExit::Return(v)),
+                    Signal::ImplicitReturn(v) => {
+                        if matches!(stmt, Stmt::When { .. } | Stmt::SafeBlock { .. }) {
+                            last = v;
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+        Ok(BlockExit::Value(last))
     }
 
     fn exec_block(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
@@ -2451,13 +2578,10 @@ impl Interpreter {
 
             Expr::Ident(name) => self.env.get(name).ok_or_else(|| {
                 let suggestion = self.env.suggest_similar(name);
-                let mut msg = format!("undefined variable: '{}'", name);
-                if let Some(similar) = suggestion {
-                    msg.push_str(&format!("\n  hint: did you mean '{}'?", similar));
-                } else {
-                    msg.push_str("\n  hint: make sure the variable is defined before use");
-                }
-                RuntimeError::new(&msg)
+                RuntimeError::new(&crate::semantics::undefined_variable(
+                    name,
+                    suggestion.as_deref(),
+                ))
             }),
 
             Expr::BinOp { left, op, right } => {
@@ -2610,29 +2734,28 @@ impl Interpreter {
                 };
                 match (inner, &idx) {
                     (Value::Array(items) | Value::Tuple(items), Value::Int(i)) => {
-                        // Support negative indices (Python-style: -1 = last)
-                        let len = items.len() as i64;
-                        let actual = if *i < 0 { len + i } else { *i };
-                        if actual < 0 || actual >= len {
-                            Err(RuntimeError::new(&format!(
-                                "index out of bounds: index {} on {} of length {}",
-                                i,
+                        // Negative indices count from the end (shared with the VM).
+                        match crate::semantics::normalize_index(*i, items.len()) {
+                            Some(slot) => Ok(items[slot].clone()),
+                            None => Err(RuntimeError::new(&crate::semantics::index_out_of_bounds(
+                                *i,
                                 if matches!(inner, Value::Tuple(_)) {
                                     "tuple"
                                 } else {
                                     "array"
                                 },
-                                len
-                            )))
-                        } else {
-                            Ok(items[actual as usize].clone())
+                                items.len(),
+                            ))),
                         }
                     }
                     (Value::Object(map), Value::String(key)) => map
                         .get(key)
                         .cloned()
-                        .ok_or_else(|| RuntimeError::new(&format!("key '{}' not found", key))),
-                    _ => Err(RuntimeError::new("invalid index operation")),
+                        .ok_or_else(|| RuntimeError::new(&crate::semantics::missing_key(key))),
+                    (container, index) => Err(RuntimeError::new(&crate::semantics::invalid_index(
+                        container.type_name(),
+                        index.type_name(),
+                    ))),
                 }
             }
 
@@ -3407,65 +3530,11 @@ impl Interpreter {
 
             Expr::Block(stmts) => {
                 self.env.push_scope();
-                let mut last = Value::Null;
-                let patch_err = |mut e: RuntimeError, s: &SpannedStmt| -> RuntimeError {
-                    if e.line == 0 {
-                        e.line = s.line;
-                        e.col = s.col;
-                    }
-                    e
-                };
-                for spanned in stmts {
-                    self.current_line = spanned.line;
-                    let stmt = &spanned.stmt;
-                    match stmt {
-                        Stmt::If {
-                            condition,
-                            then_body,
-                            else_body,
-                        } => {
-                            let cond = self
-                                .eval_expr(condition)
-                                .map_err(|e| patch_err(e, spanned))?;
-                            let branch = if cond.is_truthy() {
-                                then_body
-                            } else if let Some(eb) = else_body {
-                                eb
-                            } else {
-                                &vec![]
-                            };
-                            for s in branch {
-                                self.current_line = s.line;
-                                if let Signal::Return(v) =
-                                    self.exec_stmt(&s.stmt).map_err(|e| patch_err(e, s))?
-                                {
-                                    self.env.pop_scope();
-                                    return Ok(v);
-                                }
-                                if let Stmt::Expression(e) = &s.stmt {
-                                    last = self.eval_expr(e).map_err(|e| patch_err(e, s))?;
-                                }
-                            }
-                        }
-                        _ => match self.exec_stmt(stmt).map_err(|e| patch_err(e, spanned))? {
-                            Signal::Return(v) => {
-                                self.env.pop_scope();
-                                return Ok(v);
-                            }
-                            Signal::ImplicitReturn(v) => {
-                                last = v;
-                            }
-                            _ => {
-                                if let Stmt::Expression(expr) = stmt {
-                                    last =
-                                        self.eval_expr(expr).map_err(|e| patch_err(e, spanned))?;
-                                }
-                            }
-                        },
-                    }
-                }
+                let result = self.eval_block_value(stmts);
                 self.env.pop_scope();
-                Ok(last)
+                match result? {
+                    BlockExit::Value(v) | BlockExit::Return(v) => Ok(v),
+                }
             }
 
             Expr::Spawn(body) => self.spawn_task(body),
@@ -3739,6 +3808,22 @@ impl Interpreter {
     }
 
     fn eval_binop(&self, left: &Value, op: &BinOp, right: &Value) -> Result<Value, RuntimeError> {
+        // Arithmetic and ordering follow the rules shared with the VM.
+        if let Some(shared_op) = shared_binary_op(op) {
+            return match crate::semantics::binary(
+                shared_op,
+                semantic_operand(left),
+                semantic_operand(right),
+            ) {
+                Ok(crate::semantics::Outcome::Int(n)) => Ok(Value::Int(n)),
+                Ok(crate::semantics::Outcome::Float(f)) => Ok(Value::Float(f)),
+                Ok(crate::semantics::Outcome::Bool(b)) => Ok(Value::Bool(b)),
+                Ok(crate::semantics::Outcome::Concat) => {
+                    Ok(Value::String(format!("{}{}", left, right)))
+                }
+                Err(message) => Err(RuntimeError::new(&message)),
+            };
+        }
         match (left, right) {
             (Value::Int(a), Value::Int(b)) => match op {
                 BinOp::Add => match a.checked_add(*b) {

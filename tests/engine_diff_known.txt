@@ -1,0 +1,25 @@
+# Expectations for tests/engine_diff.rs (interpreter vs VM differential test).
+#
+#   skip <path>      not compared: needs a server/network/database, or its
+#                    output is nondeterministic
+#   diverges <path>  known interpreter/VM divergence that is not fixed yet;
+#                    the test fails once it stops diverging so the entry is
+#                    removed together with the fix
+#
+# Paths are relative to the repository root. Keep a reason after `#`.
+
+# Servers, network, databases
+skip examples/api.fg                     # @server
+skip examples/bench_client.fg            # HTTP client benchmark against a running server
+skip examples/bench_server.fg            # @server
+skip examples/bench_server_closure.fg    # @server
+skip examples/bench_server_concurrent.fg # @server
+skip examples/fetch_demo.fg              # network
+skip examples/db_parameterized.fg        # database
+skip examples/mysql_demo.fg              # MySQL server
+skip tests/mysql_test.fg                 # MySQL server
+
+# Known VM standard-library gaps (language semantics agree; these are
+# missing or differently-shaped builtins in src/vm/builtins.rs)
+diverges tests/error_handling_test.fg        # io.args_has / args_get / args_parse missing on the VM
+diverges tests/npc_test.fg                   # `npc` module missing on the VM

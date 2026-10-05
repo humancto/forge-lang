@@ -64,11 +64,15 @@ pub enum OpCode {
     IterGet, // A=dst, B=obj_reg, C=idx_reg — like GetIndex but allows Set (for for-loop iteration)
     SquadBegin, // A=dst (push squad context for collecting spawn handles)
     SquadEnd, // A=dst (join all collected handles, produce result array)
+    /// A=first register, B=last register (inclusive). Detaches any open
+    /// upvalue cells for locals in that range so the next binding stored in
+    /// those registers (e.g. the next loop iteration) gets a fresh cell.
+    CloseUpvalues,
 }
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::SquadEnd as u8 + 1 == 61);
+const _: () = assert!(OpCode::CloseUpvalues as u8 + 1 == 62);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -136,6 +140,7 @@ impl TryFrom<u8> for OpCode {
             58 => Ok(OpCode::IterGet),
             59 => Ok(OpCode::SquadBegin),
             60 => Ok(OpCode::SquadEnd),
+            61 => Ok(OpCode::CloseUpvalues),
             _ => Err(value),
         }
     }
@@ -311,7 +316,8 @@ mod tests {
 
     #[test]
     fn try_from_invalid_opcode() {
-        assert_eq!(OpCode::try_from(61u8), Err(61));
+        assert_eq!(OpCode::try_from(61u8), Ok(OpCode::CloseUpvalues));
+        assert_eq!(OpCode::try_from(62u8), Err(62));
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }

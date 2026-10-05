@@ -1,0 +1,4 @@
+// expect: [visible:hidden, null]
+// Only the requested names are bound; the module's helper stays private.
+import { visible } from "tests/parity/modules/private_helper.fg"
+[visible(), safe { hidden_helper() }]

@@ -19,6 +19,7 @@ mod registry;
 mod repl;
 mod runtime;
 mod scaffold;
+mod semantics;
 mod stdlib;
 mod testing;
 mod typechecker;
@@ -759,8 +760,22 @@ fn vm_incompatibilities(program: &Program) -> Vec<&'static str> {
     issues.into_iter().collect()
 }
 
+/// Whether the bytecode VM can run `program` faithfully. Combines the AST
+/// scan above with a trial compile: any construct the VM compiler reports as
+/// `Unsupported` (instead of silently dropping it) is rejected here, so
+/// `forge run` falls back to the interpreter rather than misbehaving.
 fn ensure_vm_compatible(program: &Program, mode: &str) -> Result<(), String> {
-    let issues = vm_incompatibilities(program);
+    let mut issues: Vec<String> = vm_incompatibilities(program)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if issues.is_empty() {
+        if let Err(e) = vm::compiler::compile(program) {
+            if e.is_unsupported() {
+                issues.push(e.message);
+            }
+        }
+    }
     if issues.is_empty() {
         return Ok(());
     }
@@ -771,6 +786,36 @@ fn ensure_vm_compatible(program: &Program, mode: &str) -> Result<(), String> {
         issues.join(", "),
         mode
     ))
+}
+
+/// Print a VM runtime error with the same source snippet the interpreter
+/// shows (anchored at the failing statement of the main program), followed
+/// by the VM stack trace.
+fn report_vm_error(source: &str, filename: &str, error: &vm::machine::VMError) {
+    let main_frame = error
+        .stack_trace
+        .iter()
+        .rev()
+        .find(|frame| frame.function == "<main>" && frame.line > 0);
+    match main_frame {
+        Some(frame) if source.lines().count() >= frame.line => {
+            eprintln!(
+                "{}",
+                errors::format_error(
+                    source,
+                    frame.line,
+                    frame.col.max(1),
+                    &format!("[{}] {}", filename, error.message)
+                )
+            );
+            if error.stack_trace.len() > 1 {
+                for frame in &error.stack_trace {
+                    eprintln!("  at {} (line {})", frame.function, frame.line);
+                }
+            }
+        }
+        _ => eprintln!("{}", errors::format_simple_error(&error.to_string())),
+    }
 }
 
 /// Run a package-manager operation on a plain OS thread.
@@ -793,36 +838,41 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     };
     emit_type_warnings(&warnings);
 
-    // Auto-fallback: if VM is requested but program uses decorators, fall back to interpreter
-    let effective_vm = if use_vm {
+    // Auto-fallback: if VM is requested but the program uses constructs the
+    // VM does not support (decorators, or anything the compiler rejects as
+    // `Unsupported`), run it on the interpreter instead.
+    let mut chunk = None;
+    if use_vm {
         match ensure_vm_compatible(&program, "VM") {
-            Ok(()) => true,
+            Ok(()) => {
+                let path = std::path::Path::new(filename);
+                let options = vm::compiler::CompileOptions {
+                    base_dir: path
+                        .exists()
+                        .then(|| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+                        .and_then(|p| p.parent().map(|d| d.to_path_buf())),
+                };
+                match vm::compiler::compile_with(&program, &options) {
+                    Ok(compiled) => chunk = Some(compiled),
+                    Err(e) if e.is_unsupported() => {
+                        eprintln!("  Info: falling back to interpreter ({})", e.message);
+                    }
+                    Err(e) => {
+                        eprintln!("{}", errors::format_simple_error(&e.message));
+                        process::exit(1);
+                    }
+                }
+            }
             Err(message) => {
                 eprintln!("  Info: falling back to interpreter ({})", message);
-                false
             }
         }
-    } else {
-        false
-    };
+    }
 
-    if effective_vm {
-        if profile {
-            match vm::run_with_profiling(&program) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{}", errors::format_simple_error(&e.to_string()));
-                    process::exit(1);
-                }
-            }
-        } else {
-            match vm::run(&program) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{}", errors::format_simple_error(&e.to_string()));
-                    process::exit(1);
-                }
-            }
+    if let Some(chunk) = chunk {
+        if let Err(e) = vm::run_chunk(&chunk, profile) {
+            report_vm_error(source, filename, &e);
+            process::exit(1);
         }
     } else {
         let mut interpreter = Interpreter::new();

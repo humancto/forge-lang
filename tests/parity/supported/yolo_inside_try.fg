@@ -1,0 +1,11 @@
+// expect: swallowed:None
+// A builtin that swallows errors from the closure it calls sees the error
+// before an enclosing try/catch does.
+let mut out = "none"
+try {
+    let r = yolo(fn() { return 1 / 0 })
+    out = "swallowed:" + str(r)
+} catch e {
+    out = "caught"
+}
+out

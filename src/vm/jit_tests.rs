@@ -893,7 +893,11 @@ fn jit_wrong_arity_runs_in_vm() {
          println(add(1, 2, 3))\nprintln(add(1))",
     );
     assert_eq!(out, vec!["3"]);
-    assert!(err.unwrap_or_default().contains("cannot apply Add"));
+    // `1 + null`: the shared operator rules (crate::semantics) report the
+    // same message as the interpreter.
+    assert!(err
+        .unwrap_or_default()
+        .contains("cannot perform arithmetic on null"));
 }
 
 #[test]
