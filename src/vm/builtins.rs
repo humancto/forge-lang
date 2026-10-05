@@ -10,6 +10,15 @@ use super::machine::{VMError, VM};
 use super::value::*;
 
 impl VM {
+    /// `range(start, end)` must not build more elements than the size cap
+    /// allows (`runtime::limits`); checked before allocating anything.
+    fn check_range_len(&self, start: i64, end: i64) -> Result<(), VMError> {
+        let len = (end as i128 - start as i128).max(0);
+        self.caps
+            .check_collection(usize::try_from(len).unwrap_or(usize::MAX))
+            .map_err(|m| VMError::new(&m))
+    }
+
     /// Call a native builtin inside a GC native scope (see the rooting
     /// invariants in `vm/gc.rs`): the arguments and everything the builtin
     /// allocates are pinned until it returns, so a GC triggered by a Forge
@@ -657,7 +666,11 @@ impl VM {
                     VMError::new(&format!("import '{}' compile error: {}", path, e.message))
                 })?;
                 self.execute_module(&chunk).map_err(|e| {
-                    if e.message.starts_with("circular import: ") {
+                    if e.is_unwound_to_handler() || e.is_fatal() {
+                        // Control transfer (a `timeout` around the import
+                        // fired inside it) or a fatal limit: propagate as is.
+                        e
+                    } else if e.message.starts_with("circular import: ") {
                         // Propagate the cycle report unwrapped.
                         VMError::new(&e.message)
                     } else {
@@ -811,7 +824,7 @@ impl VM {
                 args.get(1).map(|v| v.as_int(&self.gc)),
             ) {
                 (Some(start), Some(Some(end))) => {
-                    // Fallible: an impossible size is an error, not an abort.
+                    self.check_range_len(start, end)?;
                     let items: Vec<Value> =
                         crate::semantics::alloc::int_range(start, end, "range()", |n| {
                             Value::int(n, &mut self.gc)
@@ -821,6 +834,7 @@ impl VM {
                     Ok(Value::obj(r))
                 }
                 (Some(end_val), None) => {
+                    self.check_range_len(0, end_val)?;
                     let items: Vec<Value> =
                         crate::semantics::alloc::int_range(0, end_val, "range()", |n| {
                             Value::int(n, &mut self.gc)
@@ -1791,7 +1805,8 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             "shell" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("shell error: {}", e)))?;
@@ -1813,7 +1828,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "sh" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh error: {}", e)))?;
@@ -1824,7 +1840,8 @@ impl VM {
                 ))
             }
             "sh_lines" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_lines error: {}", e)))?;
@@ -1838,7 +1855,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "sh_json" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_json error: {}", e)))?;
@@ -1849,7 +1867,8 @@ impl VM {
                 self.from_interp_checked(&interp_val)
             }
             "sh_ok" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
                 let ok = crate::runtime::shell::succeeds(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_ok error: {}", e)))?;
@@ -1885,7 +1904,8 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "pipe_to" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let input = self.get_string_arg(&args, 0)?;
                 let cmd = self.get_string_arg(&args, 1)?;
                 let output = crate::runtime::shell::pipe(&cmd, input.as_bytes())
@@ -2588,6 +2608,9 @@ impl VM {
                     ValueKind::Int(n) => usize::try_from(n).unwrap_or(0),
                     _ => return Err(VMError::new("pad_start() second arg must be int")),
                 };
+                self.caps
+                    .check_string(target)
+                    .map_err(|m| VMError::new(&m))?;
                 let pad_char = match args.get(2) {
                     Some(v) => self
                         .get_string(v)
@@ -2618,6 +2641,9 @@ impl VM {
                     ValueKind::Int(n) => usize::try_from(n).unwrap_or(0),
                     _ => return Err(VMError::new("pad_end() second arg must be int")),
                 };
+                self.caps
+                    .check_string(target)
+                    .map_err(|m| VMError::new(&m))?;
                 let pad_char = match args.get(2) {
                     Some(v) => self
                         .get_string(v)
@@ -2650,6 +2676,9 @@ impl VM {
                     }
                     _ => return Err(VMError::new("repeat_str() second arg must be int")),
                 };
+                self.caps
+                    .check_string(s.len().saturating_mul(n))
+                    .map_err(|m| VMError::new(&m))?;
                 let out = crate::semantics::alloc::repeat_str(&s, n, "repeat_str()")
                     .map_err(|e| VMError::new(&e))?;
                 Ok(self.alloc_string(&out))
@@ -3099,12 +3128,8 @@ impl VM {
                     return Err(VMError::new("receive() requires (channel)"));
                 }
                 let ch_arc = self.extract_channel(&args[0])?;
-                let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
-                match &*guard {
-                    Some(rx) => match rx.recv() {
-                        Ok(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
-                        Err(_) => Ok(Value::null()),
-                    },
+                match self.receive_cancellable(&ch_arc)? {
+                    Some(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
                     None => Ok(Value::null()),
                 }
             }
@@ -3219,6 +3244,7 @@ impl VM {
                         }
                     }
                     offset = (offset + 1) % len;
+                    self.wait_interrupted()?;
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
@@ -3308,12 +3334,7 @@ impl VM {
                 for item in &items {
                     let maybe_slot = self.extract_task_handle(item);
                     if let Some(slot) = maybe_slot {
-                        let (lock, cvar) = &*slot;
-                        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        while guard.is_none() {
-                            guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
-                        }
-                        let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
+                        let shared = self.wait_task_result(&slot)?;
                         let val = shared_to_value(&mut self.gc, &shared);
                         // Fail-fast: propagate ResultErr immediately
                         match val.classify(&self.gc) {

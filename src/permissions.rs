@@ -31,7 +31,9 @@
 //! thread must be started through [`spawn`] (or wrap its closure with
 //! [`inherit`]) so it runs under the policy of the thread that forked it.
 //! A thread started with a bare `std::thread::spawn` would silently fall back
-//! to the process-wide policy — a sandbox escape for embedders.
+//! to the process-wide policy — a sandbox escape for embedders. The same
+//! wrapper carries the run's resource budget (`runtime::limits`), so a forked
+//! thread also charges the fuel, memory and handle limits of its parent.
 //!
 //! Engine-agnostic by construction: the checks live in the shared stdlib (and
 //! as one-line calls in the few builtins each engine implements itself), so
@@ -719,15 +721,19 @@ pub fn scope(caps: Arc<Capabilities>) -> PolicyGuard {
 }
 
 /// Wrap `f` so that, wherever it runs, it runs under the policy that is
-/// current *here*. Use for `tokio::task::spawn_blocking` and friends.
+/// current *here* — and charges the resource budget that is current here
+/// ([`crate::runtime::limits`]). Use for `tokio::task::spawn_blocking` and
+/// friends.
 pub fn inherit<F, T>(f: F) -> impl FnOnce() -> T + Send + 'static
 where
     F: FnOnce() -> T + Send + 'static,
     T: 'static,
 {
     let caps = current();
+    let budget = crate::runtime::limits::current();
     move || {
         let _guard = scope(caps);
+        let _limits = crate::runtime::limits::scope(budget);
         f()
     }
 }
@@ -821,6 +827,15 @@ pub fn set_allow_run(allowed: bool) {
 /// Check that subprocess execution is allowed.
 pub fn check_run_permission() -> Result<(), String> {
     require(Capability::Run, "shell execution").map_err(String::from)
+}
+
+/// Check that subprocess execution is allowed and take a subprocess slot
+/// from the run's resource budget (`runtime::limits`). Keep the slot alive
+/// until the subprocess has exited. Every builtin that starts a process
+/// goes through this.
+pub fn begin_subprocess() -> Result<crate::runtime::limits::Slot, String> {
+    check_run_permission()?;
+    crate::runtime::limits::acquire(crate::runtime::limits::Resource::Processes)
 }
 
 #[cfg(test)]

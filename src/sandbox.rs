@@ -8,6 +8,7 @@
 //!     .allow(Capability::Ai)
 //!     .allow_read(["./data"])                  // scoped grant
 //!     .max_time(Duration::from_secs(2))        // wall-clock limit
+//!     .max_fuel(10_000_000)                    // deterministic step budget
 //!     .run_source(r#"say "hello from the sandbox""#)
 //!     .expect("script failed");
 //! assert_eq!(out.stdout, "hello from the sandbox\n");
@@ -33,13 +34,28 @@
 //!   [`Sandbox::max_output`] bounds how much a program may print.
 //! * **Cancellation.** [`Sandbox::run_source_cancellable`] takes a
 //!   [`CancelHandle`] the host can trigger from another thread.
+//! * **Resource limits** ([`Sandbox::limits`], `runtime::limits`):
+//!   - [`Sandbox::max_fuel`] — a deterministic step budget (one step per
+//!     statement, call and loop iteration). Running out is
+//!     [`SandboxError::FuelExhausted`], at exactly the same step every time
+//!     for a single-threaded program, whatever the machine's speed.
+//!   - [`Sandbox::max_memory`] — bytes the run's threads may hold, polled at
+//!     every step; exceeding it is [`SandboxError::MemoryLimit`]. Needs
+//!     [`crate::CountingAllocator`] as the host's global allocator (the run
+//!     fails with a clear error otherwise).
+//!   - caps on concurrently open files, sockets, subprocesses and tasks, on
+//!     the size of one string or collection, and on imports — exceeding one
+//!     is [`SandboxError::ResourceLimit`] unless the program catches it.
+//!
+//!   Fuel and memory exhaustion cannot be caught by the program. The host
+//!   process is unaffected either way: the run's memory is released when
+//!   its worker thread ends.
 //!
 //! # Current limits (future work)
 //!
 //! * Runs on the tree-walking interpreter. HTTP servers, `schedule` and
 //!   `watch` blocks are host-runtime features and are not started.
-//! * No memory limit yet; call depth is bounded by the engine's recursion
-//!   limit.
+//! * Call depth is bounded by the engine's recursion limit.
 //! * stderr output (`log`, `term`, warnings) is not captured.
 //! * The host's stdin is only readable with the `process` capability
 //!   (denied by default): without it `input()` / `io.prompt` see an empty
@@ -50,6 +66,7 @@ use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::permissions::{self, Capabilities, Capability};
+use crate::runtime::limits::{self, Budget, LimitKind, Limits, Trip};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -72,6 +89,7 @@ pub struct Sandbox {
     caps: Capabilities,
     max_time: Option<Duration>,
     max_output: Option<usize>,
+    limits: Limits,
     source_label: String,
 }
 
@@ -126,6 +144,14 @@ pub enum SandboxError {
     OutputLimit { limit: usize, stdout: String },
     /// The host cancelled the run through its [`CancelHandle`].
     Cancelled { stdout: String },
+    /// The program used up its [`Sandbox::max_fuel`] budget.
+    FuelExhausted { limit: u64, stdout: String },
+    /// The program needed more than [`Sandbox::max_memory`] bytes.
+    MemoryLimit { limit: usize, stdout: String },
+    /// The program exceeded another resource limit (open handles, value
+    /// size, imports) and did not catch the error. `message` starts with
+    /// `resource limit exceeded:`.
+    ResourceLimit { message: String, stdout: String },
 }
 
 impl SandboxError {
@@ -137,12 +163,16 @@ impl SandboxError {
             | SandboxError::Runtime { stdout, .. }
             | SandboxError::Timeout { stdout, .. }
             | SandboxError::OutputLimit { stdout, .. }
-            | SandboxError::Cancelled { stdout } => stdout,
+            | SandboxError::Cancelled { stdout }
+            | SandboxError::FuelExhausted { stdout, .. }
+            | SandboxError::MemoryLimit { stdout, .. }
+            | SandboxError::ResourceLimit { stdout, .. } => stdout,
         }
     }
 
     /// Stable machine-readable kind: `syntax`, `permission_denied`,
-    /// `runtime`, `timeout`, `output_limit` or `cancelled`.
+    /// `runtime`, `timeout`, `output_limit`, `cancelled`, `fuel_exhausted`,
+    /// `memory_limit` or `resource_limit`.
     pub fn kind(&self) -> &'static str {
         match self {
             SandboxError::Syntax { .. } => "syntax",
@@ -151,6 +181,9 @@ impl SandboxError {
             SandboxError::Timeout { .. } => "timeout",
             SandboxError::OutputLimit { .. } => "output_limit",
             SandboxError::Cancelled { .. } => "cancelled",
+            SandboxError::FuelExhausted { .. } => "fuel_exhausted",
+            SandboxError::MemoryLimit { .. } => "memory_limit",
+            SandboxError::ResourceLimit { .. } => "resource_limit",
         }
     }
 }
@@ -171,6 +204,19 @@ impl std::fmt::Display for SandboxError {
                 write!(f, "output exceeded the limit of {} bytes", limit)
             }
             SandboxError::Cancelled { .. } => f.write_str("execution cancelled by the host"),
+            SandboxError::FuelExhausted { limit, .. } => write!(
+                f,
+                "{}: the program ran more than {} steps",
+                limits::FUEL_EXHAUSTED,
+                limit
+            ),
+            SandboxError::MemoryLimit { limit, .. } => write!(
+                f,
+                "{}: the program needed more than {}",
+                limits::MEMORY_LIMIT_EXCEEDED,
+                limits::format_bytes(*limit)
+            ),
+            SandboxError::ResourceLimit { message, .. } => f.write_str(message),
         }
     }
 }
@@ -190,6 +236,7 @@ impl Sandbox {
             caps: Capabilities::deny_all(),
             max_time: None,
             max_output: None,
+            limits: Limits::none(),
             source_label: "<sandbox>".to_string(),
         }
     }
@@ -266,6 +313,32 @@ impl Sandbox {
         self
     }
 
+    /// Deterministic step budget for one run: one step per statement,
+    /// function call and loop iteration. See [`SandboxError::FuelExhausted`].
+    pub fn max_fuel(mut self, steps: u64) -> Self {
+        self.limits.max_fuel = Some(steps);
+        self
+    }
+
+    /// Bytes of memory one run may hold. Requires
+    /// [`crate::CountingAllocator`] as the global allocator.
+    pub fn max_memory(mut self, bytes: usize) -> Self {
+        self.limits.max_memory = Some(bytes);
+        self
+    }
+
+    /// Replace every resource limit at once (fuel, memory, handles, value
+    /// sizes, imports).
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// The resource limits this sandbox runs under.
+    pub fn resource_limits(&self) -> &Limits {
+        &self.limits
+    }
+
     /// Label used in error messages (e.g. the agent tool name).
     pub fn source_label(mut self, label: impl Into<String>) -> Self {
         self.source_label = label.into();
@@ -307,6 +380,18 @@ impl Sandbox {
                 stdout: String::new(),
             });
         }
+        if self.limits.max_memory.is_some() && !limits::allocation_meter_installed() {
+            return Err(SandboxError::Runtime {
+                message: "Sandbox::max_memory needs forge_lang::CountingAllocator as the \
+                          global allocator to measure the interpreter's memory"
+                    .to_string(),
+                line: 0,
+                stdout: String::new(),
+            });
+        }
+        // A fresh budget per run: fuel, memory and handles are never shared
+        // between runs or sandboxes.
+        let budget = Budget::new(self.limits.clone());
         // The flag the interpreter polls. Separate from the host's handle,
         // so a timeout or output-limit stop is not reported as a cancel.
         let cancel = Arc::new(AtomicBool::new(false));
@@ -315,9 +400,10 @@ impl Sandbox {
 
         let worker_sink = sink.clone();
         let worker_cancel = cancel.clone();
+        let worker_budget = budget.clone();
         let label = self.source_label.clone();
         let source = source.to_string();
-        let budget = self
+        let output_budget = self
             .max_output
             .map(|limit| (Arc::new(std::sync::atomic::AtomicUsize::new(0)), limit));
         let spawned = std::thread::Builder::new()
@@ -326,14 +412,19 @@ impl Sandbox {
             .spawn(move || {
                 crate::runtime::recursion::register_thread_stack(WORKER_STACK_SIZE);
                 let _policy = permissions::scope(caps);
+                let _limits = limits::scope(Some(worker_budget));
                 let mut interp = Interpreter::new();
                 interp.source = Some(source);
                 interp.source_file = Some(label.into());
                 interp.output_sink = Some(worker_sink);
-                interp.output_budget = budget;
+                interp.output_budget = output_budget;
                 interp.cancelled = worker_cancel;
                 interp.set_defer_host_runtime(true);
                 let result = interp.run(&program).map(|_| ());
+                // Release the run's memory (and its accounting) before
+                // reporting, still under the run's budget.
+                drop(interp);
+                drop(program);
                 let _ = tx.send(result.map_err(|e| (e.message, e.line)));
             });
         if let Err(e) = spawned {
@@ -406,9 +497,22 @@ impl Sandbox {
         if host_cancel.is_cancelled() && outcome.as_ref().is_some_and(|r| r.is_err()) {
             return Err(SandboxError::Cancelled { stdout });
         }
+        // A fatal limit is reported even if a builtin swallowed the error
+        // (the budget remembers the trip).
+        if let Some(trip) = budget.tripped() {
+            return Err(self.limit_error(trip, stdout));
+        }
         match outcome {
             Some(Ok(())) => Ok(Output { stdout }),
             Some(Err((message, line))) => {
+                match limits::classify(&message) {
+                    Some(LimitKind::Fuel) => return Err(self.limit_error(Trip::Fuel, stdout)),
+                    Some(LimitKind::Memory) => return Err(self.limit_error(Trip::Memory, stdout)),
+                    Some(LimitKind::Resource) => {
+                        return Err(SandboxError::ResourceLimit { message, stdout })
+                    }
+                    None => {}
+                }
                 if message.starts_with("permission denied:") {
                     Err(SandboxError::PermissionDenied { message, stdout })
                 } else {
@@ -424,6 +528,21 @@ impl Sandbox {
                 line: 0,
                 stdout,
             }),
+        }
+    }
+}
+
+impl Sandbox {
+    fn limit_error(&self, trip: Trip, stdout: String) -> SandboxError {
+        match trip {
+            Trip::Fuel => SandboxError::FuelExhausted {
+                limit: self.limits.max_fuel.unwrap_or(0),
+                stdout,
+            },
+            Trip::Memory => SandboxError::MemoryLimit {
+                limit: self.limits.max_memory.unwrap_or(0),
+                stdout,
+            },
         }
     }
 }
@@ -724,5 +843,199 @@ mod tests {
         let _ = Sandbox::new().run_source("say 1");
         // The calling thread is still under the process-wide policy.
         assert!(permissions::require(Capability::Env, "").is_ok());
+    }
+
+    // -- resource limits -------------------------------------------------
+
+    const COUNTER: &str =
+        "let mut i = 0\nwhile true {\n  i = i + 1\n  if i % 100 == 0 { say i }\n}";
+
+    #[test]
+    fn fuel_exhaustion_is_typed_and_deterministic() {
+        let sb = Sandbox::new().max_fuel(20_000);
+        let first = sb.run_source(COUNTER);
+        let second = sb.run_source(COUNTER);
+        match (&first, &second) {
+            (
+                Err(SandboxError::FuelExhausted { limit, stdout }),
+                Err(SandboxError::FuelExhausted { stdout: again, .. }),
+            ) => {
+                assert_eq!(*limit, 20_000);
+                assert!(!stdout.is_empty());
+                // Exhaustion happens at exactly the same step every run.
+                assert_eq!(stdout, again);
+            }
+            other => panic!("{other:?}"),
+        }
+        let e = first.expect_err("fuel");
+        assert_eq!(e.kind(), "fuel_exhausted");
+        assert!(e.to_string().starts_with("fuel exhausted"), "{e}");
+    }
+
+    #[test]
+    fn fuel_cannot_be_caught_or_swallowed() {
+        let sb = Sandbox::new().max_fuel(5_000);
+        for src in [
+            "try { while true { } } catch e { say \"caught\" }\nsay \"after\"",
+            "safe { while true { } }\nsay \"after\"",
+            "let t = assert_throws(fn() { while true { } })\nsay \"after\"",
+            // A swallowed trip as the very last statement still fails the run.
+            "let t = assert_throws(fn() { while true { } })",
+        ] {
+            match sb.run_source(src) {
+                Err(SandboxError::FuelExhausted { stdout, .. }) => {
+                    assert!(
+                        !stdout.contains("caught") && !stdout.contains("after"),
+                        "{src}: {stdout}"
+                    )
+                }
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fuel_counts_recursion_and_empty_loops() {
+        let sb = Sandbox::new().max_fuel(10_000);
+        for src in [
+            "while true { }",
+            "loop { }",
+            "fn f(n) { return f(n + 1) }\nf(0)",
+            "for x in range(0, 100000) { }",
+        ] {
+            assert!(
+                matches!(sb.run_source(src), Err(SandboxError::FuelExhausted { .. })),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_limit_is_typed_and_the_host_survives() {
+        let start = std::time::Instant::now();
+        let sb = Sandbox::new()
+            .max_memory(16 << 20)
+            .max_time(Duration::from_secs(60));
+        let r = sb.run_source(
+            "say \"start\"\nlet mut kept = []\nwhile true { kept.push(\"some text that stays alive \" + str(len(kept))) }",
+        );
+        match r {
+            Err(e @ SandboxError::MemoryLimit { .. }) => {
+                assert_eq!(e.kind(), "memory_limit");
+                assert_eq!(e.stdout(), "start\n");
+                assert!(e.to_string().starts_with("memory limit exceeded"), "{e}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(start.elapsed() < Duration::from_secs(30));
+        // The host is fine and the next run starts from a clean budget.
+        let out = sb
+            .run_source("let xs = range(0, 1000)\nsay len(xs)")
+            .expect("runs");
+        assert_eq!(out.stdout, "1000\n");
+        // Uncatchable, like fuel.
+        assert!(matches!(
+            sb.run_source(
+                "try { let mut k = []\nwhile true { k.push(\"xxxxxxxxxxxxxxxxxxxxxxxx\") } } catch e { say \"caught\" }"
+            ),
+            Err(SandboxError::MemoryLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn size_caps_reject_single_huge_allocations() {
+        // With a memory limit the caps default to what it could hold, so
+        // these fail fast instead of trying to allocate terabytes.
+        let sb = Sandbox::new().max_memory(32 << 20);
+        for src in [
+            "let s = repeat_str(\"x\", 1000000000000)",
+            "let r = range(1000000000000)",
+            "let p = pad_end(\"x\", 1000000000000)",
+        ] {
+            match sb.run_source(src) {
+                Err(e @ SandboxError::ResourceLimit { .. }) => {
+                    assert_eq!(e.kind(), "resource_limit");
+                    assert!(e.to_string().starts_with("resource limit exceeded"), "{e}");
+                }
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        // Catchable.
+        let out = sb
+            .run_source("try { let r = range(1000000000000) } catch e { say \"too big\" }")
+            .expect("caught");
+        assert_eq!(out.stdout, "too big\n");
+        // An explicit cap stops doubling concatenation at the cap.
+        let capped = Sandbox::new().limits(Limits {
+            max_string_bytes: Some(1 << 20),
+            ..Limits::none()
+        });
+        match capped.run_source("let mut s = \"x\"\nwhile true { s = s + s }") {
+            Err(SandboxError::ResourceLimit { message, .. }) => {
+                assert!(message.contains("limit of 1048576 bytes"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_and_import_limits() {
+        let tasks = Sandbox::new().limits(Limits {
+            max_tasks: Some(1),
+            ..Limits::none()
+        });
+        match tasks.run_source("let a = spawn { wait(0.3) }\nlet b = spawn { return 1 }") {
+            Err(SandboxError::ResourceLimit { message, .. }) => {
+                assert!(message.contains("too many tasks (limit 1)"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(tasks
+            .run_source("let a = spawn { return 1 }\nawait a\nlet b = spawn { return 2 }\nawait b")
+            .is_ok());
+
+        let procs = Sandbox::new().allow(Capability::Run).limits(Limits {
+            max_processes: Some(0),
+            ..Limits::none()
+        });
+        assert!(matches!(
+            procs.run_source("sh(\"echo hi\")"),
+            Err(SandboxError::ResourceLimit { .. })
+        ));
+
+        let dir = tmpdir("imports");
+        std::fs::write(dir.join("m.fg"), "fn helper() { return 1 }").expect("write");
+        let imports = Sandbox::new().allow_read([&dir]).limits(Limits {
+            max_imports: Some(0),
+            ..Limits::none()
+        });
+        let src = format!("import \"{}/m.fg\"\nsay helper()", dir.display());
+        assert!(
+            matches!(
+                imports.run_source(&src),
+                Err(SandboxError::ResourceLimit { .. })
+            ),
+            "{:?}",
+            imports.run_source(&src)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normal_programs_run_unchanged_under_limits() {
+        let src = "fn fib(n) { if n < 2 { return n }\nreturn fib(n - 1) + fib(n - 2) }\nlet xs = map(range(0, 50), fn(x) { return x * x })\nlet mut s = \"\"\nfor x in xs { s = s + str(x) }\nsay fib(15)\nsay len(s)\nlet h = spawn { return 7 }\nsay await h";
+        let free = Sandbox::new().run_source(src).expect("unlimited");
+        let limited = Sandbox::new()
+            .limits(Limits {
+                max_fuel: Some(10_000_000),
+                max_memory: Some(64 << 20),
+                max_tasks: Some(4),
+                max_imports: Some(4),
+                ..Limits::none()
+            })
+            .run_source(src)
+            .expect("limited");
+        assert_eq!(free, limited);
+        assert!(limited.stdout.starts_with("610\n"), "{}", limited.stdout);
     }
 }

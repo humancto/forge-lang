@@ -498,6 +498,7 @@ impl Interpreter {
                     Err(e) => return Some(Err(e)),
                 };
                 let rhs = peel_frozen(&rhs);
+                let caps = self.caps;
                 Some(self.env.with_value_mut(x, |cur| {
                     if let (Value::String(s), BinOp::Add) = (&mut *cur, op) {
                         let concat = matches!(
@@ -510,7 +511,12 @@ impl Interpreter {
                         );
                         if concat {
                             use std::fmt::Write as _;
+                            let before = s.len();
                             let _ = write!(s, "{}", rhs);
+                            if let Err(m) = caps.check_string(s.len()) {
+                                s.truncate(before);
+                                return Err(RuntimeError::new(&m));
+                            }
                             return Ok(());
                         }
                     }

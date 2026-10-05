@@ -52,6 +52,9 @@ fn display_path(path: &Path) -> String {
 
 /// Push `path` onto the current thread's import chain, or report a cycle.
 pub fn enter_import(path: &Path) -> Result<ImportGuard, String> {
+    // Every module load counts against the run's import limit
+    // (`runtime::limits`).
+    crate::runtime::limits::charge_import()?;
     let path = canonical(path);
     IMPORT_STACK.with(|s| {
         let mut stack = s.borrow_mut();
