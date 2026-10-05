@@ -5,72 +5,61 @@
 
 ---
 
-## Current State: v0.4.3 — Shipping, With Backend Gaps
+## Current State: v0.8.x
 
-**Status: Shipped**
+**Status: Shipped.** Version numbers below come from `Cargo.toml`; test counts from `cargo test` and `forge --allow-run test`.
 
-| Component             | State                | Details                                                                 |
-| --------------------- | -------------------- | ----------------------------------------------------------------------- |
-| Tree-walk interpreter | Complete             | Full language support, 238+ builtins                                    |
-| Bytecode VM           | Partial              | Fast backend for a supported subset; unsupported constructs are blocked |
-| JIT (Cranelift)       | Partial              | Integer-heavy functions on the same supported subset as the VM          |
-| Standard library      | 18 modules           | 238+ functions across math, fs, crypto, db, http, jwt, mysql, etc.      |
-| HTTP server           | Complete             | axum + tokio, decorator routing, WebSocket, per-request interpreter fork (~32k req/sec on trivial handlers; CPU-bound handlers scale with CPU count up to the interpreter overhead ceiling) |
-| HTTP client           | Complete             | reqwest, JSON, all methods, SSRF guard with DNS pinning                 |
-| Type checker          | Gradual              | Arity + type warnings, `--strict` turns them into hard errors           |
-| Tests                 | 644 Rust + 631 Forge | Verified locally; one Forge test is intentionally skipped               |
-| Distribution          | Complete             | crates.io, Homebrew, curl installer, GitHub Releases                    |
+| Component             | State                     | Details                                                                                                   |
+| --------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Bytecode VM           | **Default engine**        | Register VM, NaN-boxed values, mark-sweep GC. Programs using decorator-driven servers auto-fall back to the interpreter |
+| Tree-walk interpreter | Complete (`--interp`)     | Full language and stdlib surface; reference semantics for parity work                                     |
+| JIT (Cranelift)       | Opt-in (`--jit`)          | Numeric leaf functions; anything else falls back to the VM                                                |
+| Native binaries       | Shipped                   | `forge build --native` (embeds source) / `--aot` (embeds bytecode). Standalone when `libforge_lang.a` is available, launcher otherwise |
+| Standard library      | 22 global modules         | http, db/pg/mysql, jwt, crypto, fs, csv, json, regex, term, os, path, time, url, toml, npc, ws, ...        |
+| HTTP server           | Complete                  | axum + tokio, decorator routing, WebSocket, per-request interpreter fork, backpressure, request ids, tracing/OTel |
+| HTTP client           | Complete                  | reqwest, all methods, SSRF guard with DNS pinning                                                          |
+| Concurrency           | Complete                  | `squad`/`spawn` structured concurrency, channels, `select`, `await_all`, `await_timeout`                   |
+| Packages              | Working                   | `forge.toml`, `forge install/add/update/search/publish`, semver resolution, lockfile checksums             |
+| Tooling               | Working                   | LSP, DAP, formatter, test runner with coverage, `forge doc`, `forge watch`                                 |
+| Type checker          | Gradual                   | Arity + type warnings; `--strict` turns them into errors                                                   |
+| Tests                 | 1,600+ Rust, 600+ Forge   | Plus a backend parity corpus (`tests/parity/`) run in CI                                                   |
+| Distribution          | Complete                  | crates.io, Homebrew, curl installer, GitHub Releases                                                       |
 
 ### What Works Today
 
 ```
-forge run app.fg          # Tree-walk interpreter (default)
-forge run --vm app.fg     # Bytecode VM
-forge run --jit app.fg    # JIT for integer functions, VM fallback
-forge run --profile app.fg  # VM execution with profiling report
-forge build app.fg          # Writes app.fgc bytecode to disk
-forge run app.fgc           # Loads and executes compiled bytecode
-forge build --native app.fg # Builds a native launcher (runtime still required)
+forge run app.fg              # Bytecode VM (default)
+forge --interp run app.fg     # Tree-walking interpreter
+forge --jit run app.fg        # VM + Cranelift JIT for numeric functions
+forge --profile run app.fg    # VM execution with profiling report
+forge build app.fg            # Writes app.fgc bytecode
+forge run app.fgc             # Loads and executes compiled bytecode
+forge build --native app.fg   # Native executable embedding source (servers supported)
+forge build --aot app.fg      # Native executable embedding bytecode (VM-only programs)
 ```
 
-### What Doesn't
+### Known Gaps
 
-- VM/JIT support a real subset of the language; the interpreter remains the full-fidelity runtime
-- Several AST features still compile only on the interpreter side (for example: interfaces/give blocks, safe/retry/timeout blocks, scheduler/watch/agent features)
-- JIT only natively compiles integer-heavy functions; broader programs rely on VM fallback
-- No AOT compilation
-- `forge build --native` is currently a launcher, not a standalone binary
-- Backend parity coverage has started, but it is not yet a full-language corpus
+- The VM does not yet cover the full interpreter surface. Examples found while refreshing these docs: implicit last-expression returns, default parameter values and `when`/`if` used as expressions evaluate to `null`; `match` on `Ok`/`Err` fails; SQL bind parameters are dropped; `push`/`pop` do not mutate in place; several stdlib functions and the `url`, `toml`, `npc`, `ws` modules are missing. `--interp` remains the reference runtime.
+- Decorator-driven servers always run on the interpreter (auto-fallback).
+- No capability-based sandbox: beyond `--allow-run`, the SSRF guard and `FORGE_FS_BASE`, programs have the host process's permissions.
 
 ---
 
-## Execution Focus: Next 90 Days
+## Next: Phase 0 — Hardening (in progress)
 
-The next phase is about maturity, not breadth.
+Before new language surface, make what exists sound, safe, and fast on every engine.
 
-### Top Priorities
-
-1. Unified semantics layer between parser, interpreter, VM, JIT, and future AOT
-2. Full VM parity for the most-used language features
-3. Real package and module correctness
-4. Stronger type system foundations
-5. Standalone native compilation path
-
-### 30-Day Outcomes
-
-- Land a backend parity corpus in CI
-- Close the highest-value VM gaps (closure correctness, remaining safety-block gaps, remaining destructuring gaps)
-- Improve local dependency and module behavior (`forge install`, lockfiles, cycle detection, caching)
-- Strengthen LSP navigation and strict-mode diagnostics
-
-### 90-Day Outcomes
-
-- Reduce backend divergence materially
-- Make Forge a reliable multi-file, dependency-bearing project language
-- Improve typed tooling and diagnostics
-- Establish the runtime/codegen scaffolding for real standalone native builds
-
-This is the public execution focus. Tactical sequencing, issue breakdown, and internal dependency ordering can evolve as implementation reveals constraints.
+| Item                                  | Status          | Notes                                                                                     |
+| ------------------------------------- | --------------- | ----------------------------------------------------------------------------------------- |
+| JIT soundness                         | Done            | JIT only compiles what it can prove; everything else falls back to the VM                 |
+| VM runtime safety                     | Done            | User-reachable panics converted to errors                                                  |
+| LSP rebuilt on `lsp-server`           | Done            |                                                                                           |
+| CI gates on both engines              | Done            | Test suites run against the VM and the interpreter                                         |
+| VM test-suite parity                  | In progress     | Close the Known Gaps above until the Forge test suite passes unchanged on the VM           |
+| Runtime arity checks                  | Planned         | Wrong argument counts become runtime errors on every engine, not just type-checker warnings |
+| Performance pass                      | Planned         | Re-baseline VM/JIT/interpreter and server benchmarks; fix the worst regressions            |
+| Capability-based sandbox runtime      | Planned (strategic direction) | Embeddable runtime with default-deny permissions (net, fs, run, env), resource limits (time, memory, output), and an MCP "code mode" host so agents can run Forge safely |
 
 ---
 
@@ -108,6 +97,8 @@ var     var   Prototype table (u16 count + recursive Chunk encoding)
 ```
 
 ### Phase 1.2 — VM Feature Parity
+
+**Status:** 1.2.1, 1.2.2/1.2.3 (try/catch), 1.2.6 (closure upvalues) and 1.2.8 (parity corpus in `tests/parity/`, run in CI) are done. 1.2.4/1.2.5 (full builtin and stdlib coverage on the VM) continue under Phase 0 "VM test-suite parity".
 
 | Task  | Files                                     | Description                                                                                                    |
 | ----- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
