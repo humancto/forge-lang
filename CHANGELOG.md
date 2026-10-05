@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **DAP breakpoints match by file** — `forge dap` never set the program's source file, so a breakpoint on line N of any file stopped every program at line N. Breakpoints are now keyed by canonical path and only stop in the file they were set in.
 - **Error snippets name the file** — source snippets for lex, parse and runtime errors (interpreter, VM, `forge watch`, native source runtimes) showed `<source>`; the header now shows the path relative to the current directory (`examples/x.fg:12:5`) and the message no longer repeats it. Snippet columns are counted in characters, so carets line up after non-ASCII text.
 - **Interpreter calls are lexically scoped** — calling a top-level function used to push its scope on top of the caller's, so a callee could read its caller's locals, deeply recursive ADT `match` methods failed with "non-exhaustive match", and every global lookup cost one scope per active call (recursion slowed down linearly with depth: 20× depth-9000 recursion went from ~29s to ~0.3s).
 - **Recursion inside HTTP handlers** — handlers ran on tokio blocking threads with 2 MiB stacks, so the stack guard stopped them at ~150 frames. The CLI and standalone binaries now give runtime threads (and interpreter `spawn`/`timeout` threads) a 256 MiB reserved stack registered with the guard.
