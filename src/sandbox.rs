@@ -1174,7 +1174,9 @@ mod tests {
             max_imports: Some(0),
             ..Limits::none()
         });
-        let src = format!("import \"{}/m.fg\"\nsay helper()", dir.display());
+        // Forward slashes: a Windows path's backslashes would be string escapes.
+        let dir_lit = dir.display().to_string().replace('\\', "/");
+        let src = format!("import \"{dir_lit}/m.fg\"\nsay helper()");
         assert!(
             matches!(
                 imports.run_source(&src),
