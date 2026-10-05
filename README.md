@@ -128,7 +128,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → Forge v0.8.0
+forge version          # → Forge v0.9.0
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -727,7 +727,7 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 
 ## 📊 Project Status
 
-Forge is **v0.8.0**. The bytecode VM is the default engine; the tree-walking interpreter remains the reference runtime while VM parity work continues.
+Forge is **v0.9.0**. The bytecode VM is the default engine and matches the reference tree-walking interpreter on the full test suite; a guarded JIT tier compiles hot integer code.
 
 | Metric                   |                            Value |
 | ------------------------ | -------------------------------: |
@@ -758,8 +758,8 @@ Forge is **v0.8.0**. The bytecode VM is the default engine; the tree-walking int
 | **v0.4** ✅     | JWT auth, MySQL, parameterized SQL (all DBs), CORS, PG TLS                            |
 | **v0.5–0.7** ✅ | Packages + registry, LSP/DAP, VM as default engine, native/AOT builds                 |
 | **v0.8** ✅     | `os`/`path` modules, `--allow-run`, SSRF guard, optional JIT/DB cargo features        |
-| **Next**        | Phase 0 hardening: VM parity, runtime arity checks, performance pass                  |
-| **Then**        | Capability-based sandbox runtime: embeddable, default-deny permissions, resource limits |
+| **v0.9** ✅     | Guarded JIT tier, full VM parity, VM/interpreter perf, sandbox (`--sandbox`, `--allow-*`), `forge mcp` |
+| **Next**        | Sandbox memory limits, true OSR, Arc-shared values, broader JIT types (float/string)  |
 | **v1.0**        | Stable API, compatibility guarantees, production hardening                            |
 
 See [ROADMAP.md](ROADMAP.md) for the public roadmap. Have ideas? [Open an issue](https://github.com/humancto/forge-lang/issues).

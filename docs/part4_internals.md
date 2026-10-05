@@ -1491,7 +1491,7 @@ Display version information.
 
 ```bash
 forge version
-# Output: Forge v0.8.0
+# Output: Forge v0.9.0
 #         Internet-native programming language
 #         Bytecode VM with mark-sweep GC
 ```

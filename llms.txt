@@ -2,7 +2,7 @@
 
 > Forge is an internet-native programming language implemented in Rust. HTTP client and server, SQLite/Postgres/MySQL, JSON, CSV, crypto, JWT, regex, filesystem, shell, and concurrency are built in, with no imports or packages. Source files use the `.fg` extension.
 
-This file is the canonical, compact guide for AI models writing Forge. Every code block below was run on Forge v0.8.x with the default engine (`forge run file.fg`). Prefer the forms shown here.
+This file is the canonical, compact guide for AI models writing Forge. Every code block below was run on Forge v0.9.x with the default engine (`forge run file.fg`). Prefer the forms shown here.
 
 Forge also has an optional "natural" syntax (`set x to 5`, `say`, `define`, `otherwise`, ...). It is sugar for the classic syntax below. Write classic syntax unless asked otherwise.
 
@@ -389,6 +389,6 @@ Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.
 - Always pass user input to SQL as a params array: `db.query("... WHERE id = ?", [id])`.
 
-## Engine notes (v0.8.x)
+## Engine notes (v0.9.x)
 
 The default bytecode VM and the reference interpreter run the full Forge test suite identically; `cargo test --test engine_diff` gates every example and fixture on both. Programs the VM compiler cannot handle, and `@server` programs, fall back to the interpreter automatically. Force the interpreter with `forge --interp run`.

@@ -6,8 +6,8 @@ Security fixes land on the latest minor release line. Older lines are not patche
 
 | Version | Supported |
 | ------- | --------- |
-| 0.8.x   | Yes       |
-| < 0.8   | No        |
+| 0.9.x   | Yes       |
+| < 0.9   | No        |
 
 ## Reporting a Vulnerability
 

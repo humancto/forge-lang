@@ -5,7 +5,7 @@
 
 ---
 
-## Current State: v0.8.x
+## Current State: v0.9.x
 
 **Status: Shipped.** Version numbers below come from `Cargo.toml`; test counts from `cargo test` and `forge --allow-run test`.
 
