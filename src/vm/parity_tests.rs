@@ -1238,6 +1238,62 @@ fn parity_check_between_bounds() {
     assert_cross_backend_error_contains("let x = 0\ncheck x between 1 && 10\n1", "check failed");
 }
 
+// ----- Call arity and default parameters -----
+
+#[test]
+fn parity_default_parameters() {
+    assert_cross_backend_value(
+        "fn g(a, b = 10) {\n    return a + b\n}\n[g(1), g(1, 2)]",
+        "[11, 3]",
+    );
+    // Defaults may use earlier parameters; an explicit null is kept.
+    assert_cross_backend_value(
+        "fn h(a, b = a * 2) {\n    return [a, b]\n}\n[h(3), h(3, null)]",
+        "[[3, 6], [3, null]]",
+    );
+    assert_cross_backend_value("let l = fn(x, y = 1) { x + y }\nl(4)", "5");
+}
+
+#[test]
+fn parity_call_arity_errors() {
+    assert_cross_backend_error_contains(
+        "fn add(a, b) {\n    return a + b\n}\nadd(1)",
+        "fn add expects 2 arguments, got 1",
+    );
+    assert_cross_backend_error_contains(
+        "fn add(a, b) {\n    return a + b\n}\nadd(1, 2, 3)",
+        "fn add expects 2 arguments, got 3",
+    );
+    assert_cross_backend_error_contains(
+        "fn g(a, b = 1) {\n    return a\n}\ng()",
+        "fn g expects at least 1 argument, got 0",
+    );
+    assert_cross_backend_error_contains(
+        "let l = fn(x) { x }\nl(1, 2)",
+        "fn expects 1 argument, got 2",
+    );
+    // Arity errors are catchable.
+    assert_cross_backend_value(
+        "fn add(a, b) {\n    return a + b\n}\nlet mut m = \"\"\ntry {\n    add(1)\n} catch e {\n    m = e.message\n}\nm",
+        "fn add expects 2 arguments, got 1",
+    );
+}
+
+#[test]
+fn parity_callbacks_from_builtins_are_lenient() {
+    // Builtins may pass fewer or more arguments than a callback declares.
+    assert_cross_backend_value("map([1, 2], fn(x, i) { return x })", "[1, 2]");
+    assert_cross_backend_value("reduce([1, 2, 3], 0, fn(acc, x) { acc + x })", "6");
+    assert_cross_backend_value("filter([1, 2, 3], fn(x) { x > 1 })", "[2, 3]");
+}
+
+#[test]
+fn parity_builtin_arity_comes_from_the_registry() {
+    assert_cross_backend_error_contains("len([1], [2])", "len() expects 1 argument, got 2");
+    assert_cross_backend_error_contains("upper()", "upper() expects 1 argument, got 0");
+    assert_cross_backend_value("upper(\"ab\") + lower(\"CD\") + trim(\"  x \")", "ABcdx");
+}
+
 // ----- Concurrency and modules -----
 
 #[test]

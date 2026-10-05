@@ -928,6 +928,10 @@ impl VM {
                             args.push(self.registers[base + a as usize + 1 + i]);
                         }
 
+                        // Direct calls of user functions follow the shared
+                        // arity rule; callbacks invoked by builtins (which
+                        // also use `call_value`) stay lenient.
+                        self.check_direct_call_arity(func_val, args.len())?;
                         let result = self.call_value(func_val, args)?;
                         self.registers[dst_reg] = result;
                     }
@@ -1161,6 +1165,12 @@ impl VM {
                         let idx = self.registers[base + b as usize];
                         let val = self.registers[base + c as usize];
                         self.registers[base + a as usize] = self.index_set(target, idx, val)?;
+                    }
+                    OpCode::JumpIfArg => {
+                        if self.frames[frame_idx].argc > a as usize {
+                            self.frames[frame_idx].ip =
+                                (self.frames[frame_idx].ip as isize + sbx as isize) as usize;
+                        }
                     }
                     OpCode::IterHas => {
                         // `for` loop condition: is there an element at index C?
@@ -1849,7 +1859,9 @@ impl VM {
                             self.registers[new_base + i] = Value::null();
                         }
 
-                        self.frames.push(CallFrame::new(r, new_base, frame_size));
+                        let mut frame = CallFrame::new(r, new_base, frame_size);
+                        frame.argc = args.len();
+                        self.frames.push(frame);
                         let boundary = self.frames.len() - 1;
                         self.run_until(boundary)
                     }
@@ -2331,6 +2343,22 @@ impl VM {
         };
         map.insert(field.to_string(), val);
         Ok(Value::obj(self.gc.alloc(ObjKind::Object(map))))
+    }
+
+    /// `crate::semantics::check_call_arity` for a closure called directly.
+    fn check_direct_call_arity(&self, func: Value, argc: usize) -> Result<(), VMError> {
+        let kind = func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
+        let Some(ObjKind::Closure(closure)) = kind else {
+            return Ok(());
+        };
+        let chunk = &closure.function.chunk;
+        crate::semantics::check_call_arity(
+            &closure.function.name,
+            chunk.arity as usize,
+            chunk.min_arity as usize,
+            argc,
+        )
+        .map_err(|e| VMError::new(&e))
     }
 
     /// Element count used by `Len` and `for` loops (0 for non-collections).

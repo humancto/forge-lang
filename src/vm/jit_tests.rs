@@ -890,11 +890,15 @@ fn jit_wrong_arity_runs_in_vm() {
     let (out, err) = run_parity(
         "fn add(a, b) { return a + b }\n\
          let mut i = 0\nwhile i < 150 { add(i, 1)\ni = i + 1 }\n\
-         println(add(1, 2, 3))\nprintln(add(1))",
+         println(add(1, 2))\n\
+         try { add(1, 2, 3) } catch e { println(e.message) }\n\
+         println(map([1], add))",
     );
-    assert_eq!(out, vec!["3"]);
-    // `1 + null`: the shared operator rules (crate::semantics) report the
-    // same message as the interpreter.
+    // Direct calls are arity-checked before the JIT is consulted
+    // (crate::semantics::check_call_arity) ...
+    assert_eq!(out, vec!["3", "fn add expects 2 arguments, got 3"]);
+    // ... while a builtin calling back with fewer arguments fails the JIT
+    // arity guard and runs in the VM: `1 + null`.
     assert!(err
         .unwrap_or_default()
         .contains("cannot perform arithmetic on null"));

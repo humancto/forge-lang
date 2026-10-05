@@ -814,6 +814,20 @@ fn semantic_operand(value: &Value) -> crate::semantics::Operand<'_> {
     }
 }
 
+/// Arity rule for a direct call (`f(a, b)`, `x |> f`) of a user-defined
+/// function or lambda, shared with the VM through `crate::semantics`.
+/// Callbacks invoked by builtins go through `call_function` unchecked.
+fn check_direct_call_arity(func: &Value, argc: usize) -> Result<(), RuntimeError> {
+    let (name, params) = match func {
+        Value::Function { name, params, .. } => (name.as_str(), params),
+        Value::Lambda { params, .. } => ("", params),
+        _ => return Ok(()),
+    };
+    let required = crate::semantics::required_params(params.iter().map(|p| p.default.is_some()));
+    crate::semantics::check_call_arity(name, params.len(), required, argc)
+        .map_err(|e| RuntimeError::new(&e))
+}
+
 /// How a block expression finished.
 enum BlockExit {
     Value(Value),
@@ -3334,12 +3348,14 @@ impl Interpreter {
                 let eval_args: Result<Vec<Value>, _> =
                     args.iter().map(|a| self.eval_expr(a)).collect();
                 let eval_args = eval_args?;
+                check_direct_call_arity(&func, eval_args.len())?;
                 self.call_function(func, eval_args)
             }
 
             Expr::Pipeline { value, function } => {
                 let val = self.eval_expr(value)?;
                 let func = self.eval_expr(function)?;
+                check_direct_call_arity(&func, 1)?;
                 self.call_function(func, vec![val])
             }
 
@@ -3597,6 +3613,7 @@ impl Interpreter {
                         }
                         PipeStep::Apply(func_expr) => {
                             let func = self.eval_expr(func_expr)?;
+                            check_direct_call_arity(&func, 1)?;
                             self.call_function(func, vec![current])?
                         }
                     };
@@ -4494,8 +4511,13 @@ impl Interpreter {
                 self.env = captured_env;
                 self.env.push_scope();
 
+                // Same default-parameter rule as named functions.
                 for (i, param) in params.iter().enumerate() {
-                    let val = args.get(i).cloned().unwrap_or(Value::Null);
+                    let val = args
+                        .get(i)
+                        .cloned()
+                        .or_else(|| param.default.as_ref().and_then(|d| self.eval_expr(d).ok()))
+                        .unwrap_or(Value::Null);
                     self.env.define(param.name.clone(), val);
                 }
 

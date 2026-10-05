@@ -34,6 +34,9 @@ pub struct CallFrame {
     pub timeouts: Vec<TimeoutGuard>,
     /// Shared cells for locals captured by closures created in this frame.
     pub open_upvalues: HashMap<u8, GcRef>,
+    /// Number of arguments the caller passed (`JumpIfArg` uses it to decide
+    /// whether a parameter's default value applies).
+    pub argc: usize,
 }
 
 impl CallFrame {
@@ -46,6 +49,7 @@ impl CallFrame {
             handlers: Vec::new(),
             timeouts: Vec::new(),
             open_upvalues: HashMap::new(),
+            argc: usize::MAX,
         }
     }
 

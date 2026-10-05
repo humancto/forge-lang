@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
-const VERSION_MINOR: u8 = 2;
+const VERSION_MINOR: u8 = 3;
 
 #[derive(Debug)]
 pub struct SerializeError {
@@ -53,6 +53,8 @@ fn write_chunk_inner(w: &mut Vec<u8>, chunk: &Chunk) -> Result<(), SerializeErro
     w.push(chunk.arity);
     w.push(chunk.max_registers);
     w.push(chunk.upvalue_count);
+    // v1.3+: required argument count (default parameters).
+    w.push(chunk.min_arity);
 
     write_u32(w, chunk.constants.len() as u32)?;
     for constant in &chunk.constants {
@@ -180,6 +182,15 @@ fn read_chunk_inner<R: Read>(r: &mut R, minor_version: u8) -> Result<Chunk, Seri
     let arity = meta[0];
     let max_registers = meta[1];
     let upvalue_count = meta[2];
+    // Bytecode older than v1.3 has no default parameters: every parameter
+    // was optional at run time, so keep it that way.
+    let min_arity = if minor_version >= 3 {
+        let mut b = [0u8; 1];
+        r.read_exact(&mut b)?;
+        b[0]
+    } else {
+        0
+    };
 
     let const_count = read_u32(r)? as usize;
     if const_count > 65536 {
@@ -273,6 +284,7 @@ fn read_chunk_inner<R: Read>(r: &mut R, minor_version: u8) -> Result<Chunk, Seri
         max_registers,
         upvalue_count,
         arity,
+        min_arity,
         upvalue_sources,
         proto_id: crate::vm::bytecode::next_proto_id(),
     })
@@ -629,6 +641,21 @@ mod tests {
         let result = deserialize_chunk(&data);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("newer than supported"));
+    }
+
+    #[test]
+    fn min_arity_roundtrips_and_defaults_for_old_bytecode() {
+        let mut chunk = make_simple_chunk();
+        chunk.arity = 3;
+        chunk.min_arity = 1;
+        let restored = deserialize_chunk(&serialize_chunk(&chunk).unwrap()).unwrap();
+        assert_eq!(restored.arity, 3);
+        assert_eq!(restored.min_arity, 1);
+
+        // v1.1 bytecode predates default parameters: no required minimum.
+        let old = deserialize_chunk(&serialize_chunk_v1_1(&chunk)).unwrap();
+        assert_eq!(old.arity, 3);
+        assert_eq!(old.min_arity, 0);
     }
 
     #[test]

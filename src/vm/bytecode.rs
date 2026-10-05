@@ -72,11 +72,14 @@ pub enum OpCode {
     /// index < length; for a channel, receives the next value (consumed by
     /// the following `IterGet`) and is false once the channel is closed.
     IterHas,
+    /// A=parameter register, sBx=offset: jump when the caller passed an
+    /// argument for parameter A (skips that parameter's default value).
+    JumpIfArg,
 }
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::IterHas as u8 + 1 == 63);
+const _: () = assert!(OpCode::JumpIfArg as u8 + 1 == 64);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -146,6 +149,7 @@ impl TryFrom<u8> for OpCode {
             60 => Ok(OpCode::SquadEnd),
             61 => Ok(OpCode::CloseUpvalues),
             62 => Ok(OpCode::IterHas),
+            63 => Ok(OpCode::JumpIfArg),
             _ => Err(value),
         }
     }
@@ -181,6 +185,9 @@ pub struct Chunk {
     pub max_registers: u8,
     pub upvalue_count: u8,
     pub arity: u8,
+    /// Arguments a direct call must pass (parameters up to the last one
+    /// without a default); see `semantics::check_call_arity`.
+    pub min_arity: u8,
     pub upvalue_sources: Vec<UpvalueSource>,
     /// Process-unique prototype id, assigned at construction. `Clone`
     /// preserves it, so every closure instantiated from the same prototype
@@ -208,6 +215,7 @@ impl Chunk {
             max_registers: 0,
             upvalue_count: 0,
             arity: 0,
+            min_arity: 0,
             upvalue_sources: Vec::new(),
         }
     }
@@ -323,7 +331,8 @@ mod tests {
     fn try_from_invalid_opcode() {
         assert_eq!(OpCode::try_from(61u8), Ok(OpCode::CloseUpvalues));
         assert_eq!(OpCode::try_from(62u8), Ok(OpCode::IterHas));
-        assert_eq!(OpCode::try_from(63u8), Err(63));
+        assert_eq!(OpCode::try_from(63u8), Ok(OpCode::JumpIfArg));
+        assert_eq!(OpCode::try_from(64u8), Err(64));
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }

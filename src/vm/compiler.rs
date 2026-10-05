@@ -1191,8 +1191,19 @@ fn compile_function_body(
     body: &[SpannedStmt],
 ) -> Result<(), CompileError> {
     fc.begin_scope();
+    let mut param_regs = Vec::with_capacity(params.len());
     for param in params {
-        fc.add_local(&param.name, true)?;
+        param_regs.push(fc.add_local(&param.name, true)?);
+    }
+    // Default values: evaluated in the callee (so they can use earlier
+    // parameters) only when the caller did not pass that argument, like the
+    // interpreter. An explicitly passed `null` is kept.
+    for (param, &reg) in params.iter().zip(&param_regs) {
+        if let Some(default) = &param.default {
+            let skip = fc.emit_jump(OpCode::JumpIfArg, reg, 0);
+            compile_expr(fc, default, reg)?;
+            fc.patch_jump(skip);
+        }
     }
     let (init, last) = match body.split_last() {
         Some((last, init)) => (init, Some(last)),
@@ -1218,6 +1229,8 @@ fn compile_function_body(
         None => fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0),
     }
     fc.chunk.arity = params.len() as u8;
+    fc.chunk.min_arity =
+        crate::semantics::required_params(params.iter().map(|p| p.default.is_some())) as u8;
     Ok(())
 }
 
