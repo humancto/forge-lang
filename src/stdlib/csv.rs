@@ -25,6 +25,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "csv.read" => match args.first() {
             Some(Value::String(path)) => {
+                let path = crate::stdlib::fs::confine_read(path)?;
                 let content =
                     std::fs::read_to_string(path).map_err(|e| format!("csv.read error: {}", e))?;
                 Ok(parse_csv(&content))
@@ -33,6 +34,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "csv.write" => match (args.first(), args.get(1)) {
             (Some(Value::String(path)), Some(Value::Array(rows))) => {
+                let path = crate::stdlib::fs::confine_write(path)?;
                 let content = stringify_csv(rows);
                 std::fs::write(path, &content)
                     .map(|_| Value::Null)

@@ -105,6 +105,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
         }
     };
 
+    crate::permissions::require_net(&url)?;
     let opts = args.get(1);
 
     let mut headers_map = std::collections::HashMap::new();
@@ -285,6 +286,8 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
     let (timeout_secs, max_redirects, max_bytes) =
         opts.map(parse_http_opts).unwrap_or((None, None, None));
 
+    crate::permissions::require_net(&url)?;
+    crate::stdlib::fs::confine_write(&dest)?;
     let validated = crate::runtime::client::validate_url_full(&url)?;
 
     eprintln!("  Downloading {}...", url);
@@ -336,6 +339,7 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
         _ => (None, None, None),
     };
 
+    crate::permissions::require_net(&url)?;
     let validated = crate::runtime::client::validate_url_full(&url)?;
     let url_clone = validated.url.as_str().to_string();
     let pinned = validated.pinned.clone();

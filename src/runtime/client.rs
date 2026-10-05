@@ -186,9 +186,17 @@ pub fn build_client(
     // Capture the env var *now* so the policy's behaviour matches the
     // state at build time rather than shifting mid-request.
     let deny_private = std::env::var("FORGE_HTTP_ALLOW_PRIVATE").as_deref() != Ok("1");
+    // Capture the caller's permission policy: when `net` is restricted to a
+    // host allowlist, a redirect must not leave the allowlist.
+    let caps = crate::permissions::current();
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= max_redirects {
             return attempt.error(format!("too many redirects (cap {})", max_redirects));
+        }
+        if caps.net_is_scoped() {
+            if let Err(e) = caps.check_net(attempt.url().as_str()) {
+                return attempt.error(format!("redirect rejected: {}", e));
+            }
         }
         // Re-validate the next hop: scheme + host + (optional) private-IP
         // resolution. This closes open-redirect-to-file:// and redirect-to-

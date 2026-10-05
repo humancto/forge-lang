@@ -104,12 +104,14 @@ fn query_rows(
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
+    crate::permissions::require(crate::permissions::Capability::Db, name)?;
     match name {
         "db.open" => match args.first() {
             Some(Value::String(path)) => {
                 let conn = if path == ":memory:" {
                     Connection::open_in_memory()
                 } else {
+                    crate::stdlib::fs::confine_write(path)?;
                     Connection::open(path)
                 };
                 match conn {

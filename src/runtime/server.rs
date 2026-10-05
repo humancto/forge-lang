@@ -673,6 +673,8 @@ pub async fn start_server(
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| RuntimeError::new(&format!("invalid address: {}", e)))?;
+    crate::permissions::require_net(&format!("{}:{}", config.host, config.port))
+        .map_err(|e| RuntimeError::new(&e.to_string()))?;
 
     // Always emit the structured startup event so log aggregators see
     // server boot regardless of TTY / format choice.

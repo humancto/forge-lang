@@ -573,6 +573,8 @@ impl VM {
                 };
                 let file_path = crate::package::resolve_import(&resolved)
                     .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
+                crate::permissions::require_import(&file_path)
+                    .map_err(|e| VMError::new(&e.to_string()))?;
                 let source = std::fs::read_to_string(&file_path)
                     .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
 
@@ -1759,6 +1761,8 @@ impl VM {
             "fetch" => match args.first().map(|v| v.classify(&self.gc)) {
                 Some(ValueKind::Obj(r)) => {
                     let url = self.get_string(&Value::obj(r)).unwrap_or_default();
+                    crate::permissions::require_net(&url)
+                        .map_err(|e| VMError::new(&e.to_string()))?;
                     let method = "GET".to_string();
                     match crate::runtime::client::fetch_blocking(
                         &url, &method, None, None, None, None, None,
@@ -1770,6 +1774,8 @@ impl VM {
                 _ => Err(VMError::new("fetch() requires a URL string")),
             },
             "exit" => {
+                crate::permissions::require(crate::permissions::Capability::Process, "exit")
+                    .map_err(|e| VMError::new(&e.to_string()))?;
                 let code = match args.first().map(|v| v.classify(&self.gc)) {
                     Some(ValueKind::Int(n)) => n as i32,
                     _ => 0,
@@ -2100,6 +2106,8 @@ impl VM {
             }
             "cd" => {
                 let path = self.get_string_arg(&args, 0)?;
+                crate::permissions::require(crate::permissions::Capability::Process, "cd")
+                    .map_err(|e| VMError::new(&e.to_string()))?;
                 std::env::set_current_dir(&path)
                     .map_err(|e| VMError::new(&format!("cd error: {}", e)))?;
                 Ok(self.alloc_string(&path))
