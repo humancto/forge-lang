@@ -83,9 +83,10 @@ struct Cli {
     #[arg(long = "vm")]
     use_vm: bool,
 
-    /// Use the tree-walking interpreter instead of the VM. Required for
-    /// decorator-driven HTTP servers (@server, @get, etc.). The VM
-    /// auto-falls back to the interpreter when decorators are detected.
+    /// Use the tree-walking interpreter instead of the VM (also for
+    /// `@server` programs, which the VM serves by default). The VM
+    /// auto-falls back to the interpreter for constructs it cannot run,
+    /// such as unknown decorators.
     #[arg(long = "interp")]
     use_interp: bool,
 
@@ -668,7 +669,8 @@ async fn async_main() {
             } else {
                 testing::Engine::Vm
             });
-            let vm_compat = |program: &Program| ensure_vm_compatible(program, "VM");
+            let vm_compat =
+                |program: &Program| ensure_vm_compatible(program, "VM", Serving::Supported);
             testing::run_tests(
                 &test_dir,
                 &testing::TestOptions {
@@ -848,7 +850,7 @@ fn emit_type_warnings(warnings: &[typechecker::TypeWarning]) {
     }
 }
 
-fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>) {
+fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<String>) {
     match stmt {
         Stmt::TypeDef { .. } => {}
         Stmt::InterfaceDef { .. } => {}
@@ -900,19 +902,18 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
         }
         Stmt::PromptDef { .. } => {}
         Stmt::AgentDef { .. } => {}
-        Stmt::DecoratorStmt(_) => {
-            issues.insert("decorator-driven runtime features");
+        Stmt::DecoratorStmt(decorator) => {
+            issues.extend(runtime::metadata::vm_unsupported_decorator(decorator, true));
         }
         Stmt::Import { .. } => {}
         Stmt::FnDef {
             body, decorators, ..
         } => {
-            if decorators
-                .iter()
-                .any(|decorator| !is_vm_metadata_decorator(&decorator.name))
-            {
-                issues.insert("decorator-driven runtime features");
-            }
+            issues.extend(
+                decorators
+                    .iter()
+                    .filter_map(|d| runtime::metadata::vm_unsupported_decorator(d, false)),
+            );
             for s in body {
                 collect_vm_incompatible_stmt(&s.stmt, issues);
             }
@@ -970,11 +971,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<&'static str>
     }
 }
 
-fn is_vm_metadata_decorator(name: &str) -> bool {
-    matches!(name, "test" | "skip" | "before" | "after")
-}
-
-fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>) {
+fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<String>) {
     match expr {
         Expr::BinOp { left, right, .. } => {
             collect_vm_incompatible_expr(left, issues);
@@ -1061,7 +1058,7 @@ fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<&'static str>
     }
 }
 
-fn vm_incompatibilities(program: &Program) -> Vec<&'static str> {
+fn vm_incompatibilities(program: &Program) -> Vec<String> {
     let mut issues = BTreeSet::new();
     for stmt in &program.statements {
         collect_vm_incompatible_stmt(&stmt.stmt, &mut issues);
@@ -1069,15 +1066,30 @@ fn vm_incompatibilities(program: &Program) -> Vec<&'static str> {
     issues.into_iter().collect()
 }
 
+/// Whether a VM entry point can host a program's HTTP server.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Serving {
+    /// `forge run` / `forge test`: an `@server` program is served by the VM
+    /// (`runtime::host::launch_vm`).
+    Supported,
+    /// `--jit`, `forge build` and the parity corpus only execute the
+    /// bytecode; a program that would start a server is rejected.
+    Rejected,
+}
+
 /// Whether the bytecode VM can run `program` faithfully. Combines the AST
 /// scan above with a trial compile: any construct the VM compiler reports as
 /// `Unsupported` (instead of silently dropping it) is rejected here, so
 /// `forge run` falls back to the interpreter rather than misbehaving.
-fn ensure_vm_compatible(program: &Program, mode: &str) -> Result<(), String> {
-    let mut issues: Vec<String> = vm_incompatibilities(program)
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+fn ensure_vm_compatible(program: &Program, mode: &str, serving: Serving) -> Result<(), String> {
+    let mut issues = vm_incompatibilities(program);
+    if serving == Serving::Rejected
+        && runtime::metadata::extract_runtime_plan(program)
+            .server
+            .is_some()
+    {
+        issues.push("decorator-driven runtime features (@server)".to_string());
+    }
     if issues.is_empty() {
         if let Err(e) = vm::compiler::compile(program) {
             if e.is_unsupported() {
@@ -1154,7 +1166,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     // `Unsupported`), run it on the interpreter instead.
     let mut chunk = None;
     if use_vm {
-        match ensure_vm_compatible(&program, "VM") {
+        match ensure_vm_compatible(&program, "VM", Serving::Supported) {
             Ok(()) => {
                 let path = std::path::Path::new(filename);
                 let options = vm::compiler::CompileOptions {
@@ -1181,7 +1193,30 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
     }
 
     if let Some(chunk) = chunk {
-        if let Err(e) = vm::run_chunk(&chunk, profile) {
+        let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
+        if runtime_plan.server.is_some() {
+            // Serve on the VM: run the top level with schedule/watch start-up
+            // deferred (as the interpreter path does), then fork the final
+            // state per request.
+            let mut machine = if profile {
+                vm::machine::VM::with_profiling()
+            } else {
+                vm::machine::VM::new()
+            };
+            machine.defer_host_runtime();
+            if let Err(e) = machine.execute(&chunk) {
+                report_vm_error(source, filename, &e);
+                process::exit(1);
+            }
+            if profile {
+                machine.profiler.print_report();
+            }
+            let fn_params = runtime::metadata::top_level_fn_params(&program);
+            if let Err(e) = runtime::host::launch_vm(machine, &runtime_plan, fn_params).await {
+                eprintln!("{}", errors::format_simple_error(&e.message));
+                process::exit(1);
+            }
+        } else if let Err(e) = vm::run_chunk(&chunk, profile) {
             report_vm_error(source, filename, &e);
             process::exit(1);
         }
@@ -1234,7 +1269,7 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
         Err(err) => print_frontend_error(source, filename, err),
     };
     emit_type_warnings(&warnings);
-    if let Err(message) = ensure_vm_compatible(&program, "--jit") {
+    if let Err(message) = ensure_vm_compatible(&program, "--jit", Serving::Rejected) {
         eprintln!("{}", errors::format_simple_error(&message));
         process::exit(1);
     }
@@ -1272,7 +1307,7 @@ fn compile_to_bytecode(source: &str, filename: &str, file_path: &PathBuf, strict
         Err(err) => print_frontend_error(source, filename, err),
     };
     emit_type_warnings(&warnings);
-    if let Err(message) = ensure_vm_compatible(&program, "bytecode build") {
+    if let Err(message) = ensure_vm_compatible(&program, "bytecode build", Serving::Rejected) {
         eprintln!("{}", errors::format_simple_error(&message));
         process::exit(1);
     }
@@ -1360,7 +1395,7 @@ fn compile_to_native_aot(source: &str, filename: &str, file_path: &PathBuf, stri
     };
     emit_type_warnings(&warnings);
 
-    if let Err(message) = ensure_vm_compatible(&program, "AOT build") {
+    if let Err(message) = ensure_vm_compatible(&program, "AOT build", Serving::Rejected) {
         let message = if message.contains("decorator-driven runtime features") {
             format!(
                 "{message}\n  hint: decorator-driven servers are not bytecode AOT yet; use `forge build --native` for a standalone source-runtime server binary"
@@ -1499,7 +1534,7 @@ mod tests {
         for case in &cases {
             let (program, _) = prepare_program(&case.source, false)
                 .unwrap_or_else(|err| panic!("{} should parse: {:?}", case.path.display(), err));
-            let error = ensure_vm_compatible(&program, "parity corpus")
+            let error = ensure_vm_compatible(&program, "parity corpus", Serving::Rejected)
                 .expect_err(&format!("{} should be rejected by VM", case.path.display()));
             assert!(
                 error.contains(&case.expected_error),
@@ -1551,8 +1586,7 @@ mod tests {
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
         let issues = vm_incompatibilities(&program);
-        assert!(!issues.contains(&"interface/power definitions"));
-        assert!(!issues.contains(&"impl/give blocks"));
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1565,7 +1599,7 @@ mod tests {
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
         let issues = vm_incompatibilities(&program);
-        assert!(!issues.contains(&"type definitions"));
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1749,7 +1783,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_incompatibilities_reject_server_route_decorators() {
+    fn server_programs_run_on_the_vm_only_where_it_serves() {
         let source = r#"
         @server(port: 8080)
         @get("/hello")
@@ -1757,6 +1791,37 @@ mod tests {
         "#;
 
         let (program, _) = prepare_program(source, false).expect("program should parse");
-        assert!(vm_incompatibilities(&program).contains(&"decorator-driven runtime features"));
+        assert!(vm_incompatibilities(&program).is_empty());
+        assert!(ensure_vm_compatible(&program, "VM", Serving::Supported).is_ok());
+        for mode in ["--jit", "AOT build"] {
+            let error = ensure_vm_compatible(&program, mode, Serving::Rejected)
+                .expect_err("a non-serving VM entry point must reject @server");
+            assert!(
+                error.contains("decorator-driven runtime features"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_decorators_fall_back_to_the_interpreter() {
+        for source in [
+            "@server(port: compute_port())\n@get fn a() { return 1 }",
+            "@server(8080)\n@get fn a() { return 1 }",
+            "@cache\nfn a() { return 1 }",
+            "@get(\"/a\", auth: true)\nfn a() { return 1 }",
+            "@get(path)\nfn a() { return 1 }",
+            "@patch(\"/a\")\nfn a() { return 1 }",
+            "fn outer() {\n  @cache\n  fn inner() { return 1 }\n  return inner()\n}",
+        ] {
+            let (program, _) = prepare_program(source, false).expect("program should parse");
+            let issues = vm_incompatibilities(&program);
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.contains("decorator-driven runtime features")),
+                "{source:?} should fall back, got {issues:?}"
+            );
+        }
     }
 }
