@@ -584,7 +584,9 @@ fn tool_definitions(config: &ServerConfig) -> Value {
                                          "output_limit", "cancelled", "busy"]
                             },
                             "message": { "type": "string" },
-                            "line": { "type": "integer" }
+                            "line": { "type": "integer" },
+                            "code": { "type": "string", "description": "Stable runtime error code (E0009, ...) for kind \"runtime\"; `forge explain <code>` documents it" },
+                            "hint": { "type": "string", "description": "How to fix the runtime error" }
                         },
                         "required": ["kind", "message"]
                     }
@@ -623,8 +625,9 @@ fn tool_definitions(config: &ServerConfig) -> Value {
                                 "line": { "type": "integer" },
                                 "column": { "type": "integer" },
                                 "severity": { "type": "string", "enum": ["error", "warning"] },
-                                "code": { "type": "string", "description": "Type-checker diagnostic code (T0001...), absent for syntax errors" },
-                                "message": { "type": "string" }
+                                "code": { "type": "string", "description": "Diagnostic code: T0001... for type diagnostics, E0001/E0002 for syntax errors; `forge explain <code>` documents it" },
+                                "message": { "type": "string" },
+                                "hint": { "type": "string", "description": "How to fix it (did-you-mean, ...), when known" }
                             },
                             "required": ["line", "column", "severity", "message"]
                         }
@@ -872,10 +875,13 @@ fn run_forge(config: &ServerConfig, args: &Map<String, Value>, cancel: &CancelHa
                 }
             }
             let mut error = json!({ "kind": e.kind(), "message": e.to_string() });
-            if let SandboxError::Runtime { line, .. } = e {
+            if let SandboxError::Runtime { line, message, .. } = e {
                 if *line > 0 {
                     error["line"] = json!(line);
                 }
+                // Stable code and hint (`forge explain <code>`).
+                error["code"] = json!(crate::semantics::errors::classify(message).code);
+                error["hint"] = json!(crate::semantics::errors::hint_for(message));
             }
             (text, error)
         }
@@ -905,9 +911,12 @@ pub struct Diagnostic {
     /// 1-based column (0 when unknown).
     pub column: usize,
     pub is_error: bool,
-    /// Type-checker code (`T0006`), `None` for lex/parse errors.
+    /// Diagnostic code: `T0006` for type diagnostics, `E0001` / `E0002`
+    /// for lexer / parser errors (`forge explain <code>`).
     pub code: Option<String>,
     pub message: String,
+    /// One-line hint (did-you-mean, how to fix), when there is one.
+    pub hint: Option<String>,
 }
 
 /// Lex, parse and type-check `source` without running it.
@@ -923,16 +932,24 @@ pub fn check_source(source: &str) -> Vec<Diagnostic> {
                 is_error: d.is_error(),
                 code: Some(d.code.as_str().to_string()),
                 message: d.full_message(),
+                hint: d.help.clone(),
             })
             .collect(),
-        Err(FrontendError::Lex { line, col, message })
-        | Err(FrontendError::Parse { line, col, message }) => vec![Diagnostic {
-            line,
-            column: col,
-            is_error: true,
-            code: None,
-            message,
-        }],
+        Err(e) => {
+            let (code, line, col, message) = match e {
+                FrontendError::Lex { line, col, message } => ("E0001", line, col, message),
+                FrontendError::Parse { line, col, message } => ("E0002", line, col, message),
+            };
+            let hint = crate::semantics::errors::lookup(code).map(|c| c.hint.to_string());
+            vec![Diagnostic {
+                line,
+                column: col,
+                is_error: true,
+                code: Some(code.to_string()),
+                message,
+                hint,
+            }]
+        }
     }
 }
 
@@ -975,6 +992,9 @@ fn check_forge(args: &Map<String, Value>) -> Value {
             });
             if let Some(code) = &d.code {
                 item["code"] = json!(code);
+            }
+            if let Some(hint) = &d.hint {
+                item["hint"] = json!(hint);
             }
             item
         })
@@ -1157,6 +1177,10 @@ mod tests {
 
         assert_eq!(r(3)["structuredContent"]["error"]["kind"], "runtime");
         assert_eq!(r(3)["structuredContent"]["error"]["line"], 1);
+        assert_eq!(r(3)["structuredContent"]["error"]["code"], "E0008");
+        assert!(r(3)["structuredContent"]["error"]["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("divisor")));
         assert_eq!(r(4)["structuredContent"]["error"]["kind"], "syntax");
 
         assert_eq!(r(5)["structuredContent"]["truncated"], true);
@@ -1186,6 +1210,8 @@ mod tests {
         assert_eq!(bad["ok"], false);
         assert_eq!(bad["diagnostics"][0]["severity"], "error");
         assert_eq!(bad["diagnostics"][0]["line"], 2);
+        assert_eq!(bad["diagnostics"][0]["code"], "E0002");
+        assert!(bad["diagnostics"][0]["hint"].is_string());
         let good = by_id(&msgs, 2)["result"].clone();
         assert_eq!(good["structuredContent"]["ok"], true);
         assert_eq!(good["content"][0]["text"], "No problems found.");
