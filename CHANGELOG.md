@@ -31,7 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `is_ok()` / `is_err()` / `unwrap_or()` on a non-Result value are an error on the VM too.
 - `contains()` on the VM finds object keys (`contains({a: 1}, "a")` was `false`) and rejects unsearchable arguments like the interpreter.
 - Assigning a field on a non-object (`b.a = 1` with `b = false`) is an error on the interpreter too (it was silently ignored).
-- Anonymous functions display as `<lambda>` on both engines (the VM printed `<fn <lambda>>`).
+- Anonymous functions display as `<lambda>` (and `"<Lambda>"` inside objects) on both engines (the VM printed `<fn <lambda>>` / `"<Function>"`).
+- Function values compare by identity on both engines (`f == f` was `false` on the interpreter).
+- `min_of()` / `max_of()` on the VM reject empty and non-numeric arrays and promote mixed Int/Float to Float, like the interpreter.
+- `out.push(f())` on the VM evaluates the argument before reading `out`, so mutations `f` makes to a captured `out` are kept (they were lost).
 - Built-in string methods (`chars`, `bytes`, `words`, `char_at`, `is_alpha`, `encode_uri`, ...) are shared by both engines; `"ab".chars()` and friends now work on the VM.
 - `range()`, `sample()` and `slay()` counts above 100,000,000, and `repeat_str()` / `pad_start()` / `pad_end()` results above 1 GiB, are runtime errors instead of a crash.
 

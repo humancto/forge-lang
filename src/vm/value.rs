@@ -622,6 +622,13 @@ impl GcObject {
                 format!("[{}]", entries.join(", "))
             }
             ObjKind::BoxedInt(n) => n.to_string(),
+            // Anonymous functions are `Lambda`s, as `typeof` and the
+            // interpreter report them.
+            ObjKind::Function(ObjFunction { name, .. })
+            | ObjKind::Closure(ObjClosure {
+                function: ObjFunction { name, .. },
+                ..
+            }) if name == "<lambda>" => "\"<Lambda>\"".to_string(),
             _ => format!("\"<{}>\"", self.type_name()),
         }
     }

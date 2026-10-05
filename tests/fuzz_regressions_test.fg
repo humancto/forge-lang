@@ -108,6 +108,22 @@ define test_function_values_compare_by_identity() {
 }
 
 @test
+define test_min_max_of_rules() {
+    assert_throws(fn() { min_of([]) })
+    assert_throws(fn() { max_of([]) })
+    assert_throws(fn() { min_of([1, "a"]) })
+    assert_eq(min_of([3, 1, 2]), 1)
+    assert_eq(max_of([1, 2.5]), 2.5)
+    assert_eq(typeof(min_of([1, 2.0])), "Float")
+}
+
+@test
+define test_function_inside_object_display() {
+    let f = fn(x) { return x }
+    assert_eq(contains(str({ b: f }), "<Lambda>"), true)
+}
+
+@test
 define test_contains_argument_rules() {
     assert_eq(contains({ a: 1 }, "a"), true)
     assert_eq(contains({ a: 1 }, "b"), false)

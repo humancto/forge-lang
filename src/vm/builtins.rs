@@ -1152,68 +1152,8 @@ impl VM {
                 }
                 Err(VMError::new("sum() requires an array"))
             }
-            "min_of" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    let items = if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Array(a) = &obj.kind {
-                            a.clone()
-                        } else {
-                            return Err(VMError::new("min_of() requires an array"));
-                        }
-                    } else {
-                        return Err(VMError::new("null array"));
-                    };
-                    if items.is_empty() {
-                        return Ok(Value::null());
-                    }
-                    let mut min = items[0].clone();
-                    for item in &items[1..] {
-                        let less = match (min.classify(&self.gc), item.classify(&self.gc)) {
-                            (ValueKind::Int(a), ValueKind::Int(b)) => b < a,
-                            (ValueKind::Float(a), ValueKind::Float(b)) => b < a,
-                            (ValueKind::Int(a), ValueKind::Float(b)) => b < (a as f64),
-                            (ValueKind::Float(a), ValueKind::Int(b)) => (b as f64) < a,
-                            _ => false,
-                        };
-                        if less {
-                            min = item.clone();
-                        }
-                    }
-                    return Ok(min);
-                }
-                Err(VMError::new("min_of() requires an array"))
-            }
-            "max_of" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    let items = if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Array(a) = &obj.kind {
-                            a.clone()
-                        } else {
-                            return Err(VMError::new("max_of() requires an array"));
-                        }
-                    } else {
-                        return Err(VMError::new("null array"));
-                    };
-                    if items.is_empty() {
-                        return Ok(Value::null());
-                    }
-                    let mut max = items[0].clone();
-                    for item in &items[1..] {
-                        let greater = match (max.classify(&self.gc), item.classify(&self.gc)) {
-                            (ValueKind::Int(a), ValueKind::Int(b)) => b > a,
-                            (ValueKind::Float(a), ValueKind::Float(b)) => b > a,
-                            (ValueKind::Int(a), ValueKind::Float(b)) => b > (a as f64),
-                            (ValueKind::Float(a), ValueKind::Int(b)) => (b as f64) > a,
-                            _ => false,
-                        };
-                        if greater {
-                            max = item.clone();
-                        }
-                    }
-                    return Ok(max);
-                }
-                Err(VMError::new("max_of() requires an array"))
-            }
+            "min_of" => self.min_max_of(&args, "min_of", true),
+            "max_of" => self.min_max_of(&args, "max_of", false),
             "map" => {
                 // Arity-based overload:
                 //   map()                    → empty Map
@@ -3743,6 +3683,46 @@ impl VM {
     }
 
     /// Allocate a shared string-method result (`semantics::string_method`).
+    /// `min_of` / `max_of`, mirroring the interpreter: a non-empty array;
+    /// Int/Int stays Int, any Float makes the result Float; a non-number
+    /// after the first element is an error.
+    fn min_max_of(&mut self, args: &[Value], name: &str, min: bool) -> Result<Value, VMError> {
+        let items = match args
+            .first()
+            .and_then(|v| v.as_obj())
+            .and_then(|r| self.gc.get(r))
+            .map(|o| &o.kind)
+        {
+            Some(ObjKind::Array(a)) => a.clone(),
+            _ => return Err(VMError::new(&format!("{}() requires an array", name))),
+        };
+        let Some((&first, rest)) = items.split_first() else {
+            return Err(VMError::new(&format!(
+                "{}() requires a non-empty array",
+                name
+            )));
+        };
+        let pick_f = |a: f64, b: f64| if min { a.min(b) } else { a.max(b) };
+        let mut result = first;
+        for item in rest {
+            result = match (result.classify(&self.gc), item.classify(&self.gc)) {
+                (ValueKind::Int(a), ValueKind::Int(b)) => {
+                    Value::int(if min { a.min(b) } else { a.max(b) }, &mut self.gc)
+                }
+                (ValueKind::Float(a), ValueKind::Float(b)) => Value::float(pick_f(a, b)),
+                (ValueKind::Int(a), ValueKind::Float(b)) => Value::float(pick_f(a as f64, b)),
+                (ValueKind::Float(a), ValueKind::Int(b)) => Value::float(pick_f(a, b as f64)),
+                _ => {
+                    return Err(VMError::new(&format!(
+                        "{}() requires array of numbers",
+                        name
+                    )))
+                }
+            };
+        }
+        Ok(result)
+    }
+
     #[allow(clippy::wrong_self_convention)]
     fn from_str_method(&mut self, v: crate::semantics::StrMethodValue) -> Value {
         use crate::semantics::StrMethodValue as V;
