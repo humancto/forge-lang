@@ -122,6 +122,11 @@ const ROUTE_DECORATORS: &[&str] = &["get", "post", "put", "delete", "ws"];
 /// Decorators that only tag functions for `forge test`.
 const TEST_DECORATORS: &[&str] = &["test", "skip", "before", "after"];
 
+/// Decorators that only describe a function for `forge mcp serve`
+/// (`src/mcp/tools.rs` reads them from the AST; running the file ignores
+/// them).
+const MCP_DECORATORS: &[&str] = &["tool", "param", "resource"];
+
 /// Why the bytecode VM cannot run `decorator` faithfully, or `None` when it
 /// can. `standalone` is true for a decorator statement (`@server(...)`) and
 /// false for one attached to a `fn`.
@@ -152,6 +157,10 @@ pub fn vm_unsupported_decorator(decorator: &Decorator, standalone: bool) -> Opti
             decorator.args.as_slice(),
             [] | [DecoratorArg::Positional(Expr::StringLit(_))]
         )
+    } else if MCP_DECORATORS.contains(&name) {
+        decorator.args.iter().all(|arg| match arg {
+            DecoratorArg::Named(_, value) | DecoratorArg::Positional(value) => is_literal(value),
+        })
     } else {
         TEST_DECORATORS.contains(&name)
     };

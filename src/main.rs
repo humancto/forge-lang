@@ -307,10 +307,53 @@ fn apply_grants(
     caps
 }
 
+/// `forge mcp` settings beyond the policy.
+struct McpOptions {
+    max_time: Option<f64>,
+    max_sessions: Option<usize>,
+    session_idle: Option<u64>,
+    /// `forge mcp serve FILE [--with-code-tools]`.
+    serve: Option<(PathBuf, bool)>,
+}
+
+/// Load the tools of `forge mcp serve FILE` under the server's policy, plus
+/// the file's directory (and `forge_modules/`) as import roots.
+fn load_mcp_tools(
+    file: &std::path::Path,
+    caps: &permissions::Capabilities,
+    max_time: std::time::Duration,
+) -> Result<mcp::ToolSet, String> {
+    let source =
+        fs::read_to_string(file).map_err(|e| format!("cannot read {}: {}", file.display(), e))?;
+    let dir = match file.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let caps = caps
+        .clone()
+        .grant_import_root(dir)
+        .grant_import_root("forge_modules");
+    let (tools, report) = mcp::ToolSet::load(file, &source, caps, max_time)?;
+    if !report.stdout.is_empty() {
+        eprint!("{}", report.stdout);
+    }
+    Ok(tools)
+}
+
 /// `forge mcp`: serve until the client closes stdin, then exit.
-fn run_mcp(caps: permissions::Capabilities, max_time: Option<f64>) -> ! {
+fn run_mcp(caps: permissions::Capabilities, options: McpOptions) -> ! {
+    let fail = |message: &str| -> ! {
+        eprintln!("{}", errors::format_simple_error(message));
+        process::exit(2);
+    };
     let mut config = mcp::ServerConfig::new(caps);
-    if let Some(secs) = max_time {
+    if let Some(n) = options.max_sessions {
+        config.max_sessions = n;
+    }
+    if let Some(secs) = options.session_idle {
+        config.session_idle = std::time::Duration::from_secs(secs);
+    }
+    if let Some(secs) = options.max_time {
         match std::time::Duration::try_from_secs_f64(secs) {
             Ok(limit) if secs > 0.0 => config.max_time = limit,
             _ => {
@@ -325,6 +368,14 @@ fn run_mcp(caps: permissions::Capabilities, max_time: Option<f64>) -> ! {
     // Nothing on this side of the protocol runs user code; scripts get the
     // configured policy on their own sandbox threads.
     permissions::set_global(permissions::Capabilities::deny_all());
+    if let Some((file, with_code_tools)) = options.serve {
+        config.code_tools = with_code_tools;
+        let tools = load_mcp_tools(&file, &config.capabilities, config.max_time)
+            .unwrap_or_else(|e| fail(&format!("forge mcp serve: {}", e)));
+        config = config
+            .with_tools(tools)
+            .unwrap_or_else(|e| fail(&format!("forge mcp serve: {}", e)));
+    }
     eprintln!(
         "forge mcp {}: {}",
         env!("CARGO_PKG_VERSION"),
@@ -363,6 +414,24 @@ fn start_max_time_watchdog(secs: f64) {
         );
         process::exit(MAX_TIME_EXIT_CODE);
     });
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Serve the `@tool` and `@resource` functions of a Forge file as MCP
+    /// tools and resources. Every call runs in a fresh sandboxed fork of
+    /// the file's top level, under the same grants and limits as run_forge.
+    Serve {
+        /// The Forge file that defines the tools
+        file: PathBuf,
+        /// Let tools run subprocesses (sh, run_command, ...)
+        #[arg(long = "allow-run")]
+        allow_run: bool,
+        /// Also serve run_forge, check_forge, forge_reference and
+        /// reset_session (arbitrary sandboxed code)
+        #[arg(long = "with-code-tools")]
+        with_code_tools: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -490,17 +559,29 @@ enum Command {
     Dap,
     /// Serve the Model Context Protocol over stdio so AI agents can run
     /// Forge code in a sandbox (tools: run_forge, check_forge,
-    /// forge_reference). Scripts are denied everything (files, network,
-    /// env, db, subprocesses, AI) unless granted with --allow-* flags or
-    /// [permissions] in forge.toml; --max-time caps each call (default 30s).
+    /// forge_reference, reset_session), or serve tools written in Forge
+    /// (`forge mcp serve tools.fg`). Scripts are denied everything (files,
+    /// network, env, db, subprocesses, AI) unless granted with --allow-*
+    /// flags or [permissions] in forge.toml; --max-time caps each call
+    /// (default 30s).
     #[command(
-        after_help = "Example (Claude Desktop / Claude Code config):\n  {\"command\": \"forge\", \"args\": [\"mcp\", \"--allow-net=api.example.com\"]}"
+        after_help = "Example (Claude Desktop / Claude Code config):\n  {\"command\": \"forge\", \"args\": [\"mcp\", \"--allow-net=api.example.com\"]}\n  {\"command\": \"forge\", \"args\": [\"mcp\", \"serve\", \"/path/to/tools.fg\"]}"
     )]
     Mcp {
         /// Let scripts run subprocesses (sh, run_command, ...). Never granted
         /// by default.
         #[arg(long = "allow-run")]
         allow_run: bool,
+        /// Keep at most N persistent run_forge sessions (default 16; 0
+        /// disables sessions)
+        #[arg(long = "max-sessions", value_name = "N")]
+        max_sessions: Option<usize>,
+        /// Drop a run_forge session after SECS seconds without calls
+        /// (default 900)
+        #[arg(long = "session-idle", value_name = "SECS")]
+        session_idle: Option<u64>,
+        #[command(subcommand)]
+        action: Option<McpCommand>,
     },
     /// Interactive tutorials to learn Forge
     Learn {
@@ -609,11 +690,40 @@ async fn async_main() {
         .perms
         .max_time
         .or(toml_perms.as_ref().and_then(|p| p.max_time));
-    if let Some(Command::Mcp { allow_run }) = cli.command {
+    if let Some(Command::Mcp {
+        allow_run,
+        max_sessions,
+        session_idle,
+        action,
+    }) = cli.command
+    {
         // No process watchdog for the server: the limit applies to each
         // script instead.
-        let caps = build_mcp_policy(&cli.perms, toml_perms, cli.allow_run || allow_run);
-        run_mcp(caps, max_time);
+        let serve_run = matches!(
+            action,
+            Some(McpCommand::Serve {
+                allow_run: true,
+                ..
+            })
+        );
+        let caps = build_mcp_policy(
+            &cli.perms,
+            toml_perms,
+            cli.allow_run || allow_run || serve_run,
+        );
+        let options = McpOptions {
+            max_time,
+            max_sessions,
+            session_idle,
+            serve: action.map(
+                |McpCommand::Serve {
+                     file,
+                     with_code_tools,
+                     ..
+                 }| (file, with_code_tools),
+            ),
+        };
+        run_mcp(caps, options);
     }
     permissions::set_global(build_policy(
         &cli.perms,

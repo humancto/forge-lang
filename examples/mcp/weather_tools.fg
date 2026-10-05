@@ -1,0 +1,129 @@
+// MCP tools written in Forge. Serve them to an AI agent with:
+//
+//   forge mcp serve examples/mcp/weather_tools.fg
+//
+// Every tool is a top-level function with @tool. Its typed parameters become
+// the tool's JSON Schema (Int -> integer, Float -> number, String -> string,
+// Bool -> boolean, [T] -> array, a struct -> object, ?T / Option<T> ->
+// optional); @param documents them, and the return type becomes the
+// tool's output schema (a Result<T, E> return type describes T). Return
+// Err("...") to report a tool error.
+//
+// All tools here are pure and offline: the weather "lookup" reads a table
+// defined below, so the file runs under forge mcp's default deny-all policy.
+
+struct Reading {
+    city: String,
+    condition: String,
+    temp_c: Float,
+    humidity: Int
+}
+
+struct Report {
+    city: String,
+    condition: String,
+    temperature: Float,
+    unit: String,
+    humidity: Int,
+    advice: String
+}
+
+// Top-level code runs once when the server starts; every call gets its own
+// copy of this state.
+let readings = [
+    Reading { city: "Lisbon", condition: "sunny", temp_c: 24.5, humidity: 55 },
+    Reading { city: "Oslo", condition: "snow", temp_c: -3.0, humidity: 80 },
+    Reading { city: "Nairobi", condition: "cloudy", temp_c: 19.0, humidity: 65 },
+    Reading { city: "Singapore", condition: "rain", temp_c: 30.5, humidity: 88 }
+]
+
+fn c_to_f(c: Float) -> Float {
+    return c * 9.0 / 5.0 + 32.0
+}
+
+fn f_to_c(f: Float) -> Float {
+    return (f - 32.0) * 5.0 / 9.0
+}
+
+fn round2(x: Float) -> Float {
+    return math.round(x * 100.0) / 100.0
+}
+
+fn advice_for(r: Reading) -> String {
+    if r.condition == "rain" {
+        return "Take an umbrella."
+    }
+    if r.temp_c < 0.0 {
+        return "Wear a warm coat."
+    }
+    if r.temp_c > 28.0 {
+        return "Stay hydrated."
+    }
+    return "Enjoy the day."
+}
+
+@tool(description: "Convert a temperature between Celsius (C) and Fahrenheit (F).", idempotent: true)
+@param(value: "The temperature to convert", target: "Target unit: \"C\" or \"F\"")
+fn convert_temperature(value: Float, target: String = "F") -> Result<Float, String> {
+    if target == "F" {
+        return Ok(round2(c_to_f(value)))
+    }
+    if target == "C" {
+        return Ok(round2(f_to_c(value)))
+    }
+    return Err("`target` must be \"C\" or \"F\", got \"" + target + "\"")
+}
+
+@tool(description: "Convert a distance between kilometres (km) and miles (mi).", idempotent: true)
+@param(value: "The distance to convert", unit: "Unit of `value`: \"km\" or \"mi\"")
+fn convert_distance(value: Float, unit: String) -> Result<Float, String> {
+    if unit == "km" {
+        return Ok(round2(value * 0.621371))
+    }
+    if unit == "mi" {
+        return Ok(round2(value / 0.621371))
+    }
+    return Err("`unit` must be \"km\" or \"mi\"")
+}
+
+@tool(description: "Count characters, words and lines in a text, and find its longest word.", idempotent: true)
+@param(text: "The text to analyse")
+fn text_stats(text: String) -> Object {
+    let words = filter(split(replace(text, "\n", " "), " "), fn(w) { return len(w) > 0 })
+    let mut longest = ""
+    for w in words {
+        if len(w) > len(longest) {
+            longest = w
+        }
+    }
+    return {
+        characters: len(text),
+        words: len(words),
+        lines: len(split(text, "\n")),
+        longest_word: longest
+    }
+}
+
+@tool(description: "Current weather for a city (from a built-in sample table; offline).", read_only: true, idempotent: true)
+@param(city: "City name, e.g. Lisbon", unit: "\"C\" (default) or \"F\"")
+fn weather(city: String, unit: String = "C") -> Result<Report, String> {
+    for r in readings {
+        if r.city.lower() == city.lower() {
+            let temp = if unit == "F" { round2(c_to_f(r.temp_c)) } else { r.temp_c }
+            return Ok(Report {
+                city: r.city,
+                condition: r.condition,
+                temperature: temp,
+                unit: unit,
+                humidity: r.humidity,
+                advice: advice_for(r)
+            })
+        }
+    }
+    return Err("no weather data for \"" + city + "\"; known cities: " + join(map(readings, fn(r) { return r.city }), ", "))
+}
+
+@resource(uri: "weather://cities", description: "Cities the weather tool knows about.")
+fn cities() {
+    return map(readings, fn(r) { return r.city })
+}

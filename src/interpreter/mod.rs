@@ -1149,9 +1149,9 @@ impl Interpreter {
     /// captured scopes of functions and lambdas. Each scope is visited
     /// once (keyed by `Arc` identity), which terminates the walk on the
     /// recursive-function cycle and avoids re-walking scopes many closures
-    /// share.
-    #[cfg(debug_assertions)]
-    fn find_stream_in_env(env: &Environment) -> Option<String> {
+    /// share. Available in every build so hosts that fork a template (the
+    /// MCP tool server) can reject such a program up front.
+    pub(crate) fn find_stream_in_env(env: &Environment) -> Option<String> {
         type Seen = std::collections::HashSet<*const std::sync::Mutex<Scope>>;
 
         fn walk_env(env: &Environment, prefix: &str, seen: &mut Seen) -> Option<String> {

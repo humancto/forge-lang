@@ -13,9 +13,19 @@
 //! * **Legacy** (`2025-11-25` back to `2024-11-05`): `initialize` handshake,
 //!   then plain requests. `ping` is answered in both eras.
 //!
-//! Tools: `run_forge` (sandboxed execution), `check_forge` (parse +
+//! Tools: `run_forge` (sandboxed execution, optionally in a persistent
+//! session, see [`session`]), `reset_session`, `check_forge` (parse +
 //! typecheck diagnostics) and `forge_reference` (the language guide,
-//! `llms.txt`).
+//! `llms.txt`). `forge mcp serve tools.fg` adds tools and resources written
+//! in Forge (`@tool` / `@resource` functions, see [`tools`]).
+//!
+//! Engine: every piece of agent-supplied or tool code runs on the
+//! tree-walking interpreter inside [`Sandbox`], never on the VM. The VM does
+//! not yet provide the sandbox's guarantees: `say` writes straight to the
+//! process's stdout (no capture or output budget), a deadline cannot stop
+//! `squad` tasks or a blocked `receive` (SECURITY_AUDIT.md SEC-02, VM
+//! part), and converting a very deeply nested value can overflow the native
+//! stack (SEC-16), which would take the whole server down.
 //!
 //! Robustness: every `tools/call` that runs code gets its own thread, so a
 //! stuck script never blocks the protocol loop; scripts are bounded by a
@@ -25,9 +35,15 @@
 //! and points the process's stdin at `/dev/null` and stdout at stderr, so
 //! nothing a script (or the runtime) prints or reads can corrupt the stream.
 
+pub mod session;
+pub mod tools;
+
+pub use tools::ToolSet;
+
 use crate::permissions::Capabilities;
-use crate::sandbox::{truncate_utf8, CancelHandle, Sandbox, SandboxError};
+use crate::sandbox::{parse_source, truncate_utf8, CancelHandle, Output, Sandbox, SandboxError};
 use serde_json::{json, Map, Value};
+use session::{Checkout, Sessions};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
@@ -44,6 +60,10 @@ pub const DEFAULT_MAX_TIME: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// Default number of tool calls that may run at once.
 pub const DEFAULT_MAX_CONCURRENT_CALLS: usize = 8;
+/// Default number of live `run_forge` sessions.
+pub const DEFAULT_MAX_SESSIONS: usize = 16;
+/// Default idle time after which a session is dropped.
+pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(15 * 60);
 /// A script is stopped once it has printed this much (memory bound).
 const CAPTURE_LIMIT: usize = 1024 * 1024;
 /// Longest accepted protocol line; longer ones are discarded with an error.
@@ -55,6 +75,8 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
+const RESOURCE_NOT_FOUND: i64 = -32002;
 const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 
 const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
@@ -62,7 +84,7 @@ const META_CLIENT_CAPS: &str = "io.modelcontextprotocol/clientCapabilities";
 const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 
 /// The language guide served by `forge_reference`.
-const REFERENCE: &str = include_str!("../llms.txt");
+const REFERENCE: &str = include_str!("../../llms.txt");
 
 /// What scripts may do and how long they may run.
 #[derive(Debug, Clone)]
@@ -76,7 +98,26 @@ pub struct ServerConfig {
     pub max_response_bytes: usize,
     /// Calls beyond this many in flight are rejected as busy.
     pub max_concurrent_calls: usize,
+    /// Live `run_forge` sessions at most; 0 disables sessions (and the
+    /// `session_id` argument and `reset_session` tool).
+    pub max_sessions: usize,
+    /// A session unused for this long is dropped.
+    pub session_idle: Duration,
+    /// Serve `run_forge`, `check_forge`, `forge_reference` and
+    /// `reset_session`. On by default; `forge mcp serve` turns it off
+    /// unless asked, so a tool server only exposes its own tools.
+    pub code_tools: bool,
+    /// Tools and resources written in Forge (`forge mcp serve`).
+    pub tools: Option<Arc<ToolSet>>,
 }
+
+/// Names of the built-in tools (reserved when `code_tools` is on).
+pub const CODE_TOOLS: &[&str] = &[
+    "run_forge",
+    "check_forge",
+    "forge_reference",
+    "reset_session",
+];
 
 impl ServerConfig {
     pub fn new(capabilities: Capabilities) -> Self {
@@ -85,7 +126,30 @@ impl ServerConfig {
             max_time: DEFAULT_MAX_TIME,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_concurrent_calls: DEFAULT_MAX_CONCURRENT_CALLS,
+            max_sessions: DEFAULT_MAX_SESSIONS,
+            session_idle: DEFAULT_SESSION_IDLE,
+            code_tools: true,
+            tools: None,
         }
+    }
+
+    /// Serve `tools` too. Fails if a Forge tool would shadow a built-in one.
+    pub fn with_tools(mut self, tools: ToolSet) -> Result<Self, String> {
+        if self.code_tools {
+            if let Some(name) = tools.tool_names().find(|n| CODE_TOOLS.contains(n)) {
+                return Err(format!(
+                    "{}: tool name `{}` is reserved by forge mcp (rename it with @tool(name: ...))",
+                    tools.path(),
+                    name
+                ));
+            }
+        }
+        self.tools = Some(Arc::new(tools));
+        Ok(self)
+    }
+
+    fn sessions_enabled(&self) -> bool {
+        self.code_tools && self.max_sessions > 0
     }
 
     /// One-line description of the policy for agents and logs.
@@ -178,8 +242,18 @@ struct Server {
     config: ServerConfig,
     out: Mutex<Box<dyn Write + Send>>,
     /// Running tool calls by request id (JSON text), for cancellation.
-    inflight: Mutex<HashMap<String, CancelHandle>>,
+    inflight: Mutex<HashMap<String, InFlight>>,
     idle: Condvar,
+    sessions: Mutex<Sessions>,
+}
+
+/// A running call.
+struct InFlight {
+    /// Stops the call (client cancellation, or a reset of its session).
+    stop: CancelHandle,
+    /// Set only by `notifications/cancelled`: such a request gets no
+    /// response. A call stopped for another reason still gets one.
+    client_cancelled: CancelHandle,
 }
 
 /// Serve MCP over any line-oriented byte stream until `input` reaches EOF.
@@ -195,6 +269,7 @@ pub fn serve<R: BufRead>(
         out: Mutex::new(Box::new(output)),
         inflight: Mutex::new(HashMap::new()),
         idle: Condvar::new(),
+        sessions: Mutex::new(Sessions::default()),
     });
     let mut line = Vec::new();
     let result = loop {
@@ -283,19 +358,45 @@ impl Server {
         })
     }
 
-    fn capabilities() -> Value {
-        json!({ "tools": { "listChanged": false } })
+    fn capabilities(&self) -> Value {
+        let mut caps = json!({ "tools": { "listChanged": false } });
+        if self
+            .config
+            .tools
+            .as_ref()
+            .is_some_and(|t| t.has_resources())
+        {
+            caps["resources"] = json!({ "listChanged": false, "subscribe": false });
+        }
+        caps
     }
 
     fn instructions(&self) -> String {
-        format!(
-            "Run Forge scripts in a sandbox. Instead of chaining many tool calls, write one \
-             short Forge program that does the work (HTTP, JSON, CSV, math, strings, \
-             collections are built in) and pass it to run_forge; print results with `say` or \
-             `println`. If you do not know Forge, call forge_reference first; use check_forge \
-             to find syntax and type errors without running. {}",
-            self.config.policy_summary()
-        )
+        let mut text = String::new();
+        if let Some(tools) = &self.config.tools {
+            text.push_str(&format!(
+                "Tools written in Forge ({}): {}. ",
+                tools.path(),
+                tools.tool_names().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if self.config.code_tools {
+            text.push_str(
+                "Run Forge scripts in a sandbox. Instead of chaining many tool calls, write one \
+                 short Forge program that does the work (HTTP, JSON, CSV, math, strings, \
+                 collections are built in) and pass it to run_forge; print results with `say` \
+                 or `println`. If you do not know Forge, call forge_reference first; use \
+                 check_forge to find syntax and type errors without running. ",
+            );
+            if self.config.sessions_enabled() {
+                text.push_str(
+                    "Pass the same session_id to run_forge to keep variables and functions \
+                     between calls; reset_session clears one. ",
+                );
+            }
+        }
+        text.push_str(&self.config.policy_summary());
+        text
     }
 }
 
@@ -462,8 +563,9 @@ fn handle_notification(server: &Server, method: &str, params: &Map<String, Value
         if let Some(id) = params.get("requestId") {
             let key = id.to_string();
             let inflight = server.inflight.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(handle) = inflight.get(&key) {
-                handle.cancel();
+            if let Some(call) = inflight.get(&key) {
+                call.client_cancelled.cancel();
+                call.stop.cancel();
             }
         }
     }
@@ -480,7 +582,7 @@ fn handle_request(server: &Arc<Server>, id: Value, method: &str, params: Map<Str
             id,
             json!({
                 "protocolVersion": version,
-                "capabilities": Server::capabilities(),
+                "capabilities": server.capabilities(),
                 "serverInfo": Server::server_info(),
                 "instructions": server.instructions(),
             }),
@@ -498,7 +600,7 @@ fn handle_request(server: &Arc<Server>, id: Value, method: &str, params: Map<Str
         "ping" => json!({}),
         "server/discover" => json!({
             "supportedVersions": supported_versions(),
-            "capabilities": Server::capabilities(),
+            "capabilities": server.capabilities(),
             "instructions": server.instructions(),
             "ttlMs": 3_600_000,
             "cacheScope": "public",
@@ -515,6 +617,20 @@ fn handle_request(server: &Arc<Server>, id: Value, method: &str, params: Map<Str
             start_tool_call(server, id, era, params);
             return;
         }
+        "resources/list" => {
+            let resources = server
+                .config
+                .tools
+                .as_ref()
+                .map(|t| t.resource_definitions())
+                .unwrap_or_default();
+            json!({ "resources": resources })
+        }
+        "resources/templates/list" => json!({ "resourceTemplates": [] }),
+        "resources/read" => {
+            start_resource_read(server, id, era, params);
+            return;
+        }
         _ => {
             server.send(&error_response(
                 id,
@@ -529,6 +645,19 @@ fn handle_request(server: &Arc<Server>, id: Value, method: &str, params: Map<Str
 }
 
 fn tool_definitions(config: &ServerConfig) -> Value {
+    let mut tools = Vec::new();
+    if config.code_tools {
+        tools.extend(code_tool_definitions(config));
+    }
+    if let Some(set) = &config.tools {
+        tools.extend(set.tool_definitions(config.max_time));
+    }
+    Value::Array(tools)
+}
+
+/// The built-in tools: `run_forge`, `check_forge`, `forge_reference` and,
+/// with sessions on, `reset_session`.
+fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
     use crate::permissions::Capability;
     let caps = &config.capabilities;
     let writes = [Capability::Write, Capability::Db, Capability::Run]
@@ -537,7 +666,7 @@ fn tool_definitions(config: &ServerConfig) -> Value {
     let open_world = [Capability::Net, Capability::Ai, Capability::Run]
         .iter()
         .any(|c| caps.is_granted(*c));
-    json!([
+    let tools = json!([
         {
             "name": "run_forge",
             "title": "Run Forge code",
@@ -555,6 +684,18 @@ fn tool_definitions(config: &ServerConfig) -> Value {
                     "code": {
                         "type": "string",
                         "description": "Forge source code to run."
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                        "description": format!(
+                            "Optional. Run in this persistent session: top-level variables, \
+                             functions and types from earlier calls with the same id stay \
+                             defined. Omit for a fresh, stateless run. At most {} sessions; \
+                             one idle for {}s is dropped.",
+                            config.max_sessions,
+                            fmt_secs(config.session_idle)
+                        )
                     },
                     "timeout_secs": {
                         "type": "number",
@@ -575,13 +716,23 @@ fn tool_definitions(config: &ServerConfig) -> Value {
                     "stdout": { "type": "string" },
                     "truncated": { "type": "boolean" },
                     "elapsed_ms": { "type": "number" },
+                    "session": {
+                        "type": "object",
+                        "description": "Present when session_id was given.",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "created": { "type": "boolean", "description": "This call started the session." },
+                            "lost": { "type": "boolean", "description": "The session ended with this call (its state is gone)." }
+                        },
+                        "required": ["id", "created", "lost"]
+                    },
                     "error": {
                         "type": ["object", "null"],
                         "properties": {
                             "kind": {
                                 "type": "string",
                                 "enum": ["syntax", "permission_denied", "runtime", "timeout",
-                                         "output_limit", "cancelled", "busy"]
+                                         "output_limit", "cancelled", "busy", "session"]
                             },
                             "message": { "type": "string" },
                             "line": { "type": "integer" }
@@ -651,7 +802,47 @@ fn tool_definitions(config: &ServerConfig) -> Value {
                 "openWorldHint": false
             }
         }
-    ])
+    ]);
+    let mut tools = match tools {
+        Value::Array(tools) => tools,
+        _ => Vec::new(),
+    };
+    if config.sessions_enabled() {
+        tools.push(json!({
+            "name": "reset_session",
+            "title": "Reset a run_forge session",
+            "description": "Forget a run_forge session: its variables and functions are dropped \
+                            and a call still running in it is stopped. The next run_forge with \
+                            that session_id starts fresh.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "The session to reset." }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": { "existed": { "type": "boolean" } },
+                "required": ["existed"]
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }));
+    } else if let Some(run) = tools.first_mut() {
+        if let Some(props) = run["inputSchema"]["properties"].as_object_mut() {
+            props.remove("session_id");
+        }
+        if let Some(props) = run["outputSchema"]["properties"].as_object_mut() {
+            props.remove("session");
+        }
+    }
+    tools
 }
 
 /// A tool result the agent sees as a failure (`isError: true`).
@@ -683,20 +874,63 @@ fn start_tool_call(server: &Arc<Server>, id: Value, era: Era, params: Map<String
             return;
         }
     };
+    let config = &server.config;
+    let code_tools = config.code_tools;
     match name {
-        "forge_reference" => {
+        "forge_reference" if code_tools => {
+            let sessions = if config.sessions_enabled() {
+                " With `session_id`, run_forge keeps top-level variables, functions and \
+                 types between calls that pass the same id (a failed call keeps what it \
+                 defined before the error; tasks it spawned stop when it ends); \
+                 reset_session forgets one."
+            } else {
+                ""
+            };
             let text = format!(
                 "{}\n## This server (forge mcp)\n\nrun_forge runs code on the tree-walking \
                  interpreter inside a sandbox. {} A denied operation fails with \
                  `permission denied: <capability>`; do not retry it. HTTP servers, `schedule` \
-                 and `watch` blocks are not started, and `input()` reads nothing.\n",
+                 and `watch` blocks are not started, and `input()` reads nothing.{}\n",
                 REFERENCE,
-                server.config.policy_summary()
+                config.policy_summary(),
+                sessions
             );
             let result = json!({ "content": [{ "type": "text", "text": text }] });
             server.send(&result_response(id, finish(result, era)));
         }
-        "run_forge" | "check_forge" => spawn_call(server, id, era, name == "run_forge", args),
+        "run_forge" if code_tools => spawn_call(server, id, era, Job::Run(args)),
+        "check_forge" if code_tools => spawn_call(server, id, era, Job::Check(args)),
+        "reset_session" if config.sessions_enabled() => {
+            let result = match args.get("session_id").and_then(Value::as_str) {
+                Some(sid) => {
+                    let existed = server
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .reset(sid);
+                    let text = if existed {
+                        format!("Session `{}` reset.", sid)
+                    } else {
+                        format!("There was no session `{}`.", sid)
+                    };
+                    json!({
+                        "content": [{ "type": "text", "text": text }],
+                        "structuredContent": { "existed": existed }
+                    })
+                }
+                None => tool_error("`session_id` (a string) is required"),
+            };
+            server.send(&result_response(id, finish(result, era)));
+        }
+        other if config.tools.as_ref().is_some_and(|t| t.has_tool(other)) => spawn_call(
+            server,
+            id,
+            era,
+            Job::Tool {
+                name: other.to_string(),
+                args,
+            },
+        ),
         other => server.send(&error_response(
             id,
             INVALID_PARAMS,
@@ -706,9 +940,98 @@ fn start_tool_call(server: &Arc<Server>, id: Value, era: Era, params: Map<String
     }
 }
 
-fn spawn_call(server: &Arc<Server>, id: Value, era: Era, run: bool, args: Map<String, Value>) {
+fn start_resource_read(server: &Arc<Server>, id: Value, era: Era, params: Map<String, Value>) {
+    let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+        server.send(&error_response(
+            id,
+            INVALID_PARAMS,
+            "resources/read needs a uri",
+            None,
+        ));
+        return;
+    };
+    if !server
+        .config
+        .tools
+        .as_ref()
+        .is_some_and(|t| t.has_resource(uri))
+    {
+        server.send(&error_response(
+            id,
+            RESOURCE_NOT_FOUND,
+            "Resource not found",
+            Some(json!({ "uri": uri })),
+        ));
+        return;
+    }
+    let uri = uri.to_string();
+    spawn_call(server, id, era, Job::Resource { uri });
+}
+
+/// Work that runs on its own thread, bounded by the server's limits.
+enum Job {
+    Run(Map<String, Value>),
+    Check(Map<String, Value>),
+    Tool {
+        name: String,
+        args: Map<String, Value>,
+    },
+    Resource {
+        uri: String,
+    },
+}
+
+impl Job {
+    /// Answer for a job that cannot start (busy server, no thread):
+    /// a tool error for tool calls, a JSON-RPC error for resource reads.
+    fn refusal(&self, message: &str, kind: &str) -> Result<Value, (i64, String)> {
+        match self {
+            Job::Resource { .. } => Err((INTERNAL_ERROR, message.to_string())),
+            Job::Run(_) => {
+                let mut result = tool_error(message);
+                result["structuredContent"] = json!({
+                    "ok": false, "stdout": "", "truncated": false, "elapsed_ms": 0,
+                    "error": { "kind": kind, "message": message }
+                });
+                Ok(result)
+            }
+            _ => Ok(tool_error(message)),
+        }
+    }
+
+    fn run(self, server: &Server, cancel: &CancelHandle) -> Result<Value, (i64, String)> {
+        let config = &server.config;
+        match self {
+            Job::Run(args) => Ok(run_forge(server, &args, cancel)),
+            Job::Check(args) => Ok(check_forge(&args)),
+            Job::Tool { name, args } => Ok(match &config.tools {
+                Some(set) => set.call(
+                    &name,
+                    &args,
+                    config.max_time,
+                    config.max_response_bytes,
+                    cancel,
+                ),
+                None => tool_error("no Forge tools are loaded"),
+            }),
+            Job::Resource { uri } => match &config.tools {
+                Some(set) => set
+                    .read_resource(&uri, config.max_time, config.max_response_bytes, cancel)
+                    .map_err(|e| (INTERNAL_ERROR, e)),
+                None => Err((RESOURCE_NOT_FOUND, "Resource not found".to_string())),
+            },
+        }
+    }
+}
+
+fn spawn_call(server: &Arc<Server>, id: Value, era: Era, job: Job) {
+    let reply = |result: Result<Value, (i64, String)>| match result {
+        Ok(result) => result_response(id.clone(), finish(result, era)),
+        Err((code, message)) => error_response(id.clone(), code, &message, None),
+    };
     let key = id.to_string();
     let handle = CancelHandle::new();
+    let client_cancelled = CancelHandle::new();
     {
         let mut inflight = server.inflight.lock().unwrap_or_else(|e| e.into_inner());
         if inflight.contains_key(&key) {
@@ -727,18 +1050,18 @@ fn spawn_call(server: &Arc<Server>, id: Value, era: Era, run: bool, args: Map<St
                 "server busy: {} calls are already running; retry when one finishes",
                 server.config.max_concurrent_calls
             );
-            let mut result = tool_error(&message);
-            if run {
-                result["structuredContent"] = json!({
-                    "ok": false, "stdout": "", "truncated": false, "elapsed_ms": 0,
-                    "error": { "kind": "busy", "message": message }
-                });
-            }
-            server.send(&result_response(id, finish(result, era)));
+            server.send(&reply(job.refusal(&message, "busy")));
             return;
         }
-        inflight.insert(key.clone(), handle.clone());
+        inflight.insert(
+            key.clone(),
+            InFlight {
+                stop: handle.clone(),
+                client_cancelled: client_cancelled.clone(),
+            },
+        );
     }
+    let is_resource = matches!(job, Job::Resource { .. });
     let worker_server = server.clone();
     let worker_handle = handle.clone();
     let worker_id = id.clone();
@@ -751,22 +1074,27 @@ fn spawn_call(server: &Arc<Server>, id: Value, era: Era, run: bool, args: Map<St
             );
             let server = worker_server;
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if run {
-                    run_forge(&server.config, &args, &worker_handle)
-                } else {
-                    check_forge(&args)
-                }
+                job.run(&server, &worker_handle)
             }));
-            let result = outcome
-                .unwrap_or_else(|_| tool_error("internal error: the Forge runtime panicked"));
+            let panicked = "internal error: the Forge runtime panicked";
+            let result = outcome.unwrap_or_else(|_| {
+                if is_resource {
+                    Err((INTERNAL_ERROR, panicked.to_string()))
+                } else {
+                    Ok(tool_error(panicked))
+                }
+            });
             // Remove before replying so a client that sends the next call as
             // soon as it sees this response is never told the server is busy.
             {
                 let mut inflight = server.inflight.lock().unwrap_or_else(|e| e.into_inner());
                 inflight.remove(&key);
                 // A cancelled request gets no response (MCP cancellation).
-                if !worker_handle.is_cancelled() {
-                    server.send(&result_response(worker_id, finish(result, era)));
+                if !client_cancelled.is_cancelled() {
+                    server.send(&match result {
+                        Ok(result) => result_response(worker_id, finish(result, era)),
+                        Err((code, message)) => error_response(worker_id, code, &message, None),
+                    });
                 }
             }
             server.idle.notify_all();
@@ -778,13 +1106,13 @@ fn spawn_call(server: &Arc<Server>, id: Value, era: Era, run: bool, args: Map<St
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id.to_string());
         server.idle.notify_all();
-        server.send(&result_response(
-            id,
-            finish(
-                tool_error(&format!("cannot start a worker thread: {}", e)),
-                era,
-            ),
-        ));
+        let message = format!("cannot start a worker thread: {}", e);
+        let result = if is_resource {
+            Err((INTERNAL_ERROR, message))
+        } else {
+            Ok(tool_error(&message))
+        };
+        server.send(&reply(result));
     }
 }
 
@@ -800,7 +1128,92 @@ fn code_arg(args: &Map<String, Value>) -> Result<&str, Value> {
     }
 }
 
-fn run_forge(config: &ServerConfig, args: &Map<String, Value>, cancel: &CancelHandle) -> Value {
+/// A `run_forge` failure that happened before any code ran.
+fn run_refused(kind: &str, message: &str) -> Value {
+    let mut result = tool_error(message);
+    result["structuredContent"] = json!({
+        "ok": false, "stdout": "", "truncated": false, "elapsed_ms": 0,
+        "error": { "kind": kind, "message": message }
+    });
+    result
+}
+
+/// Where a `run_forge` call ran, when it used a session.
+struct SessionNote {
+    id: String,
+    created: bool,
+    lost: bool,
+}
+
+/// Run `code` in session `id`: check the session out, run one step on its
+/// interpreter under `sandbox`, and check it back in.
+fn run_in_session(
+    server: &Server,
+    sandbox: &Sandbox,
+    id: &str,
+    code: &str,
+    cancel: &CancelHandle,
+) -> Result<(Result<Output, SandboxError>, SessionNote), Value> {
+    let config = &server.config;
+    let note = |created, lost| SessionNote {
+        id: id.to_string(),
+        created,
+        lost,
+    };
+    // A syntax error never touches (or creates) the session.
+    let program = match parse_source(code) {
+        Ok(p) => p,
+        Err(e) => return Ok((Err(e), note(false, false))),
+    };
+    let checkout = server
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .checkout(id, config.max_sessions, config.session_idle, cancel);
+    let (mut interp, generation, created) = match checkout {
+        Checkout::Ready {
+            interp,
+            generation,
+            created,
+        } => (interp, generation, created),
+        Checkout::Busy => {
+            return Err(run_refused(
+                "session",
+                &format!(
+                    "session `{}` is already running a call; wait for it to finish or use \
+                     another session_id",
+                    id
+                ),
+            ))
+        }
+        Checkout::Full(max) => {
+            return Err(run_refused(
+                "session",
+                &format!(
+                    "this server keeps at most {} sessions and all are in use; call \
+                     reset_session on one you no longer need (idle sessions expire after {}s)",
+                    max,
+                    fmt_secs(config.session_idle)
+                ),
+            ))
+        }
+    };
+    interp.source = Some(code.to_string());
+    interp.source_file = Some("<run_forge>".into());
+    let run = sandbox.run_interpreter(interp, cancel, move |interp| {
+        interp.run(&program).map(|_| ())
+    });
+    let alive = server
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .checkin(id, generation, run.interp);
+    let outcome = run.result.map(|((), stdout)| Output { stdout });
+    Ok((outcome, note(created, !alive)))
+}
+
+fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) -> Value {
+    let config = &server.config;
     let code = match code_arg(args) {
         Ok(c) => c,
         Err(e) => return e,
@@ -813,12 +1226,28 @@ fn run_forge(config: &ServerConfig, args: &Map<String, Value>, cancel: &CancelHa
             _ => return tool_error("`timeout_secs` must be a positive number of seconds"),
         },
     };
+    let session_id = match args.get("session_id") {
+        None | Some(Value::Null) => None,
+        Some(_) if !config.sessions_enabled() => {
+            return tool_error("this server does not keep sessions; omit `session_id`")
+        }
+        Some(Value::String(id)) if session::valid_session_id(id) => Some(id.as_str()),
+        Some(_) => {
+            return tool_error("`session_id` must be 1-128 letters, digits, `_`, `-`, `.` or `:`")
+        }
+    };
     let sandbox = Sandbox::with_capabilities(config.capabilities.clone())
         .max_time(limit)
         .max_output(CAPTURE_LIMIT.max(config.max_response_bytes))
         .source_label("<run_forge>");
     let started = Instant::now();
-    let outcome = sandbox.run_source_cancellable(code, cancel);
+    let (outcome, session) = match session_id {
+        None => (sandbox.run_source_cancellable(code, cancel), None),
+        Some(id) => match run_in_session(server, &sandbox, id, code, cancel) {
+            Ok((outcome, note)) => (outcome, Some(note)),
+            Err(refused) => return refused,
+        },
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
     let full = match &outcome {
@@ -836,7 +1265,7 @@ fn run_forge(config: &ServerConfig, args: &Map<String, Value>, cancel: &CancelHa
         )
     });
 
-    let (text, error) = match &outcome {
+    let (mut text, error) = match &outcome {
         Ok(_) => {
             let mut text = if stdout.is_empty() {
                 "(no output)".to_string()
@@ -880,6 +1309,17 @@ fn run_forge(config: &ServerConfig, args: &Map<String, Value>, cancel: &CancelHa
             (text, error)
         }
     };
+    if let Some(s) = session.as_ref().filter(|s| s.lost) {
+        let why = if matches!(outcome, Err(SandboxError::Cancelled { .. })) {
+            "it was reset while this call ran"
+        } else {
+            "the script did not stop in time, so its state is gone"
+        };
+        text.push_str(&format!(
+            "\n[session `{}` ended: {}; the next call with this id starts a new session]",
+            s.id, why
+        ));
+    }
     let ok = outcome.is_ok();
     let mut result = json!({
         "content": [{ "type": "text", "text": text }],
@@ -891,6 +1331,10 @@ fn run_forge(config: &ServerConfig, args: &Map<String, Value>, cancel: &CancelHa
             "error": error,
         }
     });
+    if let Some(s) = session {
+        result["structuredContent"]["session"] =
+            json!({ "id": s.id, "created": s.created, "lost": s.lost });
+    }
     if !ok {
         result["isError"] = json!(true);
     }
@@ -1103,7 +1547,15 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str())
             .collect();
-        assert_eq!(names, vec!["run_forge", "check_forge", "forge_reference"]);
+        assert_eq!(
+            names,
+            vec![
+                "run_forge",
+                "check_forge",
+                "forge_reference",
+                "reset_session"
+            ]
+        );
         let unsupported = by_id(&msgs, 3)["error"].clone();
         assert_eq!(unsupported["code"], UNSUPPORTED_PROTOCOL_VERSION);
         assert_eq!(unsupported["data"]["requested"], "2099-01-01");
@@ -1266,5 +1718,88 @@ mod tests {
         let tools = tool_definitions(&config);
         assert_eq!(tools[0]["annotations"]["openWorldHint"], true);
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
+    }
+
+    fn names(tools: &Value) -> Vec<String> {
+        tools
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn tool_set(src: &str) -> ToolSet {
+        ToolSet::load(
+            std::path::Path::new("t.fg"),
+            src,
+            Capabilities::deny_all(),
+            Duration::from_secs(5),
+        )
+        .expect("loads")
+        .0
+    }
+
+    #[test]
+    fn sessions_can_be_disabled() {
+        let mut config = deny_all();
+        config.max_sessions = 0;
+        let tools = tool_definitions(&config);
+        assert_eq!(
+            names(&tools),
+            ["run_forge", "check_forge", "forge_reference"]
+        );
+        assert!(tools[0]["inputSchema"]["properties"]
+            .get("session_id")
+            .is_none());
+        let msgs = session(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_forge\",\"arguments\":{\"code\":\"say 1\",\"session_id\":\"a\"}}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"reset_session\",\"arguments\":{\"session_id\":\"a\"}}}\n",
+            config,
+        );
+        assert_eq!(by_id(&msgs, 1)["result"]["isError"], true);
+        assert_eq!(by_id(&msgs, 2)["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[test]
+    fn forge_tools_are_listed_and_called() {
+        // Built-in names are reserved while the code tools are served.
+        assert!(deny_all()
+            .with_tools(tool_set("@tool(\"d\")\nfn run_forge() {}"))
+            .is_err());
+
+        let mut config = deny_all();
+        config.code_tools = false;
+        let config = config
+            .with_tools(tool_set(
+                "@tool(\"Say hi\")\nfn hello(name: String) -> String { return \"hi \" + name }\n\
+                 @resource(\"forge://n\")\nfn n() { return 42 }",
+            ))
+            .expect("no clash");
+        assert_eq!(names(&tool_definitions(&config)), ["hello"]);
+        let msgs = session(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hello\",\"arguments\":{\"name\":\"Ada\"}}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"run_forge\",\"arguments\":{\"code\":\"say 1\"}}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"resources/read\",\"params\":{\"uri\":\"forge://n\"}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"resources/read\",\"params\":{\"uri\":\"forge://zzz\"}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\"}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"resources/list\"}\n",
+            config,
+        );
+        let hello = by_id(&msgs, 1)["result"].clone();
+        assert_eq!(hello["structuredContent"], json!({"result": "hi Ada"}));
+        assert_eq!(hello["content"][0]["text"], "hi Ada");
+        assert_eq!(by_id(&msgs, 2)["error"]["code"], INVALID_PARAMS);
+        assert_eq!(by_id(&msgs, 3)["result"]["contents"][0]["text"], "42");
+        assert_eq!(by_id(&msgs, 4)["error"]["code"], RESOURCE_NOT_FOUND);
+        let init = by_id(&msgs, 5)["result"].clone();
+        assert!(init["capabilities"]["resources"].is_object(), "{init}");
+        assert!(init["instructions"]
+            .as_str()
+            .is_some_and(|s| s.contains("Tools written in Forge (t.fg): hello")));
+        assert_eq!(
+            by_id(&msgs, 6)["result"]["resources"][0]["uri"],
+            "forge://n"
+        );
     }
 }
