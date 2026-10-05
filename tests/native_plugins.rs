@@ -22,10 +22,16 @@ fn repo_root() -> PathBuf {
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
+    // A per-process counter makes the name unique even when parallel tests
+    // read the clock in the same tick (macOS `SystemTime` is microsecond
+    // resolution, which let two tests share and clobber one directory).
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "forge-native-{}-{}-{}",
+        "forge-native-{}-{}-{}-{}",
         tag,
         std::process::id(),
+        n,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
