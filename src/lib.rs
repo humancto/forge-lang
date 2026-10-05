@@ -1,7 +1,12 @@
-// Forge language library — exposes the runtime for AOT-compiled binaries.
+// Forge language library — exposes the runtime for AOT-compiled binaries
+// and the embedding API.
 //
 // AOT binaries link against libforge.a and call forge_execute_bytecode()
 // to run embedded bytecode without needing the `forge` CLI.
+//
+// Hosts that embed Forge to run untrusted scripts (AI agents, automation)
+// use `forge_lang::Sandbox`: default-deny capabilities, explicit grants,
+// a wall-clock limit and captured output. See `src/sandbox.rs`.
 
 mod errors;
 pub mod interpreter;
@@ -9,13 +14,17 @@ pub mod lexer;
 mod manifest;
 mod package;
 pub mod parser;
-mod permissions;
+pub mod permissions;
 mod registry;
 pub mod runtime;
+mod sandbox;
 mod semantics;
 mod stdlib;
 mod typechecker;
 pub mod vm;
+
+pub use permissions::{Capabilities, Capability, PermissionError};
+pub use sandbox::{Output, Sandbox, SandboxError};
 
 use std::panic::{self, AssertUnwindSafe};
 

@@ -105,7 +105,7 @@ mod tests {
         .expect_err("shell should be denied");
 
         assert!(
-            err.contains("Shell execution denied"),
+            err.contains("permission denied: run"),
             "unexpected error: {err}"
         );
     }

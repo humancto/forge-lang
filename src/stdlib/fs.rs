@@ -59,6 +59,22 @@ pub fn confine_path_with(path: &str, base: Option<&str>) -> Result<PathBuf, Stri
     Ok(canonical)
 }
 
+/// Confine `path` (FORGE_FS_BASE) and check it against the active
+/// `fs.read` permission. Every read-side fs entry point goes through this.
+pub fn confine_read(path: &str) -> Result<PathBuf, String> {
+    let p = confine_path(path)?;
+    crate::permissions::require_path(crate::permissions::Capability::Read, &p)?;
+    Ok(p)
+}
+
+/// Confine `path` (FORGE_FS_BASE) and check it against the active
+/// `fs.write` permission. Every write-side fs entry point goes through this.
+pub fn confine_write(path: &str) -> Result<PathBuf, String> {
+    let p = confine_path(path)?;
+    crate::permissions::require_path(crate::permissions::Capability::Write, &p)?;
+    Ok(p)
+}
+
 pub fn create_module() -> Value {
     let mut m = IndexMap::new();
     m.insert("read".to_string(), Value::BuiltIn("fs.read".to_string()));
@@ -124,7 +140,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "fs.read" => match args.first() {
             Some(Value::String(path)) => {
-                let path = confine_path(path)?;
+                let path = confine_read(path)?;
                 std::fs::read_to_string(&path)
                     .map(Value::String)
                     .map_err(|e| format!("fs.read error: {}", e))
@@ -133,7 +149,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.write" => match (args.first(), args.get(1)) {
             (Some(Value::String(path)), Some(Value::String(content))) => {
-                let path = confine_path(path)?;
+                let path = confine_write(path)?;
                 std::fs::write(&path, content)
                     .map(|_| Value::Null)
                     .map_err(|e| format!("fs.write error: {}", e))
@@ -142,7 +158,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.append" => match (args.first(), args.get(1)) {
             (Some(Value::String(path)), Some(Value::String(content))) => {
-                let path = confine_path(path)?;
+                let path = confine_write(path)?;
                 use std::io::Write;
                 let mut file = std::fs::OpenOptions::new()
                     .create(true)
@@ -160,7 +176,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 // exists() must not error when confinement rejects — return false
                 // so user code can branch on it. Outside-base existence is none of
                 // the script's business.
-                match confine_path(path) {
+                match confine_read(path) {
                     Ok(p) => Ok(Value::Bool(p.exists())),
                     Err(_) => Ok(Value::Bool(false)),
                 }
@@ -169,7 +185,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.list" => match args.first() {
             Some(Value::String(path)) => {
-                let path = confine_path(path)?;
+                let path = confine_read(path)?;
                 let entries =
                     std::fs::read_dir(&path).map_err(|e| format!("fs.list error: {}", e))?;
                 let mut items = Vec::new();
@@ -184,7 +200,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.remove" => match args.first() {
             Some(Value::String(path)) => {
-                let path = confine_path(path)?;
+                let path = confine_write(path)?;
                 if path.is_dir() {
                     std::fs::remove_dir_all(&path)
                         .map(|_| Value::Null)
@@ -199,7 +215,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.mkdir" => match args.first() {
             Some(Value::String(path)) => {
-                let path = confine_path(path)?;
+                let path = confine_write(path)?;
                 std::fs::create_dir_all(&path)
                     .map(|_| Value::Null)
                     .map_err(|e| format!("fs.mkdir error: {}", e))
@@ -208,8 +224,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.copy" => match (args.first(), args.get(1)) {
             (Some(Value::String(src)), Some(Value::String(dst))) => {
-                let src = confine_path(src)?;
-                let dst = confine_path(dst)?;
+                let src = confine_read(src)?;
+                let dst = confine_write(dst)?;
                 std::fs::copy(&src, &dst)
                     .map(|bytes| Value::Int(bytes as i64))
                     .map_err(|e| format!("fs.copy error: {}", e))
@@ -218,8 +234,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.rename" => match (args.first(), args.get(1)) {
             (Some(Value::String(src)), Some(Value::String(dst))) => {
-                let src = confine_path(src)?;
-                let dst = confine_path(dst)?;
+                let src = confine_write(src)?;
+                let dst = confine_write(dst)?;
                 std::fs::rename(&src, &dst)
                     .map(|_| Value::Null)
                     .map_err(|e| format!("fs.rename error: {}", e))
@@ -228,7 +244,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.size" => match args.first() {
             Some(Value::String(path)) => {
-                let path = confine_path(path)?;
+                let path = confine_read(path)?;
                 std::fs::metadata(&path)
                     .map(|m| Value::Int(m.len() as i64))
                     .map_err(|e| format!("fs.size error: {}", e))
@@ -247,7 +263,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.read_json" => match args.first() {
             Some(Value::String(path)) => {
-                let path = confine_path(path)?;
+                let path = confine_read(path)?;
                 let content = std::fs::read_to_string(&path)
                     .map_err(|e| format!("fs.read_json error: {}", e))?;
                 match serde_json::from_str::<serde_json::Value>(&content) {
@@ -261,7 +277,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.write_json" => match (args.first(), args.get(1)) {
             (Some(Value::String(path)), Some(val)) => {
-                let path = confine_path(path)?;
+                let path = confine_write(path)?;
                 let json_str = crate::stdlib::json_module::call("json.pretty", vec![val.clone()])?;
                 if let Value::String(content) = json_str {
                     std::fs::write(&path, &content)
@@ -275,7 +291,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.lines" => match args.first() {
             Some(Value::String(path)) => {
-                let path = confine_path(path)?;
+                let path = confine_read(path)?;
                 let content =
                     std::fs::read_to_string(&path).map_err(|e| format!("fs.lines error: {}", e))?;
                 Ok(Value::Array(
@@ -317,14 +333,14 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             _ => Err("fs.join_path() requires two path strings".to_string()),
         },
         "fs.is_dir" => match args.first() {
-            Some(Value::String(path)) => match confine_path(path) {
+            Some(Value::String(path)) => match confine_read(path) {
                 Ok(p) => Ok(Value::Bool(p.is_dir())),
                 Err(_) => Ok(Value::Bool(false)),
             },
             _ => Err("fs.is_dir() requires a path string".to_string()),
         },
         "fs.is_file" => match args.first() {
-            Some(Value::String(path)) => match confine_path(path) {
+            Some(Value::String(path)) => match confine_read(path) {
                 Ok(p) => Ok(Value::Bool(p.is_file())),
                 Err(_) => Ok(Value::Bool(false)),
             },
@@ -365,7 +381,7 @@ pub fn call_vm(
         "fs.read" => {
             let path = get_str(args.first().ok_or("fs.read() requires a path")?)
                 .ok_or("fs.read() requires a string path")?;
-            let path = confine_path(&path)?;
+            let path = confine_read(&path)?;
             std::fs::read_to_string(&path)
                 .map(FsResult::StringVal)
                 .map_err(|e| format!("fs.read error: {}", e))
@@ -375,7 +391,7 @@ pub fn call_vm(
                 .ok_or("string path required")?;
             let content = get_str(args.get(1).ok_or("fs.write() requires content")?)
                 .ok_or("string content required")?;
-            let path = confine_path(&path)?;
+            let path = confine_write(&path)?;
             std::fs::write(&path, &content)
                 .map(|_| FsResult::NullVal)
                 .map_err(|e| format!("fs.write error: {}", e))
@@ -384,7 +400,7 @@ pub fn call_vm(
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
             let content =
                 get_str(args.get(1).ok_or("content required")?).ok_or("string required")?;
-            let path = confine_path(&path)?;
+            let path = confine_write(&path)?;
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
@@ -397,14 +413,14 @@ pub fn call_vm(
         }
         "fs.exists" => {
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
-            match confine_path(&path) {
+            match confine_read(&path) {
                 Ok(p) => Ok(FsResult::BoolVal(p.exists())),
                 Err(_) => Ok(FsResult::BoolVal(false)),
             }
         }
         "fs.list" => {
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
-            let path = confine_path(&path)?;
+            let path = confine_read(&path)?;
             let entries = std::fs::read_dir(&path).map_err(|e| format!("{}", e))?;
             let items: Vec<String> = entries
                 .filter_map(|e| e.ok())
@@ -414,7 +430,7 @@ pub fn call_vm(
         }
         "fs.remove" => {
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
-            let path = confine_path(&path)?;
+            let path = confine_write(&path)?;
             if path.is_dir() {
                 std::fs::remove_dir_all(&path)
                     .map(|_| FsResult::NullVal)
@@ -427,14 +443,14 @@ pub fn call_vm(
         }
         "fs.mkdir" => {
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
-            let path = confine_path(&path)?;
+            let path = confine_write(&path)?;
             std::fs::create_dir_all(&path)
                 .map(|_| FsResult::NullVal)
                 .map_err(|e| format!("{}", e))
         }
         "fs.lines" => {
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
-            let path = confine_path(&path)?;
+            let path = confine_read(&path)?;
             let content =
                 std::fs::read_to_string(&path).map_err(|e| format!("fs.lines error: {}", e))?;
             Ok(FsResult::ArrayVal(
@@ -467,14 +483,14 @@ pub fn call_vm(
         }
         "fs.is_dir" => {
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
-            match confine_path(&path) {
+            match confine_read(&path) {
                 Ok(p) => Ok(FsResult::BoolVal(p.is_dir())),
                 Err(_) => Ok(FsResult::BoolVal(false)),
             }
         }
         "fs.is_file" => {
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
-            match confine_path(&path) {
+            match confine_read(&path) {
                 Ok(p) => Ok(FsResult::BoolVal(p.is_file())),
                 Err(_) => Ok(FsResult::BoolVal(false)),
             }

@@ -108,6 +108,169 @@ struct Cli {
     /// (default 10000; also settable with FORGE_MAX_DEPTH).
     #[arg(long = "max-depth", value_name = "N")]
     max_depth: Option<usize>,
+
+    #[command(flatten)]
+    perms: PermissionFlags,
+}
+
+/// Deno-style permission flags. Without `--sandbox`, Forge keeps its
+/// historical defaults (everything except `run`); a flag only changes the
+/// capability it names. With `--sandbox`, everything not granted is denied.
+#[derive(clap::Args, Debug, Default, Clone)]
+struct PermissionFlags {
+    /// Deny every capability (fs, net, env, db, run, ai) not granted with an
+    /// --allow-* flag. Also settable with `sandbox = true` under
+    /// [permissions] in forge.toml.
+    #[arg(long = "sandbox", global = true)]
+    sandbox: bool,
+
+    /// Allow file reads; with =PATHS, only under those comma-separated paths
+    #[arg(long = "allow-read", value_name = "PATHS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_read: Option<Vec<String>>,
+
+    /// Allow file writes; with =PATHS, only under those comma-separated paths
+    #[arg(long = "allow-write", value_name = "PATHS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_write: Option<Vec<String>>,
+
+    /// Allow network access; with =HOSTS, only to those hosts (host, *.domain, host:port)
+    #[arg(long = "allow-net", value_name = "HOSTS", num_args = 0..=1,
+          require_equals = true, value_delimiter = ',', default_missing_value = "",
+          global = true)]
+    allow_net: Option<Vec<String>>,
+
+    /// Allow reading and setting environment variables (env.*)
+    #[arg(long = "allow-env", global = true)]
+    allow_env: bool,
+
+    /// Allow database drivers (db.*, pg.*, mysql.*)
+    #[arg(long = "allow-db", global = true)]
+    allow_db: bool,
+
+    /// Allow AI/LLM calls (ask)
+    #[arg(long = "allow-ai", global = true)]
+    allow_ai: bool,
+
+    /// Stop the program after SECS seconds of wall-clock time (exit code 124)
+    #[arg(long = "max-time", value_name = "SECS", global = true)]
+    max_time: Option<f64>,
+}
+
+/// Exit code used when `--max-time` expires (same as coreutils `timeout`).
+const MAX_TIME_EXIT_CODE: i32 = 124;
+
+/// Turn `--allow-x[=a,b]` / a forge.toml grant into a scope update.
+/// `None` = leave as is; empty list = unrestricted; list = only those.
+fn apply_scoped_grant(
+    caps: permissions::Capabilities,
+    cap: permissions::Capability,
+    grant: Option<manifest::GrantSpec>,
+) -> permissions::Capabilities {
+    use permissions::Capability;
+    let items: Vec<String> = match grant {
+        None => return caps,
+        Some(manifest::GrantSpec::Flag(b)) => {
+            return if b { caps.grant(cap) } else { caps.deny(cap) }
+        }
+        Some(manifest::GrantSpec::List(items)) => items
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    };
+    if items.is_empty() {
+        return caps.grant(cap);
+    }
+    let caps = caps.deny(cap);
+    match cap {
+        Capability::Read => caps.grant_read_paths(items),
+        Capability::Write => caps.grant_write_paths(items),
+        Capability::Net => caps.grant_net_hosts(items),
+        _ => caps.grant(cap),
+    }
+}
+
+/// Build the process-wide policy from forge.toml `[permissions]` and CLI
+/// flags (flags win per capability).
+fn build_policy(
+    flags: &PermissionFlags,
+    toml: Option<manifest::PermissionsConfig>,
+    allow_run: bool,
+    is_interactive: bool,
+    import_root: Option<PathBuf>,
+) -> permissions::Capabilities {
+    use permissions::{Capabilities, Capability};
+    let toml = toml.unwrap_or_default();
+    let sandboxed = flags.sandbox || toml.sandbox;
+    let mut caps = if sandboxed {
+        // The CLI owns its process: exit()/cd() stay available.
+        Capabilities::deny_all().grant(Capability::Process)
+    } else {
+        Capabilities::cli_default()
+    };
+    let cli_list = |v: &Option<Vec<String>>| v.clone().map(manifest::GrantSpec::List);
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Read,
+        cli_list(&flags.allow_read).or(toml.allow_read),
+    );
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Write,
+        cli_list(&flags.allow_write).or(toml.allow_write),
+    );
+    caps = apply_scoped_grant(
+        caps,
+        Capability::Net,
+        cli_list(&flags.allow_net).or(toml.allow_net),
+    );
+    for (cap, flag, from_toml) in [
+        (Capability::Env, flags.allow_env, toml.allow_env),
+        (Capability::Db, flags.allow_db, toml.allow_db),
+        (Capability::Ai, flags.allow_ai, toml.allow_ai),
+    ] {
+        if flag {
+            caps = caps.grant(cap);
+        } else if let Some(b) = from_toml {
+            caps.set(cap, b);
+        }
+    }
+    // REPL and -e are user-invoked contexts — shell execution stays allowed
+    // there unless the user explicitly asked for a sandbox.
+    let run = allow_run || toml.allow_run.unwrap_or(false) || (is_interactive && !sandboxed);
+    caps.set(Capability::Run, run);
+    // Modules next to the entry script (and installed packages) stay
+    // importable even when fs.read is scoped elsewhere.
+    if let Some(root) = import_root {
+        caps = caps.grant_import_root(root);
+    }
+    caps.grant_import_root("forge_modules")
+}
+
+/// Enforce `--max-time` on every engine: after `secs`, flush output, report
+/// and exit with [`MAX_TIME_EXIT_CODE`].
+fn start_max_time_watchdog(secs: f64) {
+    if !(secs.is_finite() && secs > 0.0) {
+        eprintln!(
+            "{}",
+            errors::format_simple_error("--max-time must be a positive number of seconds")
+        );
+        process::exit(2);
+    }
+    let limit = std::time::Duration::from_secs_f64(secs);
+    std::thread::spawn(move || {
+        std::thread::sleep(limit);
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        eprintln!(
+            "{}",
+            errors::format_simple_error(&format!("execution exceeded --max-time of {}s", secs))
+        );
+        process::exit(MAX_TIME_EXIT_CODE);
+    });
 }
 
 #[derive(Subcommand)]
@@ -116,6 +279,9 @@ enum Command {
     Run {
         /// Path to a .fg or .fgc file (reads entry from forge.toml if omitted)
         file: Option<PathBuf>,
+        /// Allow shell execution (same as the top-level --allow-run)
+        #[arg(long = "allow-run")]
+        allow_run: bool,
     },
     /// Start the interactive REPL
     Repl,
@@ -266,7 +432,56 @@ async fn async_main() {
     // For file execution (forge run), require explicit --allow-run.
     let is_interactive =
         cli.eval_code.is_some() || matches!(cli.command, Some(Command::Repl) | None);
-    permissions::set_allow_run(cli.allow_run || is_interactive);
+    let run_allow_run = matches!(
+        cli.command,
+        Some(Command::Run {
+            allow_run: true,
+            ..
+        })
+    );
+    // forge.toml [permissions] applies to commands that execute the project.
+    let toml_perms = if matches!(
+        cli.command,
+        Some(Command::Run { .. } | Command::Test { .. })
+    ) {
+        match manifest::load_permissions() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", errors::format_simple_error(&e));
+                process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    let import_root = match &cli.command {
+        Some(Command::Run { file: Some(f), .. }) => {
+            Some(f.parent().map(|p| p.to_path_buf()).unwrap_or_default())
+        }
+        Some(Command::Test { dir, .. }) => Some(PathBuf::from(dir)),
+        _ => Some(PathBuf::from(".")),
+    }
+    .map(|p| {
+        if p.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            p
+        }
+    });
+    let max_time = cli
+        .perms
+        .max_time
+        .or(toml_perms.as_ref().and_then(|p| p.max_time));
+    permissions::set_global(build_policy(
+        &cli.perms,
+        toml_perms,
+        cli.allow_run || run_allow_run,
+        is_interactive,
+        import_root,
+    ));
+    if let Some(secs) = max_time {
+        start_max_time_watchdog(secs);
+    }
 
     if let Some(code) = cli.eval_code {
         let code = code.replace(';', "\n");
@@ -280,7 +495,7 @@ async fn async_main() {
     }
 
     match cli.command {
-        Some(Command::Run { file }) => {
+        Some(Command::Run { file, .. }) => {
             let file = match file {
                 Some(f) => f,
                 None => {

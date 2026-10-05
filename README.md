@@ -760,6 +760,29 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the architecture guide and PR guideli
 
 ## 🔒 Security
 
+### Sandboxing and permissions
+
+Forge has a Deno-style capability model shared by both engines. Defaults are unchanged (`forge run` allows everything except subprocesses), and `--sandbox` turns it into default-deny:
+
+```bash
+forge run --sandbox --allow-read=./data --allow-net=api.example.com agent.fg
+forge run --max-time 10 job.fg     # wall-clock limit (exit 124)
+```
+
+Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`. Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
+
+Embedding Forge in a Rust host (for AI agents and automation) starts from deny-all:
+
+```rust
+let out = forge_lang::Sandbox::new()
+    .allow_read(["./data"])
+    .max_time(std::time::Duration::from_secs(5))
+    .run_source(r#"say "hi""#)?;
+assert_eq!(out.stdout, "hi\n");
+```
+
+Details and current limits: [SECURITY.md — Sandboxing and permissions](SECURITY.md#sandboxing-and-permissions).
+
 To report a security vulnerability, please email the maintainers directly instead of opening a public issue. See [SECURITY.md](SECURITY.md).
 
 ---
