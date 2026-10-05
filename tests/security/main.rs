@@ -364,8 +364,14 @@ fn timeout_blocks_stop_everything_inside_them() {
     let squad_task =
         spin("squad {\n  spawn {\n    let mut i = 0\n    while true { i = i + 1 }\n  }\n}");
     let receive = spin("let ch = channel()\nreceive(ch)");
-    let interp_only = [squad_task.as_str(), receive.as_str()];
+    let channel_loop = spin("let ch = channel()\nfor v in ch { say v }");
+    let await_task =
+        spin("let h = spawn {\n  let mut i = 0\n  while true { i = i + 1 }\n}\nawait h");
     let both = [
+        squad_task,
+        receive,
+        channel_loop,
+        await_task,
         spin("squad {\n  let mut i = 0\n  while true { i = i + 1 }\n}"),
         spin(&format!("import \"{}\"", lit(&l.data.join("spin.fg")))),
         spin("while true { }"),
@@ -377,12 +383,6 @@ fn timeout_blocks_stop_everything_inside_them() {
             cases.push((engine, src.as_str()));
         }
     }
-    // The VM's squad tasks and channel receive are not cancellable by a
-    // `timeout` block yet (docs/SECURITY_AUDIT.md, SEC-02); the CLI's
-    // --max-time still ends the process there.
-    for src in interp_only {
-        cases.push((&["--interp"], src));
-    }
     for (engine, src) in cases {
         let o = run_cli_capped(&l.data, engine, src, Duration::from_secs(20))
             .unwrap_or_else(|| panic!("{engine:?} hung on:\n{src}"));
@@ -391,12 +391,71 @@ fn timeout_blocks_stop_everything_inside_them() {
             !o.status.success() && !out.contains("after"),
             "{engine:?}:\n{src}\nstdout: {out}\nstderr: {err}"
         );
-        // (The VM reports a deadline inside an import with a confusing
-        // message; only the interpreter's text is pinned here.)
-        if engine == ["--interp"] {
-            assert!(err.contains("timeout"), "{src}\nstderr: {err}");
-        }
+        assert!(err.contains("timeout"), "{engine:?}: {src}\nstderr: {err}");
+        assert!(
+            !err.contains("internal control transfer"),
+            "{engine:?}: {src}\nstderr: {err}"
+        );
     }
+}
+
+#[test]
+fn timeout_cancels_the_tasks_it_started() {
+    // SEC-02 on the VM: the tasks a `timeout` block started must stop when
+    // its deadline fires, not keep running after the block (here they would
+    // keep sending; the receiver after the block sees the channel go quiet).
+    let l = Layout::new("tasks_stop");
+    let src = "let ch = channel()\n\
+               try {\n\
+                 timeout 1 seconds {\n\
+                   squad {\n\
+                     spawn { while true { send(ch, 1)\nwait(0.01) } }\n\
+                   }\n\
+                 }\n\
+               } catch e { say \"timed out\" }\n\
+               wait(0.3)\n\
+               while !is_none(try_receive(ch)) { }\n\
+               wait(0.5)\n\
+               say is_none(try_receive(ch))";
+    for engine in ENGINES {
+        let o = run_cli_capped(&l.data, engine, src, Duration::from_secs(20))
+            .unwrap_or_else(|| panic!("{engine:?} hung"));
+        let (out, err) = text(&o);
+        assert_eq!(out, "timed out\ntrue\n", "{engine:?}\nstderr: {err}");
+    }
+}
+
+#[test]
+fn deeply_nested_values_are_errors_not_stack_overflows() {
+    // SEC-16: a value millions of levels deep (built in a second on the VM)
+    // used to abort the process in the recursive VM->interpreter conversion
+    // behind json.stringify. Every recursive value walker now stops at a
+    // fixed depth (runtime::recursion::MAX_VALUE_DEPTH).
+    let l = Layout::new("deep");
+    let src = "let mut a = []\n\
+               let mut i = 0\n\
+               while i < 3000000 {\n  a = [a]\n  i = i + 1\n}\n\
+               try { json.stringify(a) } catch e { say e.message }\n\
+               try { json.pretty(a) } catch e { say e.message }\n\
+               let mut b = []\n\
+               let mut j = 0\n\
+               while j < 3000000 {\n  b = [b]\n  j = j + 1\n}\n\
+               say a == b\n\
+               say len(str(a)) > 0\n\
+               say \"alive\"";
+    // The interpreter copies on every `a = [a]` (quadratic), so it never
+    // gets this deep within a test's time; the VM builds it in a second.
+    let o = run_cli_capped(&l.data, &[], src, Duration::from_secs(120))
+        .unwrap_or_else(|| panic!("VM hung"));
+    let (out, err) = text(&o);
+    assert!(o.status.success(), "stdout: {out}\nstderr: {err}");
+    assert_eq!(
+        out,
+        "value nested too deeply (more than 10000 levels)\n\
+         value nested too deeply (more than 10000 levels)\n\
+         false\ntrue\nalive\n",
+        "stderr: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------

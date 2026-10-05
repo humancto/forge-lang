@@ -8,7 +8,10 @@
 //!
 //! Bounds: at most `max_sessions` live at once (a new id beyond that is
 //! refused until one is reset or expires), a session idle for longer than
-//! `idle` is dropped, and a session runs one call at a time. A step that
+//! `idle` is dropped, and a session runs one call at a time. Each step gets
+//! a fresh fuel budget; the memory limit covers the session's whole state
+//! (the bytes retained after a step count from the start of the next, via
+//! `Sandbox::memory_baseline`). A step that
 //! fails keeps whatever it defined before the error, like a REPL. Tasks a
 //! step `spawn`s stop when that step ends. A step whose worker had to be
 //! abandoned (it did not stop after a timeout or cancel) loses the session.
@@ -39,6 +42,9 @@ struct Session {
     generation: u64,
     /// The running call, so a reset can stop it.
     running: Option<CancelHandle>,
+    /// Bytes the interpreter holds (allocation meter, as of the last call);
+    /// the next call starts its memory budget from here.
+    memory: usize,
 }
 
 /// Result of [`Sessions::checkout`].
@@ -47,6 +53,8 @@ pub enum Checkout {
         interp: Box<Interpreter>,
         generation: u64,
         created: bool,
+        /// See `Session::memory`.
+        memory: usize,
     },
     /// A call is already running in this session.
     Busy,
@@ -88,6 +96,7 @@ impl Sessions {
                 interp: Box::new(interp),
                 generation: session.generation,
                 created: false,
+                memory: session.memory,
             };
         }
         if self.map.len() >= max_sessions {
@@ -102,19 +111,27 @@ impl Sessions {
                 last_used: Instant::now(),
                 generation,
                 running: Some(cancel.clone()),
+                memory: 0,
             },
         );
         Checkout::Ready {
             interp: Box::new(Interpreter::new()),
             generation,
             created: true,
+            memory: 0,
         }
     }
 
     /// Return the interpreter after a call. `None` (the worker was
     /// abandoned) ends the session. A no-op if the session was reset (or
     /// replaced) meanwhile. Returns whether the session lives on.
-    pub fn checkin(&mut self, id: &str, generation: u64, interp: Option<Interpreter>) -> bool {
+    pub fn checkin(
+        &mut self,
+        id: &str,
+        generation: u64,
+        interp: Option<Interpreter>,
+        memory: usize,
+    ) -> bool {
         let Some(session) = self.map.get_mut(id) else {
             return false;
         };
@@ -125,6 +142,7 @@ impl Sessions {
             Some(interp) => {
                 session.interp = Some(interp);
                 session.running = None;
+                session.memory = memory;
                 session.last_used = Instant::now();
                 true
             }
@@ -150,7 +168,7 @@ impl Sessions {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub fn count(&self) -> usize {
         self.map.len()
     }
 }
@@ -165,6 +183,7 @@ mod tests {
                 interp,
                 generation,
                 created,
+                ..
             } => (*interp, generation, created),
             Checkout::Busy => panic!("busy"),
             Checkout::Full(_) => panic!("full"),
@@ -179,7 +198,7 @@ mod tests {
         let (interp, generation, created) = ready(s.checkout("a", 2, idle, &c));
         assert!(created);
         assert!(matches!(s.checkout("a", 2, idle, &c), Checkout::Busy));
-        assert!(s.checkin("a", generation, Some(interp)));
+        assert!(s.checkin("a", generation, Some(interp), 0));
         let (interp_a, gen_a, created) = ready(s.checkout("a", 2, idle, &c));
         assert!(!created);
         let (_b, _, _) = ready(s.checkout("b", 2, idle, &c));
@@ -187,9 +206,9 @@ mod tests {
         // Reset while running cancels the call; its checkin is ignored.
         assert!(s.reset("a"));
         assert!(c.is_cancelled());
-        assert!(!s.checkin("a", gen_a, Some(interp_a)));
+        assert!(!s.checkin("a", gen_a, Some(interp_a), 0));
         assert!(!s.reset("a"));
-        assert_eq!(s.len(), 1);
+        assert_eq!(s.count(), 1);
     }
 
     #[test]
@@ -197,13 +216,13 @@ mod tests {
         let mut s = Sessions::default();
         let c = CancelHandle::new();
         let (interp, generation, _) = ready(s.checkout("a", 1, Duration::from_secs(60), &c));
-        s.checkin("a", generation, Some(interp));
+        s.checkin("a", generation, Some(interp), 0);
         std::thread::sleep(Duration::from_millis(20));
         // A zero idle timeout expires it, which frees the slot.
         let (_, generation, created) = ready(s.checkout("b", 1, Duration::ZERO, &c));
         assert!(created);
-        assert!(!s.checkin("b", generation, None));
-        assert_eq!(s.len(), 0);
+        assert!(!s.checkin("b", generation, None, 0));
+        assert_eq!(s.count(), 0);
     }
 
     #[test]

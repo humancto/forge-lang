@@ -262,6 +262,7 @@ fn parse_http_opts(opts: &IndexMap<String, Value>) -> (Option<u64>, Option<usize
 }
 
 fn do_download(args: &[Value]) -> Result<Value, String> {
+    let _socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
     let url = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => return Err("http.download() requires a URL string".to_string()),
@@ -332,6 +333,7 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
 }
 
 fn do_crawl(args: &[Value]) -> Result<Value, String> {
+    let _socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
     let url = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => return Err("http.crawl() requires a URL string".to_string()),

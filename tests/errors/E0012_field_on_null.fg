@@ -1,0 +1,2 @@
+let user = null
+say user.name

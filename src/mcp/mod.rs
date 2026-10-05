@@ -20,16 +20,17 @@
 //! in Forge (`@tool` / `@resource` functions, see [`tools`]).
 //!
 //! Engine: every piece of agent-supplied or tool code runs on the
-//! tree-walking interpreter inside [`Sandbox`], never on the VM. The VM does
-//! not yet provide the sandbox's guarantees: `say` writes straight to the
-//! process's stdout (no capture or output budget), a deadline cannot stop
-//! `squad` tasks or a blocked `receive` (SECURITY_AUDIT.md SEC-02, VM
-//! part), and converting a very deeply nested value can overflow the native
-//! stack (SEC-16), which would take the whole server down.
+//! tree-walking interpreter inside [`Sandbox`], never on the VM. The VM now
+//! honours deadlines in `squad`/`timeout`/blocking waits (SEC-02) and guards
+//! deep conversions (SEC-16), but it still writes `say` straight to the
+//! process's stdout: there is no output capture or output budget, which
+//! every MCP result depends on. Moving MCP to the VM needs that first.
 //!
 //! Robustness: every `tools/call` that runs code gets its own thread, so a
 //! stuck script never blocks the protocol loop; scripts are bounded by a
-//! wall-clock limit and an output cap; malformed input gets a JSON-RPC error
+//! wall-clock limit, an output cap and per-call resource limits
+//! ([`ServerConfig::limits`]: fuel, memory, handles, value sizes, imports;
+//! see [`default_limits`]); malformed input gets a JSON-RPC error
 //! and never ends the server; `notifications/cancelled` stops a running
 //! script. [`serve_stdio`] moves the protocol onto private file descriptors
 //! and points the process's stdin at `/dev/null` and stdout at stderr, so
@@ -41,7 +42,9 @@ pub mod tools;
 pub use tools::ToolSet;
 
 use crate::permissions::Capabilities;
+use crate::runtime::limits::Limits;
 use crate::sandbox::{parse_source, truncate_utf8, CancelHandle, Output, Sandbox, SandboxError};
+
 use serde_json::{json, Map, Value};
 use session::{Checkout, Sessions};
 use std::collections::HashMap;
@@ -64,6 +67,36 @@ pub const DEFAULT_MAX_CONCURRENT_CALLS: usize = 8;
 pub const DEFAULT_MAX_SESSIONS: usize = 16;
 /// Default idle time after which a session is dropped.
 pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(15 * 60);
+/// Default (and maximum) fuel for one `run_forge` call: interpreter steps
+/// (statements, calls, loop iterations). Generous for ordinary scripts —
+/// on a loaded 4-core machine the interpreter runs roughly 7–15M steps per
+/// second, so this is on the order of the default 30 s time limit — while
+/// making a runaway loop fail deterministically instead of by wall clock.
+pub const DEFAULT_MAX_FUEL: u64 = 200_000_000;
+/// Default memory limit for one `run_forge` call.
+pub const DEFAULT_MAX_MEMORY: usize = 256 * 1024 * 1024;
+
+/// The resource limits `forge mcp` applies to every script unless the
+/// operator overrides them (`--max-fuel`, `--max-memory`, or
+/// [`ServerConfig::limits`]). Strings and collections are capped by what the
+/// memory limit could hold. The memory limit needs
+/// [`crate::CountingAllocator`] as the global allocator (the `forge` binary
+/// installs it); a host that embeds the server without it gets no memory
+/// limit by default, which [`ServerConfig::policy_summary`] shows.
+pub fn default_limits() -> Limits {
+    Limits {
+        max_fuel: Some(DEFAULT_MAX_FUEL),
+        max_memory: crate::runtime::limits::allocation_meter_installed()
+            .then_some(DEFAULT_MAX_MEMORY),
+        max_open_files: Some(32),
+        max_sockets: Some(16),
+        max_processes: Some(4),
+        max_tasks: Some(16),
+        max_string_bytes: None,
+        max_collection_len: None,
+        max_imports: Some(256),
+    }
+}
 /// A script is stopped once it has printed this much (memory bound).
 const CAPTURE_LIMIT: usize = 1024 * 1024;
 /// Longest accepted protocol line; longer ones are discarded with an error.
@@ -109,6 +142,9 @@ pub struct ServerConfig {
     pub code_tools: bool,
     /// Tools and resources written in Forge (`forge mcp serve`).
     pub tools: Option<Arc<ToolSet>>,
+    /// Resource limits for each call (a fresh budget per call). An agent's
+    /// `max_fuel` can only lower the fuel limit.
+    pub limits: Limits,
 }
 
 /// Names of the built-in tools (reserved when `code_tools` is on).
@@ -130,6 +166,7 @@ impl ServerConfig {
             session_idle: DEFAULT_SESSION_IDLE,
             code_tools: true,
             tools: None,
+            limits: default_limits(),
         }
     }
 
@@ -162,11 +199,19 @@ impl ServerConfig {
         } else {
             format!("{}; everything else is denied", granted.join(", "))
         };
-        format!(
+        let mut summary = format!(
             "Granted: {}. Time limit: {}s per call.",
             granted,
             fmt_secs(self.max_time)
-        )
+        );
+        let limits = self.limits.describe();
+        if !limits.is_empty() {
+            summary.push_str(&format!(
+                " Resource limits per call: {}.",
+                limits.join(", ")
+            ));
+        }
+        summary
     }
 }
 
@@ -704,6 +749,20 @@ fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
                             "Wall-clock limit in seconds (at most {}, the default).",
                             fmt_secs(config.max_time)
                         )
+                    },
+                    "max_fuel": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "description": match config.limits.max_fuel {
+                            Some(n) => format!(
+                                "Deterministic step budget (statements, calls, loop iterations; \
+                                 at most {}, the default).",
+                                n
+                            ),
+                            None => "Deterministic step budget (statements, calls, loop \
+                                     iterations; unlimited by default)."
+                                .to_string(),
+                        }
                     }
                 },
                 "required": ["code"],
@@ -732,10 +791,13 @@ fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
                             "kind": {
                                 "type": "string",
                                 "enum": ["syntax", "permission_denied", "runtime", "timeout",
-                                         "output_limit", "cancelled", "busy", "session"]
+                                         "output_limit", "cancelled", "busy", "session",
+                                         "fuel_exhausted", "memory_limit", "resource_limit"]
                             },
                             "message": { "type": "string" },
-                            "line": { "type": "integer" }
+                            "line": { "type": "integer" },
+                            "code": { "type": "string", "description": "Stable runtime error code (E0009, ...) for kind \"runtime\"; `forge explain <code>` documents it" },
+                            "hint": { "type": "string", "description": "How to fix the runtime error" }
                         },
                         "required": ["kind", "message"]
                     }
@@ -774,8 +836,9 @@ fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
                                 "line": { "type": "integer" },
                                 "column": { "type": "integer" },
                                 "severity": { "type": "string", "enum": ["error", "warning"] },
-                                "code": { "type": "string", "description": "Type-checker diagnostic code (T0001...), absent for syntax errors" },
-                                "message": { "type": "string" }
+                                "code": { "type": "string", "description": "Diagnostic code: T0001... for type diagnostics, E0001/E0002 for syntax errors; `forge explain <code>` documents it" },
+                                "message": { "type": "string" },
+                                "hint": { "type": "string", "description": "How to fix it (did-you-mean, ...), when known" }
                             },
                             "required": ["line", "column", "severity", "message"]
                         }
@@ -1170,12 +1233,13 @@ fn run_in_session(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .checkout(id, config.max_sessions, config.session_idle, cancel);
-    let (mut interp, generation, created) = match checkout {
+    let (mut interp, generation, created, memory) = match checkout {
         Checkout::Ready {
             interp,
             generation,
             created,
-        } => (*interp, generation, created),
+            memory,
+        } => (*interp, generation, created, memory),
         Checkout::Busy => {
             return Err(run_refused(
                 "session",
@@ -1200,14 +1264,22 @@ fn run_in_session(
     };
     interp.source = Some(code.to_string());
     interp.source_file = Some("<run_forge>".into());
-    let run = sandbox.run_interpreter(interp, cancel, move |interp| {
-        interp.run(&program).map(|_| ())
-    });
+    // A fresh fuel budget per step; the memory budget starts from what the
+    // session already holds, so its state stays within the memory limit.
+    let run = sandbox.clone().memory_baseline(memory).run_interpreter(
+        move || interp,
+        cancel,
+        move |interp| {
+            let result = interp.run(&program).map(|_| ());
+            drop(program);
+            result
+        },
+    );
     let alive = server
         .sessions
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .checkin(id, generation, run.interp);
+        .checkin(id, generation, run.interp, run.memory_held);
     let outcome = run.result.map(|((), stdout)| Output { stdout });
     Ok((outcome, note(created, !alive)))
 }
@@ -1236,9 +1308,18 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
             return tool_error("`session_id` must be 1-128 letters, digits, `_`, `-`, `.` or `:`")
         }
     };
+    let mut limits = config.limits.clone();
+    match args.get("max_fuel") {
+        None | Some(Value::Null) => {}
+        Some(v) => match v.as_u64() {
+            Some(n) if n > 0 => limits.max_fuel = Some(limits.max_fuel.map_or(n, |m| m.min(n))),
+            _ => return tool_error("`max_fuel` must be a positive integer"),
+        },
+    }
     let sandbox = Sandbox::with_capabilities(config.capabilities.clone())
         .max_time(limit)
         .max_output(CAPTURE_LIMIT.max(config.max_response_bytes))
+        .limits(limits.clone())
         .source_label("<run_forge>");
     let started = Instant::now();
     let (outcome, session) = match session_id {
@@ -1291,6 +1372,24 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
                 SandboxError::OutputLimit { .. } => {
                     text.push_str("; print less, or summarize before printing")
                 }
+                SandboxError::FuelExhausted { .. } => {
+                    if limits.max_fuel < config.limits.max_fuel {
+                        text.push_str(&format!(
+                            " (the server allows up to {} steps)",
+                            config.limits.max_fuel.unwrap_or(0)
+                        ));
+                    }
+                    text.push_str("; do less work per call, or split it into several calls")
+                }
+                SandboxError::MemoryLimit { .. } => {
+                    text.push_str("; process the data in smaller pieces");
+                    if session.is_some() {
+                        text.push_str(
+                            " (the limit covers everything the session holds; \
+                             reset_session frees it)",
+                        );
+                    }
+                }
                 _ => {}
             }
             if !stdout.is_empty() {
@@ -1301,10 +1400,13 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
                 }
             }
             let mut error = json!({ "kind": e.kind(), "message": e.to_string() });
-            if let SandboxError::Runtime { line, .. } = e {
+            if let SandboxError::Runtime { line, message, .. } = e {
                 if *line > 0 {
                     error["line"] = json!(line);
                 }
+                // Stable code and hint (`forge explain <code>`).
+                error["code"] = json!(crate::semantics::errors::classify(message).code);
+                error["hint"] = json!(crate::semantics::errors::hint_for(message));
             }
             (text, error)
         }
@@ -1349,9 +1451,12 @@ pub struct Diagnostic {
     /// 1-based column (0 when unknown).
     pub column: usize,
     pub is_error: bool,
-    /// Type-checker code (`T0006`), `None` for lex/parse errors.
+    /// Diagnostic code: `T0006` for type diagnostics, `E0001` / `E0002`
+    /// for lexer / parser errors (`forge explain <code>`).
     pub code: Option<String>,
     pub message: String,
+    /// One-line hint (did-you-mean, how to fix), when there is one.
+    pub hint: Option<String>,
 }
 
 /// Lex, parse and type-check `source` without running it.
@@ -1367,16 +1472,24 @@ pub fn check_source(source: &str) -> Vec<Diagnostic> {
                 is_error: d.is_error(),
                 code: Some(d.code.as_str().to_string()),
                 message: d.full_message(),
+                hint: d.help.clone(),
             })
             .collect(),
-        Err(FrontendError::Lex { line, col, message })
-        | Err(FrontendError::Parse { line, col, message }) => vec![Diagnostic {
-            line,
-            column: col,
-            is_error: true,
-            code: None,
-            message,
-        }],
+        Err(e) => {
+            let (code, line, col, message) = match e {
+                FrontendError::Lex { line, col, message } => ("E0001", line, col, message),
+                FrontendError::Parse { line, col, message } => ("E0002", line, col, message),
+            };
+            let hint = crate::semantics::errors::lookup(code).map(|c| c.hint.to_string());
+            vec![Diagnostic {
+                line,
+                column: col,
+                is_error: true,
+                code: Some(code.to_string()),
+                message,
+                hint,
+            }]
+        }
     }
 }
 
@@ -1419,6 +1532,9 @@ fn check_forge(args: &Map<String, Value>) -> Value {
             });
             if let Some(code) = &d.code {
                 item["code"] = json!(code);
+            }
+            if let Some(hint) = &d.hint {
+                item["hint"] = json!(hint);
             }
             item
         })
@@ -1609,6 +1725,10 @@ mod tests {
 
         assert_eq!(r(3)["structuredContent"]["error"]["kind"], "runtime");
         assert_eq!(r(3)["structuredContent"]["error"]["line"], 1);
+        assert_eq!(r(3)["structuredContent"]["error"]["code"], "E0008");
+        assert!(r(3)["structuredContent"]["error"]["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("divisor")));
         assert_eq!(r(4)["structuredContent"]["error"]["kind"], "syntax");
 
         assert_eq!(r(5)["structuredContent"]["truncated"], true);
@@ -1638,6 +1758,8 @@ mod tests {
         assert_eq!(bad["ok"], false);
         assert_eq!(bad["diagnostics"][0]["severity"], "error");
         assert_eq!(bad["diagnostics"][0]["line"], 2);
+        assert_eq!(bad["diagnostics"][0]["code"], "E0002");
+        assert!(bad["diagnostics"][0]["hint"].is_string());
         let good = by_id(&msgs, 2)["result"].clone();
         assert_eq!(good["structuredContent"]["ok"], true);
         assert_eq!(good["content"][0]["text"], "No problems found.");
@@ -1715,6 +1837,13 @@ mod tests {
         let summary = config.policy_summary();
         assert!(summary.contains("net (api.example.com)"), "{summary}");
         assert!(summary.contains("Time limit: 30s"), "{summary}");
+        assert!(
+            summary.contains(&format!("fuel {} steps", DEFAULT_MAX_FUEL)),
+            "{summary}"
+        );
+        // The lib's tests install the counting allocator, so the default
+        // memory limit is on.
+        assert!(summary.contains("memory 256 MiB"), "{summary}");
         let tools = tool_definitions(&config);
         assert_eq!(tools[0]["annotations"]["openWorldHint"], true);
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
@@ -1735,6 +1864,7 @@ mod tests {
             src,
             Capabilities::deny_all(),
             Duration::from_secs(5),
+            default_limits(),
         )
         .expect("loads")
         .0
@@ -1800,6 +1930,55 @@ mod tests {
         assert_eq!(
             by_id(&msgs, 6)["result"]["resources"][0]["uri"],
             "forge://n"
+        );
+    }
+
+    #[test]
+    fn run_forge_resource_limits() {
+        let call = |id: i64, args: &str| {
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{args}}}}}\n"
+            )
+        };
+        let mut config = deny_all();
+        config.limits.max_fuel = Some(1_000_000);
+        config.limits.max_memory = Some(16 << 20);
+        let input = [
+            // An agent can lower the fuel budget but not raise it.
+            call(1, r#"{"code":"while true { }","max_fuel":5000}"#),
+            call(2, r#"{"code":"while true { }","max_fuel":999999999999}"#),
+            call(
+                3,
+                r#"{"code":"let mut k = []\nwhile true { k.push(\"keep this string alive\") }"}"#,
+            ),
+            call(4, r#"{"code":"let s = repeat_str(\"x\", 1000000000000)"}"#),
+            call(5, r#"{"code":"say 1","max_fuel":0}"#),
+            // The server is still healthy afterwards.
+            call(6, r#"{"code":"say 6 * 7"}"#),
+        ]
+        .concat();
+        let msgs = session(&input, config);
+        let error = |id| by_id(&msgs, id)["result"]["structuredContent"]["error"].clone();
+        assert_eq!(error(1)["kind"], "fuel_exhausted");
+        let text = by_id(&msgs, 1)["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(text.contains("more than 5000 steps"), "{text}");
+        assert!(
+            text.contains("the server allows up to 1000000 steps"),
+            "{text}"
+        );
+        assert_eq!(error(2)["kind"], "fuel_exhausted");
+        assert!(error(2)["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("1000000 steps")));
+        assert_eq!(error(3)["kind"], "memory_limit");
+        assert_eq!(error(4)["kind"], "resource_limit");
+        assert_eq!(by_id(&msgs, 5)["result"]["isError"], true);
+        assert_eq!(
+            by_id(&msgs, 6)["result"]["structuredContent"]["stdout"],
+            "42\n"
         );
     }
 }

@@ -6,7 +6,8 @@
 //
 // Hosts that embed Forge to run untrusted scripts (AI agents, automation)
 // use `forge_lang::Sandbox`: default-deny capabilities, explicit grants,
-// a wall-clock limit and captured output. See `src/sandbox.rs`.
+// a wall-clock limit, deterministic fuel/memory/handle limits and captured
+// output. See `src/sandbox.rs` and `src/runtime/limits.rs`.
 
 mod builtins_registry;
 mod color;
@@ -38,7 +39,14 @@ mod typechecker;
 pub mod vm;
 
 pub use permissions::{Capabilities, Capability, PermissionError};
+pub use runtime::limits::{CountingAllocator, Limits};
 pub use sandbox::{CancelHandle, Output, Sandbox, SandboxError};
+
+// The library's own tests exercise `Sandbox::max_memory`, which measures
+// the interpreter through the counting allocator.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
 
 use std::panic::{self, AssertUnwindSafe};
 

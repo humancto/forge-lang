@@ -7810,3 +7810,37 @@ fn break_in_block_expression_does_not_cross_function_boundary() {
         "a break escaping a function must be an error, not break the caller's loop"
     );
 }
+
+#[test]
+fn fork_for_serving_gives_every_request_a_fresh_fuel_budget() {
+    use crate::runtime::limits::{self, Budget, Limits};
+    let tokens = Lexer::new("fn work() {\n  let mut i = 0\n  while i < 500 { i = i + 1 }\n  return i\n}\nfn spin() { while true { } }")
+        .tokenize()
+        .expect("lex");
+    let program = Parser::new(tokens).parse_program().expect("parse");
+    let template = {
+        let _scope = limits::scope(Some(Budget::new(Limits {
+            max_fuel: Some(5_000),
+            ..Limits::none()
+        })));
+        let mut t = Interpreter::new();
+        t.run(&program).expect("top level");
+        t
+    };
+    let call = |name: &str| {
+        let mut fork = template.fork_for_serving();
+        let f = fork.env.get(name).expect("handler");
+        fork.call_function(f, vec![])
+    };
+    // ~1.5k steps each: ten requests would exhaust one shared budget.
+    for _ in 0..10 {
+        assert_eq!(call("work").expect("fresh budget"), Value::Int(500));
+    }
+    let err = call("spin").expect_err("fuel");
+    assert!(
+        err.message.starts_with(limits::FUEL_EXHAUSTED),
+        "{}",
+        err.message
+    );
+    assert!(call("work").is_ok());
+}

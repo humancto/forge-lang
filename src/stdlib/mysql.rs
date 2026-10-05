@@ -164,6 +164,14 @@ fn mysql_val_to_forge(val: mysql_async::Value) -> Value {
     }
 }
 
+/// Socket slots (`runtime::limits`) of open pools, keyed by connection id;
+/// released by `mysql.close`.
+fn mysql_slots() -> &'static std::sync::Mutex<HashMap<String, crate::runtime::limits::Slot>> {
+    static SLOTS: OnceLock<std::sync::Mutex<HashMap<String, crate::runtime::limits::Slot>>> =
+        OnceLock::new();
+    SLOTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 fn mysql_connect(args: Vec<Value>) -> Result<Value, String> {
     let url = build_connection_url(&args)?;
     // A database connection is network access: the server must pass the
@@ -180,6 +188,7 @@ fn mysql_connect(args: Vec<Value>) -> Result<Value, String> {
         }
         crate::permissions::require_net_host(opts.ip_or_hostname(), opts.tcp_port())?;
     }
+    let socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
 
     // Connection pools live in a process-wide table, so a handle must not
     // be guessable: another sandbox in the same host process could
@@ -192,7 +201,7 @@ fn mysql_connect(args: Vec<Value>) -> Result<Value, String> {
     };
     let id_clone = id.clone();
 
-    run_mysql(async move {
+    let connected = run_mysql(async move {
         let opts = mysql_async::Opts::from_url(&url)
             .map_err(|e| format!("mysql.connect() invalid URL: {}", e))?;
         let pool = mysql_async::Pool::new(opts);
@@ -206,7 +215,12 @@ fn mysql_connect(args: Vec<Value>) -> Result<Value, String> {
 
         mysql_pool().lock().await.insert(id_clone.clone(), pool);
         Ok(Value::String(id_clone))
-    })
+    })?;
+    mysql_slots()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, socket);
+    Ok(connected)
 }
 
 fn mysql_query(args: Vec<Value>) -> Result<Value, String> {
@@ -316,6 +330,10 @@ fn mysql_close(args: Vec<Value>) -> Result<Value, String> {
         let mut pool_guard = mysql_pool().lock().await;
         if let Some(pool) = pool_guard.remove(&conn_id) {
             drop(pool_guard);
+            mysql_slots()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&conn_id);
             pool.disconnect()
                 .await
                 .map_err(|e| format!("mysql.close() error: {}", e))?;

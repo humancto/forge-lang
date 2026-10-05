@@ -132,6 +132,8 @@ forge run --sandbox --allow-read=./data --allow-write=./out agent.fg
 forge run --sandbox --allow-net=api.example.com,*.cdn.example.com agent.fg
 forge run --allow-read=./data app.fg      # scoped flag restricts just that capability
 forge run --max-time 30 job.fg            # wall-clock limit, exit code 124
+forge run --max-fuel 50000000 job.fg      # deterministic step budget
+forge run --max-memory 256MB job.fg       # memory limit
 ```
 
 - Under a restricted policy SQLite cannot open files by itself: `ATTACH DATABASE`, `VACUUM INTO` and `file:` URI names are refused unless both `fs.read` and `fs.write` are unrestricted.
@@ -177,16 +179,37 @@ let out = Sandbox::new()
 - `max_output` is charged on every write, so a print loop stops at the limit instead of growing the capture between checks.
 - `schedule`, `watch` and `@server` are never started inside a sandbox, including from imported modules and tasks.
 - A size that cannot be allocated (`repeat_str("x", 10**14)`, `range(0, 10**14)`) is a runtime error, never a process abort.
+- Resource limits (`max_fuel`, `max_memory`, or a full `forge_lang::Limits` via `.limits(...)`) come back as `SandboxError::{FuelExhausted, MemoryLimit, ResourceLimit}`; see "Resource limits" below. `max_memory` needs `forge_lang::CountingAllocator` as the host's `#[global_allocator]` (the run fails with a clear error otherwise).
 - Lower-level: `forge_lang::Capabilities` (policy builder), `forge_lang::permissions::{set_global, scope, require}`.
+
+### Resource limits
+
+Wall-clock time is not enough for multi-tenant use: it depends on machine load and does not bound memory. Every run can also carry a budget (`src/runtime/limits.rs`), set with CLI flags, `forge_lang::Sandbox`, or `forge mcp` (which applies defaults):
+
+| Limit | Meaning | CLI / API | Error |
+| --- | --- | --- | --- |
+| Fuel | Execution steps. VM: one per bytecode instruction; interpreter: one per statement, call and loop iteration. Deterministic: a single-threaded program runs out at exactly the same step on every run and every machine (per engine — the engines count different units). | `--max-fuel N`, `Sandbox::max_fuel` | `fuel exhausted: ...` (`FuelExhausted`) |
+| Memory | VM: estimated live bytes of the GC heap (strings, arrays, objects, maps, sets, closures, boxed ints); crossing the limit forces a collection and the run fails only if the live heap is still too big. Interpreter: bytes held by the run's threads, measured by `CountingAllocator` and polled at every step. | `--max-memory 256MB`, `Sandbox::max_memory` | `memory limit exceeded: ...` (`MemoryLimit`) |
+| Value size | Longest string and largest collection a program may build, checked *before* allocating (`repeat_str("x", 1e12)`, `range(1e12)`, `pad_start`, doubling `s = s + s`). With a memory limit they default to what the limit could hold. | `Limits::{max_string_bytes, max_collection_len}` | `resource limit exceeded: ...` (`ResourceLimit`) |
+| Handles | Concurrently open files (fs calls, SQLite connections), sockets (HTTP requests, WebSockets, PostgreSQL/MySQL connections), subprocesses and tasks (`spawn`, `timeout` blocks). | `Limits::{max_open_files, max_sockets, max_processes, max_tasks}` | `resource limit exceeded: too many ...` |
+| Imports | Module files loaded per run. | `Limits::max_imports` | `resource limit exceeded: more than N imports` |
+
+- **Fuel and memory are fatal.** `try`/`catch`, `safe` and `retry` do not catch them, and the budget remembers the trip: if a builtin swallows the error (`assert_throws`, a failed task), every later step fails too and the host still reports the limit. The other limits are ordinary runtime errors a program may catch.
+- **The host survives.** A tripped run unwinds normally; a sandbox's memory is released with its worker thread, and the next run starts from a fresh budget. Budgets are per run and inherited by every thread the run forks, never shared between sandboxes.
+- **Overhead.** With no limits set, engines pay one decrement and branch per safe point they already had (VM: per instruction, folded into the existing `timeout` poll; interpreter: per statement/call/iteration), and the counting allocator pays one thread-local load per allocation. See CHANGELOG for measured numbers.
+- **Servers.** With `forge run --max-fuel/--max-memory app.fg`, every HTTP request fork and every WebSocket connection gets a fresh budget with those limits (a request that trips one gets a 500; the server keeps serving). On the interpreter fallback only fuel is per request. `schedule`/`watch` blocks spend the run's own budget.
+- **JIT.** Native code has no fuel counter, so while a fuel limit is active the VM does not enter JIT code (hot functions keep running in the VM). The JIT never allocates on the GC heap, so memory accounting is unaffected.
+- **Approximations.** VM object sizes are estimates; the interpreter's meter also counts transient copies and may undercount memory allocated before the run and freed during it. Either engine can overshoot the memory limit by what a single step allocates (bounded by the value-size caps), and the VM by up to 1/8 of the limit when the live heap sits just under it.
 
 ### MCP server (`forge mcp`)
 
 `forge mcp` exposes the embedding sandbox to AI agents over the Model Context Protocol (stdio). Its policy is built like the CLI's but **always starts from deny-all**, including `process`; only the `--allow-*` flags and `forge.toml` `[permissions]` grant capabilities (`sandbox = false` is ignored, and `run` needs an explicit `--allow-run` / `allow-run = true`). `--max-time` (default 30s) bounds each call rather than the server process.
 
 - Every `run_forge` call gets a fresh interpreter on its own thread; nothing persists between calls unless the agent passes a `session_id`. A timed-out script is cancelled cooperatively and, if stuck in a native call, detached; at most 8 calls run at once. Tasks a call `spawn`s and never awaits are stopped when the call ends.
-- **Sessions** (`run_forge` with `session_id`) keep one interpreter's top-level state between calls. Each step still runs on a fresh worker thread under the full policy, deadline, output cap and cancellation; only the environment carries over. Sessions are isolated from each other, limited in number (`--max-sessions`, default 16) and dropped after `--session-idle` (default 900s); a step whose worker had to be detached ends its session. There is no per-session memory limit yet (see "Not covered yet"); `--max-sessions 0` disables sessions.
+- Every call (and every session step and Forge tool call) also gets a fresh resource budget: by default 200,000,000 steps of fuel, 256 MiB of memory, 32 open files, 16 sockets, 4 subprocesses, 16 tasks and 256 imports (`forge_lang::mcp::default_limits`). `--max-fuel` / `--max-memory` change the server's limits; an agent's `max_fuel` argument can only lower the fuel. Errors come back as `fuel_exhausted`, `memory_limit` or `resource_limit`.
+- **Sessions** (`run_forge` with `session_id`) keep one interpreter's top-level state between calls. Each step still runs on a fresh worker thread under the full policy, deadline, output cap and cancellation; only the environment carries over. Sessions are isolated from each other, limited in number (`--max-sessions`, default 16) and dropped after `--session-idle` (default 900s); a step whose worker had to be detached ends its session. Each step gets fresh fuel, while the memory limit covers everything the session holds: the bytes its interpreter retained after the previous step count from the start of the next one, so a session's state can never exceed the per-call memory limit (`reset_session` frees it). `--max-sessions 0` disables sessions.
 - **Forge-authored tools** (`forge mcp serve tools.fg`): the file is trusted operator code, but its top level and every tool call run inside the same sandbox as `run_forge` (the server's policy, plus the file's directory and `forge_modules/` as import roots). Each call runs in a fresh fork of the top-level state, so calls cannot see each other. Arguments are validated against the generated schema in Rust before any Forge code runs.
-- All MCP code runs on the tree-walking interpreter, never the VM: the VM does not capture output, cannot yet stop `squad` tasks or a blocked `receive` at a deadline (SEC-02, VM part) and can overflow the native stack on deeply nested values (SEC-16).
+- All MCP code runs on the tree-walking interpreter, never the VM: the VM does not yet capture or cap a program's output (`say` goes to the process's stdout).
 - Script output is captured (including `spawn`ed tasks, `timeout` blocks, imports and `io.print`), capped at 64 KiB in the response, and a script that prints more than 1 MiB is stopped.
 - On Unix the protocol stream is moved to private close-on-exec descriptors before any script runs; fd 0 becomes `/dev/null` and fd 1 is redirected to stderr. A script (or a granted subprocess) can therefore neither read protocol input nor inject protocol output. On other platforms only the sandbox capture applies.
 - Untrusted source cannot crash the server with deep nesting: the parser rejects nesting beyond a fixed depth.
@@ -194,7 +217,8 @@ let out = Sandbox::new()
 
 ### Not covered yet (future work)
 
-- **Memory limit.** There is no heap cap yet: an allocation the OS grants is granted (impossible sizes are errors, see above), so a script can still use as much memory as the host allows within its time limit. Call depth is bounded by `--max-depth` / `FORGE_MAX_DEPTH`.
+- **Memory accounting is approximate** (see "Resource limits"); call depth is bounded separately by `--max-depth` / `FORGE_MAX_DEPTH`. Builtins that run long without calling back into Forge code (sorting a huge array, a slow regex) are not charged fuel per element, and `replace`/`join` do not check the string cap before building their result.
+- Fuel limits disable the JIT tier for the run.
 - `--max-time` in the CLI ends the process from a watchdog thread; the embedding API cancels cooperatively. Neither interrupts a single blocking native call (an HTTP request, DNS lookup, WebSocket or database connect, or a granted subprocess): the host gets control back on time and the detached worker finishes when the call returns.
 - HTTP server handlers run on tokio's blocking pool and use the process-wide policy (the CLI's). The embedding `Sandbox` does not start servers, `schedule` or `watch` blocks.
 - stderr output (`log.*`, `term.*` drawing, download progress, warnings) is neither captured nor capped; `forge mcp` on Unix sends it to the server's stderr.

@@ -617,7 +617,12 @@ mod tests {
     #[test]
     fn rejects_invalid_opcode() {
         rejects(&with(0xFF00_0000), "invalid opcode 255");
-        rejects(&with((OpCode::PopLocal as u32 + 1) << 24), "invalid opcode");
+        // The first byte that is not an opcode (stays correct as opcodes
+        // are added).
+        let first_invalid = (0u8..=255)
+            .find(|b| OpCode::try_from(*b).is_err())
+            .expect("some byte is not an opcode");
+        rejects(&with((first_invalid as u32) << 24), "invalid opcode");
     }
 
     #[test]

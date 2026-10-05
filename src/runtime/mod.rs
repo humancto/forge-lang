@@ -2,6 +2,7 @@ pub mod client;
 pub mod embedded;
 pub mod host;
 pub mod imports;
+pub mod limits;
 pub mod metadata;
 pub mod recursion;
 pub mod server;

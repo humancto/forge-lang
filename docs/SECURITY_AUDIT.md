@@ -87,7 +87,7 @@ outside the sandbox (see SEC-15); side channels (timing).
 | `path.*` (others), `url.*`, `json.*`, `regex.*`, `crypto.*`, `jwt.*`, `math.*`, `npc.*`, `time.*` | none (pure) | — | — |
 | `os.platform`/`arch`/`cpus`/`pid`/`hostname`/`homedir`, `cwd()` | none (see SEC-18) | — | — |
 | `log.*`, `term.*` output | none; stderr, not captured (SEC-17) | — | — |
-| `spawn`, `squad`, `timeout` threads | inherit policy (`permissions::spawn`) **and the run's cancellation/containment** | `interpreter/mod.rs` | `vm/machine.rs` (policy only) |
+| `spawn`, `squad`, `timeout` threads | inherit policy (`permissions::spawn`) **and the run's cancellation/containment** | `interpreter/mod.rs` | `vm/machine.rs` (`scope_cancels`, `wait_cancellable`) |
 | JIT | pure functions only (verifier); no capability surface | — | `vm/jit` |
 
 ## 4. Findings
@@ -112,7 +112,7 @@ Severity is for the worst affected host (usually `forge mcp` or an embedder).
 | SEC-13 | Medium | Fixed | `io.args*` expose the host's command line to embedded scripts |
 | SEC-14 | Medium | Fixed | Output cap enforced only by polling; poisoned capture fell back to host stdout |
 | SEC-15 | Low | Fixed (partly) / Accepted | Check-then-open races (`cd` from another task; symlink swaps from outside) |
-| SEC-16 | Low | Deferred | VM: very deep nested values overflow the native stack in conversions |
+| SEC-16 | Low | Fixed | VM: very deep nested values overflow the native stack in conversions |
 | SEC-17 | Info | Accepted | stderr output (`log`, `term`, progress lines) is neither captured nor capped |
 | SEC-18 | Info | Accepted | Host identity is readable (`os.*`, `cwd()`, `fs.temp_dir`) |
 | SEC-19 | Info | Accepted | The `env` capability is process-wide |
@@ -177,12 +177,23 @@ The same nesting is observable from the CLI: before the fix,
 `timeout 1 seconds { squad { while true { ... } } }` (and the `squad` task,
 `receive`, `import`, empty-loop and nested-`timeout` variants) hung forever
 on the interpreter; now each stops after one second
-(`timeout_blocks_stop_everything_inside_them`). **Deferred (VM):** on the
-VM, a `timeout` block still cannot stop a `squad` *task* or a blocked
-`receive` inside it, and a deadline that fires inside an imported module is
-reported as `internal control transfer to catch handler` (it does stop). The VM only runs under the CLI, where `--max-time`
-ends the whole process, so this is not a sandbox escape today; it must be
-fixed before VM-backed long-lived hosts run untrusted code.
+(`timeout_blocks_stop_everything_inside_them`).
+
+**VM (fixed):** the VM mirrors the same containment. Every `squad` and
+`timeout` scope pushes a cancel flag on `VM::scope_cancels`; a spawned task
+inherits the run's token *and* those flags (`fork_for_spawn`), and
+`VM::is_cancelled` checks them all at every back-edge and call. A deadline
+that fires sets the flags of every scope opened inside its block, so the
+tasks the block started stop too. Every blocking wait (`await`,
+`await_all`, `receive`, `for x in channel`, `select`, the squad join) goes
+through `VM::wait_cancellable`, which wakes every 50 ms to check
+cancellation and `timeout` deadlines. JIT code polls only the run's own
+token, so code inside a squad/timeout scope stays in the VM. A deadline
+inside an imported module now unwinds to its `timeout` handler (the import
+builtin passes control transfers through) and reports `timeout: ...`.
+Tests: `timeout_blocks_stop_everything_inside_them` (every case on both
+engines, including the squad task, `receive`, `for x in channel` and
+`await`), `timeout_cancels_the_tasks_it_started`.
 
 ### SEC-03 `pg`/`mysql` ignore the `net` allowlist (High, fixed)
 
@@ -328,7 +339,7 @@ on that path. **Accepted:** a process *outside* the sandbox that swaps a
 directory for a symlink between check and open can still win (no builtin
 lets a script create symlinks or hard links).
 
-### SEC-16 VM: deep values overflow the native stack (Low, deferred)
+### SEC-16 VM: deep values overflow the native stack (Low, fixed)
 
 On the VM, `a = [a]` in a loop builds a 3,000,000-deep array in seconds;
 `json.stringify(a)` then aborts the process with a native stack overflow
@@ -336,9 +347,18 @@ in the recursive VM→interpreter value conversion. Impact today is limited
 to the CLI (the script crashes its own process; the embedding `Sandbox`
 runs the interpreter, where building such a value is quadratic and does not
 finish within any realistic time limit; `json.parse` and `toml.parse` have
-recursion limits). Deferred to the VM work in progress (servers on the VM,
-resource limits): conversions and printers need a depth guard
-(`recursion::native_stack_exhausted`) before VM-backed servers ship.
+recursion limits).
+
+**Fix** (`runtime/recursion.rs`): every recursive value walker enters one
+level per container with `recursion::enter_value_level`, which refuses past
+`MAX_VALUE_DEPTH` (10,000) levels or when the native stack is nearly
+exhausted: VM→interpreter and interpreter→VM conversions, cross-thread
+`SharedValue` conversions, VM display, JSON text and equality, the VM
+server's JSON encoding, and `json.stringify`/`json.pretty` validation.
+Fallible paths (stdlib calls, task results) fail with `value nested too
+deeply (more than 10000 levels)`; display prints `...` for the part beyond
+the limit and equality reports "not equal". Test:
+`deeply_nested_values_are_errors_not_stack_overflows`.
 
 ### SEC-17 stderr is not captured or capped (Info, accepted)
 
@@ -408,8 +428,7 @@ however it returns. Test: `unawaited_tasks_stop_when_the_run_ends`.
   (`checked_watch_path`), `import` (reads the checked path), and the
   shared fallible-allocation helpers in `range`, `repeat_str`,
   `pad_start`/`pad_end`, `sample`, `slay`.
-- SEC-16 and VM cancellation of blocking waits are left to the VM
-  resource-limit work; they matter once the VM runs untrusted code in a
-  long-lived host.
+- SEC-16 and VM cancellation of blocking waits were fixed with the VM
+  resource-limit work (`runtime/limits.rs`, `VM::scope_cancels`).
 - A future `ffi` capability (native plugins) is a full escape when granted,
   like `run`, and should be documented as such.

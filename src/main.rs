@@ -48,6 +48,12 @@ use parser::ast::{Expr, Program, Stmt};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Charges each thread's allocations to the run's resource budget when it
+/// has a memory limit (`--max-memory`, `forge mcp`); see
+/// `runtime::limits::CountingAllocator`.
+#[global_allocator]
+static ALLOCATOR: runtime::limits::CountingAllocator = runtime::limits::CountingAllocator;
+
 #[derive(Debug)]
 enum FrontendError {
     Lex {
@@ -118,8 +124,35 @@ struct Cli {
     #[arg(long = "max-depth", value_name = "N")]
     max_depth: Option<usize>,
 
+    /// How syntax, type and runtime errors are written to stderr: `human`
+    /// (source snippets) or `json` (one object per line with code,
+    /// severity, message, file, line, col, hint — for editors and agents)
+    #[arg(
+        long = "error-format",
+        value_enum,
+        value_name = "FORMAT",
+        global = true
+    )]
+    error_format: Option<DiagnosticFormat>,
+
     #[command(flatten)]
     perms: PermissionFlags,
+}
+
+/// `--error-format` / `forge check --format`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum DiagnosticFormat {
+    Human,
+    Json,
+}
+
+impl From<DiagnosticFormat> for errors::ErrorFormat {
+    fn from(f: DiagnosticFormat) -> Self {
+        match f {
+            DiagnosticFormat::Human => errors::ErrorFormat::Human,
+            DiagnosticFormat::Json => errors::ErrorFormat::Json,
+        }
+    }
 }
 
 /// Deno-style permission flags. Without `--sandbox`, Forge keeps its
@@ -173,6 +206,42 @@ struct PermissionFlags {
     /// Stop the program after SECS seconds of wall-clock time (exit code 124)
     #[arg(long = "max-time", value_name = "SECS", global = true)]
     max_time: Option<f64>,
+
+    /// Deterministic step budget: fail with "fuel exhausted" after N steps
+    /// (VM: instructions; --interp: statements, calls and loop iterations).
+    /// Disables JIT tier-up.
+    #[arg(long = "max-fuel", value_name = "N", global = true)]
+    max_fuel: Option<u64>,
+
+    /// Fail with "memory limit exceeded" when the program holds more than
+    /// SIZE (bytes, or with a K/M/G suffix, e.g. 256MB)
+    #[arg(long = "max-memory", value_name = "SIZE", global = true)]
+    max_memory: Option<String>,
+}
+
+/// Resource limits from `--max-fuel` / `--max-memory`, or an error message.
+fn build_limits(flags: &PermissionFlags) -> Result<runtime::limits::Limits, String> {
+    let mut limits = runtime::limits::Limits::none();
+    if let Some(n) = flags.max_fuel {
+        if n == 0 {
+            return Err("--max-fuel must be a positive number of steps".to_string());
+        }
+        limits.max_fuel = Some(n);
+    }
+    if let Some(raw) = &flags.max_memory {
+        limits.max_memory =
+            Some(runtime::limits::parse_bytes(raw).map_err(|e| format!("--max-memory: {}", e))?);
+    }
+    Ok(limits)
+}
+
+/// A program can swallow a fatal limit error inside a builtin (e.g.
+/// `assert_throws`); the budget remembers the trip, so report it anyway.
+fn exit_if_limit_tripped() {
+    if let Some(message) = runtime::limits::current().and_then(|b| b.trip_message()) {
+        eprintln!("{}", errors::format_simple_error(&message));
+        process::exit(1);
+    }
 }
 
 /// Exit code used when `--max-time` expires (same as coreutils `timeout`).
@@ -322,6 +391,7 @@ fn load_mcp_tools(
     file: &std::path::Path,
     caps: &permissions::Capabilities,
     max_time: std::time::Duration,
+    limits: &runtime::limits::Limits,
 ) -> Result<mcp::ToolSet, String> {
     let source =
         fs::read_to_string(file).map_err(|e| format!("cannot read {}: {}", file.display(), e))?;
@@ -333,7 +403,7 @@ fn load_mcp_tools(
         .clone()
         .grant_import_root(dir)
         .grant_import_root("forge_modules");
-    let (tools, report) = mcp::ToolSet::load(file, &source, caps, max_time)?;
+    let (tools, report) = mcp::ToolSet::load(file, &source, caps, max_time, limits.clone())?;
     if !report.stdout.is_empty() {
         eprint!("{}", report.stdout);
     }
@@ -341,7 +411,11 @@ fn load_mcp_tools(
 }
 
 /// `forge mcp`: serve until the client closes stdin, then exit.
-fn run_mcp(caps: permissions::Capabilities, options: McpOptions) -> ! {
+fn run_mcp(
+    caps: permissions::Capabilities,
+    options: McpOptions,
+    limits: runtime::limits::Limits,
+) -> ! {
     let fail = |message: &str| -> ! {
         eprintln!("{}", errors::format_simple_error(message));
         process::exit(2);
@@ -352,6 +426,13 @@ fn run_mcp(caps: permissions::Capabilities, options: McpOptions) -> ! {
     }
     if let Some(secs) = options.session_idle {
         config.session_idle = std::time::Duration::from_secs(secs);
+    }
+    // Flags override the server's default per-call limits.
+    if let Some(n) = limits.max_fuel {
+        config.limits.max_fuel = Some(n);
+    }
+    if let Some(n) = limits.max_memory {
+        config.limits.max_memory = Some(n);
     }
     if let Some(secs) = options.max_time {
         match std::time::Duration::try_from_secs_f64(secs) {
@@ -370,7 +451,7 @@ fn run_mcp(caps: permissions::Capabilities, options: McpOptions) -> ! {
     permissions::set_global(permissions::Capabilities::deny_all());
     if let Some((file, with_code_tools)) = options.serve {
         config.code_tools = with_code_tools;
-        let tools = load_mcp_tools(&file, &config.capabilities, config.max_time)
+        let tools = load_mcp_tools(&file, &config.capabilities, config.max_time, &config.limits)
             .unwrap_or_else(|e| fail(&format!("forge mcp serve: {}", e)));
         config = config
             .with_tools(tools)
@@ -443,6 +524,22 @@ enum Command {
         /// Allow shell execution (same as the top-level --allow-run)
         #[arg(long = "allow-run")]
         allow_run: bool,
+    },
+    /// Parse and type-check a file without running it. Exits 1 when it has
+    /// errors (syntax errors, or any type diagnostic under --strict).
+    Check {
+        /// Path to a .fg file (reads entry from forge.toml if omitted)
+        file: Option<PathBuf>,
+        /// Output format: human (default) or json (one diagnostic per line
+        /// on stdout)
+        #[arg(long, value_enum)]
+        format: Option<DiagnosticFormat>,
+    },
+    /// Explain an error code (E0009, T0006, ...) with an example and the
+    /// fix; without a code, list every code
+    Explain {
+        /// The code to explain
+        code: Option<String>,
     },
     /// Start the interactive REPL
     Repl,
@@ -634,6 +731,9 @@ async fn async_main() {
     forge_lang::runtime::tracing_init::init_otel();
 
     let cli = Cli::parse();
+    if let Some(format) = cli.error_format {
+        errors::set_error_format(format.into());
+    }
     if let Some(n) = cli.max_depth {
         runtime::recursion::set_max_depth(n);
     }
@@ -662,6 +762,10 @@ async fn async_main() {
         cli.command,
         Some(Command::Run { .. } | Command::Test { .. } | Command::Mcp { .. })
     ) {
+        if let Err(e) = manifest::load_edition() {
+            eprintln!("{}", errors::format_simple_error(&e));
+            process::exit(1);
+        }
         match manifest::load_permissions() {
             Ok(p) => p,
             Err(e) => {
@@ -690,6 +794,13 @@ async fn async_main() {
         .perms
         .max_time
         .or(toml_perms.as_ref().and_then(|p| p.max_time));
+    let limits = match build_limits(&cli.perms) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e));
+            process::exit(2);
+        }
+    };
     if let Some(Command::Mcp {
         allow_run,
         max_sessions,
@@ -723,8 +834,16 @@ async fn async_main() {
                  }| (file, with_code_tools),
             ),
         };
-        run_mcp(caps, options);
+        run_mcp(caps, options, limits);
     }
+    // One budget for the whole process: threads without a scope (runtime
+    // pools) see it through the global, and the scope on this thread (and
+    // every thread forked from it) also meters allocations.
+    let _limits = (!limits.is_unlimited()).then(|| {
+        let budget = runtime::limits::Budget::new(limits);
+        runtime::limits::set_global(Some(budget.clone()));
+        runtime::limits::scope(Some(budget))
+    });
     permissions::set_global(build_policy(
         &cli.perms,
         toml_perms,
@@ -799,6 +918,14 @@ async fn async_main() {
             }
             run_source(&source, &path_str, use_vm, profile, strict).await;
         }
+        Some(Command::Check { file, format }) => {
+            if let Err(e) = manifest::load_edition() {
+                eprintln!("{}", errors::format_simple_error(&e));
+                process::exit(1);
+            }
+            check_file(file, format, strict);
+        }
+        Some(Command::Explain { code }) => explain(code),
         Some(Command::Repl) => {
             repl::run_repl();
         }
@@ -1042,40 +1169,50 @@ fn prepare_program(
     Ok((program, diagnostics))
 }
 
-fn render_diagnostic(source: &str, filename: &str, d: &typechecker::Diagnostic) -> String {
+/// A type-checker diagnostic as a program diagnostic (`T0006` ...).
+fn type_diagnostic(filename: &str, d: &typechecker::Diagnostic) -> errors::ProgramDiagnostic {
     let len = if d.span.end.line == d.span.start.line {
         d.span.end.col.saturating_sub(d.span.start.col).max(1)
     } else {
         1
     };
-    errors::format_diagnostic(
-        &errors::display_path(filename),
-        source,
-        &errors::DiagnosticView {
-            code: d.code.as_str(),
-            message: &d.message,
-            help: d.help.as_deref(),
-            line: d.line(),
-            col: d.col().max(1),
-            len,
-            is_error: d.is_error(),
-        },
-    )
+    errors::ProgramDiagnostic {
+        code: d.code.as_str().to_string(),
+        is_error: d.is_error(),
+        message: d.message.clone(),
+        file: errors::display_path(filename),
+        line: d.line(),
+        col: d.col().max(1),
+        len,
+        hint: d.help.clone(),
+        phase: errors::Phase::Type,
+    }
+}
+
+/// Syntax errors (E0001 lexer, E0002 parser) or the type diagnostics of a
+/// program that could not be prepared, in checking order.
+fn frontend_diagnostics(filename: &str, err: &FrontendError) -> Vec<errors::ProgramDiagnostic> {
+    let file = errors::display_path(filename);
+    match err {
+        FrontendError::Lex { line, col, message } => vec![errors::ProgramDiagnostic::syntax(
+            true, message, &file, *line, *col,
+        )],
+        FrontendError::Parse { line, col, message } => vec![errors::ProgramDiagnostic::syntax(
+            false, message, &file, *line, *col,
+        )],
+        FrontendError::Type(diagnostics) => diagnostics
+            .iter()
+            .map(|d| type_diagnostic(filename, d))
+            .collect(),
+    }
 }
 
 fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
-    match err {
-        FrontendError::Lex { line, col, message } | FrontendError::Parse { line, col, message } => {
-            let filename = &errors::display_path(filename);
-            eprintln!(
-                "{}",
-                errors::format_error(filename, source, line, col, &message)
-            );
-        }
-        FrontendError::Type(diagnostics) => {
-            for d in &diagnostics {
-                eprintln!("{}", render_diagnostic(source, filename, d));
-            }
+    for d in frontend_diagnostics(filename, &err) {
+        eprintln!("{}", d.render(source));
+    }
+    if let FrontendError::Type(diagnostics) = &err {
+        if errors::error_format() == errors::ErrorFormat::Human {
             let errors = diagnostics.iter().filter(|d| d.is_error()).count();
             eprintln!(
                 "{}",
@@ -1092,8 +1229,123 @@ fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
 
 fn emit_type_warnings(source: &str, filename: &str, warnings: &[typechecker::Diagnostic]) {
     for d in warnings.iter().filter(|d| !d.is_error()) {
-        eprintln!("{}", render_diagnostic(source, filename, d));
+        eprintln!("{}", type_diagnostic(filename, d).render(source));
     }
+}
+
+/// The file named by `forge.toml`'s `entry`, or exit with an error.
+fn entry_file_or_exit() -> PathBuf {
+    match manifest::load_manifest() {
+        Some(m) if !m.project.entry.is_empty() => PathBuf::from(&m.project.entry),
+        Some(_) => {
+            eprintln!(
+                "{}",
+                errors::format_simple_error(
+                    "forge.toml found but no 'entry' field set. Add entry = \"src/main.fg\" to [project] or specify a file"
+                )
+            );
+            process::exit(1);
+        }
+        None => {
+            eprintln!(
+                "{}",
+                errors::format_simple_error("no file specified and no forge.toml found")
+            );
+            process::exit(1);
+        }
+    }
+}
+
+/// `forge check`: parse and type-check without running. Human output goes
+/// to stderr like `forge run`'s; JSON goes to stdout, one diagnostic per
+/// line. Exits 1 when there is an error (any diagnostic under --strict).
+fn check_file(file: Option<PathBuf>, format: Option<DiagnosticFormat>, strict: bool) -> ! {
+    if let Some(format) = format {
+        errors::set_error_format(format.into());
+    }
+    let file = file.unwrap_or_else(entry_file_or_exit);
+    let filename = file.display().to_string();
+    let source = match fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                errors::format_simple_error(&format!("could not read '{}': {}", filename, e))
+            );
+            process::exit(1);
+        }
+    };
+    let (diagnostics, failed) = match prepare_program(&source, &filename, strict) {
+        Ok((_, warnings)) => (
+            warnings
+                .iter()
+                .map(|d| type_diagnostic(&filename, d))
+                .collect::<Vec<_>>(),
+            false,
+        ),
+        Err(err) => (frontend_diagnostics(&filename, &err), true),
+    };
+    let json = errors::error_format() == errors::ErrorFormat::Json;
+    for d in &diagnostics {
+        if json {
+            println!("{}", d.to_json());
+        } else {
+            eprintln!("{}", d.to_human(&source));
+        }
+    }
+    if !json {
+        let error_count = diagnostics.iter().filter(|d| d.is_error).count();
+        let warning_count = diagnostics.len() - error_count;
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let summary = format!(
+            "{}: {} error{}, {} warning{}",
+            errors::display_path(&filename),
+            error_count,
+            plural(error_count),
+            warning_count,
+            plural(warning_count)
+        );
+        if failed {
+            eprintln!("{}", errors::format_simple_error(&summary));
+        } else {
+            eprintln!("{}", summary);
+        }
+    }
+    process::exit(i32::from(failed));
+}
+
+/// `forge explain [CODE]`.
+fn explain(code: Option<String>) -> ! {
+    use semantics::errors::RUNTIME_ERRORS;
+    use typechecker::diagnostics::Code;
+    let Some(code) = code else {
+        println!("Runtime and syntax errors:");
+        for e in RUNTIME_ERRORS {
+            println!("  {}  {}", e.code, e.title);
+        }
+        println!("\nType checker diagnostics:");
+        for c in Code::ALL {
+            println!("  {}  {}", c.as_str(), c.title());
+        }
+        println!("\nRun `forge explain <CODE>` for an explanation with an example and the fix.");
+        process::exit(0);
+    };
+    if let Some(e) = semantics::errors::lookup(&code) {
+        println!("{}: {}\n\n{}", e.code, e.title, e.explanation);
+        process::exit(0);
+    }
+    if let Some(c) = Code::parse(&code) {
+        println!("{}: {}\n\n{}", c.as_str(), c.title(), c.explanation());
+        process::exit(0);
+    }
+    eprintln!(
+        "{}",
+        errors::format_simple_error(&format!(
+            "unknown error code '{}' (codes look like E0009 or T0006; run `forge explain` to list them)",
+            code
+        ))
+    );
+    process::exit(1);
 }
 
 fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<String>) {
@@ -1359,32 +1611,39 @@ fn ensure_vm_compatible(program: &Program, mode: &str, serving: Serving) -> Resu
 /// shows (anchored at the failing statement of the main program), followed
 /// by the VM stack trace.
 fn report_vm_error(source: &str, filename: &str, error: &vm::machine::VMError) {
-    let filename = &errors::display_path(filename);
+    let file = errors::display_path(filename);
     let main_frame = error
         .stack_trace
         .iter()
         .rev()
         .find(|frame| frame.function == "<main>" && frame.line > 0);
-    match main_frame {
-        Some(frame) if source.lines().count() >= frame.line => {
-            eprintln!(
-                "{}",
-                errors::format_error(
-                    filename,
-                    source,
-                    frame.line,
-                    frame.col.max(1),
-                    &error.message
-                )
-            );
-            if error.stack_trace.len() > 1 {
-                for frame in &error.stack_trace {
-                    eprintln!("  at {} (line {})", frame.function, frame.line);
-                }
-            }
+    let (line, col) = match main_frame {
+        Some(frame) if source.lines().count() >= frame.line => (frame.line, frame.col.max(1)),
+        _ => (0, 0),
+    };
+    let diagnostic = errors::ProgramDiagnostic::runtime(&error.message, &file, line, col);
+    eprintln!("{}", diagnostic.render(source));
+    if errors::error_format() == errors::ErrorFormat::Human
+        && (line == 0 || error.stack_trace.len() > 1)
+    {
+        for frame in &error.stack_trace {
+            eprintln!("  at {} (line {})", frame.function, frame.line);
         }
-        _ => eprintln!("{}", errors::format_simple_error(&error.to_string())),
     }
+}
+
+/// Print an interpreter runtime error (rendered like the VM's).
+fn report_interpreter_error(source: &str, filename: &str, e: &interpreter::RuntimeError) {
+    let file = errors::display_path(filename);
+    let (line, col) = if e.line > 0 {
+        (e.line, e.col.max(1))
+    } else {
+        (0, 0)
+    };
+    eprintln!(
+        "{}",
+        errors::ProgramDiagnostic::runtime(&e.message, &file, line, col).render(source)
+    );
 }
 
 /// Run a package-manager operation on a plain OS thread.
@@ -1439,7 +1698,15 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
                         note_interpreter_fallback(&e.message);
                     }
                     Err(e) => {
-                        eprintln!("{}", errors::format_simple_error(&e.message));
+                        // Compile-time failures (an import that cannot be
+                        // resolved, ...) use the runtime codes the
+                        // interpreter reports for the same problem.
+                        let file = errors::display_path(filename);
+                        eprintln!(
+                            "{}",
+                            errors::ProgramDiagnostic::runtime(&e.message, &file, 0, 0)
+                                .render(source)
+                        );
                         process::exit(1);
                     }
                 }
@@ -1478,6 +1745,7 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             report_vm_error(source, filename, &e);
             process::exit(1);
         }
+        exit_if_limit_tripped();
     } else {
         let mut interpreter = Interpreter::new();
         interpreter.source = Some(source.to_string());
@@ -1490,27 +1758,11 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
         match interpreter.run(&program) {
             Ok(_) => {}
             Err(e) => {
-                let filename = &errors::display_path(filename);
-                if e.line > 0 {
-                    eprintln!(
-                        "{}",
-                        errors::format_error(
-                            filename,
-                            source,
-                            e.line,
-                            if e.col > 0 { e.col } else { 1 },
-                            &e.message
-                        )
-                    );
-                } else {
-                    eprintln!(
-                        "{}",
-                        errors::format_simple_error(&format!("[{}] {}", filename, e.message))
-                    );
-                }
+                report_interpreter_error(source, filename, &e);
                 process::exit(1);
             }
         }
+        exit_if_limit_tripped();
 
         let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
         if let Err(e) = runtime::host::launch(interpreter, &runtime_plan).await {
@@ -1549,11 +1801,9 @@ fn run_jit(source: &str, filename: &str, strict: bool) {
     vm.jit.verbose = true;
 
     match vm.execute(&chunk) {
-        Ok(_) => {}
+        Ok(_) => exit_if_limit_tripped(),
         Err(e) => {
-            // Use the full Display impl so the stack trace (function +
-            // source line) gets printed, not just the bare message.
-            eprintln!("{}", errors::format_simple_error(&e.to_string()));
+            report_vm_error(source, filename, &e);
             process::exit(1);
         }
     }
@@ -1740,14 +1990,10 @@ fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
     } else {
         vm::machine::VM::new()
     };
-    match vm.execute(&chunk) {
-        Ok(_) => {}
-        Err(e) => {
-            // Use the full Display impl so the stack trace (function +
-            // source line) gets printed, not just the bare message.
-            eprintln!("{}", errors::format_simple_error(&e.to_string()));
-            process::exit(1);
-        }
+    if let Err(e) = vm.execute(&chunk) {
+        // No source to show: the stack trace names the function and line.
+        report_vm_error("", &file_path.display().to_string(), &e);
+        process::exit(1);
     }
     if profile {
         vm.profiler.print_report();

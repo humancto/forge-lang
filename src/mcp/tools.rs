@@ -42,6 +42,7 @@ use super::{tool_error, truncate_utf8, CAPTURE_LIMIT};
 use crate::interpreter::{Interpreter, RuntimeError, Value};
 use crate::parser::ast::{Decorator, DecoratorArg, Expr, FieldDef, Param, Stmt, TypeAnn, UnaryOp};
 use crate::permissions::{Capabilities, Capability};
+use crate::runtime::limits::Limits;
 use crate::sandbox::{parse_source, CancelHandle, Sandbox, SandboxError};
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value as Json};
@@ -56,12 +57,15 @@ const MAX_RESULT_DEPTH: usize = 128;
 /// Tools and resources loaded from a Forge file, ready to serve.
 pub struct ToolSet {
     /// The program after its top level ran. Never run directly: every call
-    /// forks it.
-    template: Interpreter,
+    /// forks it (on the call's worker, under the call's budget).
+    template: Arc<Interpreter>,
     tools: Vec<ToolDef>,
     resources: Vec<ResourceDef>,
     /// Policy every tool call runs under.
     caps: Capabilities,
+    /// Resource limits for the top level and for each call (a fresh budget
+    /// every time).
+    limits: Limits,
     /// File the tools came from (error messages, imports).
     path: String,
 }
@@ -978,13 +982,15 @@ pub struct LoadReport {
 
 impl ToolSet {
     /// Load tools from Forge source: read the declarations, then run the
-    /// top level once under `caps` (and `max_time`) to build the template.
+    /// top level once under `caps`, `max_time` and `limits` to build the
+    /// template. Every later call runs under the same policy and limits.
     /// Errors read `path:line: message`.
     pub fn load(
         path: &Path,
         source: &str,
         caps: Capabilities,
         max_time: Duration,
+        limits: Limits,
     ) -> Result<(ToolSet, LoadReport), String> {
         let label = path.display().to_string();
         let program = parse_source(source).map_err(|e| format!("{}: {}", label, e))?;
@@ -1001,13 +1007,24 @@ impl ToolSet {
         let sandbox = Sandbox::with_capabilities(caps.clone())
             .max_time(max_time)
             .max_output(CAPTURE_LIMIT)
+            .limits(limits.clone())
             .source_label(label.clone());
-        let mut interp = Interpreter::new();
-        interp.source = Some(source.to_string());
-        interp.source_file = Some(path.to_path_buf());
-        let run = sandbox.run_interpreter(interp, &CancelHandle::new(), move |interp| {
-            interp.run(&program).map(|_| ())
-        });
+        let source = source.to_string();
+        let file = path.to_path_buf();
+        let run = sandbox.run_interpreter(
+            move || {
+                let mut interp = Interpreter::new();
+                interp.source = Some(source);
+                interp.source_file = Some(file);
+                interp
+            },
+            &CancelHandle::new(),
+            move |interp| {
+                let result = interp.run(&program).map(|_| ());
+                drop(program);
+                result
+            },
+        );
         let stdout = match run.result {
             Ok(((), stdout)) => stdout,
             Err(e) => return Err(format!("{}: top level failed: {}", label, e)),
@@ -1036,10 +1053,11 @@ impl ToolSet {
         }
         Ok((
             ToolSet {
-                template,
+                template: Arc::new(template),
                 tools,
                 resources,
                 caps,
+                limits,
                 path: label,
             },
             LoadReport { stdout },
@@ -1176,21 +1194,26 @@ impl ToolSet {
         let sandbox = Sandbox::with_capabilities(self.caps.clone())
             .max_time(limit)
             .max_output(CAPTURE_LIMIT)
+            .limits(self.limits.clone())
             .source_label(self.path.clone());
         let function = function.to_string();
-        let fork = self.template.fork_for_serving();
+        let template = self.template.clone();
         sandbox
-            .run_interpreter(fork, cancel, move |interp| {
-                let f = interp.env.get(&function).ok_or_else(|| {
-                    RuntimeError::new(&format!("BUG: tool function `{}` is missing", function))
-                })?;
-                let value = interp.call_function(f, args)?;
-                let produced = match &value {
-                    Value::ResultErr(inner) => value_to_json(inner, 0).map(Produced::Err),
-                    other => value_to_json(other, 0).map(Produced::Ok),
-                };
-                produced.map_err(|e| RuntimeError::new(&e))
-            })
+            .run_interpreter(
+                move || template.fork_for_serving(),
+                cancel,
+                move |interp| {
+                    let f = interp.env.get(&function).ok_or_else(|| {
+                        RuntimeError::new(&format!("BUG: tool function `{}` is missing", function))
+                    })?;
+                    let value = interp.call_function(f, args)?;
+                    let produced = match &value {
+                        Value::ResultErr(inner) => value_to_json(inner, 0).map(Produced::Err),
+                        other => value_to_json(other, 0).map(Produced::Ok),
+                    };
+                    produced.map_err(|e| RuntimeError::new(&e))
+                },
+            )
             .result
     }
 
@@ -1366,8 +1389,17 @@ fn failure(e: &SandboxError, max_response_bytes: usize) -> Json {
         text.push_str("\n\nOutput before the error:\n");
         text.push_str(&truncate_utf8(stdout.to_string(), max_response_bytes));
     }
+    let mut error = json!({ "kind": e.kind(), "message": e.to_string() });
+    if let SandboxError::Runtime { line, message, .. } = e {
+        if *line > 0 {
+            error["line"] = json!(line);
+        }
+        // Stable code and hint (`forge explain <code>`), as in run_forge.
+        error["code"] = json!(crate::semantics::errors::classify(message).code);
+        error["hint"] = json!(crate::semantics::errors::hint_for(message));
+    }
     let mut result = tool_error(&text);
-    result["_meta"] = json!({ "forge/error": { "kind": e.kind(), "message": e.to_string() } });
+    result["_meta"] = json!({ "forge/error": error });
     result
 }
 
@@ -1381,6 +1413,7 @@ mod tests {
             src,
             Capabilities::deny_all(),
             Duration::from_secs(5),
+            super::super::default_limits(),
         )
         .map(|(t, _)| t)
     }
@@ -1502,6 +1535,43 @@ mod tests {
         assert!(boom["content"][0]["text"]
             .as_str()
             .is_some_and(|t| t.contains("Output before the error:\npartial")));
+    }
+
+    #[test]
+    fn calls_run_under_fresh_resource_budgets() {
+        let (set, _) = ToolSet::load(
+            Path::new("t.fg"),
+            "@tool(\"spin\")\nfn spin(n: Int) { let mut i = 0\n while i < n { i = i + 1 }\n return i }\n\
+             @tool(\"boom\")\nfn boom() { let x = 1 / 0 }",
+            Capabilities::deny_all(),
+            Duration::from_secs(30),
+            Limits {
+                max_fuel: Some(10_000),
+                ..Limits::none()
+            },
+        )
+        .expect("loads");
+        // Each call gets its own fuel: many small calls all succeed...
+        for _ in 0..5 {
+            let ok = call(&set, "spin", json!({"n": 1000}));
+            assert_eq!(ok["structuredContent"]["result"], 1000, "{ok}");
+        }
+        // ...and one call that needs more than the budget fails.
+        let spin = call(&set, "spin", json!({"n": 1000000}));
+        assert_eq!(spin["isError"], true);
+        assert_eq!(
+            spin["_meta"]["forge/error"]["kind"], "fuel_exhausted",
+            "{spin}"
+        );
+        // Runtime errors carry the stable error code and hint.
+        let boom = call(&set, "boom", json!({}));
+        let error = &boom["_meta"]["forge/error"];
+        assert_eq!(error["kind"], "runtime");
+        assert!(
+            error["code"].as_str().is_some_and(|c| c.starts_with('E')),
+            "{boom}"
+        );
+        assert!(error["hint"].as_str().is_some_and(|h| !h.is_empty()));
     }
 
     #[test]
