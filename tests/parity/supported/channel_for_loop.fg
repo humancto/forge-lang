@@ -1,0 +1,36 @@
+// expect: 3
+// `for v in channel` receives until the channel is closed and drained;
+// `break` leaves the remaining values in the channel.
+let ch = channel()
+send(ch, 1)
+send(ch, 2)
+close(ch)
+for m in ch {
+    say m
+}
+
+let ch2 = channel()
+send(ch2, "a")
+send(ch2, "b")
+send(ch2, "c")
+close(ch2)
+for m in ch2 {
+    say "first {m}"
+    break
+}
+say receive(ch2)
+
+let producer = channel()
+let h = spawn {
+    send(producer, 10)
+    send(producer, 20)
+    close(producer)
+    "done"
+}
+let mut total = 0
+for v in producer {
+    total = total + v
+}
+say total
+say await h
+3

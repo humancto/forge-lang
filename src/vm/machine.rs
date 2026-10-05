@@ -170,6 +170,9 @@ pub struct VM {
     pub(super) stream_boundary_error: std::cell::Cell<bool>,
     /// Squad handle collector stack: when non-empty, Spawn registers handles here.
     /// Each entry is (dst_register, cancel_flag, handles, saved_outer_cancelled).
+    /// Values received by `IterHas` from a channel being iterated by a
+    /// `for` loop, consumed by the `IterGet` that immediately follows.
+    iter_prefetch: Vec<SharedValue>,
     squad_stack: Vec<(
         u8,
         Arc<std::sync::atomic::AtomicBool>,
@@ -290,6 +293,7 @@ impl VM {
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
+            iter_prefetch: Vec::new(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         vm.register_builtins();
@@ -315,6 +319,7 @@ impl VM {
             skip_timeout_check_once: false,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
+            iter_prefetch: Vec::new(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         vm.register_builtins();
@@ -1083,6 +1088,18 @@ impl VM {
                     OpCode::IterGet => {
                         let obj = self.registers[base + b as usize];
                         let idx = self.registers[base + c as usize];
+                        let is_channel = matches!(
+                            obj.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
+                            Some(ObjKind::Channel(_))
+                        );
+                        if is_channel {
+                            let shared = self.iter_prefetch.pop().ok_or_else(|| {
+                                VMError::new("BUG: channel IterGet without a prefetched value")
+                            })?;
+                            self.registers[base + a as usize] =
+                                shared_to_value(&mut self.gc, &shared);
+                            return Ok(None);
+                        }
                         let result = if let Some(r) = obj.as_obj() {
                             if let Some(i) = idx.as_int(&self.gc) {
                                 // Classify the source; clone out any pair so
@@ -1145,25 +1162,37 @@ impl VM {
                         let val = self.registers[base + c as usize];
                         self.registers[base + a as usize] = self.index_set(target, idx, val)?;
                     }
-                    OpCode::Len => {
+                    OpCode::IterHas => {
+                        // `for` loop condition: is there an element at index C?
+                        // Channels are iterated lazily: receive the next value
+                        // (blocking) and hand it to the following `IterGet`;
+                        // a closed, drained channel ends the loop.
                         let src = self.registers[base + b as usize];
-                        let len = if let Some(r) = src.as_obj() {
-                            if let Some(obj) = self.gc.get(r) {
-                                match &obj.kind {
-                                    ObjKind::String(s) => s.chars().count() as i64,
-                                    ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a) => {
-                                        a.len() as i64
-                                    }
-                                    ObjKind::Object(o) => o.len() as i64,
-                                    ObjKind::Map(p) => p.len() as i64,
-                                    _ => 0,
+                        let channel = src.as_obj().and_then(|r| match self.gc.get(r) {
+                            Some(obj) => match &obj.kind {
+                                ObjKind::Channel(ch) => Some(ch.clone()),
+                                _ => None,
+                            },
+                            None => None,
+                        });
+                        let has = if let Some(ch) = channel {
+                            let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
+                            match guard.as_ref().map(|rx| rx.recv()) {
+                                Some(Ok(shared)) => {
+                                    self.iter_prefetch.push(shared);
+                                    true
                                 }
-                            } else {
-                                0
+                                _ => false,
                             }
                         } else {
-                            0
+                            let idx = self.registers[base + c as usize].as_int(&self.gc);
+                            idx.is_some_and(|i| i < self.collection_len(src))
                         };
+                        self.registers[base + a as usize] = Value::bool_val(has);
+                    }
+                    OpCode::Len => {
+                        let src = self.registers[base + b as usize];
+                        let len = self.collection_len(src);
                         self.registers[base + a as usize] = Value::int(len, &mut self.gc);
                     }
                     OpCode::Concat => {
@@ -2302,6 +2331,17 @@ impl VM {
         };
         map.insert(field.to_string(), val);
         Ok(Value::obj(self.gc.alloc(ObjKind::Object(map))))
+    }
+
+    /// Element count used by `Len` and `for` loops (0 for non-collections).
+    fn collection_len(&self, src: Value) -> i64 {
+        match src.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::String(s)) => s.chars().count() as i64,
+            Some(ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a)) => a.len() as i64,
+            Some(ObjKind::Object(o)) => o.len() as i64,
+            Some(ObjKind::Map(p)) => p.len() as i64,
+            _ => 0,
+        }
     }
 
     /// `container[index]` — shares negative-index and error-message rules

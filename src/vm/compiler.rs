@@ -1421,12 +1421,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             // the step code instead of back to `loop_start`.
             c.push_loop(loop_start, false);
 
-            let len_reg = c.alloc_reg()?;
-            c.emit(encode_abc(OpCode::Len, len_reg, arr_reg, 0), 0);
             let cond_reg = c.alloc_reg()?;
-            c.emit(encode_abc(OpCode::Lt, cond_reg, idx_reg, len_reg), 0);
+            c.emit(encode_abc(OpCode::IterHas, cond_reg, arr_reg, idx_reg), 0);
             let exit = c.emit_jump(OpCode::JumpIfFalse, cond_reg, 0);
-            c.free_to(len_reg); // free len and cond temps
+            c.free_to(cond_reg);
 
             // Each iteration gets a fresh binding: the body scope (including
             // the loop variables) is closed before the step code runs, so

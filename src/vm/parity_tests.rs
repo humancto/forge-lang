@@ -1238,6 +1238,21 @@ fn parity_check_between_bounds() {
     assert_cross_backend_error_contains("let x = 0\ncheck x between 1 && 10\n1", "check failed");
 }
 
+// ----- Concurrency and modules -----
+
+#[test]
+fn parity_for_loop_over_channel() {
+    assert_cross_backend_value(
+        "let ch = channel()\nsend(ch, 1)\nsend(ch, 2)\nclose(ch)\nlet mut got = []\nfor m in ch {\n    got = push(got, m)\n}\ngot",
+        "[1, 2]",
+    );
+    // `break` leaves the remaining values in the channel.
+    assert_cross_backend_value(
+        "let ch = channel()\nsend(ch, 1)\nsend(ch, 2)\nsend(ch, 3)\nclose(ch)\nfor m in ch {\n    break\n}\nreceive(ch)",
+        "2",
+    );
+}
+
 #[test]
 fn parity_check_statement_is_enforced() {
     assert_cross_backend_error_contains(
