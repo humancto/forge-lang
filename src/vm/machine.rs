@@ -224,6 +224,23 @@ pub struct VM {
     )>,
     /// Cooperative cancellation flag — shared with squad parent, checked at safe points.
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// `Some` while `schedule` / `watch` start-up is deferred (see
+    /// [`VM::defer_host_runtime`]). The queued closures are GC roots.
+    deferred_host_tasks: Option<Vec<HostTask>>,
+}
+
+/// A `schedule` or `watch` block waiting to be started on its own thread.
+enum HostTask {
+    Schedule { closure: Value, interval: Duration },
+    Watch { closure: Value, path: String },
+}
+
+impl HostTask {
+    fn closure(&self) -> Value {
+        match self {
+            HostTask::Schedule { closure, .. } | HostTask::Watch { closure, .. } => *closure,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,38 +351,35 @@ impl std::fmt::Display for VMError {
 
 impl VM {
     pub fn new() -> Self {
-        let (meter, caps, gc) = Self::limits_state();
-        let mut vm = Self {
-            registers: vec![Value::null(); 256],
-            frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
-            globals: HashMap::new(),
-            method_tables: HashMap::new(),
-            static_methods: HashMap::new(),
-            embedded_fields: HashMap::new(),
-            struct_defaults: HashMap::new(),
-            gc,
-            output: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit: super::jit::tier::JitState::default(),
-            #[cfg(feature = "jit")]
-            jit_bridge_error: None,
-            profiler: Profiler::new(false),
-            safepoint_countdown: 0,
-            fuel_window: 0,
-            meter,
-            caps,
-            stream_boundary_error: std::cell::Cell::new(false),
-            squad_stack: Vec::new(),
-            iter_prefetch: Vec::new(),
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        };
+        let mut vm = Self::bare(Profiler::new(false));
         vm.register_builtins();
         vm
     }
 
     pub fn with_profiling() -> Self {
-        let (meter, caps, gc) = Self::limits_state();
-        let mut vm = Self {
+        let mut vm = Self::bare(Profiler::new(true));
+        vm.register_builtins();
+        vm
+    }
+
+    /// A VM with no globals registered. Callers install a complete global
+    /// environment themselves; the HTTP server's per-request fork
+    /// (`vm::serve`) copies one from its template instead of re-registering
+    /// every builtin and stdlib module per request. Every VM, forks
+    /// included, charges the resource budget active on the creating thread
+    /// (`limits_state`).
+    pub(super) fn bare(profiler: Profiler) -> Self {
+        Self::bare_with_budget(profiler, crate::runtime::limits::current())
+    }
+
+    /// [`VM::bare`] charging `budget` instead of the thread's active one
+    /// (the HTTP server gives every request fork its own budget).
+    pub(super) fn bare_with_budget(
+        profiler: Profiler,
+        budget: Option<Arc<crate::runtime::limits::Budget>>,
+    ) -> Self {
+        let (meter, caps, gc) = Self::limits_state(budget);
+        Self {
             registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
             globals: HashMap::new(),
@@ -379,7 +393,7 @@ impl VM {
             jit: super::jit::tier::JitState::default(),
             #[cfg(feature = "jit")]
             jit_bridge_error: None,
-            profiler: Profiler::new(true),
+            profiler,
             safepoint_countdown: 0,
             fuel_window: 0,
             meter,
@@ -388,20 +402,72 @@ impl VM {
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deferred_host_tasks: None,
+        }
+    }
+
+    /// Install the cooperative cancellation flag polled at safe points
+    /// (every backward jump and call). The HTTP server shares it with a
+    /// drop guard on the response future, so a client disconnect stops the
+    /// handler with a `task cancelled` error.
+    pub fn set_cancel_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        self.cancelled = flag;
+    }
+
+    /// Record `schedule` / `watch` blocks instead of starting them when they
+    /// execute. A program that will be served runs its whole top level
+    /// first, then [`VM::launch_deferred_host_tasks`] starts the background
+    /// tasks from the final state, like the interpreter's deferred host
+    /// runtime (`runtime::host::launch`).
+    pub fn defer_host_runtime(&mut self) {
+        if self.deferred_host_tasks.is_none() {
+            self.deferred_host_tasks = Some(Vec::new());
+        }
+    }
+
+    /// Start every `schedule` / `watch` recorded since
+    /// [`VM::defer_host_runtime`], each on its own forked VM thread, and stop
+    /// deferring.
+    pub fn launch_deferred_host_tasks(&mut self) {
+        for task in self.deferred_host_tasks.take().unwrap_or_default() {
+            self.start_host_task(task);
+        }
+        self.drain_stream_boundary_flags();
+    }
+
+    /// Start `task` now, or queue it while host runtime start-up is deferred.
+    fn spawn_host_task(&mut self, task: HostTask) {
+        match &mut self.deferred_host_tasks {
+            Some(pending) => pending.push(task),
+            None => self.start_host_task(task),
+        }
+    }
+
+    fn start_host_task(&mut self, task: HostTask) {
+        let mut sendable = self.fork_for_spawn();
+        let child_closure = match task.closure().as_obj() {
+            Some(r) => self.transfer_closure(r, &mut sendable.0),
+            None => Value::null(),
         };
-        vm.register_builtins();
-        vm
+        match task {
+            HostTask::Schedule { interval, .. } => {
+                spawn_schedule_thread(sendable, child_closure, interval)
+            }
+            HostTask::Watch { path, .. } => spawn_watch_thread(sendable, child_closure, path),
+        }
     }
 
     /// Resource-limit state for a new VM: the budget active on this thread
     /// (`runtime::limits`) decides the fuel meter, the size caps and the GC
     /// heap's memory limit.
-    fn limits_state() -> (
+    fn limits_state(
+        budget: Option<Arc<crate::runtime::limits::Budget>>,
+    ) -> (
         crate::runtime::limits::Meter,
         crate::runtime::limits::Caps,
         Gc,
     ) {
-        let meter = crate::runtime::limits::Meter::current();
+        let meter = crate::runtime::limits::Meter::for_budget(budget);
         let limits = meter
             .budget()
             .map(|b| b.limits().clone())
@@ -1591,14 +1657,10 @@ impl VM {
                             60 // Non-integer defaults to 60s (matches interpreter)
                         };
 
-                        let mut sendable = self.fork_for_spawn();
-                        let child_closure = if let Some(r) = closure_val.as_obj() {
-                            self.transfer_closure(r, &mut sendable.0)
-                        } else {
-                            Value::null()
-                        };
-
-                        spawn_schedule_thread(sendable, child_closure, Duration::from_secs(secs));
+                        self.spawn_host_task(HostTask::Schedule {
+                            closure: closure_val,
+                            interval: Duration::from_secs(secs),
+                        });
                         self.drain_stream_boundary_flags();
                     }
                     OpCode::Watch => {
@@ -1615,14 +1677,10 @@ impl VM {
                         let path =
                             path.ok_or_else(|| VMError::new("watch requires a string path"))?;
 
-                        let mut sendable = self.fork_for_spawn();
-                        let child_closure = if let Some(r) = closure_val.as_obj() {
-                            self.transfer_closure(r, &mut sendable.0)
-                        } else {
-                            Value::null()
-                        };
-
-                        spawn_watch_thread(sendable, child_closure, path);
+                        self.spawn_host_task(HostTask::Watch {
+                            closure: closure_val,
+                            path,
+                        });
                         self.drain_stream_boundary_flags();
                     }
                     OpCode::Must => {
@@ -1804,6 +1862,9 @@ impl VM {
                             roots.push(gr);
                         }
                     }
+                }
+                for task in self.deferred_host_tasks.iter().flatten() {
+                    roots.extend(task.closure().as_obj());
                 }
                 self.gc.collect(&roots);
                 if self.gc.memory_exceeded() {

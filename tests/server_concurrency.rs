@@ -14,18 +14,57 @@
 //! We pick C=8 instead of C=16 to keep the test passing on smaller CI
 //! runners. The 4x slack also accommodates tokio scheduling noise and
 //! interpreter overhead variance.
+//!
+//! Every test runs on both serving engines: the bytecode VM (the default,
+//! `vm::serve`) and the interpreter (`--interp`). `on_both_engines!` turns
+//! `fn name(engine)` into the tests `name::vm` and `name::interpreter`.
 
-use forge_lang::interpreter::Interpreter;
-use forge_lang::lexer::Lexer;
-use forge_lang::parser::Parser;
-use forge_lang::runtime::metadata::extract_runtime_plan;
-use forge_lang::runtime::server::start_server;
+#[path = "support/server.rs"]
+mod support;
+
 use futures_util::SinkExt;
+use support::Engine;
 
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+macro_rules! on_both_engines {
+    ($($name:ident),* $(,)?) => {$(
+        mod $name {
+            #[test]
+            fn vm() {
+                super::$name(super::Engine::Vm)
+            }
+
+            #[test]
+            fn interpreter() {
+                super::$name(super::Engine::Interpreter)
+            }
+        }
+    )*};
+}
+
+on_both_engines!(
+    http_handlers_run_in_parallel_not_serialized,
+    closure_capturing_handlers_run_in_parallel_not_serialized,
+    schedule_mutations_do_not_leak_into_handler_forks,
+    websocket_handler_cancelled_on_client_disconnect,
+    http_handler_cancelled_on_client_disconnect,
+    request_id_is_generated_and_propagated,
+    handler_recursion_gets_a_large_stack,
+);
+
+/// Loop iterations that keep a CPU-bound handler busy for tens of
+/// milliseconds on `engine` (debug build): long enough that scheduling
+/// noise cannot dominate the scaling ratio, short enough to keep the test
+/// fast. The VM runs these loops ~100x faster than the interpreter.
+fn cpu_iterations(engine: Engine) -> u64 {
+    match engine {
+        Engine::Vm => 1_000_000,
+        Engine::Interpreter => 200_000,
+    }
+}
 
 const MAX_SCALING_RATIO: f64 = 3.8;
 
@@ -50,71 +89,8 @@ fn exclusive_server_test() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Pick an unused TCP port by binding 0 and letting the kernel choose.
-fn pick_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
-/// Boot the server in a background tokio runtime on a dedicated thread,
-/// returning the bound port. The server stays up for the test's duration
-/// and is dropped when the runtime is dropped at test exit.
-fn spawn_test_server(source: &str) -> u16 {
-    spawn_test_server_on(source, |builder| builder)
-}
-
-/// [`spawn_test_server`] with a hook to configure the runtime (e.g. with
-/// `forge_lang::runtime::recursion::configure_runtime`, as the CLI does).
-fn spawn_test_server_on(
-    source: &str,
-    configure: fn(&mut tokio::runtime::Builder) -> &mut tokio::runtime::Builder,
-) -> u16 {
-    let port = pick_port();
-    let src = source.replace("__PORT__", &port.to_string());
-
-    std::thread::spawn(move || {
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        let rt = configure(&mut builder)
-            .worker_threads(2)
-            .max_blocking_threads(64)
-            .enable_all()
-            .build()
-            .expect("build tokio runtime");
-        rt.block_on(async move {
-            let mut lexer = Lexer::new(&src);
-            let tokens = lexer.tokenize().expect("lex");
-            let mut parser = Parser::new(tokens);
-            let program = parser.parse_program().expect("parse");
-
-            let mut interp = Interpreter::new();
-            interp.run(&program).expect("run");
-
-            let plan = extract_runtime_plan(&program);
-            let server = plan.server.expect("program has @server decorator");
-            start_server(interp, &server).await.expect("server start");
-        });
-    });
-
-    // Poll for readiness up to 5s.
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-        .expect("client");
-    let url = format!("http://127.0.0.1:{}/ping", port);
-    for _ in 0..50 {
-        if client
-            .get(&url)
-            .send()
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
-        {
-            return port;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    panic!("server failed to start on port {} within 5s", port);
+fn spawn_test_server(source: &str, engine: Engine) -> u16 {
+    support::spawn_server(source, engine)
 }
 
 fn unique_temp_file(name: &str) -> PathBuf {
@@ -197,14 +173,11 @@ fn concurrent_get_wall_time(url: &str, concurrency: usize) -> Duration {
     start.elapsed()
 }
 
-#[test]
-fn http_handlers_run_in_parallel_not_serialized() {
+fn http_handlers_run_in_parallel_not_serialized(engine: Engine) {
     let _exclusive = exclusive_server_test();
-    // CPU-bound handler. ~96ms in the tree-walking interpreter on a
-    // modern machine; tuned high enough that scheduler noise can't
-    // dominate, low enough that the test stays fast.
+    // CPU-bound handler (see `cpu_iterations`).
     let port = spawn_test_server(
-        r#"
+        &r#"
         @server(port: __PORT__)
 
         @get("/ping")
@@ -215,12 +188,14 @@ fn http_handlers_run_in_parallel_not_serialized() {
         @get("/cpu")
         fn cpu() -> Json {
             let mut total = 0
-            repeat 200000 times {
+            repeat __WORK__ times {
                 total = total + 1
             }
             return { ok: true, work: total }
         }
-        "#,
+        "#
+        .replace("__WORK__", &cpu_iterations(engine).to_string()),
+        engine,
     );
 
     let url = format!("http://127.0.0.1:{}/cpu", port);
@@ -236,7 +211,8 @@ fn http_handlers_run_in_parallel_not_serialized() {
     let (single, parallel, _) = best_scaling_round(&url);
 
     eprintln!(
-        "concurrency-scaling: C=1 wall = {:?}, C=4 wall = {:?}, ratio = {:.2}x",
+        "concurrency-scaling ({:?}): C=1 wall = {:?}, C=4 wall = {:?}, ratio = {:.2}x",
+        engine,
         single,
         parallel,
         parallel.as_secs_f64() / single.as_secs_f64()
@@ -260,8 +236,7 @@ fn http_handlers_run_in_parallel_not_serialized() {
     );
 }
 
-#[test]
-fn closure_capturing_handlers_run_in_parallel_not_serialized() {
+fn closure_capturing_handlers_run_in_parallel_not_serialized(engine: Engine) {
     let _exclusive = exclusive_server_test();
     // Captured-closure handler pattern. A top-level Lambda holds the
     // CPU loop; the @get fn invokes it. Different from the global-fn
@@ -273,12 +248,13 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
     //
     // After PR #110, deep_clone_isolated walks closures so each fork
     // has its own closure Arc and the ratio assertion holds for
-    // closure-capturing handlers too.
+    // closure-capturing handlers too. On the VM each fork gets its own
+    // copy of the closure's upvalue cells (`vm::serve`).
     let port = spawn_test_server(
-        r#"
+        &r#"
         @server(port: __PORT__)
 
-        let config = { multiplier: 200 }
+        let config = { multiplier: __MULTIPLIER__ }
 
         fn make_compute() {
             return fn(n) {
@@ -302,7 +278,12 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
             let result = compute(1000)
             return { ok: true, work: result }
         }
-        "#,
+        "#
+        .replace(
+            "__MULTIPLIER__",
+            &(cpu_iterations(engine) / 1000).to_string(),
+        ),
+        engine,
     );
 
     let url = format!("http://127.0.0.1:{}/cpu", port);
@@ -313,7 +294,8 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
     let (single, parallel, _) = best_scaling_round(&url);
 
     eprintln!(
-        "closure-handler scaling: C=1 wall = {:?}, C=4 wall = {:?}, ratio = {:.2}x",
+        "closure-handler scaling ({:?}): C=1 wall = {:?}, C=4 wall = {:?}, ratio = {:.2}x",
+        engine,
         single,
         parallel,
         parallel.as_secs_f64() / single.as_secs_f64()
@@ -331,17 +313,17 @@ fn closure_capturing_handlers_run_in_parallel_not_serialized() {
     );
 }
 
-#[test]
-fn schedule_mutations_do_not_leak_into_handler_forks() {
+fn schedule_mutations_do_not_leak_into_handler_forks(engine: Engine) {
     let _exclusive = exclusive_server_test();
     let sentinel = unique_temp_file("schedule_handler_isolation");
     let _ = std::fs::remove_file(&sentinel);
     let sentinel_str = forge_string_literal_path(&sentinel);
 
-    // `spawn_test_server` leaves `defer_host_runtime` at the Interpreter default
-    // (`false`), so schedules start during `interp.run()`. That differs from the
-    // CLI orchestration path but exercises the same background-runtime vs
-    // per-request serving-fork isolation contract.
+    // On the interpreter, `spawn_test_server` leaves `defer_host_runtime` at
+    // the default (`false`), so schedules start during `interp.run()`; the VM
+    // path defers them to after the top level, as `forge run` does. Both
+    // exercise the same background-runtime vs per-request serving-fork
+    // isolation contract.
     let source = r#"
         @server(port: __PORT__)
 
@@ -364,7 +346,7 @@ fn schedule_mutations_do_not_leak_into_handler_forks() {
         "#
     .replace("__SENTINEL__", &sentinel_str);
 
-    let port = spawn_test_server(&source);
+    let port = spawn_test_server(&source, engine);
     std::thread::sleep(Duration::from_millis(1500));
 
     assert!(
@@ -396,8 +378,7 @@ fn schedule_mutations_do_not_leak_into_handler_forks() {
     let _ = std::fs::remove_file(&sentinel);
 }
 
-#[test]
-fn websocket_handler_cancelled_on_client_disconnect() {
+fn websocket_handler_cancelled_on_client_disconnect(engine: Engine) {
     let _exclusive = exclusive_server_test();
     let started = unique_temp_file("ws_cancel_started");
     let progress = unique_temp_file("ws_cancel_progress");
@@ -434,7 +415,7 @@ fn websocket_handler_cancelled_on_client_disconnect() {
     .replace("__PROGRESS__", &progress_str)
     .replace("__FINISHED__", &finished_str);
 
-    let port = spawn_test_server(&source);
+    let port = spawn_test_server(&source, engine);
     let url = format!("ws://127.0.0.1:{}/ws", port);
 
     let rt = tokio::runtime::Runtime::new().expect("test runtime");
@@ -505,8 +486,7 @@ fn websocket_handler_cancelled_on_client_disconnect() {
     }
 }
 
-#[test]
-fn request_id_is_generated_and_propagated() {
+fn request_id_is_generated_and_propagated(engine: Engine) {
     let _exclusive = exclusive_server_test();
     // Two scenarios to verify:
     //   (a) request without X-Request-Id -> response carries a new UUID
@@ -526,6 +506,7 @@ fn request_id_is_generated_and_propagated() {
             return { ok: true }
         }
         "#,
+        engine,
     );
 
     let url = format!("http://127.0.0.1:{}/ping", port);
@@ -599,10 +580,9 @@ fn request_id_is_generated_and_propagated() {
 /// levels of Forge recursion inside a handler; the CLI configures the
 /// runtime (`recursion::configure_runtime`) so blocking threads get
 /// `WORKER_STACK_SIZE` and handler recursion matches other Forge code.
-#[test]
-fn handler_recursion_gets_a_large_stack() {
+fn handler_recursion_gets_a_large_stack(engine: Engine) {
     let _exclusive = exclusive_server_test();
-    let port = spawn_test_server_on(
+    let port = support::spawn_server_on(
         r#"
         @server(port: __PORT__)
 
@@ -621,6 +601,7 @@ fn handler_recursion_gets_a_large_stack() {
             return { depth: down(3000) }
         }
         "#,
+        engine,
         forge_lang::runtime::recursion::configure_runtime,
     );
     let body = reqwest::blocking::Client::builder()
@@ -633,4 +614,78 @@ fn handler_recursion_gets_a_large_stack() {
         .text()
         .expect("body");
     assert!(body.contains("3000"), "deep handler failed: {}", body);
+}
+
+/// A client that gives up on a long-running HTTP request must stop the
+/// handler: the response future's drop guard flips the cancel flag the
+/// forked engine polls at its safe points.
+fn http_handler_cancelled_on_client_disconnect(engine: Engine) {
+    let _exclusive = exclusive_server_test();
+    let progress = unique_temp_file("http_cancel_progress");
+    let finished = unique_temp_file("http_cancel_finished");
+    for path in [&progress, &finished] {
+        let _ = std::fs::remove_file(path);
+    }
+
+    let source = r#"
+        @server(port: __PORT__)
+
+        @get("/ping")
+        fn ping() -> Json {
+            return { ok: true }
+        }
+
+        @get("/slow")
+        fn slow() -> Json {
+            let mut i = 0
+            repeat 1000000 times {
+                i = i + 1
+                fs.write("__PROGRESS__", str(i))
+            }
+            fs.write("__FINISHED__", "done")
+            return { done: true }
+        }
+        "#
+    .replace("__PROGRESS__", &forge_string_literal_path(&progress))
+    .replace("__FINISHED__", &forge_string_literal_path(&finished));
+
+    let port = spawn_test_server(&source, engine);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .expect("client");
+    let result = client.get(format!("http://127.0.0.1:{}/slow", port)).send();
+    assert!(
+        result.is_err(),
+        "slow handler should outlive the client timeout"
+    );
+    assert!(
+        wait_for_path(&progress, Duration::from_secs(5)),
+        "slow handler never started"
+    );
+
+    let mut last_progress = std::fs::read_to_string(&progress).unwrap_or_default();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stabilized = false;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        let current = std::fs::read_to_string(&progress).unwrap_or_default();
+        if current == last_progress {
+            stabilized = true;
+            break;
+        }
+        last_progress = current;
+    }
+    assert!(
+        stabilized,
+        "HTTP handler progress kept changing after the client disconnected"
+    );
+    assert!(
+        !finished.exists(),
+        "HTTP handler ran to completion after the client disconnected"
+    );
+
+    for path in [&progress, &finished] {
+        let _ = std::fs::remove_file(path);
+    }
 }

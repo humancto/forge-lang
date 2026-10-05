@@ -529,7 +529,7 @@ Three execution tiers — pick your tradeoff:
 | ---------------------- | ---------- | ---------------------------------------------------------------- |
 | ⚙️ Bytecode VM         | (default)  | General programs                                                 |
 | 🔥 VM + Cranelift JIT  | `--jit`    | Tight numeric leaf functions (Int/Float math, loops)             |
-| 📦 Tree-walking interp | `--interp` | Full feature surface; HTTP servers fall back to it automatically |
+| 📦 Tree-walking interp | `--interp` | Reference engine; programs the VM cannot run faithfully fall back to it automatically |
 
 Measured on one 4-vCPU x86_64 Linux VM (Intel Xeon @ 2.10GHz) with a release build, wall-clock including process startup. Numbers vary by machine — run them yourself.
 
@@ -552,9 +552,21 @@ The JIT compiles functions over `Int`/`Bool` values (arithmetic, comparisons, lo
 
 Forge's HTTP server is built on axum + tokio — the same stack powering production Rust services. For typical JSON API endpoints, Forge matches raw Rust throughput while giving you a 4-line handler instead of 40.
 
-Measured at v0.4 with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS. The server has since moved to a per-request fork model, so re-measure on your hardware:
+Measured at v0.4 with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS, when handlers ran on the interpreter.
+
+Since then handlers run on the bytecode VM, each request on its own fork (the interpreter still serves with `--interp`, with identical responses). `cargo bench --bench server_throughput` boots `forge run` on the example servers on both engines; one run on a shared, heavily loaded 4-core Linux VM (release build, closed-loop keep-alive clients):
+
+| Handler (`examples/`)                       | Clients | VM req/s | VM p99 | `--interp` req/s | `--interp` p99 |
+| ------------------------------------------- | ------: | -------: | -----: | ---------------: | -------------: |
+| `GET /ping` (`bench_server.fg`)             |      32 |   12,782 |  9.5 ms |            4,579 |        29.9 ms |
+| `GET /fib` — `fib(25)` (`bench_server_concurrent.fg`) | 8 |  1,030 |   47 ms |                5 |         1.83 s |
+| `GET /cpu` — 200k-iteration `repeat` loop   |       8 |       42 |  293 ms |               12 |         808 ms |
+
+Absolute numbers depend on the machine; compare the engines within one run. Re-measure on your hardware:
 
 ```bash
+cargo bench --bench server_throughput   # both engines, req/s + p50/p99
+
 # Terminal 1
 forge run examples/bench_server.fg
 
