@@ -1,0 +1,104 @@
+name: Performance
+
+# Benchmark regression gate for pull requests (docs/BENCHMARKS.md).
+#
+# Builds the PR base and head in release mode on the same runner, runs
+# tools/bench.sh against both in interleaved rounds, and fails when any
+# benchmark's median is more than 15% slower. The comparison table goes to
+# the job summary. To accept an intended slowdown, add the
+# `perf-regression-ok` label: the job re-runs, still reports, and passes.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Base ref to compare against"
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  OVERRIDE_LABEL: perf-regression-ok
+
+jobs:
+  bench-regression:
+    name: Benchmark regression gate
+    # Label changes other than the override label do not need a re-run.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'perf-regression-ok'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf
+
+      - name: Resolve base revision
+        id: base
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          INPUT_BASE: ${{ github.event.inputs.base }}
+        run: |
+          set -euo pipefail
+          base="${PR_BASE:-}"
+          if [ -z "$base" ]; then
+            base=$(git rev-parse "origin/${INPUT_BASE:-main}")
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+          echo "Comparing $(git rev-parse --short HEAD) against $(git rev-parse --short "$base")"
+
+      # Both builds share one target dir so dependencies compile once; the
+      # shipping release profile (fat LTO) is used for both sides.
+      - name: Build head (release)
+        run: |
+          cargo build --locked --release --bin forge
+          cp target/release/forge "$RUNNER_TEMP/forge-head"
+
+      - name: Build base (release)
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          cargo build --locked --release --bin forge \
+            --manifest-path "$RUNNER_TEMP/base/Cargo.toml" --target-dir target
+          cp target/release/forge "$RUNNER_TEMP/forge-base"
+
+      - name: Compare (interleaved A/B, medians)
+        env:
+          ALLOW: ${{ contains(github.event.pull_request.labels.*.name, 'perf-regression-ok') }}
+        run: |
+          set -euo pipefail
+          args=(--base "$RUNNER_TEMP/forge-base" --head "$RUNNER_TEMP/forge-head"
+                --rounds 5 --runs 2 --threshold 0.15
+                --summary "$GITHUB_STEP_SUMMARY" --json-out "$RUNNER_TEMP/bench-compare.json")
+          if [ "$ALLOW" = "true" ]; then
+            args+=(--allow-regression)
+            echo "::notice::'$OVERRIDE_LABEL' label present: regressions are reported but do not fail the job."
+          fi
+          python3 tools/bench_compare.py "${args[@]}"
+
+      - name: Upload raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-compare
+          path: ${{ runner.temp }}/bench-compare.json
+          if-no-files-found: ignore

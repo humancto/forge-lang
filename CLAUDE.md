@@ -126,6 +126,7 @@ cargo build          # 0 errors
 cargo test           # 1,600+ Rust tests pass
 forge --allow-run test --engine both # 640+ Forge tests on VM and interpreter (shell tests need --allow-run)
 forge test --coverage # with line coverage report
+tools/bench.sh [--json]    # wall-clock benchmarks (release build); PRs are gated by perf.yml: >15% slower fails unless labelled perf-regression-ok (docs/BENCHMARKS.md)
 ```
 
 `examples/` holds 20+ programs. Server examples (`api.fg`, `bench_server*.fg`) block until killed; `devops.fg`/`showcase.fg` need `--allow-run`; `bench_client.fg` needs `FORGE_HTTP_ALLOW_PRIVATE=1` and a running bench server. `tools/run_examples.sh` runs every runnable example on the default engine, and `cargo test --test engine_diff` compares all examples, parity fixtures and `tests/*.fg` across both engines.
