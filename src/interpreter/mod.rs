@@ -1841,6 +1841,8 @@ impl Interpreter {
                     .map_err(|msg| RuntimeError::new(&msg))?;
                 let mut import_interp = Interpreter::new();
                 import_interp.source_file = Some(file_path.clone());
+                // Module top-level output goes where ours goes (sandbox/DAP capture).
+                import_interp.output_sink = self.output_sink.clone();
                 import_interp.run(&program)?;
 
                 if let Some(name_list) = names {
@@ -2063,6 +2065,7 @@ impl Interpreter {
                 let mut timeout_interp = Interpreter::new();
                 timeout_interp.env = self.env.clone();
                 timeout_interp.cancelled = cancel_flag.clone();
+                timeout_interp.output_sink = self.output_sink.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 let handle = crate::runtime::recursion::spawn_worker(move || {
                     let result = timeout_interp.exec_block(&body);
@@ -4523,6 +4526,9 @@ impl Interpreter {
         spawn_interp.env = self.env.deep_clone();
         // Propagate cancellation token so squad can cancel spawned tasks
         spawn_interp.cancelled = self.cancelled.clone();
+        // Output from the task must reach the same capture (sandbox/DAP) as
+        // the parent's, never the host's stdout.
+        spawn_interp.output_sink = self.output_sink.clone();
 
         // A plain OS thread with the same recursion headroom as the CLI
         // (WORKER_STACK_SIZE, registered with the stack guard) and the
