@@ -7537,3 +7537,44 @@ fn shadowed_len_is_not_bypassed() {
         "mine"
     );
 }
+
+#[test]
+fn break_in_block_expression_leaves_enclosing_loop() {
+    let value = run_forge(
+        "let mut out = []\n\
+         for i in range(0, 5) {\n\
+           let q = if i == 2 { break } else { i }\n\
+           out.push(q)\n\
+         }\n\
+         let mut out2 = []\n\
+         for i in range(0, 4) {\n\
+           try { let q = if i == 1 { continue } else { i }\n out2.push(q) } catch e { out2.push(-1) }\n\
+         }\n\
+         [len(out), len(out2)]",
+    );
+    assert_eq!(
+        value,
+        Value::Array(vec![Value::Int(2), Value::Int(3)]),
+        "break/continue in an if-expression must reach the loop, through try"
+    );
+}
+
+#[test]
+fn break_in_block_expression_does_not_cross_function_boundary() {
+    let value = run_forge(
+        "fn bad() {\n\
+           let x = if true { break } else { 1 }\n\
+           return x\n\
+         }\n\
+         let mut msgs = []\n\
+         for i in range(0, 3) {\n\
+           try { bad() } catch e { msgs.push(e.message) }\n\
+         }\n\
+         len(msgs)",
+    );
+    assert_eq!(
+        value,
+        Value::Int(3),
+        "a break escaping a function must be an error, not break the caller's loop"
+    );
+}

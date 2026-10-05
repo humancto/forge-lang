@@ -1588,7 +1588,7 @@ impl Interpreter {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
-                            match self.exec_body(body)? {
+                            match self.exec_loop_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1614,7 +1614,7 @@ impl Interpreter {
                             if let Some(v2) = var2 {
                                 self.env.define(v2.clone(), val);
                             }
-                            match self.exec_body(body)? {
+                            match self.exec_loop_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1642,7 +1642,7 @@ impl Interpreter {
                             } else {
                                 self.env.define(var.clone(), Value::Tuple(vec![key, val]));
                             }
-                            match self.exec_body(body)? {
+                            match self.exec_loop_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1674,7 +1674,7 @@ impl Interpreter {
                         };
                         self.env.push_scope();
                         self.env.define(var.clone(), val);
-                        match self.exec_body(body)? {
+                        match self.exec_loop_body(body)? {
                             Signal::Break => {
                                 self.env.pop_scope();
                                 break;
@@ -1707,7 +1707,7 @@ impl Interpreter {
                     if !cond.is_truthy() {
                         break;
                     }
-                    match self.exec_body(body)? {
+                    match self.exec_loop_body(body)? {
                         Signal::Break => break,
                         Signal::Continue => continue,
                         Signal::Return(v) => return Ok(Signal::Return(v)),
@@ -1719,7 +1719,7 @@ impl Interpreter {
 
             Stmt::Loop { body } => {
                 loop {
-                    match self.exec_body(body)? {
+                    match self.exec_loop_body(body)? {
                         Signal::Break => break,
                         Signal::Continue => continue,
                         Signal::Return(v) => return Ok(Signal::Return(v)),
@@ -1749,7 +1749,7 @@ impl Interpreter {
                 catch_body,
             } => match self.exec_body(try_body) {
                 Ok(signal) => Ok(signal),
-                Err(e) if e.is_early_return() => Err(e),
+                Err(e) if e.is_control_escape() => Err(e),
                 Err(e) => {
                     self.env.push_scope();
                     let mut err_obj = IndexMap::new();
@@ -2034,7 +2034,7 @@ impl Interpreter {
 
             Stmt::SafeBlock { body } => match self.exec_block(body) {
                 Ok(signal) => Ok(signal),
-                Err(e) if e.is_early_return() => Err(e),
+                Err(e) if e.is_control_escape() => Err(e),
                 Err(_) => Ok(Signal::ImplicitReturn(Value::Null)),
             },
 
@@ -2086,6 +2086,7 @@ impl Interpreter {
                 for attempt in 0..max {
                     match self.exec_body(body) {
                         Ok(signal) => return Ok(signal),
+                        Err(e) if e.is_control_escape() => return Err(e),
                         Err(e) => {
                             last_err = e.message.clone();
                             if attempt < max - 1 {
@@ -2334,6 +2335,20 @@ impl Interpreter {
         let result = self.exec_stmts_with(stmts, false);
         self.env.pop_scope();
         result
+    }
+
+    /// `exec_body` for a loop body: a `break`/`continue` that unwound out of
+    /// a block expression (`RuntimeError::loop_escape`) ends here as the
+    /// matching loop signal.
+    fn exec_loop_body(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        match self.exec_body(stmts) {
+            Err(e) => match e.loop_escape {
+                Some(LoopEscape::Break) => Ok(Signal::Break),
+                Some(LoopEscape::Continue) => Ok(Signal::Continue),
+                None => Err(e),
+            },
+            other => other,
+        }
     }
 
     fn exec_stmts(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
@@ -3346,10 +3361,10 @@ impl Interpreter {
                     // the enclosing function (same as the VM), not just
                     // from the block.
                     BlockExit::Return(v) => Err(RuntimeError::early_return(v)),
-                    // `break`/`continue` inside a block *expression* end the
-                    // block; they cannot reach the enclosing loop from
-                    // expression position in the interpreter.
-                    BlockExit::Break | BlockExit::Continue => Ok(Value::Null),
+                    // `break`/`continue` inside a block *expression* unwind
+                    // to the enclosing loop (same as the VM).
+                    BlockExit::Break => Err(RuntimeError::loop_escape(LoopEscape::Break)),
+                    BlockExit::Continue => Err(RuntimeError::loop_escape(LoopEscape::Continue)),
                 }
             }
 
@@ -4559,7 +4574,7 @@ impl Interpreter {
                         if let Some(value) = e.propagated_value() {
                             Ok(value)
                         } else {
-                            Err(e)
+                            Err(e.outside_function_boundary())
                         }
                     }
                 }
@@ -4602,7 +4617,7 @@ impl Interpreter {
                         if let Some(value) = e.propagated_value() {
                             Ok(value)
                         } else {
-                            Err(e)
+                            Err(e.outside_function_boundary())
                         }
                     }
                 }
@@ -4931,6 +4946,19 @@ pub struct RuntimeError {
     /// function call like a `return` statement and is never caught by
     /// `try`/`safe`.
     early_return: bool,
+    /// Set for a `break`/`continue` executed inside a block expression
+    /// (`let q = if c { break } else { 1 }`): it unwinds to the innermost
+    /// enclosing loop (see `exec_loop_body`), passes through `try`/`safe`
+    /// like `early_return`, and becomes a plain "outside of loop" error at
+    /// a function boundary (`outside_function_boundary`).
+    loop_escape: Option<LoopEscape>,
+}
+
+/// Which loop control a `RuntimeError::loop_escape` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopEscape {
+    Break,
+    Continue,
 }
 
 impl RuntimeError {
@@ -4941,6 +4969,7 @@ impl RuntimeError {
             col: 0,
             propagated: None,
             early_return: false,
+            loop_escape: None,
         }
     }
 
@@ -4955,6 +4984,7 @@ impl RuntimeError {
             col: 0,
             propagated: Some(value),
             early_return: false,
+            loop_escape: None,
         }
     }
 
@@ -4968,6 +4998,29 @@ impl RuntimeError {
 
     pub fn is_early_return(&self) -> bool {
         self.early_return
+    }
+
+    fn loop_escape(kind: LoopEscape) -> Self {
+        let mut err = Self::new(match kind {
+            LoopEscape::Break => "break outside of loop",
+            LoopEscape::Continue => "continue outside of loop",
+        });
+        err.loop_escape = Some(kind);
+        err
+    }
+
+    /// True for control flow that unwinds through errors (`return`, `break`,
+    /// `continue` inside block expressions); `try`/`safe` must not catch it.
+    pub fn is_control_escape(&self) -> bool {
+        self.early_return || self.loop_escape.is_some()
+    }
+
+    /// A loop escape that reaches a function boundary did not come from a
+    /// loop in that function: it becomes an ordinary error there instead of
+    /// breaking a loop in the caller.
+    fn outside_function_boundary(mut self) -> Self {
+        self.loop_escape = None;
+        self
     }
 
     pub fn propagated_value(&self) -> Option<Value> {

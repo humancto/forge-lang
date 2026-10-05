@@ -1,0 +1,29 @@
+// expect: [0, 1] [0, 10, 30, 40] [1, 2, 4, 5]
+// `break` / `continue` inside an if-expression used as a value leave / skip
+// the enclosing loop on every engine, and pass through try/catch.
+
+let mut out = []
+for i in range(0, 5) {
+  let q = if i == 2 { break } else { i }
+  out.push(q)
+}
+
+let mut out2 = []
+for i in range(0, 5) {
+  let q = if i == 2 { continue } else { i * 10 }
+  out2.push(q)
+}
+
+let mut out3 = []
+let mut n = 0
+while n < 5 {
+  n = n + 1
+  try {
+    let v = if n == 3 { continue } else { n }
+    out3.push(v)
+  } catch e {
+    out3.push("caught")
+  }
+}
+
+"{out} {out2} {out3}"
