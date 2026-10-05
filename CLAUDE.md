@@ -66,9 +66,11 @@ forge fmt                    # format code
 
 Source of truth: `forge help` (clap `Command` enum in `src/main.rs`).
 
-run, repl, version, fmt, test, new, build, install, add, update, publish, search, lsp, dap, mcp, learn, chat, watch, doc, help, plus `-e` for inline eval.
+run, repl, version, fmt, test, new, build, install, add, update, publish, yank, search, lsp, dap, mcp, learn, chat, watch, doc, help, plus `-e` for inline eval.
 
 `forge mcp` (`src/mcp.rs`, test `tests/mcp_stdio.rs`) is a stdio MCP server for AI agents: tools `run_forge` / `check_forge` / `forge_reference`; scripts run in `Sandbox` under deny-all plus the `--allow-*` / `[permissions]` grants (`build_mcp_policy` in `main.rs`). Both the binary and the lib compile `mcp.rs` and `sandbox.rs`.
+
+Package registry (`rfcs/0007-package-registry.md`): `src/registry/` = `index.rs` (sparse-index format, name rules, resolution, ownership; pure), `client.rs` (fetch + ETag cache, offline, archives), `signing.rs` (ed25519, TOFU pins); `src/publish_index.rs` = `forge publish --registry <index-clone>` / `forge yank` (binary only). End-to-end tests: `tests/registry_index.rs` (file:// index + in-process HTTP server). `tools/registry-template/` seeds the hosted index repo; its Python validator is cross-checked by those tests.
 
 Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run` (`--vm` is a backwards-compatible no-op). `forge build` takes `--native` (embeds source) or `--aot` (embeds bytecode).
 
@@ -420,6 +422,7 @@ call `tracing_init::init_subscriber()` on first use.
 - **Reading a variable copies it.** `Environment::get` deep-clones (strings, arrays, objects are owned). Hot paths must borrow via `Environment::with_value` / `with_value_mut` / `with_binding_mut` (see `src/interpreter/places.rs`). The callback runs under the scope `Mutex`, which is not re-entrant: it must not touch the environment or run Forge code — evaluate operands first, and only reorder evaluation when the operand `is_effect_free`.
 - **Statement bodies don't produce values.** Loop bodies, statement `if` branches, `match` arms and `try`/`catch` run via `exec_body`, which evaluates a trailing expression for effect only (so a trailing `out.push(x)` does not copy `out`). Only `when`/`safe` statement values are consumed by `eval_block_value`; if that changes, `exec_body` callers must change too.
 - **Arc-backed `Value::String`/`Array`/`Object` is blocked on the VM.** `src/vm` constructs and destructures `interpreter::Value::{Array, Object, Set, Map, Tuple, String}` with owned payloads, so moving them to `Arc` (copy-on-write, and hashed Set/Map indexes) needs a coordinated VM change.
+- **Registry entries are immutable; checksums are mandatory.** A published index line never changes except its `yanked` flag, and the lockfile (`archive_checksum`, `signer`) and the index CI both enforce it. Change the entry format only by bumping `index::INDEX_FORMAT_VERSION` (old clients skip newer lines) and updating `tools/registry-template/scripts/validate_index.py` in the same change (`tests/registry_index.rs` runs it). Never send `GITHUB_TOKEN` outside `client::GITHUB_HOSTS`.
 - **Threads that run Forge code need a registered stack.** Use `recursion::spawn_worker` (std threads) or `recursion::configure_runtime` (tokio runtimes); an unregistered thread is assumed to have 2 MiB and the guard stops recursion early.
 
 ## Module Dependency Map

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sparse package registry** ([RFC 0007](rfcs/0007-package-registry.md)) — `forge add`/`install`/`update` resolve remote packages from a Git-hosted sparse index (one JSON-lines file per package) at `FORGE_REGISTRY_URL` (default `https://raw.githubusercontent.com/humancto/forge-registry/main`; `file://` and mirrors supported). Index files are cached per registry and revalidated with ETags (`FORGE_CACHE_TTL`), `FORGE_OFFLINE=1` works from the cache, archives are cached content-addressed, and a mirror's `config.json` can redirect downloads (`dl`).
+- **Mandatory checksums and optional ed25519 signatures** — every archive is verified against its index SHA-256 before extraction. `forge publish --sign` signs entries with `~/.forge/keys/publish.key` (`$FORGE_SIGNING_KEY`). Installs pin each package's publisher key on first use (`~/.forge/trusted-keys.toml`) and refuse key changes or signature stripping. `FORGE_REQUIRE_SIGNATURES=1` refuses unsigned packages. `forge.lock` records `archive_checksum` and `signer` and refuses a locked version whose content or signer changed.
+- **`forge publish --registry <index-clone>`** — builds a deterministic `dist/<name>-<version>.tar.gz`, appends the entry (deps, checksum, URL, signature) and commits it on a `publish/<name>-<version>` branch, ready for a pull request (`--download-url`, `--out-dir`, `--no-commit`). It enforces name rules (lowercase, reserved and look-alike names), immutable versions, `owners.toml` namespace/key ownership and signing-key continuity.
+- **`forge yank <name@version> --registry <index-clone> [--undo]`** — yanked versions are skipped by new resolutions but stay installable from a lockfile, and `forge install` keeps lockfile versions that still match the manifest.
+- **`tools/registry-template/`** — seed for the hosted index repository: README, `config.json`, `owners.toml`, CODEOWNERS placeholder and a CI validator (`scripts/validate_index.py`: format, names, semver, ownership, signatures, append-only history, archive checksums), cross-checked against `forge publish` output in `tests/registry_index.rs`.
+
+### Changed
+
+- The default registry is now `humancto/forge-registry` (the old `forge-lang/registry` URL never existed). A registry without `config.json` is reported as "not a Forge registry" with guidance, instead of every package looking missing.
+- Registry archive extraction rejects symlinks, hard links and device entries as well as absolute and `..` paths.
+
+### Security
+
+- `GITHUB_TOKEN` is sent only over HTTPS to GitHub hosts. It was previously attached to requests for any `FORGE_REGISTRY_URL` and archive URL.
+
 ## [0.9.0] - 2026-10-05
 
 Highlights: the default VM is now trustworthy (a guarded, verified JIT tier; GC rooting; full VM/interpreter parity on the test suite), much faster (VM and interpreter performance passes), and Forge gains a capability-based sandbox (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`) plus `forge mcp`, an MCP server that lets AI agents run sandboxed Forge code.
