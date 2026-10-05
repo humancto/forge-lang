@@ -1175,7 +1175,7 @@ fn run_in_session(
             interp,
             generation,
             created,
-        } => (interp, generation, created),
+        } => (*interp, generation, created),
         Checkout::Busy => {
             return Err(run_refused(
                 "session",

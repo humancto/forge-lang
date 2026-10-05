@@ -44,7 +44,7 @@ struct Session {
 /// Result of [`Sessions::checkout`].
 pub enum Checkout {
     Ready {
-        interp: Interpreter,
+        interp: Box<Interpreter>,
         generation: u64,
         created: bool,
     },
@@ -85,7 +85,7 @@ impl Sessions {
             session.running = Some(cancel.clone());
             session.last_used = Instant::now();
             return Checkout::Ready {
-                interp,
+                interp: Box::new(interp),
                 generation: session.generation,
                 created: false,
             };
@@ -105,7 +105,7 @@ impl Sessions {
             },
         );
         Checkout::Ready {
-            interp: Interpreter::new(),
+            interp: Box::new(Interpreter::new()),
             generation,
             created: true,
         }
@@ -165,7 +165,7 @@ mod tests {
                 interp,
                 generation,
                 created,
-            } => (interp, generation, created),
+            } => (*interp, generation, created),
             Checkout::Busy => panic!("busy"),
             Checkout::Full(_) => panic!("full"),
         }
