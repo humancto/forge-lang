@@ -666,7 +666,11 @@ impl VM {
                     VMError::new(&format!("import '{}' compile error: {}", path, e.message))
                 })?;
                 self.execute_module(&chunk).map_err(|e| {
-                    if e.message.starts_with("circular import: ") {
+                    if e.is_unwound_to_handler() || e.is_fatal() {
+                        // Control transfer (a `timeout` around the import
+                        // fired inside it) or a fatal limit: propagate as is.
+                        e
+                    } else if e.message.starts_with("circular import: ") {
                         // Propagate the cycle report unwrapped.
                         VMError::new(&e.message)
                     } else {
@@ -3159,12 +3163,8 @@ impl VM {
                     return Err(VMError::new("receive() requires (channel)"));
                 }
                 let ch_arc = self.extract_channel(&args[0])?;
-                let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
-                match &*guard {
-                    Some(rx) => match rx.recv() {
-                        Ok(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
-                        Err(_) => Ok(Value::null()),
-                    },
+                match self.receive_cancellable(&ch_arc)? {
+                    Some(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
                     None => Ok(Value::null()),
                 }
             }
@@ -3279,6 +3279,7 @@ impl VM {
                         }
                     }
                     offset = (offset + 1) % len;
+                    self.wait_interrupted()?;
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
@@ -3368,12 +3369,7 @@ impl VM {
                 for item in &items {
                     let maybe_slot = self.extract_task_handle(item);
                     if let Some(slot) = maybe_slot {
-                        let (lock, cvar) = &*slot;
-                        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        while guard.is_none() {
-                            guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
-                        }
-                        let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
+                        let shared = self.wait_task_result(&slot)?;
                         let val = shared_to_value(&mut self.gc, &shared);
                         // Fail-fast: propagate ResultErr immediately
                         match val.classify(&self.gc) {

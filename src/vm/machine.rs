@@ -212,7 +212,9 @@ pub struct VM {
     /// `.collect()` first to materialize. (M9.4 bug #6.)
     pub(super) stream_boundary_error: std::cell::Cell<bool>,
     /// Squad handle collector stack: when non-empty, Spawn registers handles here.
-    /// Each entry is (dst_register, cancel_flag, handles, saved_outer_cancelled).
+    /// Each entry is (dst_register, cancel_flag, handles, scope_depth): the
+    /// squad's cancel flag is also pushed on `scope_cancels`, which held
+    /// `scope_depth` flags before.
     /// Values received by `IterHas` from a channel being iterated by a
     /// `for` loop, consumed by the `IterGet` that immediately follows.
     iter_prefetch: Vec<SharedValue>,
@@ -220,10 +222,18 @@ pub struct VM {
         u8,
         Arc<std::sync::atomic::AtomicBool>,
         Vec<Arc<(Mutex<Option<SharedValue>>, Condvar)>>,
-        Arc<std::sync::atomic::AtomicBool>,
+        usize,
     )>,
-    /// Cooperative cancellation flag — shared with squad parent, checked at safe points.
+    /// Cooperative cancellation flag — the run's (or the HTTP request's)
+    /// token, checked at safe points.
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancellation of the enclosing `squad` / `timeout` scopes, innermost
+    /// last. Containment invariant (mirrors `Interpreter::child_context`):
+    /// a task forked by `spawn` inherits `cancelled` *and* these flags, so
+    /// cancelling a scope — a squad whose task failed, a `timeout` whose
+    /// deadline passed — stops every task started inside it, at their next
+    /// safe point or blocking-wait poll. See [`VM::is_cancelled`].
+    scope_cancels: Vec<Arc<std::sync::atomic::AtomicBool>>,
     /// `Some` while `schedule` / `watch` start-up is deferred (see
     /// [`VM::defer_host_runtime`]). The queued closures are GC roots.
     deferred_host_tasks: Option<Vec<HostTask>>,
@@ -402,6 +412,7 @@ impl VM {
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            scope_cancels: Vec::new(),
             deferred_host_tasks: None,
         }
     }
@@ -633,8 +644,10 @@ impl VM {
             child.struct_defaults.insert(name.clone(), child_defaults);
         }
 
-        // Propagate cancellation flag so squad can cancel spawned tasks
+        // Containment: the task stops when the run, or any enclosing squad
+        // or timeout scope, is cancelled.
         child.cancelled = self.cancelled.clone();
+        child.scope_cancels = self.scope_cancels.clone();
 
         #[cfg(feature = "jit")]
         assert!(
@@ -777,6 +790,107 @@ impl VM {
             .min_by_key(|(_, guard)| guard.deadline)
     }
 
+    /// True when the run, or any enclosing squad / timeout scope, has been
+    /// cancelled (see `scope_cancels`).
+    #[inline]
+    pub(super) fn is_cancelled(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.cancelled.load(Ordering::Acquire)
+            || self
+                .scope_cancels
+                .iter()
+                .any(|flag| flag.load(Ordering::Acquire))
+    }
+
+    /// Set and drop every scope flag from `depth` on: tasks started inside
+    /// those scopes stop at their next safe point.
+    fn cancel_scopes_from(&mut self, depth: usize) {
+        for flag in self.scope_cancels.iter().skip(depth) {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.scope_cancels.truncate(depth);
+        // Squads opened inside those scopes are abandoned with them.
+        while self
+            .squad_stack
+            .last()
+            .is_some_and(|squad| squad.3 >= depth)
+        {
+            self.squad_stack.pop();
+        }
+    }
+
+    /// Why a blocking wait must stop now, if it must: the run or an
+    /// enclosing scope was cancelled, or a `timeout` deadline passed (whose
+    /// scope is cancelled first, so the tasks it started stop too).
+    pub(super) fn wait_interrupted(&mut self) -> Result<(), VMError> {
+        if let Some((_, guard)) = self.earliest_expired_timeout() {
+            self.cancel_scopes_from(guard.scope_depth);
+            return Err(VMError::new(&format!(
+                "timeout: operation exceeded {} second limit",
+                guard.seconds
+            )));
+        }
+        if self.is_cancelled() {
+            return Err(VMError::new("task cancelled"));
+        }
+        Ok(())
+    }
+
+    /// Block until `ready` yields a value, waking every `WAIT_POLL` to
+    /// honour cancellation and `timeout` deadlines (`wait_interrupted`).
+    /// Every blocking wait of the VM (task results, channel receives) goes
+    /// through here, so no wait can outlive the scope that started it.
+    pub(super) fn wait_cancellable<T>(
+        &mut self,
+        mut ready: impl FnMut(Duration) -> Option<T>,
+    ) -> Result<T, VMError> {
+        const WAIT_POLL: Duration = Duration::from_millis(50);
+        loop {
+            self.wait_interrupted()?;
+            if let Some(v) = ready(WAIT_POLL) {
+                return Ok(v);
+            }
+        }
+    }
+
+    /// Wait (cancellably) for a spawned task's result.
+    pub(super) fn wait_task_result(
+        &mut self,
+        slot: &Arc<(Mutex<Option<SharedValue>>, Condvar)>,
+    ) -> Result<SharedValue, VMError> {
+        let (lock, cvar) = &**slot;
+        self.wait_cancellable(|slice| {
+            let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = if guard.is_none() {
+                cvar.wait_timeout(guard, slice)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
+            } else {
+                guard
+            };
+            guard.as_ref().cloned()
+        })
+    }
+
+    /// Receive from a channel (cancellably). `None` = closed and drained.
+    pub(super) fn receive_cancellable(
+        &mut self,
+        ch: &Arc<VmChannelInner>,
+    ) -> Result<Option<SharedValue>, VMError> {
+        use std::sync::mpsc::RecvTimeoutError;
+        self.wait_cancellable(|slice| {
+            let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                None => Some(None),
+                Some(rx) => match rx.recv_timeout(slice) {
+                    Ok(v) => Some(Some(v)),
+                    Err(RecvTimeoutError::Disconnected) => Some(None),
+                    Err(RecvTimeoutError::Timeout) => None,
+                },
+            }
+        })
+    }
+
     pub(super) fn sleep_with_timeout_checks(&self, duration: Duration) -> Result<(), VMError> {
         let total_ms = duration.as_millis() as u64;
         let mut elapsed = 0u64;
@@ -818,6 +932,8 @@ impl VM {
         let base = self.frames[frame_idx].base;
         self.registers[base + guard.error_register as usize] = err_value;
 
+        // Stop everything the block started (tasks, squads, nested scopes).
+        self.cancel_scopes_from(guard.scope_depth);
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
         frame.ip = guard.catch_ip;
@@ -1072,7 +1188,7 @@ impl VM {
                     }
                     OpCode::Loop => {
                         // Cooperative cancellation check at backward jump
-                        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        if self.is_cancelled() {
                             return Err(VMError::new("task cancelled"));
                         }
                         let frame = &mut self.frames[frame_idx];
@@ -1090,7 +1206,7 @@ impl VM {
                     }
                     OpCode::Call => {
                         // Cooperative cancellation check at function call
-                        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        if self.is_cancelled() {
                             return Err(VMError::new("task cancelled"));
                         }
                         let func_val = self.registers[base + a as usize];
@@ -1363,13 +1479,12 @@ impl VM {
                             None => None,
                         });
                         let has = if let Some(ch) = channel {
-                            let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
-                            match guard.as_ref().map(|rx| rx.recv()) {
-                                Some(Ok(shared)) => {
+                            match self.receive_cancellable(&ch)? {
+                                Some(shared) => {
                                     self.iter_prefetch.push(shared);
                                     true
                                 }
-                                _ => false,
+                                None => false,
                             }
                         } else {
                             let idx = self.registers[base + c as usize].as_int(&self.gc);
@@ -1465,9 +1580,9 @@ impl VM {
                     }
                     OpCode::SquadBegin => {
                         let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        let saved = self.cancelled.clone();
-                        self.cancelled = cancel_flag.clone();
-                        self.squad_stack.push((a, cancel_flag, Vec::new(), saved));
+                        let depth = self.scope_cancels.len();
+                        self.scope_cancels.push(cancel_flag.clone());
+                        self.squad_stack.push((a, cancel_flag, Vec::new(), depth));
                     }
                     OpCode::CloseUpvalues => {
                         let frame = &mut self.frames[frame_idx];
@@ -1478,42 +1593,46 @@ impl VM {
                         }
                     }
                     OpCode::SquadEnd => {
-                        let (dst_reg, cancel_flag, handles, saved_cancelled) =
+                        let (dst_reg, cancel_flag, handles, depth) =
                             self.squad_stack.pop().unwrap_or_else(|| {
                                 let dummy = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                (a, dummy.clone(), Vec::new(), dummy)
+                                (a, dummy, Vec::new(), self.scope_cancels.len())
                             });
-                        // Restore outer cancellation flag
-                        self.cancelled = saved_cancelled;
+                        // The body is done: leave the squad's scope. Its tasks
+                        // keep the flag, so a failure below still cancels
+                        // them, but this wait is not cancelled by it.
+                        self.scope_cancels.truncate(depth);
 
                         let mut results = Vec::with_capacity(handles.len());
                         let mut first_error: Option<String> = None;
 
                         for slot in &handles {
-                            let (lock, cvar) = &**slot;
-                            let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                            while guard.is_none() {
-                                guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
-                            }
-                            if let Some(ref shared) = *guard {
-                                match shared {
-                                    SharedValue::ResultOk(inner) => {
-                                        results.push(shared_to_value(&mut self.gc, inner));
+                            // Cancellable: a deadline or the host's cancel
+                            // stops the squad's tasks and this wait.
+                            let shared = match self.wait_task_result(slot) {
+                                Ok(shared) => shared,
+                                Err(e) => {
+                                    cancel_flag.store(true, std::sync::atomic::Ordering::Release);
+                                    return Err(e);
+                                }
+                            };
+                            match &shared {
+                                SharedValue::ResultOk(inner) => {
+                                    results.push(shared_to_value(&mut self.gc, inner));
+                                }
+                                SharedValue::ResultErr(inner) => {
+                                    if first_error.is_none() {
+                                        let msg = match inner.as_ref() {
+                                            SharedValue::String(s) => s.clone(),
+                                            _ => "task error".to_string(),
+                                        };
+                                        first_error = Some(msg);
+                                        cancel_flag
+                                            .store(true, std::sync::atomic::Ordering::Release);
                                     }
-                                    SharedValue::ResultErr(inner) => {
-                                        if first_error.is_none() {
-                                            let msg = match inner.as_ref() {
-                                                SharedValue::String(s) => s.clone(),
-                                                _ => "task error".to_string(),
-                                            };
-                                            first_error = Some(msg);
-                                            cancel_flag
-                                                .store(true, std::sync::atomic::Ordering::Release);
-                                        }
-                                    }
-                                    other => {
-                                        results.push(shared_to_value(&mut self.gc, other));
-                                    }
+                                }
+                                other => {
+                                    results.push(shared_to_value(&mut self.gc, other));
                                 }
                             }
                         }
@@ -1543,16 +1662,7 @@ impl VM {
                         };
                         // GC borrow released — safe to call shared_to_value
                         let result = if let Some(slot) = maybe_slot {
-                            let (lock, cvar) = &*slot;
-                            let mut guard = lock
-                                .lock()
-                                .map_err(|_| VMError::new("await: spawned task panicked"))?;
-                            while guard.is_none() {
-                                guard = cvar
-                                    .wait(guard)
-                                    .map_err(|_| VMError::new("await: wait interrupted"))?;
-                            }
-                            let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
+                            let shared = self.wait_task_result(&slot)?;
                             let val = shared_to_value(&mut self.gc, &shared);
                             // Unwrap ResultOk, propagate ResultErr
                             match val.classify(&self.gc) {
@@ -1608,12 +1718,18 @@ impl VM {
                             (frame.ip as i64 + sbx as i64) as usize
                         };
                         let handler_base = self.frames[frame_idx].handlers.len().saturating_sub(1);
+                        // The scope's own cancel flag: tasks started inside
+                        // the block inherit it, and the deadline sets it.
+                        let scope_depth = self.scope_cancels.len();
+                        self.scope_cancels
+                            .push(Arc::new(std::sync::atomic::AtomicBool::new(false)));
                         self.frames[frame_idx].timeouts.push(TimeoutGuard {
                             deadline: Instant::now() + Duration::from_secs(seconds),
                             seconds,
                             catch_ip,
                             error_register: a,
                             handler_base,
+                            scope_depth,
                         });
                         // Poll at the next instruction, so an already
                         // expired scope fires before its body runs. The
@@ -1623,7 +1739,9 @@ impl VM {
                         self.safepoint_countdown = 0;
                     }
                     OpCode::PopTimeout => {
-                        self.frames[frame_idx].timeouts.pop();
+                        if let Some(guard) = self.frames[frame_idx].timeouts.pop() {
+                            self.scope_cancels.truncate(guard.scope_depth);
+                        }
                     }
                     OpCode::Schedule => {
                         let closure_val = self.registers[base + a as usize];
@@ -1964,8 +2082,11 @@ impl VM {
         let depth_limit = crate::runtime::recursion::max_depth();
         // Native code has no fuel counter: with a fuel budget every call
         // stays in the VM, so exhaustion is exact and deterministic.
+        // Likewise the JIT polls only the run's own cancel flag, so code
+        // inside a squad / timeout scope stays in the VM.
         let guards_ok = depth_below < depth_limit
             && !self.meter.fuel_limited()
+            && self.scope_cancels.is_empty()
             && self.frames.iter().all(|f| f.timeouts.is_empty())
             && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
         if !guards_ok {
@@ -2272,6 +2393,10 @@ impl VM {
     }
 
     pub(super) fn convert_to_interp_val(&self, v: &Value) -> crate::interpreter::Value {
+        // Too deep: Null placeholder, reported by `check_stream_boundary`.
+        let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+            return crate::interpreter::Value::Null;
+        };
         match v.classify(&self.gc) {
             ValueKind::Int(n) => crate::interpreter::Value::Int(n),
             ValueKind::Float(n) => crate::interpreter::Value::Float(n),
@@ -2346,6 +2471,9 @@ impl VM {
     }
 
     pub(super) fn convert_interp_value(&mut self, v: &crate::interpreter::Value) -> Value {
+        let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+            return Value::null();
+        };
         match v {
             crate::interpreter::Value::Int(n) => Value::int(*n, &mut self.gc),
             crate::interpreter::Value::Float(n) => Value::float(*n),
@@ -2424,6 +2552,11 @@ impl VM {
     pub(super) fn check_stream_boundary(&self) -> Result<(), VMError> {
         let cell_hit = self.stream_boundary_error.replace(false);
         let tls_hit = super::value::take_stream_boundary_error();
+        if crate::runtime::recursion::take_value_too_deep() {
+            return Err(VMError::new(
+                &crate::runtime::recursion::value_too_deep_message(),
+            ));
+        }
         if cell_hit || tls_hit {
             Err(VMError::new(
                 "Stream cannot cross the VM/interpreter boundary; call .collect() first to materialize",

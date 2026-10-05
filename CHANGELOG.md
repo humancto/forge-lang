@@ -40,14 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `pad_start`/`pad_end` with a negative width no longer try to allocate an astronomically large string (the width is treated as 0).
 - `pipe_to` no longer deadlocks when both its input and the command's output exceed the OS pipe buffer
 - `which` no longer depends on `/usr/bin/which` being installed
 - `forge run` logs: the default filter now enables the CLI binary's own targets (`forge=info`), so the server's per-request `request` span (`method`, `uri`, `request_id`) and the `forge.server` startup event are no longer filtered out; under `FORGE_LOG_FORMAT=json` the VM-to-interpreter fallback note is a `forge.runtime` JSON event instead of plain text, so stderr stays line-delimited JSON (#119, #120)
 - The debug-build check that rejects a `Value::Stream` in a server's top-level environment now also finds streams captured by closures, and names the binding path (#115)
-
-### Fixed
-
-- `pad_start`/`pad_end` with a negative width no longer try to allocate an astronomically large string (the width is treated as 0).
 
 ### Security
 
@@ -77,6 +74,8 @@ Findings and fixes from the sandbox audit (`docs/SECURITY_AUDIT.md`); every fix 
 - MySQL and WebSocket handles are unguessable, so one sandbox cannot use another's connection in the same host process (SEC-11).
 - `Sandbox::max_output` is enforced on every write instead of by polling (SEC-14).
 - Filesystem operations, imports and `watch` act on the resolved path that passed the permission check, so a concurrent `cd` cannot redirect them (SEC-15).
+- VM: a `timeout` block (and the host's cancel) now stops everything started inside it — `squad` tasks, spawned tasks, blocked `receive`/`await`/`await_all`/`select`/`for x in channel` — and a deadline inside an imported module reports `timeout: ...` instead of `internal control transfer to catch handler` (SEC-02, VM part).
+- Values nested more than 10,000 levels deep (`a = [a]` in a loop) are an error (`value nested too deeply`) in conversions, `json.stringify`/`json.pretty`, display and equality, instead of aborting the process with a native stack overflow (SEC-16).
 
 ## [0.9.0] - 2026-10-05
 

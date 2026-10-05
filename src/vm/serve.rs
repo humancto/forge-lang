@@ -385,6 +385,9 @@ impl HandlerWorker for ConnectionWorker {
 /// `server::forge_to_json` for the interpreter value each VM value
 /// corresponds to, so both engines send the same body.
 pub(crate) fn value_to_json(gc: &Gc, value: Value) -> JsonValue {
+    let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+        return JsonValue::Null;
+    };
     let opaque = |type_name: &str| JsonValue::String(format!("<{}>", type_name));
     let r = match value.classify(gc) {
         ValueKind::Int(n) => return JsonValue::Number(n.into()),

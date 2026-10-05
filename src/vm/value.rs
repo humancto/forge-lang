@@ -99,6 +99,11 @@ pub fn value_to_shared(gc: &Gc, val: &Value) -> SharedValue {
 /// `seen` holds the closures currently being converted (index = id), so a
 /// closure that captures itself becomes a `ClosureRef` instead of looping.
 fn to_shared(gc: &Gc, val: &Value, seen: &mut Vec<GcRef>) -> SharedValue {
+    // Too deep to walk: Null placeholder, reported by the caller's
+    // boundary check (`runtime::recursion::take_value_too_deep`).
+    let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+        return SharedValue::Null;
+    };
     match val.classify(gc) {
         ValueKind::Int(n) => SharedValue::Int(n),
         ValueKind::Float(n) => SharedValue::Float(n),
@@ -187,6 +192,9 @@ fn from_shared(
     sv: &SharedValue,
     closures: &mut std::collections::HashMap<usize, GcRef>,
 ) -> Value {
+    let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+        return Value::null();
+    };
     match sv {
         SharedValue::Int(n) => Value::int(*n, gc),
         SharedValue::Float(n) => Value::float(*n),
@@ -520,6 +528,12 @@ impl GcObject {
     }
 
     pub fn display(&self, gc: &Gc) -> String {
+        if let ObjKind::String(s) = &self.kind {
+            return s.clone();
+        }
+        let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+            return "...".to_string();
+        };
         match &self.kind {
             ObjKind::String(s) => s.clone(),
             ObjKind::Array(items) => {
@@ -586,6 +600,9 @@ impl GcObject {
     }
 
     pub fn to_json_string(&self, gc: &Gc) -> String {
+        let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+            return "null".to_string();
+        };
         match &self.kind {
             ObjKind::String(s) => escape_json_string(s),
             ObjKind::Array(items) => {
@@ -641,6 +658,13 @@ impl GcObject {
     }
 
     pub fn equals(&self, other: &GcObject, gc: &Gc) -> bool {
+        if let (ObjKind::String(a), ObjKind::String(b)) = (&self.kind, &other.kind) {
+            return a == b;
+        }
+        // Too deep to compare: not equal (and recorded as too deep).
+        let Some(_level) = crate::runtime::recursion::enter_value_level() else {
+            return false;
+        };
         match (&self.kind, &other.kind) {
             (ObjKind::String(a), ObjKind::String(b)) => a == b,
             (ObjKind::Array(a), ObjKind::Array(b)) => {
