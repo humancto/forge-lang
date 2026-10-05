@@ -164,7 +164,7 @@ struct FieldTy {
 
 impl Ty {
     fn is_optional(&self) -> bool {
-        matches!(self, Ty::Nullable(_) | Ty::Option(_) | Ty::Any | Ty::Null)
+        matches!(self, Ty::Nullable(_) | Ty::Option(_) | Ty::Null)
     }
 
     /// Whether results of this type are JSON objects, so they can be the
@@ -1433,7 +1433,7 @@ mod tests {
         assert_eq!(props["d"]["default"], 3);
         assert_eq!(
             schema["required"],
-            json!(["n", "f", "s", "b", "xs", "m", "o", "p"])
+            json!(["n", "f", "s", "b", "xs", "m", "o", "p", "any"])
         );
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(defs[0]["outputSchema"]["title"], "Point");
