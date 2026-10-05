@@ -9,6 +9,7 @@
 // a wall-clock limit and captured output. See `src/sandbox.rs`.
 
 mod builtins_registry;
+mod color;
 mod errors;
 pub mod interpreter;
 pub mod lexer;

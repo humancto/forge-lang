@@ -5,47 +5,11 @@
 /// only when it will be seen as color (see [`color_enabled`]); piped output
 /// and `NO_COLOR` environments get plain text.
 use ariadne::{Color, Config, Label, Report, ReportKind, Source};
-use std::io::IsTerminal;
-use std::sync::OnceLock;
 
-/// Whether diagnostics written to stderr should use ANSI color.
-///
-/// Follows the common conventions, in priority order:
-/// 1. `NO_COLOR` set to a non-empty value disables color (<https://no-color.org>).
-/// 2. `FORCE_COLOR` or `CLICOLOR_FORCE` set to a non-empty value other than
-///    `0` forces color (useful in CI log viewers that render ANSI).
-/// 3. Otherwise color is used only when stderr is a terminal.
-///
-/// Computed once per process.
+/// Whether diagnostics written to stderr should use ANSI color — the
+/// shared policy in [`crate::color`] (NO_COLOR, FORCE_COLOR, TTY).
 pub fn color_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        let var = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
-        decide_color(
-            var("NO_COLOR").as_deref(),
-            var("FORCE_COLOR").as_deref(),
-            var("CLICOLOR_FORCE").as_deref(),
-            std::io::stderr().is_terminal(),
-        )
-    })
-}
-
-/// Pure color decision, separated from the environment for testing.
-fn decide_color(
-    no_color: Option<&str>,
-    force_color: Option<&str>,
-    clicolor_force: Option<&str>,
-    stderr_is_tty: bool,
-) -> bool {
-    let set = |v: Option<&str>| v.is_some_and(|s| !s.is_empty());
-    let forced = |v: Option<&str>| v.is_some_and(|s| !s.is_empty() && s != "0");
-    if set(no_color) {
-        return false;
-    }
-    if forced(force_color) || forced(clicolor_force) {
-        return true;
-    }
-    stderr_is_tty
+    crate::color::enabled(crate::color::Stream::Stderr)
 }
 
 /// Render `message` with a source snippet pointing at `line:col` of
@@ -235,29 +199,6 @@ pub fn format_success(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn no_color_wins() {
-        assert!(!decide_color(Some("1"), Some("1"), Some("1"), true));
-    }
-
-    #[test]
-    fn empty_no_color_is_ignored() {
-        assert!(decide_color(Some(""), None, None, true));
-    }
-
-    #[test]
-    fn force_color_overrides_non_tty() {
-        assert!(decide_color(None, Some("1"), None, false));
-        assert!(decide_color(None, None, Some("1"), false));
-        assert!(!decide_color(None, Some("0"), None, false));
-    }
-
-    #[test]
-    fn defaults_to_tty_detection() {
-        assert!(decide_color(None, None, None, true));
-        assert!(!decide_color(None, None, None, false));
-    }
 
     #[test]
     fn snippet_header_names_the_file() {

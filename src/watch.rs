@@ -10,17 +10,17 @@ pub async fn run_watch(file: &Path) {
     let path_str = file.display().to_string();
 
     if !file.exists() {
-        eprintln!(
+        crate::color::ceprintln!(
             "{}",
             errors::format_simple_error(&format!("file not found: {}", path_str))
         );
         std::process::exit(1);
     }
 
-    println!();
-    println!("  \x1B[1;36m👁 Watching\x1B[0m {}", path_str);
-    println!("  \x1B[90mPress Ctrl+C to stop\x1B[0m");
-    println!();
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[1;36m👁 Watching\x1B[0m {}", path_str);
+    crate::color::cprintln!("  \x1B[90mPress Ctrl+C to stop\x1B[0m");
+    crate::color::cprintln!();
 
     let mut last_modified = get_mtime(file);
     run_file(file, &path_str);
@@ -30,9 +30,9 @@ pub async fn run_watch(file: &Path) {
         let current_mtime = get_mtime(file);
         if current_mtime != last_modified {
             last_modified = current_mtime;
-            println!("\x1B[2J\x1B[H");
-            println!("  \x1B[1;36m↻\x1B[0m File changed, re-running...");
-            println!();
+            crate::color::cprintln!("\x1B[2J\x1B[H");
+            crate::color::cprintln!("  \x1B[1;36m↻\x1B[0m File changed, re-running...");
+            crate::color::cprintln!();
             run_file(file, &path_str);
         }
     }
@@ -93,8 +93,8 @@ fn run_file(file: &Path, path_str: &str) {
     let mut interpreter = Interpreter::new();
     match interpreter.run(&program) {
         Ok(_) => {
-            println!();
-            println!(
+            crate::color::cprintln!();
+            crate::color::cprintln!(
                 "  \x1B[32m✓\x1B[0m Completed at {}",
                 chrono::Local::now().format("%H:%M:%S")
             );

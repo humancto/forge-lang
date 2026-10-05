@@ -127,7 +127,7 @@ pub fn otel_is_active() -> bool {
 pub fn init_subscriber() {
     INIT.get_or_init(|| {
         let filter = build_filter();
-        let ansi = std::io::stderr().is_terminal();
+        let ansi = crate::color::enabled(crate::color::Stream::Stderr);
 
         // Build the OTel layer ONCE into a typed Option. The variable
         // binding pins the layer's tracer type so both the Some and

@@ -108,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One color policy for all CLI output** — `src/color.rs` decides color per stream (`NO_COLOR` > `FORCE_COLOR`/`CLICOLOR_FORCE` > is-a-terminal). Diagnostics, `forge test`, the REPL (prompt highlighting and results), `forge learn`, `forge watch`/`doc`/`install`/`publish`/`chat`, the server banner, `log.*` prefixes, `term.success/error/table` chrome and the tracing subscriber all follow it, so piped output and `NO_COLOR` get plain text. Values a program builds on purpose are untouched: `term.red("x")` still returns ANSI-colored text.
 - **Tree-walking interpreter performance** — no more quadratic loops: `a.push(x)` / `a = push(a, x)` (100k items: >150s → 0.05s), `s = s + t` / `s += t` (200k chars: 1.8s → 0.08s), `a[i]`, `obj.k`, `len(a)`, `s.has(x)`, `m.get(k)` and `a[i] = v` now work on the variable in place instead of deep-copying it. Function values are shared by `Arc` (fib(30): 7.2s → 1.4s), and scopes keep values and mutability in one compact table. Benchmarks: `cargo bench --bench interpreter_hot_paths`, `tools/bench_interp.sh`.
 - **Shell-permission error text** — denied `sh`/`shell`/`run_command`/... now report `permission denied: run (shell execution) — run with --allow-run or grant it in the host policy` (was `Shell execution denied. Use --allow-run ...`).
 - **`FORGE_FS_BASE` covers more file access** — `csv.read`/`csv.write`, `toml.read`, `env.load`, SQLite `db.open` files and `http.download` destinations are now confined like `fs.*`.
