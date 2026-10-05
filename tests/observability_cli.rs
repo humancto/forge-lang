@@ -34,14 +34,19 @@ fn forge() -> Command {
 }
 
 fn script(name: &str, source: &str) -> PathBuf {
+    // Tests run in parallel and the clock is coarse on Windows, so the
+    // timestamp alone does not make the path unique.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let path = std::env::temp_dir().join(format!(
-        "forge_observability_{}_{}_{}.fg",
+        "forge_observability_{}_{}_{}_{}.fg",
         name,
         std::process::id(),
+        seq,
         nanos
     ));
     std::fs::write(&path, source).expect("write script");
