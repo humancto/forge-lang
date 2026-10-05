@@ -49,8 +49,9 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_CONCURRENT_CALLS: usize = 8;
 /// Default (and maximum) fuel for one `run_forge` call: interpreter steps
 /// (statements, calls, loop iterations). Generous for ordinary scripts —
-/// roughly several seconds of pure computation — while still making a
-/// runaway loop fail deterministically.
+/// on a loaded 4-core machine the interpreter runs roughly 7–15M steps per
+/// second, so this is on the order of the default 30 s time limit — while
+/// making a runaway loop fail deterministically instead of by wall clock.
 pub const DEFAULT_MAX_FUEL: u64 = 200_000_000;
 /// Default memory limit for one `run_forge` call.
 pub const DEFAULT_MAX_MEMORY: usize = 256 * 1024 * 1024;
