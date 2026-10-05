@@ -10,7 +10,7 @@ homepage = "https://github.com/humancto/forge-lang"
 keywords = ["language", "programming-language", "interpreter", "vm", "scripting"]
 categories = ["compilers", "command-line-utilities"]
 readme = "README.md"
-exclude = ["docs/book/programming-forge.pdf", "docs/cover.jpeg", "docs/spec/**", "docs/PROGRAMMING_FORGE.md", "docs/part*.md", "benchmarks/**", "spec/**"]
+exclude = ["docs/book/programming-forge.pdf", "docs/cover.jpeg", "docs/spec/**", "docs/PROGRAMMING_FORGE.md", "docs/part*.md", "benchmarks/**", "spec/**", "bindings/**"]
 
 [lib]
 name = "forge_lang"
@@ -119,6 +119,8 @@ cranelift-module = { version = "0.129", optional = true }
 cranelift-native = { version = "0.129", optional = true }
 gethostname = "1.1.0"
 semver = "1"
+# Native plugins (`import native`, src/plugins). dlopen/LoadLibrary wrapper.
+libloading = "0.8"
 tar = "0.4"
 
 # `forge mcp` moves the protocol off fds 0/1 so scripts cannot touch it.

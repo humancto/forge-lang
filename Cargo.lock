@@ -1050,6 +1050,7 @@ dependencies = [
  "indexmap",
  "jsonwebtoken",
  "libc",
+ "libloading",
  "lsp-server",
  "lsp-types",
  "md-5 0.10.6",

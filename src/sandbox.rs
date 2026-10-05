@@ -239,6 +239,20 @@ impl Sandbox {
         self
     }
 
+    /// Grant `ffi` (native plugins) for libraries at or under these paths.
+    ///
+    /// A native library runs with the full privileges of the host process
+    /// and bypasses every other capability: only grant libraries you trust
+    /// as much as the host itself.
+    pub fn allow_ffi<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        self.caps = self.caps.grant_ffi_paths(paths);
+        self
+    }
+
     /// Wall-clock limit for one run.
     pub fn max_time(mut self, limit: Duration) -> Self {
         self.max_time = Some(limit);

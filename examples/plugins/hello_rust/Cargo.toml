@@ -1,0 +1,16 @@
+[package]
+name = "hello_rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Example Forge native plugin written in Rust"
+
+[lib]
+# A C-compatible shared library: libhello_rust.so / .dylib / hello_rust.dll
+crate-type = ["cdylib"]
+
+[dependencies]
+forge-plugin = { path = "../../../crates/forge-plugin" }
+
+# Standalone project, not part of the forge-lang package.
+[workspace]

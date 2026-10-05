@@ -70,7 +70,7 @@ run, repl, version, fmt, test, new, build, install, add, update, publish, search
 
 `forge mcp` (`src/mcp.rs`, test `tests/mcp_stdio.rs`) is a stdio MCP server for AI agents: tools `run_forge` / `check_forge` / `forge_reference`; scripts run in `Sandbox` under deny-all plus the `--allow-*` / `[permissions]` grants (`build_mcp_policy` in `main.rs`). Both the binary and the lib compile `mcp.rs` and `sandbox.rs`.
 
-Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run` (`--vm` is a backwards-compatible no-op). `forge build` takes `--native` (embeds source) or `--aot` (embeds bytecode).
+Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run`, `--allow-ffi[=PATHS]` (`--vm` is a backwards-compatible no-op). `forge build` takes `--native` (embeds source) or `--aot` (embeds bytecode).
 
 ## Standard Library (22 global modules, 200+ module functions)
 
@@ -420,6 +420,7 @@ call `tracing_init::init_subscriber()` on first use.
 - **Reading a variable copies it.** `Environment::get` deep-clones (strings, arrays, objects are owned). Hot paths must borrow via `Environment::with_value` / `with_value_mut` / `with_binding_mut` (see `src/interpreter/places.rs`). The callback runs under the scope `Mutex`, which is not re-entrant: it must not touch the environment or run Forge code — evaluate operands first, and only reorder evaluation when the operand `is_effect_free`.
 - **Statement bodies don't produce values.** Loop bodies, statement `if` branches, `match` arms and `try`/`catch` run via `exec_body`, which evaluates a trailing expression for effect only (so a trailing `out.push(x)` does not copy `out`). Only `when`/`safe` statement values are consumed by `eval_block_value`; if that changes, `exec_body` callers must change too.
 - **Arc-backed `Value::String`/`Array`/`Object` is blocked on the VM.** `src/vm` constructs and destructures `interpreter::Value::{Array, Object, Set, Map, Tuple, String}` with owned payloads, so moving them to `Arc` (copy-on-write, and hashed Set/Map indexes) needs a coordinated VM change.
+- **Native plugins (`src/plugins`, RFC 0006): the C ABI is the contract.** `crates/forge-plugin/include/forge_plugin.h` is normative; `src/plugins/abi.rs` (host) and `crates/forge-plugin/src/abi.rs` (SDK) mirror it with layout tests. Any layout change is an ABI break: bump `ABI_VERSION` in all three. Rules: arguments are borrowed for one call (strings point into the caller's `Vec<Value>`, arrays/objects into a per-call arena); results are copied out and then always handed back to the plugin's `free_value` (the host never frees plugin memory); the `ffi` check runs on the canonical path *before* `dlopen`; libraries are never unloaded (function values are `Value::BuiltIn("native:<lib>:<fn>")` and may outlive any scope). Both engines route the `native:` prefix to `plugins::call` before any other dispatch. The SDK is a standalone crate (own `[workspace]`), not a dependency of `forge-lang`, so publishing the language crate is unaffected; `tests/native_plugins.rs` builds the example plugins with cargo/cc and diffs both engines.
 - **Threads that run Forge code need a registered stack.** Use `recursion::spawn_worker` (std threads) or `recursion::configure_runtime` (tokio runtimes); an unregistered thread is assumed to have 2 MiB and the guard stops recursion early.
 
 ## Module Dependency Map
