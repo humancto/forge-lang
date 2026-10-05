@@ -38,6 +38,7 @@ fn create_project_files(name: &str, project_dir: &Path) -> std::io::Result<()> {
         r#"[project]
 name = "{}"
 version = "0.1.0"
+edition = "2026"
 description = ""
 entry = "main.fg"
 

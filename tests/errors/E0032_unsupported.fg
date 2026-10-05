@@ -1,0 +1,2 @@
+fn numbers() { yield 1 }
+numbers()

@@ -16,6 +16,7 @@
 //! `interpreter/` or `vm/`.
 
 pub mod alloc;
+pub mod errors;
 pub mod types;
 
 /// Borrowed view of a binary-operator operand.
@@ -251,11 +252,65 @@ pub fn normalize_index(index: i64, len: usize) -> Option<usize> {
 }
 
 /// `container` is the lowercase container kind (`"array"`, `"tuple"`).
+/// The hint spells out the valid range, so off-by-one mistakes are obvious.
 pub fn index_out_of_bounds(index: i64, container: &str, len: usize) -> String {
+    let hint = if len == 0 {
+        format!("the {} is empty; check len() before indexing", container)
+    } else {
+        format!(
+            "valid indices are 0 to {} (or -{} to -1 from the end)",
+            len - 1,
+            len
+        )
+    };
     format!(
-        "index out of bounds: index {} on {} of length {}",
-        index, container, len
+        "index out of bounds: index {} on {} of length {}\n  hint: {}",
+        index, container, len, hint
     )
+}
+
+/// Calling a value that is not a function (`5()`, `null()`).
+pub fn not_callable(type_name: &str) -> String {
+    format!(
+        "cannot call a value of type {}\n  hint: only functions and lambdas can be called; check that the name is not shadowed by a variable",
+        errors::user_type_name(type_name)
+    )
+}
+
+/// Reading or writing `.field` on a value without fields. `type_name` is
+/// the engine's type name of the receiver.
+pub fn field_access(field: &str, type_name: &str) -> String {
+    if type_name == "Null" {
+        format!(
+            "cannot access field '{}' on Null\n  hint: the value is null here; it may come from a function without a `return`, a failed lookup or a missing argument; check it with `if x != null` first",
+            field
+        )
+    } else {
+        format!("cannot access field '{}' on {}", field, type_name)
+    }
+}
+
+/// Calling a method that a built-in type (String, Array, ...) lacks.
+pub fn no_method(method: &str, type_name: &str) -> String {
+    format!("no method '{}' on {}", method, type_name)
+}
+
+/// Reading a field an object does not have. `keys` are the object's
+/// fields (internal `__` fields are ignored). The hint suggests a close
+/// match, or lists the fields.
+pub fn no_field<'a>(field: &str, keys: impl IntoIterator<Item = &'a str>) -> String {
+    let mut keys: Vec<&str> = keys.into_iter().filter(|k| !k.starts_with("__")).collect();
+    keys.sort_unstable();
+    let hint = match errors::suggest_name(field, [keys.iter().copied()]) {
+        Some(similar) => format!("did you mean '{}'?", similar),
+        None if keys.is_empty() => "the object has no fields".to_string(),
+        None => {
+            let more = if keys.len() > 8 { ", ..." } else { "" };
+            let shown: Vec<&str> = keys.iter().copied().take(8).collect();
+            format!("available fields: {}{}", shown.join(", "), more)
+        }
+    };
+    format!("no field '{}' on object\n  hint: {}", field, hint)
 }
 
 pub fn missing_key(key: &str) -> String {
@@ -312,7 +367,26 @@ pub fn immutable_reassign(name: &str) -> String {
 }
 
 pub fn check_failed(displayed_value: &str) -> String {
-    format!("check failed: {} did not pass validation", displayed_value)
+    let shown = if displayed_value.is_empty() {
+        "\"\" (empty)"
+    } else {
+        displayed_value
+    };
+    format!("check failed: {} did not pass validation", shown)
+}
+
+/// A `match` (statement or expression) whose arms all failed to match.
+pub const NON_EXHAUSTIVE_MATCH: &str =
+    "non-exhaustive match: no arm matched the value\n  hint: add a `_ => ...` arm to handle every other value";
+
+/// `expr?` on a value that is not a Result.
+pub const TRY_REQUIRES_RESULT: &str =
+    "`?` expects a Result value (Ok(...) or Err(...))\n  hint: wrap the value in Ok(...), or use `?` only on calls that return a Result";
+
+/// An `Err` propagated with `?` out of the program's top level, where no
+/// caller can handle it. `shown` is the displayed error payload.
+pub fn unhandled_error(shown: &str) -> String {
+    format!("unhandled error: {}", shown)
 }
 
 /// `return` executed outside any function (top level of a program, inside
@@ -822,7 +896,16 @@ mod tests {
         assert_eq!(normalize_index(0, 0), None);
         assert_eq!(
             index_out_of_bounds(10, "array", 2),
-            "index out of bounds: index 10 on array of length 2"
+            "index out of bounds: index 10 on array of length 2\n  hint: valid indices are 0 to 1 (or -2 to -1 from the end)"
+        );
+        assert!(index_out_of_bounds(0, "array", 0).contains("the array is empty"));
+        assert_eq!(
+            no_field("nmae", ["name", "__type__"]),
+            "no field 'nmae' on object\n  hint: did you mean 'name'?"
+        );
+        assert_eq!(
+            no_field("zzz", ["b", "a"]),
+            "no field 'zzz' on object\n  hint: available fields: a, b"
         );
     }
 

@@ -873,44 +873,21 @@ impl Environment {
         }
     }
 
+    /// "Did you mean ...?" for an undefined `name`: the closest visible
+    /// name, innermost scope first (`semantics::errors::suggest_name`, the
+    /// rule the VM uses too).
     pub fn suggest_similar(&self, name: &str) -> Option<String> {
-        let mut best: Option<(String, usize)> = None;
-        for scope in &self.scopes {
-            let guard = lock_scope(scope);
-            for key in guard.names() {
-                let dist = levenshtein(name, key);
-                if dist <= 2 && dist < name.len() {
-                    match &best {
-                        Some((_, d)) if dist < *d => best = Some((key.to_string(), dist)),
-                        None => best = Some((key.to_string(), dist)),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        best.map(|(s, _)| s)
+        let groups: Vec<Vec<String>> = self
+            .scopes
+            .iter()
+            .rev()
+            .map(|scope| lock_scope(scope).names().map(str::to_string).collect())
+            .collect();
+        crate::semantics::errors::suggest_name(
+            name,
+            groups.iter().map(|g| g.iter().map(String::as_str)),
+        )
     }
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut matrix = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for i in 0..=a.len() {
-        matrix[i][0] = i;
-    }
-    for j in 0..=b.len() {
-        matrix[0][j] = j;
-    }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            matrix[i][j] = (matrix[i - 1][j] + 1)
-                .min(matrix[i][j - 1] + 1)
-                .min(matrix[i - 1][j - 1] + cost);
-        }
-    }
-    matrix[a.len()][b.len()]
 }
 
 /// Map an AST operator onto the shared arithmetic/ordering rules.
@@ -1830,7 +1807,7 @@ impl Interpreter {
                         return result;
                     }
                 }
-                Err(RuntimeError::new("non-exhaustive match"))
+                Err(RuntimeError::new(crate::semantics::NON_EXHAUSTIVE_MATCH))
             }
 
             Stmt::For {
@@ -2016,24 +1993,17 @@ impl Interpreter {
                     self.env.push_scope();
                     let mut err_obj = IndexMap::new();
                     err_obj.insert("message".to_string(), Value::String(e.message.clone()));
-                    let error_type = if e.message.contains("type") || e.message.contains("Type") {
-                        "TypeError"
-                    } else if e.message.contains("division by zero") {
-                        "ArithmeticError"
-                    } else if e.message.contains("assertion") {
-                        "AssertionError"
-                    } else if e.message.contains("index") || e.message.contains("out of bounds") {
-                        "IndexError"
-                    } else if e.message.contains("not found") || e.message.contains("undefined") {
-                        "ReferenceError"
-                    } else if e.message.contains("immutable")
-                        || e.message.contains("cannot reassign")
-                    {
-                        "TypeError"
-                    } else {
-                        "RuntimeError"
-                    };
-                    err_obj.insert("type".to_string(), Value::String(error_type.to_string()));
+                    // `type` (legacy) and `code` come from the shared table,
+                    // so both engines hand `catch` the same object.
+                    use crate::semantics::errors;
+                    err_obj.insert(
+                        "type".to_string(),
+                        Value::String(errors::legacy_error_type(&e.message).to_string()),
+                    );
+                    err_obj.insert(
+                        "code".to_string(),
+                        Value::String(errors::classify(&e.message).code.to_string()),
+                    );
                     self.env.define(catch_var.clone(), Value::Object(err_obj));
                     // FIX: was `result.unwrap_or(Signal::None);` — the semicolon
                     // silently discarded errors from the catch body itself.
@@ -2630,7 +2600,9 @@ impl Interpreter {
                         return result;
                     }
                 }
-                Err(patch_err(RuntimeError::new("non-exhaustive match")))
+                Err(patch_err(RuntimeError::new(
+                    crate::semantics::NON_EXHAUSTIVE_MATCH,
+                )))
             }
             stmt => Ok(match self.exec_stmt(stmt).map_err(patch_err)? {
                 Signal::Return(v) => BlockExit::Return(v),
@@ -3539,10 +3511,9 @@ impl Interpreter {
                             )));
                         }
                         _ => {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot call '{}' on {}",
+                            return Err(RuntimeError::new(&crate::semantics::no_method(
                                 field,
-                                obj.type_name()
+                                obj.type_name(),
                             )))
                         }
                     };
@@ -3575,9 +3546,7 @@ impl Interpreter {
                 match result {
                     Value::ResultOk(value) => Ok(*value),
                     Value::ResultErr(err) => Err(RuntimeError::propagate(Value::ResultErr(err))),
-                    _ => Err(RuntimeError::new(
-                        "`?` expects Result value (Ok(...) or Err(...))",
-                    )),
+                    _ => Err(RuntimeError::new(crate::semantics::TRY_REQUIRES_RESULT)),
                 }
             }
 
@@ -3908,9 +3877,9 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(RuntimeError::new(&format!(
-                    "no field '{}' on object",
-                    field
+                Err(RuntimeError::new(&crate::semantics::no_field(
+                    field,
+                    map.keys().map(String::as_str),
                 )))
             }
             Value::String(s) => match field {
@@ -3969,10 +3938,9 @@ impl Interpreter {
                 "len" => Ok(Value::Int(items.len() as i64)),
                 _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
             },
-            _ => Err(RuntimeError::new(&format!(
-                "cannot access field '{}' on {}",
+            _ => Err(RuntimeError::new(&crate::semantics::field_access(
                 field,
-                obj.type_name()
+                obj.type_name(),
             ))),
         }
     }
@@ -4888,9 +4856,8 @@ impl Interpreter {
 
             Value::BuiltIn(name) => self.call_builtin(&name, args),
 
-            _ => Err(RuntimeError::new(&format!(
-                "cannot call {}",
-                func.type_name()
+            _ => Err(RuntimeError::new(&crate::semantics::not_callable(
+                func.type_name(),
             ))),
         }
     }
@@ -5263,7 +5230,7 @@ impl RuntimeError {
 
     pub fn propagate(value: Value) -> Self {
         let message = match &value {
-            Value::ResultErr(err) => format!("unhandled error: {}", err),
+            Value::ResultErr(err) => crate::semantics::unhandled_error(&err.to_string()),
             _ => format!("unhandled propagated value: {}", value),
         };
         Self {

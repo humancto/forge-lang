@@ -37,8 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Fuzzing** — cargo-fuzz targets in `fuzz/` (`parse`, `compile`, `bytecode`, and a grammar-based `differential` target comparing the interpreter and the VM), a nightly `Fuzz` workflow (plus a Miri job for the C-ABI and JIT bridge code), and `tests/fuzz_smoke.rs`, which runs the same targets on stable in every `cargo test` and replays committed crashers from `fuzz/regressions/`.
 - `VM::cancel_flag()` exposes the VM's cooperative cancellation flag to embedders.
 
+- **Stable runtime error codes** — every runtime and syntax error has a code (`E0000`–`E0033`) from one table shared by both engines (`src/semantics/errors.rs`), so the same failure reports the same code and message on the VM and the interpreter. Errors print as `[E0009] Error: ...` with a one-line hint and a pointer to `forge explain`; caught errors expose `e.code`. Every code has a fixture in `tests/errors/` checked on both engines (`tests/error_codes.rs`).
+- **`forge explain [CODE]`** — explanation, example and fix for any `E`/`T` code; without a code it lists them all. Each type-checker explanation's example is verified to produce its code.
+- **Machine-readable diagnostics** — `--error-format json` (global flag) prints syntax, type and runtime diagnostics as one JSON object per line (`code`, `severity`, `message`, `file`, `line`, `col`, `hint`, `phase`). New `forge check [--format json] [file]` parses and type-checks without running (exit 1 on errors; `--strict` makes type diagnostics errors). `forge mcp`: `check_forge` diagnostics always carry a `code` (`E0001`/`E0002` for syntax errors) and a `hint`; `run_forge` runtime errors carry `code` and `hint`.
+- **Better runtime messages** — "did you mean" for undefined names now also suggests locals on the VM (and prefers the innermost scope on both engines, deterministically); unknown object fields suggest a close field or list the fields; index errors give the valid range; field access on `null` explains where null usually comes from; builtin argument errors name the types that were passed (`len() requires ... (got Int)`); calling a non-function says `cannot call a value of type Int` on both engines.
+- **Editions** — `edition = "2026"` under `[project]` in `forge.toml` is parsed and validated (unknown editions are refused by `run`, `test`, `check` and `mcp`); `forge new` writes it. Only one edition exists; `docs/STABILITY.md` describes how future breaking changes are gated on editions.
+- **Deprecation mechanism for builtins** — a registry (`DEPRECATED` in `src/builtins_registry.rs`) whose entries warn once per process on both engines. Nothing is deprecated yet.
+- **`docs/STABILITY.md`** — the 1.0 stability policy: syntax, semantics, stdlib signatures, error codes, JSON diagnostics, CLI, bytecode format versioning, `forge_lang::Sandbox` semver, plugin ABI v1, editions and the deprecation policy.
+
 ### Changed
 
+- Runtime error output is headed by the error code and shows the hint as `Help:`; `e.type` of a caught `modulo by zero` is now `ArithmeticError` on the interpreter too (it already was on the VM).
 - A `Float` value is no longer accepted where an `Int` is declared (an `Int` still widens to `Float`).
 - The default registry is now `humancto/forge-registry` (the old `forge-lang/registry` URL never existed). A registry without `config.json` is reported as "not a Forge registry" with guidance, instead of every package looking missing.
 - Registry archive extraction rejects symlinks, hard links and device entries as well as absolute and `..` paths.
@@ -47,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `pad_start`/`pad_end` with a negative width no longer try to allocate an astronomically large string (the width is treated as 0).
+- The VM ignored a statement `match` whose arms all failed; it now raises `non-exhaustive match` (E0026) like the interpreter.
+- `?` on an `Err` at the top level of a program ended it silently with exit status 0 on the VM; it now fails with `unhandled error: ...` (E0024) like the interpreter.
+- VM string builtins given a non-string said `expected string argument`; they now name the builtin (`upper() requires a string (got Int)`), as on the interpreter.
 - `pipe_to` no longer deadlocks when both its input and the command's output exceed the OS pipe buffer
 - `which` no longer depends on `/usr/bin/which` being installed
 - `forge run` logs: the default filter now enables the CLI binary's own targets (`forge=info`), so the server's per-request `request` span (`method`, `uri`, `request_id`) and the `forge.server` startup event are no longer filtered out; under `FORGE_LOG_FORMAT=json` the VM-to-interpreter fallback note is a `forge.runtime` JSON event instead of plain text, so stderr stays line-delimited JSON (#119, #120)

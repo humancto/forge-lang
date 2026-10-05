@@ -774,9 +774,8 @@ fn place_child<'v>(
         (Value::Array(_) | Value::Object(_), PlaceStep::Index(other)) => Err(RuntimeError::new(
             &crate::semantics::invalid_index(&type_name, other.type_name()),
         )),
-        (_, PlaceStep::Field(field)) => Err(RuntimeError::new(&format!(
-            "cannot access field '{}' on {}",
-            field, type_name
+        (_, PlaceStep::Field(field)) => Err(RuntimeError::new(&crate::semantics::field_access(
+            field, &type_name,
         ))),
         (_, PlaceStep::Index(_)) => Err(RuntimeError::new(
             &crate::semantics::invalid_index_assign(&type_name),

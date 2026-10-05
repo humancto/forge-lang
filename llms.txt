@@ -240,7 +240,18 @@ try {
 }
 ```
 
-There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `must expr` (both are catchable). `?` only works on `Result` values. `safe { ... }` runs a block and swallows its errors.
+There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `must expr` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. `safe { ... }` runs a block and swallows its errors.
+
+Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0018`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+
+```forge
+try {
+    let xs = [1, 2, 3]
+    println(xs[5])
+} catch e {
+    println(e.code)          // E0009
+}
+```
 
 ## Modules
 
