@@ -804,11 +804,13 @@ impl VM {
                 }
                 _ => Err(VMError::new("float() requires a number or numeric string")),
             },
+            // Like the interpreter: a second argument must be an Int too
+            // (a non-Int one used to be ignored, so `range(1, 2.5)` gave [0]).
             "range" => match (
                 args.first().and_then(|v| v.as_int(&self.gc)),
-                args.get(1).and_then(|v| v.as_int(&self.gc)),
+                args.get(1).map(|v| v.as_int(&self.gc)),
             ) {
-                (Some(start), Some(end)) => {
+                (Some(start), Some(Some(end))) => {
                     // Fallible: an impossible size is an error, not an abort.
                     let items: Vec<Value> =
                         crate::semantics::alloc::int_range(start, end, "range()", |n| {

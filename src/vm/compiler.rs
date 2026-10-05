@@ -647,6 +647,97 @@ fn is_output_expr(expr: &Expr) -> bool {
     )
 }
 
+/// `for v in range(a)` / `range(a, b)` (also `repeat n times`): the shape
+/// `compile_for_range` turns into a counting loop.
+fn is_range_call(function: &Expr, args: &[Expr]) -> bool {
+    matches!(function, Expr::Ident(name) if name == "range")
+        && (1..=2).contains(&args.len())
+        && !args.iter().any(|a| matches!(a, Expr::Spread(_)))
+}
+
+/// Counting loop for `for var in range(..)`; see `vm::range_loop` for the
+/// code shape and why it is exact. The callee and arguments are evaluated
+/// once, in source order, exactly as for the call; whether the counting
+/// path applies is decided at run time by `ForRangePrep`.
+fn compile_for_range(
+    c: &mut Compiler,
+    var: &str,
+    range_fn: &Expr,
+    args: &[Expr],
+    body: &[SpannedStmt],
+) -> Result<(), CompileError> {
+    let saved = c.next_register;
+    // R(f) = callee / counter / iterable, R(f+1) = arg / end / index.
+    let f = c.alloc_reg()?;
+    compile_expr(c, range_fn, f)?;
+    for arg in args {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+    }
+    // A one-argument call still needs R(f+1) for the end / index.
+    while c.next_register < f + 2 {
+        c.alloc_reg()?;
+    }
+    let argc = args.len() as u8;
+    let mode = c.alloc_reg()?;
+    c.emit(encode_abc(OpCode::ForRangePrep, f, argc, mode), 0);
+    let to_fast = c.emit_jump(OpCode::JumpIfTrue, mode, 0);
+
+    // Generic path: call the callee and iterate whatever it returns.
+    c.emit(encode_abc(OpCode::Call, f, argc, f), 0);
+    let zero = c.const_int(0);
+    c.emit(encode_abx(OpCode::LoadConst, f + 1, zero), 0);
+    let generic_head = c.chunk.code_len();
+
+    // Each iteration gets a fresh binding (see the generic `for`).
+    c.push_loop(generic_head, false);
+    c.begin_scope();
+    let var_reg = c.add_local(var, false)?;
+    let cond = c.alloc_reg()?;
+    c.emit(encode_abc(OpCode::IterHas, cond, f, f + 1), 0);
+    let generic_exit = c.emit_jump(OpCode::JumpIfFalse, cond, 0);
+    c.free_to(cond);
+    c.emit(encode_abc(OpCode::IterGet, var_reg, f, f + 1), 0);
+    let generic_to_body = c.emit_jump(OpCode::Jump, 0, 0);
+
+    // Counting path.
+    c.patch_jump(to_fast);
+    let fast_head = c.chunk.code_len();
+    c.emit(encode_abc(OpCode::ForRangeNext, f, var_reg, 0), 0);
+    let fast_exit = c.emit_jump(OpCode::Jump, 0, 0);
+
+    c.patch_jump(generic_to_body);
+    for s in body {
+        c.set_span(s);
+        compile_stmt(c, &s.stmt)?;
+    }
+    c.end_scope();
+
+    let continue_jumps = c
+        .loops
+        .last_mut()
+        .and_then(|ctx| ctx.continue_jumps.take())
+        .unwrap_or_default();
+    for jump in continue_jumps {
+        c.patch_jump(jump);
+    }
+    let to_generic_step = c.emit_jump(OpCode::JumpIfFalse, mode, 0);
+    c.emit_loop(fast_head, 0);
+    c.patch_jump(to_generic_step);
+    let one = c.const_int(1);
+    let one_reg = c.alloc_reg()?;
+    c.emit(encode_abx(OpCode::LoadConst, one_reg, one), 0);
+    c.emit(encode_abc(OpCode::Add, f + 1, f + 1, one_reg), 0);
+    c.free_to(one_reg);
+    c.emit_loop(generic_head, 0);
+
+    c.patch_jump(generic_exit);
+    c.patch_jump(fast_exit);
+    c.pop_loop()?;
+    c.free_to(saved);
+    Ok(())
+}
+
 fn compile_hidden_call(
     c: &mut Compiler,
     name: &str,
@@ -1701,6 +1792,20 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             c.emit_loop(loop_start, 0);
             c.pop_loop()
+        }
+
+        Stmt::For {
+            var,
+            var2: None,
+            iterable:
+                Expr::Call {
+                    function: range_fn,
+                    args: range_args,
+                },
+            body,
+            ..
+        } if is_range_call(range_fn, range_args) => {
+            compile_for_range(c, var, range_fn, range_args, body)
         }
 
         Stmt::For {

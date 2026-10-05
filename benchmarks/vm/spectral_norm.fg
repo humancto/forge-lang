@@ -1,0 +1,50 @@
+// VM benchmark: spectral norm of the 100x100 infinite-matrix section
+// (10 power iterations). Float arithmetic, a hot pure helper `a(i, j)`
+// called from array loops.
+fn a(i, j) {
+    return 1.0 / ((i + j) * (i + j + 1) / 2 + i + 1)
+}
+
+fn mul_av(v, n) {
+    let mut out = []
+    for i in range(n) {
+        let mut s = 0.0
+        for j in range(n) {
+            s = s + a(i, j) * v[j]
+        }
+        out.push(s)
+    }
+    return out
+}
+
+fn mul_atv(v, n) {
+    let mut out = []
+    for i in range(n) {
+        let mut s = 0.0
+        for j in range(n) {
+            s = s + a(j, i) * v[j]
+        }
+        out.push(s)
+    }
+    return out
+}
+
+fn spectral_norm(n) {
+    let mut u = []
+    for i in range(n) {
+        u.push(1.0)
+    }
+    let mut v = []
+    for k in range(10) {
+        v = mul_atv(mul_av(u, n), n)
+        u = mul_atv(mul_av(v, n), n)
+    }
+    let mut vbv = 0.0
+    let mut vv = 0.0
+    for i in range(n) {
+        vbv = vbv + u[i] * v[i]
+        vv = vv + v[i] * v[i]
+    }
+    return math.sqrt(vbv / vv)
+}
+println(math.round(spectral_norm(100) * 1000000000))

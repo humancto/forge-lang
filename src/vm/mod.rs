@@ -10,6 +10,7 @@ mod local_ops; // local-variable access and in-place update opcodes
 pub mod machine;
 pub mod nanbox;
 pub mod profiler;
+mod range_loop; // counting `for v in range(..)` / `repeat n times` loops
 pub mod serialize;
 pub mod serve;
 pub mod value;
