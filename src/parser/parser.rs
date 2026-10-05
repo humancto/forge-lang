@@ -8,11 +8,43 @@ use crate::lexer::Lexer;
 pub struct Parser {
     tokens: Vec<Spanned>,
     pos: usize,
+    /// Current nesting of recursive productions (see [`MAX_NESTING`]).
+    depth: usize,
 }
+
+/// Deepest nesting of expressions, statements, patterns and type
+/// annotations the parser accepts. Untrusted source (e.g. `((((...` from an
+/// agent) must produce a parse error, never a native stack overflow that
+/// aborts the host; this also bounds the recursion of every later pass.
+pub const MAX_NESTING: usize = 1000;
 
 impl Parser {
     pub fn new(tokens: Vec<Spanned>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Enter one level of a recursive production. Pair with
+    /// [`Parser::leave`] (see [`Parser::nested`]).
+    fn enter(&mut self) -> Result<(), ParseError> {
+        if self.depth >= MAX_NESTING || crate::runtime::recursion::native_stack_exhausted() {
+            return Err(self.error("code is nested too deeply"));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn nested<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        self.enter()?;
+        let result = f(self);
+        self.depth -= 1;
+        result
     }
 
     /// Return (line, col) of the current token position.
@@ -41,6 +73,10 @@ impl Parser {
     // ========== Statement Parsing ==========
 
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.nested(Self::parse_statement_inner)
+    }
+
+    fn parse_statement_inner(&mut self) -> Result<Stmt, ParseError> {
         self.skip_newlines();
 
         match self.current_token() {
@@ -1074,6 +1110,10 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        self.nested(Self::parse_pattern_inner)
+    }
+
+    fn parse_pattern_inner(&mut self) -> Result<Pattern, ParseError> {
         match self.current_token() {
             Token::Ident(ref name) if name == "_" => {
                 self.advance();
@@ -1290,7 +1330,7 @@ impl Parser {
     // ========== Expression Parsing (Pratt) ==========
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_query_chain()
+        self.nested(Self::parse_query_chain)
     }
 
     fn parse_query_chain(&mut self) -> Result<Expr, ParseError> {
@@ -1528,6 +1568,10 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        self.nested(Self::parse_unary_inner)
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
         match self.current_token() {
             Token::Await | Token::Hold => {
                 self.advance();
@@ -2042,6 +2086,10 @@ impl Parser {
     }
 
     fn parse_type_ann(&mut self) -> Result<TypeAnn, ParseError> {
+        self.nested(Self::parse_type_ann_inner)
+    }
+
+    fn parse_type_ann_inner(&mut self) -> Result<TypeAnn, ParseError> {
         match self.current_token() {
             Token::LBracket => {
                 self.advance();
@@ -2267,6 +2315,39 @@ mod tests {
         let tokens = lexer.tokenize().expect("lexing should succeed");
         let mut parser = Parser::new(tokens);
         parser.parse_program().expect("parsing should succeed")
+    }
+
+    fn parse_err(input: &str) -> ParseError {
+        let tokens = Lexer::new(input).tokenize().expect("lexing should succeed");
+        match Parser::new(tokens).parse_program() {
+            Ok(_) => panic!("expected a parse error for {input:.40}"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn pathological_nesting_is_a_parse_error_not_a_stack_overflow() {
+        // Run on a small stack: the guard must trip before it overflows.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let n = 100_000;
+                for src in [
+                    format!("let x = {}1{}", "(".repeat(n), ")".repeat(n)),
+                    format!("let x = {}1", "-".repeat(n)),
+                    format!("let x = {}{}", "[".repeat(n), "]".repeat(n)),
+                    format!("{}{}", "if true { ".repeat(n), "}".repeat(n)),
+                ] {
+                    let e = parse_err(&src);
+                    assert!(e.message.contains("nested too deeply"), "{}", e.message);
+                }
+                // Reasonable nesting still parses.
+                let ok = format!("let x = {}1{}", "(".repeat(100), ")".repeat(100));
+                parse_program(&ok);
+            })
+            .expect("spawn")
+            .join()
+            .expect("no stack overflow");
     }
 
     #[test]
