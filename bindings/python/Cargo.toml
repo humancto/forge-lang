@@ -1,0 +1,36 @@
+[package]
+name = "forge-lang-python"
+# Kept in lockstep with the forge-lang crate; the wheel version comes from here.
+version = "0.9.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Python bindings for the Forge sandbox (forge-lang on PyPI)"
+license = "MIT"
+repository = "https://github.com/humancto/forge-lang"
+# Never published to crates.io: it ships as Python wheels.
+publish = false
+
+# A standalone workspace root, so this crate never joins (or changes how
+# cargo resolves or publishes) the main forge-lang package at the repo root.
+[workspace]
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The sandbox runs on the tree-walking interpreter, so the Cranelift JIT is
+# left out of the wheel. The database drivers stay switchable.
+forge-lang = { path = "../..", default-features = false }
+pyo3 = { version = "0.29", features = ["abi3-py39", "extension-module"] }
+
+[features]
+default = ["postgres", "mysql"]
+postgres = ["forge-lang/postgres"]
+mysql = ["forge-lang/mysql"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

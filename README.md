@@ -79,7 +79,7 @@ say crypto.sha256("password")
 | [📚 Standard Library](#-standard-library-22-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
 | [🔧 CLI](#-cli-commands)                             | [📂 Examples](#-examples)       | [🏛️ Architecture](#️-architecture)     |
 | [📕 Book](#-the-book)                                | [🗺️ Roadmap](#️-roadmap)         | [🤝 Contributing](#-contributing)     |
-| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) |                                 |                                       |
+| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) | [🐍 Python](#-use-forge-from-python) |                                       |
 
 ---
 
@@ -652,6 +652,34 @@ or `claude mcp add forge -- forge mcp --allow-net=api.example.com`.
 - Each call runs on its own thread: a stuck script times out while the server keeps answering, and `notifications/cancelled` stops it. `run` (shell) is never granted unless you pass `--allow-run`.
 - Nothing a script prints or reads can reach the protocol stream (stdin/stdout are moved off fds 0/1 on Unix).
 - Protocol: `2026-07-28` (stateless, `server/discover`) and the `initialize` handshake for `2025-11-25` back to `2024-11-05`. Rust hosts can embed the same server: `forge_lang::mcp::serve(reader, writer, config)`.
+
+---
+
+## 🐍 Use Forge from Python
+
+The same sandbox is available in-process to Python hosts (agent frameworks, notebooks, automation) as the `forge-lang` package: abi3 wheels for Linux, macOS and Windows, CPython 3.9+, no `forge` binary needed.
+
+```bash
+pip install forge-lang
+```
+
+```python
+from forge_lang import Sandbox, ForgeError
+
+sb = Sandbox(
+    allow_read=["./workspace"],          # everything else is denied
+    allow_net=["api.github.com"],
+    max_time=10,                         # seconds
+    max_output=32_000,                   # bytes
+)
+
+try:
+    print(sb.run('say "hello from Forge"').stdout)
+except ForgeError as e:                  # ForgeSyntaxError, ForgePermissionError,
+    print(e.kind, e, e.stdout)           # ForgeRuntimeError, ForgeTimeoutError, ...
+```
+
+`Sandbox` is immutable and thread-safe, `run()` releases the GIL, `check()` returns parse/type diagnostics without running anything, and a `CancelToken` (or Ctrl-C) stops a run. See [`bindings/python/README.md`](bindings/python/README.md) for the full API and an agent "code mode" tool handler. A Node.js package (napi-rs) is planned: [`bindings/node/README.md`](bindings/node/README.md).
 
 ---
 
