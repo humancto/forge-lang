@@ -604,7 +604,7 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 | `forge build <file>`          | Compile to `.fgc` bytecode                           |
 | `forge build --native <file>` | Native executable embedding source (servers work)    |
 | `forge build --aot <file>`    | Native executable embedding bytecode (VM programs)   |
-| `forge install` / `add` / `update` / `search` / `publish` | Package management       |
+| `forge install` / `add` / `update` / `search` / `publish` / `yank` | Package management (sparse registry, [RFC 0007](rfcs/0007-package-registry.md)) |
 | `forge watch <file>`          | Re-run on file changes                               |
 | `forge doc [paths]`           | Generate documentation                               |
 | `forge lsp` / `forge dap`     | Language server / debug adapter                      |

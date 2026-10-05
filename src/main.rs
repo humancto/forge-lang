@@ -19,6 +19,7 @@ mod parser;
 mod permissions;
 mod plugins;
 mod publish;
+mod publish_index;
 mod registry;
 mod repl;
 mod runtime;
@@ -437,14 +438,45 @@ enum Command {
     },
     /// Update all dependencies to latest compatible versions
     Update,
-    /// Publish the current project to the local registry
+    /// Publish the current project to a local registry, or to a clone of a
+    /// sparse-index repository (a directory with config.json; rfcs/0007)
     Publish {
         /// Show what would be packaged without publishing
         #[arg(long)]
         dry_run: bool,
-        /// Custom registry path (defaults to ~/.forge/registry/)
+        /// Local registry directory (default ~/.forge/registry/), or a local
+        /// clone of a sparse-index repository
         #[arg(long)]
         registry: Option<String>,
+        /// Sign the index entry with your ed25519 publisher key
+        /// (~/.forge/keys/publish.key or $FORGE_SIGNING_KEY; created on first use)
+        #[arg(long)]
+        sign: bool,
+        /// Archive URL template for index publishing ({name}, {vers});
+        /// default: a GitHub release asset of project.repository
+        #[arg(long, value_name = "URL")]
+        download_url: Option<String>,
+        /// Where to write the archive for index publishing (default ./dist)
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+        /// Do not create a branch and commit in the index clone
+        #[arg(long)]
+        no_commit: bool,
+    },
+    /// Mark a published version as yanked (or un-yank it) in a local clone
+    /// of a sparse-index repository
+    Yank {
+        /// name@version to yank
+        package: String,
+        /// Local clone of the sparse-index repository
+        #[arg(long)]
+        registry: PathBuf,
+        /// Un-yank instead
+        #[arg(long)]
+        undo: bool,
+        /// Do not create a branch and commit in the index clone
+        #[arg(long)]
+        no_commit: bool,
     },
     /// Search the package registry
     Search {
@@ -750,8 +782,74 @@ async fn async_main() {
         Some(Command::Update) => {
             run_off_runtime(package::update);
         }
-        Some(Command::Publish { dry_run, registry }) => {
-            publish::publish(dry_run, registry.as_deref());
+        Some(Command::Publish {
+            dry_run,
+            registry,
+            sign,
+            download_url,
+            out_dir,
+            no_commit,
+        }) => {
+            let index_dir = registry
+                .as_deref()
+                .map(PathBuf::from)
+                .filter(|p| publish_index::is_index_repo(p));
+            match index_dir {
+                Some(index_dir) => {
+                    let opts = publish_index::IndexPublishOptions {
+                        project_dir: std::path::Path::new("."),
+                        index_dir: &index_dir,
+                        dry_run,
+                        sign,
+                        key_path: None,
+                        download_url,
+                        out_dir,
+                        commit: !no_commit,
+                    };
+                    match publish_index::publish_to_index(&opts) {
+                        Ok(published) => publish_index::print_report(&index_dir, &published),
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+                None => {
+                    if sign || download_url.is_some() || out_dir.is_some() || no_commit {
+                        eprintln!(
+                            "Error: --sign, --download-url, --out-dir and --no-commit apply to \
+                             publishing into a sparse-index clone (a --registry directory with config.json)"
+                        );
+                        process::exit(2);
+                    }
+                    publish::publish(dry_run, registry.as_deref());
+                }
+            }
+        }
+        Some(Command::Yank {
+            package: pkg,
+            registry,
+            undo,
+            no_commit,
+        }) => {
+            let Some((name, vers)) = pkg.split_once('@') else {
+                eprintln!("Error: expected name@version, got '{}'", pkg);
+                process::exit(2);
+            };
+            match publish_index::yank(&registry, name, vers, undo, !no_commit) {
+                Ok(branch) => {
+                    let verb = if undo { "Un-yanked" } else { "Yanked" };
+                    println!("  {} {}@{} in {}", verb, name, vers, registry.display());
+                    match branch {
+                        Some(b) => println!("  Push branch '{}' and open a pull request.", b),
+                        None => println!("  Commit the change and open a pull request."),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
         }
         Some(Command::Search { query }) => {
             let q = query.as_deref().unwrap_or("");

@@ -85,6 +85,9 @@ base64 = "0.22"
 hex = "0.4"
 hmac = "0.12"
 getrandom = "0.2"
+# Package-registry signatures (rfcs/0007). Keys are generated from getrandom
+# bytes, so the rand_core feature is not needed.
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "zeroize"] }
 
 # === URL Parsing ===
 url = "2"
