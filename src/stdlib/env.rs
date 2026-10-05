@@ -13,6 +13,7 @@ pub fn create_module() -> Value {
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
+    crate::permissions::require(crate::permissions::Capability::Env, name)?;
     match name {
         "env.get" => {
             let key = match args.first() {
@@ -54,6 +55,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Some(Value::String(s)) => s.clone(),
                 _ => ".env".to_string(),
             };
+            crate::stdlib::fs::confine_read(&path)?;
             match dotenvy::from_filename(&path) {
                 Ok(_) => Ok(Value::Bool(true)),
                 Err(e) => {

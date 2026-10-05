@@ -426,6 +426,7 @@ impl Interpreter {
             },
             "fetch" => match args.first() {
                 Some(Value::String(url)) => {
+                    crate::permissions::require_net(url).map_err(|e| RuntimeError::new(&e.to_string()))?;
                     let method = match args.get(1) {
                         Some(Value::Object(opts)) => opts
                             .get("method")
@@ -1605,6 +1606,7 @@ impl Interpreter {
                 Ok(Value::String(buffer.trim_end().to_string()))
             }
             "exit" => {
+                crate::permissions::require(crate::permissions::Capability::Process, "exit").map_err(|e| RuntimeError::new(&e.to_string()))?;
                 let code = match args.first() {
                     Some(Value::Int(n)) => *n as i32,
                     _ => 0,
@@ -1734,6 +1736,7 @@ impl Interpreter {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("cd() requires a path string")),
                 };
+                crate::permissions::require(crate::permissions::Capability::Process, "cd").map_err(|e| RuntimeError::new(&e.to_string()))?;
                 std::env::set_current_dir(&path)
                     .map_err(|e| RuntimeError::new(&format!("cd error: {}", e)))?;
                 Ok(Value::String(path))

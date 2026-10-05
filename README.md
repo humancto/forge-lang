@@ -534,11 +534,11 @@ Measured on one 4-vCPU x86_64 Linux VM (Intel Xeon @ 2.10GHz) with a release bui
 
 | Workload                             | VM (default) | `--jit` | `--interp` | Python 3.11 |
 | ------------------------------------ | -----------: | ------: | ---------: | ----------: |
-| Recursive `fib(30)`                  |      ~450 ms | ~450 ms |     ~6.7 s |     ~130 ms |
-| Numeric `while` loop, 20M iterations |        ~21 s |  ~80 ms |          — |      ~1.5 s |
+| Recursive `fib(30)`                  |       ~25 ms |  ~17 ms |     ~7.7 s |     ~120 ms |
+| Numeric `while` loop, 20M iterations |        ~18 s |  ~45 ms |          — |      ~1.0 s |
 | Startup (`forge -e 'println(1)'`)    |        ~7 ms |       — |          — |           — |
 
-The JIT compiles numeric **leaf** functions (no calls, strings, arrays, or closures) to native code; recursive functions like `fib` currently stay on the VM. VM interpretive overhead is a known Phase 0 performance item — see [ROADMAP.md](ROADMAP.md).
+The JIT compiles functions over `Int`/`Bool` values (arithmetic, comparisons, loops, self-recursion) to native code, guarded by type checks that fall back to the VM, so it never changes results. The default VM tiers a function up after 100 calls, which is why recursive `fib` is fast by default while a loop inside a function called once only runs native under `--jit`. VM interpretive overhead (~0.9 µs per loop iteration) is a known Phase 0 performance item — see [ROADMAP.md](ROADMAP.md).
 
 <details>
 <summary><strong>🌐 HTTP Server benchmark — 20,000 requests / 200 concurrent (GET /ping → JSON)</strong></summary>
@@ -759,6 +759,29 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the architecture guide and PR guideli
 ---
 
 ## 🔒 Security
+
+### Sandboxing and permissions
+
+Forge has a Deno-style capability model shared by both engines. Defaults are unchanged (`forge run` allows everything except subprocesses), and `--sandbox` turns it into default-deny:
+
+```bash
+forge run --sandbox --allow-read=./data --allow-net=api.example.com agent.fg
+forge run --max-time 10 job.fg     # wall-clock limit (exit 124)
+```
+
+Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`. Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
+
+Embedding Forge in a Rust host (for AI agents and automation) starts from deny-all:
+
+```rust
+let out = forge_lang::Sandbox::new()
+    .allow_read(["./data"])
+    .max_time(std::time::Duration::from_secs(5))
+    .run_source(r#"say "hi""#)?;
+assert_eq!(out.stdout, "hi\n");
+```
+
+Details and current limits: [SECURITY.md — Sandboxing and permissions](SECURITY.md#sandboxing-and-permissions).
 
 To report a security vulnerability, please email the maintainers directly instead of opening a public issue. See [SECURITY.md](SECURITY.md).
 

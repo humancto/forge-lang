@@ -165,6 +165,7 @@ fn forge_to_pg_param(val: &Value) -> Box<dyn tokio_postgres::types::ToSql + Sync
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
+    crate::permissions::require(crate::permissions::Capability::Db, name)?;
     match name {
         // ── pg.connect(conn_str)                  → TLS with verification (secure default)
         // ── pg.connect(conn_str, "tls")           → TLS + cert verification

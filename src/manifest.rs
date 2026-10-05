@@ -12,6 +12,68 @@ pub struct Manifest {
     pub test: TestConfig,
     #[serde(default)]
     pub scripts: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionsConfig>,
+}
+
+/// `[permissions]` in forge.toml — the project's default policy for
+/// `forge run` / `forge test`. CLI flags override it per capability.
+///
+/// ```toml
+/// [permissions]
+/// sandbox = true                 # deny everything not granted below
+/// allow-read = ["./data"]        # or `true` for everywhere
+/// allow-write = ["./out"]
+/// allow-net = ["api.example.com"]
+/// allow-env = true
+/// max-time = 30                  # seconds
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct PermissionsConfig {
+    #[serde(default)]
+    pub sandbox: bool,
+    pub allow_read: Option<GrantSpec>,
+    pub allow_write: Option<GrantSpec>,
+    pub allow_net: Option<GrantSpec>,
+    pub allow_env: Option<bool>,
+    pub allow_db: Option<bool>,
+    pub allow_ai: Option<bool>,
+    pub allow_run: Option<bool>,
+    pub max_time: Option<f64>,
+}
+
+/// `true`/`false`, or a list of paths/hosts the grant is scoped to.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum GrantSpec {
+    Flag(bool),
+    List(Vec<String>),
+}
+
+/// Read only the `[permissions]` table of `./forge.toml`. Unlike
+/// [`load_manifest`], a malformed table is an error, not `None`: silently
+/// ignoring a policy the author asked for would fail open.
+pub fn load_permissions() -> Result<Option<PermissionsConfig>, String> {
+    load_permissions_from(Path::new("forge.toml"))
+}
+
+pub fn load_permissions_from(path: &Path) -> Result<Option<PermissionsConfig>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    let table: toml::Table =
+        toml::from_str(&content).map_err(|e| format!("invalid {}: {}", path.display(), e))?;
+    match table.get("permissions") {
+        None => Ok(None),
+        Some(v) => v
+            .clone()
+            .try_into::<PermissionsConfig>()
+            .map(Some)
+            .map_err(|e| format!("invalid [permissions] in {}: {}", path.display(), e)),
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -22,21 +22,21 @@ fn spawn_thread(
     closure: Value,
     slot: Arc<(Mutex<Option<SharedValue>>, Condvar)>,
 ) {
-    std::thread::spawn(move || {
+    crate::permissions::spawn(move || {
         sendable.run(closure, slot);
     });
 }
 
 /// Run a schedule closure in a loop on a forked VM in a new OS thread.
 fn spawn_schedule_thread(sendable: SendableVM, closure: Value, interval: Duration) {
-    std::thread::spawn(move || {
+    crate::permissions::spawn(move || {
         sendable.run_loop(closure, interval);
     });
 }
 
 /// Run a watch closure on a forked VM, polling a file path for mtime changes.
 fn spawn_watch_thread(sendable: SendableVM, closure: Value, path: String) {
-    std::thread::spawn(move || {
+    crate::permissions::spawn(move || {
         sendable.run_watch(closure, path);
     });
 }
@@ -1935,6 +1935,8 @@ impl VM {
                         self.registers[base + a as usize] = result;
                     }
                     OpCode::Ask => {
+                        crate::permissions::require(crate::permissions::Capability::Ai, "ask")
+                            .map_err(|e| VMError::new(&e.to_string()))?;
                         let prompt_val = &self.registers[base + b as usize];
                         let prompt_str = prompt_val.display(&self.gc);
 
