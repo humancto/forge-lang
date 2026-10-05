@@ -15,8 +15,8 @@
 //! make both engines call it. Never re-implement one of these rules inline in
 //! `interpreter/` or `vm/`.
 
-pub mod types;
 pub mod alloc;
+pub mod types;
 
 /// Borrowed view of a binary-operator operand.
 #[derive(Clone, Copy, Debug)]
