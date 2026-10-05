@@ -103,7 +103,7 @@ Source of truth: `src/stdlib/`. Globals in the interpreter: math, fs, io, crypto
 - Collections: len, push, pop, keys, values, contains, range, enumerate, sum, min_of, max_of, unique, zip, flatten, group_by, chunk, slice, partition
 - Functional: map, filter, reduce, sort (with custom comparator), reverse, find, flat_map, any, all, sample, shuffle
 - Streams: `.stream()` on arrays/tuples/sets/maps/strings → lazy pull-based iterator. Combinators: filter, map, take, skip, chain, zip, enumerate. Terminals: collect/to_array, count, for_each, first, reduce, sum, find, any, all. Single-use (drained streams yield empty terminals), iterative (no recursion depth limit), poisons on closure error.
-- Enum methods: `impl MyType { fn foo(it, ...) { ... } }` attaches instance methods to algebraic `type` definitions; dispatch walks through the ADT value's `__type__` field into the method table. Supports method bodies with `match it { Variant(f) => ... }`, returning new ADT instances, chained calls, and dispatch via collection lambdas. Known gaps: `TypeName.method()` static dispatch on algebraic types is not resolved today (works only for `struct`), and a preexisting interpreter bug in `match_pattern` rejects deeply recursive ADT matches when outer-frame bindings collide with field pattern names (the VM is unaffected).
+- Enum methods: `impl MyType { fn foo(it, ...) { ... } }` attaches instance methods to algebraic `type` definitions; dispatch walks through the ADT value's `__type__` field into the method table. Supports method bodies with `match it { Variant(f) => ... }`, returning new ADT instances, chained calls, and dispatch via collection lambdas. Known gap: `TypeName.method()` static dispatch on algebraic types is not resolved today (works only for `struct`).
 - Objects: has_key, get (with dot-paths), pick, omit, merge, entries, from_entries, diff
 - Strings: split, join, replace, starts_with, ends_with, lines, substring, index_of, last_index_of, pad_start, pad_end, capitalize, title, repeat_str, count, slugify, snake_case, camel_case
 - Results: Ok, Err, is_ok, is_err, unwrap, unwrap_or
@@ -268,8 +268,14 @@ program's `Interpreter` is wrapped in a read-only
   WS connections are fully isolated.
 - Large top-level state (`let huge = read_file("100mb.json")`) is
   copied on every request fork. `Value::String` is `String`, not
-  `Arc<str>`. Keep top-level data small or load it lazily inside the
-  handler.
+  `Arc<str>` (only `Value::Function` bodies are `Arc`-shared). Keep
+  top-level data small or load it lazily inside the handler.
+- Handlers run on the blocking pool, whose threads get
+  `recursion::WORKER_STACK_SIZE` (256 MiB reserved) when the runtime is
+  built with `recursion::configure_runtime` (the CLI and standalone
+  binaries do this). A host embedding `start_server` in its own runtime
+  should call it too, or handler recursion is capped by the 2 MiB
+  default (~150 frames).
 - `Value::Stream` in the template env is **forbidden** (debug builds
   panic at first fork). Streams are single-use; sharing across forks
   silently breaks. Construct streams inside handlers, not at module
@@ -405,6 +411,11 @@ call `tracing_init::init_subscriber()` on first use.
 - **Recursion limits live in `runtime/recursion.rs`.** Every engine calls `check_call_depth(depth)` per Forge call: a configurable depth limit (default 10000, `FORGE_MAX_DEPTH` / `--max-depth`) plus a native-stack guard (red zone below the thread's stack end), and reports `depth_exceeded_message` so the text is identical everywhere. The CLI runs on a `forge-main` thread with a 1 GiB (lazily committed) stack; unregistered threads are assumed to have 2 MiB. Measured cost per Forge call: ~16 KB interpreter, ~4 KB VM. JIT'd self-recursion receives the remaining depth budget and deopts to the VM before exceeding the limit, so the error is identical.
 - **Import cycles: `runtime/imports.rs::enter_import`.** Both engines push the resolved module path (RAII `ImportGuard`) before running an imported file and get `circular import: a.fg -> b.fg -> a.fg` on re-entry. The chain is per-thread and unwinds on drop.
 - **VM stdlib tables are backfilled from the interpreter.** `VM::backfill_stdlib_from_interpreter` adds any member of `stdlib::*::create_module()` missing from the hand-written VM module tables (fixed `fs.size`, `term.sparkline`, `math.inf` on the VM). VM `db.*`/`term.*` now use the full `args_to_interp` conversion — a string-only conversion silently dropped array/object arguments.
+- **Interpreter calls are lexical.** `call_function_inner` runs every function in `closure` + one fresh parameter scope. The old "global function fast path" pushed the callee's scope onto the *caller's* env: dynamic scoping, and O(call depth) global lookups. Never reintroduce a path that executes a body on top of the caller's scopes.
+- **Reading a variable copies it.** `Environment::get` deep-clones (strings, arrays, objects are owned). Hot paths must borrow via `Environment::with_value` / `with_value_mut` / `with_binding_mut` (see `src/interpreter/places.rs`). The callback runs under the scope `Mutex`, which is not re-entrant: it must not touch the environment or run Forge code — evaluate operands first, and only reorder evaluation when the operand `is_effect_free`.
+- **Statement bodies don't produce values.** Loop bodies, statement `if` branches, `match` arms and `try`/`catch` run via `exec_body`, which evaluates a trailing expression for effect only (so a trailing `out.push(x)` does not copy `out`). Only `when`/`safe` statement values are consumed by `eval_block_value`; if that changes, `exec_body` callers must change too.
+- **Arc-backed `Value::String`/`Array`/`Object` is blocked on the VM.** `src/vm` constructs and destructures `interpreter::Value::{Array, Object, Set, Map, Tuple, String}` with owned payloads, so moving them to `Arc` (copy-on-write, and hashed Set/Map indexes) needs a coordinated VM change.
+- **Threads that run Forge code need a registered stack.** Use `recursion::spawn_worker` (std threads) or `recursion::configure_runtime` (tokio runtimes); an unregistered thread is assumed to have 2 MiB and the guard stops recursion early.
 
 ## Module Dependency Map
 

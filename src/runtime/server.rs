@@ -3,7 +3,12 @@
 //! Per-request fork architecture: each incoming request gets its own
 //! Interpreter forked from a shared, read-only [`InterpreterTemplate`].
 //! Handlers run on tokio's blocking pool via [`tokio::task::spawn_blocking`]
-//! so synchronous Forge code never blocks an async worker thread.
+//! so synchronous Forge code never blocks an async worker thread. The CLI
+//! and standalone binaries build their runtime with
+//! [`crate::runtime::recursion::configure_runtime`], which gives blocking
+//! threads `WORKER_STACK_SIZE` bytes of stack registered with the recursion
+//! guard, so recursion inside a handler is limited like anywhere else
+//! instead of by tokio's 2 MiB default.
 //!
 //! Concurrency guarantees:
 //! - **No global lock on the hot path.** Forks share only the
@@ -206,8 +211,8 @@ fn call_handler(
     };
 
     let mut args: Vec<Value> = Vec::new();
-    if let Value::Function { ref params, .. } = handler {
-        for param in params {
+    if let Value::Function(ref func) = handler {
+        for param in &func.params {
             if let Some(val) = path_params.get(&param.name) {
                 args.push(Value::String(val.clone()));
             } else if param.name == "body" || param.name == "data" {

@@ -1,0 +1,8 @@
+// Interpreter benchmark: 100k a.push(i) calls on a mutable array.
+let mut a = []
+let mut i = 0
+while i < 100000 {
+    a.push(i)
+    i = i + 1
+}
+println(len(a))

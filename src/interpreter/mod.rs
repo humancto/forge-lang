@@ -1,4 +1,5 @@
 mod builtins; // call_builtin — extracted for readability
+mod places; // in-place reads and updates of variables
 use crate::parser::ast::*;
 /// Forge Tree-Walk Interpreter
 /// Walks the AST and executes it directly.
@@ -132,6 +133,17 @@ impl StreamKind {
     }
 }
 
+/// A named function: its definition plus the environment it closes over.
+/// Immutable once created; see [`Value::Function`].
+#[derive(Debug)]
+pub struct FunctionValue {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub body: Vec<SpannedStmt>,
+    pub closure: Environment,
+    pub decorators: Vec<Decorator>,
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -150,16 +162,12 @@ pub enum Value {
     /// combinators can wrap upstreams without cloning cursor state.
     Stream(Arc<Mutex<StreamCell>>),
     Object(IndexMap<String, Value>),
-    Function {
-        name: String,
-        params: Vec<Param>,
-        body: Vec<SpannedStmt>,
-        closure: Environment,
-        decorators: Vec<Decorator>,
-    },
+    /// Named function. Shared by `Arc`: reading a function variable (every
+    /// call does) is a refcount bump, never a copy of its body.
+    Function(Arc<FunctionValue>),
     Lambda {
-        params: Vec<Param>,
-        body: Vec<SpannedStmt>,
+        params: Arc<[Param]>,
+        body: Arc<[SpannedStmt]>,
         closure: Arc<std::sync::Mutex<Environment>>,
     },
     ResultOk(Box<Value>),
@@ -292,7 +300,7 @@ impl Value {
             Value::Map(_) => "Map",
             Value::Object(_) => "Object",
             Value::Stream(_) => "Stream",
-            Value::Function { .. } => "Function",
+            Value::Function(_) => "Function",
             Value::Lambda { .. } => "Lambda",
             Value::ResultOk(_) | Value::ResultErr(_) => "Result",
             Value::Some(_) | Value::None => "Option",
@@ -404,7 +412,7 @@ impl fmt::Display for Value {
                 write!(f, "Stream({})", name)
             }
             Value::Object(_) => write!(f, "{}", self.to_json_string()),
-            Value::Function { name, .. } => write!(f, "<fn {}>", name),
+            Value::Function(func) => write!(f, "<fn {}>", func.name),
             Value::Lambda { .. } => write!(f, "<lambda>"),
             Value::ResultOk(v) => write!(f, "Ok({})", v),
             Value::ResultErr(v) => write!(f, "Err({})", v),
@@ -418,40 +426,134 @@ impl fmt::Display for Value {
     }
 }
 
-/// Variable environment (scope chain) — uses Arc for O(1) cloning
+/// One variable binding inside a [`Scope`].
+#[derive(Debug, Clone)]
+struct Binding {
+    name: String,
+    value: Value,
+    mutable: bool,
+}
+
+/// Scopes with more bindings than this get a hash index; smaller ones
+/// (function frames, loop bodies, blocks) are scanned linearly, which is
+/// faster than hashing for a handful of short names.
+const SCOPE_INDEX_THRESHOLD: usize = 12;
+
+/// The bindings of one lexical scope, in definition order.
+///
+/// Value and mutability live in the same entry so a lookup touches one
+/// lock and one table. Bindings are never removed from a scope (a scope is
+/// dropped as a whole), so positions stay valid for the lazily built index.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    bindings: Vec<Binding>,
+    index: Option<HashMap<String, usize>>,
+}
+
+impl Scope {
+    fn position(&self, name: &str) -> Option<usize> {
+        match &self.index {
+            Some(index) => index.get(name).copied(),
+            None => self.bindings.iter().position(|b| b.name == name),
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&Binding> {
+        self.position(name).map(|i| &self.bindings[i])
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        self.position(name).map(move |i| &mut self.bindings[i])
+    }
+
+    /// Define or redefine `name` in this scope.
+    fn insert(&mut self, name: String, value: Value, mutable: bool) {
+        if let Some(binding) = self.get_mut(&name) {
+            binding.value = value;
+            binding.mutable = mutable;
+            return;
+        }
+        let pos = self.bindings.len();
+        if let Some(index) = &mut self.index {
+            index.insert(name.clone(), pos);
+        }
+        self.bindings.push(Binding {
+            name,
+            value,
+            mutable,
+        });
+        if self.index.is_none() && self.bindings.len() > SCOPE_INDEX_THRESHOLD {
+            self.index = Some(
+                self.bindings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (b.name.clone(), i))
+                    .collect(),
+            );
+        }
+    }
+
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.bindings.iter().map(|b| b.name.as_str())
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Value> {
+        self.bindings.iter().map(|b| &b.value)
+    }
+}
+
+/// Shared, lockable scope. Closures capture scopes by `Arc`, so a write
+/// through one handle is visible through every other handle to the same
+/// scope (that is how captured variables and recursion work).
+type ScopeCell = Arc<std::sync::Mutex<Scope>>;
+
+/// Lock a scope, recovering from poisoning: a panic on another thread that
+/// held the lock must not take this interpreter down with it.
+fn lock_scope(cell: &ScopeCell) -> std::sync::MutexGuard<'_, Scope> {
+    cell.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Variable environment: a chain of scopes, innermost last.
+///
+/// `Clone` is shallow (it shares the scope `Arc`s) and is what closures
+/// use to capture their defining environment. Use [`deep_clone`] or
+/// [`deep_clone_isolated`] to get independent storage.
+///
+/// # Reading without copying
+///
+/// [`get`](Self::get) returns an owned `Value`, which deep-copies strings,
+/// arrays and objects. Hot paths that only need to look at a value use
+/// [`with_value`](Self::with_value), and in-place updates use
+/// [`with_value_mut`](Self::with_value_mut). The callbacks run while the
+/// scope lock is held, so they must not touch the environment again
+/// (the lock is not re-entrant).
+///
+/// [`deep_clone`]: Self::deep_clone
+/// [`deep_clone_isolated`]: Self::deep_clone_isolated
 #[derive(Debug, Clone)]
 pub struct Environment {
-    scopes: Vec<Arc<std::sync::Mutex<HashMap<String, Value>>>>,
-    mutability: Vec<Arc<std::sync::Mutex<HashMap<String, bool>>>>,
+    scopes: Vec<ScopeCell>,
 }
 
 /// Map from old scope `Arc` pointer to its newly allocated counterpart.
 /// Used by [`Environment::deep_clone_isolated`] to memoize Arc identity
 /// during the recursive value-walk so cycles (recursive functions whose
 /// closure captures the env that holds them) terminate.
-type ScopeMap = HashMap<
-    *const std::sync::Mutex<HashMap<String, Value>>,
-    Arc<std::sync::Mutex<HashMap<String, Value>>>,
->;
+type ScopeMap = HashMap<*const std::sync::Mutex<Scope>, ScopeCell>;
 
 impl Environment {
     pub fn new() -> Self {
         Self {
-            scopes: vec![Arc::new(std::sync::Mutex::new(HashMap::new()))],
-            mutability: vec![Arc::new(std::sync::Mutex::new(HashMap::new()))],
+            scopes: vec![ScopeCell::default()],
         }
     }
 
     pub fn push_scope(&mut self) {
-        self.scopes
-            .push(Arc::new(std::sync::Mutex::new(HashMap::new())));
-        self.mutability
-            .push(Arc::new(std::sync::Mutex::new(HashMap::new())));
+        self.scopes.push(ScopeCell::default());
     }
 
     pub fn pop_scope(&mut self) {
         self.scopes.pop();
-        self.mutability.pop();
     }
 
     pub fn define(&mut self, name: String, value: Value) {
@@ -459,63 +561,96 @@ impl Environment {
     }
 
     pub fn define_with_mutability(&mut self, name: String, value: Value, mutable: bool) {
-        // Use poison-recovery: if another thread panicked while holding the lock,
-        // we still get a usable guard rather than propagating the panic.
         if let Some(scope) = self.scopes.last() {
-            scope
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(name.clone(), value);
-        }
-        if let Some(muts) = self.mutability.last() {
-            muts.lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(name, mutable);
+            lock_scope(scope).insert(name, value, mutable);
         }
     }
 
+    /// Owned copy of the innermost binding of `name`.
     pub fn get(&self, name: &str) -> Option<Value> {
+        self.with_value(name, Value::clone)
+    }
+
+    /// True when `name` is bound in any enclosing scope.
+    pub fn contains(&self, name: &str) -> bool {
+        self.with_value(name, |_| ()).is_some()
+    }
+
+    /// Run `f` on a reference to the innermost binding of `name` without
+    /// copying it. `f` must not access this environment (see type docs).
+    pub fn with_value<R>(&self, name: &str, f: impl FnOnce(&Value) -> R) -> Option<R> {
         for scope in self.scopes.iter().rev() {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(val) = guard.get(name) {
-                return Some(val.clone());
+            let guard = lock_scope(scope);
+            if let Some(binding) = guard.get(name) {
+                return Some(f(&binding.value));
             }
         }
         None
     }
 
-    fn is_mutable(&self, name: &str) -> Option<bool> {
-        for muts in self.mutability.iter().rev() {
-            let guard = muts.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(m) = guard.get(name) {
-                return Some(*m);
-            }
-        }
-        None
-    }
-
-    pub fn set(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
-        if let Some(false) = self.is_mutable(name) {
-            return Err(RuntimeError::new(&crate::semantics::immutable_reassign(
-                name,
-            )));
-        }
+    /// Run `f` on a mutable reference to the innermost binding of `name`,
+    /// with the same checks as [`set`](Self::set): the variable must exist
+    /// and be mutable. `f` must not access this environment.
+    pub fn with_value_mut<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut Value) -> R,
+    ) -> Result<R, RuntimeError> {
         for scope in self.scopes.iter().rev() {
-            let mut guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            if guard.contains_key(name) {
-                guard.insert(name.to_string(), value);
-                return Ok(());
+            let mut guard = lock_scope(scope);
+            if let Some(binding) = guard.get_mut(name) {
+                if !binding.mutable {
+                    return Err(Self::immutable_error(name));
+                }
+                return Ok(f(&mut binding.value));
             }
         }
         Err(RuntimeError::new(&format!("undefined variable: {}", name)))
+    }
+
+    /// Raw access to the innermost binding of `name` together with its
+    /// mutability, for callers that must order their own checks (index
+    /// assignment reports a frozen value before an immutable binding).
+    /// Returns `None` when `name` is unbound. `f` must not access this
+    /// environment.
+    pub(crate) fn with_binding_mut<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut Value, bool) -> R,
+    ) -> Option<R> {
+        for scope in self.scopes.iter().rev() {
+            let mut guard = lock_scope(scope);
+            if let Some(binding) = guard.get_mut(name) {
+                return Some(f(&mut binding.value, binding.mutable));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn is_mutable(&self, name: &str) -> Option<bool> {
+        for scope in self.scopes.iter().rev() {
+            let guard = lock_scope(scope);
+            if let Some(binding) = guard.get(name) {
+                return Some(binding.mutable);
+            }
+        }
+        None
+    }
+
+    fn immutable_error(name: &str) -> RuntimeError {
+        RuntimeError::new(&crate::semantics::immutable_reassign(name))
+    }
+
+    pub fn set(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
+        self.with_value_mut(name, |slot| *slot = value)
     }
 
     /// Collect all defined variable names across all scopes (for REPL tab completion).
     pub fn all_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for scope in &self.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            names.extend(guard.keys().cloned());
+            let guard = lock_scope(scope);
+            names.extend(guard.names().map(str::to_string));
         }
         names.sort();
         names.dedup();
@@ -524,14 +659,14 @@ impl Environment {
 
     /// Deep clone for spawn — breaks sharing so thread gets independent copy.
     ///
-    /// "Deep" only at the scope-storage layer: scope `Arc<Mutex<HashMap>>`s
+    /// "Deep" only at the scope-storage layer: scope `Arc<Mutex<Scope>>`s
     /// are duplicated, but the `Value`s inside are cloned by `Value::clone`,
-    /// which is shallow on `Value::Function::closure: Environment` and
-    /// `Value::Lambda::closure: Arc<Mutex<Environment>>`. That is the
-    /// intended semantics for `spawn_task` and `fork_for_background_runtime`:
-    /// their callers want spawned/scheduled tasks to share captured closure
-    /// state with the parent (so a counter captured by a Lambda accumulates
-    /// across spawns).
+    /// which is shallow on `Value::Function`'s closure (an `Environment`
+    /// inside the shared function `Arc`) and `Value::Lambda::closure:
+    /// Arc<Mutex<Environment>>`. That is the intended semantics for
+    /// `spawn_task` and `fork_for_background_runtime`: their callers want
+    /// spawned/scheduled tasks to share captured closure state with the
+    /// parent (so a counter captured by a Lambda accumulates across spawns).
     ///
     /// The HTTP server uses [`deep_clone_isolated`](Self::deep_clone_isolated)
     /// instead — it requires per-request closure isolation as well.
@@ -540,20 +675,7 @@ impl Environment {
             scopes: self
                 .scopes
                 .iter()
-                .map(|s| {
-                    Arc::new(std::sync::Mutex::new(
-                        s.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                    ))
-                })
-                .collect(),
-            mutability: self
-                .mutability
-                .iter()
-                .map(|m| {
-                    Arc::new(std::sync::Mutex::new(
-                        m.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                    ))
-                })
+                .map(|s| Arc::new(std::sync::Mutex::new(lock_scope(s).clone())))
                 .collect(),
         }
     }
@@ -561,26 +683,25 @@ impl Environment {
     /// Deep clone with **closure isolation** — used by `fork_for_serving`
     /// to give each HTTP request a fully independent interpreter graph.
     ///
-    /// Walks every reachable `Value` and rewrites
-    /// `Value::Function::closure` and `Value::Lambda::closure` so the
-    /// returned `Environment` shares **no** scope `Arc<Mutex<...>>` with
-    /// the original. After this call, mutations made by code running
-    /// against the cloned env (including writes through captured
-    /// closures and the Lambda writeback path at
-    /// `call_function_inner` line ~4317) are invisible to the original
-    /// or any other isolated clone.
+    /// Walks every reachable `Value` and rewrites the closures of
+    /// `Value::Function` and `Value::Lambda` so the returned `Environment`
+    /// shares **no** scope `Arc<Mutex<...>>` with the original. After this
+    /// call, mutations made by code running against the cloned env
+    /// (including writes through captured closures and the Lambda
+    /// writeback path in `call_function_inner`) are invisible to the
+    /// original or any other isolated clone.
     ///
     /// # Cycle handling
     ///
-    /// Forge's `Stmt::FnDef` (lines 1130–1153) installs a function whose
-    /// closure scope vec contains the same `Arc` as the env that holds
-    /// the function — a cycle. We tie the knot via Arc-pointer-keyed
-    /// memoization (`ScopeMap`): the first time we see a scope `Arc`,
-    /// we install an empty placeholder in the map and recurse; any
-    /// re-entry resolves to the placeholder and returns immediately.
-    /// After the recursion, we fill the placeholder with the populated
-    /// `HashMap`. Topological identity is preserved: every reference
-    /// to the original scope resolves to a single new `Arc`.
+    /// Forge's `Stmt::FnDef` installs a function whose closure scope vec
+    /// contains the same `Arc` as the env that holds the function — a
+    /// cycle. We tie the knot via Arc-pointer-keyed memoization
+    /// (`ScopeMap`): the first time we see a scope `Arc`, we install an
+    /// empty placeholder in the map and recurse; any re-entry resolves to
+    /// the placeholder and returns immediately. After the recursion, we
+    /// fill the placeholder with the populated scope. Topological identity
+    /// is preserved: every reference to the original scope resolves to a
+    /// single new `Arc`.
     ///
     /// # Performance
     ///
@@ -595,28 +716,16 @@ impl Environment {
     }
 
     fn deep_clone_env(env: &Environment, scope_map: &mut ScopeMap) -> Self {
-        let scopes = env
-            .scopes
-            .iter()
-            .map(|s| Self::dup_scope(s, scope_map))
-            .collect();
-        // mutability table is just String -> bool; no Values to walk.
-        let mutability = env
-            .mutability
-            .iter()
-            .map(|m| {
-                Arc::new(std::sync::Mutex::new(
-                    m.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                ))
-            })
-            .collect();
-        Self { scopes, mutability }
+        Self {
+            scopes: env
+                .scopes
+                .iter()
+                .map(|s| Self::dup_scope(s, scope_map))
+                .collect(),
+        }
     }
 
-    fn dup_scope(
-        s: &Arc<std::sync::Mutex<HashMap<String, Value>>>,
-        scope_map: &mut ScopeMap,
-    ) -> Arc<std::sync::Mutex<HashMap<String, Value>>> {
+    fn dup_scope(s: &ScopeCell, scope_map: &mut ScopeMap) -> ScopeCell {
         let key = Arc::as_ptr(s);
         if let Some(existing) = scope_map.get(&key) {
             // Cycle: this scope is already being cloned. Return the
@@ -627,33 +736,30 @@ impl Environment {
         }
         // Tie the knot: install the placeholder before we recurse so
         // any self-reference resolves to it.
-        let new_arc = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let new_arc = ScopeCell::default();
         scope_map.insert(key, new_arc.clone());
 
-        let original = s.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let mut new_map = HashMap::with_capacity(original.len());
-        for (k, v) in original {
-            new_map.insert(k, Self::dup_value(v, scope_map));
+        let mut copy = lock_scope(s).clone();
+        for binding in &mut copy.bindings {
+            let value = std::mem::replace(&mut binding.value, Value::Null);
+            binding.value = Self::dup_value(value, scope_map);
         }
-        *new_arc.lock().unwrap_or_else(|p| p.into_inner()) = new_map;
+        *lock_scope(&new_arc) = copy;
         new_arc
     }
 
     fn dup_value(v: Value, scope_map: &mut ScopeMap) -> Value {
         match v {
-            Value::Function {
-                name,
-                params,
-                body,
-                closure,
-                decorators,
-            } => Value::Function {
-                name,
-                params,
-                body,
-                decorators,
-                closure: Self::deep_clone_env(&closure, scope_map),
-            },
+            Value::Function(func) => {
+                let closure = Self::deep_clone_env(&func.closure, scope_map);
+                Value::Function(Arc::new(FunctionValue {
+                    name: func.name.clone(),
+                    params: func.params.clone(),
+                    body: func.body.clone(),
+                    decorators: func.decorators.clone(),
+                    closure,
+                }))
+            }
             Value::Lambda {
                 params,
                 body,
@@ -719,13 +825,13 @@ impl Environment {
     pub fn suggest_similar(&self, name: &str) -> Option<String> {
         let mut best: Option<(String, usize)> = None;
         for scope in &self.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            for key in guard.keys() {
+            let guard = lock_scope(scope);
+            for key in guard.names() {
                 let dist = levenshtein(name, key);
                 if dist <= 2 && dist < name.len() {
                     match &best {
-                        Some((_, d)) if dist < *d => best = Some((key.clone(), dist)),
-                        None => best = Some((key.clone(), dist)),
+                        Some((_, d)) if dist < *d => best = Some((key.to_string(), dist)),
+                        None => best = Some((key.to_string(), dist)),
                         _ => {}
                     }
                 }
@@ -754,34 +860,6 @@ fn levenshtein(a: &str, b: &str) -> usize {
         }
     }
     matrix[a.len()][b.len()]
-}
-
-/// An imported top-level function must keep resolving names in its own
-/// module (e.g. private helpers it calls), not in the importer. Top-level
-/// functions normally take the "global function" fast path in
-/// `call_function_inner`, which runs them in the caller's environment; an
-/// extra (empty) closure scope routes imported ones through their module
-/// environment instead.
-fn bind_to_module_scope(value: Value) -> Value {
-    match value {
-        Value::Function {
-            name,
-            params,
-            body,
-            mut closure,
-            decorators,
-        } if closure.scopes.len() == 1 => {
-            closure.push_scope();
-            Value::Function {
-                name,
-                params,
-                body,
-                closure,
-                decorators,
-            }
-        }
-        other => other,
-    }
 }
 
 /// Map an AST operator onto the shared arithmetic/ordering rules.
@@ -818,8 +896,8 @@ fn semantic_operand(value: &Value) -> crate::semantics::Operand<'_> {
 /// function or lambda, shared with the VM through `crate::semantics`.
 /// Callbacks invoked by builtins go through `call_function` unchecked.
 fn check_direct_call_arity(func: &Value, argc: usize) -> Result<(), RuntimeError> {
-    let (name, params) = match func {
-        Value::Function { name, params, .. } => (name.as_str(), params),
+    let (name, params): (&str, &[Param]) = match func {
+        Value::Function(f) => (f.name.as_str(), &f.params),
         Value::Lambda { params, .. } => ("", params),
         _ => return Ok(()),
     };
@@ -973,10 +1051,7 @@ impl Interpreter {
             }
         }
         for scope in &env.scopes {
-            let guard = scope.lock().unwrap_or_else(|p| p.into_inner());
-            for v in guard.values() {
-                walk(v);
-            }
+            lock_scope(scope).values().for_each(walk);
         }
     }
 
@@ -1224,77 +1299,21 @@ impl Interpreter {
             }
 
             Stmt::Assign { target, value } => {
+                // Variable, field and index targets are handled in place
+                // (see places.rs); this is the general path for `x = expr`
+                // and the error for anything else.
+                if let Some(result) = self.try_assign_in_place(target, value) {
+                    result?;
+                    return Ok(Signal::None);
+                }
                 let val = self.eval_expr(value)?;
                 match target {
                     Expr::Ident(name) => self.env.set(name, val)?,
-                    Expr::FieldAccess { object, field } => {
-                        let name = if let Expr::Ident(n) = object.as_ref() {
-                            n.clone()
-                        } else {
-                            return Err(RuntimeError::new("can only assign to variable fields"));
-                        };
-                        let obj = self
-                            .env
-                            .get(&name)
-                            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", name)))?;
-                        if obj.is_frozen() {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot modify frozen value '{}': field '{}'",
-                                name, field
-                            )));
-                        }
-                        let mut obj = obj;
-                        if let Value::Object(ref mut map) = obj {
-                            map.insert(field.clone(), val);
-                        }
-                        self.env.set(&name, obj)?;
+                    Expr::FieldAccess { .. } => {
+                        return Err(RuntimeError::new("can only assign to variable fields"))
                     }
-                    Expr::Index { object, index } => {
-                        let name = if let Expr::Ident(n) = object.as_ref() {
-                            n.clone()
-                        } else {
-                            return Err(RuntimeError::new("can only assign to variable indices"));
-                        };
-                        let idx = self.eval_expr(index)?;
-                        let existing = self
-                            .env
-                            .get(&name)
-                            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", name)))?;
-                        if existing.is_frozen() {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot modify frozen value '{}': index assignment",
-                                name
-                            )));
-                        }
-                        let mut container = existing;
-                        match (&mut container, &idx) {
-                            (Value::Array(items), Value::Int(i)) => {
-                                let len = items.len();
-                                let slot = crate::semantics::normalize_index(*i, len).ok_or_else(
-                                    || {
-                                        RuntimeError::new(&crate::semantics::index_out_of_bounds(
-                                            *i, "array", len,
-                                        ))
-                                    },
-                                )?;
-                                items[slot] = val;
-                            }
-                            (Value::Object(map), Value::String(key)) => {
-                                map.insert(key.clone(), val);
-                            }
-                            (Value::Array(_) | Value::Object(_), other) => {
-                                return Err(RuntimeError::new(&crate::semantics::invalid_index(
-                                    container.type_name(),
-                                    other.type_name(),
-                                )));
-                            }
-                            (other, _) => {
-                                return Err(RuntimeError::new(
-                                    &crate::semantics::invalid_index_assign(other.type_name()),
-                                ));
-                            }
-                        }
-                        self.env.set(&name, container)?;
+                    Expr::Index { .. } => {
+                        return Err(RuntimeError::new("can only assign to variable indices"))
                     }
                     _ => return Err(RuntimeError::new("invalid assignment target")),
                 }
@@ -1308,31 +1327,16 @@ impl Interpreter {
                 decorators,
                 ..
             } => {
-                let func = Value::Function {
+                // The closure shares the current scope's Arc, so the function
+                // sees its own binding (recursion) once it is defined below.
+                let func = Value::Function(Arc::new(FunctionValue {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
                     closure: self.env.clone(),
                     decorators: decorators.clone(),
-                };
-                self.env.define(name.clone(), func.clone());
-                if let Value::Function {
-                    name: n,
-                    params: p,
-                    body: b,
-                    decorators: d,
-                    ..
-                } = func
-                {
-                    let recursive_func = Value::Function {
-                        name: n,
-                        params: p,
-                        body: b,
-                        closure: self.env.clone(),
-                        decorators: d,
-                    };
-                    self.env.define(name.clone(), recursive_func);
-                }
+                }));
+                self.env.define(name.clone(), func);
                 Ok(Signal::None)
             }
 
@@ -1453,13 +1457,13 @@ impl Interpreter {
                             format!("{}::{}", type_name, method_name)
                         };
 
-                        let func_val = Value::Function {
+                        let func_val = Value::Function(Arc::new(FunctionValue {
                             name: qualified_name.clone(),
                             params: params.clone(),
                             body: body.clone(),
                             closure: self.env.clone(),
                             decorators: Vec::new(),
-                        };
+                        }));
 
                         // Register in method tables
                         let type_methods = self
@@ -1520,9 +1524,9 @@ impl Interpreter {
             } => {
                 let cond = self.eval_expr(condition)?;
                 if cond.is_truthy() {
-                    self.exec_block(then_body)
+                    self.exec_body(then_body)
                 } else if let Some(else_b) = else_body {
-                    self.exec_block(else_b)
+                    self.exec_body(else_b)
                 } else {
                     Ok(Signal::None)
                 }
@@ -1580,7 +1584,7 @@ impl Interpreter {
                     if self.match_pattern(&arm.pattern, &val) {
                         self.env.push_scope();
                         self.bind_pattern(&arm.pattern, &val);
-                        let result = self.exec_block(&arm.body);
+                        let result = self.exec_body(&arm.body);
                         self.env.pop_scope();
                         return result;
                     }
@@ -1600,7 +1604,7 @@ impl Interpreter {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
-                            match self.exec_block(body)? {
+                            match self.exec_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1626,7 +1630,7 @@ impl Interpreter {
                             if let Some(v2) = var2 {
                                 self.env.define(v2.clone(), val);
                             }
-                            match self.exec_block(body)? {
+                            match self.exec_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1654,7 +1658,7 @@ impl Interpreter {
                             } else {
                                 self.env.define(var.clone(), Value::Tuple(vec![key, val]));
                             }
-                            match self.exec_block(body)? {
+                            match self.exec_body(body)? {
                                 Signal::Break => {
                                     self.env.pop_scope();
                                     break;
@@ -1686,7 +1690,7 @@ impl Interpreter {
                         };
                         self.env.push_scope();
                         self.env.define(var.clone(), val);
-                        match self.exec_block(body)? {
+                        match self.exec_body(body)? {
                             Signal::Break => {
                                 self.env.pop_scope();
                                 break;
@@ -1719,7 +1723,7 @@ impl Interpreter {
                     if !cond.is_truthy() {
                         break;
                     }
-                    match self.exec_block(body)? {
+                    match self.exec_body(body)? {
                         Signal::Break => break,
                         Signal::Continue => continue,
                         Signal::Return(v) => return Ok(Signal::Return(v)),
@@ -1731,7 +1735,7 @@ impl Interpreter {
 
             Stmt::Loop { body } => {
                 loop {
-                    match self.exec_block(body)? {
+                    match self.exec_body(body)? {
                         Signal::Break => break,
                         Signal::Continue => continue,
                         Signal::Return(v) => return Ok(Signal::Return(v)),
@@ -1759,7 +1763,7 @@ impl Interpreter {
                 try_body,
                 catch_var,
                 catch_body,
-            } => match self.exec_block(try_body) {
+            } => match self.exec_body(try_body) {
                 Ok(signal) => Ok(signal),
                 Err(e) if e.is_early_return() => Err(e),
                 Err(e) => {
@@ -1787,7 +1791,7 @@ impl Interpreter {
                     self.env.define(catch_var.clone(), Value::Object(err_obj));
                     // FIX: was `result.unwrap_or(Signal::None);` — the semicolon
                     // silently discarded errors from the catch body itself.
-                    let catch_result = self.exec_block(catch_body);
+                    let catch_result = self.exec_body(catch_body);
                     self.env.pop_scope();
                     match catch_result {
                         Ok(sig) => Ok(sig),
@@ -1844,7 +1848,7 @@ impl Interpreter {
                         let val = import_interp.env.get(name).ok_or_else(|| {
                             RuntimeError::new(&crate::semantics::import_missing_name(path, name))
                         })?;
-                        self.env.define(name.to_string(), bind_to_module_scope(val));
+                        self.env.define(name.to_string(), val);
                     }
                 } else {
                     // Import all top-level definitions
@@ -1852,7 +1856,7 @@ impl Interpreter {
                         match &spanned.stmt {
                             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
                                 if let Some(val) = import_interp.env.get(name) {
-                                    self.env.define(name.clone(), bind_to_module_scope(val));
+                                    self.env.define(name.clone(), val);
                                 }
                             }
                             Stmt::StructDef { name, .. } => {
@@ -2060,10 +2064,13 @@ impl Interpreter {
                 timeout_interp.env = self.env.clone();
                 timeout_interp.cancelled = cancel_flag.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
-                let handle = crate::permissions::spawn(move || {
+                let handle = crate::runtime::recursion::spawn_worker(move || {
                     let result = timeout_interp.exec_block(&body);
                     let _ = tx.send(result);
-                });
+                })
+                .map_err(|e| {
+                    RuntimeError::new(&format!("timeout: cannot start worker thread: {}", e))
+                })?;
                 match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
                     Ok(result) => {
                         let _ = handle.join();
@@ -2090,7 +2097,7 @@ impl Interpreter {
                 };
                 let mut last_err = String::new();
                 for attempt in 0..max {
-                    match self.exec_block(body) {
+                    match self.exec_body(body) {
                         Ok(signal) => return Ok(signal),
                         Err(e) => {
                             last_err = e.message.clone();
@@ -2166,7 +2173,7 @@ impl Interpreter {
             }
 
             Stmt::Expression(expr) => {
-                self.eval_expr(expr)?;
+                self.eval_expr_stmt(expr, false)?;
                 Ok(Signal::None)
             }
         }
@@ -2237,10 +2244,35 @@ impl Interpreter {
         result
     }
 
+    /// Run the body of a statement (loop body, `if` branch, `match` arm,
+    /// `try`/`catch` block) in a new scope. Such bodies never produce a
+    /// value — `exec_stmts` and `eval_block_value` drop the
+    /// `ImplicitReturn` payload of every statement except `when`/`safe` —
+    /// so their final expression is evaluated for effect only, which lets
+    /// a trailing `out.push(x)` mutate in place without copying `out`.
+    fn exec_body(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        self.env.push_scope();
+        let result = self.exec_stmts_with(stmts, false);
+        self.env.pop_scope();
+        result
+    }
+
     fn exec_stmts(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        self.exec_stmts_with(stmts, true)
+    }
+
+    /// Execute statements, returning `ImplicitReturn(v)` where `v` is the
+    /// value of a trailing expression statement. With `keep_value == false`
+    /// the caller promises to ignore `v`, so it is not materialised.
+    fn exec_stmts_with(
+        &mut self,
+        stmts: &[SpannedStmt],
+        keep_value: bool,
+    ) -> Result<Signal, RuntimeError> {
         let mut result = Signal::None;
         let mut last_expr_value = Value::Null;
-        for s in stmts {
+        let last_index = stmts.len().saturating_sub(1);
+        for (index, s) in stmts.iter().enumerate() {
             self.current_line = s.line;
             if let Some(ref mut cov) = self.coverage {
                 if s.line > 0 {
@@ -2252,7 +2284,8 @@ impl Interpreter {
             }
             let stmt = &s.stmt;
             if let Stmt::Expression(expr) = stmt {
-                last_expr_value = self.eval_expr(expr).map_err(|mut e| {
+                let want_value = keep_value && index == last_index;
+                last_expr_value = self.eval_expr_stmt(expr, want_value).map_err(|mut e| {
                     if e.line == 0 {
                         e.line = s.line;
                         e.col = s.col;
@@ -2375,7 +2408,7 @@ impl Interpreter {
                 }
                 let val = self.env.get(&name)?;
                 match val {
-                    Value::BuiltIn(_) | Value::Function { .. } | Value::Lambda { .. } => None,
+                    Value::BuiltIn(_) | Value::Function(_) | Value::Lambda { .. } => None,
                     Value::Object(ref map) if map.contains_key("__module__") => None,
                     _ => Some((name, format!("{}", val))),
                 }
@@ -2494,205 +2527,49 @@ impl Interpreter {
             }
 
             Expr::FieldAccess { object, field } => {
-                let obj = self.eval_expr(object)?;
-                // Unwrap Frozen for read access
-                let inner = match &obj {
-                    Value::Frozen(v) => v.as_ref(),
-                    other => other,
-                };
-                match inner {
-                    Value::Object(map) => {
-                        // Direct field access
-                        if let Some(val) = map.get(field) {
-                            return Ok(val.clone());
-                        }
-                        // Embedded field delegation: check embedded sub-objects
-                        if let Some(Value::String(type_name)) = map.get("__type__") {
-                            if let Some(embeds) = self.embedded_fields.get(type_name).cloned() {
-                                for (embed_field, _embed_type) in &embeds {
-                                    if let Some(Value::Object(sub)) = map.get(embed_field) {
-                                        if let Some(val) = sub.get(field) {
-                                            return Ok(val.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(RuntimeError::new(&format!(
-                            "no field '{}' on object",
-                            field
-                        )))
+                // Read a field of a variable in place instead of copying
+                // the whole object first.
+                if let Expr::Ident(name) = object.as_ref() {
+                    if let Some(result) = self.env.with_value(name, |obj| self.field_of(obj, field))
+                    {
+                        return result;
                     }
-                    Value::String(s) => match field.as_str() {
-                        "len" => Ok(Value::Int(s.chars().count() as i64)),
-                        "upper" => Ok(Value::String(s.to_uppercase())),
-                        "lower" => Ok(Value::String(s.to_lowercase())),
-                        "trim" => Ok(Value::String(s.trim().to_string())),
-                        "trim_start" => Ok(Value::String(s.trim_start().to_string())),
-                        "trim_end" => Ok(Value::String(s.trim_end().to_string())),
-                        "is_empty" => Ok(Value::Bool(s.is_empty())),
-                        "is_numeric" => Ok(Value::Bool(
-                            s.chars()
-                                .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
-                        )),
-                        "is_alpha" => Ok(Value::Bool(
-                            !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
-                        )),
-                        "is_alphanumeric" => Ok(Value::Bool(
-                            !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
-                        )),
-                        "chars" => Ok(Value::Array(
-                            s.chars().map(|c| Value::String(c.to_string())).collect(),
-                        )),
-                        "bytes" => Ok(Value::Array(
-                            s.bytes().map(|b| Value::Int(b as i64)).collect(),
-                        )),
-                        "words" => Ok(Value::Array(
-                            s.split_whitespace()
-                                .map(|w| Value::String(w.to_string()))
-                                .collect(),
-                        )),
-                        "lines" => Ok(Value::Array(
-                            s.lines().map(|l| Value::String(l.to_string())).collect(),
-                        )),
-                        "reverse" => Ok(Value::String(s.chars().rev().collect())),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on String",
-                            field
-                        ))),
-                    },
-                    Value::Array(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on Array",
-                            field
-                        ))),
-                    },
-                    Value::Tuple(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!(
-                            "no method '{}' on Tuple",
-                            field
-                        ))),
-                    },
-                    Value::Set(items) => match field.as_str() {
-                        "len" => Ok(Value::Int(items.len() as i64)),
-                        _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
-                    },
-                    _ => Err(RuntimeError::new(&format!(
-                        "cannot access field '{}' on {}",
-                        field,
-                        obj.type_name()
-                    ))),
                 }
+                let obj = self.eval_expr(object)?;
+                self.field_of(&obj, field)
             }
 
             Expr::Index { object, index } => {
-                let obj = self.eval_expr(object)?;
-                let idx = self.eval_expr(index)?;
-                // Unwrap Frozen for read access
-                let inner = match &obj {
-                    Value::Frozen(v) => v.as_ref(),
-                    other => other,
-                };
-                match (inner, &idx) {
-                    (Value::Array(items) | Value::Tuple(items), Value::Int(i)) => {
-                        // Negative indices count from the end (shared with the VM).
-                        match crate::semantics::normalize_index(*i, items.len()) {
-                            Some(slot) => Ok(items[slot].clone()),
-                            None => Err(RuntimeError::new(&crate::semantics::index_out_of_bounds(
-                                *i,
-                                if matches!(inner, Value::Tuple(_)) {
-                                    "tuple"
-                                } else {
-                                    "array"
-                                },
-                                items.len(),
-                            ))),
+                // `name[i]`: index the variable in place so only the element
+                // is copied. The index is evaluated before the variable is
+                // read, which is only unobservable when it cannot run code.
+                if let Expr::Ident(name) = object.as_ref() {
+                    if self.env.contains(name) && self.is_effect_free(index) {
+                        let idx = self.eval_expr(index)?;
+                        if let Some(result) =
+                            self.env.with_value(name, |obj| Self::index_of(obj, &idx))
+                        {
+                            return result;
                         }
                     }
-                    (Value::Object(map), Value::String(key)) => map
-                        .get(key)
-                        .cloned()
-                        .ok_or_else(|| RuntimeError::new(&crate::semantics::missing_key(key))),
-                    (container, index) => Err(RuntimeError::new(&crate::semantics::invalid_index(
-                        container.type_name(),
-                        index.type_name(),
-                    ))),
                 }
+                let obj = self.eval_expr(object)?;
+                let idx = self.eval_expr(index)?;
+                Self::index_of(&obj, &idx)
             }
 
             Expr::Call { function, args } => {
                 // Method call: obj.method(args) -> method(obj, args)
+                // In-place forms on variables: mutating collection methods
+                // (`a.push(x)`, `push(a, x)`, `s.add(x)`, ...) and cheap
+                // reads (`len(a)`, `s.has(x)`, `m.get(k)`, ...).
+                if let Some(result) = self.try_mutate_in_place(expr, true) {
+                    return result;
+                }
+                if let Some(result) = self.try_read_in_place(expr) {
+                    return result;
+                }
                 if let Expr::FieldAccess { object, field } = function.as_ref() {
-                    // In-place mutation for arr.push(x) / arr.pop() on mutable variables
-                    if let Expr::Ident(var_name) = object.as_ref() {
-                        if self.env.is_mutable(var_name) == Some(true) {
-                            if field == "push" && args.len() == 1 {
-                                let arr = self.eval_expr(object)?;
-                                let val = self.eval_expr(&args[0])?;
-                                if let Value::Array(mut items) = arr {
-                                    items.push(val);
-                                    let new_arr = Value::Array(items);
-                                    self.env.set(var_name, new_arr.clone())?;
-                                    return Ok(new_arr);
-                                }
-                                return Err(RuntimeError::new(
-                                    "push() first argument must be array",
-                                ));
-                            }
-                            if field == "pop" && args.is_empty() {
-                                let arr = self.eval_expr(object)?;
-                                if let Value::Array(mut items) = arr {
-                                    let popped = items.pop().unwrap_or(Value::Null);
-                                    self.env.set(var_name, Value::Array(items))?;
-                                    return Ok(popped);
-                                }
-                                return Err(RuntimeError::new("pop() requires array"));
-                            }
-                            // In-place set mutation: s.add(x) / s.remove(x) on a mutable set variable.
-                            // Peel Frozen so we can produce a useful error rather than a silent no-op.
-                            if field == "add" && args.len() == 1 {
-                                let s = self.eval_expr(object)?;
-                                let raw = match s {
-                                    Value::Frozen(_) => {
-                                        return Err(RuntimeError::new("cannot add to a frozen set"))
-                                    }
-                                    other => other,
-                                };
-                                if let Value::Set(mut items) = raw {
-                                    let val = self.eval_expr(&args[0])?;
-                                    if !items.iter().any(|v| Value::container_eq(v, &val)) {
-                                        items.push(val);
-                                    }
-                                    let new_set = Value::Set(items);
-                                    self.env.set(var_name, new_set.clone())?;
-                                    return Ok(new_set);
-                                }
-                            }
-                            if field == "remove" && args.len() == 1 {
-                                let s = self.eval_expr(object)?;
-                                let raw = match s {
-                                    Value::Frozen(_) => {
-                                        return Err(RuntimeError::new(
-                                            "cannot remove from a frozen set",
-                                        ))
-                                    }
-                                    other => other,
-                                };
-                                if let Value::Set(items) = raw {
-                                    let val = self.eval_expr(&args[0])?;
-                                    let filtered: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| !Value::container_eq(v, &val))
-                                        .collect();
-                                    let new_set = Value::Set(filtered);
-                                    self.env.set(var_name, new_set.clone())?;
-                                    return Ok(new_set);
-                                }
-                            }
-                        }
-                    }
                     let obj = self.eval_expr(object)?;
                     let method_name = field.as_str();
                     let known_methods = [
@@ -3312,40 +3189,6 @@ impl Interpreter {
                     return self.call_function(func, eval_args?);
                 }
 
-                // Special-case push/pop for in-place mutation when first arg is a mutable variable
-                if let Expr::Ident(fn_name) = function.as_ref() {
-                    if fn_name == "push" && args.len() == 2 {
-                        if let Expr::Ident(var_name) = &args[0] {
-                            if self.env.is_mutable(var_name) == Some(true) {
-                                let arr = self.eval_expr(&args[0])?;
-                                let val = self.eval_expr(&args[1])?;
-                                if let Value::Array(mut items) = arr {
-                                    items.push(val);
-                                    let new_arr = Value::Array(items);
-                                    self.env.set(var_name, new_arr.clone())?;
-                                    return Ok(new_arr);
-                                }
-                                return Err(RuntimeError::new(
-                                    "push() first argument must be array",
-                                ));
-                            }
-                        }
-                    }
-                    if fn_name == "pop" && args.len() == 1 {
-                        if let Expr::Ident(var_name) = &args[0] {
-                            if self.env.is_mutable(var_name) == Some(true) {
-                                let arr = self.eval_expr(&args[0])?;
-                                if let Value::Array(mut items) = arr {
-                                    let popped = items.pop().unwrap_or(Value::Null);
-                                    self.env.set(var_name, Value::Array(items))?;
-                                    return Ok(popped);
-                                }
-                                return Err(RuntimeError::new("pop() requires array"));
-                            }
-                        }
-                    }
-                }
-
                 let func = self.eval_expr(function)?;
                 let eval_args: Result<Vec<Value>, _> =
                     args.iter().map(|a| self.eval_expr(a)).collect();
@@ -3373,8 +3216,8 @@ impl Interpreter {
             }
 
             Expr::Lambda { params, body } => Ok(Value::Lambda {
-                params: params.clone(),
-                body: body.clone(),
+                params: Arc::from(params.as_slice()),
+                body: Arc::from(body.as_slice()),
                 closure: Arc::new(std::sync::Mutex::new(self.env.clone())),
             }),
 
@@ -3676,6 +3519,134 @@ impl Interpreter {
                     .ok_or_else(|| RuntimeError::new(&format!("unknown method: {}", method)))?;
                 self.call_function(func, full_args)
             }
+        }
+    }
+
+    /// `obj.field` for an already-evaluated receiver (see `Expr::FieldAccess`).
+    fn field_of(&self, obj: &Value, field: &str) -> Result<Value, RuntimeError> {
+        // Unwrap Frozen for read access
+        let inner = match &obj {
+            Value::Frozen(v) => v.as_ref(),
+            other => other,
+        };
+        match inner {
+            Value::Object(map) => {
+                // Direct field access
+                if let Some(val) = map.get(field) {
+                    return Ok(val.clone());
+                }
+                // Embedded field delegation: check embedded sub-objects
+                if let Some(Value::String(type_name)) = map.get("__type__") {
+                    if let Some(embeds) = self.embedded_fields.get(type_name).cloned() {
+                        for (embed_field, _embed_type) in &embeds {
+                            if let Some(Value::Object(sub)) = map.get(embed_field) {
+                                if let Some(val) = sub.get(field) {
+                                    return Ok(val.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(RuntimeError::new(&format!(
+                    "no field '{}' on object",
+                    field
+                )))
+            }
+            Value::String(s) => match field {
+                "len" => Ok(Value::Int(s.chars().count() as i64)),
+                "upper" => Ok(Value::String(s.to_uppercase())),
+                "lower" => Ok(Value::String(s.to_lowercase())),
+                "trim" => Ok(Value::String(s.trim().to_string())),
+                "trim_start" => Ok(Value::String(s.trim_start().to_string())),
+                "trim_end" => Ok(Value::String(s.trim_end().to_string())),
+                "is_empty" => Ok(Value::Bool(s.is_empty())),
+                "is_numeric" => Ok(Value::Bool(
+                    s.chars()
+                        .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
+                )),
+                "is_alpha" => Ok(Value::Bool(
+                    !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+                )),
+                "is_alphanumeric" => Ok(Value::Bool(
+                    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
+                )),
+                "chars" => Ok(Value::Array(
+                    s.chars().map(|c| Value::String(c.to_string())).collect(),
+                )),
+                "bytes" => Ok(Value::Array(
+                    s.bytes().map(|b| Value::Int(b as i64)).collect(),
+                )),
+                "words" => Ok(Value::Array(
+                    s.split_whitespace()
+                        .map(|w| Value::String(w.to_string()))
+                        .collect(),
+                )),
+                "lines" => Ok(Value::Array(
+                    s.lines().map(|l| Value::String(l.to_string())).collect(),
+                )),
+                "reverse" => Ok(Value::String(s.chars().rev().collect())),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on String",
+                    field
+                ))),
+            },
+            Value::Array(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on Array",
+                    field
+                ))),
+            },
+            Value::Tuple(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!(
+                    "no method '{}' on Tuple",
+                    field
+                ))),
+            },
+            Value::Set(items) => match field {
+                "len" => Ok(Value::Int(items.len() as i64)),
+                _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
+            },
+            _ => Err(RuntimeError::new(&format!(
+                "cannot access field '{}' on {}",
+                field,
+                obj.type_name()
+            ))),
+        }
+    }
+
+    /// `obj[idx]` for already-evaluated operands (see `Expr::Index`).
+    fn index_of(obj: &Value, idx: &Value) -> Result<Value, RuntimeError> {
+        // Unwrap Frozen for read access
+        let inner = match &obj {
+            Value::Frozen(v) => v.as_ref(),
+            other => other,
+        };
+        match (inner, &idx) {
+            (Value::Array(items) | Value::Tuple(items), Value::Int(i)) => {
+                // Negative indices count from the end (shared with the VM).
+                match crate::semantics::normalize_index(*i, items.len()) {
+                    Some(slot) => Ok(items[slot].clone()),
+                    None => Err(RuntimeError::new(&crate::semantics::index_out_of_bounds(
+                        *i,
+                        if matches!(inner, Value::Tuple(_)) {
+                            "tuple"
+                        } else {
+                            "array"
+                        },
+                        items.len(),
+                    ))),
+                }
+            }
+            (Value::Object(map), Value::String(key)) => map
+                .get(key)
+                .cloned()
+                .ok_or_else(|| RuntimeError::new(&crate::semantics::missing_key(key))),
+            (container, index) => Err(RuntimeError::new(&crate::semantics::invalid_index(
+                container.type_name(),
+                index.type_name(),
+            ))),
         }
     }
 
@@ -4400,6 +4371,24 @@ impl Interpreter {
         }
     }
 
+    /// Bind call arguments to parameters in the current (fresh) scope.
+    /// Missing arguments take the parameter default (evaluated in the
+    /// callee scope, so earlier parameters are visible) or `null`.
+    fn bind_params(&mut self, params: &[Param], args: Vec<Value>) {
+        let mut args = args.into_iter();
+        for param in params {
+            let val = match args.next() {
+                Some(v) => v,
+                None => param
+                    .default
+                    .as_ref()
+                    .and_then(|d| self.eval_expr(d).ok())
+                    .unwrap_or(Value::Null),
+            };
+            self.env.define(param.name.clone(), val);
+        }
+    }
+
     pub fn call_function(&mut self, func: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
         // Shared depth limit + native stack guard (runtime/recursion.rs):
         // runaway recursion is a catchable error, never a process abort.
@@ -4407,19 +4396,19 @@ impl Interpreter {
             return Err(RuntimeError::new(&msg));
         }
         self.call_depth += 1;
-        let frame_name = match &func {
-            Value::Function { name, .. } => {
-                if name.is_empty() {
-                    "<anonymous>".to_string()
-                } else {
-                    name.clone()
-                }
-            }
-            Value::Lambda { .. } => "<lambda>".to_string(),
-            Value::BuiltIn(n) => n.clone(),
-            _ => "<call>".to_string(),
-        };
         if self.debug_state.is_some() {
+            let frame_name = match &func {
+                Value::Function(func) => {
+                    if func.name.is_empty() {
+                        "<anonymous>".to_string()
+                    } else {
+                        func.name.clone()
+                    }
+                }
+                Value::Lambda { .. } => "<lambda>".to_string(),
+                Value::BuiltIn(n) => n.clone(),
+                _ => "<call>".to_string(),
+            };
             self.call_stack.push(DebugFrame {
                 name: frame_name,
                 line: self.current_line,
@@ -4440,50 +4429,23 @@ impl Interpreter {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         match func {
-            Value::Function {
-                name,
-                params,
-                body,
-                closure,
-                ..
-            } => {
-                let is_global_fn = !name.is_empty() && closure.scopes.len() == 1;
-
-                let result = if is_global_fn {
-                    self.env.push_scope();
-                    for (i, param) in params.iter().enumerate() {
-                        let val = args
-                            .get(i)
-                            .cloned()
-                            .or_else(|| param.default.as_ref().and_then(|d| self.eval_expr(d).ok()))
-                            .unwrap_or(Value::Null);
-                        self.env.define(param.name.clone(), val);
-                    }
-                    let result = self.exec_stmts(&body);
-                    self.env.pop_scope();
-                    result
-                } else {
-                    let saved_env = self.env.clone();
-                    self.env = closure;
-                    self.env.push_scope();
-                    if !name.is_empty() {
-                        if let Some(func_val) = saved_env.get(&name) {
-                            self.env.define(name.clone(), func_val.clone());
-                        }
-                    }
-                    for (i, param) in params.iter().enumerate() {
-                        let val = args
-                            .get(i)
-                            .cloned()
-                            .or_else(|| param.default.as_ref().and_then(|d| self.eval_expr(d).ok()))
-                            .unwrap_or(Value::Null);
-                        self.env.define(param.name.clone(), val);
-                    }
-                    let result = self.exec_stmts(&body);
-                    self.env.pop_scope();
-                    self.env = saved_env;
-                    result
-                };
+            Value::Function(func) => {
+                let FunctionValue {
+                    params,
+                    body,
+                    closure,
+                    ..
+                } = &*func;
+                // Lexical scoping: the body runs in the environment the
+                // function closed over plus one fresh scope for its
+                // parameters — never on top of the caller's scopes. That
+                // keeps lookups O(lexical depth) instead of O(call depth)
+                // and means a function cannot see its caller's locals.
+                let saved_env = std::mem::replace(&mut self.env, closure.clone());
+                self.env.push_scope();
+                self.bind_params(params, args);
+                let result = self.exec_stmts(body);
+                self.env = saved_env;
 
                 match result {
                     Ok(Signal::Return(v)) => Ok(v),
@@ -4504,7 +4466,6 @@ impl Interpreter {
                 body,
                 closure,
             } => {
-                let saved_env = self.env.clone();
                 // Lock the shared closure to get the current captured state.
                 // Using Arc<Mutex<Environment>> means mutations inside the lambda
                 // persist across calls (fixes BUG-005: mutable closure capture).
@@ -4512,18 +4473,11 @@ impl Interpreter {
                     .lock()
                     .map_err(|_| RuntimeError::new("closure lock poisoned"))?
                     .clone();
-                self.env = captured_env;
+                let saved_env = std::mem::replace(&mut self.env, captured_env);
                 self.env.push_scope();
 
                 // Same default-parameter rule as named functions.
-                for (i, param) in params.iter().enumerate() {
-                    let val = args
-                        .get(i)
-                        .cloned()
-                        .or_else(|| param.default.as_ref().and_then(|d| self.eval_expr(d).ok()))
-                        .unwrap_or(Value::Null);
-                    self.env.define(param.name.clone(), val);
-                }
+                self.bind_params(&params, args);
 
                 let result = self.exec_stmts(&body);
                 self.env.pop_scope();
@@ -4570,8 +4524,10 @@ impl Interpreter {
         // Propagate cancellation token so squad can cancel spawned tasks
         spawn_interp.cancelled = self.cancelled.clone();
 
-        // Always use std::thread — simpler, avoids tokio dependency issues
-        crate::permissions::spawn(move || {
+        // A plain OS thread with the same recursion headroom as the CLI
+        // (WORKER_STACK_SIZE, registered with the stack guard) and the
+        // caller's permission policy.
+        crate::runtime::recursion::spawn_worker(move || {
             let result = spawn_interp.exec_block(&body);
             let val = match result {
                 Ok(Signal::Return(v)) | Ok(Signal::ImplicitReturn(v)) => {
@@ -4585,7 +4541,8 @@ impl Interpreter {
                 *guard = Some(val);
                 cvar.notify_all();
             }
-        });
+        })
+        .map_err(|e| RuntimeError::new(&format!("spawn: cannot start task thread: {}", e)))?;
         let handle = Value::TaskHandle(result_slot);
         // If inside a squad block, register the handle for automatic join
         if let Some(ref mut handles) = self.squad_handles {

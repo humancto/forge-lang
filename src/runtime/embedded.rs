@@ -20,10 +20,12 @@ impl EmbeddedSourceConfig {
 }
 
 pub fn execute_source_standalone(source: &str, config: EmbeddedSourceConfig) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| format!("failed to create Tokio runtime: {err}"))?;
+    let runtime = crate::runtime::recursion::configure_runtime(
+        &mut tokio::runtime::Builder::new_multi_thread(),
+    )
+    .enable_all()
+    .build()
+    .map_err(|err| format!("failed to create Tokio runtime: {err}"))?;
 
     runtime.block_on(execute_source_on_current_runtime(source, config))
 }

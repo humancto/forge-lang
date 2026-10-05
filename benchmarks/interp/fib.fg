@@ -1,0 +1,6 @@
+// Interpreter benchmark: recursive fib(30) (call overhead, variable lookup).
+fn fib(n) {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+println(fib(30))

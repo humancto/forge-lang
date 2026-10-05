@@ -1,0 +1,14 @@
+// Interpreter benchmark: index into / take len() of a large array in a loop.
+let mut a = []
+let mut i = 0
+while i < 20000 {
+    a.push(i)
+    i = i + 1
+}
+let mut total = 0
+let mut j = 0
+while j < len(a) {
+    total = total + a[j]
+    j = j + 1
+}
+println(total)

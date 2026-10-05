@@ -396,7 +396,7 @@ fn main() {
         .stack_size(stack)
         .spawn(move || {
             runtime::recursion::register_thread_stack(stack);
-            tokio::runtime::Builder::new_multi_thread()
+            runtime::recursion::configure_runtime(&mut tokio::runtime::Builder::new_multi_thread())
                 .enable_all()
                 .build()
                 .expect("BUG: failed to build the tokio runtime")

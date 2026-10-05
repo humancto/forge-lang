@@ -66,17 +66,7 @@ impl Interpreter {
                 self.write_output(&output, true);
                 Ok(Value::Null)
             }
-            "len" => match args.first() {
-                Some(Value::String(s)) => Ok(Value::Int(s.chars().count() as i64)),
-                Some(Value::Array(a) | Value::Tuple(a) | Value::Set(a)) => {
-                    Ok(Value::Int(a.len() as i64))
-                }
-                Some(Value::Object(o)) => Ok(Value::Int(o.len() as i64)),
-                Some(Value::Map(m)) => Ok(Value::Int(m.len() as i64)),
-                _ => Err(RuntimeError::new(
-                    "len() requires string, array, tuple, set, map, or object",
-                )),
-            },
+            "len" => super::places::len_of(args.first()),
             "type" | "typeof" => match args.first() {
                 Some(v) => Ok(Value::String(v.type_name().to_string())),
                 None => Err(RuntimeError::new("typeof() requires an argument")),
@@ -138,26 +128,7 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new("values() requires object or map")),
             },
-            "contains" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(sub))) => {
-                    Ok(Value::Bool(s.contains(sub.as_str())))
-                }
-                (Some(Value::Set(arr)), Some(val)) => {
-                    Ok(Value::Bool(arr.iter().any(|v| Value::container_eq(v, val))))
-                }
-                (Some(Value::Array(arr) | Value::Tuple(arr)), Some(val)) => Ok(Value::Bool(
-                    arr.iter().any(|v| format!("{}", v) == format!("{}", val)),
-                )),
-                (Some(Value::Object(map)), Some(Value::String(key))) => {
-                    Ok(Value::Bool(map.contains_key(key)))
-                }
-                (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(
-                    pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
-                )),
-                _ => Err(RuntimeError::new(
-                    "contains() requires (string, substring), (array, value), (object, key), or (map, key)",
-                )),
-            },
+            "contains" => super::places::contains_of(args.first(), args.get(1)),
             "has_key" => match (args.first(), args.get(1)) {
                 (Some(Value::Object(map)), Some(Value::String(key))) => {
                     Ok(Value::Bool(map.contains_key(key)))
@@ -1861,7 +1832,7 @@ impl Interpreter {
             "cook" => {
                 // cook(fn) — time execution with personality
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("cook() needs a function — let him cook!")),
                 };
                 let start = std::time::Instant::now();
@@ -1885,7 +1856,7 @@ impl Interpreter {
             "yolo" => {
                 // yolo(fn) — swallow ALL errors, return None on failure
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("yolo() needs a function to send it on")),
                 };
                 match self.call_function(func, vec![]) {
@@ -1898,7 +1869,7 @@ impl Interpreter {
                 // Note: In a real implementation this would redirect stdout.
                 // For now, we execute and return the result silently.
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("ghost() needs a function to haunt")),
                 };
                 // Execute the function, capturing its return value
@@ -1908,7 +1879,7 @@ impl Interpreter {
             "slay" => {
                 // slay(fn, n?) — benchmark function n times, return stats
                 let func = match args.first() {
-                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function { .. }) => f.clone(),
+                    Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("slay() needs a function to benchmark")),
                 };
                 let n = match args.get(1) {
