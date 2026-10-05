@@ -543,10 +543,14 @@ impl Interpreter {
                         name,
                     )));
                 }
-                if let Value::Object(map) = cur {
-                    map.insert(field.to_string(), val);
+                match cur {
+                    Value::Object(map) => {
+                        map.insert(field.to_string(), val);
+                        Ok(())
+                    }
+                    // Used to be silently ignored; the VM always errored.
+                    _ => Err(RuntimeError::new("cannot set field on non-object")),
                 }
-                Ok(())
             })
             .unwrap_or_else(|| Err(RuntimeError::new(&format!("undefined: {}", name))))
     }
