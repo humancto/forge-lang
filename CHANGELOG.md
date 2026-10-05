@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` configure head sampling (`always_on`, `always_off`, `traceidratio`, `parentbased_always_on` (default), `parentbased_always_off`, `parentbased_traceidratio`); invalid values fall back to the default with a warning (#135)
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is honored and takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT` (#132)
 - Rust panics are reported as structured `ERROR` events on the `forge.panic` target (payload, location, thread, backtrace when `RUST_BACKTRACE` is set) once Forge's tracing subscriber is installed, inside the current request span; if the active filter drops that target the standard panic message is printed instead (#121)
+- **Write MCP tools in Forge: `forge mcp serve tools.fg`** — top-level functions annotated `@tool(description: ...)` become MCP tools whose JSON Schema comes from their parameter types (`Int`→integer, `Float`→number, `String`, `Bool`, `[T]`→array, `Object`/`Map<String, T>`/structs→object, `?T`/`Option<T>`/defaults→optional), documented with `@param(name: "...")`; a declared return type becomes the `outputSchema` and is checked. `@resource(uri: ...)` functions serve read-only resources (`resources/list`, `resources/read`). Arguments are validated before any Forge code runs (problems come back as `isError` results naming each field), `Err(x)` is a tool error, and every call runs in a fresh sandboxed fork of the file's top level under the server's grants, time and output limits. Load errors stop the server with `file:line` messages. `--with-code-tools` also serves `run_forge` & co. Example: `examples/mcp/weather_tools.fg`.
+- **`run_forge` sessions** — an optional `session_id` keeps top-level variables, functions and types across calls (bounded by `--max-sessions`, default 16, and `--session-idle`, default 900s; one call at a time per session); the new `reset_session` tool forgets one. Calls without `session_id` stay stateless.
 - Windows shell support, completed: when no POSIX `sh` is on `PATH`, shell builtins run through `cmd /d /s /c "<command>"` with the command passed verbatim, so quoted arguments survive (`.arg()` escaping mangled them); `which` searches `PATH` in-process and honors `PATHEXT` (`which("npm")` finds `npm.cmd`); `run_command` resolves programs through `PATHEXT`
 
 ### Changed
@@ -38,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Decorator named arguments accept soft keywords as keys, like object literals do (`@tool(timeout: 5)` was a parse error)
 - `pipe_to` no longer deadlocks when both its input and the command's output exceed the OS pipe buffer
 - `which` no longer depends on `/usr/bin/which` being installed
 - `forge run` logs: the default filter now enables the CLI binary's own targets (`forge=info`), so the server's per-request `request` span (`method`, `uri`, `request_id`) and the `forge.server` startup event are no longer filtered out; under `FORGE_LOG_FORMAT=json` the VM-to-interpreter fallback note is a `forge.runtime` JSON event instead of plain text, so stderr stays line-delimited JSON (#119, #120)
@@ -45,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Sandbox: tasks a script `spawn`s and never awaits are now stopped when the run ends. Before, `spawn { while true { } }` returned immediately and left the task spinning in the host (`forge mcp`, embedders, the Python package) after the call finished.
 - `GITHUB_TOKEN` is sent only over HTTPS to GitHub hosts. It was previously attached to requests for any `FORGE_REGISTRY_URL` and archive URL.
 - `cargo bench --bench server_throughput` boots `forge run` on `examples/bench_server*.fg` on both engines and reports requests per second and latency percentiles; `benches/fork_for_serving.rs` also measures the VM's per-request fork.
 - `tests/server_engine_parity.rs` runs one `@server` program on the VM and on the interpreter and requires identical responses (routes, path/query/body binding, every method, 404/405/body rejections, handler errors, panics, isolation of globals and closures, deep recursion, WebSocket echo).

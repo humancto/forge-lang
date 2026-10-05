@@ -621,6 +621,7 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 | `forge doc [paths]`           | Generate documentation                               |
 | `forge lsp` / `forge dap`     | Language server / debug adapter                      |
 | `forge mcp`                   | MCP server: AI agents run Forge in a sandbox         |
+| `forge mcp serve <file>`      | Serve a file's `@tool` functions as MCP tools        |
 | `forge chat`                  | AI assistant                                         |
 | `forge version`               | Version info                                         |
 
@@ -676,9 +677,10 @@ forge --allow-ffi run app.fg              # or --allow-ffi=target/release
 
 | Tool              | What it does                                                                                                    |
 | ----------------- | --------------------------------------------------------------------------------------------------------------- |
-| `run_forge`       | Runs `{code, timeout_secs?}` in the sandbox; returns what the script printed, or `isError` with a typed error (`syntax`, `permission_denied`, `runtime`, `timeout`, `output_limit`) and the output so far |
+| `run_forge`       | Runs `{code, timeout_secs?, session_id?}` in the sandbox; returns what the script printed, or `isError` with a typed error (`syntax`, `permission_denied`, `runtime`, `timeout`, `output_limit`) and the output so far |
 | `check_forge`     | Parses and type-checks `{code}` without running it; returns diagnostics with line numbers                      |
 | `forge_reference` | The compact language guide ([`llms.txt`](llms.txt)) so the agent can learn Forge                                |
+| `reset_session`   | Forgets a `run_forge` session (`{session_id}`) and stops a call still running in it                             |
 
 Scripts are **denied everything by default** — files, network, environment, databases, subprocesses, AI calls, `exit()`. Grant only what the agent needs with the usual flags (or `[permissions]` in a `forge.toml` in the server's working directory; flags win):
 
@@ -704,6 +706,51 @@ or `claude mcp add forge -- forge mcp --allow-net=api.example.com`.
 - Each call runs on its own thread: a stuck script times out while the server keeps answering, and `notifications/cancelled` stops it. `run` (shell) is never granted unless you pass `--allow-run`.
 - Nothing a script prints or reads can reach the protocol stream (stdin/stdout are moved off fds 0/1 on Unix).
 - Protocol: `2026-07-28` (stateless, `server/discover`) and the `initialize` handshake for `2025-11-25` back to `2024-11-05`. Rust hosts can embed the same server: `forge_lang::mcp::serve(reader, writer, config)`.
+- **Sessions:** pass `session_id` to `run_forge` and top-level variables, functions and types persist across calls with the same id, so an agent can build up state step by step (`reset_session` forgets one). Default is stateless. At most 16 sessions (`--max-sessions N`, `0` disables them), dropped after 15 idle minutes (`--session-idle SECS`); every step still runs under the full sandbox, and tasks a step spawns stop when it ends.
+
+### Write MCP tools in Forge
+
+`forge mcp serve tools.fg` turns the `@tool` functions of a Forge file into MCP tools. Typed parameters become the tool's JSON Schema, `@param` documents them, and the return type becomes its output schema (`Result<T, E>` describes `T`):
+
+```forge
+struct Report { city: String, temperature: Float, advice: String }
+
+@tool(description: "Convert a temperature between Celsius (C) and Fahrenheit (F).", idempotent: true)
+@param(value: "The temperature to convert", target: "Target unit: \"C\" or \"F\"")
+fn convert_temperature(value: Float, target: String = "F") -> Result<Float, String> {
+    if target == "F" { return Ok(value * 9.0 / 5.0 + 32.0) }
+    if target == "C" { return Ok((value - 32.0) * 5.0 / 9.0) }
+    return Err("`target` must be \"C\" or \"F\"")   // becomes a tool error
+}
+
+@resource(uri: "weather://cities", description: "Cities the weather tool knows")
+fn cities() { return ["Lisbon", "Oslo"] }
+```
+
+| Forge type | JSON Schema | | Forge type | JSON Schema |
+| --- | --- | --- | --- | --- |
+| `Int` | `integer` | | `[T]` / `Array<T>` | `array` of `T` |
+| `Float` | `number` | | `Object` / `Map<String, T>` | `object` |
+| `String` | `string` | | a `struct` | `object` with its fields (defaults optional) |
+| `Bool` | `boolean` | | `?T` / `Option<T>` | optional, `T` or `null` (`Option` arrives as `Some`/`None`) |
+| `Any` / no annotation | any value | | parameter with a default | optional, default shown |
+
+- `@tool(description: "...")` is required (a single string also works: `@tool("...")`); optional `name`, `title`, `timeout` (seconds, capped by `--max-time`) and the hints `read_only`, `destructive`, `idempotent`, `open_world`. Hints the policy already settles (no write grant ⇒ read-only) cannot be overridden.
+- Arguments are validated against the schema before any Forge code runs; a bad call is a tool error (`isError`) naming each problem (`` `value`: expected a number, got a string ``), so the model can fix it. Results come back as `structuredContent` (objects as is, anything else as `{"result": ...}`) plus text; `Err(x)` and runtime errors are tool errors. A declared return type is checked.
+- The file's top level runs once at start-up; **every call runs in a fresh fork of it** (like a per-request HTTP fork), in the same sandbox as `run_forge`: deny-all plus your `--allow-*` grants, `--max-time`, captured and capped output, no stdin. Modules next to the file can be imported. `say` output is returned alongside the result.
+- Only the file's tools are served; add `--with-code-tools` to also offer `run_forge` & co. Load errors (``tools.fg:12: @tool on `f` needs a description``) stop the server with exit code 2.
+
+```json
+{
+  "mcpServers": {
+    "weather": { "command": "forge", "args": ["mcp", "serve", "/abs/path/examples/mcp/weather_tools.fg"] }
+  }
+}
+```
+
+or `claude mcp add weather -- forge mcp serve /abs/path/examples/mcp/weather_tools.fg`. Full example: [`examples/mcp/weather_tools.fg`](examples/mcp/weather_tools.fg).
+
+> Engine: MCP code always runs on the tree-walking interpreter inside the sandbox. The VM does not yet capture output or stop `squad` tasks and blocked `receive`s at a deadline ([SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) SEC-02/SEC-16), so it is not used for untrusted code.
 
 ---
 

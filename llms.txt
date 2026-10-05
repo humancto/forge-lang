@@ -17,6 +17,7 @@ forge -e 'println(1 + 2)'        # evaluate inline
 forge test                       # run @test functions in tests/*.fg
 forge build --native app.fg      # native executable (also: fmt, new, lsp, add, install)
 forge mcp --allow-net=api.x.com  # MCP server: AI agents run Forge in a deny-all sandbox
+forge mcp serve tools.fg         # serve @tool functions as MCP tools
 ```
 
 Engine flags go BEFORE the subcommand: `forge --interp run x.fg`, not `forge run x.fg --interp`. Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `+=`.
@@ -391,6 +392,26 @@ Handler parameters bind by name: path params (`:name`), `body`/`data` (parsed JS
 ## Tests
 
 Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and run `forge test` (`forge --allow-run test` if tests use the shell).
+
+## MCP tools (forge mcp serve)
+
+`forge mcp serve tools.fg` serves the file's `@tool` functions to AI agents over the Model Context Protocol. Parameter types become the JSON Schema (`Int` integer, `Float` number, `String`, `Bool`, `[T]` array, `Object`/`Map<String, T>` object, a struct object, `?T`/`Option<T>` or a default make it optional); the return type becomes the output schema (`Result<T, E>` describes `T`).
+
+```
+struct Report { city: String, temp_c: Float }
+
+@tool(description: "Weather for a city (sample data)", read_only: true)
+@param(city: "City name")
+fn weather(city: String, unit: String = "C") -> Result<Report, String> {
+    if city == "Oslo" { return Ok(Report { city: "Oslo", temp_c: -3.0 }) }
+    return Err("unknown city: " + city)
+}
+
+@resource(uri: "weather://cities", description: "Known cities")
+fn cities() { return ["Oslo"] }
+```
+
+`@tool` needs a description (`@tool("...")` also works); optional `name`, `title`, `timeout` (seconds), `read_only`, `destructive`, `idempotent`, `open_world`. `@param(name: "doc", ...)` documents parameters. Decorator arguments must be constants. Return `Err(msg)` for a tool error. The top level runs once at start-up; each call runs in a fresh sandboxed fork of it (deny-all plus the server's `--allow-*` grants, `--max-time`), so calls never share state. With plain `forge mcp`, `run_forge` takes an optional `session_id` that keeps top-level variables between calls; `reset_session` clears it.
 
 ## Common mistakes
 
