@@ -1863,9 +1863,16 @@ fn interface_def() {
 }
 
 #[test]
-fn yield_stmt_noop() {
+fn yield_stmt_errors_instead_of_silently_dropping() {
+    // Generators are not implemented; `emit`/`yield` used to be a silent
+    // no-op. Both engines now raise the shared `YIELD_UNSUPPORTED` error.
     let result = try_run_forge(r#"emit 42"#);
-    assert!(result.is_ok());
+    let err = result.expect_err("emit must not be silently dropped");
+    assert!(
+        err.message.contains("yield/emit is not supported yet"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]

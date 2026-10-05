@@ -1,0 +1,16 @@
+// expect: [8, 2, b, null, small, null, 5, null, 1, 1]
+// if/when/safe expressions and implicit returns produce values.
+fn implicit(x) { x * 2 }
+let lambda = fn(x) { x + 1 }
+let picked = if 1 > 2 { "a" } else { "b" }
+let none = if false { 1 }
+let w = when 2.5 { < 3 -> "small", else -> "big" }
+let unmatched = when 10 { < 3 -> "small" }
+let s = safe { 5 }
+let failed = safe { 1 / 0 }
+let mut side = 0
+let once = if true {
+    side = side + 1
+    side
+} else { 0 }
+[implicit(4), lambda(1), picked, none, w, unmatched, s, failed, once, side]

@@ -12,6 +12,7 @@ pub mod parser;
 mod permissions;
 mod registry;
 pub mod runtime;
+mod semantics;
 mod stdlib;
 mod typechecker;
 pub mod vm;

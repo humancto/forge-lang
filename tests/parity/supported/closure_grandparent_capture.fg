@@ -1,0 +1,17 @@
+// expect: [12, 12]
+// A closure two levels down captures (and mutates) a local of its
+// grandparent.
+fn outer() {
+    let a = 1
+    let mut b = 10
+    fn mid() {
+        fn inner() {
+            b = b + a
+            return b
+        }
+        return inner()
+    }
+    mid()
+    return [mid(), b]
+}
+outer()

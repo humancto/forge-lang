@@ -1086,3 +1086,144 @@ fn vm_bet_no_cap() {
     run_on_vm("bet(true)");
     run_on_vm("no_cap(1, 1)");
 }
+
+// ----- Language-semantics parity (shared rules in `crate::semantics`) -----
+
+#[test]
+fn parity_array_plus_array_is_type_error() {
+    assert_cross_backend_error_contains("[1, 2] + [3]", "cannot apply Add to Array and Array");
+}
+
+#[test]
+fn parity_index_out_of_bounds_message() {
+    assert_cross_backend_error_contains(
+        "let a = [1, 2]\na[10]",
+        "index out of bounds: index 10 on array of length 2",
+    );
+    assert_cross_backend_error_contains(
+        "let a = [1, 2]\na[-3]",
+        "index out of bounds: index -3 on array of length 2",
+    );
+    assert_cross_backend_error_contains(
+        "let mut a = [1, 2]\na[2] = 5\na",
+        "index out of bounds: index 2 on array of length 2",
+    );
+}
+
+#[test]
+fn parity_missing_object_key_errors() {
+    assert_cross_backend_error_contains("let o = {a: 1}\no[\"b\"]", "key 'b' not found");
+}
+
+#[test]
+fn parity_string_index_is_invalid() {
+    assert_cross_backend_error_contains("\"abc\"[1]", "cannot index String with Int");
+}
+
+#[test]
+fn parity_index_assign_object_key() {
+    assert_cross_backend_value("let mut o = {a: 1}\no[\"b\"] = 2\no.b", "2");
+}
+
+#[test]
+fn parity_division_by_zero_message() {
+    assert_cross_backend_error_contains("1 / 0", "division by zero");
+    assert_cross_backend_error_contains("5 % 0", "modulo by zero");
+}
+
+#[test]
+fn parity_bool_ordering_is_error() {
+    assert_cross_backend_error_contains("true < false", "invalid operator for Bool");
+}
+
+#[test]
+fn parity_yield_is_a_runtime_error_not_dropped() {
+    assert_cross_backend_error_contains(
+        // Top level: JIT-compiled functions currently swallow errors raised
+        // by runtime-bridge calls (tracked separately), so keep this test
+        // about the compiler/interpreter contract.
+        "emit 1\n3",
+        "yield/emit is not supported yet",
+    );
+}
+
+#[test]
+fn parity_check_statement_is_enforced() {
+    assert_cross_backend_error_contains(
+        "let name = \"\"\ncheck name is not empty\n1",
+        "check failed",
+    );
+    assert_cross_backend_value("let s = \"hi\"\ncheck s is not empty\ns", "hi");
+}
+
+#[test]
+fn parity_immutable_reassign_is_catchable() {
+    assert_cross_backend_value(
+        "let mut caught = false\ntry {\n    let x = 1\n    x = 2\n} catch e {\n    caught = true\n}\ncaught",
+        "true",
+    );
+}
+
+#[test]
+fn parity_native_callers_observe_errors_before_outer_try() {
+    // yolo/assert_throws swallow errors from the closure they call; an
+    // enclosing try must not intercept them first.
+    assert_cross_backend_value(
+        "let mut out = \"none\"\ntry {\n    let r = yolo(fn() { return 1 / 0 })\n    assert_throws(fn() { return 1 / 0 })\n    out = \"swallowed\"\n} catch e {\n    out = \"caught\"\n}\nout",
+        "swallowed",
+    );
+    // ...while errors that no native caller handles still reach the try.
+    assert_cross_backend_value(
+        "let mut out = \"none\"\ntry {\n    map([1, 0], fn(x) { return 1 / x })\n} catch e {\n    out = \"caught\"\n}\nout",
+        "caught",
+    );
+}
+
+#[test]
+fn parity_import_missing_name_errors() {
+    assert_cross_backend_error_contains(
+        "import { nope } from \"tests/parity/modules/private_helper.fg\"\n1",
+        "does not export 'nope'",
+    );
+}
+
+#[test]
+fn parity_import_does_not_leak_private_names() {
+    assert_cross_backend_error_contains(
+        "import { visible } from \"tests/parity/modules/private_helper.fg\"\nhidden_helper()",
+        "undefined variable: 'hidden_helper'",
+    );
+}
+
+#[test]
+fn parity_option_truthiness() {
+    assert_cross_backend_value("[!!Some(0), !!None]", "[true, false]");
+}
+
+#[test]
+fn parity_match_on_result_constructors() {
+    assert_cross_backend_value(
+        "let r = Ok(41)\nlet mut out = 0\nmatch r {\n    Ok(v) => out = v + 1\n    Err(e) => out = -1\n}\nout",
+        "42",
+    );
+}
+
+#[test]
+fn vm_unsupported_constructs_are_rejected_not_dropped() {
+    // `break` outside a loop used to compile to a silent no-op.
+    let program = parse_program("break\n");
+    let err = compiler::compile(&program).expect_err("must be rejected");
+    assert!(err.is_unsupported(), "{}", err.message);
+}
+
+#[test]
+fn vm_many_try_blocks_reuse_registers() {
+    // Each top-level try/catch used to leak its catch register, so large
+    // programs hit the 255-register limit.
+    let mut source = String::from("let mut n = 0\n");
+    for _ in 0..300 {
+        source.push_str("try {\n    let t = n + 1\n    n = t\n} catch e {\n    n = -1\n}\n");
+    }
+    source.push_str("n\n");
+    assert_eq!(run_on_vm_value(&source), "300");
+}
