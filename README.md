@@ -15,7 +15,7 @@ Built-in HTTP, databases, crypto, AI, and a JIT compiler.<br>
 [![Stars](https://img.shields.io/github/stars/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/stargazers)
 [![crates.io](https://img.shields.io/crates/v/forge-lang?color=%23ff6b35&style=flat-square)](https://crates.io/crates/forge-lang)
 
-[📥 **Download Book**](https://github.com/humancto/forge-lang/releases/download/v0.4.1/programming-forge.pdf) · [🤖 **llms.txt**](llms.txt) · [📖 **Language Spec**](https://humancto.github.io/forge-lang/spec/) · [🌐 **Website**](https://humancto.github.io/forge-lang/) · [💬 **Discussions**](https://github.com/humancto/forge-lang/discussions) · [🐛 **Issues**](https://github.com/humancto/forge-lang/issues)
+[▶️ **Playground**](https://humancto.github.io/forge-lang/playground/) · [📥 **Download Book**](https://github.com/humancto/forge-lang/releases/download/v0.4.1/programming-forge.pdf) · [🤖 **llms.txt**](llms.txt) · [📖 **Language Spec**](https://humancto.github.io/forge-lang/spec/) · [🌐 **Website**](https://humancto.github.io/forge-lang/) · [💬 **Discussions**](https://github.com/humancto/forge-lang/discussions) · [🐛 **Issues**](https://github.com/humancto/forge-lang/issues)
 
 </div>
 
@@ -26,6 +26,8 @@ brew install humancto/tap/forge    # install
 forge learn                        # 30 interactive tutorials
 forge run app.fg                   # run a program
 ```
+
+No install needed to try it: the [**Forge Playground**](https://humancto.github.io/forge-lang/playground/) runs the language core in your browser (WebAssembly) with a 15-lesson guided tour. See [bindings/wasm](bindings/wasm/README.md) for what works there.
 
 ---
 
