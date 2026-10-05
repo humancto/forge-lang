@@ -47,6 +47,7 @@
   - [Structural Satisfaction (satisfies)](./type-system/structural-satisfaction.md)
   - [Default Field Values](./type-system/defaults.md)
   - [Static Methods](./type-system/static-methods.md)
+  - [Type Checking](./type-system/type-checking.md)
 - [Error Handling](./error-handling.md)
   - [Result Type](./error-handling/result.md)
   - [The ? Operator](./error-handling/propagation.md)

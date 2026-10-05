@@ -46,6 +46,19 @@ println(10 / 4)               // 2 (Int / Int is integer division)
 
 Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines.
 
+## Type annotations and checking
+
+Annotation syntax: `Int`, `[Int]`, `?String` (or `Option<String>`), `Result<Int, String>`, `Map<String, Int>`, `Set<Int>`, `(Int, String)`, `fn(Int, Int) -> Bool`, `Any`, user structs/types, generics `fn first<T>(xs: [T]) -> T`, `struct Box<T> { value: T }`.
+
+```forge
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { return f(x) }
+let twice: fn(Int) -> Int = fn(n) { n * 2 }   // n inferred as Int
+let names = ["ada", "bob"]
+let lens = map(names, fn(s) { len(s) })        // lens: [Int]
+```
+
+Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition. Default: warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
+
 ## Control flow
 
 ```forge

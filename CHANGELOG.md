@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A real type checker** — local inference (variables, function results, generic type arguments, lambda parameters from the function type they are passed as, struct fields, array/map element types, `Option`/`Result` payloads, `match` bindings), checked against declared types and against the engines' own run-time rules. New diagnostics: invalid operators (`"a" - 1`, via the shared arithmetic rules), unknown names, types, struct fields and module members with "did you mean" suggestions, wrong argument counts, calls of non-functions, assignments to immutable bindings, use before definition, missing returns, unreachable code, struct literals with unknown or missing fields, and non-exhaustive `match` on algebraic types. Every diagnostic has a stable code (`T0001`–`T0018`), a precise span and, where possible, a quick fix; the CLI prints them with source snippets. Default mode reports warnings and runs the program; `--strict` makes them errors. The repository's test and example corpus is checked by a test that allows no strict-mode errors beyond a justified allowlist (`tests/typecheck_allowlist.txt`).
+- **Function and tuple type annotations** — `fn(Int, String) -> Bool`, `fn()` and `(Int, String)` are valid annotations; `Option<Option<Int>>` (closing `>>`) parses.
+- **Runtime enforcement under `--strict`** — annotated function and lambda arguments and declared return values are checked on every call, identically on the VM and the interpreter (`type error: argument 'n' of 'double' must be Int, got String`); correct programs behave the same with and without the flag.
+- **LSP features on the type checker** — hover shows inferred types and signatures, go-to-definition and references follow imports across files, scope-aware rename (`textDocument/rename` + `prepareRename`) edits every file that uses the symbol, quick-fix code actions apply "did you mean" suggestions, semantic tokens classify every name, and inlay hints show the inferred type of unannotated `let` bindings. Diagnostics carry their codes.
+- **`check_forge` (MCP) reports diagnostic codes** — each diagnostic has a `code` field.
+
+### Changed
+
+- A `Float` value is no longer accepted where an `Int` is declared (an `Int` still widens to `Float`).
+
 ## [0.9.0] - 2026-10-05
 
 Highlights: the default VM is now trustworthy (a guarded, verified JIT tier; GC rooting; full VM/interpreter parity on the test suite), much faster (VM and interpreter performance passes), and Forge gains a capability-based sandbox (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`) plus `forge mcp`, an MCP server that lets AI agents run sandboxed Forge code.
