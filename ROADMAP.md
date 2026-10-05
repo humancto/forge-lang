@@ -11,12 +11,12 @@
 
 | Component             | State                     | Details                                                                                                   |
 | --------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Bytecode VM           | **Default engine**        | Register VM, NaN-boxed values, mark-sweep GC. Programs using decorator-driven servers auto-fall back to the interpreter |
+| Bytecode VM           | **Default engine**        | Register VM, NaN-boxed values, mark-sweep GC. Serves decorator-driven HTTP servers (per-request VM fork) |
 | Tree-walk interpreter | Complete (`--interp`)     | Full language and stdlib surface; reference semantics for parity work                                     |
 | JIT (Cranelift)       | Opt-in (`--jit`)          | Numeric leaf functions; anything else falls back to the VM                                                |
 | Native binaries       | Shipped                   | `forge build --native` (embeds source) / `--aot` (embeds bytecode). Standalone when `libforge_lang.a` is available, launcher otherwise |
 | Standard library      | 22 global modules         | http, db/pg/mysql, jwt, crypto, fs, csv, json, regex, term, os, path, time, url, toml, npc, ws, ...        |
-| HTTP server           | Complete                  | axum + tokio, decorator routing, WebSocket, per-request interpreter fork, backpressure, request ids, tracing/OTel |
+| HTTP server           | Complete                  | axum + tokio, decorator routing, WebSocket, per-request VM fork (interpreter with `--interp`), backpressure, request ids, tracing/OTel |
 | HTTP client           | Complete                  | reqwest, all methods, SSRF guard with DNS pinning                                                          |
 | Concurrency           | Complete                  | `squad`/`spawn` structured concurrency, channels, `select`, `await_all`, `await_timeout`                   |
 | Packages              | Working                   | `forge.toml`, `forge install/add/update/search/publish`, semver resolution, lockfile checksums             |
@@ -41,7 +41,7 @@ forge build --aot app.fg      # Native executable embedding bytecode (VM-only pr
 ### Known Gaps
 
 - The VM and interpreter now pass the full Forge test suite identically (`forge test --engine both`, `cargo test --test engine_diff`). Remaining known divergence: nested index assignment (`g[0][1] = v`) works on the VM but is rejected by the interpreter.
-- Decorator-driven servers always run on the interpreter (auto-fallback).
+- VM HTTP request workers do not share JIT-compiled code across requests (each fork tiers up on its own), and WebSocket connection workers run without the JIT.
 - No capability-based sandbox: beyond `--allow-run`, the SSRF guard and `FORGE_FS_BASE`, programs have the host process's permissions.
 
 ---

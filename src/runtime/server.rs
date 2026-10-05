@@ -1,7 +1,12 @@
 //! Forge HTTP Server — Axum + Tokio
 //!
 //! Per-request fork architecture: each incoming request gets its own
-//! Interpreter forked from a shared, read-only [`InterpreterTemplate`].
+//! engine instance forked from a shared, read-only template — a
+//! [`ServeEngine`]. Two engines implement it: the bytecode VM
+//! (`crate::vm::serve::VmTemplate`, the default) and the tree-walking
+//! interpreter ([`InterpreterTemplate`], `--interp`). Everything in this
+//! file — routing, argument binding, JSON conversion, backpressure,
+//! cancellation, tracing — is shared, so both engines serve identically.
 //! Handlers run on tokio's blocking pool via [`tokio::task::spawn_blocking`]
 //! so synchronous Forge code never blocks an async worker thread. The CLI
 //! and standalone binaries build their runtime with
@@ -12,14 +17,17 @@
 //!
 //! Concurrency guarantees:
 //! - **No global lock on the hot path.** Forks share only the
-//!   [`Arc<InterpreterTemplate>`], not any mutable state.
+//!   `Arc<dyn ServeEngine>` template, not any mutable state.
 //! - **Backpressure.** A bounded [`tokio::sync::Semaphore`] prevents the
 //!   blocking pool from queueing unboundedly; excess requests get a
 //!   503 with `Retry-After: 1`.
 //! - **Cancellation.** Each request carries an [`Arc<AtomicBool>`] that
-//!   the per-request interpreter polls at every safe point (loop / call /
-//!   statement). A `Drop` guard on the response future flips it when
-//!   axum drops the future (client disconnect, server shutdown).
+//!   the per-request engine polls at its safe points (interpreter: loop /
+//!   call / statement; VM: backward jump / call). A `Drop` guard on the
+//!   response future flips it when axum drops the future (client
+//!   disconnect, server shutdown).
+//! - **Permissions.** The capability policy in force when the server
+//!   starts is installed on every thread that runs a handler.
 //! - **Graceful shutdown.** SIGINT/SIGTERM triggers axum's graceful
 //!   shutdown; in-flight requests get up to 30s to finish before the
 //!   process exits.
@@ -59,6 +67,7 @@ use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
 use crate::interpreter::{Interpreter, RuntimeError, Value};
+use crate::permissions::Capabilities;
 use crate::runtime::metadata::{CorsMode, ServerPlan};
 use crate::runtime::tracing_init;
 use futures_util::{SinkExt, StreamExt};
@@ -125,12 +134,97 @@ fn extract_request_id(rid: &RequestId) -> String {
 /// is better than client-perceived hangs followed by RST.
 const DEFAULT_MAX_INFLIGHT: usize = 512;
 
-/// Read-only template the server forks per request.
+/// The inputs of one HTTP handler invocation, as extracted by axum.
+#[derive(Debug, Default)]
+pub struct HandlerRequest {
+    pub path_params: HashMap<String, String>,
+    pub query_params: HashMap<String, String>,
+    /// Parsed JSON body (`POST` / `PUT` only).
+    pub body: Option<JsonValue>,
+}
+
+/// Bind a handler's arguments by parameter name. Shared by both engines so
+/// they cannot drift:
 ///
-/// Construction-time only: once wrapped in `Arc<InterpreterTemplate>` and
-/// installed on a router, the inner [`Interpreter`] must not be mutated.
-/// All per-request work happens on the forked interpreter returned by
-/// [`Self::fork`].
+/// - a path parameter with the same name (`/users/:id` → `id`) wins;
+/// - `body` / `data` receive the JSON body (`{}` when there is none);
+/// - `query` / `qs` receive every query parameter as an object;
+/// - any other name receives the query parameter of that name;
+/// - otherwise the argument is `null`.
+///
+/// Path and query values are always strings.
+pub fn handler_args<'a>(
+    params: impl IntoIterator<Item = &'a str>,
+    request: &HandlerRequest,
+) -> Vec<Value> {
+    params
+        .into_iter()
+        .map(|name| {
+            if let Some(val) = request.path_params.get(name) {
+                Value::String(val.clone())
+            } else if name == "body" || name == "data" {
+                request
+                    .body
+                    .as_ref()
+                    .map(|b| json_to_forge(b.clone()))
+                    .unwrap_or(Value::Object(IndexMap::new()))
+            } else if name == "query" || name == "qs" {
+                let obj: IndexMap<String, Value> = request
+                    .query_params
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                Value::Object(obj)
+            } else if let Some(val) = request.query_params.get(name) {
+                Value::String(val.clone())
+            } else {
+                Value::Null
+            }
+        })
+        .collect()
+}
+
+/// An execution engine the server can run handlers on.
+///
+/// The implementor is a **read-only template**: the program's state after
+/// its top level ran. It is shared by every request (`Arc<dyn ServeEngine>`)
+/// and must never be mutated after the server starts. All per-request work
+/// happens on the isolated [`HandlerWorker`] each `fork_*` returns:
+/// mutations a handler makes — to top-level bindings, collections, or
+/// state captured by closures — are invisible to the template and to every
+/// other request.
+pub trait ServeEngine: Send + Sync + 'static {
+    /// Engine name recorded on the startup event (`"vm"` / `"interpreter"`).
+    fn name(&self) -> &'static str;
+
+    /// Fork a worker for one HTTP request. Called on the blocking-pool
+    /// thread that runs the handler; the worker never leaves it. The
+    /// worker polls `cancelled` at its safe points.
+    fn fork_request(&self, cancelled: Arc<AtomicBool>) -> Box<dyn HandlerWorker>;
+
+    /// Fork the worker for one WebSocket connection. It serves every
+    /// message of the connection, one at a time, so connection-scoped
+    /// state persists across messages; successive messages may run on
+    /// different blocking-pool threads.
+    fn fork_connection(&self, cancelled: Arc<AtomicBool>) -> Box<dyn HandlerWorker + Send>;
+}
+
+/// A forked engine instance that runs handlers.
+pub trait HandlerWorker {
+    /// Call HTTP handler `handler`: `200` with the JSON-encoded return
+    /// value, or `500` with `{"error": message}` when it fails.
+    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> (StatusCode, JsonValue);
+
+    /// Call WebSocket handler `handler` with one text message; returns the
+    /// reply text (`error: message` when it fails).
+    fn call_ws(&mut self, handler: &str, text: String) -> String;
+}
+
+/// Interpreter-backed [`ServeEngine`] (`forge run --interp`).
+///
+/// Construction-time only: once wrapped in an `Arc` and installed on a
+/// router, the inner [`Interpreter`] must not be mutated. All per-request
+/// work happens on the forked interpreter returned by [`Self::fork`].
 pub struct InterpreterTemplate {
     inner: Interpreter,
 }
@@ -146,13 +240,51 @@ impl InterpreterTemplate {
     pub fn fork(&self) -> Interpreter {
         self.inner.fork_for_serving()
     }
+
+    fn fork_worker(&self, cancelled: Arc<AtomicBool>) -> InterpreterWorker {
+        let mut interp = self.fork();
+        // Replace the per-request token with the one the response-future
+        // Drop guard owns. Now client disconnect short-circuits the
+        // handler at the next loop/call/statement safe point.
+        interp.cancelled = cancelled;
+        InterpreterWorker(interp)
+    }
+}
+
+impl ServeEngine for InterpreterTemplate {
+    fn name(&self) -> &'static str {
+        "interpreter"
+    }
+
+    fn fork_request(&self, cancelled: Arc<AtomicBool>) -> Box<dyn HandlerWorker> {
+        Box::new(self.fork_worker(cancelled))
+    }
+
+    fn fork_connection(&self, cancelled: Arc<AtomicBool>) -> Box<dyn HandlerWorker + Send> {
+        Box::new(self.fork_worker(cancelled))
+    }
+}
+
+struct InterpreterWorker(Interpreter);
+
+impl HandlerWorker for InterpreterWorker {
+    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> (StatusCode, JsonValue) {
+        call_handler(&mut self.0, handler, request)
+    }
+
+    fn call_ws(&mut self, handler: &str, text: String) -> String {
+        call_ws_handler(&mut self.0, handler, text)
+    }
 }
 
 /// Application state passed to every axum handler.
 #[derive(Clone)]
 pub struct AppState {
-    template: Arc<InterpreterTemplate>,
+    engine: Arc<dyn ServeEngine>,
     permits: Arc<Semaphore>,
+    /// Capability policy captured when the server started, installed on
+    /// every blocking thread that runs a handler.
+    policy: Arc<Capabilities>,
 }
 
 /// Drop guard that signals cancellation when axum drops the response
@@ -196,9 +328,7 @@ fn to_axum_path(forge_path: &str) -> String {
 fn call_handler(
     interp: &mut Interpreter,
     handler_name: &str,
-    path_params: &HashMap<String, String>,
-    query_params: &HashMap<String, String>,
-    body: Option<JsonValue>,
+    request: &HandlerRequest,
 ) -> (StatusCode, JsonValue) {
     let handler = match interp.env.get(handler_name) {
         Some(v) => v,
@@ -210,30 +340,10 @@ fn call_handler(
         }
     };
 
-    let mut args: Vec<Value> = Vec::new();
-    if let Value::Function(ref func) = handler {
-        for param in &func.params {
-            if let Some(val) = path_params.get(&param.name) {
-                args.push(Value::String(val.clone()));
-            } else if param.name == "body" || param.name == "data" {
-                args.push(
-                    body.as_ref()
-                        .map(|b| json_to_forge(b.clone()))
-                        .unwrap_or(Value::Object(IndexMap::new())),
-                );
-            } else if param.name == "query" || param.name == "qs" {
-                let obj: IndexMap<String, Value> = query_params
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                    .collect();
-                args.push(Value::Object(obj));
-            } else if let Some(val) = query_params.get(&param.name) {
-                args.push(Value::String(val.clone()));
-            } else {
-                args.push(Value::Null);
-            }
-        }
-    }
+    let args = match &handler {
+        Value::Function(func) => handler_args(func.params.iter().map(|p| p.name.as_str()), request),
+        _ => Vec::new(),
+    };
 
     match interp.call_function(handler, args) {
         Ok(value) => (StatusCode::OK, forge_to_json(&value)),
@@ -272,16 +382,14 @@ fn call_ws_handler(interp: &mut Interpreter, handler_name: &str, text: String) -
 #[tracing::instrument(
     name = "forge.handler",
     level = "info",
-    skip(state, path_params, query_params, body),
+    skip(state, request),
     fields(handler = %handler_name, request_id = tracing::field::Empty),
 )]
 async fn run_handler(
     state: AppState,
     handler_name: String,
     request_id: String,
-    path_params: HashMap<String, String>,
-    query_params: HashMap<String, String>,
-    body: Option<JsonValue>,
+    request: HandlerRequest,
 ) -> Response {
     // Belt-and-suspenders: also record on the inner forge.handler span
     // so events emitted from this function (and via Span::current()
@@ -310,7 +418,8 @@ async fn run_handler(
     // observes the cancel at its next safe point.
     let _drop_guard = CancelOnDrop(cancelled.clone());
 
-    let template = state.template.clone();
+    let engine = state.engine.clone();
+    let policy = state.policy.clone();
     let cancel_for_blocking = cancelled.clone();
 
     // CRITICAL: capture the current tracing span on the async side,
@@ -327,18 +436,12 @@ async fn run_handler(
     let hn_for_blocking = handler_name.clone();
     let join = tokio::task::spawn_blocking(move || {
         let _g = span.enter();
-        let mut interp = template.fork();
-        // Replace the per-request token with the one the response-future
-        // Drop guard owns. Now client disconnect short-circuits the
-        // handler at the next loop/call/statement safe point.
-        interp.cancelled = cancel_for_blocking;
-        call_handler(
-            &mut interp,
-            &hn_for_blocking,
-            &path_params,
-            &query_params,
-            body,
-        )
+        let _policy = crate::permissions::scope(policy);
+        // The worker shares the cancel token the response-future Drop
+        // guard owns, so a client disconnect short-circuits the handler
+        // at its next safe point.
+        let mut worker = engine.fork_request(cancel_for_blocking);
+        worker.call_http(&hn_for_blocking, &request)
     });
 
     let (status, json) = match join.await {
@@ -374,10 +477,16 @@ async fn run_handler(
     (status, JsonResponse(json)).into_response()
 }
 
+/// Serve `server` with handlers running on the interpreter.
 pub async fn start_server(
     interpreter: Interpreter,
     server: &ServerPlan,
 ) -> Result<(), RuntimeError> {
+    serve(Arc::new(InterpreterTemplate::new(interpreter)), server).await
+}
+
+/// Serve `server` with handlers running on `engine` (see [`ServeEngine`]).
+pub async fn serve(engine: Arc<dyn ServeEngine>, server: &ServerPlan) -> Result<(), RuntimeError> {
     // OTel must initialize BEFORE the subscriber so the OTel layer is
     // present when init_subscriber composes the registry. No-op when
     // the otel feature is off or OTEL_EXPORTER_OTLP_ENDPOINT is unset.
@@ -391,9 +500,11 @@ pub async fn start_server(
     let config = &server.config;
     let routes = &server.routes;
 
+    let engine_name = engine.name();
     let state = AppState {
-        template: Arc::new(InterpreterTemplate::new(interpreter)),
+        engine,
         permits: Arc::new(Semaphore::new(DEFAULT_MAX_INFLIGHT)),
+        policy: crate::permissions::current(),
     };
 
     let mut app = Router::new();
@@ -412,8 +523,12 @@ pub async fn start_server(
                               path: Option<Path<HashMap<String, String>>>,
                               Query(query): Query<HashMap<String, String>>| async move {
                         let request_id = extract_request_id(&rid);
-                        let params = path.map(|Path(p)| p).unwrap_or_default();
-                        run_handler(state, hn, request_id, params, query, None).await
+                        let request = HandlerRequest {
+                            path_params: path.map(|Path(p)| p).unwrap_or_default(),
+                            query_params: query,
+                            body: None,
+                        };
+                        run_handler(state, hn, request_id, request).await
                     }),
                 );
             }
@@ -426,8 +541,12 @@ pub async fn start_server(
                                     Query(query): Query<HashMap<String, String>>,
                                     Json(body): Json<JsonValue>| async move {
                     let request_id = extract_request_id(&rid);
-                    let params = path.map(|Path(p)| p).unwrap_or_default();
-                    run_handler(state, hn, request_id, params, query, Some(body)).await
+                    let request = HandlerRequest {
+                        path_params: path.map(|Path(p)| p).unwrap_or_default(),
+                        query_params: query,
+                        body: Some(body),
+                    };
+                    run_handler(state, hn, request_id, request).await
                 };
                 if method == "POST" {
                     app = app.route(&axum_path, post(handler));
@@ -444,15 +563,19 @@ pub async fn start_server(
                                  path: Option<Path<HashMap<String, String>>>,
                                  Query(query): Query<HashMap<String, String>>| async move {
                         let request_id = extract_request_id(&rid);
-                        let params = path.map(|Path(p)| p).unwrap_or_default();
-                        run_handler(state, hn, request_id, params, query, None).await
+                        let request = HandlerRequest {
+                            path_params: path.map(|Path(p)| p).unwrap_or_default(),
+                            query_params: query,
+                            body: None,
+                        };
+                        run_handler(state, hn, request_id, request).await
                     }),
                 );
             }
             "WS" => {
                 // WebSocket handlers hold session state across messages, so
                 // a per-request fork is the wrong model. Each connection
-                // gets its own forked interpreter held inside a
+                // gets its own forked worker held inside a
                 // parking_lot::Mutex. The guard is acquired only inside
                 // spawn_blocking so synchronous Forge execution never
                 // blocks the async socket task. Different connections
@@ -463,7 +586,8 @@ pub async fn start_server(
                     get(
                         move |State(state): State<AppState>,
                               ws: axum::extract::WebSocketUpgrade| {
-                            let template = state.template.clone();
+                            let engine = state.engine.clone();
+                            let policy = state.policy.clone();
                             let hn = hn.clone();
                             async move {
                                 ws.on_upgrade(move |socket| async move {
@@ -472,9 +596,11 @@ pub async fn start_server(
                                     let cancelled = Arc::new(AtomicBool::new(false));
                                     let _drop_guard = CancelOnDrop(cancelled.clone());
 
-                                    let mut conn_interp = template.fork();
-                                    conn_interp.cancelled = cancelled.clone();
-                                    let interp = Arc::new(parking_lot::Mutex::new(conn_interp));
+                                    let worker = {
+                                        let _policy = crate::permissions::scope(policy.clone());
+                                        engine.fork_connection(cancelled.clone())
+                                    };
+                                    let worker = Arc::new(parking_lot::Mutex::new(worker));
                                     let (mut sender, mut receiver) = socket.split();
                                     let (text_tx, mut text_rx) =
                                         tokio::sync::mpsc::channel::<String>(1);
@@ -509,13 +635,15 @@ pub async fn start_server(
                                             break;
                                         }
 
-                                        let interp_for_blocking = interp.clone();
+                                        let worker_for_blocking = worker.clone();
+                                        let policy = policy.clone();
                                         let hn_for_blocking = hn.clone();
                                         let span = tracing::Span::current();
                                         let join = tokio::task::spawn_blocking(move || {
                                             let _g = span.enter();
-                                            let mut interp = interp_for_blocking.lock();
-                                            call_ws_handler(&mut interp, &hn_for_blocking, text)
+                                            let _policy = crate::permissions::scope(policy);
+                                            let mut worker = worker_for_blocking.lock();
+                                            worker.call_ws(&hn_for_blocking, text)
                                         });
 
                                         let response = match join.await {
@@ -694,6 +822,7 @@ pub async fn start_server(
         routes = routes.len(),
         cors = cors_str,
         max_inflight = DEFAULT_MAX_INFLIGHT,
+        engine = engine_name,
         "Forge server listening",
     );
 
@@ -710,6 +839,7 @@ pub async fn start_server(
         crate::color::cprintln!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
         crate::color::cprintln!("  \x1B[1m   http://{}\x1B[0m", addr);
         crate::color::cprintln!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
+        crate::color::cprintln!("  \x1B[90m   engine: {}\x1B[0m", engine_name);
         crate::color::cprintln!(
             "  \x1B[90m   max in-flight: {} (excess returns 503)\x1B[0m",
             DEFAULT_MAX_INFLIGHT
@@ -963,12 +1093,14 @@ mod tests {
     #[test]
     fn app_state_clone_is_arc_share() {
         let state = AppState {
-            template: Arc::new(InterpreterTemplate::new(Interpreter::new())),
+            engine: Arc::new(InterpreterTemplate::new(Interpreter::new())),
             permits: Arc::new(Semaphore::new(DEFAULT_MAX_INFLIGHT)),
+            policy: crate::permissions::current(),
         };
         let other = state.clone();
-        assert!(Arc::ptr_eq(&state.template, &other.template));
+        assert!(Arc::ptr_eq(&state.engine, &other.engine));
         assert!(Arc::ptr_eq(&state.permits, &other.permits));
+        assert!(Arc::ptr_eq(&state.policy, &other.policy));
     }
 
     /// CancelOnDrop must flip the flag exactly when dropped, with

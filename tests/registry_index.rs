@@ -211,7 +211,13 @@ fn publish_sign_install_and_run() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("Trusting new publisher key"));
 
     let lock = lockfile(&app);
-    assert!(lock.contains("source = \"sparse+file://"), "{lock}");
+    // TOML may emit a literal ('...') string when the path has backslashes
+    // (Windows), so match the value, not the quoting.
+    assert!(
+        lock.lines()
+            .any(|l| l.starts_with("source = ") && l.contains("sparse+file://")),
+        "{lock}"
+    );
     assert!(lock.contains("archive_checksum = \"sha256:"), "{lock}");
     assert!(lock.contains("signer = \"ed25519:"), "{lock}");
     let trust = std::fs::read_to_string(env.home.join(".forge/trusted-keys.toml")).expect("pins");
