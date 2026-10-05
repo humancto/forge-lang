@@ -102,9 +102,7 @@ pub(super) fn contains_of(
         (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(
             pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
         )),
-        _ => Err(RuntimeError::new(
-            "contains() requires (string, substring), (array, value), (object, key), or (map, key)",
-        )),
+        _ => Err(RuntimeError::new(crate::semantics::CONTAINS_USAGE)),
     }
 }
 
@@ -628,10 +626,14 @@ impl Interpreter {
                         name,
                     )));
                 }
-                if let Value::Object(map) = cur {
-                    map.insert(field.to_string(), val);
+                match cur {
+                    Value::Object(map) => {
+                        map.insert(field.to_string(), val);
+                        Ok(())
+                    }
+                    // Used to be silently ignored; the VM always errored.
+                    _ => Err(RuntimeError::new("cannot set field on non-object")),
                 }
-                Ok(())
             })
             .unwrap_or_else(|| Err(RuntimeError::new(&format!("undefined: {}", name))))
     }

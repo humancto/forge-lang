@@ -83,6 +83,10 @@ pub struct Compiler {
     /// `0` for the line picks up a real source span instead.
     current_line: usize,
     current_col: usize,
+    /// Set when a branch distance did not fit the 16-bit sBx operand. The
+    /// branch is left as a placeholder and the function fails to compile in
+    /// `check_branches` (instead of silently jumping to the wrong place).
+    branch_overflow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +154,7 @@ impl Compiler {
             module_globals: HashSet::new(),
             current_line: 0,
             current_col: 0,
+            branch_overflow: false,
         }
     }
 
@@ -184,6 +189,7 @@ impl Compiler {
     /// captures that had to go through this compiler, mark captured locals
     /// and register the prototype. Returns the prototype index.
     fn finish_child(&mut self, mut fc: Compiler) -> Result<u16, CompileError> {
+        fc.check_branches()?;
         for (uv_idx, name) in std::mem::take(&mut fc.pending_captures) {
             let source = self.capture_for_child(&name).ok_or_else(|| {
                 CompileError::new(&format!("internal: cannot resolve captured '{}'", name))
@@ -317,13 +323,31 @@ impl Compiler {
 
     fn patch_jump(&mut self, offset: usize) {
         let target = self.chunk.code_len();
-        self.chunk.patch_jump(offset, target);
+        if !self.chunk.patch_jump(offset, target) {
+            self.branch_overflow = true;
+        }
     }
 
     fn emit_loop(&mut self, loop_start: usize, line: usize) {
         let current = self.chunk.code_len();
-        let offset = -(current as i16 - loop_start as i16) - 1;
+        let offset = branch_offset(current, loop_start).unwrap_or_else(|| {
+            self.branch_overflow = true;
+            0
+        });
         self.emit(encode_asbx(OpCode::Loop, 0, offset), line);
+    }
+
+    /// Fail when a branch in this function did not fit the 16-bit offset
+    /// (see `branch_overflow`). Called once a function's code is complete.
+    fn check_branches(&self) -> Result<(), CompileError> {
+        if self.branch_overflow {
+            return Err(CompileError::new(&format!(
+                "function '{}' is too large: a jump spans more than {} instructions. Try splitting it into smaller functions.",
+                self.chunk.name,
+                i16::MAX
+            )));
+        }
+        Ok(())
     }
 
     fn const_str(&mut self, s: &str) -> u16 {
@@ -548,6 +572,8 @@ pub fn compile_with(program: &Program, options: &CompileOptions) -> Result<Chunk
     let mut c = Compiler::new("<main>");
     c.base_dir = options.base_dir.clone();
     compile_top_level(&mut c, program)?;
+    c.check_branches()?;
+    super::verify::debug_verify_compiled(&c.chunk);
     Ok(c.chunk)
 }
 
@@ -567,6 +593,8 @@ pub fn compile_module_with(
         c.module_globals = module_top_level_names(program);
     }
     compile_top_level(&mut c, program)?;
+    c.check_branches()?;
+    super::verify::debug_verify_compiled(&c.chunk);
     Ok(c.chunk)
 }
 
@@ -599,6 +627,8 @@ pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
         c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
     }
     c.chunk.max_registers = c.max_register;
+    c.check_branches()?;
+    super::verify::debug_verify_compiled(&c.chunk);
     Ok(c.chunk)
 }
 
@@ -1001,9 +1031,25 @@ fn try_compile_mutating_call(
     }
     let saved = c.next_register;
     let pair_reg = c.alloc_reg()?;
-    let mut lowered = vec![receiver.clone(), Expr::StringLit(method.to_string())];
-    lowered.extend(args.iter().cloned());
-    compile_hidden_call(c, "__forge_method_mut", lowered, pair_reg)?;
+    // Arguments first, receiver last (like the interpreter): an argument
+    // may itself update the variable (`out.push(f())` where `f` pushes to
+    // a captured `out`), and reading the receiver first would discard that
+    // update when the result is stored back (found by the differential
+    // fuzzer).
+    let mut arg_regs = Vec::with_capacity(args.len() + 2);
+    let recv_reg = c.alloc_reg()?;
+    let method_reg = c.alloc_reg()?;
+    arg_regs.push(recv_reg);
+    arg_regs.push(method_reg);
+    for arg in args {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+        arg_regs.push(r);
+    }
+    compile_expr(c, receiver, recv_reg)?;
+    let method_idx = c.const_str(method);
+    c.emit(encode_abx(OpCode::LoadConst, method_reg, method_idx), 0);
+    compile_hidden_call_from_regs(c, "__forge_method_mut", &arg_regs, pair_reg)?;
     let idx_reg = c.alloc_reg()?;
     let new_value_reg = c.alloc_reg()?;
     let zero = c.const_int(0);
@@ -1197,6 +1243,7 @@ fn compile_match(
         c.emit(encode_abc(OpCode::LoadNull, dst, 0, 0), 0);
     }
     let mut end_jumps = Vec::new();
+    let mut has_catch_all = false;
 
     for arm in arms {
         match &arm.pattern {
@@ -1204,6 +1251,7 @@ fn compile_match(
                 c.begin_scope();
                 compile_arm_body(c, &arm.body, dst)?;
                 c.end_scope();
+                has_catch_all = true;
                 break;
             }
             Pattern::Binding(name) => {
@@ -1276,6 +1324,14 @@ fn compile_match(
                 c.patch_jump(skip);
             }
         }
+    }
+    if !has_catch_all {
+        // No arm matched: a runtime error, as in the interpreter.
+        compile_hidden_stmt(
+            c,
+            "__forge_raise_error",
+            vec![Expr::StringLit("non-exhaustive match".to_string())],
+        )?;
     }
     for ej in end_jumps {
         c.patch_jump(ej);

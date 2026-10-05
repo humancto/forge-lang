@@ -2,7 +2,7 @@ pub mod ast;
 pub mod index;
 mod parser;
 
-pub use parser::{ParseError, Parser};
+pub use parser::{ParseError, Parser, MAX_NESTING};
 
 /// Parse a standalone type annotation (`[Int]`, `fn(String) -> Bool`,
 /// `Result<Int, String>`, ...). The whole input must be one type.

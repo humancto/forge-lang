@@ -321,6 +321,16 @@ impl VM {
         vm
     }
 
+    /// The VM's cooperative cancellation flag. Storing `true` makes the
+    /// running program fail with "task cancelled" at its next back-edge
+    /// (`Loop`) or call — the hook for host-side time limits (e.g. the fuzz
+    /// harness's watchdog). The verifier guarantees every backward branch is
+    /// a `Loop`, so no verified program can spin without polling it.
+    #[allow(dead_code)] // library API (fuzz harness, embedders); unused by the CLI
+    pub fn cancel_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
     pub fn with_profiling() -> Self {
         let mut vm = Self::bare(Profiler::new(true));
         vm.register_builtins();
@@ -696,7 +706,7 @@ impl VM {
     }
 
     pub(super) fn sleep_with_timeout_checks(&self, duration: Duration) -> Result<(), VMError> {
-        let total_ms = duration.as_millis() as u64;
+        let total_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         let mut elapsed = 0u64;
         while elapsed < total_ms {
             if let Some((_, guard)) = self.earliest_expired_timeout() {
@@ -1516,7 +1526,7 @@ impl VM {
                         };
                         let handler_base = self.frames[frame_idx].handlers.len().saturating_sub(1);
                         self.frames[frame_idx].timeouts.push(TimeoutGuard {
-                            deadline: Instant::now() + Duration::from_secs(seconds),
+                            deadline: crate::semantics::timeout_deadline(Instant::now(), seconds),
                             seconds,
                             catch_ip,
                             error_register: a,
@@ -1547,11 +1557,7 @@ impl VM {
                                 } else {
                                     String::new()
                                 };
-                                match unit_str.as_str() {
-                                    "minutes" => n as u64 * 60,
-                                    "hours" => n as u64 * 3600,
-                                    _ => n as u64, // "seconds" or default
-                                }
+                                crate::semantics::schedule_interval_secs(n as u64, &unit_str)
                             } else {
                                 return Err(VMError::new(
                                     "schedule interval must be a positive integer",

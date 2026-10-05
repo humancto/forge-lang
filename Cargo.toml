@@ -10,7 +10,7 @@ homepage = "https://github.com/humancto/forge-lang"
 keywords = ["language", "programming-language", "interpreter", "vm", "scripting"]
 categories = ["compilers", "command-line-utilities"]
 readme = "README.md"
-exclude = ["docs/book/programming-forge.pdf", "docs/cover.jpeg", "docs/spec/**", "docs/PROGRAMMING_FORGE.md", "docs/part*.md", "benchmarks/**", "spec/**", "bindings/**"]
+exclude = ["docs/book/programming-forge.pdf", "docs/cover.jpeg", "docs/spec/**", "docs/PROGRAMMING_FORGE.md", "docs/part*.md", "benchmarks/**", "spec/**", "bindings/**", "fuzz/**"]
 
 [lib]
 name = "forge_lang"
@@ -158,6 +158,8 @@ opt-level = 3
 
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }
+# Drives the shared fuzz-target generator in tests/fuzz_smoke.rs.
+arbitrary = "1"
 
 [[bench]]
 name = "fork_for_serving"

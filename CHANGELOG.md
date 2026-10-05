@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is honored and takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT` (#132)
 - Rust panics are reported as structured `ERROR` events on the `forge.panic` target (payload, location, thread, backtrace when `RUST_BACKTRACE` is set) once Forge's tracing subscriber is installed, inside the current request span; if the active filter drops that target the standard panic message is printed instead (#121)
 - Windows shell support, completed: when no POSIX `sh` is on `PATH`, shell builtins run through `cmd /d /s /c "<command>"` with the command passed verbatim, so quoted arguments survive (`.arg()` escaping mangled them); `which` searches `PATH` in-process and honors `PATHEXT` (`which("npm")` finds `npm.cmd`); `run_command` resolves programs through `PATHEXT`
+- **Bytecode verifier** — `src/vm/verify.rs` checks every deserialized chunk (`forge run app.fgc`, AOT binaries) before it runs: register, constant, prototype and upvalue indices, string name operands, branch targets (back-edges only via `Loop`, which polls cancellation), arity, line tables, terminal instructions and prototype nesting depth. Malformed bytecode is rejected with `invalid bytecode in '<chunk>' at instruction N: ...` instead of misbehaving. Debug builds also verify every chunk the compiler emits.
+- **Fuzzing** — cargo-fuzz targets in `fuzz/` (`parse`, `compile`, `bytecode`, and a grammar-based `differential` target comparing the interpreter and the VM), a nightly `Fuzz` workflow (plus a Miri job for the C-ABI and JIT bridge code), and `tests/fuzz_smoke.rs`, which runs the same targets on stable in every `cargo test` and replays committed crashers from `fuzz/regressions/`.
+- `VM::cancel_flag()` exposes the VM's cooperative cancellation flag to embedders.
 
 ### Changed
 
@@ -42,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `which` no longer depends on `/usr/bin/which` being installed
 - `forge run` logs: the default filter now enables the CLI binary's own targets (`forge=info`), so the server's per-request `request` span (`method`, `uri`, `request_id`) and the `forge.server` startup event are no longer filtered out; under `FORGE_LOG_FORMAT=json` the VM-to-interpreter fallback note is a `forge.runtime` JSON event instead of plain text, so stderr stays line-delimited JSON (#119, #120)
 - The debug-build check that rejects a `Value::Stream` in a server's top-level environment now also finds streams captured by closures, and names the binding path (#115)
+- `==` / `!=` are total on both engines: comparing values of different types is `false` instead of an interpreter error, and numbers compare numerically inside collections (`[1] == [1.0]`). `match` literal patterns follow the same rule (`3` matches `3.0`). `Ok(1) == Ok(1)` is now `true` on the VM.
+- A `match` with no matching arm is a runtime error (`non-exhaustive match`) on the VM too (it silently did nothing).
+- `is_ok()` / `is_err()` / `unwrap_or()` on a non-Result value are an error on the VM too.
+- `contains()` on the VM finds object keys (`contains({a: 1}, "a")` was `false`) and rejects unsearchable arguments like the interpreter.
+- Assigning a field on a non-object (`b.a = 1` with `b = false`) is an error on the interpreter too (it was silently ignored).
+- Anonymous functions display as `<lambda>` (and `"<Lambda>"` inside objects) on both engines (the VM printed `<fn <lambda>>` / `"<Function>"`).
+- Function values compare by identity on both engines (`f == f` was `false` on the interpreter).
+- `min_of()` / `max_of()` on the VM reject empty and non-numeric arrays and promote mixed Int/Float to Float, like the interpreter.
+- `out.push(f())` on the VM evaluates the argument before reading `out`, so mutations `f` makes to a captured `out` are kept (they were lost).
+- Built-in string methods (`chars`, `bytes`, `words`, `char_at`, `is_alpha`, `encode_uri`, ...) are shared by both engines; `"ab".chars()` and friends now work on the VM.
+- `range()`, `sample()` and `slay()` counts above 100,000,000, and `repeat_str()` / `pad_start()` / `pad_end()` results above 1 GiB, are runtime errors instead of a crash.
 
 ### Security
 
@@ -71,6 +85,13 @@ Findings and fixes from the sandbox audit (`docs/SECURITY_AUDIT.md`); every fix 
 - MySQL and WebSocket handles are unguessable, so one sandbox cannot use another's connection in the same host process (SEC-11).
 - `Sandbox::max_output` is enforced on every write instead of by polling (SEC-14).
 - Filesystem operations, imports and `watch` act on the resolved path that passed the permission check, so a concurrent `cd` cannot redirect them (SEC-15).
+### Fixed
+
+- Bytecode loading: length prefixes are checked against the remaining input before allocating, prototype nesting is bounded, and trailing bytes are rejected — a crafted `.fgc` can no longer panic, overflow the stack or exhaust memory while loading.
+- The compiler fails cleanly for functions whose jumps exceed the 16-bit branch offset instead of emitting wrong jumps.
+- JIT code memory is freed when a VM is dropped (every VM that tiered a function up leaked its code pages).
+- The parser looped forever on a `prompt` block entry that is not `name: "string"` (found by fuzzing).
+- Panics on extreme inputs: `-(-9223372036854775807 - 1)` on the interpreter, `substring(s, start, end)` with `start > end`, `range()`/`sample()`/`slay()`/`repeat_str()` with huge counts, `wait()`/`time.sleep()` with huge or infinite durations, `timeout` with a huge duration on the VM, and `schedule` intervals that overflow.
 
 ## [0.9.0] - 2026-10-05
 

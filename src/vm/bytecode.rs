@@ -265,13 +265,20 @@ impl Chunk {
         self.code.len()
     }
 
-    pub fn patch_jump(&mut self, offset: usize, target: usize) {
+    /// Point the branch at `offset` to `target`. Returns `false` (leaving
+    /// the instruction unchanged) when the distance does not fit the signed
+    /// 16-bit sBx field.
+    #[must_use]
+    pub fn patch_jump(&mut self, offset: usize, target: usize) -> bool {
+        let Some(jump) = branch_offset(offset, target) else {
+            return false;
+        };
         let instruction = self.code[offset];
         let op = instruction >> 24;
         let a = (instruction >> 16) & 0xFF;
-        let jump = target as i16 - offset as i16 - 1;
         let jump_bits = (jump as u16) as u32;
         self.code[offset] = (op << 24) | (a << 16) | jump_bits;
+        true
     }
 }
 
@@ -286,6 +293,12 @@ impl Constant {
             _ => false,
         }
     }
+}
+
+/// The sBx operand for a branch at `from` to `target` (the VM increments ip
+/// before applying it), or `None` when it does not fit in 16 bits.
+pub fn branch_offset(from: usize, target: usize) -> Option<i16> {
+    i16::try_from(target as i64 - from as i64 - 1).ok()
 }
 
 pub fn encode_abc(op: OpCode, a: u8, b: u8, c: u8) -> u32 {

@@ -13,6 +13,7 @@ pub mod profiler;
 pub mod serialize;
 pub mod serve;
 pub mod value;
+pub mod verify;
 
 use crate::parser::ast::Program;
 use machine::{VMError, VM};

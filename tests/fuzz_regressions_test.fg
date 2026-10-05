@@ -1,0 +1,142 @@
+// fuzz_regressions_test.fg — minimized programs found by the fuzzers in
+// fuzz/ (crashes, and interpreter/VM divergences). Runs on both engines.
+
+@test
+define test_equality_is_total_across_types() {
+    assert_eq(10 != "a", true)
+    assert_eq(10 == "10", false)
+    assert_eq(true == 1, false)
+    assert_eq([1] == { a: 1 }, false)
+    assert_eq(null == 0, false)
+}
+
+@test
+define test_equality_is_numeric_inside_collections() {
+    assert_eq([1, 2] == [1.0, 2.0], true)
+    assert_eq({ a: 1 } == { a: 1.0 }, true)
+    assert_eq((1, "x") == (1.0, "x"), true)
+    assert_eq(Ok(1) == Ok(1), true)
+    assert_eq(Ok(1) == Err(1), false)
+}
+
+@test
+define test_match_literal_is_numeric() {
+    let mut hit = "none"
+    match 3 {
+        3.0 => { hit = "float arm" }
+        _ => { hit = "wildcard" }
+    }
+    assert_eq(hit, "float arm")
+}
+
+@test
+define test_match_without_matching_arm_is_an_error() {
+    assert_throws(fn() {
+        match 5 {
+            1 => { say "one" }
+        }
+    })
+}
+
+@test
+define test_string_methods_on_both_engines() {
+    assert_eq("ab".chars(), ["a", "b"])
+    assert_eq("hi".bytes(), [104, 105])
+    assert_eq("a b  c".words(), ["a", "b", "c"])
+    assert_eq("xyz".char_at(1), "y")
+    assert_eq("xyz".char_at(9), null)
+    assert_eq("ab1".is_alphanumeric(), true)
+    assert_eq("a b".encode_uri(), "a%20b")
+}
+
+@test
+define test_result_predicates_require_results() {
+    assert_throws(fn() { is_ok(1) })
+    assert_throws(fn() { is_err("x") })
+    assert_throws(fn() { unwrap_or(5, 0) })
+    assert_eq(unwrap_or(Err("e"), 7), 7)
+}
+
+@test
+define test_lambda_display() {
+    let f = fn(x) { return x }
+    assert_eq(str([f]), "[<lambda>]")
+}
+
+@test
+define test_negating_min_int_promotes() {
+    let m = -9223372036854775807 - 1
+    assert_eq(typeof(-m), "Float")
+}
+
+@test
+define test_huge_counts_are_errors_not_crashes() {
+    assert_throws(fn() { range(0, 9223372036854775807) })
+    assert_throws(fn() { range(-9223372036854775807, 9223372036854775807) })
+    assert_throws(fn() { repeat_str("ab", 9223372036854775807) })
+    assert_throws(fn() { pad_start("x", -1) })
+    assert_throws(fn() { sample([1, 2], -1) })
+    assert_eq(len(range(5, 2)), 0)
+}
+
+@test
+define test_substring_with_start_after_end() {
+    assert_eq(substring("hello", 3, 1), "")
+    assert_eq(substring("hello", 1, 3), "el")
+    assert_eq(substring("hello", -1), "")
+}
+
+@test
+define test_push_argument_that_mutates_the_receiver() {
+    let mut out = []
+    let add_inner = fn() {
+        out.push("inner")
+        return 1
+    }
+    out.push(add_inner())
+    assert_eq(out, ["inner", 1])
+}
+
+@test
+define test_function_values_compare_by_identity() {
+    let f = fn(x) { return x }
+    let g = f
+    let h = fn(x) { return x }
+    assert_eq(f == g, true)
+    assert_eq(f != f, false)
+    assert_eq(f == h, false)
+}
+
+@test
+define test_min_max_of_rules() {
+    assert_throws(fn() { min_of([]) })
+    assert_throws(fn() { max_of([]) })
+    assert_throws(fn() { min_of([1, "a"]) })
+    assert_eq(min_of([3, 1, 2]), 1)
+    assert_eq(max_of([1, 2.5]), 2.5)
+    assert_eq(typeof(min_of([1, 2.0])), "Float")
+}
+
+@test
+define test_function_inside_object_display() {
+    let f = fn(x) { return x }
+    assert_eq(contains(str({ b: f }), "<Lambda>"), true)
+}
+
+@test
+define test_contains_argument_rules() {
+    assert_eq(contains({ a: 1 }, "a"), true)
+    assert_eq(contains({ a: 1 }, "b"), false)
+    assert_eq(contains("x y", "y"), true)
+    assert_eq(contains([1, 2], 2), true)
+    assert_throws(fn() { contains("x y", -3) })
+    assert_throws(fn() { contains(5, 1) })
+}
+
+@test
+define test_field_assignment_on_non_object_is_an_error() {
+    assert_throws(fn() {
+        let mut b = false
+        b.a = 1
+    })
+}
