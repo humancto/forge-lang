@@ -98,6 +98,7 @@ pub fn register_thread_stack(size: usize) {
 /// stack and register it with the guard. This covers the blocking pool,
 /// so HTTP handlers (run via `spawn_blocking`) get the same recursion
 /// headroom as other Forge code instead of tokio's 2 MiB default.
+#[cfg(feature = "host")]
 pub fn configure_runtime(builder: &mut tokio::runtime::Builder) -> &mut tokio::runtime::Builder {
     builder
         .thread_stack_size(WORKER_STACK_SIZE)

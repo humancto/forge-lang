@@ -16,6 +16,7 @@
 //! Chrome is written with [`cprintln!`]/[`ceprintln!`] (and the `print`
 //! variants): they format as usual and strip SGR color sequences when
 //! color is off for that stream, so call sites keep their inline escapes.
+//! They write through `runtime::stdio`, so a host capture sees them.
 
 use std::borrow::Cow;
 use std::io::IsTerminal;
@@ -120,9 +121,9 @@ pub fn strip_sgr(text: &str) -> Cow<'_, str> {
 /// color terminal (see the module docs).
 #[allow(unused_macros)]
 macro_rules! cprintln {
-    () => { println!() };
+    () => { $crate::runtime::stdio::out_line("") };
     ($($arg:tt)*) => {
-        println!("{}", $crate::color::sanitize($crate::color::Stream::Stdout, &format!($($arg)*)))
+        $crate::runtime::stdio::out_line(&$crate::color::sanitize($crate::color::Stream::Stdout, &format!($($arg)*)))
     };
 }
 
@@ -130,16 +131,16 @@ macro_rules! cprintln {
 #[allow(unused_macros)]
 macro_rules! cprint {
     ($($arg:tt)*) => {
-        print!("{}", $crate::color::sanitize($crate::color::Stream::Stdout, &format!($($arg)*)))
+        $crate::runtime::stdio::out(&$crate::color::sanitize($crate::color::Stream::Stdout, &format!($($arg)*)))
     };
 }
 
 /// `eprintln!` for CLI chrome on stderr.
 #[allow(unused_macros)]
 macro_rules! ceprintln {
-    () => { eprintln!() };
+    () => { $crate::runtime::stdio::err_line("") };
     ($($arg:tt)*) => {
-        eprintln!("{}", $crate::color::sanitize($crate::color::Stream::Stderr, &format!($($arg)*)))
+        $crate::runtime::stdio::err_line(&$crate::color::sanitize($crate::color::Stream::Stderr, &format!($($arg)*)))
     };
 }
 
@@ -147,7 +148,7 @@ macro_rules! ceprintln {
 #[allow(unused_macros)]
 macro_rules! ceprint {
     ($($arg:tt)*) => {
-        eprint!("{}", $crate::color::sanitize($crate::color::Stream::Stderr, &format!($($arg)*)))
+        $crate::runtime::stdio::err(&$crate::color::sanitize($crate::color::Stream::Stderr, &format!($($arg)*)))
     };
 }
 

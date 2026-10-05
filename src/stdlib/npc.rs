@@ -1,6 +1,6 @@
+use crate::clock::{SystemTime, UNIX_EPOCH};
 use crate::interpreter::Value;
 use indexmap::IndexMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn create_module() -> Value {
     let mut m = IndexMap::new();

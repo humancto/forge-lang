@@ -262,6 +262,19 @@ macro_rules! module {
     }};
 }
 
+/// A module that needs the host runtime: the real one with the `host`
+/// feature, otherwise its stand-in from `stdlib::unavailable` (same members,
+/// every call fails with a clear "not available" error).
+macro_rules! host_module {
+    ($name:literal, $host:ident) => {{
+        #[cfg(feature = "host")]
+        let m = module!($name, crate::stdlib::$host);
+        #[cfg(not(feature = "host"))]
+        let m = module!($name, crate::stdlib::unavailable::$host);
+        m
+    }};
+}
+
 /// Every stdlib module available in this build.
 pub fn modules() -> &'static [Module] {
     use std::sync::OnceLock;
@@ -273,21 +286,21 @@ pub fn modules() -> &'static [Module] {
             module!("fs", crate::stdlib::fs),
             module!("io", crate::stdlib::io),
             module!("crypto", crate::stdlib::crypto),
-            module!("db", crate::stdlib::db),
+            host_module!("db", db),
             module!("env", crate::stdlib::env),
             module!("json", crate::stdlib::json_module),
             module!("regex", crate::stdlib::regex_module),
             module!("log", crate::stdlib::log),
             module!("term", crate::stdlib::term),
-            module!("http", crate::stdlib::http),
+            host_module!("http", http),
             module!("csv", crate::stdlib::csv),
             module!("time", crate::stdlib::time),
             module!("npc", crate::stdlib::npc),
             module!("url", crate::stdlib::url_module),
             module!("toml", crate::stdlib::toml_module),
-            module!("ws", crate::stdlib::ws),
+            host_module!("ws", ws),
             module!("jwt", crate::stdlib::jwt),
-            module!("os", crate::stdlib::os_module),
+            host_module!("os", os_module),
             module!("path", crate::stdlib::path_module),
             // Hidden: runtime checks inserted by `--strict` (typechecker::enforce).
             module!("__types", crate::stdlib::types_module),
@@ -296,6 +309,11 @@ pub fn modules() -> &'static [Module] {
         all.push(module!("pg", crate::stdlib::pg));
         #[cfg(feature = "mysql")]
         all.push(module!("mysql", crate::stdlib::mysql));
+        #[cfg(not(feature = "host"))]
+        all.extend([
+            module!("pg", crate::stdlib::unavailable::pg),
+            module!("mysql", crate::stdlib::unavailable::mysql),
+        ]);
         all
     })
 }

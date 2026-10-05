@@ -150,6 +150,15 @@ pub struct PermissionError {
 
 impl fmt::Display for PermissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !cfg!(feature = "host") {
+            // No host runtime: nothing can grant this, so say so.
+            let what = if self.detail.is_empty() {
+                format!("{} access", self.capability)
+            } else {
+                format!("{} access ({})", self.capability, self.detail)
+            };
+            return f.write_str(&crate::runtime::unavailable_message(&what));
+        }
         write!(f, "permission denied: {}", self.capability)?;
         if !self.detail.is_empty() {
             write!(f, " ({})", self.detail)?;
@@ -675,10 +684,15 @@ thread_local! {
 }
 
 fn default_policy() -> Arc<Capabilities> {
+    // Without the host runtime (the browser playground) there is no
+    // operating system to grant access to: everything is denied, and the
+    // denial reads "not available" (see `PermissionError`'s `Display`).
+    #[cfg(feature = "host")]
+    let make = Capabilities::cli_default;
+    #[cfg(not(feature = "host"))]
+    let make = Capabilities::deny_all;
     static DEFAULT: OnceLock<Arc<Capabilities>> = OnceLock::new();
-    DEFAULT
-        .get_or_init(|| Arc::new(Capabilities::cli_default()))
-        .clone()
+    DEFAULT.get_or_init(|| Arc::new(make())).clone()
 }
 
 fn global_policy() -> Arc<Capabilities> {

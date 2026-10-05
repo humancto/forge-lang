@@ -499,10 +499,19 @@ fn install_from_registry_as(
         });
     }
 
-    // Fall back to the remote sparse registry
-    let client = crate::registry::client::RegistryClient::from_env();
-    let trust_path = crate::registry::signing::TrustStore::default_path();
-    install_from_remote_registry(name, &req, ctx, &client, &trust_path)
+    // Fall back to the remote sparse registry (host builds only: it needs
+    // the HTTP client).
+    #[cfg(feature = "host")]
+    {
+        let client = crate::registry::client::RegistryClient::from_env();
+        let trust_path = crate::registry::signing::TrustStore::default_path();
+        install_from_remote_registry(name, &req, ctx, &client, &trust_path)
+    }
+    #[cfg(not(feature = "host"))]
+    Err(crate::runtime::unavailable_message(&format!(
+        "installing package '{}' from the registry",
+        name
+    )))
 }
 
 /// Install `name` from a sparse registry (rfcs/0007):
@@ -510,6 +519,7 @@ fn install_from_registry_as(
 /// signature trust policy, download the archive and verify its mandatory
 /// checksum, then extract it. The returned lock entry pins the archive
 /// checksum and signer.
+#[cfg(feature = "host")]
 fn install_from_remote_registry(
     name: &str,
     req: &VersionReq,

@@ -19,7 +19,7 @@ path = ".."
 # The JIT is part of the default VM; keep the database drivers out of the
 # fuzz build (they add nothing the targets reach).
 default-features = false
-features = ["jit"]
+features = ["host", "jit"]
 
 # Keep this crate out of any parent workspace (cargo-fuzz convention).
 [workspace]

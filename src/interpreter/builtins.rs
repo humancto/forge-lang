@@ -501,7 +501,7 @@ impl Interpreter {
                             return Err(RuntimeError::new("cancelled"));
                         }
                         let chunk = std::cmp::min(100, total_ms - elapsed);
-                        std::thread::sleep(std::time::Duration::from_millis(chunk));
+                        crate::clock::sleep(std::time::Duration::from_millis(chunk));
                         elapsed += chunk;
                     }
                     Ok(Value::Null)
@@ -514,7 +514,7 @@ impl Interpreter {
                             return Err(RuntimeError::new("cancelled"));
                         }
                         let chunk = std::cmp::min(100, total_ms - elapsed);
-                        std::thread::sleep(std::time::Duration::from_millis(chunk));
+                        crate::clock::sleep(std::time::Duration::from_millis(chunk));
                         elapsed += chunk;
                     }
                     Ok(Value::Null)
@@ -581,7 +581,8 @@ impl Interpreter {
                         let inner = inner.clone();
                         self.wait_cancellable(|slice| match inner.rx.lock() {
                             Ok(guard) => match guard.as_ref() {
-                                Some(receiver) => match receiver.recv_timeout(slice) {
+                                Some(receiver) => match crate::clock::recv_timeout(receiver, slice)
+                                {
                                     Ok(val) => Some(val),
                                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -1436,7 +1437,7 @@ impl Interpreter {
                     Some(Value::Float(ms)) => Some(ms.max(0.0) as u128),
                     _ => None,
                 };
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 let len = channels.len();
                 let mut offset = 0usize;
                 loop {
@@ -1466,7 +1467,7 @@ impl Interpreter {
                         }
                     }
                     offset = (offset + 1) % len;
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    crate::clock::sleep(std::time::Duration::from_millis(1));
                 }
             }
             "close" => {
@@ -1674,7 +1675,7 @@ impl Interpreter {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let json: serde_json::Value = serde_json::from_str(stdout.trim())
                     .map_err(|e| RuntimeError::new(&format!("sh_json parse error: {}", e)))?;
-                Ok(crate::runtime::server::json_to_forge(json))
+                Ok(crate::stdlib::json_module::json_to_forge(json))
             }
             "sh_ok" => {
                 crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
@@ -1775,10 +1776,10 @@ impl Interpreter {
                     Value::String(s) => format!("\"{}\"", s),
                     other => format!("{}", other),
                 };
-                eprintln!(
+                crate::runtime::stdio::err_line(&format!(
                     "\x1b[33m🔍 SUS CHECK:\x1b[0m {} \x1b[2m({})\x1b[0m",
                     display, type_str
-                );
+                ));
                 Ok(args.into_iter().next().unwrap_or(Value::Null))
             }
             "bruh" => {
@@ -1847,21 +1848,21 @@ impl Interpreter {
                     Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("cook() needs a function — let him cook!")),
                 };
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 let result = self.call_function(func, vec![])?;
                 let elapsed = start.elapsed();
                 let ms = elapsed.as_secs_f64() * 1000.0;
                 if ms < 1.0 {
-                    eprintln!(
+                    crate::runtime::stdio::err_line(&format!(
                         "\x1b[32m👨‍🍳 COOKED:\x1b[0m done in {:.2}µs — \x1b[2mspeed demon fr\x1b[0m",
                         elapsed.as_secs_f64() * 1_000_000.0
-                    );
+                    ));
                 } else if ms < 100.0 {
-                    eprintln!("\x1b[32m👨‍🍳 COOKED:\x1b[0m done in {:.2}ms — \x1b[2mno cap that was fast\x1b[0m", ms);
+                    crate::runtime::stdio::err_line(&format!("\x1b[32m👨‍🍳 COOKED:\x1b[0m done in {:.2}ms — \x1b[2mno cap that was fast\x1b[0m", ms));
                 } else if ms < 1000.0 {
-                    eprintln!("\x1b[33m👨‍🍳 COOKED:\x1b[0m done in {:.0}ms — \x1b[2mit's giving adequate\x1b[0m", ms);
+                    crate::runtime::stdio::err_line(&format!("\x1b[33m👨‍🍳 COOKED:\x1b[0m done in {:.0}ms — \x1b[2mit's giving adequate\x1b[0m", ms));
                 } else {
-                    eprintln!("\x1b[31m👨‍🍳 COOKED:\x1b[0m done in {:.2}s — \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64());
+                    crate::runtime::stdio::err_line(&format!("\x1b[31m👨‍🍳 COOKED:\x1b[0m done in {:.2}s — \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64()));
                 }
                 Ok(result)
             }
@@ -1903,7 +1904,7 @@ impl Interpreter {
                     .map_err(|e| RuntimeError::new(&e))?;
                 let mut last_result = Value::Null;
                 for _ in 0..n {
-                    let start = std::time::Instant::now();
+                    let start = crate::clock::Instant::now();
                     last_result = self.call_function(func.clone(), vec![])?;
                     times.push(start.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -1923,10 +1924,10 @@ impl Interpreter {
                 stats.insert("p99_ms".to_string(), Value::Float(p99));
                 stats.insert("runs".to_string(), Value::Int(n as i64));
                 stats.insert("result".to_string(), last_result);
-                eprintln!(
+                crate::runtime::stdio::err_line(&format!(
                     "\x1b[35m💅 SLAYED:\x1b[0m {}x runs — avg {:.3}ms, min {:.3}ms, max {:.3}ms, p99 {:.3}ms",
                     n, avg, min, max, p99
-                );
+                ));
                 Ok(Value::Object(stats))
             }
 
@@ -2018,7 +2019,7 @@ impl Interpreter {
                         if items.is_empty() {
                             return Ok(Value::Array(vec![]));
                         }
-                        use std::time::{SystemTime, UNIX_EPOCH};
+                        use crate::clock::{SystemTime, UNIX_EPOCH};
                         let seed = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
@@ -2046,7 +2047,7 @@ impl Interpreter {
                 // shuffle(arr) — Fisher-Yates shuffle
                 match args.into_iter().next() {
                     Some(Value::Array(mut items)) => {
-                        use std::time::{SystemTime, UNIX_EPOCH};
+                        use crate::clock::{SystemTime, UNIX_EPOCH};
                         let mut seed = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()

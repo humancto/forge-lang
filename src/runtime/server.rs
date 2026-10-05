@@ -907,26 +907,8 @@ async fn shutdown_signal() {
     );
 }
 
-pub fn json_to_forge(v: JsonValue) -> Value {
-    match v {
-        JsonValue::Null => Value::Null,
-        JsonValue::Bool(b) => Value::Bool(b),
-        JsonValue::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::Null
-            }
-        }
-        JsonValue::String(s) => Value::String(s),
-        JsonValue::Array(a) => Value::Array(a.into_iter().map(json_to_forge).collect()),
-        JsonValue::Object(m) => {
-            Value::Object(m.into_iter().map(|(k, v)| (k, json_to_forge(v))).collect())
-        }
-    }
-}
+/// JSON to Forge value conversion is shared with the `json` module.
+pub use crate::stdlib::json_module::json_to_forge;
 
 pub fn forge_to_json(v: &Value) -> JsonValue {
     match v {

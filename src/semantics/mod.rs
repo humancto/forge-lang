@@ -614,7 +614,7 @@ pub fn schedule_interval_secs(n: u64, unit: &str) -> u64 {
 /// Deadline `secs` seconds after `now` for a `timeout` block. Saturates at
 /// a century, which outlives any program, rather than overflowing
 /// `Instant` (a panic) for absurd durations.
-pub fn timeout_deadline(now: std::time::Instant, secs: u64) -> std::time::Instant {
+pub fn timeout_deadline(now: crate::clock::Instant, secs: u64) -> crate::clock::Instant {
     const CENTURY_SECS: u64 = 100 * 365 * 24 * 60 * 60;
     let capped = std::time::Duration::from_secs(secs.min(CENTURY_SECS));
     now.checked_add(capped).unwrap_or(now)

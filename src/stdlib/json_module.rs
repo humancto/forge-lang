@@ -91,7 +91,7 @@ fn deep_merge(
     result
 }
 
-fn json_to_forge(v: serde_json::Value) -> Value {
+pub fn json_to_forge(v: serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(b),

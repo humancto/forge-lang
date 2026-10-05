@@ -1,7 +1,8 @@
+use crate::clock::Instant;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::bytecode::*;
 use super::frame::*;
@@ -72,7 +73,7 @@ impl SendableVM {
             vm.registers[0] = closure;
         }
         loop {
-            std::thread::sleep(interval);
+            crate::clock::sleep(interval);
             let _ = vm.call_value(closure, vec![]);
             // Re-root after call (call_value may have modified registers)
             if vm.registers.is_empty() {
@@ -93,7 +94,7 @@ impl SendableVM {
         }
         let mut last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            crate::clock::sleep(Duration::from_secs(1));
             let current = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             if current != last_modified {
                 last_modified = current;
@@ -716,7 +717,7 @@ impl VM {
                 )));
             }
             let chunk = std::cmp::min(50, total_ms - elapsed);
-            std::thread::sleep(Duration::from_millis(chunk));
+            crate::clock::sleep(Duration::from_millis(chunk));
             elapsed += chunk;
         }
         if let Some((_, guard)) = self.earliest_expired_timeout() {
@@ -1285,10 +1286,13 @@ impl VM {
                         });
                         let has = if let Some(ch) = channel {
                             let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
-                            match guard.as_ref().map(|rx| rx.recv()) {
+                            match guard.as_ref().map(crate::clock::recv) {
                                 Some(Ok(shared)) => {
                                     self.iter_prefetch.push(shared);
                                     true
+                                }
+                                Some(Err(crate::clock::RecvFailure::WouldBlockForever)) => {
+                                    return Err(VMError::new(crate::clock::RECV_BLOCKS_FOREVER));
                                 }
                                 _ => false,
                             }

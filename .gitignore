@@ -52,3 +52,6 @@ docs/ARCHITECTURE_AUDIT.md
 /examples/plugins/*/*.so
 /examples/plugins/*/*.dylib
 /examples/plugins/*/*.dll
+
+# Built by bindings/wasm/build.sh (CI deploys it with the playground)
+/docs/playground/pkg/
