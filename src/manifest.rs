@@ -94,11 +94,83 @@ pub struct ProjectConfig {
     pub license: String,
     #[serde(default)]
     pub repository: String,
+    /// Language edition (`edition = "2026"`); see [`Edition`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
+}
+
+/// A language edition: the unit in which Forge may make source-breaking
+/// changes after 1.0 (docs/STABILITY.md). A project opts into an edition
+/// with `edition = "..."` under `[project]`; projects without the key use
+/// [`Edition::DEFAULT`]. Every edition stays supported, so code never
+/// breaks by upgrading the toolchain — only by changing its edition.
+///
+/// Only one edition exists today. Adding one means adding a variant here,
+/// a row in docs/STABILITY.md, and gating each breaking change on
+/// `edition >= Edition::Eyyyy` at the point where the behaviour differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Edition {
+    E2026,
+}
+
+impl Edition {
+    pub const DEFAULT: Edition = Edition::E2026;
+    pub const ALL: &'static [Edition] = &[Edition::E2026];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Edition::E2026 => "2026",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Edition, String> {
+        Edition::ALL
+            .iter()
+            .copied()
+            .find(|e| e.as_str() == text)
+            .ok_or_else(|| {
+                let known: Vec<&str> = Edition::ALL.iter().map(|e| e.as_str()).collect();
+                format!(
+                    "unknown edition \"{}\" in forge.toml (known editions: {}); this Forge v{} may be too old for the project",
+                    text,
+                    known.join(", "),
+                    env!("CARGO_PKG_VERSION")
+                )
+            })
+    }
+}
+
+/// The edition of the project in `./forge.toml` (the default when there is
+/// no manifest or no `edition` key). An unknown or malformed edition is an
+/// error: running code under the wrong edition's rules would be silent
+/// breakage.
+pub fn load_edition() -> Result<Edition, String> {
+    load_edition_from(Path::new("forge.toml"))
+}
+
+pub fn load_edition_from(path: &Path) -> Result<Edition, String> {
+    if !path.exists() {
+        return Ok(Edition::DEFAULT);
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    let table: toml::Table =
+        toml::from_str(&content).map_err(|e| format!("invalid {}: {}", path.display(), e))?;
+    match table.get("project").and_then(|p| p.get("edition")) {
+        None => Ok(Edition::DEFAULT),
+        Some(toml::Value::String(s)) => Edition::parse(s),
+        Some(other) => Err(format!(
+            "invalid edition in {}: expected a string like \"2026\", got {}",
+            path.display(),
+            other
+        )),
+    }
 }
 
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
+            edition: None,
             name: default_name(),
             version: default_version(),
             description: String::new(),
@@ -599,5 +671,39 @@ test = "forge test"
         assert_eq!(loaded.dependencies["router"].version_str(), "^1.0");
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn editions_are_parsed_and_validated() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-edition-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("forge.toml");
+        let check = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            load_edition_from(&path)
+        };
+        assert_eq!(
+            load_edition_from(&dir.join("absent.toml")),
+            Ok(Edition::DEFAULT)
+        );
+        assert_eq!(check("[project]\nname = \"a\"\n"), Ok(Edition::DEFAULT));
+        assert_eq!(check("[project]\nedition = \"2026\"\n"), Ok(Edition::E2026));
+        let err = check("[project]\nedition = \"2030\"\n").unwrap_err();
+        assert!(err.contains("unknown edition \"2030\""), "{err}");
+        assert!(err.contains("known editions: 2026"), "{err}");
+        let err = check("[project]\nedition = 2026\n").unwrap_err();
+        assert!(err.contains("expected a string"), "{err}");
+        // The typed manifest keeps the key and round-trips it.
+        std::fs::write(&path, "[project]\nname = \"a\"\nedition = \"2026\"\n").unwrap();
+        let manifest = load_manifest_from(&path).unwrap();
+        assert_eq!(manifest.project.edition.as_deref(), Some("2026"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
