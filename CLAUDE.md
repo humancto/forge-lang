@@ -2,7 +2,7 @@
 
 ## What Is This?
 
-Forge is an internet-native programming language built in Rust. ~26,000 lines. Dual syntax (classic + natural language). Built-in HTTP, database, crypto, AI, CSV, terminal UI, shell integration, NPC fake data, GenZ debug kit, and 30 interactive tutorials.
+Forge is an internet-native programming language built in Rust (60k+ lines; run `find src -name '*.rs' | xargs wc -l` for the current figure). Dual syntax (classic + natural language). Built-in HTTP, database, crypto, AI, CSV, terminal UI, shell integration, NPC fake data, GenZ debug kit, and 30 interactive tutorials.
 
 ## Architecture
 
@@ -13,7 +13,9 @@ Source (.fg) → Lexer → Parser → AST → Type Checker → VM / Interpreter 
                                               (axum, reqwest, tokio, rusqlite)
 ```
 
-The bytecode VM is the default engine. A tree-walking interpreter (`--interp` flag) is available for full feature coverage (decorator-driven HTTP servers auto-fallback). A JIT compiler (`--jit`) is available for maximum performance on numeric workloads.
+The bytecode VM is the default engine (`--vm` is accepted but is a no-op). A tree-walking interpreter (`--interp` flag) is available for full feature coverage (decorator-driven HTTP servers auto-fallback). A JIT compiler (`--jit`) is available for maximum performance on numeric workloads.
+
+For a compact, verified description of canonical Forge (written for AI models), see `llms.txt` at the repo root. Keep it in sync when syntax or stdlib signatures change.
 
 ## Quick Start
 
@@ -41,7 +43,7 @@ forge fmt                    # format code
 | Async fn    | `async fn x() { }` | `forge x() { }`             |
 | Await       | `await expr`       | `hold expr`                 |
 | Yield       | `yield value`      | `emit value`                |
-| Destructure | `let {a, b} = obj` | `unpack {a, b} from obj`    |
+| Destructure | `let (a, b) = tuple` (tuples only) | `unpack {a, b} from obj` / `unpack [x, ...rest] from arr` |
 | Fetch       | `fetch("url")`     | `grab resp from "url"`      |
 
 ## Innovation Keywords (unique to Forge)
@@ -60,11 +62,17 @@ forge fmt                    # format code
 - `repeat 5 times { }` -- counted loop
 - `wait 2 seconds` -- sleep with units
 
-## CLI Commands (16)
+## CLI Commands
 
-run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, chat, doc, help, -e
+Source of truth: `forge help` (clap `Command` enum in `src/main.rs`).
 
-## Standard Library (20 modules, 250+ functions)
+run, repl, version, fmt, test, new, build, install, add, update, publish, search, lsp, dap, learn, chat, watch, doc, help, plus `-e` for inline eval.
+
+Global flags: `--interp`, `--jit`, `--profile`, `--strict`, `--allow-run` (`--vm` is a backwards-compatible no-op). `forge build` takes `--native` (embeds source) or `--aot` (embeds bytecode).
+
+## Standard Library (22 global modules, 200+ module functions)
+
+Source of truth: `src/stdlib/`. Globals in the interpreter: math, fs, io, crypto, db, pg, mysql, jwt, env, json, regex, log, http, csv, term, os, path, time, url, toml, npc, ws. The VM does not yet expose url, toml, npc, ws (programs using them need `--interp`). `exec` is not a global object — use the `run_command` builtin.
 
 | Module   | Key Functions                                                                                                                                                    |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -111,19 +119,20 @@ run, repl, version, fmt, test, new, build, install, publish, lsp, dap, learn, ch
 
 ```bash
 cargo build          # 0 errors
-cargo test           # 948+ Rust tests pass
-forge test           # integration tests pass (run after cargo build)
+cargo test           # 1,600+ Rust tests pass
+forge --allow-run test # 600+ Forge integration tests (shell tests need --allow-run; CI passes it)
 forge test --coverage # with line coverage report
 ```
 
-All 18 example files run successfully.
+`examples/` holds 20+ programs. Server examples (`api.fg`, `bench_server*.fg`) block until killed; `devops.fg`/`showcase.fg` need `--allow-run`; `bench_client.fg` needs `FORGE_HTTP_ALLOW_PRIVATE=1` and a running bench server. Some examples still hit VM parity gaps on the default engine (tracked in ROADMAP Phase 0) — run them with both the default engine and `--interp`.
 
 ## Known Limitations (v0.8.0)
 
 - All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
 - The VM is the default engine; programs using decorator-driven HTTP servers (`@server`, `@get`, etc.) auto-fallback to the interpreter
 - Use `--interp` for full feature coverage, `--jit` for maximum numeric performance
-- `forge build --aot` embeds bytecode in a native binary but still requires the Forge runtime at execution time
+- `forge build --native` / `--aot` produce standalone executables when `libforge_lang.a` is found (via `FORGE_LIB_DIR` or next to the `forge` binary); otherwise they fall back to a launcher that shells into an installed `forge`. `--aot` is VM-only and rejects decorator-driven servers — use `--native` for those.
+- Shell builtins (`sh`, `shell`, `run_command`, `pipe_to`, ...) require `--allow-run` for `forge run`; the REPL and `-e` enable it automatically.
 - `regex` functions take `(text, pattern)` order, not `(pattern, text)`
 - Result constructors accept both cases: `Ok(42)`/`ok(42)`, `Err("msg")`/`err("msg")`
 
@@ -150,7 +159,7 @@ These rules are non-negotiable. Follow them on every change.
 
 10. **Run `cargo test`.** If tests fail, fix before committing.
 11. **Run the examples.** `forge run examples/hello.fg` and `forge run examples/functional.fg` must pass.
-12. **Check for regressions.** If you changed the VM, test with `--vm`. If you changed the JIT, test with `--jit`.
+12. **Check for regressions.** The VM is the default engine, so plain `forge run` exercises it; also run with `--interp` when you touch shared semantics, and with `--jit` when you change the JIT.
 13. **Update CHANGELOG.md.** Every PR that ships user-facing changes must have an entry under `[Unreleased]`. Format: `- Description of change ([#PR](link))`. On release, `[Unreleased]` is cut into a version block.
 14. **Bump the version together.** When cutting a release, update `Cargo.toml` version, add CHANGELOG heading (e.g. `## [0.5.0] - 2026-03-06`), and tag the commit.
 
@@ -385,19 +394,24 @@ call `tracing_init::init_subscriber()` on first use.
 - **VM-interpreter parity is not automatic.** The two share no code. Every interpreter builtin fix must be manually ported to `src/vm/builtins.rs`. Known audit-tracked gaps: `sort()` string support, `split("")` char-splitting, `int(bool)`, `keys({})`, `is_some`/`is_none` — all fixed in March 2026.
 - **`sort()` with custom comparator:** `sort_by` closure borrows `self` immutably but calling `self.call_value()` needs `&mut self`. Work around by collecting items first (releasing the `gc` borrow), then sort with `call_value` on cloned items.
 - **GC borrow in closures:** Never call `self.alloc_string()` or `self.call_value()` inside a closure that still holds `self.gc.get()`. Always collect into a `Vec<String>` or `Vec<Value>` first to drop the GC borrow.
-- **VM `TryCatch`:** The compiler currently drops the catch block (logs as TODO, M1.2.2). Until it's implemented, `--vm` mode does not catch runtime errors.
-- **VM `Destructure`:** Similarly dropped by the compiler (M1.2.1). Any `let {a, b} = obj` in `--vm` mode is silently skipped.
+- **VM `TryCatch` (resolved):** The compiler used to drop the catch block (M1.2.2), so the VM did not catch runtime errors. It is now compiled; `try { } catch e { }` works on the default VM engine.
+- **VM `Destructure` (resolved):** Also once dropped by the compiler (M1.2.1). `unpack {a, b} from obj`, `unpack [x, ...rest] from arr` and `let (a, b) = tuple` now work on the VM. Note there is no `let {a, b} = obj` form — object destructuring is `unpack` only.
 
 ## Module Dependency Map
 
 ```
 main.rs → lexer, parser, interpreter, vm, runtime, errors, typechecker, ...
 vm/mod.rs → compiler, machine, bytecode, frame, gc, green, jit, value
-vm/machine.rs → bytecode, frame, gc, value (2483 lines — largest VM file)
-vm/compiler.rs → bytecode, parser::ast (927 lines)
-vm/jit/ir_builder.rs → bytecode, cranelift (276 lines)
-vm/jit/jit_module.rs → ir_builder (47 lines)
-interpreter/mod.rs → parser::ast, runtime, stdlib (8153 lines — largest file)
-runtime/server.rs → interpreter, parser::ast, axum (354 lines)
-runtime/client.rs → reqwest (100 lines)
+vm/machine.rs → bytecode, frame, gc, value (largest VM file)
+vm/compiler.rs → bytecode, parser::ast
+vm/jit/ir_builder.rs → bytecode, cranelift
+vm/jit/jit_module.rs → ir_builder
+vm/jit/runtime.rs → extern "C" helpers called from JIT code (unsafe)
+interpreter/mod.rs → parser::ast, runtime, stdlib (largest file)
+runtime/server.rs → interpreter, parser::ast, axum
+runtime/client.rs → reqwest (SSRF guard)
+lib.rs → C ABI entry points used by native/AOT binaries (unsafe FFI)
+native.rs → `forge build --native/--aot` (standalone vs launcher)
+
+Line counts drift fast; measure with `wc -l` instead of recording them here.
 ```
