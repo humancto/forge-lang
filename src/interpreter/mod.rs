@@ -2094,7 +2094,22 @@ impl Interpreter {
 
             Stmt::Import { path, names } => {
                 if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
-                    if self.env.get(path).is_some() {
+                    if let Some(module) = self.env.get(path) {
+                        // `import { sqrt } from "math"` binds `math.sqrt`.
+                        for name in names.iter().flatten() {
+                            crate::semantics::check_builtin_module_import(path, name)
+                                .map_err(|m| RuntimeError::new(&m))?;
+                            let member = match &module {
+                                Value::Object(members) => members.get(name).cloned(),
+                                _ => None,
+                            }
+                            .ok_or_else(|| {
+                                RuntimeError::new(&crate::semantics::import_missing_name(
+                                    path, name,
+                                ))
+                            })?;
+                            self.env.define(name.to_string(), member);
+                        }
                         return Ok(Signal::None);
                     }
                     return Err(RuntimeError::new(&format!(

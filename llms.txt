@@ -259,6 +259,8 @@ try {
 ```forge
 import { double, shout } from "utils.fg"   // selected names
 println(double(21))
+import { sqrt, pi } from "math"            // members of a built-in module
+println(sqrt(16))                          // math.* stays available too
 ```
 
 Native plugins (Rust/C shared libraries built with `crates/forge-plugin`): `import native "target/release/libfoo" as foo` then `foo.add(1, 2)`, or `import { add } from native "path/libfoo"`. The platform suffix is added; paths resolve like `.fg` imports. Needs `--allow-ffi` (full trust; denied under `--sandbox` and `forge mcp`). Plugin errors are catchable runtime errors.

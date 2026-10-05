@@ -60,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `import { sqrt } from "math"` silently bound nothing on both engines; selective imports from a built-in module now bind its members (`sqrt` is `math.sqrt`), and an unknown member is an E0019 error.
 - Decorator named arguments accept soft keywords as keys, like object literals do (`@tool(timeout: 5)` was a parse error)
 - `pad_start`/`pad_end` with a negative width no longer try to allocate an astronomically large string (the width is treated as 0).
 - The VM ignored a statement `match` whose arms all failed; it now raises `non-exhaustive match` (E0026) like the interpreter.

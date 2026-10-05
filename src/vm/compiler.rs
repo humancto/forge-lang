@@ -2425,6 +2425,25 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::Import { path, names } => {
             if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                // `import { sqrt } from "math"` binds `math.sqrt`, as in the
+                // interpreter.
+                if let Some(name_list) = names {
+                    for name in name_list {
+                        crate::semantics::check_builtin_module_import(path, name)
+                            .map_err(|m| CompileError::new(&m))?;
+                    }
+                    let module_reg = c.alloc_reg()?;
+                    let module_idx = c.const_str(&c.global_name(path));
+                    c.emit(encode_abx(OpCode::GetGlobal, module_reg, module_idx), 0);
+                    for name in name_list {
+                        let local_reg = c.add_local(name, false)?;
+                        emit_get_field(c, local_reg, module_reg, name)?;
+                        if c.scope_depth == 1 {
+                            let name_idx = c.const_str(&c.global_name(name));
+                            c.emit(encode_abx(OpCode::SetGlobal, local_reg, name_idx), 0);
+                        }
+                    }
+                }
                 return Ok(());
             }
 

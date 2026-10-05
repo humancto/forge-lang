@@ -701,6 +701,27 @@ pub fn import_missing_name(path: &str, name: &str) -> String {
     )
 }
 
+/// `import { name } from "<module>"` for a built-in module: `Ok` when the
+/// module has that member (both engines then bind `name` to
+/// `module.name`), otherwise the same E0019 error as a missing file export.
+pub fn check_builtin_module_import(module: &str, name: &str) -> Result<(), String> {
+    let has_member = crate::builtins_registry::modules()
+        .iter()
+        .find(|m| m.name == module)
+        .is_some_and(|m| match (m.create)() {
+            crate::interpreter::Value::Object(members) => members.contains_key(name),
+            _ => false,
+        });
+    if has_member {
+        Ok(())
+    } else {
+        Err(format!(
+            "import '{}' does not export '{}'\n  hint: '{}' is a built-in module; check the member name (`{}.<name>`)",
+            module, name, module, module
+        ))
+    }
+}
+
 pub fn import_not_found(path: &str) -> String {
     format!(
         "cannot import '{}': file not found (checked relative to the importing file, {0}, {0}.fg, forge_modules/{0}/main.fg)",
@@ -712,6 +733,16 @@ pub fn import_not_found(path: &str) -> String {
 mod tests {
     use super::*;
     use Operand::*;
+
+    #[test]
+    fn builtin_module_imports_check_members() {
+        assert_eq!(check_builtin_module_import("math", "sqrt"), Ok(()));
+        let err = check_builtin_module_import("math", "sqrtx").unwrap_err();
+        assert!(err.starts_with("import 'math' does not export 'sqrtx'"));
+        assert_eq!(crate::semantics::errors::classify(&err).code, "E0019");
+        // `exec` is accepted by `import "exec"` but has no members.
+        assert!(check_builtin_module_import("exec", "run_command").is_err());
+    }
 
     #[test]
     fn range_len_is_bounded() {
