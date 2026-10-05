@@ -51,6 +51,8 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
 
 impl Interpreter {
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        crate::builtins_registry::check_arity(name, args.len())
+            .map_err(|e| RuntimeError::new(&e))?;
         match name {
             "print" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
@@ -1560,74 +1562,21 @@ impl Interpreter {
                     )),
                 }
             }
-            _ if name.starts_with("math.") => {
-                crate::stdlib::math::call(name, args).map_err(|e| RuntimeError::new(&e))
+            // Every stdlib module member is implemented once, in the shared
+            // registry (`builtins_registry`), for both engines.
+            _ if crate::builtins_registry::module_for(name).is_some() => {
+                crate::builtins_registry::call_module(name, args)
+                    .unwrap_or_else(|| Err(format!("unknown module function: {}", name)))
+                    .map_err(|e| RuntimeError::new(&e))
             }
-            _ if name.starts_with("fs.") => {
-                crate::stdlib::fs::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("io.") => {
-                crate::stdlib::io::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("crypto.") => {
-                crate::stdlib::crypto::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("db.") => {
-                crate::stdlib::db::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("env.") => {
-                crate::stdlib::env::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("json.") => {
-                crate::stdlib::json_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("regex.") => {
-                crate::stdlib::regex_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("log.") => {
-                crate::stdlib::log::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            #[cfg(feature = "postgres")]
-            _ if name.starts_with("pg.") => {
-                crate::stdlib::pg::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("term.") => {
-                crate::stdlib::term::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("http.") => {
-                crate::stdlib::http::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("csv.") => {
-                crate::stdlib::csv::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("time.") => {
-                crate::stdlib::time::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("npc.") => {
-                crate::stdlib::npc::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("url.") => {
-                crate::stdlib::url_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("toml.") => {
-                crate::stdlib::toml_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("ws.") => {
-                crate::stdlib::ws::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("jwt.") => {
-                crate::stdlib::jwt::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("os.") => {
-                crate::stdlib::os_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            _ if name.starts_with("path.") => {
-                crate::stdlib::path_module::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
-            #[cfg(feature = "mysql")]
-            _ if name.starts_with("mysql.") => {
-                crate::stdlib::mysql::call(name, args).map_err(|e| RuntimeError::new(&e))
-            }
+            "upper" | "lower" | "trim" => match args.first() {
+                Some(Value::String(s)) => Ok(Value::String(match name {
+                    "upper" => s.to_uppercase(),
+                    "lower" => s.to_lowercase(),
+                    _ => s.trim().to_string(),
+                })),
+                _ => Err(RuntimeError::new(&format!("{}() requires a string", name))),
+            },
             "input" => {
                 use std::io::Read;
                 let mut buffer = String::new();

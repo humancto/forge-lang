@@ -1,0 +1,45 @@
+// expect: [1, 2]
+// Direct calls of user functions check the argument count (the rule lives
+// in src/semantics); callbacks invoked by builtins stay lenient.
+fn add(a, b) {
+    return a + b
+}
+fn opt(a, b = 1) {
+    return a + b
+}
+let l = fn(x) { x }
+
+try {
+    add(1)
+} catch e {
+    say e.message
+}
+try {
+    add(1, 2, 3)
+} catch e {
+    say e.message
+}
+try {
+    opt()
+} catch e {
+    say e.message
+}
+try {
+    opt(1, 2, 3)
+} catch e {
+    say e.message
+}
+try {
+    l(1, 2)
+} catch e {
+    say e.message
+}
+try {
+    len([1], [2])
+} catch e {
+    say e.message
+}
+
+say map([1, 2], fn(x, i) { return x })
+say reduce([1, 2, 3], 0, fn(acc, x) { acc + x })
+map([1, 2], fn(x, i) { return x })

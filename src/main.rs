@@ -1,3 +1,4 @@
+mod builtins_registry;
 mod chat;
 mod dap;
 mod doc;

@@ -1,0 +1,52 @@
+// expect: [1, 1, 0]
+// Collections are values on both engines: assignment, arguments and method
+// receivers get independent copies; only the assigned binding changes.
+let mut z = [1, 2]
+let w = z
+z[0] = 9
+say w
+say z
+
+let mut o = {a: 1}
+let p = o
+o.a = 5
+say p.a
+say o.a
+
+fn set_first(a) {
+    let mut b = a
+    b[0] = 100
+    return b
+}
+let q = [1, 2]
+say set_first(q)
+say q
+
+let mut cnt = [0]
+fn bump() {
+    cnt[0] = cnt[0] + 1
+}
+bump()
+bump()
+say cnt
+
+struct Counter { n: Int }
+give Counter {
+    fn bump(it) {
+        it.n = it.n + 1
+        return it.n
+    }
+}
+let mut c = Counter { n: 0 }
+let first = c.bump()
+let second = c.bump()
+say [first, second, c.n]
+
+let imm = [1]
+try {
+    imm[0] = 2
+    say "mutated"
+} catch e {
+    say e.message
+}
+[first, second, c.n]

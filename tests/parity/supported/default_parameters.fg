@@ -1,0 +1,18 @@
+// expect: [11, 3, [3, 6], 5]
+// Default parameter values apply when the argument is omitted; they may
+// refer to earlier parameters, and an explicit null is kept.
+fn g(a, b = 10) {
+    return a + b
+}
+say g(1)
+say g(1, 2)
+
+fn h(a, b = a * 2) {
+    return [a, b]
+}
+say h(3)
+say h(3, null)
+
+let inc = fn(x, step = 1) { x + step }
+say inc(4)
+[g(1), g(1, 2), h(3), inc(4)]

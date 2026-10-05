@@ -1138,12 +1138,199 @@ fn parity_bool_ordering_is_error() {
 
 #[test]
 fn parity_yield_is_a_runtime_error_not_dropped() {
+    assert_cross_backend_error_contains("emit 1\n3", "yield/emit is not supported yet");
+    // Inside a hot function (the eager JIT tier sees it on the first call):
+    // the error must surface, never be swallowed by native code.
     assert_cross_backend_error_contains(
-        // Top level: JIT-compiled functions currently swallow errors raised
-        // by runtime-bridge calls (tracked separately), so keep this test
-        // about the compiler/interpreter contract.
-        "emit 1\n3",
+        "fn gen(n) {\n    emit n\n    return n\n}\nlet mut i = 0\nwhile i < 50 {\n    gen(i)\n    i = i + 1\n}\n3",
         "yield/emit is not supported yet",
+    );
+}
+
+// ----- Value semantics: collections are values on both engines -----
+
+#[test]
+fn parity_assignment_copies_collections() {
+    assert_cross_backend_value(
+        "let mut z = [1, 2]\nlet w = z\nz[0] = 9\n[w, z]",
+        "[[1, 2], [9, 2]]",
+    );
+    assert_cross_backend_value(
+        "let mut o = {a: 1}\nlet p = o\no.a = 5\n[p.a, o.a]",
+        "[1, 5]",
+    );
+}
+
+#[test]
+fn parity_function_arguments_are_copies() {
+    assert_cross_backend_value(
+        "fn f(a) {\n    let mut b = a\n    b[0] = 100\n    return b\n}\nlet q = [1]\nlet r = f(q)\n[q, r]",
+        "[[1], [100]]",
+    );
+    assert_cross_backend_value(
+        "fn setx(o) {\n    o.x = 99\n    return o.x\n}\nlet mut obj = {x: 1}\nlet r = setx(obj)\n[obj.x, r]",
+        "[1, 99]",
+    );
+}
+
+#[test]
+fn parity_methods_do_not_mutate_receiver() {
+    assert_cross_backend_value(
+        "struct Counter { n: Int }\ngive Counter {\n    fn bump(it) {\n        it.n = it.n + 1\n        return it.n\n    }\n}\nlet mut c = Counter { n: 0 }\nlet a = c.bump()\nlet b = c.bump()\n[a, b, c.n]",
+        "[1, 1, 0]",
+    );
+}
+
+#[test]
+fn parity_index_assign_on_immutable_binding_errors() {
+    assert_cross_backend_error_contains(
+        "let imm = [1]\nimm[0] = 2\nimm",
+        "cannot reassign immutable variable 'imm'",
+    );
+    assert_cross_backend_error_contains(
+        "let o = {a: 1}\no.a = 2\no",
+        "cannot reassign immutable variable 'o'",
+    );
+}
+
+#[test]
+fn parity_global_collection_updated_from_function() {
+    assert_cross_backend_value(
+        "let mut cnt = [0]\nfn bump() {\n    cnt[0] = cnt[0] + 1\n}\nbump()\nbump()\ncnt",
+        "[2]",
+    );
+}
+
+#[test]
+fn vm_nested_index_assign_has_value_semantics() {
+    // The interpreter only supports `name[i] = v`; the VM also supports
+    // nested places and rebuilds each level instead of mutating shared rows.
+    assert_eq!(
+        run_on_vm_value("let mut g = [[1, 2], [3]]\nlet snap = g\ng[0][1] = 7\n[g, snap]"),
+        "[[[1, 7], [3]], [[1, 2], [3]]]"
+    );
+}
+
+// ----- `return` inside an if-expression returns from the function -----
+
+#[test]
+fn parity_return_inside_if_expression_returns_from_function() {
+    assert_cross_backend_value(
+        "fn g(x) {\n    let y = if x > 0 { return \"pos\" } else { \"neg\" }\n    return \"after \" + y\n}\n[g(1), g(-1)]",
+        "[pos, after neg]",
+    );
+    // Not intercepted by an enclosing try.
+    assert_cross_backend_value(
+        "fn h() {\n    try {\n        let y = if true { return 1 } else { 2 }\n    } catch e {\n        return -1\n    }\n    return 0\n}\nh()",
+        "1",
+    );
+}
+
+// ----- `check ... between` -----
+
+#[test]
+fn parity_check_between_bounds() {
+    assert_cross_backend_value(
+        "let x = 5\ncheck x between 1 && 10\ncheck x between 1 and 10\ncheck x between 1.0 and 10.0\ncheck 2.5 between 1 and 10\ncheck x between 0 - 1 and 2 * 5\n\"ok\"",
+        "ok",
+    );
+    assert_cross_backend_error_contains("let x = 50\ncheck x between 1 and 10\n1", "check failed");
+    assert_cross_backend_error_contains("let x = 0\ncheck x between 1 && 10\n1", "check failed");
+}
+
+// ----- Call arity and default parameters -----
+
+#[test]
+fn parity_default_parameters() {
+    assert_cross_backend_value(
+        "fn g(a, b = 10) {\n    return a + b\n}\n[g(1), g(1, 2)]",
+        "[11, 3]",
+    );
+    // Defaults may use earlier parameters; an explicit null is kept.
+    assert_cross_backend_value(
+        "fn h(a, b = a * 2) {\n    return [a, b]\n}\n[h(3), h(3, null)]",
+        "[[3, 6], [3, null]]",
+    );
+    assert_cross_backend_value("let l = fn(x, y = 1) { x + y }\nl(4)", "5");
+}
+
+#[test]
+fn parity_call_arity_errors() {
+    assert_cross_backend_error_contains(
+        "fn add(a, b) {\n    return a + b\n}\nadd(1)",
+        "fn add expects 2 arguments, got 1",
+    );
+    assert_cross_backend_error_contains(
+        "fn add(a, b) {\n    return a + b\n}\nadd(1, 2, 3)",
+        "fn add expects 2 arguments, got 3",
+    );
+    assert_cross_backend_error_contains(
+        "fn g(a, b = 1) {\n    return a\n}\ng()",
+        "fn g expects at least 1 argument, got 0",
+    );
+    assert_cross_backend_error_contains(
+        "let l = fn(x) { x }\nl(1, 2)",
+        "fn expects 1 argument, got 2",
+    );
+    // Arity errors are catchable.
+    assert_cross_backend_value(
+        "fn add(a, b) {\n    return a + b\n}\nlet mut m = \"\"\ntry {\n    add(1)\n} catch e {\n    m = e.message\n}\nm",
+        "fn add expects 2 arguments, got 1",
+    );
+}
+
+#[test]
+fn parity_callbacks_from_builtins_are_lenient() {
+    // Builtins may pass fewer or more arguments than a callback declares.
+    assert_cross_backend_value("map([1, 2], fn(x, i) { return x })", "[1, 2]");
+    assert_cross_backend_value("reduce([1, 2, 3], 0, fn(acc, x) { acc + x })", "6");
+    assert_cross_backend_value("filter([1, 2, 3], fn(x) { x > 1 })", "[2, 3]");
+}
+
+#[test]
+fn parity_builtin_arity_comes_from_the_registry() {
+    assert_cross_backend_error_contains("len([1], [2])", "len() expects 1 argument, got 2");
+    assert_cross_backend_error_contains("upper()", "upper() expects 1 argument, got 0");
+    assert_cross_backend_value("upper(\"ab\") + lower(\"CD\") + trim(\"  x \")", "ABcdx");
+}
+
+// ----- Concurrency and modules -----
+
+#[test]
+fn parity_for_loop_over_channel() {
+    assert_cross_backend_value(
+        "let ch = channel()\nsend(ch, 1)\nsend(ch, 2)\nclose(ch)\nlet mut got = []\nfor m in ch {\n    got = push(got, m)\n}\ngot",
+        "[1, 2]",
+    );
+    // `break` leaves the remaining values in the channel.
+    assert_cross_backend_value(
+        "let ch = channel()\nsend(ch, 1)\nsend(ch, 2)\nsend(ch, 3)\nclose(ch)\nfor m in ch {\n    break\n}\nreceive(ch)",
+        "2",
+    );
+}
+
+#[test]
+fn parity_spawn_sees_top_level_functions_and_globals() {
+    assert_cross_backend_value(
+        "fn w() {\n    return 42\n}\nlet h = spawn { w() }\nawait h",
+        "42",
+    );
+    assert_cross_backend_value(
+        "let base = 10\nfn add(x) {\n    return x + base\n}\nlet h = spawn { add(5) }\nawait h",
+        "15",
+    );
+    // A captured recursive lambda survives the transfer.
+    assert_cross_backend_value(
+        "let fact = fn(n) {\n    if n <= 1 {\n        return 1\n    }\n    return n * fact(n - 1)\n}\nlet h = spawn { fact(5) }\nawait h",
+        "120",
+    );
+}
+
+#[test]
+fn parity_stdlib_modules_exist_on_both_engines() {
+    assert_cross_backend_value(
+        "[type(npc), type(url), type(toml), type(ws), type(io.args()), type(npc.first_name())]",
+        "[Object, Object, Object, Object, Array, String]",
     );
 }
 
@@ -1226,4 +1413,63 @@ fn vm_many_try_blocks_reuse_registers() {
     }
     source.push_str("n\n");
     assert_eq!(run_on_vm_value(&source), "300");
+}
+
+// ----- Builtin registry: one source of truth for both engines -----
+
+#[test]
+fn registry_globals_and_modules_exist_on_both_engines() {
+    use crate::interpreter::Value as IV;
+    let interp = Interpreter::new();
+    let vm = VM::new();
+    let mut missing = Vec::new();
+    for builtin in crate::builtins_registry::GLOBALS {
+        if interp.env.get(builtin.name).is_none() {
+            missing.push(format!("interpreter global {}", builtin.name));
+        }
+        if !vm.globals.contains_key(builtin.name) {
+            missing.push(format!("vm global {}", builtin.name));
+        }
+    }
+    for module in crate::builtins_registry::modules() {
+        let IV::Object(expected) = (module.create)() else {
+            panic!("module {} is not an object", module.name);
+        };
+        let expected: Vec<String> = expected.keys().cloned().collect();
+        match interp.env.get(module.name) {
+            Some(IV::Object(members)) => {
+                let keys: Vec<String> = members.keys().cloned().collect();
+                if keys != expected {
+                    missing.push(format!("interpreter module {} members differ", module.name));
+                }
+            }
+            _ => missing.push(format!("interpreter module {}", module.name)),
+        }
+        let vm_members = vm
+            .globals
+            .get(module.name)
+            .and_then(|v| v.as_obj())
+            .and_then(|r| vm.gc.get(r))
+            .and_then(|o| match &o.kind {
+                crate::vm::value::ObjKind::Object(map) => {
+                    Some(map.keys().cloned().collect::<Vec<_>>())
+                }
+                _ => None,
+            });
+        match vm_members {
+            Some(keys) => {
+                for key in &expected {
+                    if !keys.contains(key) {
+                        missing.push(format!("vm {}.{}", module.name, key));
+                    }
+                }
+            }
+            None => missing.push(format!("vm module {}", module.name)),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "registry entries missing: {:?}",
+        missing
+    );
 }

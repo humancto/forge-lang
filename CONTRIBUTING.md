@@ -206,6 +206,22 @@ list only ever shrinks. Rules both engines share (operators, comparisons,
 indexing, truthiness, error messages) live in `src/semantics/` — change them there,
 not in one engine.
 
+### Adding a builtin or stdlib function
+
+Both engines take their builtin names from `src/builtins_registry.rs`:
+
+- **Global builtin** — add a `Builtin` entry (name + arity) to `GLOBALS`, then a
+  match arm in `src/interpreter/builtins.rs` *and* in `src/vm/builtins.rs`. The
+  registry tests fail if either arm is missing.
+- **Stdlib module member** — add it to the module's `create_module()` and `call()` in
+  `src/stdlib/<module>.rs`. Both engines dispatch module calls through
+  `builtins_registry::call_module`, so there is nothing to port to the VM.
+- **New stdlib module** — add one `module!(...)` line to `builtins_registry::modules()`
+  and its name to `semantics::BUILTIN_MODULES`.
+
+Language rules both engines must agree on (operators, `check ... between`, call
+arity, error messages) go in `src/semantics/`.
+
 ### Run the CI gates locally
 
 Every required CI job can be reproduced from a checkout. Run them before

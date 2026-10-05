@@ -890,14 +890,48 @@ fn jit_wrong_arity_runs_in_vm() {
     let (out, err) = run_parity(
         "fn add(a, b) { return a + b }\n\
          let mut i = 0\nwhile i < 150 { add(i, 1)\ni = i + 1 }\n\
-         println(add(1, 2, 3))\nprintln(add(1))",
+         println(add(1, 2))\n\
+         try { add(1, 2, 3) } catch e { println(e.message) }\n\
+         println(map([1], add))",
     );
-    assert_eq!(out, vec!["3"]);
-    // `1 + null`: the shared operator rules (crate::semantics) report the
-    // same message as the interpreter.
+    // Direct calls are arity-checked before the JIT is consulted
+    // (crate::semantics::check_call_arity) ...
+    assert_eq!(out, vec!["3", "fn add expects 2 arguments, got 3"]);
+    // ... while a builtin calling back with fewer arguments fails the JIT
+    // arity guard and runs in the VM: `1 + null`.
     assert!(err
         .unwrap_or_default()
         .contains("cannot perform arithmetic on null"));
+}
+
+#[test]
+fn jit_bridge_errors_are_recorded_not_swallowed() {
+    use crate::vm::jit::runtime::{encode_null, encode_value, rt_call_native, rt_get_global};
+    let (_, err, mut vm) = run_mode("fn boom() {\n    emit 1\n}\n1", JitMode::Off);
+    assert!(err.is_none());
+    let boom = *vm.globals.get("boom").expect("boom is defined");
+    let encoded = encode_value(&boom, &vm.gc);
+    let vm_ptr: *mut VM = &mut vm;
+    let result = rt_call_native(vm_ptr, encoded, std::ptr::null(), 0);
+    assert_eq!(result, encode_null());
+    let err = vm
+        .take_jit_bridge_error()
+        .expect("a failing bridge call must record its error");
+    assert!(
+        err.message.contains("yield/emit is not supported yet"),
+        "{}",
+        err.message
+    );
+
+    let name = vm.alloc_string("no_such_global");
+    let name_ref = name.as_obj().expect("string is an object").0 as i64;
+    let vm_ptr: *mut VM = &mut vm;
+    assert_eq!(rt_get_global(vm_ptr, name_ref), encode_null());
+    let err = vm
+        .take_jit_bridge_error()
+        .expect("missing global is an error");
+    assert!(err.message.contains("undefined variable: 'no_such_global'"));
+    assert!(vm.take_jit_bridge_error().is_none());
 }
 
 #[test]
