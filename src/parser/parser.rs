@@ -1,4 +1,5 @@
 use super::ast::*;
+use super::index::{DefKind, IndexBuilder, OccId, Pos, Role, ScopeKind, Span, SyntaxIndex};
 /// Forge Parser — Recursive Descent
 /// Converts a token stream into an AST.
 /// Expression parsing uses Pratt parsing for correct precedence.
@@ -10,6 +11,15 @@ pub struct Parser {
     pos: usize,
     /// Current nesting of recursive productions (see [`MAX_NESTING`]).
     depth: usize,
+    /// Present when the caller asked for a [`SyntaxIndex`]
+    /// ([`Parser::with_index`]); every recording helper is a no-op otherwise.
+    index: Option<IndexBuilder>,
+    /// Source text (as chars, matching token offsets), kept for indexing so
+    /// names inside string interpolations get exact columns.
+    source: Option<Vec<char>>,
+    /// Set while parsing the methods of an `impl`/`give` block: function
+    /// definitions there are methods of this type, not variables.
+    impl_owner: Option<String>,
 }
 
 /// Deepest nesting of expressions, statements, patterns and type
@@ -24,7 +34,105 @@ impl Parser {
             tokens,
             pos: 0,
             depth: 0,
+            index: None,
+            source: None,
+            impl_owner: None,
         }
+    }
+
+    /// A parser that also builds a [`SyntaxIndex`] of every name and scope
+    /// (see `parser::index`). `source` must be the text `tokens` were lexed
+    /// from. Retrieve the index with [`Parser::take_index`] after parsing.
+    pub fn with_index(tokens: Vec<Spanned>, source: &str) -> Self {
+        let mut parser = Self::new(tokens);
+        parser.index = Some(IndexBuilder::new());
+        parser.source = Some(source.chars().collect());
+        parser
+    }
+
+    /// The index built so far (complete after a successful
+    /// [`Parser::parse_program`]). `None` unless built [`Parser::with_index`].
+    pub fn take_index(&mut self) -> Option<SyntaxIndex> {
+        let end = self.tokens.last().map(|t| Pos::new(t.line, t.col));
+        self.index.take().map(|b| b.finish(end.unwrap_or_default()))
+    }
+
+    // ========== Syntax index recording ==========
+    //
+    // All of these are no-ops unless the parser was built `with_index`.
+
+    fn token_span(&self, i: usize) -> Span {
+        match self.tokens.get(i) {
+            Some(t) => Span::new(
+                Pos::new(t.line, t.col),
+                Pos::new(t.line, t.col + t.len.max(1)),
+            ),
+            None => Span::default(),
+        }
+    }
+
+    /// Span of the token just consumed.
+    fn prev_span(&self) -> Span {
+        self.token_span(self.pos.saturating_sub(1))
+    }
+
+    fn cur_start(&self) -> Pos {
+        self.token_span(self.pos).start
+    }
+
+    fn prev_end(&self) -> Pos {
+        self.prev_span().end
+    }
+
+    /// Record the token just consumed as `name` in `role`.
+    fn note_prev(&mut self, name: &str, role: Role) -> Option<OccId> {
+        let span = self.prev_span();
+        self.index.as_mut().map(|ix| ix.reference(name, span, role))
+    }
+
+    /// Record the token just consumed as a definition.
+    fn note_def(&mut self, name: &str, kind: DefKind) -> Option<OccId> {
+        let span = self.prev_span();
+        self.index.as_mut().map(|ix| ix.def(name, span, kind))
+    }
+
+    fn set_visible(&mut self, occ: Option<OccId>, pos: Pos) {
+        if let (Some(ix), Some(occ)) = (self.index.as_mut(), occ) {
+            ix.set_visible_from(occ, pos);
+        }
+    }
+
+    fn hoist(&mut self, occ: Option<OccId>) {
+        if let (Some(ix), Some(occ)) = (self.index.as_mut(), occ) {
+            ix.hoist_to_scope(occ);
+        }
+    }
+
+    fn open_scope(&mut self, kind: ScopeKind, start: Pos) {
+        if let Some(ix) = self.index.as_mut() {
+            ix.open_scope(kind, start);
+        }
+    }
+
+    fn close_scope(&mut self) {
+        let end = self.prev_end();
+        if let Some(ix) = self.index.as_mut() {
+            ix.close_scope(end);
+        }
+    }
+
+    /// Run `f` inside a scope opened at `start`; the scope is closed (at the
+    /// end of the last consumed token) whether `f` succeeds or not.
+    fn scoped<T>(
+        &mut self,
+        kind: ScopeKind,
+        start: Pos,
+        f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        self.open_scope(kind, start);
+        let result = f(self);
+        self.close_scope();
+        result
     }
 
     /// Enter one level of a recursive production. Pair with
@@ -78,7 +186,36 @@ impl Parser {
 
     fn parse_statement_inner(&mut self) -> Result<Stmt, ParseError> {
         self.skip_newlines();
+        let start = self.cur_start();
+        if let Some(ix) = self.index.as_mut() {
+            ix.push_stmt(start);
+        }
+        let result = self.parse_statement_kind();
+        if let Some(ix) = self.index.as_mut() {
+            ix.pop_stmt();
+        }
+        result
+    }
 
+    /// Parse a statement that is not reached through
+    /// [`Parser::parse_statement`] (an `else if`, an `impl` method) so the
+    /// index still attributes its names to it.
+    fn as_statement(
+        &mut self,
+        start: Pos,
+        f: impl FnOnce(&mut Self) -> Result<Stmt, ParseError>,
+    ) -> Result<Stmt, ParseError> {
+        if let Some(ix) = self.index.as_mut() {
+            ix.push_stmt(start);
+        }
+        let result = f(self);
+        if let Some(ix) = self.index.as_mut() {
+            ix.pop_stmt();
+        }
+        result
+    }
+
+    fn parse_statement_kind(&mut self) -> Result<Stmt, ParseError> {
         match self.current_token() {
             Token::Let => self.parse_let(),
             // `set` is context-sensitive: `set(...)` is the set() constructor call,
@@ -149,8 +286,11 @@ impl Parser {
         if self.check(&Token::LParen) {
             self.advance();
             let mut names = Vec::new();
+            let mut defs = Vec::new();
             while !self.check(&Token::RParen) {
-                names.push(self.expect_ident()?);
+                let name = self.expect_ident()?;
+                defs.push(self.note_def(&name, DefKind::Variable { mutable }));
+                names.push(name);
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
@@ -158,6 +298,10 @@ impl Parser {
             self.expect(Token::RParen)?;
             self.expect(Token::Eq)?;
             let value = self.parse_expr()?;
+            let end = self.prev_end();
+            for def in defs {
+                self.set_visible(def, end);
+            }
             return Ok(Stmt::Destructure {
                 pattern: DestructurePattern::Tuple(names),
                 value,
@@ -165,6 +309,7 @@ impl Parser {
         }
 
         let name = self.expect_ident()?;
+        let def = self.note_def(&name, DefKind::Variable { mutable });
 
         let type_ann = if self.check(&Token::Colon) {
             self.advance();
@@ -175,6 +320,8 @@ impl Parser {
 
         self.expect(Token::Eq)?;
         let value = self.parse_expr()?;
+        let end = self.prev_end();
+        self.set_visible(def, end);
 
         Ok(Stmt::Let {
             name,
@@ -196,8 +343,11 @@ impl Parser {
         };
 
         let name = self.expect_ident()?;
+        let def = self.note_def(&name, DefKind::Variable { mutable });
         self.expect(Token::To)?;
         let value = self.parse_expr()?;
+        let end = self.prev_end();
+        self.set_visible(def, end);
 
         Ok(Stmt::Let {
             name,
@@ -221,12 +371,28 @@ impl Parser {
     fn parse_type_def(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Type)?;
         let name = self.expect_ident()?;
+        let def = self.note_def(&name, DefKind::TypeDef);
+        self.hoist(def);
         self.expect(Token::Eq)?;
         self.skip_newlines();
 
         let mut variants = Vec::new();
         loop {
             let variant_name = self.expect_ident_or_type_name()?;
+            if matches!(
+                self.tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| &t.token),
+                Some(Token::Ident(_))
+            ) {
+                let def = self.note_def(
+                    &variant_name,
+                    DefKind::Variant {
+                        owner: name.clone(),
+                    },
+                );
+                self.hoist(def);
+            }
             let fields = if self.check(&Token::LParen) {
                 self.advance();
                 let mut fields = Vec::new();
@@ -273,6 +439,8 @@ impl Parser {
             return Err(self.error("expected 'interface' or 'power'"));
         }
         let name = self.expect_ident()?;
+        let def = self.note_def(&name, DefKind::Interface);
+        self.hoist(def);
         self.expect(Token::LBrace)?;
         self.skip_newlines();
 
@@ -282,15 +450,25 @@ impl Parser {
                 self.advance();
             }
             let method_name = self.expect_ident()?;
+            self.note_def(
+                &method_name,
+                DefKind::Method {
+                    owner: name.clone(),
+                },
+            );
             self.expect(Token::LParen)?;
-            let params = self.parse_params()?;
-            self.expect(Token::RParen)?;
-            let return_type = if self.check(&Token::Arrow) {
-                self.advance();
-                Some(self.parse_type_ann()?)
-            } else {
-                None
-            };
+            let start = self.prev_span().start;
+            let (params, return_type) = self.scoped(ScopeKind::Signature, start, |p| {
+                let params = p.parse_params()?;
+                p.expect(Token::RParen)?;
+                let return_type = if p.check(&Token::Arrow) {
+                    p.advance();
+                    Some(p.parse_type_ann()?)
+                } else {
+                    None
+                };
+                Ok((params, return_type))
+            })?;
             methods.push(MethodSig {
                 name: method_name,
                 params,
@@ -313,6 +491,7 @@ impl Parser {
         self.advance(); // consume 'impl' or 'give'
 
         let first_name = self.expect_ident()?;
+        self.note_prev(&first_name, Role::TypeRef);
         let mut type_name = first_name.clone();
         let mut ability: Option<String> = None;
 
@@ -322,7 +501,9 @@ impl Parser {
                 self.advance(); // consume 'the'
                 if self.check(&Token::Power) {
                     self.advance(); // consume 'power'
-                    ability = Some(self.expect_ident()?);
+                    let name = self.expect_ident()?;
+                    self.note_prev(&name, Role::TypeRef);
+                    ability = Some(name);
                 } else {
                     return Err(self.error("expected 'power' after 'the'"));
                 }
@@ -335,6 +516,7 @@ impl Parser {
                 ability = Some(first_name);
                 self.advance(); // consume 'for'
                 type_name = self.expect_ident()?;
+                self.note_prev(&type_name, Role::TypeRef);
             }
         }
 
@@ -343,12 +525,9 @@ impl Parser {
         self.skip_newlines();
 
         let mut methods = Vec::new();
-        while !self.check(&Token::RBrace) {
-            let (line, col) = self.current_pos();
-            let stmt = self.parse_fn_def(Vec::new())?;
-            methods.push(SpannedStmt::new(stmt, line, col));
-            self.skip_newlines();
-        }
+        let parsed = self.parse_impl_methods(&type_name, &mut methods);
+        self.impl_owner = None;
+        parsed?;
         self.expect(Token::RBrace)?;
 
         Ok(Stmt::ImplBlock {
@@ -356,6 +535,23 @@ impl Parser {
             ability,
             methods,
         })
+    }
+
+    fn parse_impl_methods(
+        &mut self,
+        type_name: &str,
+        methods: &mut Vec<SpannedStmt>,
+    ) -> Result<(), ParseError> {
+        while !self.check(&Token::RBrace) {
+            let (line, col) = self.current_pos();
+            // `parse_fn_def` takes this, so functions nested in a method
+            // body are ordinary functions again.
+            self.impl_owner = Some(type_name.to_string());
+            let stmt = self.as_statement(Pos::new(line, col), |p| p.parse_fn_def(Vec::new()))?;
+            methods.push(SpannedStmt::new(stmt, line, col));
+            self.skip_newlines();
+        }
+        Ok(())
     }
 
     /// Parses: say/yell/whisper expr
@@ -379,6 +575,7 @@ impl Parser {
     fn parse_grab(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Grab)?;
         let name = self.expect_ident()?;
+        let def = self.note_def(&name, DefKind::Variable { mutable: false });
         self.expect(Token::From)?;
         let url_expr = self.parse_expr()?;
 
@@ -410,6 +607,8 @@ impl Parser {
             }
         };
 
+        let end = self.prev_end();
+        self.set_visible(def, end);
         Ok(Stmt::Let {
             name,
             mutable: false,
@@ -438,8 +637,14 @@ impl Parser {
         let try_body = self.parse_block()?;
         self.skip_newlines();
         self.expect(Token::Catch)?;
-        let catch_var = self.expect_ident()?;
-        let catch_body = self.parse_block()?;
+        let start = self.cur_start();
+        let (catch_var, catch_body) = self.scoped(ScopeKind::Catch, start, |p| {
+            let catch_var = p.expect_ident()?;
+            let def = p.note_def(&catch_var, DefKind::CatchVariable);
+            p.hoist(def);
+            let catch_body = p.parse_block()?;
+            Ok((catch_var, catch_body))
+        })?;
         Ok(Stmt::TryCatch {
             try_body,
             catch_var,
@@ -475,9 +680,14 @@ impl Parser {
 
         if self.at_native_path() {
             let path = self.parse_native_path()?;
+            // The name is bound at the alias, or (derived from the path) at
+            // the path string.
+            let mut name_span = self.prev_span();
             let alias = if matches!(self.current_token(), Token::Ident(ref s) if s == "as") {
                 self.advance();
-                Some(self.expect_ident()?)
+                let alias = self.expect_ident()?;
+                name_span = self.prev_span();
+                Some(alias)
             } else {
                 None
             };
@@ -490,6 +700,15 @@ impl Parser {
                     )))
                 }
             };
+            let end = self.prev_end();
+            if let Some(ix) = self.index.as_mut() {
+                let def = ix.def(
+                    &name,
+                    name_span,
+                    DefKind::NativeImport { path: path.clone() },
+                );
+                ix.set_visible_from(def, end);
+            }
             return Ok(Stmt::ImportNative {
                 path,
                 binding: NativeBinding::Namespace(name),
@@ -500,8 +719,10 @@ impl Parser {
             // import { name1, name2 } from "path"
             self.advance();
             let mut names = Vec::new();
+            let mut spans = Vec::new();
             while !self.check(&Token::RBrace) {
                 names.push(self.expect_ident()?);
+                spans.push(self.prev_span());
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
@@ -510,6 +731,13 @@ impl Parser {
             self.expect(Token::From)?;
             if self.at_native_path() {
                 let path = self.parse_native_path()?;
+                let end = self.prev_end();
+                if let Some(ix) = self.index.as_mut() {
+                    for (name, span) in names.iter().zip(&spans) {
+                        let def = ix.def(name, *span, DefKind::NativeImport { path: path.clone() });
+                        ix.set_visible_from(def, end);
+                    }
+                }
                 return Ok(Stmt::ImportNative {
                     path,
                     binding: NativeBinding::Names(names),
@@ -522,6 +750,13 @@ impl Parser {
                 }
                 _ => return Err(self.error("expected string path after 'from'")),
             };
+            let end = self.prev_end();
+            if let Some(ix) = self.index.as_mut() {
+                for (name, span) in names.iter().zip(spans) {
+                    let def = ix.def(name, span, DefKind::Import { path: path.clone() });
+                    ix.set_visible_from(def, end);
+                }
+            }
             Ok(Stmt::Import {
                 path,
                 names: Some(names),
@@ -554,14 +789,22 @@ impl Parser {
     }
 
     /// Parses: unpack { a, b } from expr  /  unpack [ a, ...rest ] from expr
+    /// An identifier bound by destructuring (`unpack`).
+    fn expect_bound_ident(&mut self, defs: &mut Vec<Option<OccId>>) -> Result<String, ParseError> {
+        let name = self.expect_ident()?;
+        defs.push(self.note_def(&name, DefKind::Variable { mutable: false }));
+        Ok(name)
+    }
+
     fn parse_unpack(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Unpack)?;
+        let mut defs = Vec::new();
 
         let pattern = if self.check(&Token::LBrace) {
             self.advance();
             let mut names = Vec::new();
             while !self.check(&Token::RBrace) {
-                names.push(self.expect_ident()?);
+                names.push(self.expect_bound_ident(&mut defs)?);
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
@@ -575,9 +818,9 @@ impl Parser {
             while !self.check(&Token::RBracket) {
                 if self.check(&Token::DotDotDot) {
                     self.advance();
-                    rest = Some(self.expect_ident()?);
+                    rest = Some(self.expect_bound_ident(&mut defs)?);
                 } else {
-                    items.push(self.expect_ident()?);
+                    items.push(self.expect_bound_ident(&mut defs)?);
                 }
                 if self.check(&Token::Comma) {
                     self.advance();
@@ -589,7 +832,7 @@ impl Parser {
             self.advance();
             let mut names = Vec::new();
             while !self.check(&Token::RParen) {
-                names.push(self.expect_ident()?);
+                names.push(self.expect_bound_ident(&mut defs)?);
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
@@ -602,6 +845,10 @@ impl Parser {
 
         self.expect(Token::From)?;
         let value = self.parse_expr()?;
+        let end = self.prev_end();
+        for def in defs {
+            self.set_visible(def, end);
+        }
 
         Ok(Stmt::Destructure { pattern, value })
     }
@@ -831,9 +1078,13 @@ impl Parser {
     fn parse_prompt_def(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Prompt)?;
         let name = self.expect_ident()?;
+        let def = self.note_def(&name, DefKind::Callable);
         self.expect(Token::LParen)?;
-        let params = self.parse_params()?;
+        let start = self.prev_span().start;
+        let params = self.scoped(ScopeKind::Function, start, |p| p.parse_params())?;
         self.expect(Token::RParen)?;
+        let end = self.prev_end();
+        self.set_visible(def, end);
         self.expect(Token::LBrace)?;
         self.skip_newlines();
         let mut system = String::new();
@@ -870,9 +1121,13 @@ impl Parser {
     fn parse_agent_def(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Agent)?;
         let name = self.expect_ident()?;
+        let def = self.note_def(&name, DefKind::Callable);
         self.expect(Token::LParen)?;
-        let params = self.parse_params()?;
+        let start = self.prev_span().start;
+        let params = self.scoped(ScopeKind::Function, start, |p| p.parse_params())?;
         self.expect(Token::RParen)?;
+        let end = self.prev_end();
+        self.set_visible(def, end);
         self.expect(Token::LBrace)?;
         self.skip_newlines();
 
@@ -963,7 +1218,10 @@ impl Parser {
         self.advance(); // consume <
         let mut params = Vec::new();
         loop {
-            params.push(self.expect_ident()?);
+            let name = self.expect_ident()?;
+            let def = self.note_def(&name, DefKind::TypeParameter);
+            self.hoist(def);
+            params.push(name);
             if self.check(&Token::Comma) {
                 self.advance();
             } else {
@@ -991,20 +1249,31 @@ impl Parser {
             return Err(self.error("expected 'fn' or 'define'"));
         }
         let name = self.expect_ident()?;
-        let type_params = self.parse_type_params()?;
-
-        self.expect(Token::LParen)?;
-        let params = self.parse_params()?;
-        self.expect(Token::RParen)?;
-
-        let return_type = if self.check(&Token::Arrow) {
-            self.advance();
-            Some(self.parse_type_ann()?)
-        } else {
-            None
+        let def = match self.impl_owner.take() {
+            Some(owner) => self.note_def(&name, DefKind::Method { owner }),
+            None => self.note_def(&name, DefKind::Function),
         };
+        let start = self.prev_end();
+        let parsed = self.scoped(ScopeKind::Function, start, |p| {
+            let type_params = p.parse_type_params()?;
 
-        let body = self.parse_block()?;
+            p.expect(Token::LParen)?;
+            let params = p.parse_params()?;
+            p.expect(Token::RParen)?;
+
+            let return_type = if p.check(&Token::Arrow) {
+                p.advance();
+                Some(p.parse_type_ann()?)
+            } else {
+                None
+            };
+
+            let body = p.parse_block()?;
+            Ok((type_params, params, return_type, body))
+        });
+        let (type_params, params, return_type, body) = parsed?;
+        let end = self.prev_end();
+        self.set_visible(def, end);
 
         Ok(Stmt::FnDef {
             name,
@@ -1027,6 +1296,23 @@ impl Parser {
             return Err(self.error("expected 'struct' or 'thing'"));
         }
         let name = self.expect_ident()?;
+        let def = self.note_def(&name, DefKind::Struct);
+        self.hoist(def);
+        let start = self.prev_end();
+        let (type_params, fields) =
+            self.scoped(ScopeKind::Struct, start, |p| p.parse_struct_body(&name))?;
+        Ok(Stmt::StructDef {
+            name,
+            type_params,
+            fields,
+        })
+    }
+
+    /// `<T, ...> { field: Type [= default], has embedded: Type, ... }`
+    fn parse_struct_body(
+        &mut self,
+        name: &str,
+    ) -> Result<(Vec<String>, Vec<FieldDef>), ParseError> {
         let type_params = self.parse_type_params()?;
 
         self.expect(Token::LBrace)?;
@@ -1047,6 +1333,12 @@ impl Parser {
             };
 
             let field_name = self.expect_ident()?;
+            self.note_def(
+                &field_name,
+                DefKind::Field {
+                    owner: name.to_string(),
+                },
+            );
             self.expect(Token::Colon)?;
             let type_ann = self.parse_type_ann()?;
 
@@ -1072,11 +1364,7 @@ impl Parser {
         }
 
         self.expect(Token::RBrace)?;
-        Ok(Stmt::StructDef {
-            name,
-            type_params,
-            fields,
-        })
+        Ok((type_params, fields))
     }
 
     fn parse_return(&mut self) -> Result<Stmt, ParseError> {
@@ -1109,7 +1397,7 @@ impl Parser {
                 } else {
                     (0, 0)
                 };
-                let elif = self.parse_if()?;
+                let elif = self.as_statement(Pos::new(line, col), Self::parse_if)?;
                 Some(vec![SpannedStmt::new(elif, line, col)])
             } else {
                 Some(self.parse_block()?)
@@ -1134,22 +1422,9 @@ impl Parser {
 
         let mut arms = Vec::new();
         while !self.check(&Token::RBrace) {
-            let pattern = self.parse_pattern()?;
-            self.expect(Token::FatArrow)?;
-
-            let body = if self.check(&Token::LBrace) {
-                self.parse_block()?
-            } else {
-                let (line, col) = if self.pos < self.tokens.len() {
-                    (self.tokens[self.pos].line, self.tokens[self.pos].col)
-                } else {
-                    (0, 0)
-                };
-                let stmt = self.parse_statement()?;
-                vec![SpannedStmt::new(stmt, line, col)]
-            };
-
-            arms.push(MatchArm { pattern, body });
+            let start = self.cur_start();
+            let arm = self.scoped(ScopeKind::Arm, start, Self::parse_match_arm)?;
+            arms.push(arm);
             self.skip_newlines();
             if self.check(&Token::Comma) {
                 self.advance();
@@ -1159,6 +1434,25 @@ impl Parser {
 
         self.expect(Token::RBrace)?;
         Ok(Stmt::Match { subject, arms })
+    }
+
+    /// `pattern => { body }` or `pattern => statement`.
+    fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
+        let pattern = self.parse_pattern()?;
+        self.expect(Token::FatArrow)?;
+
+        let body = if self.check(&Token::LBrace) {
+            self.parse_block()?
+        } else {
+            let (line, col) = if self.pos < self.tokens.len() {
+                (self.tokens[self.pos].line, self.tokens[self.pos].col)
+            } else {
+                (0, 0)
+            };
+            let stmt = self.parse_statement()?;
+            vec![SpannedStmt::new(stmt, line, col)]
+        };
+        Ok(MatchArm { pattern, body })
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
@@ -1177,6 +1471,7 @@ impl Parser {
 
                 // Check for constructor pattern: Name(fields...)
                 if self.check(&Token::LParen) {
+                    self.note_prev(&name, Role::Ref);
                     self.advance();
                     let mut fields = Vec::new();
                     while !self.check(&Token::RParen) {
@@ -1188,6 +1483,8 @@ impl Parser {
                     self.expect(Token::RParen)?;
                     Ok(Pattern::Constructor { name, fields })
                 } else {
+                    let def = self.note_def(&name, DefKind::PatternBinding);
+                    self.hoist(def);
                     Ok(Pattern::Binding(name))
                 }
             }
@@ -1220,19 +1517,31 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::For)?;
+        let start = self.prev_span().start;
+        self.scoped(ScopeKind::Loop, start, Self::parse_for_rest)
+    }
+
+    fn parse_for_rest(&mut self) -> Result<Stmt, ParseError> {
         if self.check(&Token::Each) {
             self.advance();
         }
         let var = self.expect_ident()?;
+        let def1 = self.note_def(&var, DefKind::LoopVariable);
         // Check for key, value syntax
-        let var2 = if self.check(&Token::Comma) {
+        let (var2, def2) = if self.check(&Token::Comma) {
             self.advance();
-            Some(self.expect_ident()?)
+            let name = self.expect_ident()?;
+            let def = self.note_def(&name, DefKind::LoopVariable);
+            (Some(name), def)
         } else {
-            None
+            (None, None)
         };
         self.expect(Token::In)?;
         let iterable = self.parse_expr()?;
+        // The loop variables are in scope in the body, not in the iterable.
+        let body_start = self.cur_start();
+        self.set_visible(def1, body_start);
+        self.set_visible(def2, body_start);
         let body = self.parse_block()?;
 
         Ok(Stmt::For {
@@ -1426,6 +1735,7 @@ impl Parser {
     fn parse_where_filter_suffix(&mut self, source: Expr) -> Result<Expr, ParseError> {
         self.expect(Token::Where)?;
         let field = self.expect_ident()?;
+        self.note_prev(&field, Role::Field);
         let op = self.parse_query_compare_op()?;
         let value = self.parse_pipeline()?;
         Ok(Expr::WhereFilter {
@@ -1447,7 +1757,9 @@ impl Parser {
                 self.advance();
                 let field = if self.check(&Token::By) {
                     self.advance();
-                    Some(self.expect_ident()?)
+                    let field = self.expect_ident()?;
+                    self.note_prev(&field, Role::Field);
+                    Some(field)
                 } else {
                     None
                 };
@@ -1463,6 +1775,7 @@ impl Parser {
 
     fn parse_pipe_keep_predicate(&mut self) -> Result<Expr, ParseError> {
         let field = self.expect_ident()?;
+        self.note_prev(&field, Role::Field);
         let predicate = if self.is_query_compare_op() {
             let op = self.parse_query_compare_op()?;
             let rhs = self.parse_pipeline()?;
@@ -1688,6 +2001,7 @@ impl Parser {
                 Token::Dot => {
                     self.advance();
                     let field = self.expect_ident()?;
+                    self.note_prev(&field, Role::Field);
                     expr = Expr::FieldAccess {
                         object: Box::new(expr),
                         field,
@@ -1754,7 +2068,8 @@ impl Parser {
                 let s = s.clone();
                 self.advance();
                 if s.contains('{') && s.contains('}') {
-                    self.parse_string_interpolation(&s)
+                    let token = self.pos - 1;
+                    self.parse_string_interpolation(&s, token)
                 } else {
                     Ok(Expr::StringLit(s))
                 }
@@ -1769,6 +2084,7 @@ impl Parser {
             // Allow 'any' keyword as identifier in expression context (builtin function)
             Token::Any => {
                 self.advance();
+                self.note_prev("any", Role::Ref);
                 Ok(Expr::Ident("any".to_string()))
             }
 
@@ -1777,6 +2093,7 @@ impl Parser {
             // `set name to ...` is handled earlier in parse_statement.
             Token::Set => {
                 self.advance();
+                self.note_prev("set", Role::Ref);
                 Ok(Expr::Ident("set".to_string()))
             }
 
@@ -1784,11 +2101,13 @@ impl Parser {
             Token::Craft => {
                 self.advance();
                 let name = self.expect_ident()?;
+                self.note_prev(&name, Role::TypeRef);
                 self.expect(Token::LBrace)?;
                 self.skip_newlines();
                 let mut fields = Vec::new();
                 while !self.check(&Token::RBrace) {
                     let field_name = self.expect_ident()?;
+                    self.note_prev(&field_name, Role::Field);
                     self.expect(Token::Colon)?;
                     let value = self.parse_expr()?;
                     fields.push((field_name, value));
@@ -1810,11 +2129,13 @@ impl Parser {
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
                     && self.check(&Token::LBrace)
                 {
+                    self.note_prev(&name, Role::TypeRef);
                     self.advance();
                     self.skip_newlines();
                     let mut fields = Vec::new();
                     while !self.check(&Token::RBrace) {
                         let field_name = self.expect_ident()?;
+                        self.note_prev(&field_name, Role::Field);
                         self.expect(Token::Colon)?;
                         let value = self.parse_expr()?;
                         fields.push((field_name, value));
@@ -1827,6 +2148,7 @@ impl Parser {
                     self.expect(Token::RBrace)?;
                     Ok(Expr::StructInit { name, fields })
                 } else {
+                    self.note_prev(&name, Role::Ref);
                     Ok(Expr::Ident(name))
                 }
             }
@@ -1900,21 +2222,26 @@ impl Parser {
 
             Token::Type => {
                 self.advance();
+                self.note_prev("type", Role::Ref);
                 Ok(Expr::Ident("type".to_string()))
             }
 
             Token::Select => {
                 self.advance();
+                self.note_prev("select", Role::Ref);
                 Ok(Expr::Ident("select".to_string()))
             }
 
             Token::Fn => {
                 self.advance();
-                self.expect(Token::LParen)?;
-                let params = self.parse_params()?;
-                self.expect(Token::RParen)?;
-                let body = self.parse_block()?;
-                Ok(Expr::Lambda { params, body })
+                let start = self.prev_span().start;
+                self.scoped(ScopeKind::Lambda, start, |p| {
+                    p.expect(Token::LParen)?;
+                    let params = p.parse_params()?;
+                    p.expect(Token::RParen)?;
+                    let body = p.parse_block()?;
+                    Ok(Expr::Lambda { params, body })
+                })
             }
 
             Token::When => {
@@ -1931,19 +2258,21 @@ impl Parser {
         }
     }
 
-    fn parse_string_interpolation(&self, s: &str) -> Result<Expr, ParseError> {
+    /// `token` is the index of the string literal token (for the index).
+    fn parse_string_interpolation(&mut self, s: &str, token: usize) -> Result<Expr, ParseError> {
         let mut parts = Vec::new();
-        let mut chars = s.chars().peekable();
+        let mut chars = s.chars().enumerate().peekable();
         let mut current = String::new();
 
-        while let Some(ch) = chars.next() {
+        while let Some((_, ch)) = chars.next() {
             if ch == '{' {
                 if !current.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut current)));
                 }
                 let mut expr_str = String::new();
+                let mut expr_start = None;
                 let mut depth = 1;
-                for inner in chars.by_ref() {
+                for (i, inner) in chars.by_ref() {
                     if inner == '{' {
                         depth += 1;
                     }
@@ -1953,18 +2282,22 @@ impl Parser {
                             break;
                         }
                     }
+                    expr_start.get_or_insert(i);
                     expr_str.push(inner);
                 }
                 if depth != 0 {
                     return Err(self.error("unterminated interpolation expression"));
                 }
 
+                let leading = expr_str.chars().take_while(|c| c.is_whitespace()).count();
                 let expr_str = expr_str.trim();
                 if expr_str.is_empty() {
                     return Err(self.error("empty interpolation expression"));
                 }
 
-                let parsed = self.parse_interpolation_expr(expr_str)?;
+                // Value index of the first char of the trimmed expression.
+                let start = expr_start.unwrap_or(0) + leading;
+                let parsed = self.parse_interpolation_expr(expr_str, token, start)?;
                 parts.push(StringPart::Expr(parsed));
             } else if ch == '}' {
                 return Err(self.error("unexpected '}' in string literal"));
@@ -1986,7 +2319,16 @@ impl Parser {
         Ok(Expr::StringInterp(parts))
     }
 
-    fn parse_interpolation_expr(&self, expr_source: &str) -> Result<Expr, ParseError> {
+    /// Parse one `{expr}` of an interpolated string. `token` is the string
+    /// literal's token index and `value_start` the index (in the string's
+    /// value, after escape processing) of the expression's first char;
+    /// both are used only to place the expression's names in the index.
+    fn parse_interpolation_expr(
+        &mut self,
+        expr_source: &str,
+        token: usize,
+        value_start: usize,
+    ) -> Result<Expr, ParseError> {
         let mut lexer = Lexer::new(expr_source);
         let tokens = lexer.tokenize().map_err(|e| {
             self.error(&format!(
@@ -1995,7 +2337,11 @@ impl Parser {
             ))
         })?;
 
-        let mut parser = Parser::new(tokens);
+        let mut parser = if self.index.is_some() {
+            Parser::with_index(tokens, expr_source)
+        } else {
+            Parser::new(tokens)
+        };
         let expr = parser.parse_expr().map_err(|e| {
             self.error(&format!(
                 "invalid interpolation expression '{{{}}}': {}",
@@ -2010,7 +2356,44 @@ impl Parser {
             )));
         }
 
+        if let Some(nested) = parser.take_index() {
+            let columns = self.string_value_columns(token);
+            let line = self.tokens.get(token).map_or(0, |t| t.line);
+            let map = |pos: Pos| {
+                // Nested positions are 1-based within `expr_source`, which
+                // is one line (string literals cannot span lines).
+                let value_index = value_start + pos.col.saturating_sub(1);
+                let col = columns
+                    .get(value_index)
+                    .copied()
+                    .or_else(|| columns.last().map(|c| c + 1))
+                    .unwrap_or(0);
+                Pos::new(line, col)
+            };
+            if let Some(ix) = self.index.as_mut() {
+                ix.merge_nested(nested, &map);
+            }
+        }
+
         Ok(expr)
+    }
+
+    /// Source column of each char of a string literal's value (plus one
+    /// past the end), accounting for two-char escapes like `\"`.
+    fn string_value_columns(&self, token: usize) -> Vec<usize> {
+        let (Some(source), Some(tok)) = (self.source.as_ref(), self.tokens.get(token)) else {
+            return Vec::new();
+        };
+        let raw = source.get(tok.offset..tok.offset + tok.len).unwrap_or(&[]);
+        let mut columns = Vec::new();
+        // Skip the opening quote.
+        let mut i = 1;
+        while i + 1 < raw.len() {
+            columns.push(tok.col + i);
+            i += if raw[i] == '\\' { 2 } else { 1 };
+        }
+        columns.push(tok.col + i);
+        columns
     }
 
     fn parse_object_or_block(&mut self) -> Result<Expr, ParseError> {
@@ -2035,15 +2418,18 @@ impl Parser {
         }
 
         // Otherwise it's a block
-        let mut stmts = Vec::new();
-        while !self.check(&Token::RBrace) {
-            let (line, col) = self.current_pos();
-            let stmt = self.parse_statement()?;
-            stmts.push(SpannedStmt::new(stmt, line, col));
-            self.skip_newlines();
-        }
-        self.expect(Token::RBrace)?;
-        Ok(Expr::Block(stmts))
+        let start = self.prev_span().start;
+        self.scoped(ScopeKind::Block, start, |p| {
+            let mut stmts = Vec::new();
+            while !p.check(&Token::RBrace) {
+                let (line, col) = p.current_pos();
+                let stmt = p.parse_statement()?;
+                stmts.push(SpannedStmt::new(stmt, line, col));
+                p.skip_newlines();
+            }
+            p.expect(Token::RBrace)?;
+            Ok(Expr::Block(stmts))
+        })
     }
 
     fn parse_object_fields(&mut self) -> Result<Expr, ParseError> {
@@ -2056,7 +2442,11 @@ impl Parser {
                     self.advance();
                     s
                 }
-                _ => self.expect_ident()?,
+                _ => {
+                    let key = self.expect_ident()?;
+                    self.note_prev(&key, Role::Field);
+                    key
+                }
             };
             self.expect(Token::Colon)?;
             let value = self.parse_expr()?;
@@ -2077,6 +2467,12 @@ impl Parser {
     fn parse_block(&mut self) -> Result<Vec<SpannedStmt>, ParseError> {
         self.skip_newlines();
         self.expect(Token::LBrace)?;
+        let start = self.prev_span().start;
+        self.scoped(ScopeKind::Block, start, Self::parse_block_rest)
+    }
+
+    /// The statements of a block whose `{` was consumed, through its `}`.
+    fn parse_block_rest(&mut self) -> Result<Vec<SpannedStmt>, ParseError> {
         self.skip_newlines();
 
         let mut stmts = Vec::new();
@@ -2091,10 +2487,14 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// Parameters, visible from the start of the enclosing (function or
+    /// lambda) scope.
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut params = Vec::new();
         while !self.check(&Token::RParen) {
             let name = self.expect_ident()?;
+            let def = self.note_def(&name, DefKind::Parameter);
+            self.hoist(def);
 
             let type_ann = if self.check(&Token::Colon) {
                 self.advance();
@@ -2141,6 +2541,17 @@ impl Parser {
         self.nested(Self::parse_type_ann_inner)
     }
 
+    /// A type annotation that must be the whole input (see
+    /// `parser::parse_type_annotation`).
+    pub(crate) fn parse_standalone_type(&mut self) -> Result<TypeAnn, ParseError> {
+        let ann = self.parse_type_ann()?;
+        self.skip_newlines();
+        if !self.is_at_end() {
+            return Err(self.error(&format!("unexpected {:?} after type", self.current_token())));
+        }
+        Ok(ann)
+    }
+
     fn parse_type_ann_inner(&mut self) -> Result<TypeAnn, ParseError> {
         match self.current_token() {
             Token::LBracket => {
@@ -2157,20 +2568,76 @@ impl Parser {
             Token::Ident(ref name) if matches!(self.current_token(), Token::Ident(_)) => {
                 let name = name.clone();
                 self.advance();
+                self.note_prev(&name, Role::TypeRef);
                 if self.check(&Token::Lt) {
                     self.advance();
                     let mut type_args = Vec::new();
-                    while !self.check(&Token::Gt) {
+                    while !self.check_type_args_close() {
                         type_args.push(self.parse_type_ann()?);
                         if self.check(&Token::Comma) {
                             self.advance();
                         }
                     }
-                    self.expect(Token::Gt)?;
+                    self.expect_type_args_close()?;
                     Ok(TypeAnn::Generic(name, type_args))
                 } else {
                     Ok(TypeAnn::Simple(name))
                 }
+            }
+            // Function type: fn(A, B) -> R. Without `-> R` the function's
+            // result is unconstrained (`Any`).
+            Token::Fn => {
+                self.advance();
+                self.expect(Token::LParen)?;
+                let mut params = Vec::new();
+                while !self.check(&Token::RParen) {
+                    params.push(self.parse_type_ann()?);
+                    if self.check(&Token::Comma) {
+                        self.advance();
+                    } else if !self.check(&Token::RParen) {
+                        return Err(self.error(&format!(
+                            "expected ',' or ')' in function type, got {:?}",
+                            self.current_token()
+                        )));
+                    }
+                }
+                self.expect(Token::RParen)?;
+                let ret = if self.check(&Token::Arrow) {
+                    self.advance();
+                    self.parse_type_ann()?
+                } else {
+                    TypeAnn::Simple("Any".into())
+                };
+                Ok(TypeAnn::Function(params, Box::new(ret)))
+            }
+            // Tuple type (A, B), or a parenthesized type (A).
+            Token::LParen => {
+                self.advance();
+                let mut items = Vec::new();
+                let mut trailing_comma = false;
+                while !self.check(&Token::RParen) {
+                    items.push(self.parse_type_ann()?);
+                    trailing_comma = false;
+                    if self.check(&Token::Comma) {
+                        self.advance();
+                        trailing_comma = true;
+                    } else if !self.check(&Token::RParen) {
+                        return Err(self.error(&format!(
+                            "expected ',' or ')' in tuple type, got {:?}",
+                            self.current_token()
+                        )));
+                    }
+                }
+                self.expect(Token::RParen)?;
+                if items.len() == 1 && !trailing_comma {
+                    Ok(items.pop().unwrap_or(TypeAnn::Tuple(Vec::new())))
+                } else {
+                    Ok(TypeAnn::Tuple(items))
+                }
+            }
+            Token::NullLit => {
+                self.advance();
+                Ok(TypeAnn::Simple("Null".into()))
             }
             Token::IntType => {
                 self.advance();
@@ -2210,6 +2677,25 @@ impl Parser {
             .get(self.pos + offset)
             .map(|s| s.token.clone())
             .unwrap_or(Token::Eof)
+    }
+
+    /// At the `>` closing a type argument list. `>>` (lexed as one token)
+    /// closes two nested lists: `Option<Option<Int>>`.
+    fn check_type_args_close(&self) -> bool {
+        self.check(&Token::Gt) || self.check(&Token::PipeRight)
+    }
+
+    fn expect_type_args_close(&mut self) -> Result<(), ParseError> {
+        if self.check(&Token::PipeRight) {
+            // Consume the first `>` of `>>`: the token becomes the second.
+            let tok = &mut self.tokens[self.pos];
+            tok.token = Token::Gt;
+            tok.col += 1;
+            tok.offset += 1;
+            tok.len = 1;
+            return Ok(());
+        }
+        self.expect(Token::Gt)
     }
 
     fn is_type_definition_start(&self) -> bool {
@@ -2775,5 +3261,175 @@ mod tests {
             },
             other => panic!("expected Destructure, got {:?}", other),
         }
+    }
+
+    // ========== Type annotations ==========
+
+    fn let_type(input: &str) -> TypeAnn {
+        match &parse_program(input).statements[0].stmt {
+            Stmt::Let {
+                type_ann: Some(t), ..
+            } => t.clone(),
+            other => panic!("expected annotated let, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_function_type_annotations() {
+        assert_eq!(
+            let_type("let f: fn(Int, String) -> Bool = g"),
+            TypeAnn::Function(
+                vec![
+                    TypeAnn::Simple("Int".into()),
+                    TypeAnn::Simple("String".into())
+                ],
+                Box::new(TypeAnn::Simple("Bool".into()))
+            )
+        );
+        // No arrow: the result is unconstrained.
+        assert_eq!(
+            let_type("let f: fn() = g"),
+            TypeAnn::Function(vec![], Box::new(TypeAnn::Simple("Any".into())))
+        );
+        // Function types nest.
+        assert!(matches!(
+            let_type("let f: fn(fn(Int) -> Int) -> [Int] = g"),
+            TypeAnn::Function(params, _) if matches!(params[0], TypeAnn::Function(..))
+        ));
+    }
+
+    #[test]
+    fn parses_tuple_and_nested_generic_annotations() {
+        assert_eq!(
+            let_type("let t: (Int, String) = x"),
+            TypeAnn::Tuple(vec![
+                TypeAnn::Simple("Int".into()),
+                TypeAnn::Simple("String".into())
+            ])
+        );
+        assert_eq!(let_type("let t: (Int) = x"), TypeAnn::Simple("Int".into()));
+        // `>>` closes two type argument lists.
+        assert_eq!(
+            let_type("let o: Option<Option<Int>> = x"),
+            TypeAnn::Generic(
+                "Option".into(),
+                vec![TypeAnn::Generic(
+                    "Option".into(),
+                    vec![TypeAnn::Simple("Int".into())]
+                )]
+            )
+        );
+        assert!(crate::parser::parse_type_annotation("fn(Int) -> ").is_err());
+        assert!(crate::parser::parse_type_annotation("[Int] extra").is_err());
+    }
+
+    // ========== Syntax index ==========
+
+    fn indexed(input: &str) -> super::super::index::SyntaxIndex {
+        let tokens = Lexer::new(input).tokenize().expect("lexes");
+        let mut parser = Parser::with_index(tokens, input);
+        parser.parse_program().expect("parses");
+        parser.take_index().expect("index built")
+    }
+
+    fn roles(ix: &super::super::index::SyntaxIndex) -> Vec<(String, usize, usize, String)> {
+        ix.occurrences
+            .iter()
+            .map(|o| {
+                let role = match &o.role {
+                    Role::Def(k) => format!("def:{:?}", k),
+                    Role::Ref => "ref".into(),
+                    Role::TypeRef => "type".into(),
+                    Role::Field => "field".into(),
+                };
+                (o.name.clone(), o.span.start.line, o.span.start.col, role)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn index_records_names_with_roles_and_positions() {
+        let ix = indexed("let total: Int = add(1, 2)\nsay total.value");
+        // (`Int` is a keyword token: builtin type names are not indexed.)
+        let expected: Vec<(String, usize, usize, String)> = vec![
+            (
+                "total".into(),
+                1,
+                5,
+                "def:Variable { mutable: false }".into(),
+            ),
+            ("add".into(), 1, 18, "ref".into()),
+            ("total".into(), 2, 5, "ref".into()),
+            ("value".into(), 2, 11, "field".into()),
+        ];
+        assert_eq!(roles(&ix), expected);
+        // `let` is visible only after its statement.
+        assert!(ix.occurrences[0].visible_from > ix.occurrences[1].span.start);
+    }
+
+    #[test]
+    fn index_records_desugared_names_once() {
+        // `x += 1` is `x = x + 1` in the AST but one token in the source.
+        let ix = indexed("let mut x = 1\nx += 1");
+        assert_eq!(ix.occurrences.iter().filter(|o| o.name == "x").count(), 2);
+        // `say` is a keyword, not a recorded reference.
+        let ix = indexed("say 1");
+        assert!(ix.occurrences.is_empty());
+    }
+
+    #[test]
+    fn index_scopes_functions_lambdas_and_blocks() {
+        let ix = indexed("fn f(a) {\n  let b = fn(c) { c }\n  return b(a)\n}");
+        let param = ix
+            .occurrences
+            .iter()
+            .find(|o| o.name == "a")
+            .expect("param a");
+        assert_eq!(ix.scopes[param.scope].kind, ScopeKind::Function);
+        let lambda_param = ix
+            .occurrences
+            .iter()
+            .find(|o| o.name == "c")
+            .expect("param c");
+        assert_eq!(ix.scopes[lambda_param.scope].kind, ScopeKind::Lambda);
+        // The lambda's scope ends at its closing brace, on line 2.
+        assert_eq!(ix.scopes[lambda_param.scope].end.line, 2);
+    }
+
+    #[test]
+    fn index_places_interpolated_names_at_their_columns() {
+        let ix = indexed("let who = 1\nsay \"a\\\"b {who}\"");
+        let r = ix
+            .occurrences
+            .iter()
+            .find(|o| o.name == "who" && matches!(o.role, Role::Ref))
+            .expect("interpolated ref");
+        // `say "a\"b {who}"`: the escape takes two source columns.
+        assert_eq!((r.span.start.line, r.span.start.col), (2, 12));
+    }
+
+    #[test]
+    fn index_marks_methods_fields_and_types() {
+        let ix = indexed(
+            "struct P { x: Int }\nimpl P { fn get(it) { return it.x } }\nlet p = P { x: 1 }",
+        );
+        let kinds: Vec<String> = ix
+            .occurrences
+            .iter()
+            .map(|o| format!("{}:{:?}", o.name, o.role))
+            .collect();
+        assert!(kinds.contains(&"P:Def(Struct)".to_string()), "{:?}", kinds);
+        assert!(kinds.contains(&"x:Def(Field { owner: \"P\" })".to_string()));
+        assert!(kinds.contains(&"get:Def(Method { owner: \"P\" })".to_string()));
+        assert!(kinds.iter().filter(|k| *k == "P:TypeRef").count() == 2);
+        assert!(kinds.contains(&"x:Field".to_string()));
+    }
+
+    #[test]
+    fn plain_parser_builds_no_index() {
+        let tokens = Lexer::new("let a = 1").tokenize().expect("lexes");
+        let mut parser = Parser::new(tokens);
+        parser.parse_program().expect("parses");
+        assert!(parser.take_index().is_none());
     }
 }

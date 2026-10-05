@@ -623,6 +623,7 @@ fn tool_definitions(config: &ServerConfig) -> Value {
                                 "line": { "type": "integer" },
                                 "column": { "type": "integer" },
                                 "severity": { "type": "string", "enum": ["error", "warning"] },
+                                "code": { "type": "string", "description": "Type-checker diagnostic code (T0001...), absent for syntax errors" },
                                 "message": { "type": "string" }
                             },
                             "required": ["line", "column", "severity", "message"]
@@ -904,43 +905,35 @@ pub struct Diagnostic {
     /// 1-based column (0 when unknown).
     pub column: usize,
     pub is_error: bool,
+    /// Type-checker code (`T0006`), `None` for lex/parse errors.
+    pub code: Option<String>,
     pub message: String,
 }
 
 /// Lex, parse and type-check `source` without running it.
 pub fn check_source(source: &str) -> Vec<Diagnostic> {
-    let tokens = match crate::lexer::Lexer::new(source).tokenize() {
-        Ok(t) => t,
-        Err(e) => {
-            return vec![Diagnostic {
-                line: e.line,
-                column: e.col,
-                is_error: true,
-                message: e.message,
-            }]
-        }
-    };
-    let program = match crate::parser::Parser::new(tokens).parse_program() {
-        Ok(p) => p,
-        Err(e) => {
-            return vec![Diagnostic {
-                line: e.line,
-                column: e.col,
-                is_error: true,
-                message: e.message,
-            }]
-        }
-    };
-    crate::typechecker::TypeChecker::with_strict(false)
-        .check(&program)
-        .into_iter()
-        .map(|w| Diagnostic {
-            line: w.line,
-            column: w.col,
-            is_error: w.is_error,
-            message: w.message,
-        })
-        .collect()
+    use crate::typechecker::{analyze, CheckOptions, FrontendError};
+    match analyze(source, &CheckOptions::default()) {
+        Ok(analysis) => analysis
+            .diagnostics
+            .into_iter()
+            .map(|d| Diagnostic {
+                line: d.line(),
+                column: d.col(),
+                is_error: d.is_error(),
+                code: Some(d.code.as_str().to_string()),
+                message: d.full_message(),
+            })
+            .collect(),
+        Err(FrontendError::Lex { line, col, message })
+        | Err(FrontendError::Parse { line, col, message }) => vec![Diagnostic {
+            line,
+            column: col,
+            is_error: true,
+            code: None,
+            message,
+        }],
+    }
 }
 
 fn check_forge(args: &Map<String, Value>) -> Value {
@@ -957,10 +950,14 @@ fn check_forge(args: &Map<String, Value>) -> Value {
             .iter()
             .map(|d| {
                 format!(
-                    "line {}:{}: {}: {}",
+                    "line {}:{}: {}{}: {}",
                     d.line,
                     d.column,
                     if d.is_error { "error" } else { "warning" },
+                    d.code
+                        .as_deref()
+                        .map(|c| format!("[{}]", c))
+                        .unwrap_or_default(),
                     d.message
                 )
             })
@@ -970,12 +967,16 @@ fn check_forge(args: &Map<String, Value>) -> Value {
     let items: Vec<Value> = diagnostics
         .iter()
         .map(|d| {
-            json!({
+            let mut item = json!({
                 "line": d.line,
                 "column": d.column,
                 "severity": if d.is_error { "error" } else { "warning" },
                 "message": d.message,
-            })
+            });
+            if let Some(code) = &d.code {
+                item["code"] = json!(code);
+            }
+            item
         })
         .collect();
     json!({
