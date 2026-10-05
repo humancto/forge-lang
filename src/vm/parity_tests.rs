@@ -1310,6 +1310,31 @@ fn parity_for_loop_over_channel() {
 }
 
 #[test]
+fn parity_spawn_sees_top_level_functions_and_globals() {
+    assert_cross_backend_value(
+        "fn w() {\n    return 42\n}\nlet h = spawn { w() }\nawait h",
+        "42",
+    );
+    assert_cross_backend_value(
+        "let base = 10\nfn add(x) {\n    return x + base\n}\nlet h = spawn { add(5) }\nawait h",
+        "15",
+    );
+    // A captured recursive lambda survives the transfer.
+    assert_cross_backend_value(
+        "let fact = fn(n) {\n    if n <= 1 {\n        return 1\n    }\n    return n * fact(n - 1)\n}\nlet h = spawn { fact(5) }\nawait h",
+        "120",
+    );
+}
+
+#[test]
+fn parity_stdlib_modules_exist_on_both_engines() {
+    assert_cross_backend_value(
+        "[type(npc), type(url), type(toml), type(ws), type(io.args()), type(npc.first_name())]",
+        "[Object, Object, Object, Object, Array, String]",
+    );
+}
+
+#[test]
 fn parity_check_statement_is_enforced() {
     assert_cross_backend_error_contains(
         "let name = \"\"\ncheck name is not empty\n1",

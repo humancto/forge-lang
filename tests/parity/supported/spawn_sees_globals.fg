@@ -1,0 +1,25 @@
+// expect: 120
+// Spawned tasks see top-level functions, globals and captured closures
+// (including recursive lambdas) on both engines.
+fn w() {
+    return 42
+}
+let h = spawn { w() }
+say await h
+
+let base = 10
+fn add(x) {
+    return x + base
+}
+let h2 = spawn { add(5) }
+say await h2
+
+let fact = fn(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * fact(n - 1)
+}
+let h3 = spawn { fact(5) }
+say await h3
+120
