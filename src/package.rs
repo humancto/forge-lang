@@ -13,13 +13,13 @@ pub fn update() {
     let manifest = match manifest::load_manifest_from(manifest_path) {
         Some(m) => m,
         None => {
-            eprintln!("Error: no forge.toml found in current directory");
+            crate::color::ceprintln!("Error: no forge.toml found in current directory");
             std::process::exit(1);
         }
     };
 
     if manifest.dependencies.is_empty() {
-        println!("No dependencies to update.");
+        crate::color::cprintln!("No dependencies to update.");
         return;
     }
 
@@ -30,7 +30,7 @@ pub fn update() {
         let pkg_dir = packages_dir.join(name);
         if pkg_dir.exists() {
             if let Err(e) = remove_path(&pkg_dir) {
-                eprintln!("Error: failed to remove {}: {}", name, e);
+                crate::color::ceprintln!("Error: failed to remove {}: {}", name, e);
                 std::process::exit(1);
             }
         }
@@ -48,19 +48,20 @@ pub fn update() {
         &registry_roots,
     ) {
         Ok(summary) => {
-            println!(
+            crate::color::cprintln!(
                 "  Updated {} dependencies for '{}'",
-                summary.processed, manifest.project.name
+                summary.processed,
+                manifest.project.name
             );
             if summary.locked_packages > 0 {
-                println!(
+                crate::color::cprintln!(
                     "  Updated forge.lock ({} packages)",
                     summary.locked_packages
                 );
             }
         }
         Err(message) => {
-            eprintln!("{}", message);
+            crate::color::ceprintln!("{}", message);
             std::process::exit(1);
         }
     }
@@ -74,7 +75,7 @@ pub fn install(source: &str) {
 
     let packages_dir = Path::new(PACKAGES_DIR);
     if let Err(e) = std::fs::create_dir_all(packages_dir) {
-        eprintln!("Error: failed to create packages directory: {}", e);
+        crate::color::ceprintln!("Error: failed to create packages directory: {}", e);
         std::process::exit(1);
     }
 
@@ -90,7 +91,7 @@ pub fn install(source: &str) {
     };
 
     if let Err(message) = result {
-        eprintln!("{}", message);
+        crate::color::ceprintln!("{}", message);
         std::process::exit(1);
     }
 }
@@ -100,7 +101,7 @@ pub fn install_from_manifest() {
     let manifest = match manifest::load_manifest_from(manifest_path) {
         Some(m) => m,
         None => {
-            eprintln!("No forge.toml found in current directory");
+            crate::color::ceprintln!("No forge.toml found in current directory");
             std::process::exit(1);
         }
     };
@@ -117,19 +118,20 @@ pub fn install_from_manifest() {
         &registry_roots,
     ) {
         Ok(summary) => {
-            println!(
+            crate::color::cprintln!(
                 "  {} dependencies processed for '{}'",
-                summary.processed, manifest.project.name
+                summary.processed,
+                manifest.project.name
             );
             if summary.installed > 0 {
-                println!(
+                crate::color::cprintln!(
                     "  Updated forge.lock ({} packages)",
                     summary.locked_packages
                 );
             }
         }
         Err(message) => {
-            eprintln!("{}", message);
+            crate::color::ceprintln!("{}", message);
             std::process::exit(1);
         }
     }
@@ -149,12 +151,12 @@ pub fn add(name: &str, version: &str) {
         version,
     ) {
         Ok((action, summary)) => {
-            println!("  {} {} = \"{}\" to forge.toml", action, name, version);
-            println!("  {} dependencies processed", summary.processed);
+            crate::color::cprintln!("  {} {} = \"{}\" to forge.toml", action, name, version);
+            crate::color::cprintln!("  {} dependencies processed", summary.processed);
         }
         Err(message) => {
-            eprintln!("{}", message);
-            eprintln!("  forge.toml was not modified.");
+            crate::color::ceprintln!("{}", message);
+            crate::color::ceprintln!("  forge.toml was not modified.");
             std::process::exit(1);
         }
     }
@@ -218,7 +220,7 @@ fn install_manifest_dependencies(
     registry_roots: &[PathBuf],
 ) -> Result<InstallSummary, String> {
     if manifest.dependencies.is_empty() {
-        println!("  No dependencies to install.");
+        crate::color::cprintln!("  No dependencies to install.");
         return Ok(InstallSummary {
             processed: 0,
             installed: 0,
@@ -269,7 +271,7 @@ fn install_manifest_dependencies(
     // Verify lockfile integrity
     let warnings = verify_lockfile_integrity(&lockfile, packages_dir);
     for warning in &warnings {
-        eprintln!("  {}", warning);
+        crate::color::ceprintln!("  {}", warning);
     }
 
     Ok(InstallSummary {
@@ -445,9 +447,10 @@ fn install_from_registry_as(
     // Try local registry first
     if let Ok((resolved_version, source)) = resolve_best_version(name, &req, registry_roots) {
         install_from_path_as(name, &source, packages_dir)?;
-        println!(
+        crate::color::cprintln!(
             "  \x1B[32m✓\x1B[0m Installed {} @ {}",
-            name, resolved_version
+            name,
+            resolved_version
         );
         return Ok(LockedPackage {
             name: name.to_string(),
@@ -490,20 +493,23 @@ fn install_from_remote_registry(
     let resolved = registry::resolve_remote_version(name, req, &entry.versions)?;
 
     if resolved.checksum.is_empty() {
-        eprintln!(
+        crate::color::ceprintln!(
             "  Warning: no checksum for {} @ {} — integrity not verified",
-            name, resolved.version
+            name,
+            resolved.version
         );
     }
 
-    println!(
+    crate::color::cprintln!(
         "  Downloading {} @ {} from remote registry...",
-        name, resolved.version
+        name,
+        resolved.version
     );
     registry::download_and_extract(&resolved.url, &packages_dir.join(name), &resolved.checksum)?;
-    println!(
+    crate::color::cprintln!(
         "  \x1B[32m✓\x1B[0m Installed {} @ {} (remote)",
-        name, resolved.version
+        name,
+        resolved.version
     );
 
     Ok(LockedPackage {
@@ -774,17 +780,17 @@ fn install_from_git_as(
     let target = packages_dir.join(name);
 
     if target.exists() {
-        println!("  Updating {}...", name);
+        crate::color::cprintln!("  Updating {}...", name);
         let status = Command::new("git")
             .args(["pull"])
             .current_dir(&target)
             .status();
         match status {
-            Ok(s) if s.success() => println!("  \x1B[32m✓\x1B[0m Updated {}", name),
+            Ok(s) if s.success() => crate::color::cprintln!("  \x1B[32m✓\x1B[0m Updated {}", name),
             _ => return Err(format!("  \x1B[31m✗\x1B[0m Failed to update {}", name)),
         }
     } else {
-        println!("  Installing {} from {}...", name, url);
+        crate::color::cprintln!("  Installing {} from {}...", name, url);
         let target_str = target.display().to_string();
         let mut args = vec!["clone"];
         if let Some(b) = branch {
@@ -799,7 +805,7 @@ fn install_from_git_as(
         let status = Command::new("git").args(&args).status();
         match status {
             Ok(s) if s.success() => {
-                println!("  \x1B[32m✓\x1B[0m Installed {}", name);
+                crate::color::cprintln!("  \x1B[32m✓\x1B[0m Installed {}", name);
             }
             _ => {
                 return Err(format!("  \x1B[31m✗\x1B[0m Failed to clone {}", url));
@@ -813,7 +819,7 @@ fn install_from_git_as(
 fn install_from_local_as(name: &str, source: &str, packages_dir: &Path) -> Result<(), String> {
     let src = Path::new(source);
     install_from_path_as(name, src, packages_dir)?;
-    println!("  \x1B[32m✓\x1B[0m Installed {} from {}", name, source);
+    crate::color::cprintln!("  \x1B[32m✓\x1B[0m Installed {} from {}", name, source);
     Ok(())
 }
 

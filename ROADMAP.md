@@ -59,7 +59,7 @@ Before new language surface, make what exists sound, safe, and fast on every eng
 | VM test-suite parity                  | Done            | 635/635 Forge tests on both engines; single builtin registry (`src/builtins_registry.rs`)  |
 | Runtime arity checks                  | Done            | Direct calls on both engines (`semantics::check_call_arity`); method calls not yet checked  |
 | Performance pass                      | Planned         | Re-baseline VM/JIT/interpreter and server benchmarks; fix the worst regressions            |
-| Capability-based sandbox runtime      | Foundation done (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`); memory limits + MCP host next | Embeddable runtime with default-deny permissions (net, fs, run, env), resource limits (time, memory, output), and an MCP "code mode" host so agents can run Forge safely |
+| Capability-based sandbox runtime      | Foundation + MCP host done (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`, `forge mcp`); memory limits next | Embeddable runtime with default-deny permissions (net, fs, run, env), resource limits (time, memory, output), and an MCP "code mode" host so agents can run Forge safely |
 
 ---
 

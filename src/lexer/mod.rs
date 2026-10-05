@@ -1,4 +1,5 @@
 mod lexer;
 pub mod token;
 
-pub use lexer::Lexer;
+#[allow(unused_imports)] // `Comment` is part of the library API
+pub use lexer::{Comment, LexError, Lexer};

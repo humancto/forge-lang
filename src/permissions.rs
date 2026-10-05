@@ -226,6 +226,17 @@ impl HostRule {
     }
 }
 
+impl fmt::Display for HostRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let v6 = self.host.contains(':') && !self.host.starts_with('[');
+        match (self.port, v6) {
+            (Some(p), true) => write!(f, "[{}]:{}", self.host, p),
+            (Some(p), false) => write!(f, "{}:{}", self.host, p),
+            (None, _) => f.write_str(&self.host),
+        }
+    }
+}
+
 fn split_host_port(raw: &str) -> (&str, Option<u16>) {
     if let Some(rest) = raw.strip_prefix('[') {
         // [v6]:port
@@ -397,6 +408,40 @@ impl Capabilities {
     /// Whether network access is restricted to an allowlist of hosts.
     pub fn net_is_scoped(&self) -> bool {
         matches!(self.net, Scope::Only(_))
+    }
+
+    /// Human-readable summary of what is granted, one entry per granted
+    /// capability (`fs.read (/srv/data)`, `net (api.example.com)`, `env`).
+    /// Empty when nothing is granted. Used to tell agents and operators
+    /// what a sandbox allows.
+    pub fn describe(&self) -> Vec<String> {
+        fn scoped<T>(name: &str, scope: &Scope<T>, show: impl Fn(&T) -> String) -> Option<String> {
+            match scope {
+                Scope::Denied => None,
+                Scope::All => Some(name.to_string()),
+                Scope::Only(items) => Some(format!(
+                    "{} ({})",
+                    name,
+                    items.iter().map(show).collect::<Vec<_>>().join(", ")
+                )),
+            }
+        }
+        let mut out = Vec::new();
+        out.extend(scoped("fs.read", &self.read, |p| p.display().to_string()));
+        out.extend(scoped("fs.write", &self.write, |p| p.display().to_string()));
+        out.extend(scoped("net", &self.net, |h| h.to_string()));
+        for cap in [
+            Capability::Env,
+            Capability::Db,
+            Capability::Run,
+            Capability::Ai,
+            Capability::Process,
+        ] {
+            if self.is_granted(cap) {
+                out.push(cap.name().to_string());
+            }
+        }
+        out
     }
 
     /// The central check. `detail` is what is being accessed: a path for
@@ -807,5 +852,23 @@ mod tests {
         }
         // ...and the guard restores the previous (process) policy.
         assert!(require(Capability::Env, "").is_ok());
+    }
+
+    #[test]
+    fn describe_lists_grants_and_scopes() {
+        assert!(Capabilities::deny_all().describe().is_empty());
+        let caps = Capabilities::deny_all()
+            .grant_net_hosts(["API.example.com", "*.cdn.example.com:8443"])
+            .grant(Capability::Env);
+        assert_eq!(
+            caps.describe(),
+            vec![
+                "net (api.example.com, *.cdn.example.com:8443)".to_string(),
+                "env".to_string()
+            ]
+        );
+        let all = Capabilities::allow_all().describe();
+        assert_eq!(all.len(), Capability::ALL.len());
+        assert_eq!(all[0], "fs.read");
     }
 }

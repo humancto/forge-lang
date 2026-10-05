@@ -132,11 +132,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         .enumerate()
                         .map(|(i, h)| format!(" {:<width$} ", h, width = widths[i]))
                         .collect();
-                    eprintln!("\x1B[1m{}\x1B[0m", header_line.join("|"));
+                    crate::color::ceprintln!("\x1B[1m{}\x1B[0m", header_line.join("|"));
 
                     // Print separator
                     let sep: Vec<String> = widths.iter().map(|w| "-".repeat(w + 2)).collect();
-                    eprintln!("{}", sep.join("+"));
+                    crate::color::ceprintln!("{}", sep.join("+"));
 
                     // Print rows
                     for row in rows {
@@ -150,7 +150,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                                     format!(" {:<width$} ", val, width = widths[i])
                                 })
                                 .collect();
-                            eprintln!("{}", cells.join("|"));
+                            crate::color::ceprintln!("{}", cells.join("|"));
                         }
                     }
                     Ok(Value::Null)
@@ -180,12 +180,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                     }
                 })
                 .unwrap_or_else(|| "─".to_string());
-            eprintln!("{}", ch.repeat(width));
+            crate::color::ceprintln!("{}", ch.repeat(width));
             Ok(Value::Null)
         }
 
         "term.clear" => {
-            eprint!("\x1B[2J\x1B[1;1H");
+            crate::color::ceprint!("\x1B[2J\x1B[1;1H");
             Ok(Value::Null)
         }
 
@@ -194,7 +194,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 .first()
                 .map(|v| format!("{}", v))
                 .unwrap_or_else(|| "Loading...".to_string());
-            eprint!("\x1B[2K\r{} ⠋", msg);
+            crate::color::ceprint!("\x1B[2K\r{} ⠋", msg);
             Ok(Value::Null)
         }
 
@@ -203,7 +203,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 .first()
                 .map(|v| format!("{}", v))
                 .unwrap_or_else(|| "Continue?".to_string());
-            eprint!("{} [y/N] ", prompt);
+            crate::color::ceprint!("{} [y/N] ", prompt);
             use std::io::Write;
             std::io::stderr().flush().ok();
             let mut input = String::new();
@@ -263,7 +263,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 "░".repeat(width - filled),
                 (value / max) * 100.0,
             );
-            eprintln!("  {}", bar);
+            crate::color::ceprintln!("  {}", bar);
             Ok(Value::Null)
         }
 
@@ -271,9 +271,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             let text = args.first().map(|v| format!("{}", v)).unwrap_or_default();
             let width = text.len() + 4;
             let border = "═".repeat(width);
-            eprintln!("╔{}╗", border);
-            eprintln!("║  {}  ║", text);
-            eprintln!("╚{}╝", border);
+            crate::color::ceprintln!("╔{}╗", border);
+            crate::color::ceprintln!("║  {}  ║", text);
+            crate::color::ceprintln!("╚{}╝", border);
             Ok(Value::Null)
         }
 
@@ -283,11 +283,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 _ => 3,
             };
             for i in (1..=secs).rev() {
-                eprint!("\r  {} ", i);
+                crate::color::ceprint!("\r  {} ", i);
                 std::io::stderr().flush().ok();
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            eprintln!("\r  Go! 🚀");
+            crate::color::ceprintln!("\r  Go! 🚀");
             Ok(Value::Null)
         }
 
@@ -296,11 +296,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             let lines: Vec<&str> = text.lines().collect();
             let max_width = lines.iter().map(|l| l.len()).max().unwrap_or(0);
             let border = "─".repeat(max_width + 2);
-            eprintln!("┌{}┐", border);
+            crate::color::ceprintln!("┌{}┐", border);
             for line in &lines {
-                eprintln!("│ {:<width$} │", line, width = max_width);
+                crate::color::ceprintln!("│ {:<width$} │", line, width = max_width);
             }
-            eprintln!("└{}┘", border);
+            crate::color::ceprintln!("└{}┘", border);
             Ok(Value::Null)
         }
 
@@ -317,11 +317,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 })
                 .unwrap_or(30);
             for ch in text.chars() {
-                eprint!("{}", ch);
+                crate::color::ceprint!("{}", ch);
                 std::io::stderr().flush().ok();
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }
-            eprintln!();
+            crate::color::ceprintln!();
             Ok(Value::Null)
         }
 
@@ -331,11 +331,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                     .get(1)
                     .map(|v| format!("{}", v))
                     .unwrap_or_else(|| "Choose an option:".to_string());
-                eprintln!("\n  {}", prompt);
+                crate::color::ceprintln!("\n  {}", prompt);
                 for (i, opt) in options.iter().enumerate() {
-                    eprintln!("  \x1B[36m{})\x1B[0m {}", i + 1, opt);
+                    crate::color::ceprintln!("  \x1B[36m{})\x1B[0m {}", i + 1, opt);
                 }
-                eprint!("\n  Your choice: ");
+                crate::color::ceprint!("\n  Your choice: ");
                 std::io::stderr().flush().ok();
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input).ok();
@@ -350,7 +350,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
 
         "term.beep" => {
-            eprint!("\x07");
+            crate::color::ceprint!("\x07");
             std::io::stderr().flush().ok();
             Ok(Value::Null)
         }
@@ -384,17 +384,22 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 ("gear", "⚙️", "also: settings"),
                 ("tools", "🔧", "also: wrench"),
             ];
-            eprintln!();
-            eprintln!("  \x1B[1mAvailable Emojis:\x1B[0m  term.emoji(\"name\")");
-            eprintln!("  {}", "─".repeat(45));
+            crate::color::ceprintln!();
+            crate::color::ceprintln!("  \x1B[1mAvailable Emojis:\x1B[0m  term.emoji(\"name\")");
+            crate::color::ceprintln!("  {}", "─".repeat(45));
             for (name, emoji, aliases) in &emojis {
                 if aliases.is_empty() {
-                    eprintln!("  {}  {:<12}", emoji, name);
+                    crate::color::ceprintln!("  {}  {:<12}", emoji, name);
                 } else {
-                    eprintln!("  {}  {:<12} \x1B[90m{}\x1B[0m", emoji, name, aliases);
+                    crate::color::ceprintln!(
+                        "  {}  {:<12} \x1B[90m{}\x1B[0m",
+                        emoji,
+                        name,
+                        aliases
+                    );
                 }
             }
-            eprintln!();
+            crate::color::ceprintln!();
             Ok(Value::Null)
         }
 
@@ -446,25 +451,25 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 
         "term.success" => {
             let msg = args.first().map(|v| format!("{}", v)).unwrap_or_default();
-            eprintln!("  \x1B[32m✅ {}\x1B[0m", msg);
+            crate::color::ceprintln!("  \x1B[32m✅ {}\x1B[0m", msg);
             Ok(Value::Null)
         }
 
         "term.error" => {
             let msg = args.first().map(|v| format!("{}", v)).unwrap_or_default();
-            eprintln!("  \x1B[31m❌ {}\x1B[0m", msg);
+            crate::color::ceprintln!("  \x1B[31m❌ {}\x1B[0m", msg);
             Ok(Value::Null)
         }
 
         "term.warning" => {
             let msg = args.first().map(|v| format!("{}", v)).unwrap_or_default();
-            eprintln!("  \x1B[33m⚠️  {}\x1B[0m", msg);
+            crate::color::ceprintln!("  \x1B[33m⚠️  {}\x1B[0m", msg);
             Ok(Value::Null)
         }
 
         "term.info" => {
             let msg = args.first().map(|v| format!("{}", v)).unwrap_or_default();
-            eprintln!("  \x1B[36mℹ️  {}\x1B[0m", msg);
+            crate::color::ceprintln!("  \x1B[36mℹ️  {}\x1B[0m", msg);
             Ok(Value::Null)
         }
 

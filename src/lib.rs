@@ -9,10 +9,12 @@
 // a wall-clock limit and captured output. See `src/sandbox.rs`.
 
 mod builtins_registry;
+mod color;
 mod errors;
 pub mod interpreter;
 pub mod lexer;
 mod manifest;
+pub mod mcp;
 mod package;
 pub mod parser;
 pub mod permissions;
@@ -25,7 +27,7 @@ mod typechecker;
 pub mod vm;
 
 pub use permissions::{Capabilities, Capability, PermissionError};
-pub use sandbox::{Output, Sandbox, SandboxError};
+pub use sandbox::{CancelHandle, Output, Sandbox, SandboxError};
 
 use std::panic::{self, AssertUnwindSafe};
 

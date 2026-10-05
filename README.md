@@ -79,6 +79,7 @@ say crypto.sha256("password")
 | [📚 Standard Library](#-standard-library-22-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
 | [🔧 CLI](#-cli-commands)                             | [📂 Examples](#-examples)       | [🏛️ Architecture](#️-architecture)     |
 | [📕 Book](#-the-book)                                | [🗺️ Roadmap](#️-roadmap)         | [🤝 Contributing](#-contributing)     |
+| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) |                                 |                                       |
 
 ---
 
@@ -607,12 +608,50 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 | `forge watch <file>`          | Re-run on file changes                               |
 | `forge doc [paths]`           | Generate documentation                               |
 | `forge lsp` / `forge dap`     | Language server / debug adapter                      |
+| `forge mcp`                   | MCP server: AI agents run Forge in a sandbox         |
 | `forge chat`                  | AI assistant                                         |
 | `forge version`               | Version info                                         |
 
 **Global flags go before the subcommand:** `forge --interp run app.fg`, `forge --jit run app.fg`, `forge --allow-run run deploy.fg`. Also `--profile` and `--strict`. `--vm` is accepted for compatibility and does nothing (the VM is already the default).
 
 Native builds are standalone when `libforge_lang.a` is available (set `FORGE_LIB_DIR`, or keep it next to the `forge` binary); otherwise Forge builds a launcher that runs the program through an installed `forge`.
+
+---
+
+## 🤖 Use Forge from an AI agent (MCP)
+
+`forge mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. It gives an agent a sandboxed Forge runtime ("code mode"): instead of many tool calls, the agent writes one short script — fetch, filter, compute, print — and runs it.
+
+| Tool              | What it does                                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------------------------- |
+| `run_forge`       | Runs `{code, timeout_secs?}` in the sandbox; returns what the script printed, or `isError` with a typed error (`syntax`, `permission_denied`, `runtime`, `timeout`, `output_limit`) and the output so far |
+| `check_forge`     | Parses and type-checks `{code}` without running it; returns diagnostics with line numbers                      |
+| `forge_reference` | The compact language guide ([`llms.txt`](llms.txt)) so the agent can learn Forge                                |
+
+Scripts are **denied everything by default** — files, network, environment, databases, subprocesses, AI calls, `exit()`. Grant only what the agent needs with the usual flags (or `[permissions]` in a `forge.toml` in the server's working directory; flags win):
+
+```bash
+forge mcp                                         # pure computation only
+forge mcp --allow-net=api.example.com             # HTTP to one host
+forge mcp --allow-read=./data --allow-write=./out --max-time 10
+```
+
+Claude Desktop (`claude_desktop_config.json`) or a project `.mcp.json` for Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "forge": { "command": "forge", "args": ["mcp", "--allow-net=api.example.com"] }
+  }
+}
+```
+
+or `claude mcp add forge -- forge mcp --allow-net=api.example.com`.
+
+- `--max-time` (default 30s) is the per-call limit; an agent's `timeout_secs` can only lower it. Output returned to the agent is capped at 64 KiB (a script printing over 1 MiB is stopped).
+- Each call runs on its own thread: a stuck script times out while the server keeps answering, and `notifications/cancelled` stops it. `run` (shell) is never granted unless you pass `--allow-run`.
+- Nothing a script prints or reads can reach the protocol stream (stdin/stdout are moved off fds 0/1 on Unix).
+- Protocol: `2026-07-28` (stateless, `server/discover`) and the `initialize` handshake for `2025-11-25` back to `2024-11-05`. Rust hosts can embed the same server: `forge_lang::mcp::serve(reader, writer, config)`.
 
 ---
 
@@ -780,6 +819,8 @@ let out = forge_lang::Sandbox::new()
     .run_source(r#"say "hi""#)?;
 assert_eq!(out.stdout, "hi\n");
 ```
+
+AI agents can use the same sandbox through [`forge mcp`](#-use-forge-from-an-ai-agent-mcp).
 
 Details and current limits: [SECURITY.md — Sandboxing and permissions](SECURITY.md#sandboxing-and-permissions).
 

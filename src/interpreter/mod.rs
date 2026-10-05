@@ -906,10 +906,37 @@ fn check_direct_call_arity(func: &Value, argc: usize) -> Result<(), RuntimeError
         .map_err(|e| RuntimeError::new(&e))
 }
 
-/// How a block expression finished.
+/// Arity rule for `receiver.method(args)` reaching a user-defined function
+/// (an object field, a static method, or an instance method whose first
+/// parameter receives `receiver` when `receiver_param`). `argc` counts the
+/// explicit arguments; errors name the method as written at the call site.
+/// The VM applies the same rule (`check_user_method_arity`).
+fn check_method_call_arity(
+    func: &Value,
+    method: &str,
+    argc: usize,
+    receiver_param: bool,
+) -> Result<(), RuntimeError> {
+    let params: &[Param] = match func {
+        Value::Function(f) => &f.params,
+        Value::Lambda { params, .. } => params,
+        _ => return Ok(()),
+    };
+    let required = crate::semantics::required_params(params.iter().map(|p| p.default.is_some()));
+    if receiver_param {
+        crate::semantics::check_method_arity(method, params.len(), required, argc)
+    } else {
+        crate::semantics::check_call_arity(method, params.len(), required, argc)
+    }
+    .map_err(|e| RuntimeError::new(&e))
+}
+
+/// How a block expression (or a body's value-producing tail) finished.
 enum BlockExit {
     Value(Value),
     Return(Value),
+    Break,
+    Continue,
 }
 
 /// Control flow signals
@@ -1535,50 +1562,7 @@ impl Interpreter {
             Stmt::Match { subject, arms } => {
                 let val = self.eval_expr(subject)?;
 
-                // Check exhaustiveness for ADT values
-                if let Value::Object(ref obj) = val {
-                    if let Some(Value::String(type_name)) = obj.get("__type__") {
-                        let type_key = format!("__type_{}__", type_name);
-                        if let Some(Value::Object(type_meta)) = self.env.get(&type_key) {
-                            if let Some(Value::Array(variant_list)) = type_meta.get("variants") {
-                                let has_wildcard =
-                                    arms.iter().any(|a| matches!(a.pattern, Pattern::Wildcard));
-                                let variant_names: Vec<&str> = variant_list
-                                    .iter()
-                                    .filter_map(|v| {
-                                        if let Value::String(s) = v {
-                                            Some(s.as_str())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect();
-                                let has_true_catchall = arms.iter().any(|a| {
-                                    if let Pattern::Binding(bname) = &a.pattern {
-                                        !variant_names.contains(&bname.as_str())
-                                    } else {
-                                        false
-                                    }
-                                });
-                                if !has_wildcard && !has_true_catchall {
-                                    for vname in &variant_names {
-                                        let covered = arms.iter().any(|a| match &a.pattern {
-                                            Pattern::Constructor { name, .. } => name == vname,
-                                            Pattern::Binding(bname) => bname == vname,
-                                            _ => false,
-                                        });
-                                        if !covered {
-                                            return Err(RuntimeError::new(&format!(
-                                                "non-exhaustive match: missing variant '{}'",
-                                                vname
-                                            )));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                self.check_match_exhaustive(&val, arms)?;
 
                 for arm in arms {
                     if self.match_pattern(&arm.pattern, &val) {
@@ -1841,6 +1825,8 @@ impl Interpreter {
                     .map_err(|msg| RuntimeError::new(&msg))?;
                 let mut import_interp = Interpreter::new();
                 import_interp.source_file = Some(file_path.clone());
+                // Module top-level output goes where ours goes (sandbox/DAP capture).
+                import_interp.output_sink = self.output_sink.clone();
                 import_interp.run(&program)?;
 
                 if let Some(name_list) = names {
@@ -2063,6 +2049,7 @@ impl Interpreter {
                 let mut timeout_interp = Interpreter::new();
                 timeout_interp.env = self.env.clone();
                 timeout_interp.cancelled = cancel_flag.clone();
+                timeout_interp.output_sink = self.output_sink.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 let handle = crate::runtime::recursion::spawn_worker(move || {
                     let result = timeout_interp.exec_block(&body);
@@ -2179,62 +2166,154 @@ impl Interpreter {
         }
     }
 
-    /// Value of a block expression (`if`/`when`/`safe` expressions and
-    /// `{ ... }` blocks): the value of the final statement — an expression's
-    /// value, the taken branch of an `if`, the matched arm of a `when`, the
-    /// result of a `safe` block — or null for any other statement. The VM
-    /// compiler implements the same rule (`compile_block_value`).
-    fn eval_block_value(&mut self, stmts: &[SpannedStmt]) -> Result<BlockExit, RuntimeError> {
-        let patch_err = |mut e: RuntimeError, s: &SpannedStmt| -> RuntimeError {
-            if e.line == 0 {
-                e.line = s.line;
-                e.col = s.col;
+    /// A `match` on an ADT value must cover every variant unless it has a
+    /// wildcard or catch-all binding arm.
+    fn check_match_exhaustive(&self, val: &Value, arms: &[MatchArm]) -> Result<(), RuntimeError> {
+        // Check exhaustiveness for ADT values
+        if let Value::Object(obj) = val {
+            if let Some(Value::String(type_name)) = obj.get("__type__") {
+                let type_key = format!("__type_{}__", type_name);
+                if let Some(Value::Object(type_meta)) = self.env.get(&type_key) {
+                    if let Some(Value::Array(variant_list)) = type_meta.get("variants") {
+                        let has_wildcard =
+                            arms.iter().any(|a| matches!(a.pattern, Pattern::Wildcard));
+                        let variant_names: Vec<&str> = variant_list
+                            .iter()
+                            .filter_map(|v| {
+                                if let Value::String(s) = v {
+                                    Some(s.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let has_true_catchall = arms.iter().any(|a| {
+                            if let Pattern::Binding(bname) = &a.pattern {
+                                !variant_names.contains(&bname.as_str())
+                            } else {
+                                false
+                            }
+                        });
+                        if !has_wildcard && !has_true_catchall {
+                            for vname in &variant_names {
+                                let covered = arms.iter().any(|a| match &a.pattern {
+                                    Pattern::Constructor { name, .. } => name == vname,
+                                    Pattern::Binding(bname) => bname == vname,
+                                    _ => false,
+                                });
+                                if !covered {
+                                    return Err(RuntimeError::new(&format!(
+                                        "non-exhaustive match: missing variant '{}'",
+                                        vname
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            e
-        };
+        }
+        Ok(())
+    }
+
+    /// Bookkeeping before running a statement: current line, coverage and
+    /// debugger stop point.
+    fn enter_stmt(&mut self, s: &SpannedStmt) {
+        self.current_line = s.line;
+        if s.line > 0 {
+            if let Some(ref mut cov) = self.coverage {
+                cov.insert(s.line);
+            }
+            self.debug_check(s.line);
+        }
+    }
+
+    /// Value of a block expression (`if`/`when`/`safe` expressions and
+    /// `{ ... }` blocks): the value of the final statement (see
+    /// [`Interpreter::eval_stmt_value`]). The VM compiler implements the
+    /// same rule (`compile_block_value`).
+    fn eval_block_value(&mut self, stmts: &[SpannedStmt]) -> Result<BlockExit, RuntimeError> {
         let mut last = Value::Null;
         for spanned in stmts {
-            self.current_line = spanned.line;
-            last = Value::Null;
-            match &spanned.stmt {
-                Stmt::Expression(expr) => {
-                    last = self.eval_expr(expr).map_err(|e| patch_err(e, spanned))?;
-                }
-                Stmt::If {
-                    condition,
-                    then_body,
-                    else_body,
-                } => {
-                    let cond = self
-                        .eval_expr(condition)
-                        .map_err(|e| patch_err(e, spanned))?;
-                    let branch = if cond.is_truthy() {
-                        Some(then_body)
-                    } else {
-                        else_body.as_ref()
-                    };
-                    if let Some(branch) = branch {
-                        self.env.push_scope();
-                        let result = self.eval_block_value(branch);
-                        self.env.pop_scope();
-                        match result? {
-                            BlockExit::Value(v) => last = v,
-                            exit @ BlockExit::Return(_) => return Ok(exit),
-                        }
-                    }
-                }
-                stmt => match self.exec_stmt(stmt).map_err(|e| patch_err(e, spanned))? {
-                    Signal::Return(v) => return Ok(BlockExit::Return(v)),
-                    Signal::ImplicitReturn(v) => {
-                        if matches!(stmt, Stmt::When { .. } | Stmt::SafeBlock { .. }) {
-                            last = v;
-                        }
-                    }
-                    _ => {}
-                },
+            self.enter_stmt(spanned);
+            match self.eval_stmt_value(spanned)? {
+                BlockExit::Value(v) => last = v,
+                exit => return Ok(exit),
             }
         }
         Ok(BlockExit::Value(last))
+    }
+
+    /// Run one statement and produce its value: an expression's value, the
+    /// taken branch of an `if`, the matched arm of a `when` or `match`, the
+    /// result of a `safe` block — or null for any other statement
+    /// (`semantics::is_value_tail`). `return`/`break`/`continue` inside
+    /// stop evaluation and are reported as the matching [`BlockExit`].
+    fn eval_stmt_value(&mut self, spanned: &SpannedStmt) -> Result<BlockExit, RuntimeError> {
+        let patch_err = |mut e: RuntimeError| -> RuntimeError {
+            if e.line == 0 {
+                e.line = spanned.line;
+                e.col = spanned.col;
+            }
+            e
+        };
+        match &spanned.stmt {
+            Stmt::Expression(expr) => {
+                Ok(BlockExit::Value(self.eval_expr(expr).map_err(patch_err)?))
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(RuntimeError::new("cancelled"));
+                }
+                let cond = self.eval_expr(condition).map_err(patch_err)?;
+                let branch = if cond.is_truthy() {
+                    Some(then_body)
+                } else {
+                    else_body.as_ref()
+                };
+                match branch {
+                    Some(branch) => {
+                        self.env.push_scope();
+                        let result = self.eval_block_value(branch);
+                        self.env.pop_scope();
+                        result
+                    }
+                    None => Ok(BlockExit::Value(Value::Null)),
+                }
+            }
+            Stmt::Match { subject, arms } => {
+                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(RuntimeError::new("cancelled"));
+                }
+                let val = self.eval_expr(subject).map_err(patch_err)?;
+                self.check_match_exhaustive(&val, arms).map_err(patch_err)?;
+                for arm in arms {
+                    if self.match_pattern(&arm.pattern, &val) {
+                        self.env.push_scope();
+                        self.bind_pattern(&arm.pattern, &val);
+                        let result = self.eval_block_value(&arm.body);
+                        self.env.pop_scope();
+                        return result;
+                    }
+                }
+                Err(patch_err(RuntimeError::new("non-exhaustive match")))
+            }
+            stmt => Ok(match self.exec_stmt(stmt).map_err(patch_err)? {
+                Signal::Return(v) => BlockExit::Return(v),
+                Signal::Break => BlockExit::Break,
+                Signal::Continue => BlockExit::Continue,
+                Signal::ImplicitReturn(v)
+                    if matches!(stmt, Stmt::When { .. } | Stmt::SafeBlock { .. }) =>
+                {
+                    BlockExit::Value(v)
+                }
+                Signal::None | Signal::ImplicitReturn(_) => BlockExit::Value(Value::Null),
+            }),
+        }
     }
 
     fn exec_block(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
@@ -2273,16 +2352,19 @@ impl Interpreter {
         let mut last_expr_value = Value::Null;
         let last_index = stmts.len().saturating_sub(1);
         for (index, s) in stmts.iter().enumerate() {
-            self.current_line = s.line;
-            if let Some(ref mut cov) = self.coverage {
-                if s.line > 0 {
-                    cov.insert(s.line);
-                }
-            }
-            if s.line > 0 {
-                self.debug_check(s.line);
-            }
+            self.enter_stmt(s);
             let stmt = &s.stmt;
+            if keep_value && index == last_index && crate::semantics::is_value_tail(stmt) {
+                // A trailing `if`/`when`/`match`/`safe` yields the value of
+                // the branch that ran (same rule as the VM's
+                // `compile_function_body`).
+                return Ok(match self.eval_stmt_value(s)? {
+                    BlockExit::Value(v) => Signal::ImplicitReturn(v),
+                    BlockExit::Return(v) => Signal::Return(v),
+                    BlockExit::Break => Signal::Break,
+                    BlockExit::Continue => Signal::Continue,
+                });
+            }
             if let Stmt::Expression(expr) = stmt {
                 let want_value = keep_value && index == last_index;
                 last_expr_value = self.eval_expr_stmt(expr, want_value).map_err(|mut e| {
@@ -2667,7 +2749,14 @@ impl Interpreter {
                             if let Some(func) = func_opt {
                                 let eval_args: Result<Vec<Value>, _> =
                                     args.iter().map(|a| self.eval_expr(a)).collect();
-                                return self.call_function(func, eval_args?);
+                                let eval_args = eval_args?;
+                                check_method_call_arity(
+                                    &func,
+                                    method_name,
+                                    eval_args.len(),
+                                    false,
+                                )?;
+                                return self.call_function(func, eval_args);
                             }
                             return Err(RuntimeError::new(&format!(
                                 "no static method '{}' on {}",
@@ -2691,6 +2780,7 @@ impl Interpreter {
                                 for arg in args {
                                     full_args.push(self.eval_expr(arg)?);
                                 }
+                                check_method_call_arity(&func, method_name, args.len(), true)?;
                                 return self.call_function(func, full_args);
                             }
                             // Check embedded fields for delegation
@@ -2709,6 +2799,12 @@ impl Interpreter {
                                         for arg in args {
                                             full_args.push(self.eval_expr(arg)?);
                                         }
+                                        check_method_call_arity(
+                                            &func,
+                                            method_name,
+                                            args.len(),
+                                            true,
+                                        )?;
                                         return self.call_function(func, full_args);
                                     }
                                 }
@@ -3184,9 +3280,13 @@ impl Interpreter {
                             )))
                         }
                     };
+                    // A function stored in an object field is called
+                    // directly: same arity rule as `f(args)`.
                     let eval_args: Result<Vec<Value>, _> =
                         args.iter().map(|a| self.eval_expr(a)).collect();
-                    return self.call_function(func, eval_args?);
+                    let eval_args = eval_args?;
+                    check_method_call_arity(&func, method_name, eval_args.len(), false)?;
+                    return self.call_function(func, eval_args);
                 }
 
                 let func = self.eval_expr(function)?;
@@ -3246,6 +3346,10 @@ impl Interpreter {
                     // the enclosing function (same as the VM), not just
                     // from the block.
                     BlockExit::Return(v) => Err(RuntimeError::early_return(v)),
+                    // `break`/`continue` inside a block *expression* end the
+                    // block; they cannot reach the enclosing loop from
+                    // expression position in the interpreter.
+                    BlockExit::Break | BlockExit::Continue => Ok(Value::Null),
                 }
             }
 
@@ -4523,6 +4627,9 @@ impl Interpreter {
         spawn_interp.env = self.env.deep_clone();
         // Propagate cancellation token so squad can cancel spawned tasks
         spawn_interp.cancelled = self.cancelled.clone();
+        // Output from the task must reach the same capture (sandbox/DAP) as
+        // the parent's, never the host's stdout.
+        spawn_interp.output_sink = self.output_sink.clone();
 
         // A plain OS thread with the same recursion headroom as the CLI
         // (WORKER_STACK_SIZE, registered with the stack guard) and the

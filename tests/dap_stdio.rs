@@ -120,6 +120,44 @@ fn dap_breakpoint_session_over_stdio() {
 }
 
 #[test]
+fn dap_breakpoints_match_by_file_path() {
+    let program = write_program("paths.fg", "let a = 1\nlet b = 2\nlet c = 3\n");
+    let other = write_program("other.fg", "say 1\nsay 2\n");
+    let mut dap = Dap::start();
+    initialize(&mut dap);
+    dap.request("launch", json!({"program": program, "stopOnEntry": false}));
+    // Line 2 of a different file must not stop this program.
+    dap.request(
+        "setBreakpoints",
+        json!({"source": {"path": other}, "breakpoints": [{"line": 2}]}),
+    );
+    // The same program spelled differently (`dir/./paths.fg`) still matches.
+    let path = std::path::Path::new(&program);
+    let respelled = path
+        .parent()
+        .expect("temp file has a parent")
+        .join(".")
+        .join(path.file_name().expect("temp file has a name"))
+        .to_string_lossy()
+        .into_owned();
+    dap.request(
+        "setBreakpoints",
+        json!({"source": {"path": respelled}, "breakpoints": [{"line": 3}]}),
+    );
+    dap.request("configurationDone", json!({}));
+
+    let stopped = dap.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint");
+    let trace = dap.request("stackTrace", json!({"threadId": 1}));
+    assert_eq!(trace["body"]["stackFrames"][0]["line"], 3);
+
+    dap.request("continue", json!({"threadId": 1}));
+    dap.event("terminated");
+    dap.request("disconnect", json!({}));
+    assert!(dap.server.wait_exit().success());
+}
+
+#[test]
 fn dap_stop_on_entry_and_step() {
     let program = write_program("step.fg", "let a = 1\nlet b = 2\nlet c = 3\n");
     let mut dap = Dap::start();

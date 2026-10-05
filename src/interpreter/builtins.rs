@@ -1534,6 +1534,13 @@ impl Interpreter {
                     )),
                 }
             }
+            // `io.print` must honour the output capture like `print` does
+            // (the shared registry version writes to the process stdout).
+            "io.print" => {
+                let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
+                self.write_output(&text.join(" "), false);
+                Ok(Value::Null)
+            }
             // Every stdlib module member is implemented once, in the shared
             // registry (`builtins_registry`), for both engines.
             _ if crate::builtins_registry::module_for(name).is_some() => {

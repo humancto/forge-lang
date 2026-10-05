@@ -143,6 +143,16 @@ let out = Sandbox::new()
 - `max_time` returns control to the host by the deadline: the program is cancelled cooperatively, and if it does not stop within a short grace period its worker thread is detached.
 - Lower-level: `forge_lang::Capabilities` (policy builder), `forge_lang::permissions::{set_global, scope, require}`.
 
+### MCP server (`forge mcp`)
+
+`forge mcp` exposes the embedding sandbox to AI agents over the Model Context Protocol (stdio). Its policy is built like the CLI's but **always starts from deny-all**, including `process`; only the `--allow-*` flags and `forge.toml` `[permissions]` grant capabilities (`sandbox = false` is ignored, and `run` needs an explicit `--allow-run` / `allow-run = true`). `--max-time` (default 30s) bounds each call rather than the server process.
+
+- Every `run_forge` call gets a fresh interpreter on its own thread; nothing persists between calls. A timed-out script is cancelled cooperatively and, if stuck in a native call, detached; at most 8 calls run at once.
+- Script output is captured (including `spawn`ed tasks, `timeout` blocks, imports and `io.print`), capped at 64 KiB in the response, and a script that prints more than 1 MiB is stopped.
+- On Unix the protocol stream is moved to private close-on-exec descriptors before any script runs; fd 0 becomes `/dev/null` and fd 1 is redirected to stderr. A script (or a granted subprocess) can therefore neither read protocol input nor inject protocol output. On other platforms only the sandbox capture applies.
+- Untrusted source cannot crash the server with deep nesting: the parser rejects nesting beyond a fixed depth.
+- The server trusts its client: anyone who can write to its stdin can run code with the granted capabilities. Grant the narrowest scopes (`--allow-net=api.example.com`, `--allow-read=./data`).
+
 ### Not covered yet (future work)
 
 - **Memory limit.** There is no heap cap yet; call depth is bounded by `--max-depth` / `FORGE_MAX_DEPTH`.

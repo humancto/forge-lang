@@ -706,21 +706,21 @@ pub async fn start_server(
             CorsMode::Permissive => "\x1B[33mpermissive (any origin)\x1B[0m",
             CorsMode::Restrictive => "\x1B[32mrestrictive (same-origin)\x1B[0m",
         };
-        println!();
-        println!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
-        println!("  \x1B[1m   http://{}\x1B[0m", addr);
-        println!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
-        println!(
+        crate::color::cprintln!();
+        crate::color::cprintln!("  \x1B[1;32m🔥 Forge server running\x1B[0m");
+        crate::color::cprintln!("  \x1B[1m   http://{}\x1B[0m", addr);
+        crate::color::cprintln!("  \x1B[90m   CORS: {}\x1B[0m", cors_label);
+        crate::color::cprintln!(
             "  \x1B[90m   max in-flight: {} (excess returns 503)\x1B[0m",
             DEFAULT_MAX_INFLIGHT
         );
-        println!();
+        crate::color::cprintln!();
         for route in routes {
-            println!("  \x1B[36m{:>6}\x1B[0m  {}", route.method, route.pattern);
+            crate::color::cprintln!("  \x1B[36m{:>6}\x1B[0m  {}", route.method, route.pattern);
         }
-        println!();
-        println!("  \x1B[90mPowered by axum + tokio | Ctrl+C to stop\x1B[0m");
-        println!();
+        crate::color::cprintln!();
+        crate::color::cprintln!("  \x1B[90mPowered by axum + tokio | Ctrl+C to stop\x1B[0m");
+        crate::color::cprintln!();
     }
 
     let listener = tokio::net::TcpListener::bind(addr)

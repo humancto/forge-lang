@@ -422,7 +422,7 @@ say "Random: {math.random_int(1, 10)}""#,
 pub fn run_learn(lesson_num: Option<usize>) {
     if let Some(n) = lesson_num {
         if n == 0 || n > LESSONS.len() {
-            eprintln!(
+            crate::color::ceprintln!(
                 "Lesson {} doesn't exist. There are {} lessons.",
                 n,
                 LESSONS.len()
@@ -433,45 +433,45 @@ pub fn run_learn(lesson_num: Option<usize>) {
         return;
     }
 
-    println!();
-    println!("  \x1B[1;36m╔══════════════════════════════════════╗\x1B[0m");
-    println!("  \x1B[1;36m║     Welcome to Forge Academy!        ║\x1B[0m");
-    println!("  \x1B[1;36m╚══════════════════════════════════════╝\x1B[0m");
-    println!();
-    println!("  {} interactive lessons available:", LESSONS.len());
-    println!();
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[1;36m╔══════════════════════════════════════╗\x1B[0m");
+    crate::color::cprintln!("  \x1B[1;36m║     Welcome to Forge Academy!        ║\x1B[0m");
+    crate::color::cprintln!("  \x1B[1;36m╚══════════════════════════════════════╝\x1B[0m");
+    crate::color::cprintln!();
+    crate::color::cprintln!("  {} interactive lessons available:", LESSONS.len());
+    crate::color::cprintln!();
     for (i, (title, _, _, _)) in LESSONS.iter().enumerate() {
-        println!("    \x1B[1m{:>2}.\x1B[0m {}", i + 1, title);
+        crate::color::cprintln!("    \x1B[1m{:>2}.\x1B[0m {}", i + 1, title);
     }
-    println!();
-    println!("  Run a lesson:  \x1B[36mforge learn <number>\x1B[0m");
-    println!("  Example:       \x1B[36mforge learn 1\x1B[0m");
-    println!();
+    crate::color::cprintln!();
+    crate::color::cprintln!("  Run a lesson:  \x1B[36mforge learn <number>\x1B[0m");
+    crate::color::cprintln!("  Example:       \x1B[36mforge learn 1\x1B[0m");
+    crate::color::cprintln!();
 }
 
 fn show_lesson(idx: usize) {
     let (title, explanation, code, expected) = LESSONS[idx];
 
-    println!();
-    println!(
+    crate::color::cprintln!();
+    crate::color::cprintln!(
         "  \x1B[1;33m━━━ Lesson {} of {}: {} ━━━\x1B[0m",
         idx + 1,
         LESSONS.len(),
         title
     );
-    println!();
-    println!("  \x1B[90m{}\x1B[0m", explanation);
-    println!();
-    println!("  \x1B[1mCode:\x1B[0m");
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[90m{}\x1B[0m", explanation);
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[1mCode:\x1B[0m");
     for line in code.lines() {
-        println!("    \x1B[36m{}\x1B[0m", line);
+        crate::color::cprintln!("    \x1B[36m{}\x1B[0m", line);
     }
-    println!();
-    println!("  \x1B[1mExpected output:\x1B[0m");
-    println!("    \x1B[32m{}\x1B[0m", expected);
-    println!();
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[1mExpected output:\x1B[0m");
+    crate::color::cprintln!("    \x1B[32m{}\x1B[0m", expected);
+    crate::color::cprintln!();
 
-    print!("  \x1B[90mPress Enter to run this code (or 'q' to quit): \x1B[0m");
+    crate::color::cprint!("  \x1B[90mPress Enter to run this code (or 'q' to quit): \x1B[0m");
     io::stdout().flush().ok();
     let mut input = String::new();
     io::stdin().read_line(&mut input).ok();
@@ -479,15 +479,15 @@ fn show_lesson(idx: usize) {
         return;
     }
 
-    println!();
-    println!("  \x1B[1mOutput:\x1B[0m");
-    print!("    ");
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[1mOutput:\x1B[0m");
+    crate::color::cprint!("    ");
 
     let mut lexer = crate::lexer::Lexer::new(code);
     let tokens = match lexer.tokenize() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("    \x1B[31mLex error: {}\x1B[0m", e);
+            crate::color::ceprintln!("    \x1B[31mLex error: {}\x1B[0m", e);
             return;
         }
     };
@@ -495,7 +495,7 @@ fn show_lesson(idx: usize) {
     let program = match parser.parse_program() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("    \x1B[31mParse error: {}\x1B[0m", e);
+            crate::color::ceprintln!("    \x1B[31mParse error: {}\x1B[0m", e);
             return;
         }
     };
@@ -503,18 +503,20 @@ fn show_lesson(idx: usize) {
     match interp.run(&program) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("    \x1B[31m{}\x1B[0m", e);
+            crate::color::ceprintln!("    \x1B[31m{}\x1B[0m", e);
         }
     }
 
-    println!();
+    crate::color::cprintln!();
     if idx + 1 < LESSONS.len() {
-        println!(
+        crate::color::cprintln!(
             "  \x1B[90mNext lesson: \x1B[36mforge learn {}\x1B[0m",
             idx + 2
         );
     } else {
-        println!("  \x1B[1;32mYou've completed all lessons! You're a Forge developer now!\x1B[0m");
+        crate::color::cprintln!(
+            "  \x1B[1;32mYou've completed all lessons! You're a Forge developer now!\x1B[0m"
+        );
     }
-    println!();
+    crate::color::cprintln!();
 }

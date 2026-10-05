@@ -75,10 +75,11 @@ fn format_runtime_error(
 ) -> String {
     if err.line > 0 {
         crate::errors::format_error(
+            &crate::errors::display_path(label),
             source,
             err.line,
             if err.col > 0 { err.col } else { 1 },
-            &format!("[{}] {}", label, err.message),
+            &err.message,
         )
     } else {
         crate::errors::format_simple_error(&format!("[{}] {}", label, err.message))

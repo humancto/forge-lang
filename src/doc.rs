@@ -20,20 +20,20 @@ pub fn generate_docs(paths: &[PathBuf]) {
     };
 
     if files.is_empty() {
-        println!("  No .fg files found.");
+        crate::color::cprintln!("  No .fg files found.");
         return;
     }
 
-    println!();
-    println!("  \x1B[1mForge Documentation\x1B[0m");
-    println!("  {}", "=".repeat(50));
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[1mForge Documentation\x1B[0m");
+    crate::color::cprintln!("  {}", "=".repeat(50));
 
     for file in &files {
         document_file(file);
     }
 
-    println!();
-    println!(
+    crate::color::cprintln!();
+    crate::color::cprintln!(
         "  \x1B[90mGenerated from {} file{}\x1B[0m",
         files.len(),
         if files.len() == 1 { "" } else { "s" }
@@ -84,11 +84,11 @@ fn document_file(file: &Path) {
         return;
     }
 
-    println!();
-    println!("  \x1B[1;34m## {}\x1B[0m", file.display());
+    crate::color::cprintln!();
+    crate::color::cprintln!("  \x1B[1;34m## {}\x1B[0m", file.display());
 
     for entry in &entries {
-        println!();
+        crate::color::cprintln!();
         match &entry.kind {
             DocKind::Function {
                 name,
@@ -111,17 +111,19 @@ fn document_file(file: &Path) {
                 } else {
                     format!(" -> {}", return_type)
                 };
-                println!(
+                crate::color::cprintln!(
                     "  \x1B[33mfn\x1B[0m \x1B[1m{}\x1B[0m({}){}",
-                    name, params_str, ret
+                    name,
+                    params_str,
+                    ret
                 );
             }
             DocKind::Variable { name, mutable } => {
                 let prefix = if *mutable { "let mut" } else { "let" };
-                println!("  \x1B[33m{}\x1B[0m \x1B[1m{}\x1B[0m", prefix, name);
+                crate::color::cprintln!("  \x1B[33m{}\x1B[0m \x1B[1m{}\x1B[0m", prefix, name);
             }
             DocKind::Struct { name, fields } => {
-                println!(
+                crate::color::cprintln!(
                     "  \x1B[33mstruct\x1B[0m \x1B[1m{}\x1B[0m {{ {} }}",
                     name,
                     fields.join(", ")
@@ -130,12 +132,12 @@ fn document_file(file: &Path) {
         }
 
         for comment in &entry.comments {
-            println!("    \x1B[90m{}\x1B[0m", comment);
+            crate::color::cprintln!("    \x1B[90m{}\x1B[0m", comment);
         }
 
         if !entry.decorators.is_empty() {
             for dec in &entry.decorators {
-                println!("    \x1B[36m@{}\x1B[0m", dec);
+                crate::color::cprintln!("    \x1B[36m@{}\x1B[0m", dec);
             }
         }
     }
