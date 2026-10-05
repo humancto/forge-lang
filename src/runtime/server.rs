@@ -268,11 +268,17 @@ impl ServeEngine for InterpreterTemplate {
 struct InterpreterWorker(Interpreter);
 
 impl HandlerWorker for InterpreterWorker {
+    // The fork's fresh budget must be the thread's budget while the handler
+    // runs, as on the VM (`vm::serve`): the counting allocator, handle
+    // slots and import counts charge the thread's budget, not the
+    // interpreter's meter.
     fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> (StatusCode, JsonValue) {
+        let _limits = crate::runtime::limits::scope(self.0.resource_budget());
         call_handler(&mut self.0, handler, request)
     }
 
     fn call_ws(&mut self, handler: &str, text: String) -> String {
+        let _limits = crate::runtime::limits::scope(self.0.resource_budget());
         call_ws_handler(&mut self.0, handler, text)
     }
 }
@@ -944,6 +950,48 @@ pub fn forge_to_json(v: &Value) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── per-request budgets (interpreter engine) ────────────────────────────
+
+    /// The interpreter's request forks get a fresh budget *and* run with it
+    /// installed on the handler thread, so memory (counted by the
+    /// allocator) and handle slots are charged per request, as on the VM.
+    #[test]
+    fn interpreter_request_forks_charge_their_own_budget() {
+        use crate::runtime::limits::{self, Budget, Limits};
+        let source = "fn work() {\n  let mut i = 0\n  while i < 500 { i = i + 1 }\n  return i\n}\n\
+            fn hoard() {\n  let mut kept = []\n  let mut i = 0\n  while true {\n    \
+            kept.push(\"kept by one request \" + str(i))\n    i = i + 1\n  }\n}\n";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let program = crate::parser::Parser::new(tokens)
+            .parse_program()
+            .expect("parse");
+        let template = {
+            let _scope = limits::scope(Some(Budget::new(Limits {
+                max_fuel: Some(5_000_000),
+                max_memory: Some(256 << 10),
+                ..Limits::none()
+            })));
+            let mut interp = Interpreter::new();
+            interp.run(&program).expect("top level");
+            InterpreterTemplate::new(interp)
+        };
+        let call = |handler: &str| {
+            template
+                .fork_request(Arc::new(AtomicBool::new(false)))
+                .call_http(handler, &HandlerRequest::default())
+        };
+        assert_eq!(call("work").0.as_u16(), 200);
+        // Without the fork's budget on the thread, the allocator charges
+        // nothing and `hoard` runs until it is out of fuel instead.
+        let (status, body) = call("hoard");
+        assert_eq!(status.as_u16(), 500);
+        assert!(
+            body.to_string().contains(limits::MEMORY_LIMIT_EXCEEDED),
+            "{body}"
+        );
+        assert_eq!(call("work").0.as_u16(), 200);
+    }
 
     // ── to_axum_path ────────────────────────────────────────────────────────
 

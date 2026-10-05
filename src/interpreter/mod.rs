@@ -1203,6 +1203,13 @@ impl Interpreter {
         }
     }
 
+    /// The resource budget this interpreter charges (`runtime::limits`):
+    /// a server request fork's own fresh budget, which the host installs
+    /// on the handler thread.
+    pub(crate) fn resource_budget(&self) -> Option<Arc<crate::runtime::limits::Budget>> {
+        self.meter.budget().cloned()
+    }
+
     /// The environment a new closure captures. Registers its scopes as
     /// cycle-collection candidates (a closure stored in a scope it captures
     /// is a reference cycle) and may run a collection; see `heap.rs`.

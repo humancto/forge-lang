@@ -60,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Interpreter-backed servers (`--interp`, or auto-fallback) now install each request's fresh resource budget on the handler thread, as the VM does: `--max-memory` and the handle caps applied to the server's shared budget instead of the request's.
 - `import { sqrt } from "math"` silently bound nothing on both engines; selective imports from a built-in module now bind its members (`sqrt` is `math.sqrt`), and an unknown member is an E0019 error.
 - Decorator named arguments accept soft keywords as keys, like object literals do (`@tool(timeout: 5)` was a parse error)
 - `pad_start`/`pad_end` with a negative width no longer try to allocate an astronomically large string (the width is treated as 0).
