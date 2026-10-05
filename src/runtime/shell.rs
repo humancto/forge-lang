@@ -205,16 +205,12 @@ fn executable_extensions(pathext: Option<OsString>) -> Vec<String> {
 }
 
 /// `base` itself (when it could be run as named), then `base` + each
-/// extension. On Windows a name that already ends in one of the
-/// extensions (`git.exe`) is tried as-is first; a bare name (`git`) is
-/// only tried with an extension appended, as cmd.exe does.
+/// extension. On Windows a name that already has an extension
+/// (`git.exe`, `tool.cmd`) is tried as given first, whether or not that
+/// extension is listed in `PATHEXT` (cmd.exe runs an explicitly named
+/// script); a bare name (`git`) is only tried with an extension appended.
 fn candidates<'a>(base: &'a Path, exts: &'a [String]) -> impl Iterator<Item = PathBuf> + 'a {
-    let as_is = if exts.is_empty() {
-        true
-    } else {
-        let lower = base.to_string_lossy().to_ascii_lowercase();
-        exts.iter().any(|e| lower.ends_with(e.as_str()))
-    };
+    let as_is = exts.is_empty() || base.extension().is_some();
     let first = as_is.then(|| base.to_path_buf());
     first.into_iter().chain(exts.iter().map(move |ext| {
         let mut name = base.as_os_str().to_os_string();
