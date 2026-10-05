@@ -556,6 +556,13 @@ impl GcObject {
                     .collect();
                 format!("{{ {} }}", entries.join(", "))
             }
+            // Anonymous functions display as `<lambda>`, like the
+            // interpreter's `Value::Lambda`.
+            ObjKind::Function(ObjFunction { name, .. })
+            | ObjKind::Closure(ObjClosure {
+                function: ObjFunction { name, .. },
+                ..
+            }) if name == "<lambda>" => "<lambda>".to_string(),
             ObjKind::Function(f) => format!("<fn {}>", f.name),
             ObjKind::Closure(c) => format!("<fn {}>", c.function.name),
             ObjKind::NativeFunction(n) => format!("<builtin {}>", n.name),
@@ -669,6 +676,9 @@ impl GcObject {
                     })
             }
             (ObjKind::BoxedInt(a), ObjKind::BoxedInt(b)) => a == b,
+            // Results compare by payload, like the interpreter.
+            (ObjKind::ResultOk(a), ObjKind::ResultOk(b))
+            | (ObjKind::ResultErr(a), ObjKind::ResultErr(b)) => a.equals(b, gc),
             _ => false,
         }
     }

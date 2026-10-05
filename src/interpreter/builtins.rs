@@ -281,9 +281,11 @@ impl Interpreter {
             },
             "range" => match (args.first(), args.get(1)) {
                 (Some(Value::Int(start)), Some(Value::Int(end))) => {
+                    crate::semantics::range_len(*start, *end).map_err(|e| RuntimeError::new(&e))?;
                     Ok(Value::Array((*start..*end).map(Value::Int).collect()))
                 }
                 (Some(Value::Int(end)), None) => {
+                    crate::semantics::range_len(0, *end).map_err(|e| RuntimeError::new(&e))?;
                     Ok(Value::Array((0..*end).map(Value::Int).collect()))
                 }
                 _ => Err(RuntimeError::new("range() requires integer arguments")),
@@ -487,7 +489,7 @@ impl Interpreter {
             }
             "wait" => match args.first() {
                 Some(Value::Int(secs)) => {
-                    let total_ms = ((*secs).max(0) as u64) * 1000;
+                    let total_ms = ((*secs).max(0) as u64).saturating_mul(1000);
                     let mut elapsed = 0u64;
                     while elapsed < total_ms {
                         if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -953,7 +955,9 @@ impl Interpreter {
                         Some(Value::Int(n)) => (*n as usize).min(chars.len()),
                         _ => chars.len(),
                     };
-                    if start > chars.len() {
+                    // `end` is clamped to the length, so this also covers a
+                    // start past the end (and `start > end`, which used to panic).
+                    if start >= end {
                         return Ok(Value::String(String::new()));
                     }
                     Ok(Value::String(chars[start..end].iter().collect()))
@@ -1000,6 +1004,12 @@ impl Interpreter {
                     if char_count >= target {
                         Ok(Value::String(s.clone()))
                     } else {
+                        crate::semantics::check_repeat(
+                            "pad_start",
+                            pad_char.len_utf8(),
+                            target - char_count,
+                        )
+                        .map_err(|e| RuntimeError::new(&e))?;
                         let padding: String = std::iter::repeat(pad_char)
                             .take(target - char_count)
                             .collect();
@@ -1019,6 +1029,12 @@ impl Interpreter {
                     if char_count >= target {
                         Ok(Value::String(s.clone()))
                     } else {
+                        crate::semantics::check_repeat(
+                            "pad_end",
+                            pad_char.len_utf8(),
+                            target - char_count,
+                        )
+                        .map_err(|e| RuntimeError::new(&e))?;
                         let padding: String = std::iter::repeat(pad_char)
                             .take(target - char_count)
                             .collect();
@@ -1068,6 +1084,8 @@ impl Interpreter {
                     if *n < 0 {
                         return Err(RuntimeError::new("repeat_str() count must be non-negative"));
                     }
+                    crate::semantics::check_repeat("repeat_str", s.len(), *n as usize)
+                        .map_err(|e| RuntimeError::new(&e))?;
                     Ok(Value::String(s.repeat(*n as usize)))
                 }
                 _ => Err(RuntimeError::new("repeat_str() requires (string, count)")),
@@ -1893,7 +1911,8 @@ impl Interpreter {
                     _ => return Err(RuntimeError::new("slay() needs a function to benchmark")),
                 };
                 let n = match args.get(1) {
-                    Some(Value::Int(n)) => *n as usize,
+                    Some(Value::Int(n)) => crate::semantics::checked_count("slay", *n)
+                        .map_err(|e| RuntimeError::new(&e))?,
                     _ => 100,
                 };
                 let mut times: Vec<f64> = Vec::with_capacity(n);
@@ -2007,7 +2026,8 @@ impl Interpreter {
                 match args.first() {
                     Some(Value::Array(items)) => {
                         let n = match args.get(1) {
-                            Some(Value::Int(n)) => *n as usize,
+                            Some(Value::Int(n)) => crate::semantics::checked_count("sample", *n)
+                                .map_err(|e| RuntimeError::new(&e))?,
                             _ => 1,
                         };
                         if items.is_empty() {

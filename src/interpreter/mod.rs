@@ -232,6 +232,46 @@ impl PartialEq for Value {
 }
 
 impl Value {
+    /// Convert a shared string-method result (`semantics::string_method`).
+    pub(crate) fn from_str_method(v: crate::semantics::StrMethodValue) -> Value {
+        use crate::semantics::StrMethodValue as V;
+        match v {
+            V::Str(s) => Value::String(s),
+            V::Int(n) => Value::Int(n),
+            V::Bool(b) => Value::Bool(b),
+            V::Strs(items) => Value::Array(items.into_iter().map(Value::String).collect()),
+            V::Ints(items) => Value::Array(items.into_iter().map(Value::Int).collect()),
+            V::Null => Value::Null,
+        }
+    }
+
+    /// The language's `==`, mirroring the VM's `Value::equals`: numbers
+    /// compare numerically across Int/Float (IEEE-754, so NaN != NaN),
+    /// strings/bools/null by value, arrays, tuples and objects element-wise
+    /// with this same rule, sets/maps order-independently, and values of
+    /// different types are simply unequal (never an error).
+    pub fn lang_eq(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Frozen(x), _) => Value::lang_eq(x, b),
+            (_, Value::Frozen(y)) => Value::lang_eq(a, y),
+            (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => {
+                (*x as f64) == *y
+            }
+            (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| Value::lang_eq(p, q))
+            }
+            (Value::Object(x), Value::Object(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|(k, v)| y.get(k).is_some_and(|w| Value::lang_eq(v, w)))
+            }
+            (Value::ResultOk(x), Value::ResultOk(y))
+            | (Value::ResultErr(x), Value::ResultErr(y))
+            | (Value::Some(x), Value::Some(y)) => Value::lang_eq(x, y),
+            _ => a == b,
+        }
+    }
+
     /// Container-aware equality used for set membership, set equality, and
     /// any other collection where we want NaN==NaN and Int↔Float promotion
     /// to agree with the VM's `Value::equals` semantics.
@@ -2615,7 +2655,11 @@ impl Interpreter {
                 let val = self.eval_expr(operand)?;
                 match op {
                     UnaryOp::Neg => match val {
-                        Value::Int(n) => Ok(Value::Int(-n)),
+                        // `-i64::MIN` does not fit: promote to float like
+                        // every other integer overflow (and like the VM).
+                        Value::Int(n) => Ok(n
+                            .checked_neg()
+                            .map_or(Value::Float(-(n as f64)), Value::Int)),
                         Value::Float(n) => Ok(Value::Float(-n)),
                         _ => Err(RuntimeError::new("cannot negate non-number")),
                     },
@@ -2840,125 +2884,23 @@ impl Interpreter {
                             )));
                         }
                         Value::String(s)
-                            if matches!(
-                                method_name,
-                                "upper"
-                                    | "lower"
-                                    | "trim"
-                                    | "trim_start"
-                                    | "trim_end"
-                                    | "len"
-                                    | "chars"
-                                    | "bytes"
-                                    | "words"
-                                    | "is_empty"
-                                    | "is_numeric"
-                                    | "is_alpha"
-                                    | "is_alphanumeric"
-                                    | "reverse"
-                                    | "char_at"
-                                    | "encode_uri"
-                                    | "decode_uri"
-                            ) =>
+                            if crate::semantics::STRING_METHODS.contains(&method_name) =>
                         {
-                            match method_name {
-                                "upper" => return Ok(Value::String(s.to_uppercase())),
-                                "lower" => return Ok(Value::String(s.to_lowercase())),
-                                "trim" => return Ok(Value::String(s.trim().to_string())),
-                                "trim_start" => {
-                                    return Ok(Value::String(s.trim_start().to_string()))
+                            // Shared with the VM (`semantics::string_method`).
+                            let index = if method_name == "char_at" {
+                                match args.first().map(|a| self.eval_expr(a)) {
+                                    Some(Ok(Value::Int(i))) => Some(i),
+                                    Some(Err(e)) => return Err(e),
+                                    _ => None,
                                 }
-                                "trim_end" => return Ok(Value::String(s.trim_end().to_string())),
-                                "len" => return Ok(Value::Int(s.chars().count() as i64)),
-                                "is_empty" => return Ok(Value::Bool(s.is_empty())),
-                                "is_numeric" => {
-                                    return Ok(Value::Bool(
-                                        s.chars()
-                                            .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
-                                    ))
-                                }
-                                "is_alpha" => {
-                                    return Ok(Value::Bool(
-                                        !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
-                                    ))
-                                }
-                                "is_alphanumeric" => {
-                                    return Ok(Value::Bool(
-                                        !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
-                                    ))
-                                }
-                                "reverse" => return Ok(Value::String(s.chars().rev().collect())),
-                                "chars" => {
-                                    return Ok(Value::Array(
-                                        s.chars().map(|c| Value::String(c.to_string())).collect(),
-                                    ))
-                                }
-                                "bytes" => {
-                                    return Ok(Value::Array(
-                                        s.bytes().map(|b| Value::Int(b as i64)).collect(),
-                                    ))
-                                }
-                                "words" => {
-                                    return Ok(Value::Array(
-                                        s.split_whitespace()
-                                            .map(|w| Value::String(w.to_string()))
-                                            .collect(),
-                                    ))
-                                }
-                                "char_at" => {
-                                    let idx = match args.first().map(|a| self.eval_expr(a)) {
-                                        Some(Ok(Value::Int(i))) => i as usize,
-                                        _ => {
-                                            return Err(RuntimeError::new(
-                                                "char_at() requires an integer index",
-                                            ))
-                                        }
-                                    };
-                                    return Ok(s
-                                        .chars()
-                                        .nth(idx)
-                                        .map(|c| Value::String(c.to_string()))
-                                        .unwrap_or(Value::Null));
-                                }
-                                "encode_uri" => {
-                                    let encoded: String = s
-                                        .chars()
-                                        .map(|c| match c {
-                                            'A'..='Z'
-                                            | 'a'..='z'
-                                            | '0'..='9'
-                                            | '-'
-                                            | '_'
-                                            | '.'
-                                            | '~' => c.to_string(),
-                                            _ => format!("%{:02X}", c as u32),
-                                        })
-                                        .collect();
-                                    return Ok(Value::String(encoded));
-                                }
-                                "decode_uri" => {
-                                    let mut result = String::new();
-                                    let mut chars = s.chars();
-                                    while let Some(c) = chars.next() {
-                                        if c == '%' {
-                                            let hex: String = chars.by_ref().take(2).collect();
-                                            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                                                result.push(byte as char);
-                                            } else {
-                                                result.push('%');
-                                                result.push_str(&hex);
-                                            }
-                                        } else if c == '+' {
-                                            result.push(' ');
-                                        } else {
-                                            result.push(c);
-                                        }
-                                    }
-                                    return Ok(Value::String(result));
-                                }
-                                _ => {}
-                            }
-                            return Ok(Value::Null);
+                            } else {
+                                None
+                            };
+                            return match crate::semantics::string_method(s, method_name, index) {
+                                Some(Ok(v)) => Ok(Value::from_str_method(v)),
+                                Some(Err(e)) => Err(RuntimeError::new(&e)),
+                                None => Ok(Value::Null),
+                            };
                         }
                         _ if {
                             let is_set_receiver = matches!(&obj, Value::Set(_))
@@ -3770,6 +3712,13 @@ impl Interpreter {
     }
 
     fn eval_binop(&self, left: &Value, op: &BinOp, right: &Value) -> Result<Value, RuntimeError> {
+        // `==` / `!=` are total: values of different types are unequal,
+        // never an error (same rule as the VM's `Value::equals`).
+        match op {
+            BinOp::Eq => return Ok(Value::Bool(Value::lang_eq(left, right))),
+            BinOp::NotEq => return Ok(Value::Bool(!Value::lang_eq(left, right))),
+            _ => {}
+        }
         // Arithmetic and ordering follow the rules shared with the VM.
         if let Some(shared_op) = shared_binary_op(op) {
             return match crate::semantics::binary(
@@ -4791,6 +4740,9 @@ impl Interpreter {
             Pattern::Literal(expr) => match (expr, value) {
                 (Expr::Int(a), Value::Int(b)) => a == b,
                 (Expr::Float(a), Value::Float(b)) => a == b,
+                // Numbers match numerically, like `==` (and the VM's `Eq`).
+                (Expr::Int(a), Value::Float(b)) => (*a as f64) == *b,
+                (Expr::Float(a), Value::Int(b)) => *a == (*b as f64),
                 (Expr::StringLit(a), Value::String(b)) => a == b,
                 (Expr::Bool(a), Value::Bool(b)) => a == b,
                 _ => false,

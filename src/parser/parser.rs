@@ -788,20 +788,23 @@ impl Parser {
         let mut user_template = String::new();
         let mut returns = None;
         while !self.check(&Token::RBrace) {
-            if let Token::Ident(ref key) = self.current_token() {
-                let key = key.clone();
-                self.advance();
-                self.expect(Token::Colon)?;
-                if let Token::StringLit(ref s) | Token::RawStringLit(ref s) = self.current_token() {
-                    let val = s.clone();
-                    self.advance();
-                    match key.as_str() {
-                        "system" => system = val,
-                        "user" => user_template = val,
-                        "returns" => returns = Some(val),
-                        _ => {}
-                    }
-                }
+            // Every iteration must consume tokens or fail: anything but
+            // `name: "string"` used to spin here forever.
+            let Token::Ident(key) = self.current_token().clone() else {
+                return Err(self.error("expected prompt field (system, user or returns)"));
+            };
+            self.advance();
+            self.expect(Token::Colon)?;
+            let (Token::StringLit(val) | Token::RawStringLit(val)) = self.current_token().clone()
+            else {
+                return Err(self.error("prompt fields must be string literals"));
+            };
+            self.advance();
+            match key.as_str() {
+                "system" => system = val,
+                "user" => user_template = val,
+                "returns" => returns = Some(val),
+                _ => {}
             }
             self.skip_newlines();
         }
@@ -2323,6 +2326,19 @@ mod tests {
             Ok(_) => panic!("expected a parse error for {input:.40}"),
             Err(e) => e,
         }
+    }
+
+    /// Found by `fuzz/` (parse target): a non-`name: "string"` entry in a
+    /// `prompt` block made the parser loop forever.
+    #[test]
+    fn malformed_prompt_fields_are_errors_not_hangs() {
+        let e = parse_err("prompt p(x) {\n    system: \"s\"\n    10\n}\n");
+        assert!(e.message.contains("expected prompt field"), "{}", e.message);
+        let e = parse_err("prompt p(x) {\n    user: 3\n}\n");
+        assert!(e.message.contains("string literals"), "{}", e.message);
+        let e = parse_err("prompt p(x) {\n    system: \"s\"\n");
+        assert!(e.message.contains("expected prompt field"), "{}", e.message);
+        parse_program("prompt p(x) {\n    system: \"s\"\n    user: \"u {x}\"\n}\n");
     }
 
     #[test]

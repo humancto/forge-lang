@@ -615,7 +615,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Ok(Value::Null)
             }
             Some(Value::Float(secs)) => {
-                std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0)));
+                std::thread::sleep(crate::semantics::seconds_f64(*secs));
                 Ok(Value::Null)
             }
             _ => Err("time.sleep() requires seconds (number)".to_string()),

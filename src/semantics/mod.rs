@@ -434,6 +434,185 @@ pub const BUILTIN_MODULES: &[&str] = &[
     "exec", "time", "url", "toml", "npc", "ws", "jwt", "mysql", "os", "path",
 ];
 
+/// Result of a built-in string method (see [`string_method`]), in a form
+/// each engine converts to its own value representation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrMethodValue {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+    Strs(Vec<String>),
+    Ints(Vec<i64>),
+    Null,
+}
+
+/// The built-in string methods (`s.upper()`, `s.chars()`, ...), shared by
+/// both engines. `index` is the integer argument of `char_at`.
+pub const STRING_METHODS: &[&str] = &[
+    "upper",
+    "lower",
+    "trim",
+    "trim_start",
+    "trim_end",
+    "len",
+    "chars",
+    "bytes",
+    "words",
+    "is_empty",
+    "is_numeric",
+    "is_alpha",
+    "is_alphanumeric",
+    "reverse",
+    "char_at",
+    "encode_uri",
+    "decode_uri",
+];
+
+/// Evaluate built-in string method `name` on `s`. `None` when `name` is
+/// not one of [`STRING_METHODS`].
+pub fn string_method(
+    s: &str,
+    name: &str,
+    index: Option<i64>,
+) -> Option<Result<StrMethodValue, String>> {
+    use StrMethodValue as V;
+    let strs = |it: &mut dyn Iterator<Item = String>| V::Strs(it.collect());
+    Some(Ok(match name {
+        "upper" => V::Str(s.to_uppercase()),
+        "lower" => V::Str(s.to_lowercase()),
+        "trim" => V::Str(s.trim().to_string()),
+        "trim_start" => V::Str(s.trim_start().to_string()),
+        "trim_end" => V::Str(s.trim_end().to_string()),
+        "len" => V::Int(s.chars().count() as i64),
+        "is_empty" => V::Bool(s.is_empty()),
+        "is_numeric" => V::Bool(
+            s.chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
+        ),
+        "is_alpha" => V::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())),
+        "is_alphanumeric" => V::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphanumeric())),
+        "reverse" => V::Str(s.chars().rev().collect()),
+        "chars" => strs(&mut s.chars().map(|c| c.to_string())),
+        "bytes" => V::Ints(s.bytes().map(|b| b as i64).collect()),
+        "words" => strs(&mut s.split_whitespace().map(str::to_string)),
+        "char_at" => match index {
+            Some(i) if i >= 0 => s
+                .chars()
+                .nth(i as usize)
+                .map_or(V::Null, |c| V::Str(c.to_string())),
+            Some(_) => V::Null,
+            None => return Some(Err("char_at() requires an integer index".to_string())),
+        },
+        "encode_uri" => V::Str(
+            s.chars()
+                .map(|c| match c {
+                    'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+                    _ => format!("%{:02X}", c as u32),
+                })
+                .collect(),
+        ),
+        "decode_uri" => {
+            let mut result = String::new();
+            let mut chars = s.chars();
+            while let Some(c) = chars.next() {
+                if c == '%' {
+                    let hex: String = chars.by_ref().take(2).collect();
+                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        result.push(byte as char);
+                    } else {
+                        result.push('%');
+                        result.push_str(&hex);
+                    }
+                } else if c == '+' {
+                    result.push(' ');
+                } else {
+                    result.push(c);
+                }
+            }
+            V::Str(result)
+        }
+        _ => return None,
+    }))
+}
+
+/// Most elements `range()` materializes. Larger ranges are a catchable
+/// error instead of a capacity-overflow panic or an out-of-memory abort.
+pub const MAX_RANGE_LEN: u64 = 100_000_000;
+
+/// Number of elements of `range(start, end)` (0 when `end <= start`), or
+/// the error both engines report when it exceeds [`MAX_RANGE_LEN`].
+pub fn range_len(start: i64, end: i64) -> Result<usize, String> {
+    let len = (end as i128 - start as i128).max(0) as u128;
+    if len > MAX_RANGE_LEN as u128 {
+        return Err(format!(
+            "range({}, {}) would create {} elements (limit {})",
+            start, end, len, MAX_RANGE_LEN
+        ));
+    }
+    Ok(len as usize)
+}
+
+/// Validate a user-supplied element/iteration count (`sample(xs, n)`,
+/// `slay(f, n)`): negative counts and counts above [`MAX_RANGE_LEN`] are
+/// errors rather than a capacity-overflow panic.
+pub fn checked_count(builtin: &str, n: i64) -> Result<usize, String> {
+    if n < 0 {
+        return Err(format!(
+            "{}() count must be non-negative, got {}",
+            builtin, n
+        ));
+    }
+    if n as u64 > MAX_RANGE_LEN {
+        return Err(format!(
+            "{}() count {} exceeds the limit of {}",
+            builtin, n, MAX_RANGE_LEN
+        ));
+    }
+    Ok(n as usize)
+}
+
+/// Largest string `repeat_str` / `pad_start` / `pad_end` build (1 GiB).
+pub const MAX_REPEAT_BYTES: usize = 1 << 30;
+
+/// Check that repeating a `byte_len`-byte string `n` times stays within
+/// [`MAX_REPEAT_BYTES`] (a huge count used to abort with a capacity
+/// overflow).
+pub fn check_repeat(builtin: &str, byte_len: usize, n: usize) -> Result<(), String> {
+    match byte_len.checked_mul(n) {
+        Some(total) if total <= MAX_REPEAT_BYTES => Ok(()),
+        _ => Err(format!(
+            "{}() result would exceed {} bytes",
+            builtin, MAX_REPEAT_BYTES
+        )),
+    }
+}
+
+/// Seconds as a `Duration` for `wait`/`time.sleep`: negative and NaN mean
+/// zero, values too large for a `Duration` (including infinity) saturate to
+/// "forever" instead of panicking.
+pub fn seconds_f64(secs: f64) -> std::time::Duration {
+    std::time::Duration::try_from_secs_f64(secs.max(0.0)).unwrap_or(std::time::Duration::MAX)
+}
+
+/// `schedule every <n> <unit>` interval in seconds, saturating instead of
+/// overflowing for absurd `n`.
+pub fn schedule_interval_secs(n: u64, unit: &str) -> u64 {
+    match unit {
+        "minutes" => n.saturating_mul(60),
+        "hours" => n.saturating_mul(3600),
+        _ => n, // "seconds" or default
+    }
+}
+
+/// Deadline `secs` seconds after `now` for a `timeout` block. Saturates at
+/// a century, which outlives any program, rather than overflowing
+/// `Instant` (a panic) for absurd durations.
+pub fn timeout_deadline(now: std::time::Instant, secs: u64) -> std::time::Instant {
+    const CENTURY_SECS: u64 = 100 * 365 * 24 * 60 * 60;
+    let capped = std::time::Duration::from_secs(secs.min(CENTURY_SECS));
+    now.checked_add(capped).unwrap_or(now)
+}
+
 pub fn import_missing_name(path: &str, name: &str) -> String {
     format!(
         "import '{}' does not export '{}'\n  hint: only top-level `fn`, `let`, `type` and `struct` definitions can be imported",
@@ -452,6 +631,34 @@ pub fn import_not_found(path: &str) -> String {
 mod tests {
     use super::*;
     use Operand::*;
+
+    #[test]
+    fn range_len_is_bounded() {
+        assert_eq!(range_len(0, 3), Ok(3));
+        assert_eq!(range_len(5, 2), Ok(0));
+        assert_eq!(range_len(-2, 2), Ok(4));
+        assert!(range_len(0, MAX_RANGE_LEN as i64).is_ok());
+        assert!(range_len(0, MAX_RANGE_LEN as i64 + 1).is_err());
+        let e = range_len(i64::MIN, i64::MAX).unwrap_err();
+        assert!(e.contains("limit"), "{e}");
+    }
+
+    #[test]
+    fn durations_saturate_instead_of_panicking() {
+        use std::time::{Duration, Instant};
+        assert_eq!(seconds_f64(1.5), Duration::from_millis(1500));
+        assert_eq!(seconds_f64(-3.0), Duration::ZERO);
+        assert_eq!(seconds_f64(f64::NAN), Duration::ZERO);
+        assert_eq!(seconds_f64(f64::INFINITY), Duration::MAX);
+        assert_eq!(seconds_f64(1e300), Duration::MAX);
+        assert_eq!(schedule_interval_secs(2, "minutes"), 120);
+        assert_eq!(schedule_interval_secs(2, "hours"), 7200);
+        assert_eq!(schedule_interval_secs(u64::MAX, "hours"), u64::MAX);
+        assert_eq!(schedule_interval_secs(7, "seconds"), 7);
+        let now = Instant::now();
+        assert_eq!(timeout_deadline(now, 2), now + Duration::from_secs(2));
+        assert!(timeout_deadline(now, u64::MAX) > now + Duration::from_secs(1 << 30));
+    }
 
     #[test]
     fn between_table() {

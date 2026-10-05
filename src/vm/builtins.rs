@@ -762,12 +762,14 @@ impl VM {
                 args.get(1).and_then(|v| v.as_int(&self.gc)),
             ) {
                 (Some(start), Some(end)) => {
+                    crate::semantics::range_len(start, end).map_err(|e| VMError::new(&e))?;
                     let items: Vec<Value> =
                         (start..end).map(|n| Value::int(n, &mut self.gc)).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
                 (Some(end_val), None) => {
+                    crate::semantics::range_len(0, end_val).map_err(|e| VMError::new(&e))?;
                     let items: Vec<Value> =
                         (0..end_val).map(|n| Value::int(n, &mut self.gc)).collect();
                     let r = self.gc.alloc(ObjKind::Array(items));
@@ -874,20 +876,30 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "is_ok" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultOk(_))));
-                    }
+                // Like the interpreter: only a Result has an answer.
+                match args
+                    .first()
+                    .and_then(|v| v.as_obj())
+                    .and_then(|r| self.gc.get(r))
+                    .map(|obj| &obj.kind)
+                {
+                    Some(ObjKind::ResultOk(_)) => Ok(Value::bool_val(true)),
+                    Some(ObjKind::ResultErr(_)) => Ok(Value::bool_val(false)),
+                    _ => Err(VMError::new("is_ok() requires a Result value")),
                 }
-                Ok(Value::bool_val(false))
             }
             "is_err" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultErr(_))));
-                    }
+                // Like the interpreter: only a Result has an answer.
+                match args
+                    .first()
+                    .and_then(|v| v.as_obj())
+                    .and_then(|r| self.gc.get(r))
+                    .map(|obj| &obj.kind)
+                {
+                    Some(ObjKind::ResultErr(_)) => Ok(Value::bool_val(true)),
+                    Some(ObjKind::ResultOk(_)) => Ok(Value::bool_val(false)),
+                    _ => Err(VMError::new("is_err() requires a Result value")),
                 }
-                Ok(Value::bool_val(false))
             }
             "unwrap" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
@@ -925,7 +937,11 @@ impl VM {
                 }
                 match self.option_parts(&args[0]) {
                     Some(Some(inner)) => Ok(inner),
-                    _ => Ok(args[1].clone()),
+                    Some(None) => Ok(args[1].clone()),
+                    // Like the interpreter: only Result/Option have a default.
+                    None => Err(VMError::new(
+                        "unwrap_or() requires a Result or Option value as first argument",
+                    )),
                 }
             }
             "assert" => {
@@ -1563,9 +1579,7 @@ impl VM {
                     Ok(Value::null())
                 }
                 Some(ValueKind::Float(secs)) => {
-                    self.sleep_with_timeout_checks(std::time::Duration::from_secs_f64(
-                        secs.max(0.0),
-                    ))?;
+                    self.sleep_with_timeout_checks(crate::semantics::seconds_f64(secs))?;
                     Ok(Value::null())
                 }
                 _ => Err(VMError::new("wait() requires a number of seconds")),
@@ -2513,7 +2527,9 @@ impl VM {
                     Some(ValueKind::Int(n)) => (n as usize).min(chars.len()),
                     _ => chars.len(),
                 };
-                if start > chars.len() {
+                // `end` is clamped to the length, so this also covers a
+                // start past the end (and `start > end`, which used to panic).
+                if start >= end {
                     return Ok(self.alloc_string(""));
                 }
                 Ok(self.alloc_string(&chars[start..end].iter().collect::<String>()))
@@ -2613,6 +2629,12 @@ impl VM {
                 if char_count >= target {
                     Ok(self.alloc_string(&s))
                 } else {
+                    crate::semantics::check_repeat(
+                        "pad_start",
+                        pad_char.len_utf8(),
+                        target - char_count,
+                    )
+                    .map_err(|e| VMError::new(&e))?;
                     let padding: String = std::iter::repeat(pad_char)
                         .take(target - char_count)
                         .collect();
@@ -2639,6 +2661,12 @@ impl VM {
                 if char_count >= target {
                     Ok(self.alloc_string(&s))
                 } else {
+                    crate::semantics::check_repeat(
+                        "pad_end",
+                        pad_char.len_utf8(),
+                        target - char_count,
+                    )
+                    .map_err(|e| VMError::new(&e))?;
                     let padding: String = std::iter::repeat(pad_char)
                         .take(target - char_count)
                         .collect();
@@ -2657,6 +2685,8 @@ impl VM {
                     }
                     _ => return Err(VMError::new("repeat_str() second arg must be int")),
                 };
+                crate::semantics::check_repeat("repeat_str", s.len(), n)
+                    .map_err(|e| VMError::new(&e))?;
                 Ok(self.alloc_string(&s.repeat(n)))
             }
             "count" => {
@@ -2739,7 +2769,8 @@ impl VM {
                     "sample() requires an array",
                 )?;
                 let n = match args.get(1).map(|v| v.classify(&self.gc)) {
-                    Some(ValueKind::Int(n)) => n as usize,
+                    Some(ValueKind::Int(n)) => crate::semantics::checked_count("sample", n)
+                        .map_err(|e| VMError::new(&e))?,
                     _ => 1,
                 };
                 if items.is_empty() {
@@ -3014,7 +3045,9 @@ impl VM {
                 }
                 let func = args[0].clone();
                 let n = match args.get(1).map(|v| v.classify(&self.gc)) {
-                    Some(ValueKind::Int(n)) => n as usize,
+                    Some(ValueKind::Int(n)) => {
+                        crate::semantics::checked_count("slay", n).map_err(|e| VMError::new(&e))?
+                    }
                     _ => 100,
                 };
                 let mut times: Vec<f64> = Vec::with_capacity(n);
@@ -3666,6 +3699,26 @@ impl VM {
         .map_err(|e| VMError::new(&e))
     }
 
+    /// Allocate a shared string-method result (`semantics::string_method`).
+    fn from_str_method(&mut self, v: crate::semantics::StrMethodValue) -> Value {
+        use crate::semantics::StrMethodValue as V;
+        match v {
+            V::Str(s) => self.alloc_string(&s),
+            V::Int(n) => Value::int(n, &mut self.gc),
+            V::Bool(b) => Value::bool_val(b),
+            V::Strs(items) => {
+                let values: Vec<Value> = items.iter().map(|s| self.alloc_string(s)).collect();
+                Value::obj(self.gc.alloc(ObjKind::Array(values)))
+            }
+            V::Ints(items) => {
+                let values: Vec<Value> =
+                    items.iter().map(|&n| Value::int(n, &mut self.gc)).collect();
+                Value::obj(self.gc.alloc(ObjKind::Array(values)))
+            }
+            V::Null => Value::null(),
+        }
+    }
+
     fn call_forge_method(
         &mut self,
         receiver: Value,
@@ -3999,6 +4052,24 @@ impl VM {
                     return Ok(Value::obj(nr));
                 }
                 _ => {}
+            }
+        }
+
+        // Built-in string methods, shared with the interpreter.
+        if crate::semantics::STRING_METHODS.contains(&method_name) {
+            if let Some(s) = self.get_string(&receiver) {
+                let index = if method_name == "char_at" {
+                    extra_args.first().and_then(|v| match v.classify(&self.gc) {
+                        ValueKind::Int(i) => Some(i),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                if let Some(result) = crate::semantics::string_method(&s, method_name, index) {
+                    let v = result.map_err(|e| VMError::new(&e))?;
+                    return Ok(self.from_str_method(v));
+                }
             }
         }
 

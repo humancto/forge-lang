@@ -64,11 +64,10 @@ fn schedule_interval_seconds(
 ) -> Result<u64, RuntimeError> {
     let mut eval_interp = interpreter.fork_for_background_runtime();
     match eval_interp.eval_expr(&schedule.interval)? {
-        Value::Int(n) => Ok(match schedule.unit.as_str() {
-            "minutes" => n as u64 * 60,
-            "hours" => n as u64 * 3600,
-            _ => n as u64,
-        }),
+        Value::Int(n) => Ok(crate::semantics::schedule_interval_secs(
+            n as u64,
+            &schedule.unit,
+        )),
         _ => Ok(60),
     }
 }
