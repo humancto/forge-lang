@@ -143,3 +143,9 @@ pub unsafe extern "C" fn forge_execute_source(
         }
     }
 }
+
+/// C-ABI entry points, exercised the way a native launcher calls them. Named
+/// `miri_*` so the Miri CI job (`cargo +nightly miri test --lib -- miri_`)
+/// checks the raw-pointer handling for undefined behaviour.
+#[cfg(test)]
+mod ffi_miri_tests;

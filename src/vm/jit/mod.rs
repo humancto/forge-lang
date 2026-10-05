@@ -79,3 +79,6 @@ pub mod runtime;
 pub mod tier;
 pub mod types;
 pub mod verifier;
+
+#[cfg(test)]
+mod runtime_miri_tests;
