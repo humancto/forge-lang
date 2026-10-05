@@ -817,11 +817,13 @@ impl VM {
                 }
                 _ => Err(VMError::new("float() requires a number or numeric string")),
             },
+            // Like the interpreter: a second argument must be an Int too
+            // (a non-Int one used to be ignored, so `range(1, 2.5)` gave [0]).
             "range" => match (
                 args.first().and_then(|v| v.as_int(&self.gc)),
-                args.get(1).and_then(|v| v.as_int(&self.gc)),
+                args.get(1).map(|v| v.as_int(&self.gc)),
             ) {
-                (Some(start), Some(end)) => {
+                (Some(start), Some(Some(end))) => {
                     self.check_range_len(start, end)?;
                     let items: Vec<Value> =
                         crate::semantics::alloc::int_range(start, end, "range()", |n| {
@@ -942,20 +944,30 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "is_ok" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultOk(_))));
-                    }
+                // Like the interpreter: only a Result has an answer.
+                match args
+                    .first()
+                    .and_then(|v| v.as_obj())
+                    .and_then(|r| self.gc.get(r))
+                    .map(|obj| &obj.kind)
+                {
+                    Some(ObjKind::ResultOk(_)) => Ok(Value::bool_val(true)),
+                    Some(ObjKind::ResultErr(_)) => Ok(Value::bool_val(false)),
+                    _ => Err(VMError::new("is_ok() requires a Result value")),
                 }
-                Ok(Value::bool_val(false))
             }
             "is_err" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultErr(_))));
-                    }
+                // Like the interpreter: only a Result has an answer.
+                match args
+                    .first()
+                    .and_then(|v| v.as_obj())
+                    .and_then(|r| self.gc.get(r))
+                    .map(|obj| &obj.kind)
+                {
+                    Some(ObjKind::ResultErr(_)) => Ok(Value::bool_val(true)),
+                    Some(ObjKind::ResultOk(_)) => Ok(Value::bool_val(false)),
+                    _ => Err(VMError::new("is_err() requires a Result value")),
                 }
-                Ok(Value::bool_val(false))
             }
             "unwrap" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
@@ -993,7 +1005,11 @@ impl VM {
                 }
                 match self.option_parts(&args[0]) {
                     Some(Some(inner)) => Ok(inner),
-                    _ => Ok(args[1].clone()),
+                    Some(None) => Ok(args[1].clone()),
+                    // Like the interpreter: only Result/Option have a default.
+                    None => Err(VMError::new(
+                        "unwrap_or() requires a Result or Option value as first argument",
+                    )),
                 }
             }
             "assert" => {
@@ -1158,68 +1174,8 @@ impl VM {
                 }
                 Err(VMError::new("sum() requires an array"))
             }
-            "min_of" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    let items = if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Array(a) = &obj.kind {
-                            a.clone()
-                        } else {
-                            return Err(VMError::new("min_of() requires an array"));
-                        }
-                    } else {
-                        return Err(VMError::new("null array"));
-                    };
-                    if items.is_empty() {
-                        return Ok(Value::null());
-                    }
-                    let mut min = items[0].clone();
-                    for item in &items[1..] {
-                        let less = match (min.classify(&self.gc), item.classify(&self.gc)) {
-                            (ValueKind::Int(a), ValueKind::Int(b)) => b < a,
-                            (ValueKind::Float(a), ValueKind::Float(b)) => b < a,
-                            (ValueKind::Int(a), ValueKind::Float(b)) => b < (a as f64),
-                            (ValueKind::Float(a), ValueKind::Int(b)) => (b as f64) < a,
-                            _ => false,
-                        };
-                        if less {
-                            min = item.clone();
-                        }
-                    }
-                    return Ok(min);
-                }
-                Err(VMError::new("min_of() requires an array"))
-            }
-            "max_of" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    let items = if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Array(a) = &obj.kind {
-                            a.clone()
-                        } else {
-                            return Err(VMError::new("max_of() requires an array"));
-                        }
-                    } else {
-                        return Err(VMError::new("null array"));
-                    };
-                    if items.is_empty() {
-                        return Ok(Value::null());
-                    }
-                    let mut max = items[0].clone();
-                    for item in &items[1..] {
-                        let greater = match (max.classify(&self.gc), item.classify(&self.gc)) {
-                            (ValueKind::Int(a), ValueKind::Int(b)) => b > a,
-                            (ValueKind::Float(a), ValueKind::Float(b)) => b > a,
-                            (ValueKind::Int(a), ValueKind::Float(b)) => b > (a as f64),
-                            (ValueKind::Float(a), ValueKind::Int(b)) => (b as f64) > a,
-                            _ => false,
-                        };
-                        if greater {
-                            max = item.clone();
-                        }
-                    }
-                    return Ok(max);
-                }
-                Err(VMError::new("max_of() requires an array"))
-            }
+            "min_of" => self.min_max_of(&args, "min_of", true),
+            "max_of" => self.min_max_of(&args, "max_of", false),
             "map" => {
                 // Arity-based overload:
                 //   map()                    → empty Map
@@ -1463,8 +1419,14 @@ impl VM {
                     if let Some(obj) = self.gc.get(r) {
                         match &obj.kind {
                             ObjKind::String(s) => {
-                                let sub = val.display(&self.gc);
-                                return Ok(Value::bool_val(s.contains(&sub)));
+                                if let Some(sub) = self.get_string(val) {
+                                    return Ok(Value::bool_val(s.contains(&sub)));
+                                }
+                            }
+                            ObjKind::Object(map) => {
+                                if let Some(key) = self.get_string(val) {
+                                    return Ok(Value::bool_val(map.contains_key(&key)));
+                                }
                             }
                             ObjKind::Set(items) => {
                                 // Sets use value equality (same as .has()) so that
@@ -1488,9 +1450,9 @@ impl VM {
                             _ => {}
                         }
                     }
-                    Ok(Value::bool_val(false))
+                    Err(VMError::new(crate::semantics::CONTAINS_USAGE))
                 }
-                _ => Err(VMError::new("contains() requires (collection, value)")),
+                _ => Err(VMError::new(crate::semantics::CONTAINS_USAGE)),
             },
             "keys" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
@@ -1631,9 +1593,7 @@ impl VM {
                     Ok(Value::null())
                 }
                 Some(ValueKind::Float(secs)) => {
-                    self.sleep_with_timeout_checks(std::time::Duration::from_secs_f64(
-                        secs.max(0.0),
-                    ))?;
+                    self.sleep_with_timeout_checks(crate::semantics::seconds_f64(secs))?;
                     Ok(Value::null())
                 }
                 _ => Err(VMError::new("wait() requires a number of seconds")),
@@ -2556,7 +2516,9 @@ impl VM {
                     Some(ValueKind::Int(n)) => (n as usize).min(chars.len()),
                     _ => chars.len(),
                 };
-                if start > chars.len() {
+                // `end` is clamped to the length, so this also covers a
+                // start past the end (and `start > end`, which used to panic).
+                if start >= end {
                     return Ok(self.alloc_string(""));
                 }
                 Ok(self.alloc_string(&chars[start..end].iter().collect::<String>()))
@@ -2801,7 +2763,8 @@ impl VM {
                     "sample() requires an array",
                 )?;
                 let n = match args.get(1).map(|v| v.classify(&self.gc)) {
-                    Some(ValueKind::Int(n)) => n as usize,
+                    Some(ValueKind::Int(n)) => crate::semantics::checked_count("sample", n)
+                        .map_err(|e| VMError::new(&e))?,
                     _ => 1,
                 };
                 if items.is_empty() {
@@ -3080,7 +3043,9 @@ impl VM {
                 }
                 let func = args[0].clone();
                 let n = match args.get(1).map(|v| v.classify(&self.gc)) {
-                    Some(ValueKind::Int(n)) => n as usize,
+                    Some(ValueKind::Int(n)) => {
+                        crate::semantics::checked_count("slay", n).map_err(|e| VMError::new(&e))?
+                    }
                     _ => 100,
                 };
                 let mut times: Vec<f64> = crate::semantics::alloc::vec_with_capacity(n, "slay()")
@@ -3725,6 +3690,67 @@ impl VM {
         .map_err(|e| VMError::new(&e))
     }
 
+    /// Allocate a shared string-method result (`semantics::string_method`).
+    /// `min_of` / `max_of`, mirroring the interpreter: a non-empty array;
+    /// Int/Int stays Int, any Float makes the result Float; a non-number
+    /// after the first element is an error.
+    fn min_max_of(&mut self, args: &[Value], name: &str, min: bool) -> Result<Value, VMError> {
+        let items = match args
+            .first()
+            .and_then(|v| v.as_obj())
+            .and_then(|r| self.gc.get(r))
+            .map(|o| &o.kind)
+        {
+            Some(ObjKind::Array(a)) => a.clone(),
+            _ => return Err(VMError::new(&format!("{}() requires an array", name))),
+        };
+        let Some((&first, rest)) = items.split_first() else {
+            return Err(VMError::new(&format!(
+                "{}() requires a non-empty array",
+                name
+            )));
+        };
+        let pick_f = |a: f64, b: f64| if min { a.min(b) } else { a.max(b) };
+        let mut result = first;
+        for item in rest {
+            result = match (result.classify(&self.gc), item.classify(&self.gc)) {
+                (ValueKind::Int(a), ValueKind::Int(b)) => {
+                    Value::int(if min { a.min(b) } else { a.max(b) }, &mut self.gc)
+                }
+                (ValueKind::Float(a), ValueKind::Float(b)) => Value::float(pick_f(a, b)),
+                (ValueKind::Int(a), ValueKind::Float(b)) => Value::float(pick_f(a as f64, b)),
+                (ValueKind::Float(a), ValueKind::Int(b)) => Value::float(pick_f(a, b as f64)),
+                _ => {
+                    return Err(VMError::new(&format!(
+                        "{}() requires array of numbers",
+                        name
+                    )))
+                }
+            };
+        }
+        Ok(result)
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    fn from_str_method(&mut self, v: crate::semantics::StrMethodValue) -> Value {
+        use crate::semantics::StrMethodValue as V;
+        match v {
+            V::Str(s) => self.alloc_string(&s),
+            V::Int(n) => Value::int(n, &mut self.gc),
+            V::Bool(b) => Value::bool_val(b),
+            V::Strs(items) => {
+                let values: Vec<Value> = items.iter().map(|s| self.alloc_string(s)).collect();
+                Value::obj(self.gc.alloc(ObjKind::Array(values)))
+            }
+            V::Ints(items) => {
+                let values: Vec<Value> =
+                    items.iter().map(|&n| Value::int(n, &mut self.gc)).collect();
+                Value::obj(self.gc.alloc(ObjKind::Array(values)))
+            }
+            V::Null => Value::null(),
+        }
+    }
+
     fn call_forge_method(
         &mut self,
         receiver: Value,
@@ -4058,6 +4084,24 @@ impl VM {
                     return Ok(Value::obj(nr));
                 }
                 _ => {}
+            }
+        }
+
+        // Built-in string methods, shared with the interpreter.
+        if crate::semantics::STRING_METHODS.contains(&method_name) {
+            if let Some(s) = self.get_string(&receiver) {
+                let index = if method_name == "char_at" {
+                    extra_args.first().and_then(|v| match v.classify(&self.gc) {
+                        ValueKind::Int(i) => Some(i),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                if let Some(result) = crate::semantics::string_method(&s, method_name, index) {
+                    let v = result.map_err(|e| VMError::new(&e))?;
+                    return Ok(self.from_str_method(v));
+                }
             }
         }
 

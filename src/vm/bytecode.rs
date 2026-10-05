@@ -87,11 +87,24 @@ pub enum OpCode {
     /// A=local register, B=dst: `R(B) = local.pop()` on a mutable local,
     /// in place when the local uniquely owns its array.
     PopLocal,
+    /// A=callee register, B=argument count, C=mode register: set-up of
+    /// `for v in range(..)`. The arguments are in `R(A+1)..=R(A+B)`. When
+    /// `R(A)` is the builtin `range`, `B` is 1 or 2 and every argument is an
+    /// Int, the loop runs as a counting loop: `R(A)` = start, `R(A+1)` = end
+    /// and `R(C)` = true. Otherwise only `R(C)` = false is written and the
+    /// compiler's generic path calls `R(A)` and iterates its result. Both
+    /// paths visit exactly the values `range(..)` would return.
+    ForRangePrep,
+    /// A=counter register, B=loop variable: step of a counting `for` loop
+    /// set up by `ForRangePrep`. If `R(A) < R(A+1)`: `R(B) = R(A)`,
+    /// `R(A) += 1` and the next instruction (the loop-exit jump) is skipped;
+    /// otherwise execution continues with that exit jump.
+    ForRangeNext,
 }
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::PopLocal as u8 + 1 == 67);
+const _: () = assert!(OpCode::ForRangeNext as u8 + 1 == 69);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -165,6 +178,8 @@ impl TryFrom<u8> for OpCode {
             64 => Ok(OpCode::AddLocal),
             65 => Ok(OpCode::PushLocal),
             66 => Ok(OpCode::PopLocal),
+            67 => Ok(OpCode::ForRangePrep),
+            68 => Ok(OpCode::ForRangeNext),
             _ => Err(value),
         }
     }
@@ -265,13 +280,20 @@ impl Chunk {
         self.code.len()
     }
 
-    pub fn patch_jump(&mut self, offset: usize, target: usize) {
+    /// Point the branch at `offset` to `target`. Returns `false` (leaving
+    /// the instruction unchanged) when the distance does not fit the signed
+    /// 16-bit sBx field.
+    #[must_use]
+    pub fn patch_jump(&mut self, offset: usize, target: usize) -> bool {
+        let Some(jump) = branch_offset(offset, target) else {
+            return false;
+        };
         let instruction = self.code[offset];
         let op = instruction >> 24;
         let a = (instruction >> 16) & 0xFF;
-        let jump = target as i16 - offset as i16 - 1;
         let jump_bits = (jump as u16) as u32;
         self.code[offset] = (op << 24) | (a << 16) | jump_bits;
+        true
     }
 }
 
@@ -286,6 +308,12 @@ impl Constant {
             _ => false,
         }
     }
+}
+
+/// The sBx operand for a branch at `from` to `target` (the VM increments ip
+/// before applying it), or `None` when it does not fit in 16 bits.
+pub fn branch_offset(from: usize, target: usize) -> Option<i16> {
+    i16::try_from(target as i64 - from as i64 - 1).ok()
 }
 
 pub fn encode_abc(op: OpCode, a: u8, b: u8, c: u8) -> u32 {
@@ -350,7 +378,9 @@ mod tests {
         assert_eq!(OpCode::try_from(64u8), Ok(OpCode::AddLocal));
         assert_eq!(OpCode::try_from(65u8), Ok(OpCode::PushLocal));
         assert_eq!(OpCode::try_from(66u8), Ok(OpCode::PopLocal));
-        assert_eq!(OpCode::try_from(67u8), Err(67));
+        assert_eq!(OpCode::try_from(67u8), Ok(OpCode::ForRangePrep));
+        assert_eq!(OpCode::try_from(68u8), Ok(OpCode::ForRangeNext));
+        assert_eq!(OpCode::try_from(69u8), Err(69));
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }

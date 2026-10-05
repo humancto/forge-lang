@@ -24,12 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`forge publish --registry <index-clone>`** — builds a deterministic `dist/<name>-<version>.tar.gz`, appends the entry (deps, checksum, URL, signature) and commits it on a `publish/<name>-<version>` branch, ready for a pull request (`--download-url`, `--out-dir`, `--no-commit`). It enforces name rules (lowercase, reserved and look-alike names), immutable versions, `owners.toml` namespace/key ownership and signing-key continuity.
 - **`forge yank <name@version> --registry <index-clone> [--undo]`** — yanked versions are skipped by new resolutions but stay installable from a lockfile, and `forge install` keeps lockfile versions that still match the manifest.
 - **Benchmark regression gate** — `tools/bench.sh` is the single benchmark runner (suites `vm`, `interp`, `startup`, plus `peers` for Python/Node/Lua ports; human table or `--json`). `tools/bench_compare.py` runs it against two binaries in interleaved A/B rounds and compares medians. The new `Performance` workflow builds the PR base and head in release mode on one runner and fails when a benchmark is more than 15% slower, with the table in the job summary. The `perf-regression-ok` label accepts an intended slowdown. `tools/bench_vm.sh` / `bench_interp.sh` are now wrappers. Methodology and current numbers: `docs/BENCHMARKS.md`.
+- **JIT Float tier** — functions over Float (and mixed Int/Float, with the language's promotion rules) now compile: arithmetic, comparisons, equality and truthiness with the VM's exact IEEE semantics (NaN, infinities, signed zero), plus pure builtins `math.sqrt/abs/floor/ceil/round/sin/cos/tan/log/pow/min/max/clamp`, `math.pi/e/inf`, `float()` and `int()`. Int overflow and results the VM would box differently (e.g. `math.floor(1e30)`) still deopt to the VM. `benchmarks/vm/mandelbrot.fg`: 0.55 s → 0.03 s; `spectral_norm`: 0.41 s → 0.18 s (release, whole process).
+- **JIT calls between compiled functions** — a hot function that calls another pure function (through a global or a captured top-level `fn`) compiles to a direct native call of the callee's specialization instead of staying in the VM. Every global or captured binding the code relies on is a guard re-checked at each native entry, so rebinding it sends the next call to the VM.
+- **Benchmarks** — `mandelbrot`, `spectral_norm`, `nbody`, `repeat_loop` and `range_loop` in `benchmarks/vm` (Python/Node/Lua ports in `benchmarks/peers`).
 - **`tools/registry-template/`** — seed for the hosted index repository: README, `config.json`, `owners.toml`, CODEOWNERS placeholder and a CI validator (`scripts/validate_index.py`: format, names, semver, ownership, signatures, append-only history, archive checksums), cross-checked against `forge publish` output in `tests/registry_index.rs`.
 - Outbound HTTP requests (`fetch`, `http.*`, `download`, `crawl`) run in an `http.client.request` span and, when OpenTelemetry export is active, send the W3C `traceparent` of that span, so downstream services join the caller's trace. A `traceparent` header the script sets itself is never replaced (#134)
 - `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` configure head sampling (`always_on`, `always_off`, `traceidratio`, `parentbased_always_on` (default), `parentbased_always_off`, `parentbased_traceidratio`); invalid values fall back to the default with a warning (#135)
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is honored and takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT` (#132)
 - Rust panics are reported as structured `ERROR` events on the `forge.panic` target (payload, location, thread, backtrace when `RUST_BACKTRACE` is set) once Forge's tracing subscriber is installed, inside the current request span; if the active filter drops that target the standard panic message is printed instead (#121)
 - Windows shell support, completed: when no POSIX `sh` is on `PATH`, shell builtins run through `cmd /d /s /c "<command>"` with the command passed verbatim, so quoted arguments survive (`.arg()` escaping mangled them); `which` searches `PATH` in-process and honors `PATHEXT` (`which("npm")` finds `npm.cmd`); `run_command` resolves programs through `PATHEXT`
+- **Bytecode verifier** — `src/vm/verify.rs` checks every deserialized chunk (`forge run app.fgc`, AOT binaries) before it runs: register, constant, prototype and upvalue indices, string name operands, branch targets (back-edges only via `Loop`, which polls cancellation), arity, line tables, terminal instructions and prototype nesting depth. Malformed bytecode is rejected with `invalid bytecode in '<chunk>' at instruction N: ...` instead of misbehaving. Debug builds also verify every chunk the compiler emits.
+- **Fuzzing** — cargo-fuzz targets in `fuzz/` (`parse`, `compile`, `bytecode`, and a grammar-based `differential` target comparing the interpreter and the VM), a nightly `Fuzz` workflow (plus a Miri job for the C-ABI and JIT bridge code), and `tests/fuzz_smoke.rs`, which runs the same targets on stable in every `cargo test` and replays committed crashers from `fuzz/regressions/`.
+- `VM::cancel_flag()` exposes the VM's cooperative cancellation flag to embedders.
 
 ### Changed
 
@@ -45,6 +51,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `which` no longer depends on `/usr/bin/which` being installed
 - `forge run` logs: the default filter now enables the CLI binary's own targets (`forge=info`), so the server's per-request `request` span (`method`, `uri`, `request_id`) and the `forge.server` startup event are no longer filtered out; under `FORGE_LOG_FORMAT=json` the VM-to-interpreter fallback note is a `forge.runtime` JSON event instead of plain text, so stderr stays line-delimited JSON (#119, #120)
 - The debug-build check that rejects a `Value::Stream` in a server's top-level environment now also finds streams captured by closures, and names the binding path (#115)
+- `==` / `!=` are total on both engines: comparing values of different types is `false` instead of an interpreter error, and numbers compare numerically inside collections (`[1] == [1.0]`). `match` literal patterns follow the same rule (`3` matches `3.0`). `Ok(1) == Ok(1)` is now `true` on the VM.
+- A `match` with no matching arm is a runtime error (`non-exhaustive match`) on the VM too (it silently did nothing).
+- `is_ok()` / `is_err()` / `unwrap_or()` on a non-Result value are an error on the VM too.
+- `contains()` on the VM finds object keys (`contains({a: 1}, "a")` was `false`) and rejects unsearchable arguments like the interpreter.
+- Assigning a field on a non-object (`b.a = 1` with `b = false`) is an error on the interpreter too (it was silently ignored).
+- Anonymous functions display as `<lambda>` (and `"<Lambda>"` inside objects) on both engines (the VM printed `<fn <lambda>>` / `"<Function>"`).
+- Function values compare by identity on both engines (`f == f` was `false` on the interpreter).
+- `min_of()` / `max_of()` on the VM reject empty and non-numeric arrays and promote mixed Int/Float to Float, like the interpreter.
+- `out.push(f())` on the VM evaluates the argument before reading `out`, so mutations `f` makes to a captured `out` are kept (they were lost).
+- Built-in string methods (`chars`, `bytes`, `words`, `char_at`, `is_alpha`, `encode_uri`, ...) are shared by both engines; `"ab".chars()` and friends now work on the VM.
+- `range()`, `sample()` and `slay()` counts above 100,000,000, and `repeat_str()` / `pad_start()` / `pad_end()` results above 1 GiB, are runtime errors instead of a crash.
+- **`repeat n times` and `for i in range(..)` no longer allocate the range** on the VM: they compile to a counting loop (falling back to the old path when `range` is not the builtin or the arguments are not Ints) and are JIT-eligible. A function running `repeat 2000000 times` went from 0.29 s to 0.02 s; top-level `repeat`/`range` loops (never JIT-compiled) are 1.5-1.8x faster.
+
+### Fixed
+
+- VM: `range(1, 2.5)` raised no error and returned `[0]`; it now fails with "range() requires integer arguments", like the interpreter.
 
 ### Security
 
@@ -76,6 +98,14 @@ Findings and fixes from the sandbox audit (`docs/SECURITY_AUDIT.md`); every fix 
 - Filesystem operations, imports and `watch` act on the resolved path that passed the permission check, so a concurrent `cd` cannot redirect them (SEC-15).
 - VM: a `timeout` block (and the host's cancel) now stops everything started inside it — `squad` tasks, spawned tasks, blocked `receive`/`await`/`await_all`/`select`/`for x in channel` — and a deadline inside an imported module reports `timeout: ...` instead of `internal control transfer to catch handler` (SEC-02, VM part).
 - Values nested more than 10,000 levels deep (`a = [a]` in a loop) are an error (`value nested too deeply`) in conversions, `json.stringify`/`json.pretty`, display and equality, instead of aborting the process with a native stack overflow (SEC-16).
+
+### Fixed
+
+- Bytecode loading: length prefixes are checked against the remaining input before allocating, prototype nesting is bounded, and trailing bytes are rejected — a crafted `.fgc` can no longer panic, overflow the stack or exhaust memory while loading.
+- The compiler fails cleanly for functions whose jumps exceed the 16-bit branch offset instead of emitting wrong jumps.
+- JIT code memory is freed when a VM is dropped (every VM that tiered a function up leaked its code pages).
+- The parser looped forever on a `prompt` block entry that is not `name: "string"` (found by fuzzing).
+- Panics on extreme inputs: `-(-9223372036854775807 - 1)` on the interpreter, `substring(s, start, end)` with `start > end`, `range()`/`sample()`/`slay()`/`repeat_str()` with huge counts, `wait()`/`time.sleep()` with huge or infinite durations, `timeout` with a huge duration on the VM, and `schedule` intervals that overflow.
 
 ## [0.9.0] - 2026-10-05
 

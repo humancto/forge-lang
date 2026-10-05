@@ -12,8 +12,12 @@
 //! (overflow) and reserved with `try_reserve_exact`, so an impossible
 //! request becomes an ordinary runtime error on both engines.
 //!
-//! This is not a memory limit: a request the allocator grants is still
-//! granted (bounding total memory is a host/resource-limit concern).
+//! Policy caps come first: [`crate::semantics::MAX_RANGE_LEN`] elements and
+//! [`crate::semantics::MAX_REPEAT_BYTES`] bytes (deterministic, the same on
+//! every machine), then the fallible reservation catches anything the
+//! allocator still refuses. This is not a memory limit: a request within
+//! the caps that the allocator grants is still granted (bounding total
+//! memory is a host/resource-limit concern).
 
 /// The error both engines report when a sized allocation cannot be made.
 /// `size` is a user-meaningful count (`"5000000000 elements"`), identical on
@@ -43,6 +47,7 @@ pub fn string_with_capacity(bytes: usize, what: &str) -> Result<String, String> 
 
 /// `s` repeated `n` times (`repeat_str`).
 pub fn repeat_str(s: &str, n: usize, what: &str) -> Result<String, String> {
+    crate::semantics::check_repeat(what.trim_end_matches("()"), s.len(), n)?;
     let bytes = s
         .len()
         .checked_mul(n)
@@ -56,6 +61,7 @@ pub fn repeat_str(s: &str, n: usize, what: &str) -> Result<String, String> {
 
 /// `count` copies of `pad` (`pad_start` / `pad_end`).
 pub fn padding(pad: char, count: usize, what: &str) -> Result<String, String> {
+    crate::semantics::check_repeat(what.trim_end_matches("()"), pad.len_utf8(), count)?;
     let bytes = pad
         .len_utf8()
         .checked_mul(count)
@@ -81,6 +87,7 @@ pub fn int_range<T>(
     what: &str,
     mut f: impl FnMut(i64) -> T,
 ) -> Result<Vec<T>, String> {
+    crate::semantics::range_len(start, end)?;
     let mut out = vec_with_capacity(range_len(start, end), what)?;
     for n in start..end {
         out.push(f(n));
