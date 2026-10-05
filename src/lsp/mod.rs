@@ -9,8 +9,14 @@
 //! [`handle_request`] (or [`handle_notification`]), and write the handler.
 //!
 //! Provides: diagnostics (lex/parse errors + type-checker diagnostics with
-//! codes), completions, hover, go-to-definition, references, document
-//! symbols, whole-document formatting and signature help.
+//! codes), completions, hover with inferred types, scope-aware
+//! go-to-definition / references / rename across imports, quick fixes,
+//! semantic tokens, inlay hints for inferred `let` types, document
+//! symbols, whole-document formatting and signature help. The semantic
+//! features live in [`semantic`]; when a document does not parse, hover,
+//! definition and references fall back to the word-based versions here.
+
+mod semantic;
 
 use crate::parser::ast::Stmt;
 use lsp_server::{Connection, ErrorCode, Message, Notification, ProtocolError, Request, Response};
@@ -37,6 +43,14 @@ fn store_document(uri: &str, text: &str) {
 
 fn get_document(uri: &str) -> Option<String> {
     DOCUMENTS.lock().ok()?.get(uri).cloned()
+}
+
+/// URIs of every open document.
+fn open_document_uris() -> Vec<String> {
+    DOCUMENTS
+        .lock()
+        .map(|docs| docs.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn remove_document(uri: &str) {
@@ -90,7 +104,30 @@ pub(crate) fn server_capabilities() -> ServerCapabilities {
         references_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
-
+        rename_provider: Some(OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        semantic_tokens_provider: Some(
+            lsp_types::SemanticTokensOptions {
+                legend: lsp_types::SemanticTokensLegend {
+                    token_types: semantic::TOKEN_TYPES
+                        .iter()
+                        .map(|t| lsp_types::SemanticTokenType::new(t))
+                        .collect(),
+                    token_modifiers: semantic::TOKEN_MODIFIERS
+                        .iter()
+                        .map(|m| lsp_types::SemanticTokenModifier::new(m))
+                        .collect(),
+                },
+                full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
+                range: None,
+                work_done_progress_options: Default::default(),
+            }
+            .into(),
+        ),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
             retrigger_characters: None,
@@ -116,7 +153,8 @@ fn initialize_result() -> serde_json::Value {
 /// `shutdown` + `exit`, `Ok(false)` when the client went away or sent
 /// `exit` without `shutdown`.
 pub(crate) fn serve(connection: &Connection) -> Result<bool, ProtocolError> {
-    let (id, _params) = connection.initialize_start()?;
+    let (id, params) = connection.initialize_start()?;
+    semantic::set_root(&params);
     connection.initialize_finish(id, initialize_result())?;
 
     for msg in &connection.receiver {
@@ -191,14 +229,46 @@ pub(crate) fn handle_request(req: &Request) -> Response {
             };
             Some(serde_json::json!(completions))
         }
-        request::HoverRequest::METHOD => {
-            position_params(params).map(|(uri, line, ch)| get_hover(uri, line, ch))
+        request::HoverRequest::METHOD => position_params(params).map(|(uri, line, ch)| {
+            semantic::hover(uri, line, ch).unwrap_or_else(|| get_hover(uri, line, ch))
+        }),
+        request::GotoDefinition::METHOD => position_params(params).map(|(uri, line, ch)| {
+            semantic::definition(uri, line, ch).unwrap_or_else(|| get_definition(uri, line, ch))
+        }),
+        request::References::METHOD => position_params(params).map(|(uri, line, ch)| {
+            let include = params
+                .pointer("/context/includeDeclaration")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            semantic::references(uri, line, ch, include)
+                .unwrap_or_else(|| serde_json::json!(get_references(uri, line, ch)))
+        }),
+        request::PrepareRenameRequest::METHOD => {
+            position_params(params).map(|(uri, line, ch)| semantic::prepare_rename(uri, line, ch))
         }
-        request::GotoDefinition::METHOD => {
-            position_params(params).map(|(uri, line, ch)| get_definition(uri, line, ch))
+        request::Rename::METHOD => {
+            let new_name = param_str(params, "/newName");
+            match (position_params(params), new_name) {
+                (Some((uri, line, ch)), Some(new_name)) => {
+                    match semantic::rename(uri, line, ch, new_name) {
+                        Ok(edit) => Some(edit),
+                        Err(message) => {
+                            return Response::new_err(id, ErrorCode::InvalidRequest as i32, message)
+                        }
+                    }
+                }
+                _ => None,
+            }
         }
-        request::References::METHOD => position_params(params)
-            .map(|(uri, line, ch)| serde_json::json!(get_references(uri, line, ch))),
+        request::CodeActionRequest::METHOD => {
+            param_str(params, "/textDocument/uri").map(|uri| semantic::code_actions(uri, params))
+        }
+        request::SemanticTokensFullRequest::METHOD => {
+            param_str(params, "/textDocument/uri").map(semantic::semantic_tokens)
+        }
+        request::InlayHintRequest::METHOD => {
+            param_str(params, "/textDocument/uri").map(|uri| semantic::inlay_hints(uri, params))
+        }
         request::DocumentSymbolRequest::METHOD => param_str(params, "/textDocument/uri")
             .map(|uri| serde_json::json!(get_document_symbols(uri))),
         request::Formatting::METHOD => {
@@ -246,7 +316,7 @@ pub(crate) fn handle_notification(note: &Notification) -> Vec<Notification> {
             store_document(uri, text);
             vec![publish_diagnostics(
                 uri,
-                get_diagnostics_for(text, uri_path(uri)),
+                get_diagnostics_for(text, semantic::uri_to_path(uri)),
             )]
         }
         notification::DidChangeTextDocument::METHOD => {
@@ -266,7 +336,7 @@ pub(crate) fn handle_notification(note: &Notification) -> Vec<Notification> {
             store_document(uri, text);
             vec![publish_diagnostics(
                 uri,
-                get_diagnostics_for(text, uri_path(uri)),
+                get_diagnostics_for(text, semantic::uri_to_path(uri)),
             )]
         }
         notification::DidCloseTextDocument::METHOD => {
@@ -445,11 +515,6 @@ fn get_signature_help(uri: &str, line: usize, character: usize) -> serde_json::V
         "activeSignature": 0,
         "activeParameter": active
     })
-}
-
-/// The file a `file://` URI names.
-fn uri_path(uri: &str) -> Option<std::path::PathBuf> {
-    uri.strip_prefix("file://").map(std::path::PathBuf::from)
 }
 
 fn get_diagnostics(source: &str) -> Vec<serde_json::Value> {
