@@ -75,11 +75,23 @@ pub enum OpCode {
     /// A=parameter register, sBx=offset: jump when the caller passed an
     /// argument for parameter A (skips that parameter's default value).
     JumpIfArg,
+    /// A=local register, B=operand: `local = local + R(B)` for a mutable
+    /// local. Reads and writes the local exactly like `GetLocal` + `Add` +
+    /// `SetLocal`, but appends to a uniquely owned string in place (see
+    /// `GcObject::unique`), making `s = s + x` amortized O(len(x)).
+    AddLocal,
+    /// A=local register, B=value: statement `local.push(R(B))` on a mutable
+    /// local (result discarded). Pushes in place when the local uniquely
+    /// owns its array; otherwise behaves like `__forge_method_mut`.
+    PushLocal,
+    /// A=local register, B=dst: `R(B) = local.pop()` on a mutable local,
+    /// in place when the local uniquely owns its array.
+    PopLocal,
 }
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::JumpIfArg as u8 + 1 == 64);
+const _: () = assert!(OpCode::PopLocal as u8 + 1 == 67);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -150,6 +162,9 @@ impl TryFrom<u8> for OpCode {
             61 => Ok(OpCode::CloseUpvalues),
             62 => Ok(OpCode::IterHas),
             63 => Ok(OpCode::JumpIfArg),
+            64 => Ok(OpCode::AddLocal),
+            65 => Ok(OpCode::PushLocal),
+            66 => Ok(OpCode::PopLocal),
             _ => Err(value),
         }
     }
@@ -332,7 +347,10 @@ mod tests {
         assert_eq!(OpCode::try_from(61u8), Ok(OpCode::CloseUpvalues));
         assert_eq!(OpCode::try_from(62u8), Ok(OpCode::IterHas));
         assert_eq!(OpCode::try_from(63u8), Ok(OpCode::JumpIfArg));
-        assert_eq!(OpCode::try_from(64u8), Err(64));
+        assert_eq!(OpCode::try_from(64u8), Ok(OpCode::AddLocal));
+        assert_eq!(OpCode::try_from(65u8), Ok(OpCode::PushLocal));
+        assert_eq!(OpCode::try_from(66u8), Ok(OpCode::PopLocal));
+        assert_eq!(OpCode::try_from(67u8), Err(67));
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }

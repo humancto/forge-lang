@@ -500,6 +500,14 @@ impl fmt::Debug for Value {
 pub struct GcObject {
     pub kind: ObjKind,
     pub marked: bool,
+    /// Single-owner bit: set only on a string or array that the VM created
+    /// for, and stored into, exactly one local-variable register (by
+    /// `AddLocal` / `PushLocal` / `PopLocal`). While it is set, no other
+    /// register, global, upvalue or heap object refers to the object, so
+    /// those opcodes may update it in place without breaking value
+    /// semantics. Every operation that copies a reference out of a local
+    /// register (`GetLocal`, `Move`, closure capture) clears it first.
+    pub unique: bool,
 }
 
 impl GcObject {
@@ -507,6 +515,7 @@ impl GcObject {
         Self {
             kind,
             marked: false,
+            unique: false,
         }
     }
 

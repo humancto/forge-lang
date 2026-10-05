@@ -1,4 +1,4 @@
-use super::value::GcRef;
+use super::value::{GcRef, Value};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -37,6 +37,13 @@ pub struct CallFrame {
     /// Number of arguments the caller passed (`JumpIfArg` uses it to decide
     /// whether a parameter's default value applies).
     pub argc: usize,
+    /// The arguments this call was entered with (empty for the main and
+    /// module frames). Kept so a hot loop can re-run the whole call in
+    /// native code (`VM::try_jit_loop_restart`) even after the body has
+    /// overwritten its parameters. GC roots.
+    pub entry_args: Vec<Value>,
+    /// Backward jumps taken in this frame (loop hotness for JIT tier-up).
+    pub back_edges: u32,
 }
 
 impl CallFrame {
@@ -50,6 +57,8 @@ impl CallFrame {
             timeouts: Vec::new(),
             open_upvalues: HashMap::new(),
             argc: usize::MAX,
+            entry_args: Vec::new(),
+            back_edges: 0,
         }
     }
 

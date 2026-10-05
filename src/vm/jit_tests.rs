@@ -1120,3 +1120,133 @@ fn vm_error_display_collapses_repeated_frames() {
     assert!(rendered.ends_with("at <main> (line 3, col 5)"));
     assert!(rendered.lines().count() < 10);
 }
+
+// ---------------------------------------------------------------------------
+// Loop tier-up: a hot loop in a function called once restarts the call in
+// native code (`VM::try_jit_loop_restart`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hot_loop_in_function_called_once_runs_natively_under_auto() {
+    let source = r#"
+fn count(n) {
+    let mut i = 0
+    let mut total = 0
+    while i < n {
+        total = total + i
+        i = i + 1
+    }
+    return total
+}
+say count(50000)
+"#;
+    assert_eq!(run_jit_function(source), vec!["1249975000"]);
+    let (_, _, vm) = run_mode(source, JitMode::Auto);
+    assert_eq!(
+        vm.jit.native_runs("count"),
+        1,
+        "a single call with a hot loop must tier up; compiled: {:?}",
+        vm.jit.compiled_function_names()
+    );
+}
+
+#[test]
+fn loop_restart_uses_entry_arguments_after_parameters_change() {
+    // The body overwrites its parameter before the loop gets hot; the native
+    // restart must start from the arguments the call was entered with.
+    let source = r#"
+fn countdown(n) {
+    let mut steps = 0
+    while n > 0 {
+        n = n - 1
+        steps = steps + 1
+    }
+    return steps
+}
+say countdown(20000)
+"#;
+    assert_eq!(run_jit_function(source), vec!["20000"]);
+    let (_, _, vm) = run_mode(source, JitMode::Auto);
+    assert_eq!(vm.jit.native_runs("countdown"), 1);
+}
+
+#[test]
+fn loop_restart_deopt_continues_in_the_vm() {
+    // Overflow promotes to Float in the VM; native code deopts, and the
+    // frame must carry on in the VM with its state intact.
+    let source = r#"
+fn grow(n) {
+    let mut x = 1
+    let mut i = 0
+    while i < n {
+        x = x * 3
+        i = i + 1
+    }
+    return x
+}
+say grow(3000)
+"#;
+    let out = run_jit_function(source);
+    assert_eq!(out.len(), 1);
+}
+
+#[test]
+fn short_loops_do_not_tier_up() {
+    let source = r#"
+fn small(n) {
+    let mut i = 0
+    while i < n {
+        i = i + 1
+    }
+    return i
+}
+say small(10)
+"#;
+    assert_eq!(run_jit_function(source), vec!["10"]);
+    let (_, _, vm) = run_mode(source, JitMode::Auto);
+    assert_eq!(vm.jit.native_runs("small"), 0);
+}
+
+#[test]
+fn hot_loop_with_side_effects_is_not_restarted() {
+    // `say` makes the function impure: the verifier rejects it, so the loop
+    // keeps running in the VM and every line is printed exactly once.
+    let source = r#"
+fn noisy(n) {
+    let mut i = 0
+    while i < n {
+        if i % 500 == 0 {
+            say i
+        }
+        i = i + 1
+    }
+    return i
+}
+say noisy(2000)
+"#;
+    assert_eq!(
+        run_jit_function(source),
+        vec!["0", "500", "1000", "1500", "2000"]
+    );
+}
+
+#[test]
+fn hot_loop_inside_timeout_is_not_restarted() {
+    let source = r#"
+fn count(n) {
+    let mut i = 0
+    while i < n {
+        i = i + 1
+    }
+    return i
+}
+let mut r = 0
+timeout 5 seconds {
+    r = count(5000)
+}
+say r
+"#;
+    assert_eq!(run_jit_function(source), vec!["5000"]);
+    let (_, _, vm) = run_mode(source, JitMode::Auto);
+    assert_eq!(vm.jit.native_runs("count"), 0);
+}

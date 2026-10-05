@@ -6,6 +6,7 @@ pub mod gc;
 pub mod green;
 #[cfg(feature = "jit")]
 pub mod jit;
+mod local_ops; // local-variable access and in-place update opcodes
 pub mod machine;
 pub mod nanbox;
 pub mod profiler;
@@ -48,6 +49,8 @@ mod map_tests;
 mod must_ask_freeze_tests;
 #[cfg(test)]
 mod parity_tests;
+#[cfg(test)]
+mod perf_tests;
 #[cfg(test)]
 mod runtime_safety_tests;
 #[cfg(test)]

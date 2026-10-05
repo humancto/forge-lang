@@ -109,6 +109,21 @@ impl SendableVM {
     }
 }
 
+/// Instructions executed between two polls of `timeout` deadlines. Polling
+/// reads the clock and walks every frame, so it must not run per
+/// instruction; 1024 simple instructions take a few microseconds, far below
+/// the one-second resolution of `timeout` scopes. Cancellation (squads,
+/// HTTP cancel-on-drop) is a single atomic load and is still checked on
+/// every backward jump and call.
+pub(super) const SAFEPOINT_INTERVAL: u32 = 1024;
+
+/// Backward jumps after which a frame's function is offered to the JIT
+/// (see `VM::try_jit_loop_restart`). Low enough that a loop-heavy function
+/// called once still tiers up early, high enough that short loops never
+/// pay for compilation.
+#[cfg(feature = "jit")]
+pub(super) const LOOP_HOT_THRESHOLD: u32 = 1000;
+
 /// Compiler intrinsics: natives the bytecode compiler emits calls to. They
 /// are not user-visible builtins (those live in `crate::builtins_registry`).
 const COMPILER_INTRINSICS: &[&str] = &[
@@ -160,7 +175,15 @@ pub struct VM {
     #[cfg(feature = "jit")]
     pub(crate) jit_bridge_error: Option<VMError>,
     pub profiler: Profiler,
-    skip_timeout_check_once: bool,
+    /// Instructions left before the next safe-point poll of `timeout`
+    /// deadlines (see [`SAFEPOINT_INTERVAL`]). Reading the clock and walking
+    /// every frame's timeout stack on each instruction dominated the cost of
+    /// simple loops, so deadlines are polled every `SAFEPOINT_INTERVAL`
+    /// instructions instead. `PushTimeout` zeroes it so a scope that is
+    /// already expired (`timeout 0 seconds`) fires before its body runs, and
+    /// a fired timeout refills it so the catch path's `PopTimeout` runs
+    /// before the next poll.
+    safepoint_countdown: u32,
     /// Set by the Stream arms of `convert_to_interp_val` / `convert_interp_value`
     /// / `value_to_shared` when a Stream is encountered at the VM↔interpreter
     /// boundary. Callers of those conversions must check this flag after each
@@ -290,7 +313,7 @@ impl VM {
             #[cfg(feature = "jit")]
             jit_bridge_error: None,
             profiler: Profiler::new(false),
-            skip_timeout_check_once: false,
+            safepoint_countdown: 0,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
@@ -316,7 +339,7 @@ impl VM {
             #[cfg(feature = "jit")]
             jit_bridge_error: None,
             profiler: Profiler::new(true),
-            skip_timeout_check_once: false,
+            safepoint_countdown: 0,
             stream_boundary_error: std::cell::Cell::new(false),
             squad_stack: Vec::new(),
             iter_prefetch: Vec::new(),
@@ -382,7 +405,7 @@ impl VM {
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
-        let r = self.gc.alloc_string(s.to_string());
+        let r = self.gc.alloc_str(s);
         Value::obj(r)
     }
 
@@ -393,16 +416,14 @@ impl VM {
         Value::obj(native)
     }
 
+    #[inline]
     fn constant_to_value(&mut self, constant: &Constant) -> Value {
         match constant {
             Constant::Int(n) => Value::int(*n, &mut self.gc),
             Constant::Float(n) => Value::float(*n),
             Constant::Bool(b) => Value::bool_val(*b),
             Constant::Null => Value::null(),
-            Constant::Str(s) => {
-                let r = self.gc.alloc_string(s.clone());
-                Value::obj(r)
-            }
+            Constant::Str(s) => Value::obj(self.gc.alloc_str(s)),
         }
     }
 
@@ -660,7 +681,7 @@ impl VM {
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
         frame.ip = guard.catch_ip;
-        self.skip_timeout_check_once = true;
+        self.safepoint_countdown = SAFEPOINT_INTERVAL;
         Ok(frame_idx)
     }
 
@@ -690,29 +711,32 @@ impl VM {
                 };
                 cached_closure = Some((current_closure, c));
             }
-            let chunk = cached_closure
+            // Borrowed, not cloned: an `Arc` clone/drop pair per instruction
+            // showed up in the dispatch cost. The cache is only refreshed
+            // when the top frame's closure changes.
+            let chunk: &Arc<Chunk> = &cached_closure
                 .as_ref()
                 .expect("BUG: cached_closure is None after need_fetch guard always fills it")
-                .1
-                .clone();
+                .1;
 
             if self.frames[frame_idx].ip >= chunk.code.len() {
                 self.frames.pop();
                 continue;
             }
 
-            if self.skip_timeout_check_once {
-                self.skip_timeout_check_once = false;
-            } else if self.earliest_expired_timeout().is_some() {
-                match self.handle_timeout_expiry() {
-                    Ok(handler_frame_idx) => {
-                        if handler_frame_idx < boundary_frame_idx {
-                            return Err(VMError::unwound_to_handler());
-                        }
-                        continue;
+            // Safe point: poll `timeout` deadlines every SAFEPOINT_INTERVAL
+            // instructions (see `safepoint_countdown`).
+            if self.safepoint_countdown == 0 {
+                self.safepoint_countdown = SAFEPOINT_INTERVAL;
+                if self.earliest_expired_timeout().is_some() {
+                    let handler_frame_idx = self.handle_timeout_expiry()?;
+                    if handler_frame_idx < boundary_frame_idx {
+                        return Err(VMError::unwound_to_handler());
                     }
-                    Err(err) => return Err(err),
+                    continue;
                 }
+            } else {
+                self.safepoint_countdown -= 1;
             }
 
             let frame = &mut self.frames[frame_idx];
@@ -745,7 +769,11 @@ impl VM {
                         self.registers[base + a as usize] = Value::bool_val(false);
                     }
                     OpCode::Move => {
-                        self.registers[base + a as usize] = self.registers[base + b as usize];
+                        let v = self.registers[base + b as usize];
+                        // The source may be a local register: the copy is a
+                        // second reference (see `GcObject::unique`).
+                        self.gc.share(v);
+                        self.registers[base + a as usize] = v;
                     }
                     OpCode::Add => {
                         let left = self.registers[base + b as usize];
@@ -855,38 +883,27 @@ impl VM {
                         }
                     }
                     OpCode::GetLocal => {
-                        let local_slot = b;
-                        let value = if let Some(uv_ref) = self.frames[frame_idx]
-                            .open_upvalues
-                            .get(&local_slot)
-                            .copied()
-                        {
-                            let value = self
-                                .gc
-                                .get(uv_ref)
-                                .and_then(|uv_obj| match &uv_obj.kind {
-                                    ObjKind::Upvalue(uv) => Some(uv.value),
-                                    _ => None,
-                                })
-                                .ok_or_else(|| VMError::new("invalid open upvalue"))?;
-                            self.registers[base + local_slot as usize] = value;
-                            value
-                        } else {
-                            self.registers[base + local_slot as usize]
-                        };
+                        let value = self.read_local(frame_idx, base, b)?;
+                        // Copying a reference out of a local: it is no
+                        // longer uniquely owned (see `GcObject::unique`).
+                        self.gc.share(value);
                         self.registers[base + a as usize] = value;
                     }
                     OpCode::SetLocal => {
                         let val = self.registers[base + b as usize];
-                        self.registers[base + a as usize] = val;
-                        let open_upvalue = self.frames[frame_idx].open_upvalues.get(&a).copied();
-                        if let Some(uv_ref) = open_upvalue {
-                            if let Some(uv_obj) = self.gc.get_mut(uv_ref) {
-                                if let ObjKind::Upvalue(uv) = &mut uv_obj.kind {
-                                    uv.value = val;
-                                }
-                            }
-                        }
+                        self.write_local(frame_idx, base, a, val);
+                    }
+                    OpCode::AddLocal => {
+                        let rhs = self.registers[base + b as usize];
+                        self.add_local(frame_idx, base, a, rhs)?;
+                    }
+                    OpCode::PushLocal => {
+                        let value = self.registers[base + b as usize];
+                        self.push_local(frame_idx, base, a, value)?;
+                    }
+                    OpCode::PopLocal => {
+                        let popped = self.pop_local(frame_idx, base, a)?;
+                        self.registers[base + b as usize] = popped;
                     }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
@@ -913,6 +930,16 @@ impl VM {
                         }
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
+                        frame.back_edges = frame.back_edges.saturating_add(1);
+                        #[cfg(feature = "jit")]
+                        if frame.back_edges == LOOP_HOT_THRESHOLD {
+                            if let Some(value) = self.try_jit_loop_restart(frame_idx, chunk)? {
+                                // Exactly what `Return` does with the value.
+                                self.profiler.exit_function();
+                                self.frames.pop();
+                                return Ok(Some(value));
+                            }
+                        }
                     }
                     OpCode::Call => {
                         // Cooperative cancellation check at function call
@@ -971,6 +998,9 @@ impl VM {
                                         existing
                                     } else {
                                         let val = self.registers[base + *src_reg as usize];
+                                        // The upvalue cell is a second
+                                        // reference to the local's value.
+                                        self.gc.share(val);
                                         let uv_ref = self
                                             .gc
                                             .alloc(ObjKind::Upvalue(ObjUpvalue { value: val }));
@@ -1434,6 +1464,9 @@ impl VM {
                             error_register: a,
                             handler_base,
                         });
+                        // Poll at the next instruction, so an already
+                        // expired scope fires before its body runs.
+                        self.safepoint_countdown = 0;
                     }
                     OpCode::PopTimeout => {
                         self.frames[frame_idx].timeouts.pop();
@@ -1658,6 +1691,7 @@ impl VM {
                 }
                 for frame in &self.frames {
                     roots.push(frame.closure);
+                    roots.extend(frame.entry_args.iter().filter_map(|v| v.as_obj()));
                     for gr in frame.open_upvalues.values() {
                         roots.push(*gr);
                     }
@@ -1705,9 +1739,61 @@ impl VM {
         chunk: &Arc<Chunk>,
         args: &[Value],
     ) -> Result<Option<Value>, VMError> {
+        self.try_jit_native(chunk, args, self.frames.len(), false)
+    }
+
+    /// Loop tier-up ("restart in native code"). Called when the frame at
+    /// `frame_idx` takes its [`LOOP_HOT_THRESHOLD`]th backward jump: if its
+    /// function has (or can now get) a specialization for the arguments the
+    /// frame was entered with, the *whole call* is re-run natively from the
+    /// start and its result is the frame's result.
+    ///
+    /// This is sound for the same reason deoptimization is: the verifier
+    /// only accepts pure functions (they read only their arguments, write
+    /// only their own registers and call only themselves), so the work the
+    /// VM has done in this frame so far has no observable effect and
+    /// repeating it natively is indistinguishable from finishing it in the
+    /// VM. The repeated work is bounded by the threshold. On a guard
+    /// failure, rejection or deopt the frame simply continues in the VM.
+    ///
+    /// True on-stack replacement (entering native code at the loop header
+    /// with the frame's live registers) is a possible follow-up; restarting
+    /// needs no new entry points or state mapping in the JIT.
+    #[cfg(feature = "jit")]
+    fn try_jit_loop_restart(
+        &mut self,
+        frame_idx: usize,
+        chunk: &Arc<Chunk>,
+    ) -> Result<Option<Value>, VMError> {
+        if self.jit.mode == super::jit::tier::JitMode::Off
+            || chunk.name == "<main>"
+            || chunk.name == "<module>"
+        {
+            return Ok(None);
+        }
+        let frame = &self.frames[frame_idx];
+        if frame.entry_args.len() != chunk.arity as usize {
+            return Ok(None);
+        }
+        let args = frame.entry_args.clone();
+        // The native call replaces this frame, so it starts at its depth.
+        self.try_jit_native(chunk, &args, frame_idx, true)
+    }
+
+    /// Shared native-call path. `depth_below` is the number of VM frames
+    /// beneath the call; `force_hot` skips the call-count threshold (the
+    /// caller has its own hotness evidence).
+    #[cfg(feature = "jit")]
+    fn try_jit_native(
+        &mut self,
+        chunk: &Arc<Chunk>,
+        args: &[Value],
+        depth_below: usize,
+        force_hot: bool,
+    ) -> Result<Option<Value>, VMError> {
         use super::jit::tier::{invoke, Invoke};
 
-        let Some(sel) = self.jit.select(chunk, args, &self.gc) else {
+        let Some(sel) = self.jit.select(chunk, args, &self.gc, force_hot) else {
             return Ok(None);
         };
 
@@ -1716,7 +1802,7 @@ impl VM {
         // instructions; native code does not), or the global the code calls
         // itself through no longer names this function.
         let depth_limit = crate::runtime::recursion::max_depth();
-        let guards_ok = self.frames.len() < depth_limit
+        let guards_ok = depth_below < depth_limit
             && self.frames.iter().all(|f| f.timeouts.is_empty())
             && (!sel.needs_self_binding || self.jit_self_binding_matches(chunk));
         if !guards_ok {
@@ -1734,7 +1820,7 @@ impl VM {
             };
             raw.push(encoded);
         }
-        let max_depth = (depth_limit - 1 - self.frames.len()) as i64;
+        let max_depth = (depth_limit - 1 - depth_below) as i64;
         // SAFETY: `sel.entry` was produced by the JIT compiler owned by
         // `self.jit`, which outlives this call; `raw` has exactly the
         // specialization's arity (checked by `select`); `self.cancelled` is
@@ -1863,6 +1949,7 @@ impl VM {
 
                         let mut frame = CallFrame::new(r, new_base, frame_size);
                         frame.argc = args.len();
+                        frame.entry_args = args;
                         self.frames.push(frame);
                         let boundary = self.frames.len() - 1;
                         self.run_until(boundary)
@@ -2521,7 +2608,12 @@ impl VM {
         })
     }
 
-    fn arith_op(&mut self, left: &Value, right: &Value, op: OpCode) -> Result<Value, VMError> {
+    pub(super) fn arith_op(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        op: OpCode,
+    ) -> Result<Value, VMError> {
         use crate::semantics::BinaryOp;
         // Fast path: non-overflowing int arithmetic never needs the shared table.
         if let (ValueKind::Int(a), ValueKind::Int(b)) =

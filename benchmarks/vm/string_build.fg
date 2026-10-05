@@ -1,0 +1,11 @@
+// VM benchmark: build a 200k-char string by repeated concatenation.
+fn build(n) {
+    let mut s = ""
+    let mut i = 0
+    while i < n {
+        s = s + "x"
+        i = i + 1
+    }
+    return s
+}
+println(len(build(200000)))

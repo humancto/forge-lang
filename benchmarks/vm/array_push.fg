@@ -1,0 +1,11 @@
+// VM benchmark: grow an array with push in a loop.
+fn fill(n) {
+    let mut a = []
+    let mut i = 0
+    while i < n {
+        a.push(i)
+        i = i + 1
+    }
+    return a
+}
+println(len(fill(100000)))

@@ -179,17 +179,69 @@ impl Gc {
         }
     }
 
+    /// Like [`Gc::alloc_string`] for a borrowed string: an intern-table hit
+    /// allocates nothing (no `String` is built just to be looked up), which
+    /// keeps `LoadConst` of a string constant allocation-free.
+    pub fn alloc_str(&mut self, s: &str) -> GcRef {
+        if s.len() <= INTERN_MAX_LEN {
+            if let Some(&existing) = self.interned.get(s) {
+                if self.pinning {
+                    self.pinned.push(existing);
+                }
+                return existing;
+            }
+        }
+        self.alloc_string(s.to_string())
+    }
+
+    /// Allocate a string that is *not* interned, marked as uniquely owned
+    /// (see `GcObject::unique`). Used for strings a local variable will be
+    /// extended in place; interned strings are shared and never mutated.
+    pub fn alloc_unique_string(&mut self, s: String) -> GcRef {
+        let r = self.alloc(ObjKind::String(s));
+        self.set_unique(r);
+        r
+    }
+
+    /// Mark `r` as uniquely owned by the local register it is stored in.
+    #[inline]
+    pub fn set_unique(&mut self, r: GcRef) {
+        if let Some(obj) = self.get_mut(r) {
+            obj.unique = true;
+        }
+    }
+
+    /// `v` is being copied out of a local register: if it is a uniquely
+    /// owned object it now has a second reference, so clear the bit.
+    #[inline]
+    pub fn share(&mut self, v: Value) {
+        if let Some(r) = v.as_obj() {
+            if let Some(obj) = self.get_mut(r) {
+                obj.unique = false;
+            }
+        }
+    }
+
+    /// Whether `r` is uniquely owned by the local register holding it.
+    #[inline]
+    pub fn is_unique(&self, r: GcRef) -> bool {
+        self.get(r).is_some_and(|o| o.unique)
+    }
+
     /// Check if GC should run.
+    #[inline]
     pub fn should_collect(&self) -> bool {
         self.alloc_count >= self.next_gc || (self.stress && self.allocs_since_collect > 0)
     }
 
     /// Get an object by ref (immutable).
+    #[inline]
     pub fn get(&self, r: GcRef) -> Option<&GcObject> {
         self.objects.get(r.0).and_then(|o| o.as_ref())
     }
 
     /// Get an object by ref (mutable).
+    #[inline]
     pub fn get_mut(&mut self, r: GcRef) -> Option<&mut GcObject> {
         self.objects.get_mut(r.0).and_then(|o| o.as_mut())
     }
@@ -234,8 +286,14 @@ impl Gc {
                 // Extract string content before destroying, to clean intern table
                 if let Some(obj) = &self.objects[i] {
                     if let ObjKind::String(ref s) = obj.kind {
-                        if s.len() <= INTERN_MAX_LEN {
-                            self.interned.remove(s);
+                        // Only drop the entry if it names *this* object: a
+                        // short string allocated outside the table (e.g. a
+                        // string built in place) must not evict the live
+                        // canonical copy of the same text.
+                        if s.len() <= INTERN_MAX_LEN
+                            && self.interned.get(s.as_str()) == Some(&GcRef(i))
+                        {
+                            self.interned.remove(s.as_str());
                         }
                     }
                 }
