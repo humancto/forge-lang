@@ -729,15 +729,11 @@ impl VM {
             if self.safepoint_countdown == 0 {
                 self.safepoint_countdown = SAFEPOINT_INTERVAL;
                 if self.earliest_expired_timeout().is_some() {
-                    match self.handle_timeout_expiry() {
-                        Ok(handler_frame_idx) => {
-                            if handler_frame_idx < boundary_frame_idx {
-                                return Err(VMError::unwound_to_handler());
-                            }
-                            continue;
-                        }
-                        Err(err) => return Err(err),
+                    let handler_frame_idx = self.handle_timeout_expiry()?;
+                    if handler_frame_idx < boundary_frame_idx {
+                        return Err(VMError::unwound_to_handler());
                     }
+                    continue;
                 }
             } else {
                 self.safepoint_countdown -= 1;
