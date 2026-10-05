@@ -41,8 +41,10 @@
 //! * No memory limit yet; call depth is bounded by the engine's recursion
 //!   limit.
 //! * stderr output (`log`, `term`, warnings) is not captured.
-//! * stdin is the host's: `input()`/`io.prompt` read from it. Hosts that
-//!   use stdin for something else (like `forge mcp`) must redirect it.
+//! * The host's stdin is only readable with the `process` capability
+//!   (denied by default): without it `input()` / `io.prompt` see an empty
+//!   stream, so a script can never consume a host's stdin (e.g. the
+//!   `forge mcp` protocol stream) on any platform.
 
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
@@ -494,6 +496,16 @@ mod tests {
             )
             .expect("granted");
         assert_eq!(out.stdout, "1\ndb ok\n");
+    }
+
+    #[test]
+    fn host_stdin_is_not_readable_without_process() {
+        // Must return immediately (empty stream), never block on or consume
+        // the host's stdin; the prompt is not printed either.
+        let out = Sandbox::new()
+            .run_source("let a = io.prompt(\"name? \")\nlet b = input()\nsay \"[\" + a + b + \"]\"")
+            .expect("stdin reads are not errors");
+        assert_eq!(out.stdout, "[]\n");
     }
 
     #[test]

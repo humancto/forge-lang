@@ -59,8 +59,11 @@ pub enum Capability {
     Run,
     /// LLM calls (`ask`).
     Ai,
-    /// Mutate host-process state: `exit()` and `cd()`. Always granted by the
-    /// CLI; denied by default for embedders so a script cannot kill the host.
+    /// Host-process state: `exit()`, `cd()`, and reading the host's stdin
+    /// (`input()`, `io.prompt`). Always granted by the CLI; denied by default
+    /// for embedders so a script cannot kill the host or consume its stdin
+    /// (which `forge mcp` uses for the protocol). Without it, stdin reads
+    /// behave like an empty stream and no prompt is printed.
     Process,
 }
 
@@ -681,6 +684,12 @@ where
 
 /// The one central check against the active policy. See
 /// [`Capabilities::check`] for how `detail` is interpreted.
+/// Whether the running script may read the host's stdin (see
+/// [`Capability::Process`]). Denied reads behave like an empty stream.
+pub fn host_stdin_allowed() -> bool {
+    current().check(Capability::Process, "stdin").is_ok()
+}
+
 pub fn require(cap: Capability, detail: &str) -> Result<(), PermissionError> {
     current().check(cap, detail)
 }
