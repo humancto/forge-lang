@@ -1818,6 +1818,8 @@ impl Interpreter {
                         return Err(RuntimeError::new(&crate::semantics::import_not_found(path)));
                     }
                 };
+                crate::permissions::require_import(&file_path)
+                    .map_err(|e| RuntimeError::new(&e.to_string()))?;
                 let source = std::fs::read_to_string(&file_path)
                     .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
                 let mut lexer = crate::lexer::Lexer::new(&source);
@@ -2058,7 +2060,7 @@ impl Interpreter {
                 timeout_interp.env = self.env.clone();
                 timeout_interp.cancelled = cancel_flag.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
-                let handle = std::thread::spawn(move || {
+                let handle = crate::permissions::spawn(move || {
                     let result = timeout_interp.exec_block(&body);
                     let _ = tx.send(result);
                 });
@@ -3453,6 +3455,8 @@ impl Interpreter {
             }
 
             Expr::Ask(prompt_expr) => {
+                crate::permissions::require(crate::permissions::Capability::Ai, "ask")
+                    .map_err(|e| RuntimeError::new(&e.to_string()))?;
                 let prompt = self.eval_expr(prompt_expr)?;
                 let prompt_str = format!("{}", prompt);
                 let api_key = std::env::var("FORGE_AI_KEY")
@@ -4567,7 +4571,7 @@ impl Interpreter {
         spawn_interp.cancelled = self.cancelled.clone();
 
         // Always use std::thread — simpler, avoids tokio dependency issues
-        std::thread::spawn(move || {
+        crate::permissions::spawn(move || {
             let result = spawn_interp.exec_block(&body);
             let val = match result {
                 Ok(Signal::Return(v)) | Ok(Signal::ImplicitReturn(v)) => {

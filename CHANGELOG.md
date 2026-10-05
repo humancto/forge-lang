@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Capability-based permissions** — one policy, checked identically by the VM and the interpreter, covering `fs.read`, `fs.write` (path-scoped; `..` and symlink escapes denied), `net` (host allowlist, redirects re-checked, server listen gated), `env`, `db`, `run`, `ai` and `process` (`exit`/`cd`). Denials read `permission denied: <cap> (<detail>) — run with --allow-<cap> or grant it in the host policy`. Defaults for `forge run`, `-e` and the REPL are unchanged.
+- **`--sandbox` and Deno-style `--allow-read[=paths]`, `--allow-write[=paths]`, `--allow-net[=hosts]`, `--allow-env`, `--allow-db`, `--allow-ai`** — usable before or after the subcommand; `forge run --allow-run` now works too. The same policy can be set in `forge.toml` under `[permissions]` (a malformed table is an error, not ignored).
+- **`--max-time <secs>`** — wall-clock limit for any program on any engine; exits with code 124.
+- **Embedding API: `forge_lang::Sandbox`** — run untrusted Forge source from a Rust host under a default-deny policy with scoped grants, a wall-clock limit and captured stdout; returns `Output` or a typed `SandboxError`. Policies are per worker thread and inherited by every thread the engines fork, so concurrent sandboxes are independent.
+
 - **Interpreter/VM differential test** — `cargo test --test engine_diff` runs all examples, parity fixtures and `tests/*.fg` suites on both engines and fails on any new output divergence; known gaps are tracked in `tests/engine_diff_known.txt`.
 - **VS Code extension: language server and debugger** — `editors/vscode` now starts `forge lsp` via `vscode-languageclient` and contributes a `forge` debug type backed by `forge dap` (F5 on a `.fg` file works without `launch.json`). New settings `forge.path`, `forge.lsp.enabled`, `forge.trace.server` and a **Forge: Restart Language Server** command. The extension is plain JavaScript (no build step) and is ready to publish (`npm run package` produces a `.vsix`; icon, license and extension changelog included).
 - **LSP formatting and signature help** — `forge lsp` now advertises `textDocument/formatting` (whole-document, via the `forge fmt` formatter) and `textDocument/signatureHelp` (builtins and user-defined functions, with active-parameter tracking).
@@ -87,6 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Shell-permission error text** — denied `sh`/`shell`/`run_command`/... now report `permission denied: run (shell execution) — run with --allow-run or grant it in the host policy` (was `Shell execution denied. Use --allow-run ...`).
+- **`FORGE_FS_BASE` covers more file access** — `csv.read`/`csv.write`, `toml.read`, `env.load`, SQLite `db.open` files and `http.download` destinations are now confined like `fs.*`.
+- **Documentation refreshed for v0.8.x and `llms.txt` added** — README, CLAUDE.md, ROADMAP.md (new Phase 0 hardening section), SECURITY.md (0.8.x support, `--allow-run`, SSRF guard, `FORGE_FS_BASE`) and the book's CLI sections now match current behavior: VM is the default engine, engine flags go before the subcommand, native builds are standalone when `libforge_lang.a` is available, and performance numbers are re-measured. New `llms.txt` is a compact, verified guide to canonical Forge for AI models.
 - **Public library surface expanded** — `forge_lang::interpreter`, `forge_lang::lexer`, `forge_lang::parser`, and `forge_lang::runtime` are now `pub` (previously private modules behind the C ABI entry point). Embedders can now drive the language end-to-end from Rust. Required by the new `tests/server_concurrency.rs` integration test; also matches the AOT-binary embedding story.
 - **New direct dependency: `parking_lot = "0.12"`** — used by the WS handler for per-connection state (no poisoning, no Send-across-await hazard with the way the lock is held). Already a transitive dep via `tokio-postgres`, now promoted to direct.
 

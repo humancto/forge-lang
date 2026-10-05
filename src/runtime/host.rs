@@ -30,7 +30,7 @@ pub(crate) fn spawn_schedule(
     let secs = schedule_interval_seconds(interpreter, schedule)?;
     let body = schedule.body.clone();
     let mut sched_interp = interpreter.fork_for_background_runtime();
-    std::thread::spawn(move || loop {
+    crate::permissions::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(secs));
         let _ = sched_interp.exec_background_block(&body);
     });
@@ -44,7 +44,7 @@ pub(crate) fn spawn_watch(
     let path = watch_path(interpreter, watch)?;
     let body = watch.body.clone();
     let mut watch_interp = interpreter.fork_for_background_runtime();
-    std::thread::spawn(move || {
+    crate::permissions::spawn(move || {
         let mut last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));

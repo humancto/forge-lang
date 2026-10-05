@@ -58,6 +58,7 @@ fn mysql_transactions() -> &'static tokio::sync::Mutex<HashMap<String, ActiveMys
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
+    crate::permissions::require(crate::permissions::Capability::Db, name)?;
     match name {
         "mysql.connect" => mysql_connect(args),
         "mysql.query" => mysql_query(args),

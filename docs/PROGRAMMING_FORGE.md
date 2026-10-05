@@ -11425,7 +11425,7 @@ The data structures for genuine cooperative scheduling are in place—thread sta
 The bytecode VM is the default engine as of v0.7.0. To explicitly use the interpreter instead:
 
 ```bash
-forge run program.fg --interp
+forge --interp run program.fg
 ```
 
 To compile a program to bytecode and view compilation statistics:
@@ -11450,9 +11450,9 @@ To compile to a standalone native binary using AOT compilation:
 forge build program.fg --aot
 ```
 
-This embeds the compiled bytecode into a native C launcher, producing a self-contained binary that requires no Forge runtime at execution time.
+This embeds the compiled bytecode into a native executable. When `libforge_lang.a` is available (set `FORGE_LIB_DIR`, or place it next to the `forge` binary), the result is standalone and needs no Forge install at run time; otherwise Forge builds a small launcher that runs the bytecode through an installed `forge`. `--aot` is VM-only, so decorator-driven servers must use `forge build --native` instead.
 
-The VM supports the vast majority of Forge features including variables, functions, closures, control flow, data structures, error handling, async/await, concurrency, and all standard library modules. Features that require the interpreter (HTTP server decorators, certain advanced features) are auto-detected at startup, and Forge falls back to the interpreter automatically.
+The VM supports most Forge features, including variables, functions, closures, control flow, data structures, error handling, async/await, and concurrency. A few builtins and stdlib modules are still interpreter-only (VM parity is tracked in ROADMAP.md); use `--interp` if a program behaves differently on the VM. Features that require the interpreter (HTTP server decorators, certain advanced features) are auto-detected at startup, and Forge falls back to the interpreter automatically.
 
 ---
 
@@ -11619,7 +11619,7 @@ This runs the lexer, parser, and bytecode compiler, then reports statistics abou
 forge build program.fg --aot
 ```
 
-AOT compilation embeds the compiled bytecode into a native C launcher binary. The resulting executable is a standalone binary that writes the embedded bytecode to a temporary `.fgc` file and invokes the Forge runtime. Unlike `--native` (which embeds raw source), `--aot` provides no source exposure and faster startup since the bytecode is pre-compiled. The `--aot` and `--native` flags are mutually exclusive.
+AOT compilation embeds the compiled bytecode into a native executable. When `libforge_lang.a` is available (via `FORGE_LIB_DIR` or next to the `forge` binary), the executable links the Forge runtime statically and runs standalone; otherwise Forge falls back to a launcher that writes the bytecode to a temporary `.fgc` file and invokes an installed `forge`. Unlike `--native` (which embeds raw source), `--aot` provides no source exposure and faster startup since the bytecode is pre-compiled. The `--aot` and `--native` flags are mutually exclusive.
 
 ### forge install: Package Management
 
@@ -12022,6 +12022,9 @@ forge [OPTIONS] [COMMAND]
 | ------------------- | ---------------------------------------------------------- |
 | `-e, --eval <CODE>` | Evaluate a Forge expression inline                         |
 | `--interp`          | Use the tree-walking interpreter instead of the default VM |
+| `--jit`             | JIT-compile numeric functions on top of the VM             |
+| `--allow-run`       | Allow shell builtins (`sh`, `run_command`, ...) under `forge run` |
+| `--vm`              | Accepted for compatibility; no effect (the VM is the default) |
 | `-h, --help`        | Print help information                                     |
 | `-V, --version`     | Print version number                                       |
 
@@ -12033,7 +12036,7 @@ Run a Forge source file.
 
 ```bash
 forge run main.fg
-forge run main.fg --interp    # Use interpreter instead of VM
+forge --interp run main.fg    # Use interpreter instead of VM (engine flags go before the subcommand)
 ```
 
 | Argument | Description                 |

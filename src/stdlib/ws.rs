@@ -52,6 +52,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Some(Value::String(s)) => s.clone(),
                 _ => return Err("ws.connect() requires a URL string".to_string()),
             };
+            crate::permissions::require_net(&url)?;
             ws_connect(&url)
         }
         "ws.send" => {
