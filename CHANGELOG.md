@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Python package `forge-lang`** (`bindings/python`, PyO3 + maturin, abi3 wheels for CPython 3.9+ on Linux/macOS/Windows) — `forge_lang.Sandbox(allow=..., allow_read=..., allow_write=..., allow_net=..., max_time=..., max_output=...)` runs untrusted Forge code in-process under the deny-by-default sandbox. `run()` releases the GIL, is safe to call from many threads, honours Ctrl-C and a `CancelToken`, and raises typed exceptions (`ForgeSyntaxError`, `ForgePermissionError`, `ForgeRuntimeError`, `ForgeTimeoutError`, `ForgeOutputLimitError`, `ForgeCancelledError`, all `ForgeError`) carrying `kind`, `stdout`, `line`/`column` and `limit`; `check()` returns the same diagnostics as `forge mcp`'s `check_forge`. Ships type stubs and `py.typed`. A new `Python` workflow builds wheels and an sdist, runs pytest on Linux, and publishes to PyPI on `py-v*` tags via trusted publishing once enabled. A Node.js (napi-rs) design is in `bindings/node/README.md`.
 
+### Security
+
+Findings and fixes from the sandbox audit (`docs/SECURITY_AUDIT.md`); every fix has a regression test in `tests/security/` (`cargo test --test security`).
+
+- SQLite can no longer open files outside the filesystem grant: under a restricted `fs` policy `ATTACH DATABASE`, `VACUUM INTO` and `file:` URI names are refused, and `db.open` files need both `fs.read` and `fs.write` (SEC-01).
+- A sandbox's deadline and cancel now reach everything the script started: `squad` bodies and tasks, `timeout` bodies, imported modules, blocking waits (`receive`, iterating a channel, `await`, `await_all`, `select`, `time.sleep`) and loops with an empty body (`while true { }`). Imported modules and tasks can no longer start `schedule`/`watch` threads inside a sandbox (SEC-02).
+- `pg.connect` and `mysql.connect` require `net` for every server they connect to, not just `db` (SEC-03).
+- Script-sized allocations (`repeat_str`, `range`, `pad_start`/`pad_end`, `sample`, `slay`, `crypto.random_bytes`) are fallible: an impossible size is a runtime error instead of aborting the host process; a negative pad length pads nothing; `time.sleep` with an out-of-range duration is an error instead of a panic (SEC-04).
+- Under a restricted policy, `env.set`/`env.load` cannot change Forge's own configuration (the `FORGE_*` variables the runtime reads, `OPENAI_API_KEY`, `OTEL_*`, HTTP proxy variables, `RUST_LOG`), closing net-allowlist and SSRF-guard bypasses; invalid variable names are errors instead of panics (SEC-05, SEC-12).
+- `env.load` loads exactly the checked file instead of searching parent directories outside the grant (SEC-06).
+- `term.confirm`/`term.menu` and `io.args*` need the `process` capability, like `input()`: embedded scripts can no longer read the host's stdin or command line (SEC-07, SEC-13).
+- `which()` requires `--allow-run` (it spawns a subprocess) (SEC-08).
+- `watch`, `path.resolve` and `path.relative` require `fs.read` for the path (SEC-09).
+- `ws.connect` applies the HTTP client's private-address (SSRF) guard (SEC-10).
+- MySQL and WebSocket handles are unguessable, so one sandbox cannot use another's connection in the same host process (SEC-11).
+- `Sandbox::max_output` is enforced on every write instead of by polling (SEC-14).
+- Filesystem operations, imports and `watch` act on the resolved path that passed the permission check, so a concurrent `cd` cannot redirect them (SEC-15).
+
 ## [0.9.0] - 2026-10-05
 
 Highlights: the default VM is now trustworthy (a guarded, verified JIT tier; GC rooting; full VM/interpreter parity on the test suite), much faster (VM and interpreter performance passes), and Forge gains a capability-based sandbox (`--sandbox`, `--allow-*`, `--max-time`, `forge_lang::Sandbox`) plus `forge mcp`, an MCP server that lets AI agents run sandboxed Forge code.
