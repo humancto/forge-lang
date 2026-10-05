@@ -67,6 +67,12 @@ pub fn format_source(source: &str) -> String {
     crate::formatter::format_source(source)
 }
 
+/// The stable runtime error code (`E0000`–) for a runtime error message,
+/// the same classification `forge run --error-format json` reports.
+pub fn runtime_error_code(message: &str) -> &'static str {
+    crate::semantics::errors::classify(message).code
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +98,12 @@ mod tests {
         assert!(first.code.as_deref().is_some_and(|c| c.starts_with('T')));
         assert_eq!(first.line, 2);
         assert!(first.end_column >= first.column);
+    }
+
+    #[test]
+    fn runtime_errors_are_classified() {
+        let code = runtime_error_code("division by zero");
+        assert!(code.starts_with('E') && code.len() == 5, "{code}");
     }
 
     #[test]
