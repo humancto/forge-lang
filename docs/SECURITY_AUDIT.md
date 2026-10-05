@@ -120,6 +120,7 @@ Severity is for the worst affected host (usually `forge mcp` or an embedder).
 | SEC-21 | Info | No issue | MCP JSON-RPC handling |
 | SEC-22 | Info | No issue | Parser, lexer and data-format nesting |
 | SEC-23 | Info | Accepted | Pre-existing hard links inside a grant |
+| SEC-24 | Medium | Fixed | Tasks a script spawns and never awaits outlive a successful run |
 
 ### SEC-01 SQLite reaches any file under `db` alone (High, fixed)
 
@@ -388,6 +389,18 @@ size limits.
 A hard link inside a granted directory to a file outside it is
 indistinguishable from a regular file. No builtin creates links; hosts
 must not grant directories containing links they do not want followed.
+
+### SEC-24 Unawaited tasks outlive a successful run (Medium, fixed)
+
+Found while adding MCP sessions and Forge-authored tools (after this
+audit). SEC-02 made every task inherit the run's cancellation token, but
+the token was only set on a timeout or host cancel. A script that ended
+normally, such as `spawn { while true { } }`, returned at once and left its
+task running in the host, so every `run_forge` call could leave one more
+spinning thread behind. **Fix** (`src/sandbox.rs`): the one runner every
+sandboxed execution goes through (`Sandbox::run_interpreter`, also used by
+MCP sessions and tool calls) sets the run's token when the job returns,
+however it returns. Test: `unawaited_tasks_stop_when_the_run_ends`.
 
 ## 5. Coordination notes
 

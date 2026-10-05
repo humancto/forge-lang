@@ -46,7 +46,7 @@
 //!   stream, so a script can never consume a host's stdin (e.g. the
 //!   `forge mcp` protocol stream) on any platform.
 
-use crate::interpreter::Interpreter;
+use crate::interpreter::{Interpreter, RuntimeError};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::permissions::{self, Capabilities, Capability};
@@ -289,59 +289,80 @@ impl Sandbox {
         source: &str,
         cancel: &CancelHandle,
     ) -> Result<Output, SandboxError> {
-        let tokens = Lexer::new(source)
-            .tokenize()
-            .map_err(|e| SandboxError::Syntax {
-                message: e.to_string(),
-            })?;
-        let program = Parser::new(tokens)
-            .parse_program()
-            .map_err(|e| SandboxError::Syntax {
-                message: e.to_string(),
-            })?;
+        let program = parse_source(source)?;
+        let mut interp = Interpreter::new();
+        interp.source = Some(source.to_string());
+        interp.source_file = Some(self.source_label.clone().into());
+        self.run_interpreter(interp, cancel, move |interp| {
+            interp.run(&program).map(|_| ())
+        })
+        .result
+        .map(|((), stdout)| Output { stdout })
+    }
 
+    /// Run `job` on `interp` under this sandbox: on a fresh worker thread,
+    /// under the policy, with captured and budgeted output, the wall-clock
+    /// limit, the host's `cancel` handle and no host runtime (`schedule`,
+    /// `watch`, servers).
+    ///
+    /// This is the one place that applies a sandbox's containment, so every
+    /// way of running untrusted code (a whole program, a call into a loaded
+    /// program, one step of a persistent session) gets the same guarantees.
+    /// When the job ends, however it ends, its cancellation token is set,
+    /// so tasks the code `spawn`ed and never awaited stop instead of
+    /// outliving the run.
+    ///
+    /// `interp` may carry state from earlier runs (it is handed back in
+    /// [`InterpreterRun::interp`]); its cancellation token, output capture
+    /// and budget are replaced for this run.
+    pub(crate) fn run_interpreter<T: Send + 'static>(
+        &self,
+        mut interp: Interpreter,
+        cancel: &CancelHandle,
+        job: impl FnOnce(&mut Interpreter) -> Result<T, RuntimeError> + Send + 'static,
+    ) -> InterpreterRun<T> {
         let sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let host_cancel = cancel;
         if host_cancel.is_cancelled() {
-            return Err(SandboxError::Cancelled {
-                stdout: String::new(),
-            });
+            return InterpreterRun {
+                result: Err(SandboxError::Cancelled {
+                    stdout: String::new(),
+                }),
+                interp: Some(interp),
+            };
         }
         // The flag the interpreter polls. Separate from the host's handle,
         // so a timeout or output-limit stop is not reported as a cancel.
         let cancel = Arc::new(AtomicBool::new(false));
         let caps = Arc::new(self.caps.clone());
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<(Result<T, RuntimeError>, Interpreter)>();
 
-        let worker_sink = sink.clone();
-        let worker_cancel = cancel.clone();
-        let label = self.source_label.clone();
-        let source = source.to_string();
-        let budget = self
+        interp.output_sink = Some(sink.clone());
+        interp.output_budget = self
             .max_output
             .map(|limit| (Arc::new(std::sync::atomic::AtomicUsize::new(0)), limit));
+        interp.cancelled = cancel.clone();
+        interp.set_defer_host_runtime(true);
         let spawned = std::thread::Builder::new()
             .name("forge-sandbox".to_string())
             .stack_size(WORKER_STACK_SIZE)
             .spawn(move || {
                 crate::runtime::recursion::register_thread_stack(WORKER_STACK_SIZE);
                 let _policy = permissions::scope(caps);
-                let mut interp = Interpreter::new();
-                interp.source = Some(source);
-                interp.source_file = Some(label.into());
-                interp.output_sink = Some(worker_sink);
-                interp.output_budget = budget;
-                interp.cancelled = worker_cancel;
-                interp.set_defer_host_runtime(true);
-                let result = interp.run(&program).map(|_| ());
-                let _ = tx.send(result.map_err(|e| (e.message, e.line)));
+                let result = job(&mut interp);
+                // The run is over: stop anything it started and left running.
+                interp.cancelled.store(true, Ordering::Release);
+                let _ = tx.send((result, interp));
             });
         if let Err(e) = spawned {
-            return Err(SandboxError::Runtime {
-                message: format!("failed to start sandbox thread: {}", e),
-                line: 0,
-                stdout: String::new(),
-            });
+            return InterpreterRun {
+                result: Err(SandboxError::Runtime {
+                    message: format!("failed to start sandbox thread: {}", e),
+                    line: 0,
+                    stdout: String::new(),
+                }),
+                interp: None,
+            };
         }
 
         let collect = |sink: &Arc<Mutex<Vec<String>>>| -> String {
@@ -356,10 +377,11 @@ impl Sandbox {
                 .unwrap_or_else(|e| count(&e.into_inner()))
         };
         // Stop the worker cooperatively and give it a moment to unwind;
-        // either way the host gets control back now.
-        let stop = |cancel: &AtomicBool| {
+        // either way the host gets control back now. The interpreter comes
+        // back only if the worker stopped within the grace period.
+        let stop = |cancel: &AtomicBool| -> Option<Interpreter> {
             cancel.store(true, Ordering::Release);
-            let _ = rx.recv_timeout(CANCEL_GRACE);
+            rx.recv_timeout(CANCEL_GRACE).ok().map(|(_, interp)| interp)
         };
 
         let deadline = self.max_time.map(|limit| (limit, Instant::now() + limit));
@@ -370,60 +392,100 @@ impl Sandbox {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
             if host_cancel.is_cancelled() {
-                stop(&cancel);
-                return Err(SandboxError::Cancelled {
-                    stdout: collect(&sink),
-                });
+                let interp = stop(&cancel);
+                return InterpreterRun {
+                    result: Err(SandboxError::Cancelled {
+                        stdout: collect(&sink),
+                    }),
+                    interp,
+                };
             }
             if let Some((limit, at)) = deadline {
                 if Instant::now() >= at {
-                    stop(&cancel);
-                    return Err(SandboxError::Timeout {
-                        limit,
-                        stdout: collect(&sink),
-                    });
+                    let interp = stop(&cancel);
+                    return InterpreterRun {
+                        result: Err(SandboxError::Timeout {
+                            limit,
+                            stdout: collect(&sink),
+                        }),
+                        interp,
+                    };
                 }
             }
             if let Some(limit) = self.max_output {
                 if printed(&sink) > limit {
-                    stop(&cancel);
-                    return Err(SandboxError::OutputLimit {
-                        limit,
-                        stdout: truncate_utf8(collect(&sink), limit),
-                    });
+                    let interp = stop(&cancel);
+                    return InterpreterRun {
+                        result: Err(SandboxError::OutputLimit {
+                            limit,
+                            stdout: truncate_utf8(collect(&sink), limit),
+                        }),
+                        interp,
+                    };
                 }
             }
         };
+        let (outcome, interp) = match outcome {
+            Some((result, interp)) => (Some(result), Some(interp)),
+            None => (None, None),
+        };
         let stdout = collect(&sink);
-        if let Some(limit) = self.max_output {
-            if stdout.len() > limit {
-                return Err(SandboxError::OutputLimit {
-                    limit,
-                    stdout: truncate_utf8(stdout, limit),
-                });
+        let over_limit = self.max_output.filter(|limit| stdout.len() > *limit);
+        let result = if let Some(limit) = over_limit {
+            Err(SandboxError::OutputLimit {
+                limit,
+                stdout: truncate_utf8(stdout, limit),
+            })
+        } else if host_cancel.is_cancelled() && outcome.as_ref().is_some_and(|r| r.is_err()) {
+            Err(SandboxError::Cancelled { stdout })
+        } else {
+            match outcome {
+                Some(Ok(value)) => Ok((value, stdout)),
+                Some(Err(e)) => Err(classify_error(e.message, e.line, stdout)),
+                None => Err(SandboxError::Runtime {
+                    message: "sandbox worker panicked".to_string(),
+                    line: 0,
+                    stdout,
+                }),
             }
-        }
-        if host_cancel.is_cancelled() && outcome.as_ref().is_some_and(|r| r.is_err()) {
-            return Err(SandboxError::Cancelled { stdout });
-        }
-        match outcome {
-            Some(Ok(())) => Ok(Output { stdout }),
-            Some(Err((message, line))) => {
-                if message.starts_with("permission denied:") {
-                    Err(SandboxError::PermissionDenied { message, stdout })
-                } else {
-                    Err(SandboxError::Runtime {
-                        message,
-                        line,
-                        stdout,
-                    })
-                }
-            }
-            None => Err(SandboxError::Runtime {
-                message: "sandbox worker panicked".to_string(),
-                line: 0,
-                stdout,
-            }),
+        };
+        InterpreterRun { result, interp }
+    }
+}
+
+/// What [`Sandbox::run_interpreter`] produced.
+pub(crate) struct InterpreterRun<T> {
+    /// The job's value and everything the run printed, or why it failed.
+    pub result: Result<(T, String), SandboxError>,
+    /// The interpreter, with whatever state the run left in it. `None` when
+    /// the worker had to be abandoned (it did not stop within the grace
+    /// period after a timeout or cancel) or panicked.
+    pub interp: Option<Interpreter>,
+}
+
+/// Lex and parse `source`, reporting failures as [`SandboxError::Syntax`].
+pub(crate) fn parse_source(source: &str) -> Result<crate::parser::ast::Program, SandboxError> {
+    let tokens = Lexer::new(source)
+        .tokenize()
+        .map_err(|e| SandboxError::Syntax {
+            message: e.to_string(),
+        })?;
+    Parser::new(tokens)
+        .parse_program()
+        .map_err(|e| SandboxError::Syntax {
+            message: e.to_string(),
+        })
+}
+
+/// Map an interpreter error to the sandbox error a host sees.
+fn classify_error(message: String, line: usize, stdout: String) -> SandboxError {
+    if message.starts_with("permission denied:") {
+        SandboxError::PermissionDenied { message, stdout }
+    } else {
+        SandboxError::Runtime {
+            message,
+            line,
+            stdout,
         }
     }
 }
@@ -566,6 +628,57 @@ mod tests {
             .expect("exists is not an error");
         assert_eq!(out.stdout, "false\n");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unawaited_tasks_stop_when_the_run_ends() {
+        // A task the program never awaits must not keep running (and
+        // burning CPU or writing files) after the run returns.
+        let dir = tmpdir("leak");
+        let file = dir.join("ticks.txt");
+        let lit = file.display().to_string().replace('\\', "\\\\");
+        let out = Sandbox::new()
+            .allow_write([&dir])
+            .allow_read([&dir])
+            .run_source(&format!(
+                "spawn {{ while true {{ fs.append(\"{lit}\", \"x\")\nwait(0.01) }} }}\nwait(0.1)\nsay \"done\""
+            ))
+            .expect("runs");
+        assert_eq!(out.stdout, "done\n");
+        // Let a straggler notice the cancellation, then check it stopped.
+        std::thread::sleep(Duration::from_millis(200));
+        let size = || std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        let before = size();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(size(), before, "the task kept running after the run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_interpreter_hands_back_state() {
+        let sb = Sandbox::new().max_time(Duration::from_secs(5));
+        let program = parse_source("let x = 41").expect("parses");
+        let run = sb.run_interpreter(Interpreter::new(), &CancelHandle::new(), move |i| {
+            i.run(&program).map(|_| ())
+        });
+        assert!(run.result.is_ok());
+        let interp = run.interp.expect("interpreter comes back");
+        let program = parse_source("say x + 1").expect("parses");
+        let run = sb.run_interpreter(interp, &CancelHandle::new(), move |i| {
+            i.run(&program).map(|_| ())
+        });
+        assert_eq!(run.result.expect("runs").1, "42\n");
+        // After a timeout the interpreter still comes back when the worker
+        // stops within the grace period.
+        let sb = Sandbox::new().max_time(Duration::from_millis(200));
+        let program = parse_source("while true { }").expect("parses");
+        let run = sb.run_interpreter(
+            run.interp.expect("interp"),
+            &CancelHandle::new(),
+            move |i| i.run(&program).map(|_| ()),
+        );
+        assert!(matches!(run.result, Err(SandboxError::Timeout { .. })));
+        assert!(run.interp.is_some());
     }
 
     #[test]
