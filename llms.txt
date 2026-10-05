@@ -236,6 +236,8 @@ import { double, shout } from "utils.fg"   // selected names
 println(double(21))
 ```
 
+Native plugins (Rust/C shared libraries built with `crates/forge-plugin`): `import native "target/release/libfoo" as foo` then `foo.add(1, 2)`, or `import { add } from native "path/libfoo"`. The platform suffix is added; paths resolve like `.fg` imports. Needs `--allow-ffi` (full trust; denied under `--sandbox` and `forge mcp`). Plugin errors are catchable runtime errors.
+
 `import "utils.fg"` brings every top-level name into scope. Paths resolve relative to the current working directory, then `forge_modules/<name>/main.fg`. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
 
 ## Collections and builtins

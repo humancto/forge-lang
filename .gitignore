@@ -44,3 +44,11 @@ TESTING.md
 BUGS.md
 ANALYSIS_REPORT.md
 docs/ARCHITECTURE_AUDIT.md
+
+# Native plugin SDK / examples (standalone cargo projects)
+/crates/*/target
+/crates/*/Cargo.lock
+/examples/plugins/*/target
+/examples/plugins/*/*.so
+/examples/plugins/*/*.dylib
+/examples/plugins/*/*.dll

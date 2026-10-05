@@ -1,0 +1,49 @@
+// Calling Rust from Forge.
+//
+//   cd examples/plugins/hello_rust
+//   cargo build
+//   forge --allow-ffi run main.fg
+//
+// Loading native code is full trust, so it needs --allow-ffi
+// (or --allow-ffi=target to allow only libraries under ./target).
+
+import native "target/debug/libhello_rust" as hello
+import { add, greet } from native "target/debug/libhello_rust"
+
+say add(40, 2)
+say greet("Forge")
+say hello.divide(7, 2)
+say hello.sum([1, 2.5, 3])
+
+let stats = hello.word_stats("the quick brown fox jumps", 2)
+say stats.words
+say stats.longest
+say stats.first
+
+say hello.fnv1a("forge")
+say hello.reverse_bytes([1, 2, 3])
+
+// Plugin functions are ordinary values.
+say map([1, 2, 3], fn(x) { return hello.add(x, 10) })
+
+// Errors and panics surface as catchable Forge errors.
+try {
+    hello.divide(1, 0)
+} catch e {
+    say "caught: {e.message}"
+}
+try {
+    hello.explode("boom")
+} catch e {
+    say "caught: {e.message}"
+}
+try {
+    add(1, "two")
+} catch e {
+    say "caught: {e.message}"
+}
+try {
+    add(1)
+} catch e {
+    say "caught: {e.message}"
+}

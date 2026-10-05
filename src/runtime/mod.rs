@@ -6,4 +6,5 @@ pub mod limits;
 pub mod metadata;
 pub mod recursion;
 pub mod server;
+pub mod shell;
 pub mod tracing_init;

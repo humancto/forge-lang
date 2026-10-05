@@ -41,6 +41,17 @@ forge --allow-run run deploy.fg
 
 The REPL and `forge -e` enable shell execution automatically, since a person is typing the code. `forge build --native --allow-run` bakes the permission into a standalone binary; without it the binary denies shell execution.
 
+### Native plugins are full trust (`--allow-ffi`)
+
+> **Loading a native plugin (`import native "libfoo"`) runs arbitrary machine code inside the Forge process.** Nothing Forge enforces — no capability, `--sandbox`, `FORGE_FS_BASE`, the SSRF guard, `--max-time` or the MCP output capture — applies to code inside the library. It can read and write any file, open sockets, spawn processes, and corrupt or crash Forge. Granting `ffi` is equivalent to granting everything.
+
+- `forge run` and `forge test` refuse to load native code unless `--allow-ffi` (any library) or `--allow-ffi=PATHS` (only libraries at or under those paths) is given, or `allow-ffi` is set in `forge.toml` `[permissions]`. It is opt-in like `--allow-run`, because a script could otherwise write a library to disk and load it to escape every other restriction.
+- The REPL and `forge -e` allow it (a person is typing), unless `--sandbox` is given.
+- `--sandbox`, `forge mcp` and the embedding `Sandbox` deny it unless explicitly granted (`--allow-ffi=PATHS` / `Sandbox::allow_ffi`). Never grant `ffi` to code you would not run as a native binary yourself.
+- The check runs on the resolved, canonical library path **before** the library is opened (opening already runs its initializers), so `..` and symlinks cannot widen a scoped grant. There is no library search path: Forge only loads the file the program names, relative to the importing file or the working directory.
+- Prefer path-scoped grants to a directory only you can write to (`--allow-ffi=./plugins`). A writable plugin directory lets anyone who can write there run code as you.
+- Plugins are never unloaded, and they must be thread-safe. A plugin that violates the ABI (`crates/forge-plugin/include/forge_plugin.h`) can cause undefined behaviour; Forge validates the descriptor and every returned value it can check (tags, UTF-8, NULL pointers, nesting depth), but cannot protect against a library that writes through bad pointers.
+
 ### HTTP client SSRF guard (on by default)
 
 The HTTP client (`http.*`, `fetch`, `download`, `crawl`) refuses requests whose host is, or resolves to, a private, loopback, or link-local address. The resolved address is pinned for the connection, and every redirect target is re-checked. To call local services on purpose (for example in development), set:
@@ -91,10 +102,11 @@ permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it
 | `run` | `sh`, `shell`, `sh_lines`, `sh_json`, `sh_ok`, `run_command`, `pipe_to` | `--allow-run` |
 | `ai` | `ask` | `--allow-ai` |
 | `process` | `exit()`, `cd()` (mutate the host process) | always granted by the CLI; host policy only |
+| `ffi` | `import native` — loading a native plugin. **Full trust**: see "Native plugins are full trust" | `--allow-ffi[=PATHS]` |
 
 ### CLI
 
-Defaults are unchanged: `forge run` allows everything except `run`; `-e` and the REPL also allow `run`. `--sandbox` switches to default-deny, and each `--allow-*` flag grants one capability back:
+Defaults: `forge run` allows everything except `run` and `ffi`; `-e` and the REPL also allow `run` and `ffi`. `--sandbox` switches to default-deny, and each `--allow-*` flag grants one capability back:
 
 ```bash
 forge run --sandbox agent.fg                                   # nothing allowed
@@ -121,6 +133,7 @@ allow-read = ["./data"]   # or true
 allow-write = ["./out"]
 allow-net = ["api.example.com"]
 allow-env = true
+allow-ffi = ["./plugins"] # native plugins: full trust
 max-time = 30
 ```
 
@@ -198,6 +211,7 @@ These are documented limitations, not vulnerabilities:
 
 - Pass user input to SQL only as query parameters.
 - Do not pass untrusted input to `sh()` / `run_command()`, and only grant `--allow-run` to scripts you trust.
+- Only pass `--allow-ffi` for plugins you built or trust as much as Forge itself; scope it to their directory.
 - Run scripts you did not write with `--sandbox` and only the `--allow-*` grants they need; embed untrusted code with `forge_lang::Sandbox`.
 - Set `FORGE_FS_BASE` when running scripts that should only touch one directory.
 - Leave `FORGE_HTTP_ALLOW_PRIVATE` unset in production.

@@ -27,6 +27,9 @@ pub fn create_module() -> Value {
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "io.prompt" => {
+            if !crate::permissions::host_stdin_allowed() {
+                return Ok(Value::String(String::new()));
+            }
             let prompt_text = args.first().map(|v| format!("{}", v)).unwrap_or_default();
             use std::io::Write;
             print!("{}", prompt_text);

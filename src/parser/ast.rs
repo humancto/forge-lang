@@ -23,6 +23,16 @@ impl SpannedStmt {
     }
 }
 
+/// What an `import native` statement binds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeBinding {
+    /// `import native "path" [as name]`: one name bound to an object whose
+    /// members are the library's functions.
+    Namespace(String),
+    /// `import { f, g } from native "path"`: each function bound directly.
+    Names(Vec<String>),
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Program {
@@ -114,6 +124,13 @@ pub enum Stmt {
     Import {
         path: String,
         names: Option<Vec<String>>,
+    },
+    /// `import native "path" [as name]` / `import { f, g } from native "path"`:
+    /// load a native plugin (see `src/plugins`). Bound names are known here,
+    /// at parse time; nothing is loaded until the statement runs.
+    ImportNative {
+        path: String,
+        binding: NativeBinding,
     },
     YieldStmt(Expr),
     /// when subject { < val -> expr, else -> expr }

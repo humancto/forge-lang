@@ -40,12 +40,13 @@ pub fn update() {
     let lockfile_path = Path::new("forge.lock");
     let registry_roots = default_registry_roots();
     let manifest_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    match install_manifest_dependencies(
+    match install_manifest_dependencies_with(
         &manifest,
         manifest_root,
         packages_dir,
         lockfile_path,
         &registry_roots,
+        LockMode::Refresh,
     ) {
         Ok(summary) => {
             crate::color::cprintln!(
@@ -212,12 +213,49 @@ struct InstallSummary {
     locked_packages: usize,
 }
 
+/// How an existing forge.lock steers resolution of sparse-registry packages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockMode {
+    /// `forge install` / `forge add`: keep locked versions that still satisfy
+    /// the manifest (even if yanked since).
+    Respect,
+    /// `forge update`: re-resolve to the newest compatible versions.
+    Refresh,
+}
+
+/// Everything a single dependency install needs besides the dependency.
+struct InstallCtx<'a> {
+    packages_dir: &'a Path,
+    registry_roots: &'a [PathBuf],
+    /// forge.lock as it was before this install started.
+    previous_lock: &'a Lockfile,
+    mode: LockMode,
+}
+
 fn install_manifest_dependencies(
     manifest: &Manifest,
     manifest_root: &Path,
     packages_dir: &Path,
     lockfile_path: &Path,
     registry_roots: &[PathBuf],
+) -> Result<InstallSummary, String> {
+    install_manifest_dependencies_with(
+        manifest,
+        manifest_root,
+        packages_dir,
+        lockfile_path,
+        registry_roots,
+        LockMode::Respect,
+    )
+}
+
+fn install_manifest_dependencies_with(
+    manifest: &Manifest,
+    manifest_root: &Path,
+    packages_dir: &Path,
+    lockfile_path: &Path,
+    registry_roots: &[PathBuf],
+    mode: LockMode,
 ) -> Result<InstallSummary, String> {
     if manifest.dependencies.is_empty() {
         crate::color::cprintln!("  No dependencies to install.");
@@ -232,14 +270,20 @@ fn install_manifest_dependencies(
         .map_err(|e| format!("Error: failed to create forge_modules/: {}", e))?;
 
     let mut lockfile = load_lockfile_from(lockfile_path).unwrap_or_default();
+    let previous_lock = lockfile.clone();
+    let ctx = InstallCtx {
+        packages_dir,
+        registry_roots,
+        previous_lock: &previous_lock,
+        mode,
+    };
     let mut installed = 0;
 
     // Track the root project to detect cycles back to it
     let mut visiting = vec![manifest.project.name.clone()];
 
     for (name, spec) in &manifest.dependencies {
-        let mut locked =
-            install_single_dependency(name, spec, manifest_root, packages_dir, registry_roots)?;
+        let mut locked = install_single_dependency(name, spec, manifest_root, &ctx)?;
 
         // Compute directory checksum for integrity verification
         if let Ok(hash) = compute_directory_checksum(&packages_dir.join(name)) {
@@ -252,7 +296,7 @@ fn install_manifest_dependencies(
         installed += 1;
 
         // Resolve transitive dependencies
-        let transitive = resolve_transitive(name, packages_dir, registry_roots, &mut visiting)?;
+        let transitive = resolve_transitive(name, &ctx, &mut visiting)?;
         for tlocked in transitive {
             let mut tlocked = tlocked;
             if let Ok(hash) = compute_directory_checksum(&packages_dir.join(&tlocked.name)) {
@@ -293,13 +337,11 @@ fn install_single_dependency(
     name: &str,
     spec: &DependencySpec,
     context_dir: &Path,
-    packages_dir: &Path,
-    registry_roots: &[PathBuf],
+    ctx: &InstallCtx,
 ) -> Result<LockedPackage, String> {
+    let packages_dir = ctx.packages_dir;
     match spec {
-        DependencySpec::Version(ver) => {
-            install_from_registry_as(name, ver, packages_dir, registry_roots)
-        }
+        DependencySpec::Version(ver) => install_from_registry_as(name, ver, ctx),
         DependencySpec::Detailed(dep) if !dep.git.is_empty() => {
             let branch = if dep.branch.is_empty() {
                 None
@@ -312,7 +354,7 @@ fn install_single_dependency(
                 version: dep.version.clone(),
                 source: format!("git+{}", dep.git),
                 checksum: get_git_rev(packages_dir, name),
-                checksum_kind: None,
+                ..Default::default()
             })
         }
         DependencySpec::Detailed(dep) if !dep.path.is_empty() => {
@@ -322,12 +364,11 @@ fn install_single_dependency(
                 name: name.to_string(),
                 version: dep.version.clone(),
                 source: format!("path+{}", source_path.display()),
-                checksum: String::new(),
-                checksum_kind: None,
+                ..Default::default()
             })
         }
         DependencySpec::Detailed(dep) if !dep.version.is_empty() => {
-            install_from_registry_as(name, &dep.version, packages_dir, registry_roots)
+            install_from_registry_as(name, &dep.version, ctx)
         }
         DependencySpec::Detailed(_) => Err(format!(
             "  Error: dependency '{}' has no supported source. Use version, path, or git.",
@@ -338,10 +379,10 @@ fn install_single_dependency(
 
 fn resolve_transitive(
     parent: &str,
-    packages_dir: &Path,
-    registry_roots: &[PathBuf],
+    ctx: &InstallCtx,
     visiting: &mut Vec<String>,
 ) -> Result<Vec<LockedPackage>, String> {
+    let packages_dir = ctx.packages_dir;
     let pkg_dir = packages_dir.join(parent);
     let manifest_path = pkg_dir.join("forge.toml");
 
@@ -374,12 +415,11 @@ fn resolve_transitive(
         }
 
         // Resolve relative to the installed package's directory
-        let locked =
-            install_single_dependency(dep_name, dep_spec, &pkg_dir, packages_dir, registry_roots)?;
+        let locked = install_single_dependency(dep_name, dep_spec, &pkg_dir, ctx)?;
         results.push(locked);
 
         // Recurse into this transitive dep's own dependencies
-        let nested = resolve_transitive(dep_name, packages_dir, registry_roots, visiting)?;
+        let nested = resolve_transitive(dep_name, ctx, visiting)?;
         results.extend(nested);
     }
 
@@ -430,8 +470,7 @@ fn save_lockfile_at(lockfile: &Lockfile, path: &Path) -> std::io::Result<()> {
 fn install_from_registry_as(
     name: &str,
     version_str: &str,
-    packages_dir: &Path,
-    registry_roots: &[PathBuf],
+    ctx: &InstallCtx,
 ) -> Result<LockedPackage, String> {
     let req = if version_str.is_empty() || version_str == "*" {
         VersionReq::STAR
@@ -445,8 +484,8 @@ fn install_from_registry_as(
     };
 
     // Try local registry first
-    if let Ok((resolved_version, source)) = resolve_best_version(name, &req, registry_roots) {
-        install_from_path_as(name, &source, packages_dir)?;
+    if let Ok((resolved_version, source)) = resolve_best_version(name, &req, ctx.registry_roots) {
+        install_from_path_as(name, &source, ctx.packages_dir)?;
         crate::color::cprintln!(
             "  \x1B[32m✓\x1B[0m Installed {} @ {}",
             name,
@@ -456,68 +495,131 @@ fn install_from_registry_as(
             name: name.to_string(),
             version: resolved_version,
             source: format!("registry+{}", source.display()),
-            checksum: String::new(),
-            checksum_kind: None,
+            ..Default::default()
         });
     }
 
-    // Fall back to remote registry
-    install_from_remote_registry(name, &req, packages_dir)
+    // Fall back to the remote sparse registry
+    let client = crate::registry::client::RegistryClient::from_env();
+    let trust_path = crate::registry::signing::TrustStore::default_path();
+    install_from_remote_registry(name, &req, ctx, &client, &trust_path)
 }
 
+/// Install `name` from a sparse registry (rfcs/0007):
+/// resolve against the index (honouring forge.lock and yanks), apply the
+/// signature trust policy, download the archive and verify its mandatory
+/// checksum, then extract it. The returned lock entry pins the archive
+/// checksum and signer.
 fn install_from_remote_registry(
     name: &str,
     req: &VersionReq,
-    packages_dir: &Path,
+    ctx: &InstallCtx,
+    client: &crate::registry::client::RegistryClient,
+    trust_path: &Path,
 ) -> Result<LockedPackage, String> {
-    use crate::registry;
+    use crate::registry::{self, client, index, signing};
 
     validate_package_name(name)?;
+    let fail = |e: String| format!("  Error: {}", e);
+    let registry_url = client.base_url().to_string();
+    let source = format!("sparse+{}", registry_url);
 
-    let entry = match registry::fetch_package_entry(name) {
-        Ok(Some(e)) => e,
-        Ok(None) => {
+    let config = client.config().map_err(|e| {
+        format!(
+            "  Error: package '{}' is not in a local registry, and the remote registry is unavailable:\n  {}",
+            name, e
+        )
+    })?;
+    let entries = match client.entries(name).map_err(fail)? {
+        Some(entries) => entries,
+        None => {
             return Err(format!(
-                "  Error: package '{}' not found in local or remote registry",
-                name
-            ));
-        }
-        Err(e) => {
-            return Err(format!(
-                "  Error: failed to fetch '{}' from remote registry: {}",
-                name, e
-            ));
+                "  Error: package '{}' not found in local registries or in {}",
+                name, registry_url
+            ))
         }
     };
 
-    let resolved = registry::resolve_remote_version(name, req, &entry.versions)?;
+    let previous = ctx.previous_lock.find(name).filter(|p| p.source == source);
+    let pinned_version = match ctx.mode {
+        LockMode::Respect => previous.map(|p| p.version.as_str()),
+        LockMode::Refresh => None,
+    };
+    let entry = index::resolve(name, req, &entries, pinned_version).map_err(fail)?;
 
-    if resolved.checksum.is_empty() {
+    // The lockfile pins content, not just a version number.
+    if let Some(prev) = previous.filter(|p| p.version == entry.vers) {
+        let archive = format!("sha256:{}", entry.cksum);
+        if let Some(locked) = &prev.archive_checksum {
+            if *locked != archive {
+                return Err(format!(
+                    "  Error: {}@{} in {} has checksum {}, but forge.lock pins {}.\n  \
+                     A published version's content changed; refusing to install.",
+                    name, entry.vers, registry_url, archive, locked
+                ));
+            }
+        }
+        if let Some(signer) = &prev.signer {
+            if entry.pubkey.as_ref() != Some(signer) {
+                return Err(format!(
+                    "  Error: {}@{} is no longer signed by {} as pinned in forge.lock",
+                    name, entry.vers, signer
+                ));
+            }
+        }
+    }
+    if entry.yanked {
         crate::color::ceprintln!(
-            "  Warning: no checksum for {} @ {} — integrity not verified",
+            "  Warning: {}@{} is yanked; keeping it because forge.lock pins it",
             name,
-            resolved.version
+            entry.vers
         );
     }
 
+    let mut trust = signing::TrustStore::load(trust_path).map_err(fail)?;
+    let decision = trust
+        .check(&registry_url, entry, client::require_signatures())
+        .map_err(fail)?;
+
     crate::color::cprintln!(
-        "  Downloading {} @ {} from remote registry...",
+        "  Downloading {} @ {} from {}...",
         name,
-        resolved.version
+        entry.vers,
+        registry_url
     );
-    registry::download_and_extract(&resolved.url, &packages_dir.join(name), &resolved.checksum)?;
+    let archive = client.fetch_archive(&config, entry).map_err(fail)?;
+    registry::extract_archive(&archive, &ctx.packages_dir.join(name)).map_err(fail)?;
+    trust.save().map_err(fail)?;
+
+    let signer = match &decision {
+        signing::TrustDecision::Unsigned => {
+            crate::color::ceprintln!(
+                "  Warning: {}@{} is not signed (checksum verified)",
+                name,
+                entry.vers
+            );
+            None
+        }
+        signing::TrustDecision::Trusted(key) => Some(key.clone()),
+        signing::TrustDecision::NewlyPinned(key) => {
+            crate::color::cprintln!("  Trusting new publisher key for '{}': {}", name, key);
+            Some(key.clone())
+        }
+    };
     crate::color::cprintln!(
-        "  \x1B[32m✓\x1B[0m Installed {} @ {} (remote)",
+        "  \x1B[32m✓\x1B[0m Installed {} @ {} (remote{})",
         name,
-        resolved.version
+        entry.vers,
+        if signer.is_some() { ", signed" } else { "" }
     );
 
     Ok(LockedPackage {
         name: name.to_string(),
-        version: resolved.version,
-        source: format!("remote+{}", resolved.url),
-        checksum: resolved.checksum,
-        checksum_kind: None,
+        version: entry.vers.clone(),
+        source,
+        archive_checksum: Some(format!("sha256:{}", entry.cksum)),
+        signer,
+        ..Default::default()
     })
 }
 
@@ -1617,6 +1719,7 @@ foo = "^1.0"
                 source: String::new(),
                 checksum: original_hash,
                 checksum_kind: Some("directory-sha256".to_string()),
+                ..Default::default()
             }],
         };
 
@@ -1648,6 +1751,7 @@ foo = "^1.0"
                 source: String::new(),
                 checksum: "tarball-hash-here".to_string(),
                 checksum_kind: None,
+                ..Default::default()
             }],
         };
 
@@ -1670,6 +1774,7 @@ foo = "^1.0"
                 source: String::new(),
                 checksum: "abc123".to_string(),
                 checksum_kind: Some("directory-sha256".to_string()),
+                ..Default::default()
             }],
         };
 

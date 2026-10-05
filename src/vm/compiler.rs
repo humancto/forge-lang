@@ -2267,6 +2267,55 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             Ok(())
         }
 
+        Stmt::ImportNative { path, binding } => {
+            // Loading happens at run time in the shared `plugins::import`
+            // (resolution, `ffi` check, registry); the bound names are known
+            // now, so they compile to ordinary locals.
+            let base_dir = c
+                .base_dir
+                .as_ref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            let names_arg = match binding {
+                NativeBinding::Names(names) => Expr::Array(
+                    names
+                        .iter()
+                        .map(|name| Expr::StringLit(name.clone()))
+                        .collect(),
+                ),
+                NativeBinding::Namespace(_) => Expr::Bool(false),
+            };
+            let import_args = vec![
+                Expr::StringLit(path.clone()),
+                Expr::StringLit(base_dir),
+                names_arg,
+            ];
+            let namespace_reg = c.alloc_reg()?;
+            compile_hidden_call(c, "__forge_import_native", import_args, namespace_reg)?;
+            let bind_global = |c: &mut Compiler, name: &str, reg: u8| {
+                if c.scope_depth == 1 {
+                    // Top-level imports are also globals, as in the interpreter.
+                    let name_idx = c.const_str(&c.global_name(name));
+                    c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                }
+            };
+            match binding {
+                NativeBinding::Namespace(alias) => {
+                    let local_reg = c.add_local(alias, false)?;
+                    c.emit(encode_abc(OpCode::Move, local_reg, namespace_reg, 0), 0);
+                    bind_global(c, alias, local_reg);
+                }
+                NativeBinding::Names(names) => {
+                    for name in names {
+                        let local_reg = c.add_local(name, false)?;
+                        emit_get_field(c, local_reg, namespace_reg, name)?;
+                        bind_global(c, name, local_reg);
+                    }
+                }
+            }
+            Ok(())
+        }
+
         Stmt::Spawn { body } => {
             let mut sc = c.child("<spawn>");
             sc.begin_scope();

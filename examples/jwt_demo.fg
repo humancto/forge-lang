@@ -13,7 +13,10 @@ let token = jwt.sign({
     expires: "1h",
     issuer: "forge-app"
 })
-say "Token: " + token
+// The token embeds issue/expiry timestamps, so print only its fixed header
+// segment (keeps the example's output deterministic).
+let parts = split(token, ".")
+say "Token: " + parts[0] + ".<payload>.<signature> (" + str(len(parts)) + " parts)"
 
 // 2. Verify the token (natural syntax)
 set claims to jwt.verify(token, secret)

@@ -508,7 +508,7 @@ m5-016: ci: release workflow for libforge.a per target
 ### Milestone 6 Deliverables
 
 - [x] `forge.toml` dependency management
-- [x] Package registry (forge-packages.dev)
+- [x] Package registry: sparse Git-hosted index with checksums, signatures and yanking (rfcs/0007; hosted repo `humancto/forge-registry` still to be created from `tools/registry-template/`)
 - [x] `forge install`, `forge publish`, `forge update`
 - [x] Module resolution with cycle detection
 
