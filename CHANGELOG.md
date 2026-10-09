@@ -94,6 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JIT code memory is freed when a VM is dropped (every VM that tiered a function up leaked its code pages).
 - The parser looped forever on a `prompt` block entry that is not `name: "string"` (found by fuzzing).
 - Panics on extreme inputs: `-(-9223372036854775807 - 1)` on the interpreter, `substring(s, start, end)` with `start > end`, `range()`/`sample()`/`slay()`/`repeat_str()` with huge counts, `wait()`/`time.sleep()` with huge or infinite durations, `timeout` with a huge duration on the VM, and `schedule` intervals that overflow.
+- Playground: error hints no longer suggest remedies that only exist on the command line (`--max-fuel`, `--max-memory`, `FORGE_MAX_DEPTH`, `--allow-*`, `--interp`); the browser runner rewrites them for the playground or drops them.
 
 ### Security
 
