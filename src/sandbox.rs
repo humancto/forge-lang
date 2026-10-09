@@ -533,8 +533,13 @@ impl Sandbox {
 
         let collect = || sink.snapshot().text(stdio::Stream::Stdout);
         // The sink keeps one byte more than the limit, so "printed more
-        // than the limit" is visible in its byte count.
-        let over_output = || self.max_output.is_some_and(|limit| sink.bytes() > limit);
+        // than the limit" is visible in its byte count, or in its
+        // truncation flag when the cut fell inside a multibyte character
+        // (the byte count then backs down to the previous boundary).
+        let over_output = || {
+            self.max_output
+                .is_some_and(|limit| sink.truncated() || sink.bytes() > limit)
+        };
         // Stop the worker cooperatively and give it a moment to unwind;
         // either way the host gets control back now. The state comes back
         // only if the worker stopped within the grace period.
@@ -1221,6 +1226,26 @@ mod tests {
             .max_output(10)
             .run_source("say \"ok\"")
             .is_ok());
+    }
+
+    #[test]
+    fn output_limit_cut_inside_a_multibyte_char_is_reported() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            // The capture keeps limit + 1 = 2 bytes, inside the 4-byte
+            // emoji: nothing is stored, but output still overflowed.
+            match Sandbox::new()
+                .engine(engine)
+                .max_output(1)
+                .run_source("say \"\u{1F600}\"")
+            {
+                Err(SandboxError::OutputLimit { limit, stdout }) => {
+                    assert_eq!(limit, 1);
+                    assert_eq!(stdout, "");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

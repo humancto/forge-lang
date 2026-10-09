@@ -121,6 +121,18 @@ fn default_fuel(engine: Engine) -> u64 {
     }
 }
 
+/// Limits for one `run_forge` call. Sessions always run on the
+/// interpreter (`run_in_session`), whose steps are cheaper than VM
+/// instructions, so an unchanged engine default becomes the
+/// interpreter's default there.
+fn run_limits(config: &ServerConfig, in_session: bool) -> Limits {
+    let mut limits = config.limits.clone();
+    if in_session && limits.max_fuel == Some(default_fuel(config.engine)) {
+        limits.max_fuel = Some(default_fuel(Engine::Interpreter));
+    }
+    limits
+}
+
 /// A script is stopped once it has printed this much (memory bound).
 const CAPTURE_LIMIT: usize = 1024 * 1024;
 /// Longest accepted protocol line; longer ones are discarded with an error.
@@ -1348,7 +1360,7 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
             return tool_error("`session_id` must be 1-128 letters, digits, `_`, `-`, `.` or `:`")
         }
     };
-    let mut limits = config.limits.clone();
+    let mut limits = run_limits(config, session_id.is_some());
     match args.get("max_fuel") {
         None | Some(Value::Null) => {}
         Some(v) => match v.as_u64() {
@@ -1920,6 +1932,20 @@ mod tests {
             read_line_bounded(&mut reader, &mut input, 4).ok(),
             Some(None)
         );
+    }
+
+    #[test]
+    fn sessions_get_the_interpreter_fuel_default() {
+        let config = ServerConfig::new(Capabilities::deny_all());
+        assert_eq!(run_limits(&config, false).max_fuel, Some(DEFAULT_MAX_FUEL));
+        assert_eq!(
+            run_limits(&config, true).max_fuel,
+            Some(DEFAULT_MAX_FUEL_INTERP)
+        );
+        // An explicit budget is the operator's choice: kept as is.
+        let mut custom = ServerConfig::new(Capabilities::deny_all());
+        custom.limits.max_fuel = Some(1_000);
+        assert_eq!(run_limits(&custom, true).max_fuel, Some(1_000));
     }
 
     #[test]

@@ -70,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Sandbox::max_output` reports `OutputLimit` when the limit falls inside a multibyte character (the capture stored nothing past the last whole character, so the overflow went unnoticed); `forge mcp` sessions on the default VM server get the interpreter's fuel default, since sessions run on the interpreter.
 - VM: compiling a bare `import "file"` read the module without the `fs.read`/import-root check (a sandboxed program could probe files and leak a line through parse errors); `wait`/`time.sleep` ignored host deadlines and cancellation; in a sandbox, the memory limit now covers every spawned task (run-wide allocation meter) (SEC-25).
 - VM: tasks forked while `schedule`/`watch` start-up is deferred keep deferring (as the interpreter's `child_context` does), so a sandboxed task never starts a host thread.
 - Interpreter-backed servers (`--interp`, or auto-fallback) now install each request's fresh resource budget on the handler thread, as the VM does: `--max-memory` and the handle caps applied to the server's shared budget instead of the request's.
