@@ -35,7 +35,7 @@ mod typechecker;
 mod vm;
 mod watch;
 
-use std::collections::BTreeSet;
+use runtime::metadata::vm_incompatibilities;
 use std::fs;
 use std::path::PathBuf;
 use std::process;
@@ -45,7 +45,7 @@ use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 
 use interpreter::Interpreter;
-use parser::ast::{Expr, Program, Stmt};
+use parser::ast::Program;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -382,6 +382,8 @@ struct McpOptions {
     max_time: Option<f64>,
     max_sessions: Option<usize>,
     session_idle: Option<u64>,
+    /// `--engine` (or the global `--interp`).
+    engine: sandbox::Engine,
     /// `forge mcp serve FILE [--with-code-tools]`.
     serve: Option<(PathBuf, bool)>,
 }
@@ -393,6 +395,7 @@ fn load_mcp_tools(
     caps: &permissions::Capabilities,
     max_time: std::time::Duration,
     limits: &runtime::limits::Limits,
+    engine: sandbox::Engine,
 ) -> Result<mcp::ToolSet, String> {
     let source =
         fs::read_to_string(file).map_err(|e| format!("cannot read {}: {}", file.display(), e))?;
@@ -404,7 +407,8 @@ fn load_mcp_tools(
         .clone()
         .grant_import_root(dir)
         .grant_import_root("forge_modules");
-    let (tools, report) = mcp::ToolSet::load(file, &source, caps, max_time, limits.clone())?;
+    let (tools, report) =
+        mcp::ToolSet::load(file, &source, caps, max_time, limits.clone(), engine)?;
     if !report.stdout.is_empty() {
         eprint!("{}", report.stdout);
     }
@@ -421,7 +425,7 @@ fn run_mcp(
         eprintln!("{}", errors::format_simple_error(message));
         process::exit(2);
     };
-    let mut config = mcp::ServerConfig::new(caps);
+    let mut config = mcp::ServerConfig::new(caps).with_engine(options.engine);
     if let Some(n) = options.max_sessions {
         config.max_sessions = n;
     }
@@ -452,15 +456,22 @@ fn run_mcp(
     permissions::set_global(permissions::Capabilities::deny_all());
     if let Some((file, with_code_tools)) = options.serve {
         config.code_tools = with_code_tools;
-        let tools = load_mcp_tools(&file, &config.capabilities, config.max_time, &config.limits)
-            .unwrap_or_else(|e| fail(&format!("forge mcp serve: {}", e)));
+        let tools = load_mcp_tools(
+            &file,
+            &config.capabilities,
+            config.max_time,
+            &config.limits,
+            config.engine,
+        )
+        .unwrap_or_else(|e| fail(&format!("forge mcp serve: {}", e)));
         config = config
             .with_tools(tools)
             .unwrap_or_else(|e| fail(&format!("forge mcp serve: {}", e)));
     }
     eprintln!(
-        "forge mcp {}: {}",
+        "forge mcp {} ({} engine): {}",
         env!("CARGO_PKG_VERSION"),
+        config.engine,
         config.policy_summary()
     );
     match mcp::serve_stdio(config) {
@@ -678,6 +689,11 @@ enum Command {
         /// (default 900)
         #[arg(long = "session-idle", value_name = "SECS")]
         session_idle: Option<u64>,
+        /// Engine that runs scripts and tools: `vm` (default) or `interp`.
+        /// Both run under the same sandbox (`--interp` also selects interp)
+        #[arg(long = "engine", value_name = "ENGINE", global = true,
+              value_parser = ["vm", "interp"])]
+        engine: Option<String>,
         #[command(subcommand)]
         action: Option<McpCommand>,
     },
@@ -806,6 +822,7 @@ async fn async_main() {
         allow_run,
         max_sessions,
         session_idle,
+        engine,
         action,
     }) = cli.command
     {
@@ -823,10 +840,16 @@ async fn async_main() {
             toml_perms,
             cli.allow_run || allow_run || serve_run,
         );
+        let engine = match engine.as_deref() {
+            Some(name) => sandbox::Engine::parse(name).unwrap_or_default(),
+            None if cli.use_interp => sandbox::Engine::Interpreter,
+            None => sandbox::Engine::default(),
+        };
         let options = McpOptions {
             max_time,
             max_sessions,
             session_idle,
+            engine,
             serve: action.map(
                 |McpCommand::Serve {
                      file,
@@ -1347,222 +1370,6 @@ fn explain(code: Option<String>) -> ! {
         ))
     );
     process::exit(1);
-}
-
-fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut BTreeSet<String>) {
-    match stmt {
-        Stmt::TypeDef { .. } => {}
-        Stmt::InterfaceDef { .. } => {}
-        Stmt::ImplBlock { methods, .. } => {
-            for method in methods {
-                collect_vm_incompatible_stmt(&method.stmt, issues);
-            }
-        }
-        Stmt::Destructure { pattern: _, value } => {
-            collect_vm_incompatible_expr(value, issues);
-        }
-        Stmt::TryCatch {
-            try_body,
-            catch_body,
-            ..
-        } => {
-            for s in try_body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-            for s in catch_body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Stmt::SafeBlock { body } => {
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Stmt::TimeoutBlock { body, .. } => {
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Stmt::RetryBlock { count, body } => {
-            collect_vm_incompatible_expr(count, issues);
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Stmt::ScheduleBlock { body, .. } => {
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Stmt::WatchBlock { body, .. } => {
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Stmt::PromptDef { .. } => {}
-        Stmt::AgentDef { .. } => {}
-        Stmt::DecoratorStmt(decorator) => {
-            issues.extend(runtime::metadata::vm_unsupported_decorator(decorator, true));
-        }
-        Stmt::Import { .. } | Stmt::ImportNative { .. } => {}
-        Stmt::FnDef {
-            body, decorators, ..
-        } => {
-            issues.extend(
-                decorators
-                    .iter()
-                    .filter_map(|d| runtime::metadata::vm_unsupported_decorator(d, false)),
-            );
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Stmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            for s in then_body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-            if let Some(else_body) = else_body {
-                for s in else_body {
-                    collect_vm_incompatible_stmt(&s.stmt, issues);
-                }
-            }
-        }
-        Stmt::Match { arms, .. } => {
-            for arm in arms {
-                for s in &arm.body {
-                    collect_vm_incompatible_stmt(&s.stmt, issues);
-                }
-            }
-        }
-        Stmt::For { body, .. }
-        | Stmt::While { body, .. }
-        | Stmt::Loop { body }
-        | Stmt::Spawn { body }
-        | Stmt::Squad { body } => {
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Stmt::Let { value, .. } | Stmt::Expression(value) | Stmt::YieldStmt(value) => {
-            collect_vm_incompatible_expr(value, issues)
-        }
-        Stmt::Assign { target, value } => {
-            collect_vm_incompatible_expr(target, issues);
-            collect_vm_incompatible_expr(value, issues);
-        }
-        Stmt::Return(Some(expr)) | Stmt::CheckStmt { expr, .. } => {
-            collect_vm_incompatible_expr(expr, issues)
-        }
-        Stmt::When { subject, arms } => {
-            collect_vm_incompatible_expr(subject, issues);
-            for arm in arms {
-                if let Some(value) = &arm.value {
-                    collect_vm_incompatible_expr(value, issues);
-                }
-                collect_vm_incompatible_expr(&arm.result, issues);
-            }
-        }
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::StructDef { .. } => {}
-    }
-}
-
-fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut BTreeSet<String>) {
-    match expr {
-        Expr::BinOp { left, right, .. } => {
-            collect_vm_incompatible_expr(left, issues);
-            collect_vm_incompatible_expr(right, issues);
-        }
-        Expr::UnaryOp { operand, .. } | Expr::Try(operand) => {
-            collect_vm_incompatible_expr(operand, issues)
-        }
-        Expr::FieldAccess { object, .. } => collect_vm_incompatible_expr(object, issues),
-        Expr::Index { object, index } => {
-            collect_vm_incompatible_expr(object, issues);
-            collect_vm_incompatible_expr(index, issues);
-        }
-        Expr::Call { function, args } => {
-            collect_vm_incompatible_expr(function, issues);
-            for arg in args {
-                collect_vm_incompatible_expr(arg, issues);
-            }
-        }
-        Expr::Pipeline { value, function } => {
-            collect_vm_incompatible_expr(value, issues);
-            collect_vm_incompatible_expr(function, issues);
-        }
-        Expr::Lambda { body, .. } | Expr::Block(body) => {
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Expr::Object(fields) | Expr::StructInit { fields, .. } => {
-            for (_, value) in fields {
-                collect_vm_incompatible_expr(value, issues);
-            }
-        }
-        Expr::Array(items) => {
-            for item in items {
-                collect_vm_incompatible_expr(item, issues);
-            }
-        }
-        Expr::StringInterp(parts) => {
-            for part in parts {
-                if let parser::ast::StringPart::Expr(expr) = part {
-                    collect_vm_incompatible_expr(expr, issues);
-                }
-            }
-        }
-        Expr::MethodCall { object, args, .. } => {
-            collect_vm_incompatible_expr(object, issues);
-            for arg in args {
-                collect_vm_incompatible_expr(arg, issues);
-            }
-        }
-        Expr::WhereFilter { source, value, .. } => {
-            collect_vm_incompatible_expr(source, issues);
-            collect_vm_incompatible_expr(value, issues);
-        }
-        Expr::PipeChain { source, steps } => {
-            collect_vm_incompatible_expr(source, issues);
-            for step in steps {
-                match step {
-                    parser::ast::PipeStep::Keep(expr)
-                    | parser::ast::PipeStep::Take(expr)
-                    | parser::ast::PipeStep::Apply(expr) => {
-                        collect_vm_incompatible_expr(expr, issues);
-                    }
-                    parser::ast::PipeStep::Sort(_) => {}
-                }
-            }
-        }
-        Expr::Must(expr) | Expr::Ask(expr) | Expr::Freeze(expr) | Expr::Await(expr) => {
-            collect_vm_incompatible_expr(expr, issues);
-        }
-        Expr::Spread(expr) => collect_vm_incompatible_expr(expr, issues),
-        Expr::Spawn(body) | Expr::Squad(body) => {
-            for s in body {
-                collect_vm_incompatible_stmt(&s.stmt, issues);
-            }
-        }
-        Expr::Tuple(items) => {
-            for item in items {
-                collect_vm_incompatible_expr(item, issues);
-            }
-        }
-        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => {}
-    }
-}
-
-fn vm_incompatibilities(program: &Program) -> Vec<String> {
-    let mut issues = BTreeSet::new();
-    for stmt in &program.statements {
-        collect_vm_incompatible_stmt(&stmt.stmt, &mut issues);
-    }
-    issues.into_iter().collect()
 }
 
 /// Whether a VM entry point can host a program's HTTP server.

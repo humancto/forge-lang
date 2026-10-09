@@ -12,7 +12,7 @@
 //! * Embedding exploits run through `forge_lang::Sandbox` (the API behind
 //!   `forge mcp` and the Python binding).
 
-use forge_lang::{Capability, Sandbox, SandboxError};
+use forge_lang::{Capability, Engine, Sandbox, SandboxError};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -462,6 +462,10 @@ fn deeply_nested_values_are_errors_not_stack_overflows() {
 // Embedding API (`Sandbox`): what `forge mcp` and the Python binding run
 // ---------------------------------------------------------------------------
 
+/// Every embedding test runs on both engines: the sandbox's containment
+/// must be identical on each.
+const SANDBOX_ENGINES: [Engine; 2] = [Engine::Vm, Engine::Interpreter];
+
 /// Run `src` under `sandbox` and assert the host got control back by the
 /// deadline plus a small grace, whatever the script did.
 fn run_bounded(sandbox: Sandbox, src: &str) -> Result<forge_lang::Output, SandboxError> {
@@ -496,6 +500,13 @@ fn assert_stopped(path: &Path, what: &str) {
 
 #[test]
 fn deadline_reaches_every_task_the_script_started() {
+    for engine in SANDBOX_ENGINES {
+        eprintln!("engine: {engine}");
+        deadline_reaches_every_task_the_script_started_on(engine);
+    }
+}
+
+fn deadline_reaches_every_task_the_script_started_on(engine: Engine) {
     let l = Layout::new("deadline");
     let mark = l.data.join("counter.txt");
     let tick = format!(
@@ -521,7 +532,10 @@ fn deadline_reaches_every_task_the_script_started() {
     ];
     for (what, src) in &cases {
         let _ = std::fs::remove_file(&mark);
-        let sb = Sandbox::new().allow_write([&l.data]).allow_read([&l.data]);
+        let sb = Sandbox::new()
+            .engine(engine)
+            .allow_write([&l.data])
+            .allow_read([&l.data]);
         let r = run_bounded(sb, src);
         assert!(
             matches!(r, Err(SandboxError::Timeout { .. })),
@@ -534,6 +548,13 @@ fn deadline_reaches_every_task_the_script_started() {
 
 #[test]
 fn imported_modules_are_contained() {
+    for engine in SANDBOX_ENGINES {
+        eprintln!("engine: {engine}");
+        imported_modules_are_contained_on(engine);
+    }
+}
+
+fn imported_modules_are_contained_on(engine: Engine) {
     let l = Layout::new("import");
     let mark = l.data.join("counter.txt");
     // An imported module's top level runs under the same deadline...
@@ -545,7 +566,10 @@ fn imported_modules_are_contained() {
         ),
     )
     .expect("write module");
-    let sb = Sandbox::new().allow_write([&l.data]).allow_read([&l.data]);
+    let sb = Sandbox::new()
+        .engine(engine)
+        .allow_write([&l.data])
+        .allow_read([&l.data]);
     let r = run_bounded(sb, &format!("import \"{}\"", lit(&l.data.join("spin.fg"))));
     assert!(matches!(r, Err(SandboxError::Timeout { .. })), "{r:?}");
     assert_stopped(&mark, "import");
@@ -560,7 +584,10 @@ fn imported_modules_are_contained() {
         ),
     )
     .expect("write module");
-    let sb = Sandbox::new().allow_write([&l.data]).allow_read([&l.data]);
+    let sb = Sandbox::new()
+        .engine(engine)
+        .allow_write([&l.data])
+        .allow_read([&l.data]);
     let r = sb.run_source(&format!(
         "import \"{}\"\nlet h = spawn {{\n  schedule every 1 seconds {{\n    fs.append(\"{}\", \"y\")\n  }}\n}}\nawait h",
         lit(&l.data.join("sched.fg")),
@@ -576,6 +603,13 @@ fn imported_modules_are_contained() {
 
 #[test]
 fn blocking_waits_honour_the_deadline() {
+    for engine in SANDBOX_ENGINES {
+        eprintln!("engine: {engine}");
+        blocking_waits_honour_the_deadline_on(engine);
+    }
+}
+
+fn blocking_waits_honour_the_deadline_on(engine: Engine) {
     // Each of these blocks forever; the run must time out promptly and the
     // worker must not stay parked (checked by the run returning at all for
     // `squad`, which joins its tasks).
@@ -590,7 +624,7 @@ fn blocking_waits_honour_the_deadline() {
         "wait(100000000000000)",
     ];
     for src in cases {
-        let r = run_bounded(Sandbox::new(), src);
+        let r = run_bounded(Sandbox::new().engine(engine), src);
         assert!(
             matches!(r, Err(SandboxError::Timeout { .. })),
             "{src}: {r:?}"
@@ -600,8 +634,16 @@ fn blocking_waits_honour_the_deadline() {
 
 #[test]
 fn output_cap_bounds_memory_between_polls() {
+    for engine in SANDBOX_ENGINES {
+        eprintln!("engine: {engine}");
+        output_cap_bounds_memory_between_polls_on(engine);
+    }
+}
+
+fn output_cap_bounds_memory_between_polls_on(engine: Engine) {
     let start = Instant::now();
     let r = Sandbox::new()
+        .engine(engine)
         .max_output(1000)
         .max_time(Duration::from_secs(20))
         .run_source("let big = repeat_str(\"x\", 1000000)\nwhile true { say big }");
@@ -614,7 +656,14 @@ fn output_cap_bounds_memory_between_polls() {
 
 #[test]
 fn host_stdin_and_argv_are_not_readable_without_process() {
-    let out = Sandbox::new()
+    for engine in SANDBOX_ENGINES {
+        eprintln!("engine: {engine}");
+        host_stdin_and_argv_are_not_readable_without_process_on(engine);
+    }
+}
+
+fn host_stdin_and_argv_are_not_readable_without_process_on(engine: Engine) {
+    let out = Sandbox::new().engine(engine)
         .run_source(
             "say term.confirm(\"ok?\")\nsay term.menu([\"a\", \"b\"])\nsay io.args()\nsay io.args_has(\"--x\")",
         )
@@ -622,6 +671,7 @@ fn host_stdin_and_argv_are_not_readable_without_process() {
     assert_eq!(out.stdout, "false\nnull\n[]\nfalse\n");
     // With `process`, the arguments are the host's.
     let out = Sandbox::new()
+        .engine(engine)
         .allow(Capability::Process)
         .run_source("say len(io.args()) > 0")
         .expect("runs");
@@ -630,12 +680,19 @@ fn host_stdin_and_argv_are_not_readable_without_process() {
 
 #[test]
 fn oversized_allocations_do_not_abort_the_host() {
+    for engine in SANDBOX_ENGINES {
+        eprintln!("engine: {engine}");
+        oversized_allocations_do_not_abort_the_host_on(engine);
+    }
+}
+
+fn oversized_allocations_do_not_abort_the_host_on(engine: Engine) {
     for src in [
         "repeat_str(\"x\", 100000000000000)",
         "range(0, 100000000000000)",
         "pad_start(\"x\", 100000000000000)",
     ] {
-        match Sandbox::new().run_source(src) {
+        match Sandbox::new().engine(engine).run_source(src) {
             Err(SandboxError::Runtime { message, .. }) => {
                 assert!(message.contains("too large"), "{src}: {message}")
             }

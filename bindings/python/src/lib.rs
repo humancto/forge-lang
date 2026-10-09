@@ -13,15 +13,18 @@
 //! * **Stack.** Lexing, parsing and type-checking are recursive; Python's own
 //!   threads may have small stacks (512 KiB on macOS). Every call into Forge
 //!   therefore runs on a thread with [`FRONTEND_STACK_SIZE`] reserved (only
-//!   touched pages are committed). The interpreter itself runs on the
-//!   sandbox's own worker thread.
+//!   touched pages are committed). The engine itself runs on the sandbox's
+//!   own worker thread.
+//! * **Engine.** `engine="vm"` (the default, the bytecode VM) or
+//!   `engine="interp"` (the tree-walking interpreter). The core sandbox
+//!   applies the same containment to both.
 //! * **Thread safety.** [`Sandbox`] is an immutable (`frozen`) value. Each
-//!   `run` builds its own interpreter, so one `Sandbox` can be used from many
-//!   Python threads at once.
+//!   `run` builds its own engine instance, so one `Sandbox` can be used from
+//!   many Python threads at once.
 
 use forge_lang::mcp::{check_source, Diagnostic as ForgeDiagnostic};
 use forge_lang::tooling::{runtime_error_code, runtime_error_hint};
-use forge_lang::{CancelHandle, Capability, Sandbox as ForgeSandbox, SandboxError};
+use forge_lang::{CancelHandle, Capability, Engine, Sandbox as ForgeSandbox, SandboxError};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -381,6 +384,8 @@ pub struct Sandbox {
     max_output: Option<usize>,
     max_fuel: Option<u64>,
     max_memory: Option<usize>,
+    /// Set only when the caller chose one (`__repr__`).
+    engine: Option<Engine>,
 }
 
 #[pymethods]
@@ -397,6 +402,7 @@ impl Sandbox {
         max_fuel = None,
         max_memory = None,
         label = None,
+        engine = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -409,6 +415,7 @@ impl Sandbox {
         max_fuel: Option<u64>,
         max_memory: Option<usize>,
         label: Option<String>,
+        engine: Option<String>,
     ) -> PyResult<Self> {
         let mut inner = ForgeSandbox::new();
         for name in &allow {
@@ -463,6 +470,18 @@ impl Sandbox {
             }
             inner = inner.max_memory(bytes);
         }
+        let engine = engine
+            .map(|name| {
+                Engine::parse(&name).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "unknown engine {name:?}; expected \"vm\" or \"interp\""
+                    ))
+                })
+            })
+            .transpose()?;
+        if let Some(engine) = engine {
+            inner = inner.engine(engine);
+        }
         Ok(Sandbox {
             inner,
             allow,
@@ -473,6 +492,7 @@ impl Sandbox {
             max_output,
             max_fuel,
             max_memory,
+            engine,
         })
     }
 
@@ -544,6 +564,9 @@ impl Sandbox {
         }
         if let Some(m) = self.max_memory {
             parts.push(format!("max_memory={m}"));
+        }
+        if let Some(e) = self.engine {
+            parts.push(format!("engine='{}'", e.name()));
         }
         Ok(format!("Sandbox({})", parts.join(", ")))
     }

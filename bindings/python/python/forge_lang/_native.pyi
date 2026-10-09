@@ -99,6 +99,8 @@ class Sandbox:
         statement, function call and loop iteration).
     :param max_memory: bytes of memory one run may hold.
     :param label: name used for the source in error messages.
+    :param engine: ``"vm"`` (default, the bytecode VM) or ``"interp"`` (the
+        tree-walking interpreter). Both run under the same sandbox.
     """
 
     def __new__(
@@ -113,6 +115,7 @@ class Sandbox:
         max_fuel: Optional[int] = None,
         max_memory: Optional[int] = None,
         label: Optional[str] = None,
+        engine: Optional[Literal["vm", "interp"]] = None,
     ) -> Sandbox: ...
     def run(self, code: str, *, cancel: Optional[CancelToken] = None) -> Result:
         """Run Forge source to completion with the GIL released.

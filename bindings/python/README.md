@@ -40,6 +40,7 @@ sb = Sandbox(
     max_output=64_000,                 # stop after printing this many bytes
     max_fuel=50_000_000,               # deterministic step budget per run
     max_memory=256 * 1024 * 1024,      # bytes one run may hold
+    engine="vm",                       # or "interp"; same sandbox either way
 )
 
 result = sb.run(f'''
@@ -181,8 +182,9 @@ reference written for models; include it in the system prompt.
 
 ## Current limits
 
-* Programs run on Forge's tree-walking interpreter. HTTP servers
-  (`@server`), `schedule` and `watch` blocks are not started.
+* Programs run on Forge's bytecode VM by default (`engine="interp"` picks
+  the tree-walking interpreter; the sandbox is the same on both). HTTP
+  servers (`@server`), `schedule` and `watch` blocks are not started.
 * Call depth is bounded by the engine's recursion limit (default 10,000;
   `FORGE_MAX_DEPTH` in the host's environment).
 * stderr output (`log`, `term`) is not captured, and `input()` reads the

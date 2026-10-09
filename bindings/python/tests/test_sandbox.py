@@ -66,6 +66,20 @@ def test_repr():
 # --- configuration validation ----------------------------------------------
 
 
+@pytest.mark.parametrize("engine", ["vm", "interp"])
+def test_both_engines_run_contained(engine):
+    sb = forge_lang.Sandbox(engine=engine, max_time=5)
+    assert sb.run('say 6 * 7').stdout == "42\n"
+    with pytest.raises(forge_lang.ForgePermissionError):
+        sb.run('sh("echo escaped")')
+    assert f"engine='{engine}'" in repr(sb)
+
+
+def test_unknown_engine_is_rejected():
+    with pytest.raises(ValueError, match="unknown engine"):
+        forge_lang.Sandbox(engine="jit")
+
+
 def test_unknown_capability_is_rejected():
     with pytest.raises(ValueError, match="unknown capability"):
         Sandbox(allow=["teleport"])
