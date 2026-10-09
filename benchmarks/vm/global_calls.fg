@@ -1,0 +1,13 @@
+// VM benchmark: builtins looked up as globals in a hot loop (2M
+// iterations, two global reads each). Builtin calls keep the function in
+// the VM, so this measures `GetGlobal` plus the native call.
+fn run(xs, s, n) {
+    let mut i = 0
+    let mut total = 0
+    while i < n {
+        total = total + len(xs) + len(s)
+        i = i + 1
+    }
+    return total
+}
+println(run([1, 2, 3], "ab", 2000000))

@@ -1,0 +1,8 @@
+// VM benchmark: `string_build` (200k `s = s + "x"`) at the top level.
+let mut s = ""
+let mut i = 0
+while i < 200000 {
+    s = s + "x"
+    i = i + 1
+}
+println(len(s))

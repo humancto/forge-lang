@@ -258,8 +258,8 @@ fn fork_does_not_reregister_builtins() {
     vm.execute(&chunk).expect("run");
     let t = VmTemplate::new(&vm, HashMap::new()).expect("template");
     let fork = t.fork(flag());
-    let mut template_names: Vec<_> = vm.globals.keys().cloned().collect();
-    let mut fork_names: Vec<_> = fork.globals.keys().cloned().collect();
+    let mut template_names: Vec<_> = vm.globals.keys().collect();
+    let mut fork_names: Vec<_> = fork.globals.keys().collect();
     template_names.sort();
     fork_names.sort();
     assert_eq!(template_names, fork_names);

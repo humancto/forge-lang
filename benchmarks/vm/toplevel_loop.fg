@@ -1,0 +1,10 @@
+// VM benchmark: a 5M-iteration `while` at the top level of the script.
+// Pairs with `toplevel_loop_fn` (the same loop inside a function, which
+// tiers up into the JIT; top-level code always runs in the VM).
+let mut i = 0
+let mut total = 0
+while i < 5000000 {
+    total = total + i
+    i = i + 1
+}
+println(total)

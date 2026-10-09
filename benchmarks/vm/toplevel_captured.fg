@@ -1,0 +1,13 @@
+// VM benchmark: top-level variables captured by a top-level function,
+// called from a top-level loop (2M calls). Exercises global function
+// lookups and captured-local reads/writes in the main frame.
+let mut total = 0
+fn bump(n) {
+    total = total + n
+}
+let mut i = 0
+while i < 2000000 {
+    bump(i)
+    i = i + 1
+}
+println(total)

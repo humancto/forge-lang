@@ -168,7 +168,8 @@ const COMPILER_INTRINSICS: &[&str] = &[
 pub struct VM {
     pub registers: Vec<Value>,
     pub frames: Vec<CallFrame>,
-    pub globals: HashMap<String, Value>,
+    /// Global variables: indexed slots, see `vm::globals`.
+    pub globals: super::globals::Globals,
     pub method_tables: HashMap<String, IndexMap<String, Value>>,
     pub static_methods: HashMap<String, IndexMap<String, Value>>,
     pub embedded_fields: HashMap<String, Vec<(String, String)>>,
@@ -403,7 +404,7 @@ impl VM {
         Self {
             registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
-            globals: HashMap::new(),
+            globals: super::globals::Globals::new(),
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
@@ -609,13 +610,13 @@ impl VM {
         // Copy non-function globals. Skip globals where value_to_shared returns
         // Null but the original wasn't Null (i.e., functions/closures/natives) —
         // these would overwrite the child's freshly-registered builtins.
-        for (name, val) in &self.globals {
+        for (name, val) in self.globals.iter() {
             let shared = value_to_shared(&self.gc, val);
             if matches!(shared, SharedValue::Null) && !val.is_null() {
                 continue;
             }
             let child_val = shared_to_value(&mut child.gc, &shared);
-            child.globals.insert(name.clone(), child_val);
+            child.globals.insert(name, child_val);
         }
 
         for (name, methods) in &self.method_tables {
@@ -1144,20 +1145,21 @@ impl VM {
                         self.registers[base + a as usize] = Value::bool_val(!val);
                     }
                     OpCode::GetGlobal => {
-                        let name_const = &chunk.constants[bx as usize];
-                        if let Constant::Str(name) = name_const {
-                            let Some(val) = self.globals.get(name).cloned() else {
+                        // Slot lookup through the chunk's id cache; the name
+                        // is only needed for the error (see `vm::globals`).
+                        if let Some(id) = chunk.global_id(bx) {
+                            let Some(val) = self.globals.get_id(id) else {
                                 let pc = self.frames[frame_idx].ip - 1;
+                                let name = super::globals::name_of(id);
                                 return Err(self.undefined_global(chunk, pc, name));
                             };
                             self.registers[base + a as usize] = val;
                         }
                     }
                     OpCode::SetGlobal => {
-                        let name_const = &chunk.constants[bx as usize];
-                        if let Constant::Str(name) = name_const {
+                        if let Some(id) = chunk.global_id(bx) {
                             let val = self.registers[base + a as usize];
-                            self.globals.insert(name.clone(), val);
+                            self.globals.set_id(id, val);
                         }
                     }
                     OpCode::GetLocal => {
@@ -2347,7 +2349,7 @@ impl VM {
             name,
             [
                 local.into_iter().collect::<Vec<_>>(),
-                self.globals.keys().map(String::as_str).collect(),
+                self.globals.keys().collect(),
             ],
         );
         VMError::new(&crate::semantics::undefined_variable(
@@ -3016,7 +3018,7 @@ impl VM {
 /// The VM's globals as seen by the JIT verifier and entry guards.
 #[cfg(feature = "jit")]
 struct JitGlobals<'a> {
-    globals: &'a HashMap<String, Value>,
+    globals: &'a super::globals::Globals,
     gc: &'a super::gc::Gc,
 }
 

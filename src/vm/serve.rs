@@ -77,7 +77,8 @@ pub struct VmTemplate {
     cells: Vec<(usize, Value)>,
     /// Every other object, `(slot, object)`, children before parents.
     objects: Vec<(usize, FrozenObj)>,
-    globals: Vec<(String, Value)>,
+    /// Globals with frozen values (same names and slots as the VM's).
+    globals: super::globals::Globals,
     method_tables: FrozenTables,
     static_methods: FrozenTables,
     struct_defaults: FrozenTables,
@@ -105,7 +106,7 @@ impl VmTemplate {
     /// debug builds; the VM reports it before the server starts listening.)
     pub fn new(vm: &VM, fn_params: HashMap<String, Vec<String>>) -> Result<Self, String> {
         let mut freezer = Freezer::new(&vm.gc);
-        let globals = freezer.freeze_named(vm.globals.iter())?;
+        let globals = vm.globals.try_map_values(|v| freezer.freeze(*v))?;
         let method_tables = freezer.freeze_tables(&vm.method_tables)?;
         let static_methods = freezer.freeze_tables(&vm.static_methods)?;
         let struct_defaults = freezer.freeze_tables(&vm.struct_defaults)?;
@@ -155,9 +156,8 @@ impl VmTemplate {
         };
         vm.globals = self
             .globals
-            .iter()
-            .map(|(k, v)| (k.clone(), remap(v)))
-            .collect();
+            .try_map_values(|v| Ok::<_, std::convert::Infallible>(remap(v)))
+            .unwrap_or_else(|never| match never {});
         vm.method_tables = self
             .method_tables
             .iter()
@@ -492,15 +492,6 @@ impl<'a> Freezer<'a> {
             objects: Vec::new(),
             pending_cells: Vec::new(),
         }
-    }
-
-    fn freeze_named<'v>(
-        &mut self,
-        entries: impl Iterator<Item = (&'v String, &'v Value)>,
-    ) -> Result<Vec<(String, Value)>, String> {
-        entries
-            .map(|(k, v)| Ok((k.clone(), self.freeze(*v)?)))
-            .collect()
     }
 
     fn freeze_tables(

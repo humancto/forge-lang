@@ -411,6 +411,7 @@ fn read_chunk_inner(
         upvalue_sources,
         proto_id: crate::vm::bytecode::next_proto_id(),
         global_hints: Vec::new(),
+        global_ids: Default::default(),
     })
 }
 
