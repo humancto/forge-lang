@@ -66,6 +66,20 @@ def test_repr():
 # --- configuration validation ----------------------------------------------
 
 
+@pytest.mark.parametrize("engine", ["vm", "interp"])
+def test_both_engines_run_contained(engine):
+    sb = forge_lang.Sandbox(engine=engine, max_time=5)
+    assert sb.run('say 6 * 7').stdout == "42\n"
+    with pytest.raises(forge_lang.ForgePermissionError):
+        sb.run('sh("echo escaped")')
+    assert f"engine='{engine}'" in repr(sb)
+
+
+def test_unknown_engine_is_rejected():
+    with pytest.raises(ValueError, match="unknown engine"):
+        forge_lang.Sandbox(engine="jit")
+
+
 def test_unknown_capability_is_rejected():
     with pytest.raises(ValueError, match="unknown capability"):
         Sandbox(allow=["teleport"])
@@ -173,6 +187,84 @@ def test_output_limit():
     assert Sandbox(max_output=10).run('say "ok"').stdout == "ok\n"
 
 
+def test_fuel_limit_is_deterministic():
+    with pytest.raises(forge_lang.ForgeFuelExhaustedError) as exc:
+        Sandbox(max_fuel=10_000).run('say "start"\nwhile true { }')
+    e = exc.value
+    assert isinstance(e, ForgeError)
+    assert e.kind == "fuel_exhausted"
+    assert e.limit == 10_000
+    assert e.stdout == "start\n"
+    assert e.code is None
+    # The same program and budget stop at the same step: same output.
+    count = "let mut i = 0\nwhile true { i = i + 1\n if i % 100 == 0 { say i } }"
+    outs = set()
+    for _ in range(3):
+        with pytest.raises(forge_lang.ForgeFuelExhaustedError) as again:
+            Sandbox(max_fuel=5_000).run(count)
+        outs.add(again.value.stdout)
+    assert len(outs) == 1
+    # Enough fuel: the run completes.
+    assert Sandbox(max_fuel=1_000_000).run('say "ok"').stdout == "ok\n"
+
+
+def test_fuel_exhaustion_cannot_be_caught():
+    code = 'try {\n  while true { }\n} catch e {\n  say "caught"\n}'
+    with pytest.raises(forge_lang.ForgeFuelExhaustedError) as exc:
+        Sandbox(max_fuel=10_000).run(code)
+    assert "caught" not in exc.value.stdout
+
+
+def test_memory_limit():
+    with pytest.raises(forge_lang.ForgeMemoryLimitError) as exc:
+        Sandbox(max_memory=8 * 1024 * 1024, max_time=20).run(
+            'let mut xs = []\nwhile true { xs.push(repeat_str("x", 4096)) }'
+        )
+    e = exc.value
+    assert e.kind == "memory_limit"
+    assert e.limit == 8 * 1024 * 1024
+    assert Sandbox(max_memory=64 * 1024 * 1024).run("say 1 + 1").stdout == "2\n"
+
+
+@pytest.mark.parametrize("kwargs", [{"max_fuel": 0}, {"max_memory": 0}])
+def test_zero_limits_are_rejected(kwargs):
+    with pytest.raises(ValueError):
+        Sandbox(**kwargs)
+
+
+@pytest.mark.parametrize("kwargs", [{"max_fuel": -1}, {"max_memory": -1}])
+def test_negative_limits_are_rejected(kwargs):
+    with pytest.raises((ValueError, OverflowError)):
+        Sandbox(**kwargs)
+
+
+def test_limits_in_repr():
+    r = repr(Sandbox(max_fuel=100, max_memory=2048))
+    assert r == "Sandbox(allow=[], max_fuel=100, max_memory=2048)"
+
+
+def test_runtime_error_has_code_and_hint():
+    with pytest.raises(ForgeRuntimeError) as exc:
+        Sandbox().run("let x = 1 / 0")
+    e = exc.value
+    assert e.code is not None and e.code.startswith("E") and len(e.code) == 5
+    assert e.hint
+
+
+def test_permission_error_has_code_and_hint():
+    with pytest.raises(ForgePermissionError) as exc:
+        Sandbox().run('sh("echo hi")')
+    e = exc.value
+    assert e.code is not None and e.code.startswith("E")
+    assert e.hint
+
+
+def test_syntax_error_has_code():
+    with pytest.raises(ForgeSyntaxError) as exc:
+        Sandbox().run("let = =")
+    assert exc.value.code in ("E0001", "E0002")
+
+
 def test_cancel_token_from_another_thread():
     token = CancelToken()
     assert not token.cancelled
@@ -263,7 +355,16 @@ def test_check_reports_parse_error_with_location():
     assert d.severity == "error"
     assert d.line == 2
     assert d.message
+    assert d.code == "E0002"
     assert str(d).startswith("line 2:")
+
+
+def test_check_type_diagnostic_has_code_and_hint():
+    diags = forge_lang.check('fn f(a: Int) -> Int { return a }\nf("x")')
+    assert diags
+    d = diags[0]
+    assert d.code is not None and d.code.startswith("T")
+    assert d.hint is None or isinstance(d.hint, str)
 
 
 def test_check_does_not_run_code(tmp_path):

@@ -11,7 +11,8 @@ model and the current guarantees.
 
 - `forge --sandbox run` (CLI, VM by default or `--interp`), with some grants
   such as `--allow-read=/data`, `--allow-net=api.example.com`;
-- `forge_lang::Sandbox` (Rust embedding API, tree-walking interpreter);
+- `forge_lang::Sandbox` (Rust embedding API; bytecode VM by default, or the
+  tree-walking interpreter — same containment, `Sandbox::run_contained`);
 - the Python package (`bindings/python`, same `Sandbox` in-process);
 - `forge mcp` (an AI agent submits scripts over MCP stdio).
 
@@ -82,7 +83,7 @@ outside the sandbox (see SEC-15); side channels (timing).
 | `ask` | `ai` | `interpreter/mod.rs` | `vm/machine.rs` |
 | `import "file"` | import root or `fs.read`; **reads the checked path** | `interpreter/mod.rs` | `vm/builtins.rs` |
 | **`watch "path"`** | **`fs.read`** | `runtime/host.rs` | `vm/machine.rs` (same helper) |
-| `schedule`, `watch`, `@server` under `Sandbox` | not started (`defer_host_runtime`), **also from imports and tasks** | `interpreter/mod.rs` | n/a (Sandbox is interpreter-only) |
+| `schedule`, `watch`, `@server` under `Sandbox` | not started (`defer_host_runtime`), **also from imports and tasks** | `interpreter/mod.rs` | `vm/machine.rs` (`fork_for_spawn` keeps deferring) |
 | **`path.resolve`, `path.relative`** | **`fs.read`** (they canonicalise) | shared | shared |
 | `path.*` (others), `url.*`, `json.*`, `regex.*`, `crypto.*`, `jwt.*`, `math.*`, `npc.*`, `time.*` | none (pure) | — | — |
 | `os.platform`/`arch`/`cpus`/`pid`/`hostname`/`homedir`, `cwd()` | none (see SEC-18) | — | — |
@@ -418,9 +419,40 @@ the token was only set on a timeout or host cancel. A script that ended
 normally, such as `spawn { while true { } }`, returned at once and left its
 task running in the host, so every `run_forge` call could leave one more
 spinning thread behind. **Fix** (`src/sandbox.rs`): the one runner every
-sandboxed execution goes through (`Sandbox::run_interpreter`, also used by
-MCP sessions and tool calls) sets the run's token when the job returns,
-however it returns. Test: `unawaited_tasks_stop_when_the_run_ends`.
+sandboxed execution goes through (`Sandbox::run_contained`, for both
+engines; also used by MCP sessions and tool calls) sets the run's token
+when the job returns, however it returns. Test:
+`unawaited_tasks_stop_when_the_run_ends`.
+
+### SEC-25 VM gaps found while moving the sandbox to the VM (Medium, fixed)
+
+Running `Sandbox` / `forge mcp` on the VM (now the default) exposed three
+places where the VM did less than the interpreter:
+
+- **Compile-time import reads.** A bare `import "file"` is resolved when
+  the program is compiled (to learn the module's exported names), and the
+  compiler read the file without the `fs.read` / import-root check, so a
+  sandboxed program could probe files outside its grant and leak their
+  first line through lex/parse errors. **Fix**: `parse_import_program`
+  (`vm/compiler.rs`) calls `permissions::require_import` and reads the
+  checked path; the sandbox compiles on its worker, under the run's
+  policy. Test: `vm_imports_are_read_under_the_policy`.
+- **`wait` / `time.sleep` ignored cancellation.** The VM's sleep only
+  polled `timeout` deadlines, so a host deadline or cancel could not
+  reclaim a sleeping worker, and `time.sleep` went to the shared stdlib's
+  plain sleep. **Fix**: both poll `VM::wait_interrupted` (cancel token,
+  scope cancels, deadlines). Test:
+  `sandbox_cancellation_reaches_blocked_and_nested_work`.
+- **Memory across tasks.** Each spawned VM task has its own GC heap, whose
+  limit only bounds itself. **Fix**: in the sandbox the VM (and every task
+  it forks) also polls the run's allocation meter at safe points
+  (`VM::poll_allocation_meter`). Test:
+  `memory_limit_covers_every_task_of_the_run`.
+
+Output capture needed no engine change: `runtime::stdio` sinks are now
+shared and inherited by every thread started through
+`permissions::inherit`, so output from spawned VM tasks is captured and
+budgeted like the interpreter's.
 
 ## 5. Coordination notes
 

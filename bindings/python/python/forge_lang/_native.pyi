@@ -10,8 +10,11 @@ __all__ = [
     "Diagnostic",
     "ForgeCancelledError",
     "ForgeError",
+    "ForgeFuelExhaustedError",
+    "ForgeMemoryLimitError",
     "ForgeOutputLimitError",
     "ForgePermissionError",
+    "ForgeResourceLimitError",
     "ForgeRuntimeError",
     "ForgeSyntaxError",
     "ForgeTimeoutError",
@@ -54,6 +57,13 @@ class Diagnostic:
     @property
     def message(self) -> str: ...
     @property
+    def code(self) -> Optional[str]:
+        """Stable code (``E0002`` for syntax errors, ``T0006`` for type
+        diagnostics; ``forge explain <code>`` documents it), when known."""
+    @property
+    def hint(self) -> Optional[str]:
+        """How to fix it (did-you-mean, expected type), when there is a hint."""
+    @property
     def severity(self) -> Literal["error", "warning"]: ...
 
 @final
@@ -85,7 +95,12 @@ class Sandbox:
     :param max_time: wall-clock limit per run, in seconds.
     :param max_output: stop the program once it has printed more than this
         many bytes.
+    :param max_fuel: deterministic step budget per run (one step per
+        statement, function call and loop iteration).
+    :param max_memory: bytes of memory one run may hold.
     :param label: name used for the source in error messages.
+    :param engine: ``"vm"`` (default, the bytecode VM) or ``"interp"`` (the
+        tree-walking interpreter). Both run under the same sandbox.
     """
 
     def __new__(
@@ -97,7 +112,10 @@ class Sandbox:
         allow_net: Sequence[str] = ...,
         max_time: Optional[float] = None,
         max_output: Optional[int] = None,
+        max_fuel: Optional[int] = None,
+        max_memory: Optional[int] = None,
         label: Optional[str] = None,
+        engine: Optional[Literal["vm", "interp"]] = None,
     ) -> Sandbox: ...
     def run(self, code: str, *, cancel: Optional[CancelToken] = None) -> Result:
         """Run Forge source to completion with the GIL released.
@@ -108,6 +126,9 @@ class Sandbox:
         :raises ForgeTimeoutError: ``max_time`` was exceeded.
         :raises ForgeOutputLimitError: ``max_output`` was exceeded.
         :raises ForgeCancelledError: ``cancel`` was triggered.
+        :raises ForgeFuelExhaustedError: ``max_fuel`` steps were used up.
+        :raises ForgeMemoryLimitError: ``max_memory`` was exceeded.
+        :raises ForgeResourceLimitError: another resource cap was exceeded.
         """
     def check(self, code: str) -> list[Diagnostic]:
         """Lex, parse and type-check without running. Same as :func:`check`."""
@@ -119,7 +140,8 @@ class ForgeError(Exception):
     """Base class for every error raised by a Forge run."""
 
     #: Stable machine-readable kind: ``syntax``, ``permission_denied``,
-    #: ``runtime``, ``timeout``, ``output_limit`` or ``cancelled``.
+    #: ``runtime``, ``timeout``, ``output_limit``, ``cancelled``,
+    #: ``fuel_exhausted``, ``memory_limit`` or ``resource_limit``.
     kind: str
     #: Output printed before the failure (empty for syntax errors).
     stdout: str
@@ -127,8 +149,14 @@ class ForgeError(Exception):
     line: Optional[int]
     #: 1-based column, when known (syntax errors).
     column: Optional[int]
-    #: The limit that was hit: seconds for timeouts, bytes for output limits.
+    #: The limit that was hit: seconds for timeouts, bytes for output and
+    #: memory limits, steps for fuel.
     limit: Optional[Union[int, float]]
+    #: Stable error code (``E0012``, ...) for syntax, runtime and permission
+    #: errors; ``forge explain <code>`` documents it.
+    code: Optional[str]
+    #: How to fix the error, when there is a hint.
+    hint: Optional[str]
 
 class ForgeSyntaxError(ForgeError): ...
 class ForgePermissionError(ForgeError): ...
@@ -141,3 +169,11 @@ class ForgeOutputLimitError(ForgeError):
     limit: int
 
 class ForgeCancelledError(ForgeError): ...
+
+class ForgeFuelExhaustedError(ForgeError):
+    limit: int
+
+class ForgeMemoryLimitError(ForgeError):
+    limit: int
+
+class ForgeResourceLimitError(ForgeError): ...

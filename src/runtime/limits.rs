@@ -565,6 +565,9 @@ pub struct Meter {
     budget: Option<Arc<Budget>>,
     fuel: bool,
     poll_memory: bool,
+    /// Poll memory at every step (the interpreter, whose steps are
+    /// statements) rather than at the engine's ordinary safe points.
+    memory_every_step: bool,
 }
 
 impl Meter {
@@ -580,6 +583,7 @@ impl Meter {
             budget,
             fuel,
             poll_memory: false,
+            memory_every_step: false,
         }
     }
 
@@ -590,7 +594,27 @@ impl Meter {
             .budget
             .as_ref()
             .is_some_and(|b| b.limits.max_memory.is_some());
+        self.memory_every_step = self.poll_memory;
         self
+    }
+
+    /// Also poll the allocation meter, at the engine's ordinary safe points.
+    /// The sandbox turns this on for the VM, so a run's memory limit covers
+    /// every thread of the run (spawned tasks each have their own GC heap,
+    /// which only bounds itself), as it does on the interpreter.
+    pub fn with_safepoint_memory_polling(mut self) -> Meter {
+        if !self.poll_memory {
+            self.poll_memory = self
+                .budget
+                .as_ref()
+                .is_some_and(|b| b.limits.max_memory.is_some());
+        }
+        self
+    }
+
+    /// Whether this meter polls the allocation meter.
+    pub fn polls_memory(&self) -> bool {
+        self.poll_memory
     }
 
     pub fn budget(&self) -> Option<&Arc<Budget>> {
@@ -634,7 +658,9 @@ impl Meter {
             if b.over_memory() {
                 return Err(b.trip(Trip::Memory));
             }
-            next = 0;
+            if self.memory_every_step {
+                next = 0;
+            }
         }
         Ok(next as u32)
     }

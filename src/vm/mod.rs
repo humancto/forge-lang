@@ -1,6 +1,8 @@
 mod builtins; // VM builtin dispatch — extracted from machine.rs
 pub mod bytecode;
 pub mod compiler;
+#[cfg(feature = "host")]
+pub(crate) mod embed; // compile / call helpers for the sandbox and `forge mcp`
 pub mod frame;
 pub mod gc;
 pub mod globals;

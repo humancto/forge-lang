@@ -78,6 +78,11 @@ the worker after a crash.
 * **Recursion** is limited to 1,000 calls on the VM and 450 on the
   interpreter (the browser's JS stack is ~1 MB). A JS stack overflow or Rust
   panic is reported as an error and the worker is replaced.
+* **Hints fit the browser.** The core's error hints suggest CLI remedies
+  (`--max-fuel`, `--max-memory`, `FORGE_MAX_DEPTH`, `--allow-*`,
+  `--interp`). `browser_message`/`browser_hint` in `src/lib.rs` rewrite
+  them for the playground or drop them, for run errors and `check`
+  diagnostics. The core's error text is unchanged.
 
 ## What works in the browser
 

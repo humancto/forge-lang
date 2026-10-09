@@ -1632,6 +1632,16 @@ impl VM {
                 }
                 Err(VMError::new("ends_with() requires (string, suffix)"))
             }
+            // `time.sleep` blocks like `wait`, so it must stay cancellable
+            // (as in the interpreter); other arguments get the module's error.
+            "time.sleep"
+                if matches!(
+                    args.first().map(|v| v.classify(&self.gc)),
+                    Some(ValueKind::Int(_) | ValueKind::Float(_))
+                ) =>
+            {
+                self.dispatch_native("wait", args)
+            }
             "wait" => match args.first().map(|v| v.classify(&self.gc)) {
                 Some(ValueKind::Int(secs)) => {
                     self.sleep_with_timeout_checks(std::time::Duration::from_secs(

@@ -16,7 +16,7 @@ forge --allow-run run app.fg     # allow sh/run_command and other shell builtins
 forge -e 'println(1 + 2)'        # evaluate inline
 forge test                       # run @test functions in tests/*.fg
 forge build --native app.fg      # native executable (also: fmt, new, lsp, add, install)
-forge mcp --allow-net=api.x.com  # MCP server: AI agents run Forge in a deny-all sandbox
+forge mcp --allow-net=api.x.com  # MCP server: AI agents run Forge in a deny-all sandbox (VM; --engine interp)
 forge mcp serve tools.fg         # serve @tool functions as MCP tools
 forge run --max-fuel 1000000 --max-memory 64MB f.fg  # deterministic step budget + memory cap ("fuel exhausted" / "memory limit exceeded", not catchable)
 ```

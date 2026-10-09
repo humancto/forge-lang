@@ -19,12 +19,14 @@
 //! `llms.txt`). `forge mcp serve tools.fg` adds tools and resources written
 //! in Forge (`@tool` / `@resource` functions, see [`tools`]).
 //!
-//! Engine: every piece of agent-supplied or tool code runs on the
-//! tree-walking interpreter inside [`Sandbox`], never on the VM. The VM now
-//! honours deadlines in `squad`/`timeout`/blocking waits (SEC-02) and guards
-//! deep conversions (SEC-16), but it still writes `say` straight to the
-//! process's stdout: there is no output capture or output budget, which
-//! every MCP result depends on. Moving MCP to the VM needs that first.
+//! Engine: every piece of agent-supplied or tool code runs inside
+//! [`Sandbox`], on the engine [`ServerConfig::engine`] names: the bytecode
+//! VM by default (`forge mcp --engine vm`), or the tree-walking interpreter
+//! (`--engine interp`). The containment (policy, deadline, cancellation,
+//! output capture and budget, resource limits, no host runtime) is the
+//! sandbox's and identical on both; see [`Sandbox::run_contained`]. Code
+//! the VM cannot run faithfully (an unknown decorator) runs on the
+//! interpreter inside the same sandbox.
 //!
 //! Robustness: every `tools/call` that runs code gets its own thread, so a
 //! stuck script never blocks the protocol loop; scripts are bounded by a
@@ -43,7 +45,9 @@ pub use tools::ToolSet;
 
 use crate::permissions::Capabilities;
 use crate::runtime::limits::Limits;
-use crate::sandbox::{parse_source, truncate_utf8, CancelHandle, Output, Sandbox, SandboxError};
+use crate::sandbox::{
+    parse_source, truncate_utf8, CancelHandle, Engine, Output, Sandbox, SandboxError,
+};
 
 use serde_json::{json, Map, Value};
 use session::{Checkout, Sessions};
@@ -67,12 +71,18 @@ pub const DEFAULT_MAX_CONCURRENT_CALLS: usize = 8;
 pub const DEFAULT_MAX_SESSIONS: usize = 16;
 /// Default idle time after which a session is dropped.
 pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(15 * 60);
-/// Default (and maximum) fuel for one `run_forge` call: interpreter steps
-/// (statements, calls, loop iterations). Generous for ordinary scripts —
-/// on a loaded 4-core machine the interpreter runs roughly 7–15M steps per
-/// second, so this is on the order of the default 30 s time limit — while
-/// making a runaway loop fail deterministically instead of by wall clock.
-pub const DEFAULT_MAX_FUEL: u64 = 200_000_000;
+/// Default (and maximum) fuel for one `run_forge` call on the interpreter:
+/// interpreter steps (statements, calls, loop iterations). Generous for
+/// ordinary scripts — on a loaded 4-core machine the interpreter runs
+/// roughly 7–15M steps per second, so this is on the order of the default
+/// 30 s time limit — while making a runaway loop fail deterministically
+/// instead of by wall clock.
+pub const DEFAULT_MAX_FUEL_INTERP: u64 = 200_000_000;
+/// Default fuel on the VM (the default engine): VM instructions. Typical
+/// scripts (loops, calls, collection builtins) execute about twice as many
+/// VM instructions as interpreter steps, so this lets a script do the same
+/// work on either engine (and the VM does it many times faster).
+pub const DEFAULT_MAX_FUEL: u64 = 2 * DEFAULT_MAX_FUEL_INTERP;
 /// Default memory limit for one `run_forge` call.
 pub const DEFAULT_MAX_MEMORY: usize = 256 * 1024 * 1024;
 
@@ -84,8 +94,14 @@ pub const DEFAULT_MAX_MEMORY: usize = 256 * 1024 * 1024;
 /// installs it); a host that embeds the server without it gets no memory
 /// limit by default, which [`ServerConfig::policy_summary`] shows.
 pub fn default_limits() -> Limits {
+    default_limits_for(Engine::default())
+}
+
+/// [`default_limits`] for scripts running on `engine` (fuel counts that
+/// engine's steps).
+pub fn default_limits_for(engine: Engine) -> Limits {
     Limits {
-        max_fuel: Some(DEFAULT_MAX_FUEL),
+        max_fuel: Some(default_fuel(engine)),
         max_memory: crate::runtime::limits::allocation_meter_installed()
             .then_some(DEFAULT_MAX_MEMORY),
         max_open_files: Some(32),
@@ -97,6 +113,14 @@ pub fn default_limits() -> Limits {
         max_imports: Some(256),
     }
 }
+
+fn default_fuel(engine: Engine) -> u64 {
+    match engine {
+        Engine::Vm => DEFAULT_MAX_FUEL,
+        Engine::Interpreter => DEFAULT_MAX_FUEL_INTERP,
+    }
+}
+
 /// A script is stopped once it has printed this much (memory bound).
 const CAPTURE_LIMIT: usize = 1024 * 1024;
 /// Longest accepted protocol line; longer ones are discarded with an error.
@@ -145,6 +169,10 @@ pub struct ServerConfig {
     /// Resource limits for each call (a fresh budget per call). An agent's
     /// `max_fuel` can only lower the fuel limit.
     pub limits: Limits,
+    /// Engine that runs `run_forge` code and session steps. Forge tools
+    /// (`forge mcp serve`) run on the engine their [`ToolSet`] was loaded
+    /// for.
+    pub engine: Engine,
 }
 
 /// Names of the built-in tools (reserved when `code_tools` is on).
@@ -167,7 +195,19 @@ impl ServerConfig {
             code_tools: true,
             tools: None,
             limits: default_limits(),
+            engine: Engine::default(),
         }
+    }
+
+    /// Run scripts and tools on `engine`. A fuel limit still at the old
+    /// engine's default moves to the new engine's default (fuel counts the
+    /// engine's own steps, see [`DEFAULT_MAX_FUEL`]).
+    pub fn with_engine(mut self, engine: Engine) -> Self {
+        if self.limits.max_fuel == Some(default_fuel(self.engine)) {
+            self.limits.max_fuel = Some(default_fuel(engine));
+        }
+        self.engine = engine;
+        self
     }
 
     /// Serve `tools` too. Fails if a Forge tool would shadow a built-in one.
@@ -1320,7 +1360,8 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
         .max_time(limit)
         .max_output(CAPTURE_LIMIT.max(config.max_response_bytes))
         .limits(limits.clone())
-        .source_label("<run_forge>");
+        .source_label("<run_forge>")
+        .engine(config.engine);
     let started = Instant::now();
     let (outcome, session) = match session_id {
         None => (sandbox.run_source_cancellable(code, cancel), None),
@@ -1579,8 +1620,10 @@ mod tests {
             .collect()
     }
 
-    fn deny_all() -> ServerConfig {
-        ServerConfig::new(Capabilities::deny_all())
+    const ENGINES: [Engine; 2] = [Engine::Vm, Engine::Interpreter];
+
+    fn deny_all(engine: Engine) -> ServerConfig {
+        ServerConfig::new(Capabilities::deny_all()).with_engine(engine)
     }
 
     fn by_id(msgs: &[Value], id: i64) -> Value {
@@ -1592,6 +1635,13 @@ mod tests {
 
     #[test]
     fn malformed_input_gets_errors_not_a_crash() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            malformed_input_gets_errors_not_a_crash_on(engine);
+        }
+    }
+
+    fn malformed_input_gets_errors_not_a_crash_on(engine: Engine) {
         let msgs = session(
             "{not json\n[]\n42\n{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"ping\"}\n\
              {\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"ping\"}\n\
@@ -1599,7 +1649,7 @@ mod tests {
              {\"jsonrpc\":\"2.0\",\"method\":\"notifications/whatever\"}\n\
              {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n\
              \n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\"}\n",
-            deny_all(),
+            deny_all(engine),
         );
         let codes: Vec<i64> = msgs
             .iter()
@@ -1622,10 +1672,17 @@ mod tests {
 
     #[test]
     fn legacy_initialize_negotiates_a_version() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            legacy_initialize_negotiates_a_version_on(engine);
+        }
+    }
+
+    fn legacy_initialize_negotiates_a_version_on(engine: Engine) {
         let msgs = session(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}\n\
              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1999-01-01\"}}\n",
-            deny_all(),
+            deny_all(engine),
         );
         assert_eq!(by_id(&msgs, 1)["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(
@@ -1642,6 +1699,13 @@ mod tests {
 
     #[test]
     fn modern_requests_are_stateless_and_versioned() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            modern_requests_are_stateless_and_versioned_on(engine);
+        }
+    }
+
+    fn modern_requests_are_stateless_and_versioned_on(engine: Engine) {
         let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}"#;
         let input = format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{{{meta}}}}}\n\
@@ -1650,7 +1714,7 @@ mod tests {
              {{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\",\"params\":{{\"_meta\":{{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}}}}\n\
              {{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{{\"code\":\"say 6 * 7\"}},{meta}}}}}\n"
         );
-        let msgs = session(&input, deny_all());
+        let msgs = session(&input, deny_all(engine));
         let discover = by_id(&msgs, 1)["result"].clone();
         assert_eq!(discover["resultType"], "complete");
         assert_eq!(discover["supportedVersions"][0], "2026-07-28");
@@ -1683,12 +1747,19 @@ mod tests {
 
     #[test]
     fn run_forge_results() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            run_forge_results_on(engine);
+        }
+    }
+
+    fn run_forge_results_on(engine: Engine) {
         let call = |id: i64, args: &str| {
             format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{args}}}}}\n"
             )
         };
-        let mut config = deny_all();
+        let mut config = deny_all(engine);
         config.max_response_bytes = 20;
         let input = [
             call(1, r#"{"code":"say \"hi\""}"#),
@@ -1747,12 +1818,19 @@ mod tests {
 
     #[test]
     fn check_forge_and_reference() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            check_forge_and_reference_on(engine);
+        }
+    }
+
+    fn check_forge_and_reference_on(engine: Engine) {
         let msgs = session(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"check_forge\",\"arguments\":{\"code\":\"let x = 1\\nlet y = (\"}}}\n\
              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"check_forge\",\"arguments\":{\"code\":\"say 1\"}}}\n\
              {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"forge_reference\"}}\n\
              {\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"rm_rf\"}}\n",
-            deny_all(),
+            deny_all(engine),
         );
         let bad = by_id(&msgs, 1)["result"]["structuredContent"].clone();
         assert_eq!(bad["ok"], false);
@@ -1774,7 +1852,14 @@ mod tests {
 
     #[test]
     fn busy_and_duplicate_ids() {
-        let mut config = deny_all();
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            busy_and_duplicate_ids_on(engine);
+        }
+    }
+
+    fn busy_and_duplicate_ids_on(engine: Engine) {
+        let mut config = deny_all(engine);
         config.max_concurrent_calls = 1;
         config.max_time = Duration::from_millis(500);
         let msgs = session(
@@ -1797,13 +1882,20 @@ mod tests {
 
     #[test]
     fn cancelled_requests_get_no_response() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            cancelled_requests_get_no_response_on(engine);
+        }
+    }
+
+    fn cancelled_requests_get_no_response_on(engine: Engine) {
         // The cancel notification arrives while the call runs; the server
         // drains at EOF, so the absence of a response is observable.
         let msgs = session(
             "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"method\":\"tools/call\",\"params\":{\"name\":\"run_forge\",\"arguments\":{\"code\":\"while true { }\"}}}\n\
              {\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"c1\",\"reason\":\"user\"}}\n\
              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
-            deny_all(),
+            deny_all(engine),
         );
         assert!(msgs.iter().all(|m| m["id"] != json!("c1")), "{msgs:?}");
         assert_eq!(by_id(&msgs, 2)["result"], json!({}));
@@ -1827,6 +1919,26 @@ mod tests {
         assert_eq!(
             read_line_bounded(&mut reader, &mut input, 4).ok(),
             Some(None)
+        );
+    }
+
+    #[test]
+    fn default_fuel_follows_the_engine() {
+        let config = ServerConfig::new(Capabilities::deny_all());
+        assert_eq!(config.engine, Engine::Vm);
+        assert_eq!(config.limits.max_fuel, Some(DEFAULT_MAX_FUEL));
+        let interp = config.with_engine(Engine::Interpreter);
+        assert_eq!(interp.limits.max_fuel, Some(DEFAULT_MAX_FUEL_INTERP));
+        assert_eq!(
+            interp.with_engine(Engine::Vm).limits.max_fuel,
+            Some(DEFAULT_MAX_FUEL)
+        );
+        // An explicit limit is kept.
+        let mut custom = ServerConfig::new(Capabilities::deny_all());
+        custom.limits.max_fuel = Some(5);
+        assert_eq!(
+            custom.with_engine(Engine::Interpreter).limits.max_fuel,
+            Some(5)
         );
     }
 
@@ -1858,13 +1970,14 @@ mod tests {
             .collect()
     }
 
-    fn tool_set(src: &str) -> ToolSet {
+    fn tool_set(engine: Engine, src: &str) -> ToolSet {
         ToolSet::load(
             std::path::Path::new("t.fg"),
             src,
             Capabilities::deny_all(),
             Duration::from_secs(5),
             default_limits(),
+            engine,
         )
         .expect("loads")
         .0
@@ -1872,7 +1985,14 @@ mod tests {
 
     #[test]
     fn sessions_can_be_disabled() {
-        let mut config = deny_all();
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            sessions_can_be_disabled_on(engine);
+        }
+    }
+
+    fn sessions_can_be_disabled_on(engine: Engine) {
+        let mut config = deny_all(engine);
         config.max_sessions = 0;
         let tools = tool_definitions(&config);
         assert_eq!(
@@ -1893,15 +2013,23 @@ mod tests {
 
     #[test]
     fn forge_tools_are_listed_and_called() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            forge_tools_are_listed_and_called_on(engine);
+        }
+    }
+
+    fn forge_tools_are_listed_and_called_on(engine: Engine) {
         // Built-in names are reserved while the code tools are served.
-        assert!(deny_all()
-            .with_tools(tool_set("@tool(\"d\")\nfn run_forge() {}"))
+        assert!(deny_all(engine)
+            .with_tools(tool_set(engine, "@tool(\"d\")\nfn run_forge() {}"))
             .is_err());
 
-        let mut config = deny_all();
+        let mut config = deny_all(engine);
         config.code_tools = false;
         let config = config
             .with_tools(tool_set(
+                engine,
                 "@tool(\"Say hi\")\nfn hello(name: String) -> String { return \"hi \" + name }\n\
                  @resource(\"forge://n\")\nfn n() { return 42 }",
             ))
@@ -1935,12 +2063,19 @@ mod tests {
 
     #[test]
     fn run_forge_resource_limits() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            run_forge_resource_limits_on(engine);
+        }
+    }
+
+    fn run_forge_resource_limits_on(engine: Engine) {
         let call = |id: i64, args: &str| {
             format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{args}}}}}\n"
             )
         };
-        let mut config = deny_all();
+        let mut config = deny_all(engine);
         config.limits.max_fuel = Some(1_000_000);
         config.limits.max_memory = Some(16 << 20);
         let input = [
@@ -1949,7 +2084,9 @@ mod tests {
             call(2, r#"{"code":"while true { }","max_fuel":999999999999}"#),
             call(
                 3,
-                r#"{"code":"let mut k = []\nwhile true { k.push(\"keep this string alive\") }"}"#,
+                // 1 KB of distinct text per step, so memory runs out before
+                // fuel on either engine (the VM shares a repeated literal).
+                r#"{"code":"let mut k = []\nwhile true { k.push(repeat_str(\"x\", 1000) + str(len(k))) }"}"#,
             ),
             call(4, r#"{"code":"let s = repeat_str(\"x\", 1000000000000)"}"#),
             call(5, r#"{"code":"say 1","max_fuel":0}"#),

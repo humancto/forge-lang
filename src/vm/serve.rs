@@ -140,6 +140,27 @@ impl VmTemplate {
         self.fork_with_budget(cancelled, self.fork_budget())
     }
 
+    /// A fork that charges the resource budget active on this thread instead
+    /// of a fresh one: the sandbox (`forge mcp` tool calls, `run_forge`
+    /// session steps) runs each call under its own budget and forks on the
+    /// call's worker, so building the fork is charged to the call.
+    pub(crate) fn fork_in_current_budget(&self, cancelled: Arc<AtomicBool>) -> VM {
+        self.fork_with_budget(cancelled, crate::runtime::limits::current())
+    }
+
+    /// Whether the global `name` is a function (named or anonymous).
+    pub(crate) fn has_function(&self, name: &str) -> bool {
+        let Some(value) = self.globals.get(name) else {
+            return false;
+        };
+        let Some(GcRef(slot)) = value.as_obj() else {
+            return false;
+        };
+        self.objects.iter().any(|(s, object)| {
+            *s == slot && matches!(object, FrozenObj::Function(_) | FrozenObj::Closure { .. })
+        })
+    }
+
     fn fork_with_budget(
         &self,
         cancelled: Arc<AtomicBool>,

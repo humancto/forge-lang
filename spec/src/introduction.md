@@ -1,6 +1,6 @@
 # Introduction
 
-This document is the formal specification for the **Forge** programming language, version **0.3.3**.
+This document is the formal specification for the **Forge** programming language, version **0.10.0**.
 
 Forge is an internet-native, general-purpose programming language implemented in Rust. It is designed for application-layer work: web services, scripts, data pipelines, prototypes, and tooling. Forge ships with built-in support for HTTP clients and servers, databases (SQLite and PostgreSQL), cryptography, JSON, CSV, terminal UI, AI/LLM integration, and more — eliminating the need for third-party packages for common internet-oriented tasks.
 
