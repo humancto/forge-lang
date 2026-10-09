@@ -9,7 +9,7 @@ name: Release
 #                          next to the forge executable (src/native.rs)
 #     README.md LICENSE CHANGELOG.md
 #   SHA256SUMS.txt          `sha256sum` format, one line per archive
-# <tag> keeps the leading "v" (e.g. forge-v0.9.0-x86_64-unknown-linux-gnu.tar.gz).
+# <tag> keeps the leading "v" (e.g. forge-v0.10.0-x86_64-unknown-linux-gnu.tar.gz).
 
 on:
   push:
@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build and publish, e.g. v0.9.0"
+        description: "Existing tag to (re)build and publish, e.g. v0.10.0"
         required: true
 
 permissions:

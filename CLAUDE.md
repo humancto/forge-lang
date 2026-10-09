@@ -131,7 +131,7 @@ tools/bench.sh [--json]    # wall-clock benchmarks (release build); PRs are gate
 
 `examples/` holds 20+ programs. Server examples (`api.fg`, `bench_server*.fg`) block until killed; `devops.fg`/`showcase.fg` need `--allow-run`; `bench_client.fg` needs `FORGE_HTTP_ALLOW_PRIVATE=1` and a running bench server. `tools/run_examples.sh` runs every runnable example on the default engine, and `cargo test --test engine_diff` compares all examples, parity fixtures and `tests/*.fg` across both engines.
 
-## Known Limitations (v0.9.0)
+## Known Limitations (v0.10.0)
 
 - All three database modules (db, pg, mysql) now support parameterized queries — always use them for user input
 - The VM is the default engine, including for decorator-driven HTTP servers (`@server`, `@get`, ...); decorators it cannot honor (unknown ones, non-literal `@server` arguments) auto-fallback to the interpreter

@@ -130,7 +130,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → Forge v0.9.0
+forge version          # → Forge v0.10.0
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -858,7 +858,7 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 
 ## 📊 Project Status
 
-Forge is **v0.9.0**. The bytecode VM is the default engine and matches the reference tree-walking interpreter on the full test suite; a guarded JIT tier compiles hot integer code.
+Forge is **v0.10.0**. The bytecode VM is the default engine (including for `@server` programs) and matches the reference tree-walking interpreter on the full test suite; a guarded JIT tier compiles hot Int and Float code.
 
 | Metric                   |                            Value |
 | ------------------------ | -------------------------------: |

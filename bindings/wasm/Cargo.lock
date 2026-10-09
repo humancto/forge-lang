@@ -170,7 +170,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "forge-lang"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ariadne",
  "base64",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "forge-wasm"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "forge-lang",
  "serde",
