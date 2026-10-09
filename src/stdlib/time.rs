@@ -611,19 +611,22 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 
         "time.sleep" => match args.first() {
             Some(Value::Int(secs)) => {
-                std::thread::sleep(std::time::Duration::from_secs((*secs).max(0) as u64));
+                crate::clock::sleep(std::time::Duration::from_secs((*secs).max(0) as u64));
                 Ok(Value::Null)
             }
             Some(Value::Float(secs)) => {
-                std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0)));
+                // try_: `from_secs_f64` panics on huge or infinite values.
+                let d = std::time::Duration::try_from_secs_f64(secs.max(0.0))
+                    .map_err(|_| "time.sleep() duration is out of range".to_string())?;
+                crate::clock::sleep(d);
                 Ok(Value::Null)
             }
             _ => Err("time.sleep() requires seconds (number)".to_string()),
         },
 
         "time.measure" | "time.elapsed" => Ok(Value::Int(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::clock::SystemTime::now()
+                .duration_since(crate::clock::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64,
         )),

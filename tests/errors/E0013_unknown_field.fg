@@ -1,0 +1,2 @@
+let user = {name: "Ada"}
+say user.nmae

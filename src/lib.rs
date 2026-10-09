@@ -6,30 +6,66 @@
 //
 // Hosts that embed Forge to run untrusted scripts (AI agents, automation)
 // use `forge_lang::Sandbox`: default-deny capabilities, explicit grants,
-// a wall-clock limit and captured output. See `src/sandbox.rs`.
+// a wall-clock limit, deterministic fuel/memory/handle limits and captured
+// output. See `src/sandbox.rs` and `src/runtime/limits.rs`.
+//
+// Without the default `host` feature (`--no-default-features`, e.g. the
+// browser playground in bindings/wasm) only the portable core is built:
+// lexer, parser, type checker, formatter (`tooling`), interpreter, VM and
+// the pure stdlib. Host-only helpers the core still links are then unused.
+
+#![cfg_attr(not(feature = "host"), allow(dead_code))]
 
 mod builtins_registry;
+pub mod clock;
 mod color;
 mod errors;
+// The binary's `forge fmt` driver; the library uses `format_source`
+// (through `tooling`).
+#[allow(dead_code)]
+mod formatter;
 pub mod interpreter;
 pub mod lexer;
+// `manifest`, `package` and `registry` are the CLI's package manager; the
+// library uses only import resolution from them (`package::resolve_import*`),
+// so the rest is dead code from the library's point of view (the binary
+// still reports genuinely unused items).
+#[allow(dead_code)]
 mod manifest;
+#[cfg(feature = "host")]
 pub mod mcp;
+#[allow(dead_code)]
 mod package;
 pub mod parser;
 pub mod permissions;
+mod plugins;
+#[cfg(feature = "host")]
+#[allow(dead_code)]
 mod registry;
 pub mod runtime;
+#[cfg(feature = "host")]
 mod sandbox;
 mod semantics;
 mod stdlib;
+// The binary uses the whole checker (CLI, LSP, `--strict`); the library only
+// `analyze` (for `forge_lang::mcp`).
+pub mod tooling;
+#[allow(dead_code)]
 mod typechecker;
 pub mod vm;
 
 pub use permissions::{Capabilities, Capability, PermissionError};
+pub use runtime::limits::{CountingAllocator, Limits};
+#[cfg(feature = "host")]
 pub use sandbox::{CancelHandle, Output, Sandbox, SandboxError};
 
-use std::panic::{self, AssertUnwindSafe};
+// The library's own tests exercise `Sandbox::max_memory`, which measures
+// the interpreter through the counting allocator.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+use std::panic;
 
 /// Execute serialized bytecode. Returns 0 on success, 1 on error.
 ///
@@ -85,6 +121,7 @@ pub extern "C" fn forge_execute_bytecode(bytecode_ptr: *const u8, bytecode_len: 
 /// `source_ptr` must point to `source_len` valid bytes of UTF-8 Forge source
 /// for the duration of this call. When `path_len > 0`, `path_ptr` must point to
 /// `path_len` valid bytes of UTF-8 diagnostic label data.
+#[cfg(feature = "host")]
 #[no_mangle]
 pub unsafe extern "C" fn forge_execute_source(
     source_ptr: *const u8,
@@ -102,7 +139,7 @@ pub unsafe extern "C" fn forge_execute_source(
         return 1;
     }
 
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let source_bytes = unsafe { std::slice::from_raw_parts(source_ptr, source_len) };
         let source = match std::str::from_utf8(source_bytes) {
             Ok(source) => source,
@@ -143,3 +180,9 @@ pub unsafe extern "C" fn forge_execute_source(
         }
     }
 }
+
+/// C-ABI entry points, exercised the way a native launcher calls them. Named
+/// `miri_*` so the Miri CI job (`cargo +nightly miri test --lib -- miri_`)
+/// checks the raw-pointer handling for undefined behaviour.
+#[cfg(all(test, feature = "host"))]
+mod ffi_miri_tests;

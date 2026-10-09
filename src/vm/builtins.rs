@@ -10,6 +10,15 @@ use super::machine::{VMError, VM};
 use super::value::*;
 
 impl VM {
+    /// `range(start, end)` must not build more elements than the size cap
+    /// allows (`runtime::limits`); checked before allocating anything.
+    fn check_range_len(&self, start: i64, end: i64) -> Result<(), VMError> {
+        let len = (end as i128 - start as i128).max(0);
+        self.caps
+            .check_collection(usize::try_from(len).unwrap_or(usize::MAX))
+            .map_err(|m| VMError::new(&m))
+    }
+
     /// Call a native builtin inside a GC native scope (see the rooting
     /// invariants in `vm/gc.rs`): the arguments and everything the builtin
     /// allocates are pinned until it returns, so a GC triggered by a Forge
@@ -18,11 +27,58 @@ impl VM {
     /// native call goes through this wrapper.
     pub(super) fn call_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
         crate::builtins_registry::check_arity(name, args.len()).map_err(|e| VMError::new(&e))?;
+        crate::builtins_registry::warn_if_deprecated(name);
+        // Values are `Copy`; keep the leading arguments (pinned below until
+        // `exit_native`) to describe them if the builtin rejects them.
+        let mut leading = [Value::null(); crate::semantics::errors::MAX_ANNOTATED_ARGS];
+        let argc = args.len().min(leading.len());
+        leading[..argc].copy_from_slice(&args[..argc]);
         let scope = self.gc.enter_native();
         self.gc.pin_values(&args);
-        let result = self.dispatch_native(name, args);
+        let mut result = self.dispatch_native(name, args);
+        if let Err(e) = &mut result {
+            // `get_string_arg` does not know which builtin called it; name
+            // it the way the interpreter's builtins do.
+            if e.message == "expected string argument" {
+                e.message = format!("{}() requires a string", name);
+            }
+            let mut types = [""; crate::semantics::errors::MAX_ANNOTATED_ARGS];
+            for (slot, value) in types.iter_mut().zip(&leading[..argc]) {
+                *slot = self.user_type_name(*value);
+            }
+            if let Some(message) =
+                crate::semantics::errors::annotate_builtin_error(name, &e.message, &types[..argc])
+            {
+                e.message = message;
+            }
+        }
         self.gc.exit_native(scope);
         result
+    }
+
+    /// The user-facing type name of `value` in error messages, matching the
+    /// interpreter's (`Option` values are ADT objects here, frozen values
+    /// are described by their contents).
+    fn user_type_name(&self, value: Value) -> &'static str {
+        if let Some(obj) = value.as_obj().and_then(|r| self.gc.get(r)) {
+            match &obj.kind {
+                ObjKind::Frozen(inner) => return self.user_type_name(*inner),
+                ObjKind::Object(map) => {
+                    let is_option = map
+                        .get("__type__")
+                        .and_then(|t| t.as_obj())
+                        .and_then(|r| self.gc.get(r))
+                        .is_some_and(
+                            |o| matches!(&o.kind, ObjKind::String(s) if s.as_str() == "Option"),
+                        );
+                    if is_option {
+                        return "Option";
+                    }
+                }
+                _ => {}
+            }
+        }
+        crate::semantics::errors::user_type_name(value.type_name(&self.gc))
     }
 
     /// Run a stdlib module member through the shared implementation in
@@ -36,6 +92,13 @@ impl VM {
     }
 
     fn dispatch_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
+        // Native plugin functions (`import native`) run the shared
+        // implementation in `plugins`, converting values at the boundary.
+        if crate::plugins::is_plugin_fn(name) {
+            let interp_args = self.args_to_interp(&args)?;
+            let result = crate::plugins::call(name, interp_args).map_err(|e| VMError::new(&e))?;
+            return self.from_interp_checked(&result);
+        }
         match name {
             "__forge_register_struct" => {
                 if args.len() != 3 {
@@ -222,7 +285,7 @@ impl VM {
                     .map(|n| n.max(0) as u64)
                     .unwrap_or(0);
                 if attempt > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+                    crate::clock::sleep(std::time::Duration::from_millis(100 * attempt));
                 }
                 Ok(Value::null())
             }
@@ -535,6 +598,45 @@ impl VM {
                 let pair = self.gc.alloc(ObjKind::Tuple(vec![new_receiver, result]));
                 Ok(Value::obj(pair))
             }
+            "__forge_import_native" => {
+                // (path_as_written, base_dir | null, names | false)
+                if args.len() != 3 {
+                    return Err(VMError::new(
+                        "__forge_import_native() requires (path, base_dir, names)",
+                    ));
+                }
+                let path = self.get_string_arg(&args, 0)?;
+                // An empty base directory means "no importing file" (REPL, -e).
+                let base_dir = self
+                    .get_string(&args[1])
+                    .filter(|d| !d.is_empty())
+                    .map(std::path::PathBuf::from);
+                let names: Option<Vec<String>> = match args[2].classify(&self.gc) {
+                    ValueKind::Obj(r) => Some(
+                        self.gc
+                            .get(r)
+                            .and_then(|obj| match &obj.kind {
+                                ObjKind::Array(items) => Some(
+                                    items
+                                        .iter()
+                                        .filter_map(|item| self.get_string(item))
+                                        .collect::<Vec<_>>(),
+                                ),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                VMError::new(
+                                    "__forge_import_native() names must be an array of strings",
+                                )
+                            })?,
+                    ),
+                    _ => None,
+                };
+                let namespace =
+                    crate::plugins::import(&path, base_dir.as_deref(), names.as_deref())
+                        .map_err(|e| VMError::new(&e))?;
+                self.from_interp_checked(&namespace)
+            }
             "__forge_import_module" => {
                 // (resolved_path, names | false, path_as_written)
                 if args.is_empty() || args.len() > 3 {
@@ -575,9 +677,10 @@ impl VM {
                 };
                 let file_path = crate::package::resolve_import(&resolved)
                     .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
-                crate::permissions::require_import(&file_path)
+                // Read the path that was checked (resolved under a scoped grant).
+                let checked = crate::permissions::require_import(&file_path)
                     .map_err(|e| VMError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&file_path)
+                let source = std::fs::read_to_string(&checked)
                     .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
 
                 let mut lexer = crate::lexer::Lexer::new(&source);
@@ -610,7 +713,11 @@ impl VM {
                     VMError::new(&format!("import '{}' compile error: {}", path, e.message))
                 })?;
                 self.execute_module(&chunk).map_err(|e| {
-                    if e.message.starts_with("circular import: ") {
+                    if e.is_unwound_to_handler() || e.is_fatal() {
+                        // Control transfer (a `timeout` around the import
+                        // fired inside it) or a fatal limit: propagate as is.
+                        e
+                    } else if e.message.starts_with("circular import: ") {
                         // Propagate the cycle report unwrapped.
                         VMError::new(&e.message)
                     } else {
@@ -650,26 +757,26 @@ impl VM {
             "println" | "say" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ");
-                println!("{}", output);
+                crate::runtime::stdio::out_line(&output);
                 self.output.push(output);
                 Ok(Value::null())
             }
             "print" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
-                print!("{}", text.join(" "));
+                crate::runtime::stdio::out(&text.join(" "));
                 Ok(Value::null())
             }
             "yell" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ").to_uppercase();
-                println!("{}", output);
+                crate::runtime::stdio::out_line(&output);
                 self.output.push(output);
                 Ok(Value::null())
             }
             "whisper" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ").to_lowercase();
-                println!("{}", output);
+                crate::runtime::stdio::out_line(&output);
                 self.output.push(output);
                 Ok(Value::null())
             }
@@ -757,19 +864,29 @@ impl VM {
                 }
                 _ => Err(VMError::new("float() requires a number or numeric string")),
             },
+            // Like the interpreter: a second argument must be an Int too
+            // (a non-Int one used to be ignored, so `range(1, 2.5)` gave [0]).
             "range" => match (
                 args.first().and_then(|v| v.as_int(&self.gc)),
-                args.get(1).and_then(|v| v.as_int(&self.gc)),
+                args.get(1).map(|v| v.as_int(&self.gc)),
             ) {
-                (Some(start), Some(end)) => {
+                (Some(start), Some(Some(end))) => {
+                    self.check_range_len(start, end)?;
                     let items: Vec<Value> =
-                        (start..end).map(|n| Value::int(n, &mut self.gc)).collect();
+                        crate::semantics::alloc::int_range(start, end, "range()", |n| {
+                            Value::int(n, &mut self.gc)
+                        })
+                        .map_err(|e| VMError::new(&e))?;
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
                 (Some(end_val), None) => {
+                    self.check_range_len(0, end_val)?;
                     let items: Vec<Value> =
-                        (0..end_val).map(|n| Value::int(n, &mut self.gc)).collect();
+                        crate::semantics::alloc::int_range(0, end_val, "range()", |n| {
+                            Value::int(n, &mut self.gc)
+                        })
+                        .map_err(|e| VMError::new(&e))?;
                     let r = self.gc.alloc(ObjKind::Array(items));
                     Ok(Value::obj(r))
                 }
@@ -874,20 +991,30 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "is_ok" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultOk(_))));
-                    }
+                // Like the interpreter: only a Result has an answer.
+                match args
+                    .first()
+                    .and_then(|v| v.as_obj())
+                    .and_then(|r| self.gc.get(r))
+                    .map(|obj| &obj.kind)
+                {
+                    Some(ObjKind::ResultOk(_)) => Ok(Value::bool_val(true)),
+                    Some(ObjKind::ResultErr(_)) => Ok(Value::bool_val(false)),
+                    _ => Err(VMError::new("is_ok() requires a Result value")),
                 }
-                Ok(Value::bool_val(false))
             }
             "is_err" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    if let Some(obj) = self.gc.get(r) {
-                        return Ok(Value::bool_val(matches!(obj.kind, ObjKind::ResultErr(_))));
-                    }
+                // Like the interpreter: only a Result has an answer.
+                match args
+                    .first()
+                    .and_then(|v| v.as_obj())
+                    .and_then(|r| self.gc.get(r))
+                    .map(|obj| &obj.kind)
+                {
+                    Some(ObjKind::ResultErr(_)) => Ok(Value::bool_val(true)),
+                    Some(ObjKind::ResultOk(_)) => Ok(Value::bool_val(false)),
+                    _ => Err(VMError::new("is_err() requires a Result value")),
                 }
-                Ok(Value::bool_val(false))
             }
             "unwrap" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
@@ -925,7 +1052,11 @@ impl VM {
                 }
                 match self.option_parts(&args[0]) {
                     Some(Some(inner)) => Ok(inner),
-                    _ => Ok(args[1].clone()),
+                    Some(None) => Ok(args[1].clone()),
+                    // Like the interpreter: only Result/Option have a default.
+                    None => Err(VMError::new(
+                        "unwrap_or() requires a Result or Option value as first argument",
+                    )),
                 }
             }
             "assert" => {
@@ -1090,68 +1221,8 @@ impl VM {
                 }
                 Err(VMError::new("sum() requires an array"))
             }
-            "min_of" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    let items = if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Array(a) = &obj.kind {
-                            a.clone()
-                        } else {
-                            return Err(VMError::new("min_of() requires an array"));
-                        }
-                    } else {
-                        return Err(VMError::new("null array"));
-                    };
-                    if items.is_empty() {
-                        return Ok(Value::null());
-                    }
-                    let mut min = items[0].clone();
-                    for item in &items[1..] {
-                        let less = match (min.classify(&self.gc), item.classify(&self.gc)) {
-                            (ValueKind::Int(a), ValueKind::Int(b)) => b < a,
-                            (ValueKind::Float(a), ValueKind::Float(b)) => b < a,
-                            (ValueKind::Int(a), ValueKind::Float(b)) => b < (a as f64),
-                            (ValueKind::Float(a), ValueKind::Int(b)) => (b as f64) < a,
-                            _ => false,
-                        };
-                        if less {
-                            min = item.clone();
-                        }
-                    }
-                    return Ok(min);
-                }
-                Err(VMError::new("min_of() requires an array"))
-            }
-            "max_of" => {
-                if let Some(r) = args.first().and_then(|v| v.as_obj()) {
-                    let items = if let Some(obj) = self.gc.get(r) {
-                        if let ObjKind::Array(a) = &obj.kind {
-                            a.clone()
-                        } else {
-                            return Err(VMError::new("max_of() requires an array"));
-                        }
-                    } else {
-                        return Err(VMError::new("null array"));
-                    };
-                    if items.is_empty() {
-                        return Ok(Value::null());
-                    }
-                    let mut max = items[0].clone();
-                    for item in &items[1..] {
-                        let greater = match (max.classify(&self.gc), item.classify(&self.gc)) {
-                            (ValueKind::Int(a), ValueKind::Int(b)) => b > a,
-                            (ValueKind::Float(a), ValueKind::Float(b)) => b > a,
-                            (ValueKind::Int(a), ValueKind::Float(b)) => b > (a as f64),
-                            (ValueKind::Float(a), ValueKind::Int(b)) => (b as f64) > a,
-                            _ => false,
-                        };
-                        if greater {
-                            max = item.clone();
-                        }
-                    }
-                    return Ok(max);
-                }
-                Err(VMError::new("max_of() requires an array"))
-            }
+            "min_of" => self.min_max_of(&args, "min_of", true),
+            "max_of" => self.min_max_of(&args, "max_of", false),
             "map" => {
                 // Arity-based overload:
                 //   map()                    → empty Map
@@ -1395,8 +1466,14 @@ impl VM {
                     if let Some(obj) = self.gc.get(r) {
                         match &obj.kind {
                             ObjKind::String(s) => {
-                                let sub = val.display(&self.gc);
-                                return Ok(Value::bool_val(s.contains(&sub)));
+                                if let Some(sub) = self.get_string(val) {
+                                    return Ok(Value::bool_val(s.contains(&sub)));
+                                }
+                            }
+                            ObjKind::Object(map) => {
+                                if let Some(key) = self.get_string(val) {
+                                    return Ok(Value::bool_val(map.contains_key(&key)));
+                                }
                             }
                             ObjKind::Set(items) => {
                                 // Sets use value equality (same as .has()) so that
@@ -1420,9 +1497,9 @@ impl VM {
                             _ => {}
                         }
                     }
-                    Ok(Value::bool_val(false))
+                    Err(VMError::new(crate::semantics::CONTAINS_USAGE))
                 }
-                _ => Err(VMError::new("contains() requires (collection, value)")),
+                _ => Err(VMError::new(crate::semantics::CONTAINS_USAGE)),
             },
             "keys" => {
                 if let Some(r) = args.first().and_then(|v| v.as_obj()) {
@@ -1563,9 +1640,7 @@ impl VM {
                     Ok(Value::null())
                 }
                 Some(ValueKind::Float(secs)) => {
-                    self.sleep_with_timeout_checks(std::time::Duration::from_secs_f64(
-                        secs.max(0.0),
-                    ))?;
+                    self.sleep_with_timeout_checks(crate::semantics::seconds_f64(secs))?;
                     Ok(Value::null())
                 }
                 _ => Err(VMError::new("wait() requires a number of seconds")),
@@ -1777,10 +1852,10 @@ impl VM {
                 self.from_interp_checked(&result)
             }
             "shell" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("shell error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout)
                     .trim_end()
@@ -1800,10 +1875,10 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "sh" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh error: {}", e)))?;
                 Ok(self.alloc_string(
                     &String::from_utf8_lossy(&output.stdout)
@@ -1812,10 +1887,10 @@ impl VM {
                 ))
             }
             "sh_lines" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_lines error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let lines: Vec<Value> = stdout
@@ -1827,37 +1902,34 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "sh_json" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let json: serde_json::Value = serde_json::from_str(stdout.trim())
                     .map_err(|e| VMError::new(&format!("sh_json parse error: {}", e)))?;
-                let interp_val = crate::runtime::server::json_to_forge(json);
+                let interp_val = crate::stdlib::json_module::json_to_forge(json);
                 self.from_interp_checked(&interp_val)
             }
             "sh_ok" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let status = crate::runtime::shell::command(&cmd)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
+                let ok = crate::runtime::shell::succeeds(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_ok error: {}", e)))?;
-                Ok(Value::bool_val(status.success()))
+                Ok(Value::bool_val(ok))
             }
             "which" => {
+                // Reveals the host's PATH/installed tools: needs `run`
+                // (same as the interpreter, SEC-08).
+                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
                 let cmd = self.get_string_arg(&args, 0)?;
-                let result = std::process::Command::new("/usr/bin/which")
-                    .arg(&cmd)
-                    .output();
-                match result {
-                    Ok(output) if output.status.success() => Ok(self
-                        .alloc_string(&String::from_utf8_lossy(&output.stdout).trim().to_string())),
-                    _ => Ok(Value::null()),
-                }
+                Ok(match crate::runtime::shell::which(&cmd) {
+                    Some(path) => self.alloc_string(&path.display().to_string()),
+                    None => Value::null(),
+                })
             }
             "cwd" => {
                 let path = std::env::current_dir()
@@ -1879,21 +1951,11 @@ impl VM {
                 Ok(Value::obj(r))
             }
             "pipe_to" => {
-                crate::permissions::check_run_permission().map_err(|e| VMError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| VMError::new(&e))?;
                 let input = self.get_string_arg(&args, 0)?;
                 let cmd = self.get_string_arg(&args, 1)?;
-                use std::io::Write;
-                let mut child = crate::runtime::shell::command(&cmd)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|e| VMError::new(&format!("pipe_to error: {}", e)))?;
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(input.as_bytes());
-                }
-                let output = child
-                    .wait_with_output()
+                let output = crate::runtime::shell::pipe(&cmd, input.as_bytes())
                     .map_err(|e| VMError::new(&format!("pipe_to error: {}", e)))?;
                 let mut map = IndexMap::new();
                 map.insert(
@@ -2501,7 +2563,9 @@ impl VM {
                     Some(ValueKind::Int(n)) => (n as usize).min(chars.len()),
                     _ => chars.len(),
                 };
-                if start > chars.len() {
+                // `end` is clamped to the length, so this also covers a
+                // start past the end (and `start > end`, which used to panic).
+                if start >= end {
                     return Ok(self.alloc_string(""));
                 }
                 Ok(self.alloc_string(&chars[start..end].iter().collect::<String>()))
@@ -2587,9 +2651,13 @@ impl VM {
                 }
                 let s = self.get_string_arg(&args, 0)?;
                 let target = match args[1].classify(&self.gc) {
-                    ValueKind::Int(n) => n as usize,
+                    // Negative pads nothing (same as the interpreter).
+                    ValueKind::Int(n) => usize::try_from(n).unwrap_or(0),
                     _ => return Err(VMError::new("pad_start() second arg must be int")),
                 };
+                self.caps
+                    .check_string(target)
+                    .map_err(|m| VMError::new(&m))?;
                 let pad_char = match args.get(2) {
                     Some(v) => self
                         .get_string(v)
@@ -2601,9 +2669,12 @@ impl VM {
                 if char_count >= target {
                     Ok(self.alloc_string(&s))
                 } else {
-                    let padding: String = std::iter::repeat(pad_char)
-                        .take(target - char_count)
-                        .collect();
+                    let padding = crate::semantics::alloc::padding(
+                        pad_char,
+                        target - char_count,
+                        "pad_start()",
+                    )
+                    .map_err(|e| VMError::new(&e))?;
                     Ok(self.alloc_string(&format!("{}{}", padding, s)))
                 }
             }
@@ -2613,9 +2684,13 @@ impl VM {
                 }
                 let s = self.get_string_arg(&args, 0)?;
                 let target = match args[1].classify(&self.gc) {
-                    ValueKind::Int(n) => n as usize,
+                    // Negative pads nothing (same as the interpreter).
+                    ValueKind::Int(n) => usize::try_from(n).unwrap_or(0),
                     _ => return Err(VMError::new("pad_end() second arg must be int")),
                 };
+                self.caps
+                    .check_string(target)
+                    .map_err(|m| VMError::new(&m))?;
                 let pad_char = match args.get(2) {
                     Some(v) => self
                         .get_string(v)
@@ -2627,9 +2702,12 @@ impl VM {
                 if char_count >= target {
                     Ok(self.alloc_string(&s))
                 } else {
-                    let padding: String = std::iter::repeat(pad_char)
-                        .take(target - char_count)
-                        .collect();
+                    let padding = crate::semantics::alloc::padding(
+                        pad_char,
+                        target - char_count,
+                        "pad_end()",
+                    )
+                    .map_err(|e| VMError::new(&e))?;
                     Ok(self.alloc_string(&format!("{}{}", s, padding)))
                 }
             }
@@ -2645,7 +2723,12 @@ impl VM {
                     }
                     _ => return Err(VMError::new("repeat_str() second arg must be int")),
                 };
-                Ok(self.alloc_string(&s.repeat(n)))
+                self.caps
+                    .check_string(s.len().saturating_mul(n))
+                    .map_err(|m| VMError::new(&m))?;
+                let out = crate::semantics::alloc::repeat_str(&s, n, "repeat_str()")
+                    .map_err(|e| VMError::new(&e))?;
+                Ok(self.alloc_string(&out))
             }
             "count" => {
                 if args.len() < 2 {
@@ -2727,19 +2810,21 @@ impl VM {
                     "sample() requires an array",
                 )?;
                 let n = match args.get(1).map(|v| v.classify(&self.gc)) {
-                    Some(ValueKind::Int(n)) => n as usize,
+                    Some(ValueKind::Int(n)) => crate::semantics::checked_count("sample", n)
+                        .map_err(|e| VMError::new(&e))?,
                     _ => 1,
                 };
                 if items.is_empty() {
                     let r = self.gc.alloc(ObjKind::Array(vec![]));
                     return Ok(Value::obj(r));
                 }
-                use std::time::{SystemTime, UNIX_EPOCH};
+                use crate::clock::{SystemTime, UNIX_EPOCH};
                 let seed = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos() as u64;
-                let mut result = Vec::with_capacity(n);
+                let mut result = crate::semantics::alloc::vec_with_capacity(n, "sample()")
+                    .map_err(|e| VMError::new(&e))?;
                 for i in 0..n {
                     let mut x = seed.wrapping_add(i as u64);
                     x ^= x << 13;
@@ -2761,7 +2846,7 @@ impl VM {
                         .ok_or_else(|| VMError::new("shuffle() requires an array"))?,
                     "shuffle() requires an array",
                 )?;
-                use std::time::{SystemTime, UNIX_EPOCH};
+                use crate::clock::{SystemTime, UNIX_EPOCH};
                 let mut seed = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -2896,10 +2981,10 @@ impl VM {
                 let val = &args[0];
                 let type_str = val.type_name(&self.gc);
                 let display = val.display(&self.gc);
-                eprintln!(
+                crate::runtime::stdio::err_line(&format!(
                     "\x1b[33m\u{1f50d} SUS CHECK:\x1b[0m {} \x1b[2m({})\x1b[0m",
                     display, type_str
-                );
+                ));
                 Ok(args.into_iter().next().unwrap_or(Value::null()))
             }
             "bruh" => {
@@ -2962,21 +3047,21 @@ impl VM {
                     ));
                 }
                 let func = args[0].clone();
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 let result = self.call_value(func, vec![])?;
                 let elapsed = start.elapsed();
                 let ms = elapsed.as_secs_f64() * 1000.0;
                 if ms < 1.0 {
-                    eprintln!(
+                    crate::runtime::stdio::err_line(&format!(
                         "\x1b[32m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}\u{00b5}s \u{2014} \x1b[2mspeed demon fr\x1b[0m",
                         elapsed.as_secs_f64() * 1_000_000.0
-                    );
+                    ));
                 } else if ms < 100.0 {
-                    eprintln!("\x1b[32m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}ms \u{2014} \x1b[2mno cap that was fast\x1b[0m", ms);
+                    crate::runtime::stdio::err_line(&format!("\x1b[32m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}ms \u{2014} \x1b[2mno cap that was fast\x1b[0m", ms));
                 } else if ms < 1000.0 {
-                    eprintln!("\x1b[33m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.0}ms \u{2014} \x1b[2mit's giving adequate\x1b[0m", ms);
+                    crate::runtime::stdio::err_line(&format!("\x1b[33m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.0}ms \u{2014} \x1b[2mit's giving adequate\x1b[0m", ms));
                 } else {
-                    eprintln!("\x1b[31m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}s \u{2014} \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64());
+                    crate::runtime::stdio::err_line(&format!("\x1b[31m\u{1f468}\u{200d}\u{1f373} COOKED:\x1b[0m done in {:.2}s \u{2014} \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64()));
                 }
                 Ok(result)
             }
@@ -3005,13 +3090,16 @@ impl VM {
                 }
                 let func = args[0].clone();
                 let n = match args.get(1).map(|v| v.classify(&self.gc)) {
-                    Some(ValueKind::Int(n)) => n as usize,
+                    Some(ValueKind::Int(n)) => {
+                        crate::semantics::checked_count("slay", n).map_err(|e| VMError::new(&e))?
+                    }
                     _ => 100,
                 };
-                let mut times: Vec<f64> = Vec::with_capacity(n);
+                let mut times: Vec<f64> = crate::semantics::alloc::vec_with_capacity(n, "slay()")
+                    .map_err(|e| VMError::new(&e))?;
                 let mut last_result = Value::null();
                 for _ in 0..n {
-                    let start = std::time::Instant::now();
+                    let start = crate::clock::Instant::now();
                     last_result = self.call_value(func.clone(), vec![])?;
                     times.push(start.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -3031,10 +3119,10 @@ impl VM {
                 stats.insert("p99_ms".to_string(), Value::float(p99));
                 stats.insert("runs".to_string(), Value::int(n as i64, &mut self.gc));
                 stats.insert("result".to_string(), last_result);
-                eprintln!(
+                crate::runtime::stdio::err_line(&format!(
                     "\x1b[35m\u{1f485} SLAYED:\x1b[0m {}x runs \u{2014} avg {:.3}ms, min {:.3}ms, max {:.3}ms, p99 {:.3}ms",
                     n, avg, min_t, max_t, p99
-                );
+                ));
                 let r = self.gc.alloc(ObjKind::Object(stats));
                 Ok(Value::obj(r))
             }
@@ -3087,12 +3175,8 @@ impl VM {
                     return Err(VMError::new("receive() requires (channel)"));
                 }
                 let ch_arc = self.extract_channel(&args[0])?;
-                let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
-                match &*guard {
-                    Some(rx) => match rx.recv() {
-                        Ok(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
-                        Err(_) => Ok(Value::null()),
-                    },
+                match self.receive_cancellable(&ch_arc)? {
+                    Some(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
                     None => Ok(Value::null()),
                 }
             }
@@ -3170,7 +3254,7 @@ impl VM {
                     Some(ValueKind::Float(ms)) => Some(ms.max(0.0) as u128),
                     _ => None,
                 };
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 let len = channels.len();
                 let mut offset = 0usize;
                 loop {
@@ -3207,7 +3291,8 @@ impl VM {
                         }
                     }
                     offset = (offset + 1) % len;
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    self.wait_interrupted()?;
+                    crate::clock::sleep(std::time::Duration::from_millis(1));
                 }
             }
 
@@ -3296,12 +3381,7 @@ impl VM {
                 for item in &items {
                     let maybe_slot = self.extract_task_handle(item);
                     if let Some(slot) = maybe_slot {
-                        let (lock, cvar) = &*slot;
-                        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        while guard.is_none() {
-                            guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
-                        }
-                        let shared = guard.as_ref().cloned().unwrap_or(SharedValue::Null);
+                        let shared = self.wait_task_result(&slot)?;
                         let val = shared_to_value(&mut self.gc, &shared);
                         // Fail-fast: propagate ResultErr immediately
                         match val.classify(&self.gc) {
@@ -3351,7 +3431,7 @@ impl VM {
                         let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
                         if guard.is_none() {
                             let deadline = std::time::Duration::from_millis(timeout_ms);
-                            let start = std::time::Instant::now();
+                            let start = crate::clock::Instant::now();
                             loop {
                                 let remaining = deadline.saturating_sub(start.elapsed());
                                 if remaining.is_zero() {
@@ -3655,6 +3735,67 @@ impl VM {
             crate::semantics::check_call_arity(name, params, required, argc)
         }
         .map_err(|e| VMError::new(&e))
+    }
+
+    /// Allocate a shared string-method result (`semantics::string_method`).
+    /// `min_of` / `max_of`, mirroring the interpreter: a non-empty array;
+    /// Int/Int stays Int, any Float makes the result Float; a non-number
+    /// after the first element is an error.
+    fn min_max_of(&mut self, args: &[Value], name: &str, min: bool) -> Result<Value, VMError> {
+        let items = match args
+            .first()
+            .and_then(|v| v.as_obj())
+            .and_then(|r| self.gc.get(r))
+            .map(|o| &o.kind)
+        {
+            Some(ObjKind::Array(a)) => a.clone(),
+            _ => return Err(VMError::new(&format!("{}() requires an array", name))),
+        };
+        let Some((&first, rest)) = items.split_first() else {
+            return Err(VMError::new(&format!(
+                "{}() requires a non-empty array",
+                name
+            )));
+        };
+        let pick_f = |a: f64, b: f64| if min { a.min(b) } else { a.max(b) };
+        let mut result = first;
+        for item in rest {
+            result = match (result.classify(&self.gc), item.classify(&self.gc)) {
+                (ValueKind::Int(a), ValueKind::Int(b)) => {
+                    Value::int(if min { a.min(b) } else { a.max(b) }, &mut self.gc)
+                }
+                (ValueKind::Float(a), ValueKind::Float(b)) => Value::float(pick_f(a, b)),
+                (ValueKind::Int(a), ValueKind::Float(b)) => Value::float(pick_f(a as f64, b)),
+                (ValueKind::Float(a), ValueKind::Int(b)) => Value::float(pick_f(a, b as f64)),
+                _ => {
+                    return Err(VMError::new(&format!(
+                        "{}() requires array of numbers",
+                        name
+                    )))
+                }
+            };
+        }
+        Ok(result)
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    fn from_str_method(&mut self, v: crate::semantics::StrMethodValue) -> Value {
+        use crate::semantics::StrMethodValue as V;
+        match v {
+            V::Str(s) => self.alloc_string(&s),
+            V::Int(n) => Value::int(n, &mut self.gc),
+            V::Bool(b) => Value::bool_val(b),
+            V::Strs(items) => {
+                let values: Vec<Value> = items.iter().map(|s| self.alloc_string(s)).collect();
+                Value::obj(self.gc.alloc(ObjKind::Array(values)))
+            }
+            V::Ints(items) => {
+                let values: Vec<Value> =
+                    items.iter().map(|&n| Value::int(n, &mut self.gc)).collect();
+                Value::obj(self.gc.alloc(ObjKind::Array(values)))
+            }
+            V::Null => Value::null(),
+        }
     }
 
     fn call_forge_method(
@@ -3990,6 +4131,24 @@ impl VM {
                     return Ok(Value::obj(nr));
                 }
                 _ => {}
+            }
+        }
+
+        // Built-in string methods, shared with the interpreter.
+        if crate::semantics::STRING_METHODS.contains(&method_name) {
+            if let Some(s) = self.get_string(&receiver) {
+                let index = if method_name == "char_at" {
+                    extra_args.first().and_then(|v| match v.classify(&self.gc) {
+                        ValueKind::Int(i) => Some(i),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                if let Some(result) = crate::semantics::string_method(&s, method_name, index) {
+                    let v = result.map_err(|e| VMError::new(&e))?;
+                    return Ok(self.from_str_method(v));
+                }
             }
         }
 

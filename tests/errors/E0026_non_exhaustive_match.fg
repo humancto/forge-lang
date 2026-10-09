@@ -1,0 +1,4 @@
+let status = "error"
+match status {
+    "ok" => say "fine"
+}

@@ -60,19 +60,25 @@ pub fn confine_path_with(path: &str, base: Option<&str>) -> Result<PathBuf, Stri
 }
 
 /// Confine `path` (FORGE_FS_BASE) and check it against the active
-/// `fs.read` permission. Every read-side fs entry point goes through this.
+/// `fs.read` permission. Every read-side fs entry point goes through this
+/// and must open the returned path (the resolved one under a scoped grant),
+/// never its original argument.
 pub fn confine_read(path: &str) -> Result<PathBuf, String> {
     let p = confine_path(path)?;
-    crate::permissions::require_path(crate::permissions::Capability::Read, &p)?;
-    Ok(p)
+    Ok(crate::permissions::checked_path(
+        crate::permissions::Capability::Read,
+        &p,
+    )?)
 }
 
 /// Confine `path` (FORGE_FS_BASE) and check it against the active
 /// `fs.write` permission. Every write-side fs entry point goes through this.
 pub fn confine_write(path: &str) -> Result<PathBuf, String> {
     let p = confine_path(path)?;
-    crate::permissions::require_path(crate::permissions::Capability::Write, &p)?;
-    Ok(p)
+    Ok(crate::permissions::checked_path(
+        crate::permissions::Capability::Write,
+        &p,
+    )?)
 }
 
 pub fn create_module() -> Value {
@@ -137,6 +143,8 @@ pub fn create_module() -> Value {
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
+    // Every fs call may hold a file open while it runs (`runtime::limits`).
+    let _file = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Files)?;
     match name {
         "fs.read" => match args.first() {
             Some(Value::String(path)) => {
@@ -366,6 +374,7 @@ pub fn call_vm(
     args: &[crate::vm::value::Value],
     gc: &crate::vm::gc::Gc,
 ) -> Result<FsResult, String> {
+    let _file = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Files)?;
     let get_str = |v: &crate::vm::value::Value| -> Option<String> {
         if let Some(r) = v.as_obj() {
             if let Some(obj) = gc.get(r) {
@@ -619,8 +628,8 @@ mod tests {
 
     fn unique_temp_dir(tag: &str) -> PathBuf {
         let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::clock::SystemTime::now()
+            .duration_since(crate::clock::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!("forge_confine_{}_{}_{}", tag, pid, nanos));
@@ -667,8 +676,8 @@ mod tests {
         let outside = std::env::temp_dir().join(format!(
             "forge_confine_outside_{}_{}.txt",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::clock::SystemTime::now()
+                .duration_since(crate::clock::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));

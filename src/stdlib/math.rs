@@ -93,7 +93,7 @@ pub(crate) fn rounded_float_to_num(f: f64) -> Num {
 
 /// Uniform-ish integer in `[min, max]` without overflowing on wide ranges.
 pub(crate) fn random_int_between(min: i64, max: i64) -> i64 {
-    use std::time::SystemTime;
+    use crate::clock::SystemTime;
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -163,8 +163,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             _ => Err("math.round() requires a number".to_string()),
         },
         "math.random" => {
-            let r: f64 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let r: f64 = crate::clock::SystemTime::now()
+                .duration_since(crate::clock::UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_nanos() as f64
                 / 1_000_000_000.0;
@@ -341,8 +341,8 @@ fn call_vm_num(
             }
         }
         "math.random" => {
-            let r = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let r = crate::clock::SystemTime::now()
+                .duration_since(crate::clock::UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_nanos() as f64
                 / 1_000_000_000.0;

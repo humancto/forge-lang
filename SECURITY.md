@@ -41,6 +41,17 @@ forge --allow-run run deploy.fg
 
 The REPL and `forge -e` enable shell execution automatically, since a person is typing the code. `forge build --native --allow-run` bakes the permission into a standalone binary; without it the binary denies shell execution.
 
+### Native plugins are full trust (`--allow-ffi`)
+
+> **Loading a native plugin (`import native "libfoo"`) runs arbitrary machine code inside the Forge process.** Nothing Forge enforces — no capability, `--sandbox`, `FORGE_FS_BASE`, the SSRF guard, `--max-time` or the MCP output capture — applies to code inside the library. It can read and write any file, open sockets, spawn processes, and corrupt or crash Forge. Granting `ffi` is equivalent to granting everything.
+
+- `forge run` and `forge test` refuse to load native code unless `--allow-ffi` (any library) or `--allow-ffi=PATHS` (only libraries at or under those paths) is given, or `allow-ffi` is set in `forge.toml` `[permissions]`. It is opt-in like `--allow-run`, because a script could otherwise write a library to disk and load it to escape every other restriction.
+- The REPL and `forge -e` allow it (a person is typing), unless `--sandbox` is given.
+- `--sandbox`, `forge mcp` and the embedding `Sandbox` deny it unless explicitly granted (`--allow-ffi=PATHS` / `Sandbox::allow_ffi`). Never grant `ffi` to code you would not run as a native binary yourself.
+- The check runs on the resolved, canonical library path **before** the library is opened (opening already runs its initializers), so `..` and symlinks cannot widen a scoped grant. There is no library search path: Forge only loads the file the program names, relative to the importing file or the working directory.
+- Prefer path-scoped grants to a directory only you can write to (`--allow-ffi=./plugins`). A writable plugin directory lets anyone who can write there run code as you.
+- Plugins are never unloaded, and they must be thread-safe. A plugin that violates the ABI (`crates/forge-plugin/include/forge_plugin.h`) can cause undefined behaviour; Forge validates the descriptor and every returned value it can check (tags, UTF-8, NULL pointers, nesting depth), but cannot protect against a library that writes through bad pointers.
+
 ### HTTP client SSRF guard (on by default)
 
 The HTTP client (`http.*`, `fetch`, `download`, `crawl`) refuses requests whose host is, or resolves to, a private, loopback, or link-local address. The resolved address is pinned for the connection, and every redirect target is re-checked. To call local services on purpose (for example in development), set:
@@ -75,6 +86,24 @@ Note: the interpreter binds these parameters correctly. Parameter binding on the
 
 ## Sandboxing and permissions
 
+### Threat model
+
+The sandbox is designed for running Forge source you do not trust — code
+written by an AI agent (`forge mcp`), by users of your application
+(`forge_lang::Sandbox`, the Python package), or downloaded scripts
+(`forge --sandbox run`). The attacker controls the script; the host
+controls the policy. Within the granted capabilities the script must not
+be able to: reach paths, hosts or capabilities it was not granted; run
+processes; read the host's environment, stdin or command line; exit or
+`cd` the host; crash the host (panic, abort, stack overflow) or keep
+running after its time limit; corrupt the MCP protocol stream; or see
+another sandbox's state. Not in scope: scripts granted `run` (a
+subprocess can do anything the host user can), a malicious MCP client
+(the server trusts its client), and other processes that modify files
+inside a granted directory while a script runs. The latest audit, with
+every finding and its regression test, is
+[`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md).
+
 Forge has a capability-based permission model shared by the VM and the interpreter. Every privileged operation asks one central check against the active policy and fails with the same message shape:
 
 ```text
@@ -83,18 +112,19 @@ permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it
 
 | Capability | Covers | CLI flag |
 | --- | --- | --- |
-| `fs.read` | `fs.read`/`list`/`exists`/`size`/`lines`/`read_json`/`is_dir`/`is_file`, `csv.read`, `toml.read`, `env.load`, `import` (see below) | `--allow-read[=PATHS]` |
+| `fs.read` | `fs.read`/`list`/`exists`/`size`/`lines`/`read_json`/`is_dir`/`is_file`, `csv.read`, `toml.read`, `env.load`, `db.open` files, `import` (see below), `watch`, `path.resolve`/`path.relative` | `--allow-read[=PATHS]` |
 | `fs.write` | `fs.write`/`append`/`remove`/`mkdir`/`copy`/`rename`/`write_json`, `csv.write`, `db.open` files, `http.download` destination | `--allow-write[=PATHS]` |
-| `net` | `http.*`, `fetch`, `download`, `crawl`, `ws.connect`, binding an `@server` port | `--allow-net[=HOSTS]` |
+| `net` | `http.*`, `fetch`, `download`, `crawl`, `ws.connect`, binding an `@server` port, the server of `pg.connect`/`mysql.connect` | `--allow-net[=HOSTS]` |
 | `env` | `env.*` | `--allow-env` |
-| `db` | `db.*`, `pg.*`, `mysql.*` | `--allow-db` |
-| `run` | `sh`, `shell`, `sh_lines`, `sh_json`, `sh_ok`, `run_command`, `pipe_to` | `--allow-run` |
+| `db` | `db.*`, `pg.*`, `mysql.*` (file databases also need `fs.read` + `fs.write`; network databases also need `net`) | `--allow-db` |
+| `run` | `sh`, `shell`, `sh_lines`, `sh_json`, `sh_ok`, `run_command`, `pipe_to`, `which` | `--allow-run` |
 | `ai` | `ask` | `--allow-ai` |
-| `process` | `exit()`, `cd()` (mutate the host process) | always granted by the CLI; host policy only |
+| `process` | `exit()`, `cd()`, the host's stdin (`input()`, `io.prompt`, `term.confirm`, `term.menu`) and command line (`io.args*`) | always granted by the CLI; host policy only |
+| `ffi` | `import native` — loading a native plugin. **Full trust**: see "Native plugins are full trust" | `--allow-ffi[=PATHS]` |
 
 ### CLI
 
-Defaults are unchanged: `forge run` allows everything except `run`; `-e` and the REPL also allow `run`. `--sandbox` switches to default-deny, and each `--allow-*` flag grants one capability back:
+Defaults: `forge run` allows everything except `run` and `ffi`; `-e` and the REPL also allow `run` and `ffi`. `--sandbox` switches to default-deny, and each `--allow-*` flag grants one capability back:
 
 ```bash
 forge run --sandbox agent.fg                                   # nothing allowed
@@ -102,8 +132,12 @@ forge run --sandbox --allow-read=./data --allow-write=./out agent.fg
 forge run --sandbox --allow-net=api.example.com,*.cdn.example.com agent.fg
 forge run --allow-read=./data app.fg      # scoped flag restricts just that capability
 forge run --max-time 30 job.fg            # wall-clock limit, exit code 124
+forge run --max-fuel 50000000 job.fg      # deterministic step budget
+forge run --max-memory 256MB job.fg       # memory limit
 ```
 
+- Under a restricted policy SQLite cannot open files by itself: `ATTACH DATABASE`, `VACUUM INTO` and `file:` URI names are refused unless both `fs.read` and `fs.write` are unrestricted.
+- Under a restricted policy (`fs.read`, `fs.write` or `net` not fully granted), `env.set`/`env.load` cannot change Forge's own configuration: the `FORGE_*` variables the runtime reads (`FORGE_HTTP_ALLOW_PRIVATE`, `FORGE_FS_BASE`, `FORGE_AI_URL`, ...), `OPENAI_API_KEY`, `OTEL_*`, `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` and `RUST_LOG` (list: `RESERVED_KEYS` in `src/stdlib/env.rs`).
 - Path scopes are resolved like the OS resolves them: made absolute, every existing component canonicalized (symlinks followed, `..` applied to the real parent), the not-yet-existing tail normalized. A symlink or `..` that leads outside a granted directory is denied; a dangling symlink is always denied. Grants are resolved once, at startup.
 - `fs.exists`, `fs.is_dir` and `fs.is_file` return `false` instead of failing when the path is outside the grant, so they cannot probe for files.
 - Host scopes match `host`, `*.domain` (subdomains and the domain itself) or `host:port`, case-insensitively. When `net` is scoped, every redirect target must also be on the allowlist. The SSRF guard still applies on top: granting `127.0.0.1` does not bypass it (use `FORGE_HTTP_ALLOW_PRIVATE=1`).
@@ -119,6 +153,7 @@ allow-read = ["./data"]   # or true
 allow-write = ["./out"]
 allow-net = ["api.example.com"]
 allow-env = true
+allow-ffi = ["./plugins"] # native plugins: full trust
 max-time = 30
 ```
 
@@ -140,14 +175,41 @@ let out = Sandbox::new()
 
 - The policy is installed on the sandbox's worker thread, not process-wide, so concurrent sandboxes and the host itself are independent. Every thread the engines fork (`spawn`, `squad`, `timeout`, `schedule`, `watch`) inherits the policy of the thread that forked it (`permissions::spawn`).
 - `say`/`println`/`print` output is captured in `Output::stdout`. Errors come back as `SandboxError::{Syntax, PermissionDenied, Runtime, Timeout}`.
-- `max_time` returns control to the host by the deadline: the program is cancelled cooperatively, and if it does not stop within a short grace period its worker thread is detached.
+- `max_time` returns control to the host by the deadline: the program is cancelled cooperatively, and if it does not stop within a short grace period its worker thread is detached. Cancellation reaches everything the program started — `spawn`ed and `squad` tasks, `timeout` bodies, imported modules — and every blocking wait (`receive`, `await`, `select`, `wait`, `time.sleep`, iterating a channel).
+- `max_output` is charged on every write, so a print loop stops at the limit instead of growing the capture between checks.
+- `schedule`, `watch` and `@server` are never started inside a sandbox, including from imported modules and tasks.
+- A size that cannot be allocated (`repeat_str("x", 10**14)`, `range(0, 10**14)`) is a runtime error, never a process abort.
+- Resource limits (`max_fuel`, `max_memory`, or a full `forge_lang::Limits` via `.limits(...)`) come back as `SandboxError::{FuelExhausted, MemoryLimit, ResourceLimit}`; see "Resource limits" below. `max_memory` needs `forge_lang::CountingAllocator` as the host's `#[global_allocator]` (the run fails with a clear error otherwise).
 - Lower-level: `forge_lang::Capabilities` (policy builder), `forge_lang::permissions::{set_global, scope, require}`.
+
+### Resource limits
+
+Wall-clock time is not enough for multi-tenant use: it depends on machine load and does not bound memory. Every run can also carry a budget (`src/runtime/limits.rs`), set with CLI flags, `forge_lang::Sandbox`, or `forge mcp` (which applies defaults):
+
+| Limit | Meaning | CLI / API | Error |
+| --- | --- | --- | --- |
+| Fuel | Execution steps. VM: one per bytecode instruction; interpreter: one per statement, call and loop iteration. Deterministic: a single-threaded program runs out at exactly the same step on every run and every machine (per engine — the engines count different units). | `--max-fuel N`, `Sandbox::max_fuel` | `fuel exhausted: ...` (`FuelExhausted`) |
+| Memory | VM: estimated live bytes of the GC heap (strings, arrays, objects, maps, sets, closures, boxed ints); crossing the limit forces a collection and the run fails only if the live heap is still too big. Interpreter: bytes held by the run's threads, measured by `CountingAllocator` and polled at every step. | `--max-memory 256MB`, `Sandbox::max_memory` | `memory limit exceeded: ...` (`MemoryLimit`) |
+| Value size | Longest string and largest collection a program may build, checked *before* allocating (`repeat_str("x", 1e12)`, `range(1e12)`, `pad_start`, doubling `s = s + s`). With a memory limit they default to what the limit could hold. | `Limits::{max_string_bytes, max_collection_len}` | `resource limit exceeded: ...` (`ResourceLimit`) |
+| Handles | Concurrently open files (fs calls, SQLite connections), sockets (HTTP requests, WebSockets, PostgreSQL/MySQL connections), subprocesses and tasks (`spawn`, `timeout` blocks). | `Limits::{max_open_files, max_sockets, max_processes, max_tasks}` | `resource limit exceeded: too many ...` |
+| Imports | Module files loaded per run. | `Limits::max_imports` | `resource limit exceeded: more than N imports` |
+
+- **Fuel and memory are fatal.** `try`/`catch`, `safe` and `retry` do not catch them, and the budget remembers the trip: if a builtin swallows the error (`assert_throws`, a failed task), every later step fails too and the host still reports the limit. The other limits are ordinary runtime errors a program may catch.
+- **The host survives.** A tripped run unwinds normally; a sandbox's memory is released with its worker thread, and the next run starts from a fresh budget. Budgets are per run and inherited by every thread the run forks, never shared between sandboxes.
+- **Overhead.** With no limits set, engines pay one decrement and branch per safe point they already had (VM: per instruction, folded into the existing `timeout` poll; interpreter: per statement/call/iteration), and the counting allocator pays one thread-local load per allocation. See CHANGELOG for measured numbers.
+- **Servers.** With `forge run --max-fuel/--max-memory app.fg`, every HTTP request fork and every WebSocket connection gets a fresh budget with those limits (a request that trips one gets a 500; the server keeps serving). On the interpreter fallback only fuel is per request. `schedule`/`watch` blocks spend the run's own budget.
+- **JIT.** Native code has no fuel counter, so while a fuel limit is active the VM does not enter JIT code (hot functions keep running in the VM). The JIT never allocates on the GC heap, so memory accounting is unaffected.
+- **Approximations.** VM object sizes are estimates; the interpreter's meter also counts transient copies and may undercount memory allocated before the run and freed during it. Either engine can overshoot the memory limit by what a single step allocates (bounded by the value-size caps), and the VM by up to 1/8 of the limit when the live heap sits just under it.
 
 ### MCP server (`forge mcp`)
 
 `forge mcp` exposes the embedding sandbox to AI agents over the Model Context Protocol (stdio). Its policy is built like the CLI's but **always starts from deny-all**, including `process`; only the `--allow-*` flags and `forge.toml` `[permissions]` grant capabilities (`sandbox = false` is ignored, and `run` needs an explicit `--allow-run` / `allow-run = true`). `--max-time` (default 30s) bounds each call rather than the server process.
 
-- Every `run_forge` call gets a fresh interpreter on its own thread; nothing persists between calls. A timed-out script is cancelled cooperatively and, if stuck in a native call, detached; at most 8 calls run at once.
+- Every `run_forge` call gets a fresh interpreter on its own thread; nothing persists between calls unless the agent passes a `session_id`. A timed-out script is cancelled cooperatively and, if stuck in a native call, detached; at most 8 calls run at once. Tasks a call `spawn`s and never awaits are stopped when the call ends.
+- Every call (and every session step and Forge tool call) also gets a fresh resource budget: by default 200,000,000 steps of fuel, 256 MiB of memory, 32 open files, 16 sockets, 4 subprocesses, 16 tasks and 256 imports (`forge_lang::mcp::default_limits`). `--max-fuel` / `--max-memory` change the server's limits; an agent's `max_fuel` argument can only lower the fuel. Errors come back as `fuel_exhausted`, `memory_limit` or `resource_limit`.
+- **Sessions** (`run_forge` with `session_id`) keep one interpreter's top-level state between calls. Each step still runs on a fresh worker thread under the full policy, deadline, output cap and cancellation; only the environment carries over. Sessions are isolated from each other, limited in number (`--max-sessions`, default 16) and dropped after `--session-idle` (default 900s); a step whose worker had to be detached ends its session. Each step gets fresh fuel, while the memory limit covers everything the session holds: the bytes its interpreter retained after the previous step count from the start of the next one, so a session's state can never exceed the per-call memory limit (`reset_session` frees it). `--max-sessions 0` disables sessions.
+- **Forge-authored tools** (`forge mcp serve tools.fg`): the file is trusted operator code, but its top level and every tool call run inside the same sandbox as `run_forge` (the server's policy, plus the file's directory and `forge_modules/` as import roots). Each call runs in a fresh fork of the top-level state, so calls cannot see each other. Arguments are validated against the generated schema in Rust before any Forge code runs.
+- All MCP code runs on the tree-walking interpreter, never the VM: the VM does not yet capture or cap a program's output (`say` goes to the process's stdout).
 - Script output is captured (including `spawn`ed tasks, `timeout` blocks, imports and `io.print`), capped at 64 KiB in the response, and a script that prints more than 1 MiB is stopped.
 - On Unix the protocol stream is moved to private close-on-exec descriptors before any script runs; fd 0 becomes `/dev/null` and fd 1 is redirected to stderr. A script (or a granted subprocess) can therefore neither read protocol input nor inject protocol output. On other platforms only the sandbox capture applies.
 - Untrusted source cannot crash the server with deep nesting: the parser rejects nesting beyond a fixed depth.
@@ -155,13 +217,16 @@ let out = Sandbox::new()
 
 ### Not covered yet (future work)
 
-- **Memory limit.** There is no heap cap yet; call depth is bounded by `--max-depth` / `FORGE_MAX_DEPTH`.
-- `--max-time` in the CLI ends the process from a watchdog thread; the embedding API cancels cooperatively. Neither interrupts a single blocking native call (a long HTTP request is bounded by its own timeout).
+- **Memory accounting is approximate** (see "Resource limits"); call depth is bounded separately by `--max-depth` / `FORGE_MAX_DEPTH`. Builtins that run long without calling back into Forge code (sorting a huge array, a slow regex) are not charged fuel per element, and `replace`/`join` do not check the string cap before building their result.
+- Fuel limits disable the JIT tier for the run.
+- `--max-time` in the CLI ends the process from a watchdog thread; the embedding API cancels cooperatively. Neither interrupts a single blocking native call (an HTTP request, DNS lookup, WebSocket or database connect, or a granted subprocess): the host gets control back on time and the detached worker finishes when the call returns.
 - HTTP server handlers run on tokio's blocking pool and use the process-wide policy (the CLI's). The embedding `Sandbox` does not start servers, `schedule` or `watch` blocks.
-- `db` grants SQLite's own file access (`ATTACH DATABASE`), and `pg`/`mysql` open network connections under `db`, not `net`.
-- `which()`, `input()`/`io.prompt`, `os.*` and `time` are not gated. stdin is shared with the host.
-- Path checks and the subsequent open are not atomic: a process outside the sandbox that swaps a directory for a symlink between the two can win the race.
-- The VM's `ws` module is not registered yet; on the interpreter `ws.connect` is gated by `net`.
+- stderr output (`log.*`, `term.*` drawing, download progress, warnings) is neither captured nor capped; `forge mcp` on Unix sends it to the server's stderr.
+- `os.*` (hostname, home directory, pid, CPU count), `cwd()` and `fs.temp_dir` are not gated; they reveal host identity, not file contents.
+- The `env` capability is process-wide: one sandbox's `env.set` is visible to the host and every other sandbox. Grant it only to trusted single-tenant hosts.
+- MySQL and WebSocket handles are unguessable bearer tokens in process-wide tables; a script that is *given* another sandbox's handle can use it.
+- Path checks and the subsequent open are not atomic: a process outside the sandbox that swaps a directory for a symlink between the two can win the race. (Races inside the sandbox, such as another task calling `cd`, are closed: operations use the resolved path that was checked.)
+- On the VM (CLI only), converting a value nested millions of levels deep (e.g. `json.stringify`) can overflow the native stack and abort the process.
 
 ## Known Limitations
 
@@ -175,6 +240,7 @@ These are documented limitations, not vulnerabilities:
 
 - Pass user input to SQL only as query parameters.
 - Do not pass untrusted input to `sh()` / `run_command()`, and only grant `--allow-run` to scripts you trust.
+- Only pass `--allow-ffi` for plugins you built or trust as much as Forge itself; scope it to their directory.
 - Run scripts you did not write with `--sandbox` and only the `--allow-*` grants they need; embed untrusted code with `forge_lang::Sandbox`.
 - Set `FORGE_FS_BASE` when running scripts that should only touch one directory.
 - Leave `FORGE_HTTP_ALLOW_PRIVATE` unset in production.

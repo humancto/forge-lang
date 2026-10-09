@@ -31,7 +31,9 @@
 //! thread must be started through [`spawn`] (or wrap its closure with
 //! [`inherit`]) so it runs under the policy of the thread that forked it.
 //! A thread started with a bare `std::thread::spawn` would silently fall back
-//! to the process-wide policy — a sandbox escape for embedders.
+//! to the process-wide policy — a sandbox escape for embedders. The same
+//! wrapper carries the run's resource budget (`runtime::limits`), so a forked
+//! thread also charges the fuel, memory and handle limits of its parent.
 //!
 //! Engine-agnostic by construction: the checks live in the shared stdlib (and
 //! as one-line calls in the few builtins each engine implements itself), so
@@ -59,17 +61,23 @@ pub enum Capability {
     Run,
     /// LLM calls (`ask`).
     Ai,
-    /// Host-process state: `exit()`, `cd()`, and reading the host's stdin
-    /// (`input()`, `io.prompt`). Always granted by the CLI; denied by default
-    /// for embedders so a script cannot kill the host or consume its stdin
-    /// (which `forge mcp` uses for the protocol). Without it, stdin reads
-    /// behave like an empty stream and no prompt is printed.
+    /// Host-process state: `exit()`, `cd()`, reading the host's stdin
+    /// (`input()`, `io.prompt`, `term.confirm`, `term.menu`) and its command
+    /// line (`io.args*`). Always granted by the CLI; denied by default for
+    /// embedders so a script cannot kill the host, consume its stdin (which
+    /// `forge mcp` uses for the protocol) or read its arguments. Without it,
+    /// stdin reads behave like an empty stream, no prompt is printed and the
+    /// argument list is empty.
     Process,
+    /// Load native code: `import native "libfoo"`. A loaded library runs
+    /// with the full privileges of the process, outside every other check,
+    /// so this is equivalent to full trust. Scoped by library path.
+    Ffi,
 }
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 8] = [
+    pub const ALL: [Capability; 9] = [
         Capability::Read,
         Capability::Write,
         Capability::Net,
@@ -78,6 +86,7 @@ impl Capability {
         Capability::Run,
         Capability::Ai,
         Capability::Process,
+        Capability::Ffi,
     ];
 
     /// Stable name used in error messages and policy files.
@@ -91,6 +100,7 @@ impl Capability {
             Capability::Run => "run",
             Capability::Ai => "ai",
             Capability::Process => "process",
+            Capability::Ffi => "ffi",
         }
     }
 
@@ -105,6 +115,7 @@ impl Capability {
             Capability::Run => Some("--allow-run"),
             Capability::Ai => Some("--allow-ai"),
             Capability::Process => None,
+            Capability::Ffi => Some("--allow-ffi"),
         }
     }
 
@@ -119,6 +130,7 @@ impl Capability {
             "run" => Some(Capability::Run),
             "ai" => Some(Capability::Ai),
             "process" => Some(Capability::Process),
+            "ffi" | "native" => Some(Capability::Ffi),
             _ => None,
         }
     }
@@ -140,6 +152,15 @@ pub struct PermissionError {
 
 impl fmt::Display for PermissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !cfg!(feature = "host") {
+            // No host runtime: nothing can grant this, so say so.
+            let what = if self.detail.is_empty() {
+                format!("{} access", self.capability)
+            } else {
+                format!("{} access ({})", self.capability, self.detail)
+            };
+            return f.write_str(&crate::runtime::unavailable_message(&what));
+        }
         write!(f, "permission denied: {}", self.capability)?;
         if !self.detail.is_empty() {
             write!(f, " ({})", self.detail)?;
@@ -273,6 +294,8 @@ pub struct Capabilities {
     run: bool,
     ai: bool,
     process: bool,
+    /// Native libraries that may be loaded (files or directory trees).
+    ffi: Scope<PathBuf>,
     /// Directories from which `import` may load modules even when `fs.read`
     /// does not cover them (the CLI adds the entry script's directory).
     import_roots: Vec<PathBuf>,
@@ -296,6 +319,7 @@ impl Capabilities {
             run: true,
             ai: true,
             process: true,
+            ffi: Scope::All,
             import_roots: Vec::new(),
         }
     }
@@ -311,15 +335,18 @@ impl Capabilities {
             run: false,
             ai: false,
             process: false,
+            ffi: Scope::Denied,
             import_roots: Vec::new(),
         }
     }
 
     /// Forge's historical default for `forge run`: everything except
-    /// subprocesses (`run` needs `--allow-run`).
+    /// subprocesses (`run` needs `--allow-run`) and native code (`ffi` needs
+    /// `--allow-ffi`; it is strictly more powerful than `run`).
     pub fn cli_default() -> Self {
         Capabilities {
             run: false,
+            ffi: Scope::Denied,
             ..Capabilities::allow_all()
         }
     }
@@ -347,6 +374,7 @@ impl Capabilities {
             Capability::Run => self.run = granted,
             Capability::Ai => self.ai = granted,
             Capability::Process => self.process = granted,
+            Capability::Ffi => self.ffi = if granted { Scope::All } else { Scope::Denied },
         }
     }
 
@@ -386,6 +414,17 @@ impl Capabilities {
         self
     }
 
+    /// Allow loading native libraries at or under these paths (files or
+    /// directory trees).
+    pub fn grant_ffi_paths<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        self.ffi.add(resolve_roots(paths));
+        self
+    }
+
     /// Allow `import` of modules under `dir` regardless of `fs.read`.
     pub fn grant_import_root(mut self, dir: impl AsRef<Path>) -> Self {
         if let Some(p) = resolve_for_check(dir.as_ref()) {
@@ -405,6 +444,7 @@ impl Capabilities {
             Capability::Run => self.run,
             Capability::Ai => self.ai,
             Capability::Process => self.process,
+            Capability::Ffi => self.ffi.is_granted(),
         }
     }
 
@@ -433,6 +473,7 @@ impl Capabilities {
         out.extend(scoped("fs.read", &self.read, |p| p.display().to_string()));
         out.extend(scoped("fs.write", &self.write, |p| p.display().to_string()));
         out.extend(scoped("net", &self.net, |h| h.to_string()));
+        out.extend(scoped("ffi", &self.ffi, |p| p.display().to_string()));
         for cap in [
             Capability::Env,
             Capability::Db,
@@ -452,7 +493,7 @@ impl Capabilities {
     /// For scoped grants an empty `detail` only passes an `All` grant.
     pub fn check(&self, cap: Capability, detail: &str) -> Result<(), PermissionError> {
         let ok = match cap {
-            Capability::Read | Capability::Write => {
+            Capability::Read | Capability::Write | Capability::Ffi => {
                 if detail.is_empty() {
                     matches!(self.path_scope(cap), Scope::All)
                 } else {
@@ -476,14 +517,15 @@ impl Capabilities {
     }
 
     fn path_scope(&self, cap: Capability) -> &Scope<PathBuf> {
-        if cap == Capability::Write {
-            &self.write
-        } else {
-            &self.read
+        match cap {
+            Capability::Write => &self.write,
+            Capability::Ffi => &self.ffi,
+            _ => &self.read,
         }
     }
 
-    /// Check a filesystem path against the `fs.read` or `fs.write` scope.
+    /// Check a filesystem path against the `fs.read`, `fs.write` or `ffi`
+    /// scope.
     /// The path is resolved the way the OS would (symlinks followed, `..`
     /// applied) before comparing, so neither `..` nor a symlink can reach
     /// outside a granted directory.
@@ -499,16 +541,49 @@ impl Capabilities {
         }
     }
 
+    /// Like [`Capabilities::check_path`], but returns the path the caller
+    /// must open. Under a scoped grant that is the *resolved absolute* path
+    /// that was checked, so a later change of the working directory (another
+    /// thread calling `cd`) or of a relative component cannot make the
+    /// operation land somewhere other than what was approved. Under an
+    /// unrestricted grant the path is returned unchanged (no behaviour
+    /// change for trusted scripts).
+    pub fn checked_path(&self, cap: Capability, path: &Path) -> Result<PathBuf, PermissionError> {
+        let shown = path.display().to_string();
+        match self.path_scope(cap) {
+            Scope::All => Ok(path.to_path_buf()),
+            Scope::Denied => Err(denied(cap, &shown)),
+            Scope::Only(roots) => match resolve_for_check(path) {
+                Some(resolved) if roots.iter().any(|r| resolved.starts_with(r)) => Ok(resolved),
+                _ => Err(denied(cap, &shown)),
+            },
+        }
+    }
+
+    /// Whether `cap` (`fs.read`, `fs.write` or `net`) is granted without any
+    /// path or host restriction. Embedded engines (SQLite) that can reach
+    /// files or hosts on their own only get those features when this holds.
+    pub fn is_unrestricted(&self, cap: Capability) -> bool {
+        match cap {
+            Capability::Read => matches!(self.read, Scope::All),
+            Capability::Write => matches!(self.write, Scope::All),
+            Capability::Net => matches!(self.net, Scope::All),
+            Capability::Ffi => matches!(self.ffi, Scope::All),
+            other => self.is_granted(other),
+        }
+    }
+
     /// Check a module import: allowed under an import root or by `fs.read`.
-    pub fn check_import(&self, path: &Path) -> Result<(), PermissionError> {
+    /// Returns the path to read (see [`Capabilities::checked_path`]).
+    pub fn check_import(&self, path: &Path) -> Result<PathBuf, PermissionError> {
         if !self.import_roots.is_empty() {
             if let Some(resolved) = resolve_for_check(path) {
                 if self.import_roots.iter().any(|r| resolved.starts_with(r)) {
-                    return Ok(());
+                    return Ok(resolved);
                 }
             }
         }
-        self.check_path(Capability::Read, path)
+        self.checked_path(Capability::Read, path)
             .map_err(|e| denied(Capability::Read, &format!("import {}", e.detail)))
     }
 
@@ -611,10 +686,15 @@ thread_local! {
 }
 
 fn default_policy() -> Arc<Capabilities> {
+    // Without the host runtime (the browser playground) there is no
+    // operating system to grant access to: everything is denied, and the
+    // denial reads "not available" (see `PermissionError`'s `Display`).
+    #[cfg(feature = "host")]
+    let make = Capabilities::cli_default;
+    #[cfg(not(feature = "host"))]
+    let make = Capabilities::deny_all;
     static DEFAULT: OnceLock<Arc<Capabilities>> = OnceLock::new();
-    DEFAULT
-        .get_or_init(|| Arc::new(Capabilities::cli_default()))
-        .clone()
+    DEFAULT.get_or_init(|| Arc::new(make())).clone()
 }
 
 fn global_policy() -> Arc<Capabilities> {
@@ -655,15 +735,19 @@ pub fn scope(caps: Arc<Capabilities>) -> PolicyGuard {
 }
 
 /// Wrap `f` so that, wherever it runs, it runs under the policy that is
-/// current *here*. Use for `tokio::task::spawn_blocking` and friends.
+/// current *here* — and charges the resource budget that is current here
+/// ([`crate::runtime::limits`]). Use for `tokio::task::spawn_blocking` and
+/// friends.
 pub fn inherit<F, T>(f: F) -> impl FnOnce() -> T + Send + 'static
 where
     F: FnOnce() -> T + Send + 'static,
     T: 'static,
 {
     let caps = current();
+    let budget = crate::runtime::limits::current();
     move || {
         let _guard = scope(caps);
+        let _limits = crate::runtime::limits::scope(budget);
         f()
     }
 }
@@ -699,13 +783,44 @@ pub fn require_path(cap: Capability, path: impl AsRef<Path>) -> Result<(), Permi
     current().check_path(cap, path.as_ref())
 }
 
+/// [`require_path`] that returns the path to open (see
+/// [`Capabilities::checked_path`]). Every stdlib filesystem entry point
+/// opens what this returns, never the caller's original string.
+pub fn checked_path(cap: Capability, path: impl AsRef<Path>) -> Result<PathBuf, PermissionError> {
+    current().checked_path(cap, path.as_ref())
+}
+
 /// [`require`] for a network target (URL, `host` or `host:port`).
 pub fn require_net(target: &str) -> Result<(), PermissionError> {
     current().check_net(target)
 }
 
-/// Check that a module file may be imported.
-pub fn require_import(path: impl AsRef<Path>) -> Result<(), PermissionError> {
+/// [`require_net`] for a raw `host` + `port` pair (database drivers and
+/// other non-URL clients). IPv6 literals are bracketed for the check.
+pub fn require_net_host(host: &str, port: u16) -> Result<(), PermissionError> {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let target = if host.contains(':') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    };
+    current().check_net(&target)
+}
+
+/// Whether the active policy grants `net` with no host restriction. Clients
+/// that can reach endpoints the allowlist cannot describe (Unix sockets)
+/// only get them in that case.
+pub fn net_unrestricted() -> bool {
+    current().is_unrestricted(Capability::Net)
+}
+
+/// Check that a native library may be loaded (`import native`).
+pub fn require_ffi(path: impl AsRef<Path>) -> Result<(), PermissionError> {
+    current().check_path(Capability::Ffi, path.as_ref())
+}
+
+/// Check that a module file may be imported; returns the path to read.
+pub fn require_import(path: impl AsRef<Path>) -> Result<PathBuf, PermissionError> {
     current().check_import(path.as_ref())
 }
 
@@ -726,6 +841,15 @@ pub fn set_allow_run(allowed: bool) {
 /// Check that subprocess execution is allowed.
 pub fn check_run_permission() -> Result<(), String> {
     require(Capability::Run, "shell execution").map_err(String::from)
+}
+
+/// Check that subprocess execution is allowed and take a subprocess slot
+/// from the run's resource budget (`runtime::limits`). Keep the slot alive
+/// until the subprocess has exited. Every builtin that starts a process
+/// goes through this.
+pub fn begin_subprocess() -> Result<crate::runtime::limits::Slot, String> {
+    check_run_permission()?;
+    crate::runtime::limits::acquire(crate::runtime::limits::Resource::Processes)
 }
 
 #[cfg(test)]
@@ -768,7 +892,8 @@ mod tests {
     fn cli_default_matches_historical_behaviour() {
         let c = Capabilities::cli_default();
         for cap in Capability::ALL {
-            assert_eq!(c.is_granted(cap), cap != Capability::Run, "{cap}");
+            let opt_in = matches!(cap, Capability::Run | Capability::Ffi);
+            assert_eq!(c.is_granted(cap), !opt_in, "{cap}");
         }
     }
 
@@ -830,6 +955,38 @@ mod tests {
     }
 
     #[test]
+    fn checked_path_returns_what_was_approved() {
+        // Under a scoped grant the caller gets the resolved absolute path,
+        // so a later `cd` (or a swapped relative component) cannot change
+        // which file is opened.
+        let root = tmpdir("checked");
+        let allowed = root.join("allowed");
+        std::fs::create_dir_all(&allowed).expect("mkdir");
+        let allowed = std::fs::canonicalize(&allowed).expect("canonicalize");
+        std::fs::write(allowed.join("a.txt"), "a").expect("write");
+        let c = Capabilities::deny_all().grant_read_paths([&allowed]);
+        let got = c
+            .checked_path(Capability::Read, &allowed.join("x/../a.txt"))
+            .expect("inside");
+        assert_eq!(got, allowed.join("a.txt"));
+        assert!(got.is_absolute());
+        assert!(c
+            .checked_path(Capability::Read, &allowed.join("../outside.txt"))
+            .is_err());
+        // Unrestricted grants hand the path back untouched.
+        let all = Capabilities::allow_all();
+        assert_eq!(
+            all.checked_path(Capability::Read, Path::new("rel/x.txt"))
+                .expect("all"),
+            PathBuf::from("rel/x.txt")
+        );
+        assert!(all.is_unrestricted(Capability::Read));
+        assert!(!c.is_unrestricted(Capability::Read));
+        assert!(!c.is_unrestricted(Capability::Net));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn host_allowlist() {
         let c = Capabilities::deny_all().grant_net_hosts([
             "api.example.com",
@@ -879,5 +1036,48 @@ mod tests {
         let all = Capabilities::allow_all().describe();
         assert_eq!(all.len(), Capability::ALL.len());
         assert_eq!(all[0], "fs.read");
+    }
+
+    #[test]
+    fn ffi_is_scoped_by_library_path() {
+        let root = tmpdir("ffi");
+        let plugins = root.join("plugins");
+        std::fs::create_dir_all(&plugins).expect("mkdir");
+        std::fs::write(plugins.join("libok.so"), "").expect("write");
+        std::fs::write(root.join("libevil.so"), "").expect("write");
+
+        let none = Capabilities::deny_all();
+        let e = none
+            .check_path(Capability::Ffi, &plugins.join("libok.so"))
+            .expect_err("denied");
+        assert!(e.to_string().contains("run with --allow-ffi"), "{e}");
+
+        let c = Capabilities::deny_all().grant_ffi_paths([&plugins]);
+        assert!(c.is_granted(Capability::Ffi));
+        assert!(c
+            .check_path(Capability::Ffi, &plugins.join("libok.so"))
+            .is_ok());
+        assert!(c
+            .check_path(Capability::Ffi, &root.join("libevil.so"))
+            .is_err());
+        assert!(c
+            .check_path(Capability::Ffi, &plugins.join("../libevil.so"))
+            .is_err());
+        // An ffi grant is not a read grant, and vice versa.
+        assert!(c
+            .check_path(Capability::Read, &plugins.join("libok.so"))
+            .is_err());
+        let reader = Capabilities::deny_all().grant(Capability::Read);
+        assert!(reader
+            .check_path(Capability::Ffi, &plugins.join("libok.so"))
+            .is_err());
+        assert_eq!(
+            c.describe(),
+            vec![format!(
+                "ffi ({})",
+                resolve_for_check(&plugins).expect("resolve").display()
+            )]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

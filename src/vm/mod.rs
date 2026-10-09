@@ -10,8 +10,12 @@ mod local_ops; // local-variable access and in-place update opcodes
 pub mod machine;
 pub mod nanbox;
 pub mod profiler;
+mod range_loop; // counting `for v in range(..)` / `repeat n times` loops
 pub mod serialize;
+#[cfg(feature = "host")]
+pub mod serve;
 pub mod value;
+pub mod verify;
 
 use crate::parser::ast::Program;
 use machine::{VMError, VM};
@@ -44,6 +48,8 @@ mod enum_methods_tests;
 #[cfg(all(test, feature = "jit"))]
 mod jit_tests;
 #[cfg(test)]
+mod limits_tests;
+#[cfg(test)]
 mod map_tests;
 #[cfg(test)]
 mod must_ask_freeze_tests;
@@ -55,6 +61,8 @@ mod perf_tests;
 mod runtime_safety_tests;
 #[cfg(test)]
 mod schedule_watch_tests;
+#[cfg(all(test, feature = "host"))]
+mod serve_tests;
 #[cfg(test)]
 mod set_tests;
 #[cfg(test)]

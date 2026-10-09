@@ -8,9 +8,15 @@
 //! advertise it in [`server_capabilities`], add a match arm in
 //! [`handle_request`] (or [`handle_notification`]), and write the handler.
 //!
-//! Provides: diagnostics (lex/parse errors + type-check warnings),
-//! completions, hover, go-to-definition, references, document symbols,
-//! whole-document formatting and signature help.
+//! Provides: diagnostics (lex/parse errors + type-checker diagnostics with
+//! codes), completions, hover with inferred types, scope-aware
+//! go-to-definition / references / rename across imports, quick fixes,
+//! semantic tokens, inlay hints for inferred `let` types, document
+//! symbols, whole-document formatting and signature help. The semantic
+//! features live in [`semantic`]; when a document does not parse, hover,
+//! definition and references fall back to the word-based versions here.
+
+mod semantic;
 
 use crate::parser::ast::Stmt;
 use lsp_server::{Connection, ErrorCode, Message, Notification, ProtocolError, Request, Response};
@@ -37,6 +43,14 @@ fn store_document(uri: &str, text: &str) {
 
 fn get_document(uri: &str) -> Option<String> {
     DOCUMENTS.lock().ok()?.get(uri).cloned()
+}
+
+/// URIs of every open document.
+fn open_document_uris() -> Vec<String> {
+    DOCUMENTS
+        .lock()
+        .map(|docs| docs.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn remove_document(uri: &str) {
@@ -90,6 +104,30 @@ pub(crate) fn server_capabilities() -> ServerCapabilities {
         references_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        semantic_tokens_provider: Some(
+            lsp_types::SemanticTokensOptions {
+                legend: lsp_types::SemanticTokensLegend {
+                    token_types: semantic::TOKEN_TYPES
+                        .iter()
+                        .map(|t| lsp_types::SemanticTokenType::new(t))
+                        .collect(),
+                    token_modifiers: semantic::TOKEN_MODIFIERS
+                        .iter()
+                        .map(|m| lsp_types::SemanticTokenModifier::new(m))
+                        .collect(),
+                },
+                full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
+                range: None,
+                work_done_progress_options: Default::default(),
+            }
+            .into(),
+        ),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
             retrigger_characters: None,
@@ -115,7 +153,8 @@ fn initialize_result() -> serde_json::Value {
 /// `shutdown` + `exit`, `Ok(false)` when the client went away or sent
 /// `exit` without `shutdown`.
 pub(crate) fn serve(connection: &Connection) -> Result<bool, ProtocolError> {
-    let (id, _params) = connection.initialize_start()?;
+    let (id, params) = connection.initialize_start()?;
+    semantic::set_root(&params);
     connection.initialize_finish(id, initialize_result())?;
 
     for msg in &connection.receiver {
@@ -190,14 +229,46 @@ pub(crate) fn handle_request(req: &Request) -> Response {
             };
             Some(serde_json::json!(completions))
         }
-        request::HoverRequest::METHOD => {
-            position_params(params).map(|(uri, line, ch)| get_hover(uri, line, ch))
+        request::HoverRequest::METHOD => position_params(params).map(|(uri, line, ch)| {
+            semantic::hover(uri, line, ch).unwrap_or_else(|| get_hover(uri, line, ch))
+        }),
+        request::GotoDefinition::METHOD => position_params(params).map(|(uri, line, ch)| {
+            semantic::definition(uri, line, ch).unwrap_or_else(|| get_definition(uri, line, ch))
+        }),
+        request::References::METHOD => position_params(params).map(|(uri, line, ch)| {
+            let include = params
+                .pointer("/context/includeDeclaration")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            semantic::references(uri, line, ch, include)
+                .unwrap_or_else(|| serde_json::json!(get_references(uri, line, ch)))
+        }),
+        request::PrepareRenameRequest::METHOD => {
+            position_params(params).map(|(uri, line, ch)| semantic::prepare_rename(uri, line, ch))
         }
-        request::GotoDefinition::METHOD => {
-            position_params(params).map(|(uri, line, ch)| get_definition(uri, line, ch))
+        request::Rename::METHOD => {
+            let new_name = param_str(params, "/newName");
+            match (position_params(params), new_name) {
+                (Some((uri, line, ch)), Some(new_name)) => {
+                    match semantic::rename(uri, line, ch, new_name) {
+                        Ok(edit) => Some(edit),
+                        Err(message) => {
+                            return Response::new_err(id, ErrorCode::InvalidRequest as i32, message)
+                        }
+                    }
+                }
+                _ => None,
+            }
         }
-        request::References::METHOD => position_params(params)
-            .map(|(uri, line, ch)| serde_json::json!(get_references(uri, line, ch))),
+        request::CodeActionRequest::METHOD => {
+            param_str(params, "/textDocument/uri").map(|uri| semantic::code_actions(uri, params))
+        }
+        request::SemanticTokensFullRequest::METHOD => {
+            param_str(params, "/textDocument/uri").map(semantic::semantic_tokens)
+        }
+        request::InlayHintRequest::METHOD => {
+            param_str(params, "/textDocument/uri").map(|uri| semantic::inlay_hints(uri, params))
+        }
         request::DocumentSymbolRequest::METHOD => param_str(params, "/textDocument/uri")
             .map(|uri| serde_json::json!(get_document_symbols(uri))),
         request::Formatting::METHOD => {
@@ -243,7 +314,10 @@ pub(crate) fn handle_notification(note: &Notification) -> Vec<Notification> {
                 return vec![];
             };
             store_document(uri, text);
-            vec![publish_diagnostics(uri, get_diagnostics(text))]
+            vec![publish_diagnostics(
+                uri,
+                get_diagnostics_for(text, semantic::uri_to_path(uri)),
+            )]
         }
         notification::DidChangeTextDocument::METHOD => {
             let Some(uri) = param_str(params, "/textDocument/uri") else {
@@ -260,7 +334,10 @@ pub(crate) fn handle_notification(note: &Notification) -> Vec<Notification> {
                 return vec![];
             };
             store_document(uri, text);
-            vec![publish_diagnostics(uri, get_diagnostics(text))]
+            vec![publish_diagnostics(
+                uri,
+                get_diagnostics_for(text, semantic::uri_to_path(uri)),
+            )]
         }
         notification::DidCloseTextDocument::METHOD => {
             let Some(uri) = param_str(params, "/textDocument/uri") else {
@@ -441,53 +518,70 @@ fn get_signature_help(uri: &str, line: usize, character: usize) -> serde_json::V
 }
 
 fn get_diagnostics(source: &str) -> Vec<serde_json::Value> {
-    let mut lexer = crate::lexer::Lexer::new(source);
-    let tokens = match lexer.tokenize() {
-        Ok(t) => t,
-        Err(e) => {
-            return vec![serde_json::json!({
-                "range": {
-                    "start": {"line": e.line.saturating_sub(1), "character": e.col.saturating_sub(1)},
-                    "end": {"line": e.line.saturating_sub(1), "character": e.col}
-                },
-                "severity": 1,
-                "message": e.message
-            })];
-        }
-    };
+    get_diagnostics_for(source, None)
+}
 
-    let mut parser = crate::parser::Parser::new(tokens);
-    match parser.parse_program() {
-        Ok(program) => {
-            let source_lines: Vec<&str> = source.lines().collect();
-            let mut checker = crate::typechecker::TypeChecker::with_strict(false);
-            let warnings = checker.check(&program);
-            warnings
-                .into_iter()
-                .map(|w| {
-                    let line = w.line.saturating_sub(1);
-                    let end_char = source_lines.get(line).map(|l| l.len()).unwrap_or(0);
-                    let severity = if w.is_error { 1 } else { 2 };
-                    serde_json::json!({
-                        "range": {
-                            "start": {"line": line, "character": 0},
-                            "end": {"line": line, "character": end_char}
-                        },
-                        "severity": severity,
-                        "source": "forge-typecheck",
-                        "message": w.message
-                    })
+/// LSP column (UTF-16 code units) of a 1-based char column on a line.
+fn utf16_col(line_text: &str, char_col: usize) -> usize {
+    line_text
+        .chars()
+        .take(char_col.saturating_sub(1))
+        .map(char::len_utf16)
+        .sum()
+}
+
+/// LSP range for a 1-based (line, char col) span.
+fn lsp_range(source: &str, span: crate::parser::index::Span) -> serde_json::Value {
+    let line_of = |n: usize| source.lines().nth(n.saturating_sub(1)).unwrap_or("");
+    let start_line = span.start.line.max(1);
+    let end_line = span.end.line.max(start_line);
+    let start = utf16_col(line_of(start_line), span.start.col.max(1));
+    let mut end = utf16_col(line_of(end_line), span.end.col.max(1));
+    if end_line == start_line && end <= start {
+        end = start + 1;
+    }
+    serde_json::json!({
+        "start": {"line": start_line - 1, "character": start},
+        "end": {"line": end_line - 1, "character": end}
+    })
+}
+
+/// Diagnostics for a document. `path` (when the document is a file on
+/// disk) lets the checker resolve imports relative to it.
+fn get_diagnostics_for(source: &str, path: Option<std::path::PathBuf>) -> Vec<serde_json::Value> {
+    use crate::typechecker::{analyze, CheckOptions, FrontendError};
+    let options = CheckOptions {
+        strict: false,
+        file: path,
+    };
+    match analyze(source, &options) {
+        Ok(analysis) => analysis
+            .diagnostics
+            .iter()
+            .map(|d| {
+                let mut message = d.message.clone();
+                if let Some(help) = &d.help {
+                    message.push_str("\nhelp: ");
+                    message.push_str(help);
+                }
+                serde_json::json!({
+                    "range": lsp_range(source, d.span),
+                    "severity": if d.is_error() { 1 } else { 2 },
+                    "code": d.code.as_str(),
+                    "source": "forge-typecheck",
+                    "message": message,
                 })
-                .collect()
-        }
-        Err(e) => {
+            })
+            .collect(),
+        Err(FrontendError::Lex { line, col, message })
+        | Err(FrontendError::Parse { line, col, message }) => {
+            let start = crate::parser::index::Pos::new(line.max(1), col.max(1));
+            let end = crate::parser::index::Pos::new(line.max(1), col.max(1) + 1);
             vec![serde_json::json!({
-                "range": {
-                    "start": {"line": e.line.saturating_sub(1), "character": e.col.saturating_sub(1)},
-                    "end": {"line": e.line.saturating_sub(1), "character": e.col}
-                },
+                "range": lsp_range(source, crate::parser::index::Span::new(start, end)),
                 "severity": 1,
-                "message": e.message
+                "source": "forge",
+                "message": message
             })]
         }
     }
@@ -1217,6 +1311,19 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
                 symbols.push(DocumentSymbolInfo {
                     name: path.clone(),
                     kind: 2,
+                    line,
+                });
+            }
+        }
+        Stmt::ImportNative { binding, .. } => {
+            let names = match binding {
+                crate::parser::ast::NativeBinding::Namespace(name) => std::slice::from_ref(name),
+                crate::parser::ast::NativeBinding::Names(names) => names.as_slice(),
+            };
+            for n in names {
+                symbols.push(DocumentSymbolInfo {
+                    name: n.clone(),
+                    kind: 2, // Module
                     line,
                 });
             }
@@ -1965,7 +2072,7 @@ mod tests {
     #[test]
     fn unknown_request_returns_method_not_found_error() {
         let response = handle_message(
-            r#"{"jsonrpc":"2.0","id":42,"method":"textDocument/codeAction","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":42,"method":"textDocument/foldingRange","params":{}}"#,
         )
         .expect("requests must always get a response");
         let json: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1982,7 +2089,7 @@ mod tests {
             .pointer("/error/message")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        assert!(msg.contains("textDocument/codeAction"));
+        assert!(msg.contains("textDocument/foldingRange"));
     }
 
     #[test]
@@ -2349,7 +2456,11 @@ mod tests {
         // Unknown request -> MethodNotFound, and the server keeps going.
         client
             .sender
-            .send(request(2, "textDocument/codeAction", serde_json::json!({})))
+            .send(request(
+                2,
+                "textDocument/foldingRange",
+                serde_json::json!({}),
+            ))
             .unwrap();
         let Message::Response(resp) = recv(&client) else {
             panic!("expected response")

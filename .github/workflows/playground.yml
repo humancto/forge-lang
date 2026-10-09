@@ -1,0 +1,128 @@
+name: Playground
+
+# Builds Forge for the browser (bindings/wasm -> docs/playground/pkg),
+# checks that the portable core still compiles without the host runtime,
+# and runs the headless smoke tests (Node + the generated JS bindings).
+#
+# Deployment to GitHub Pages is optional and OFF until both are done:
+#   1. Settings -> Pages -> Source: "GitHub Actions" (the whole docs/ folder
+#      is published by this workflow, so the site, spec and book links keep
+#      working; it replaces "Deploy from branch /docs").
+#   2. Settings -> Variables: set the repository variable
+#      PLAYGROUND_PAGES=true.
+# No secrets are involved: deploy-pages uses the workflow's OIDC token.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "bindings/wasm/**"
+      - "docs/**"
+      - "editors/vscode/syntaxes/**"
+      - "examples/**"
+      - ".github/workflows/playground.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "bindings/wasm/**"
+      - "docs/playground/**"
+      - "editors/vscode/syntaxes/**"
+      - "examples/**"
+      - ".github/workflows/playground.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playground-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: Build and smoke-test (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            bindings/wasm -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install wasm-bindgen CLI (version pinned in bindings/wasm/Cargo.toml)
+        run: |
+          version="$(sed -n 's/^wasm-bindgen = "=\(.*\)"/\1/p' bindings/wasm/Cargo.toml)"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Portable core builds without the host runtime
+        run: |
+          cargo check --locked --lib --no-default-features
+          cargo check --locked --lib --no-default-features --target wasm32-unknown-unknown
+
+      - name: Lint (bindings)
+        working-directory: bindings/wasm
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Rust tests (native)
+        working-directory: bindings/wasm
+        run: cargo test --locked
+
+      - name: Build the WebAssembly module (release)
+        run: bindings/wasm/build.sh
+
+      - name: Size report
+        run: |
+          wasm=docs/playground/pkg/forge_wasm_bg.wasm
+          raw=$(wc -c <"$wasm"); gz=$(gzip -9 -c "$wasm" | wc -c)
+          echo "### Playground module" >> "$GITHUB_STEP_SUMMARY"
+          echo "forge_wasm_bg.wasm: $((raw / 1024)) KiB, $((gz / 1024)) KiB gzipped" >> "$GITHUB_STEP_SUMMARY"
+          # Budget: the playground must stay quick to load.
+          test "$gz" -lt $((3 * 1024 * 1024))
+
+      - name: Generated playground data is up to date
+        run: node bindings/wasm/tools/gen-playground-data.mjs --check
+
+      - name: Smoke tests (Node + generated JS bindings)
+        run: node --test bindings/wasm/tests/*.mjs
+
+      - name: Upload the site
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PLAYGROUND_PAGES == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PLAYGROUND_PAGES == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

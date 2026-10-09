@@ -33,6 +33,8 @@ struct WsConnection {
     write: Arc<Mutex<WsSink>>,
     read: Arc<Mutex<WsStream>>,
     url: String,
+    /// The run's socket slot (`runtime::limits`), released on `ws.close`.
+    socket: crate::runtime::limits::Slot,
 }
 
 fn ws_pool() -> &'static Mutex<HashMap<String, WsConnection>> {
@@ -53,6 +55,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 _ => return Err("ws.connect() requires a URL string".to_string()),
             };
             crate::permissions::require_net(&url)?;
+            check_ws_target(&url)?;
             ws_connect(&url)
         }
         "ws.send" => {
@@ -89,14 +92,38 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
+/// Apply the HTTP client's SSRF guard to a WebSocket URL: `ws://` and
+/// `wss://` targets must not be private/loopback addresses either (unless
+/// the host set `FORGE_HTTP_ALLOW_PRIVATE=1`).
+fn check_ws_target(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    let as_http = if lower.starts_with("ws://") {
+        format!("http://{}", &url[5..])
+    } else if lower.starts_with("wss://") {
+        format!("https://{}", &url[6..])
+    } else {
+        return Err(format!(
+            "ws.connect(): unsupported URL scheme in '{}' (use ws:// or wss://)",
+            url
+        ));
+    };
+    crate::runtime::client::validate_url_full(&as_http)
+        .map(|_| ())
+        .map_err(|e| format!("ws.connect(): {}", e))
+}
+
 fn ws_connect(url: &str) -> Result<Value, String> {
     let url = url.to_string();
+    let socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
 
-    // Generate ID before entering async block (std::sync::Mutex isn't Send)
+    // Generate ID before entering async block (std::sync::Mutex isn't Send).
+    // Connections live in a process-wide table, so the handle must not be
+    // guessable: another sandbox in the same host must not be able to use
+    // this connection by trying `ws_1`, `ws_2`, ...
     let id = {
         let mut counter = ws_counter().lock().map_err(|e| format!("{}", e))?;
         *counter += 1;
-        format!("ws_{}", *counter)
+        format!("ws_{}_{}", *counter, uuid::Uuid::new_v4().simple())
     };
     let id_clone = id.clone();
 
@@ -116,6 +143,7 @@ fn ws_connect(url: &str) -> Result<Value, String> {
             write: Arc::new(Mutex::new(write)),
             read: Arc::new(Mutex::new(read)),
             url: url.clone(),
+            socket,
         };
 
         ws_pool().lock().await.insert(id.clone(), conn);

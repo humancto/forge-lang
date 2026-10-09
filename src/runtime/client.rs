@@ -6,6 +6,7 @@ use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
+use tracing::Instrument;
 
 /// Default ceiling on HTTP redirect chains. Applies to fetch, download, and crawl
 /// unless an explicit override is supplied. Tighter than reqwest's default of 10
@@ -213,6 +214,45 @@ pub fn build_client(
         .map_err(|e| format!("client error: {}", e))
 }
 
+/// The tracing span for one outbound HTTP request: a child of the caller's
+/// current span (an HTTP handler's request span, a `log` call site, ...).
+///
+/// With OTel export active it becomes a `client`-kind span, and its id is
+/// what [`inject_trace_context`] sends as the parent in `traceparent`, so
+/// the downstream service's spans nest under this request. Only the
+/// method and host are recorded: full URLs can carry credentials or
+/// tokens in the query string.
+pub fn request_span(method: &str, url: &url::Url) -> tracing::Span {
+    let method = method.to_ascii_uppercase();
+    tracing::info_span!(
+        "http.client.request",
+        otel.kind = "client",
+        otel.name = %method,
+        http.request.method = %method,
+        server.address = url.host_str().unwrap_or(""),
+    )
+}
+
+/// Add the W3C trace-context headers for `span` to `req` (see
+/// [`crate::runtime::tracing_init::trace_context_headers`]). A header the
+/// caller set explicitly (compared case-insensitively) is never replaced,
+/// so a script can still forward its own `traceparent`. A no-op unless
+/// OTel export is active.
+pub fn inject_trace_context(
+    mut req: reqwest::RequestBuilder,
+    span: &tracing::Span,
+    user_headers: Option<&HashMap<String, String>>,
+) -> reqwest::RequestBuilder {
+    for (name, value) in crate::runtime::tracing_init::trace_context_headers(span) {
+        let user_set = user_headers
+            .is_some_and(|headers| headers.keys().any(|k| k.eq_ignore_ascii_case(&name)));
+        if !user_set {
+            req = req.header(name, value);
+        }
+    }
+    req
+}
+
 /// Stream a response body up to `max_bytes` then abort. Pre-checks
 /// `Content-Length` for fast-fail when the server advertises an oversized body.
 pub async fn read_body_capped(resp: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -249,6 +289,34 @@ pub async fn fetch(
     max_bytes: Option<u64>,
 ) -> Result<Value, String> {
     let validated = validate_url_full(url)?;
+    let span = request_span(method, &validated.url);
+    fetch_validated(
+        url,
+        validated,
+        method,
+        body,
+        headers,
+        timeout_secs,
+        max_redirects,
+        max_bytes,
+        &span,
+    )
+    .instrument(span.clone())
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_validated(
+    url: &str,
+    validated: ValidatedUrl,
+    method: &str,
+    body: Option<String>,
+    headers: Option<&HashMap<String, String>>,
+    timeout_secs: Option<u64>,
+    max_redirects: Option<usize>,
+    max_bytes: Option<u64>,
+    span: &tracing::Span,
+) -> Result<Value, String> {
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(30));
     let redirects = max_redirects.unwrap_or(DEFAULT_MAX_REDIRECTS);
     let cap = max_bytes.unwrap_or(DEFAULT_FETCH_MAX_BYTES);
@@ -271,6 +339,7 @@ pub async fn fetch(
             req = req.header(key.as_str(), value.as_str());
         }
     }
+    req = inject_trace_context(req, span, headers);
 
     // Add body for methods that support it
     if let Some(body) = body {
@@ -335,6 +404,9 @@ pub fn fetch_blocking(
     max_redirects: Option<usize>,
     max_bytes: Option<u64>,
 ) -> Result<Value, String> {
+    // One socket of the run's budget (`runtime::limits`) while the request
+    // is in flight.
+    let _socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
     // Use the existing tokio runtime handle
     let handle = tokio::runtime::Handle::try_current();
 

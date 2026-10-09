@@ -97,6 +97,76 @@ pub fn extract_runtime_plan(program: &Program) -> RuntimePlan {
     }
 }
 
+/// Parameter names of every top-level `fn`, keyed by function name (the
+/// last definition wins, as it does for the global binding). The server
+/// binds a handler's arguments by parameter name (see
+/// [`crate::runtime::server::handler_args`]); the bytecode VM keeps no
+/// parameter names in its chunks, so the VM server takes them from here.
+pub fn top_level_fn_params(program: &Program) -> std::collections::HashMap<String, Vec<String>> {
+    program
+        .statements
+        .iter()
+        .filter_map(|spanned| match &spanned.stmt {
+            Stmt::FnDef { name, params, .. } => Some((
+                name.clone(),
+                params.iter().map(|param| param.name.clone()).collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Route decorators the HTTP server understands (see [`extract_runtime_plan`]).
+const ROUTE_DECORATORS: &[&str] = &["get", "post", "put", "delete", "ws"];
+
+/// Decorators that only tag functions for `forge test`.
+const TEST_DECORATORS: &[&str] = &["test", "skip", "before", "after"];
+
+/// Decorators that only describe a function for `forge mcp serve`
+/// (`src/mcp/tools.rs` reads them from the AST; running the file ignores
+/// them).
+const MCP_DECORATORS: &[&str] = &["tool", "param", "resource"];
+
+/// Why the bytecode VM cannot run `decorator` faithfully, or `None` when it
+/// can. `standalone` is true for a decorator statement (`@server(...)`) and
+/// false for one attached to a `fn`.
+///
+/// The VM treats the supported forms as pure metadata: the server reads
+/// them from the AST ([`extract_runtime_plan`]), the same way it does for
+/// the interpreter, so nothing has to run. Everything else — unknown
+/// decorators, arguments the server would not read, or `@server` arguments
+/// that are not literals (the interpreter evaluates those) — is reported,
+/// so the caller falls back to the interpreter instead of silently dropping
+/// it.
+pub fn vm_unsupported_decorator(decorator: &Decorator, standalone: bool) -> Option<String> {
+    let name = decorator.name.as_str();
+    let is_literal = |expr: &Expr| {
+        matches!(
+            expr,
+            Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_)
+        )
+    };
+    let supported = if standalone {
+        name == "server"
+            && decorator.args.iter().all(|arg| match arg {
+                DecoratorArg::Named(_, value) => is_literal(value),
+                DecoratorArg::Positional(_) => false,
+            })
+    } else if ROUTE_DECORATORS.contains(&name) {
+        matches!(
+            decorator.args.as_slice(),
+            [] | [DecoratorArg::Positional(Expr::StringLit(_))]
+        )
+    } else if MCP_DECORATORS.contains(&name) {
+        decorator.args.iter().all(|arg| match arg {
+            DecoratorArg::Named(_, value) | DecoratorArg::Positional(value) => is_literal(value),
+        })
+    } else {
+        TEST_DECORATORS.contains(&name)
+    };
+    (!supported).then(|| format!("decorator-driven runtime features (@{})", name))
+}
+
 fn extract_routes(name: &str, decorators: &[Decorator]) -> Vec<Route> {
     let mut routes = Vec::new();
     for dec in decorators {

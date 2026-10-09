@@ -1,5 +1,6 @@
+use crate::clock::Instant;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const HOT_THRESHOLD: u32 = 100;
 
@@ -200,7 +201,7 @@ mod tests {
         p.exit_function();
 
         p.enter_function("slow");
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::clock::sleep(std::time::Duration::from_millis(2));
         p.exit_function();
 
         let report = p.report();
@@ -213,7 +214,7 @@ mod tests {
     fn profiler_tracks_timing() {
         let mut p = Profiler::new(true);
         p.enter_function("timed");
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        crate::clock::sleep(std::time::Duration::from_millis(5));
         p.exit_function();
 
         let stats = p.stats.get("timed").unwrap();

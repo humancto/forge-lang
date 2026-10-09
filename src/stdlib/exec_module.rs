@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 /// Uses std::process::Command which does NOT invoke a shell,
 /// preventing command injection.
 pub fn call(args: Vec<Value>) -> Result<Value, String> {
-    crate::permissions::check_run_permission()?;
+    let _subprocess = crate::permissions::begin_subprocess()?;
     let cmd_str = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => return Err("run_command() requires a command string".to_string()),
@@ -19,7 +19,7 @@ pub fn call(args: Vec<Value>) -> Result<Value, String> {
     let program = parts[0];
     let cmd_args = &parts[1..];
 
-    let output = std::process::Command::new(program)
+    let output = std::process::Command::new(crate::runtime::shell::resolve_program(program))
         .args(cmd_args)
         .output()
         .map_err(|e| format!("command error: {}", e))?;

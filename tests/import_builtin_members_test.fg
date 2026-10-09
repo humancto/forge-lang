@@ -1,0 +1,17 @@
+// import_builtin_members_test.fg — `import { name } from "<builtin module>"`
+// binds module members directly (both engines).
+
+import { sqrt, pi } from "math"
+import { stringify } from "json"
+
+@test
+define test_selective_import_from_builtin_module() {
+    assert_eq(sqrt(16), 4.0)
+    assert_eq(pi, math.pi)
+    assert_eq(stringify([1, 2]), json.stringify([1, 2]))
+}
+
+@test
+define test_module_stays_available_after_selective_import() {
+    assert_eq(math.sqrt(9), 3.0)
+}

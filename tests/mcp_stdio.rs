@@ -186,7 +186,15 @@ fn mcp_full_session_over_stdio() {
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    assert_eq!(names, ["run_forge", "check_forge", "forge_reference"]);
+    assert_eq!(
+        names,
+        [
+            "run_forge",
+            "check_forge",
+            "forge_reference",
+            "reset_session"
+        ]
+    );
     assert!(tools["tools"][0]["inputSchema"]["required"]
         .as_array()
         .is_some_and(|r| r.contains(&json!("code"))));
@@ -362,5 +370,349 @@ fn mcp_modern_stateless_requests() {
     let bad = server.response(bad);
     assert_eq!(bad["error"]["code"], -32022);
     assert_eq!(bad["error"]["data"]["requested"], "1999-01-01");
+    assert!(server.close_and_wait().success());
+}
+
+fn example_tools() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/mcp/weather_tools.fg")
+}
+
+fn structured(result: &Value) -> Value {
+    result["structuredContent"].clone()
+}
+
+#[test]
+fn mcp_serve_example_tools() {
+    let example = example_tools();
+    let mut server = McpServer::spawn(&["serve", example.to_str().expect("utf8 path")], None);
+    let init = server.initialize();
+    assert!(init["capabilities"]["resources"].is_object(), "{init}");
+
+    // Only the file's tools: no arbitrary code execution unless asked.
+    let tools = server.request("tools/list", json!({}));
+    let tools = tools["tools"].as_array().expect("tools").clone();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "convert_temperature",
+            "convert_distance",
+            "text_stats",
+            "weather"
+        ]
+    );
+    let convert = &tools[0];
+    assert_eq!(
+        convert["inputSchema"]["properties"]["value"],
+        json!({"type": "number", "description": "The temperature to convert"})
+    );
+    assert_eq!(
+        convert["inputSchema"]["properties"]["target"]["default"],
+        "F"
+    );
+    assert_eq!(convert["inputSchema"]["required"], json!(["value"]));
+    assert_eq!(convert["inputSchema"]["additionalProperties"], false);
+    assert_eq!(
+        convert["outputSchema"]["properties"]["result"]["type"],
+        "number"
+    );
+    assert_eq!(convert["annotations"]["idempotentHint"], true);
+    assert_eq!(convert["annotations"]["readOnlyHint"], true);
+    let weather = &tools[3];
+    assert_eq!(weather["outputSchema"]["title"], "Report");
+    assert!(weather["outputSchema"]["required"]
+        .as_array()
+        .is_some_and(|r| r.contains(&json!("advice"))));
+
+    let hot = server.call("convert_temperature", json!({"value": 100}));
+    assert_eq!(structured(&hot), json!({"result": 212.0}), "{hot}");
+    let back = server.call("convert_temperature", json!({"value": 212, "target": "C"}));
+    assert_eq!(structured(&back)["result"], 100.0);
+    let bad_unit = server.call("convert_temperature", json!({"value": 1, "target": "K"}));
+    assert_eq!(bad_unit["isError"], true);
+    assert!(
+        text(&bad_unit).contains("must be \"C\" or \"F\""),
+        "{bad_unit}"
+    );
+
+    // Schema validation errors are tool errors the model can act on.
+    let invalid = server.call("convert_temperature", json!({"value": "hot", "scale": 1}));
+    assert_eq!(invalid["isError"], true);
+    let message = text(&invalid);
+    assert!(
+        message.contains("`value`: expected a number, got a string"),
+        "{message}"
+    );
+    assert!(message.contains("`scale`: unknown argument"), "{message}");
+    let missing = server.call("convert_distance", json!({"value": 5}));
+    assert!(
+        text(&missing).contains("`unit`: missing required argument"),
+        "{missing}"
+    );
+
+    let lisbon = server.call("weather", json!({"city": "lisbon"}));
+    let report = structured(&lisbon);
+    assert_eq!(report["city"], "Lisbon", "{lisbon}");
+    assert_eq!(report["temperature"], 24.5);
+    assert_eq!(report["advice"], "Enjoy the day.");
+    assert!(report.get("__type__").is_none(), "{report}");
+    let oslo_f = server.call("weather", json!({"city": "Oslo", "unit": "F"}));
+    assert_eq!(structured(&oslo_f)["temperature"], 26.6);
+    let nowhere = server.call("weather", json!({"city": "Atlantis"}));
+    assert_eq!(nowhere["isError"], true);
+    assert!(text(&nowhere).contains("known cities: Lisbon"), "{nowhere}");
+
+    let stats = server.call("text_stats", json!({"text": "hello big world\nbye"}));
+    assert_eq!(
+        structured(&stats),
+        json!({"characters": 19, "words": 4, "lines": 2, "longest_word": "hello"})
+    );
+
+    let resources = server.request("resources/list", json!({}));
+    assert_eq!(resources["resources"][0]["uri"], "weather://cities");
+    let cities = server.request("resources/read", json!({"uri": "weather://cities"}));
+    let body = cities["contents"][0]["text"].as_str().expect("text");
+    assert!(body.contains("Singapore"), "{body}");
+
+    // run_forge is not served by a tool server unless asked.
+    let refused = server.send(
+        "tools/call",
+        json!({"name": "run_forge", "arguments": {"code": "say 1"}}),
+    );
+    assert_eq!(server.response(refused)["error"]["code"], -32602);
+    assert!(server.close_and_wait().success());
+}
+
+#[test]
+fn mcp_serve_tools_keep_the_sandbox() {
+    let dir = temp_dir("tools");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).expect("mkdir");
+    std::fs::write(data.join("note.txt"), "inside").expect("write");
+    std::fs::write(dir.join("secret.txt"), "secret").expect("write");
+    std::fs::write(dir.join("helpers.fg"), "fn shout(s) { return s.upper() }\n").expect("write");
+    let tools = dir.join("tools.fg");
+    std::fs::write(
+        &tools,
+        r#"import "helpers.fg"
+let mut calls = 0
+say "loading tools"
+
+@tool(description: "Read a file")
+fn read(path: String) -> String { return fs.read(path) }
+
+@tool(description: "Run a shell command")
+fn shell(cmd: String) { return sh(cmd) }
+
+@tool(description: "Spin forever", timeout: 1)
+fn spin() { say "spinning"
+squad { spawn { while true { } } } }
+
+@tool(description: "Wait on a channel nobody sends to", timeout: 1)
+fn stuck() { let ch = channel()
+return receive(ch) }
+
+@tool(description: "Count calls")
+fn count() -> Int { calls = calls + 1
+return calls }
+
+@tool(description: "Shout")
+fn loud(s: String) -> String { return shout(s) }
+
+@tool(description: "Read stdin")
+fn stdin() { return "[" + input() + "]" }
+
+@tool(description: "Print a lot")
+fn spam() { while true { say "spam spam spam spam" } }
+"#,
+    )
+    .expect("write tools");
+    let read_flag = format!("--allow-read={}", data.display());
+    let mut server = McpServer::spawn(
+        &[
+            "serve",
+            tools.to_str().expect("utf8"),
+            "--with-code-tools",
+            &read_flag,
+        ],
+        None,
+    );
+    server.initialize();
+    let listed = server.request("tools/list", json!({}));
+    let names: Vec<&str> = listed["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        names.starts_with(&[
+            "run_forge",
+            "check_forge",
+            "forge_reference",
+            "reset_session",
+            "read"
+        ]),
+        "{names:?}"
+    );
+
+    let inside = server.call(
+        "read",
+        json!({"path": data.join("note.txt").display().to_string()}),
+    );
+    assert_eq!(structured(&inside)["result"], "inside", "{inside}");
+    let outside = server.call(
+        "read",
+        json!({"path": dir.join("secret.txt").display().to_string()}),
+    );
+    assert_eq!(outside["isError"], true);
+    assert!(
+        text(&outside).starts_with("permission denied: fs.read"),
+        "{outside}"
+    );
+    assert_eq!(outside["_meta"]["forge/error"]["kind"], "permission_denied");
+    let shell = server.call("shell", json!({"cmd": "echo pwned"}));
+    assert!(
+        text(&shell).starts_with("permission denied: run"),
+        "{shell}"
+    );
+
+    // The per-tool limit stops squad tasks and blocked waits (guarantees
+    // the VM cannot give yet, which is why tools run on the interpreter).
+    for tool in ["spin", "stuck"] {
+        let started = Instant::now();
+        let r = server.call(tool, json!({}));
+        assert_eq!(r["isError"], true, "{r}");
+        assert_eq!(r["_meta"]["forge/error"]["kind"], "timeout", "{r}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    // Every call is a fresh fork of the top level.
+    for _ in 0..3 {
+        assert_eq!(structured(&server.call("count", json!({})))["result"], 1);
+    }
+    // Imports next to the tool file work; stdin is not readable.
+    assert_eq!(
+        structured(&server.call("loud", json!({"s": "hi"})))["result"],
+        "HI"
+    );
+    assert_eq!(structured(&server.call("stdin", json!({})))["result"], "[]");
+    let spam = server.call("spam", json!({}));
+    assert_eq!(
+        spam["_meta"]["forge/error"]["kind"], "output_limit",
+        "{spam}"
+    );
+
+    // The code tools are there too, under the same policy.
+    let run = server.call("run_forge", json!({"code": "say 6 * 7"}));
+    assert_eq!(text(&run), "42\n");
+    assert!(server.close_and_wait().success());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mcp_serve_rejects_bad_tool_files() {
+    let dir = temp_dir("badtools");
+    let file = dir.join("bad.fg");
+    std::fs::write(&file, "let x = 1\n@tool\nfn f() {}\n").expect("write");
+    let out = Command::new(env!("CARGO_BIN_EXE_forge"))
+        .args(["mcp", "serve", file.to_str().expect("utf8")])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run forge");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bad.fg:2: @tool on `f` needs a description"),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn run_in(server: &mut McpServer, session: &str, code: &str) -> Value {
+    server.call("run_forge", json!({"code": code, "session_id": session}))
+}
+
+#[test]
+fn mcp_run_forge_sessions() {
+    let mut server = McpServer::spawn(&["--max-sessions", "2"], None);
+    server.initialize();
+
+    let first = run_in(&mut server, "a", "let x = 41\nfn twice(n) { return n * 2 }");
+    assert_eq!(
+        structured(&first)["session"],
+        json!({"id": "a", "created": true, "lost": false})
+    );
+    let second = run_in(&mut server, "a", "say x + 1\nsay twice(x)");
+    assert_eq!(text(&second), "42\n82\n", "{second}");
+    assert_eq!(structured(&second)["session"]["created"], false);
+
+    // Sessions are isolated from each other and from stateless calls.
+    let other = run_in(&mut server, "b", "say x");
+    assert_eq!(other["isError"], true, "{other}");
+    let stateless = server.call("run_forge", json!({"code": "say x"}));
+    assert_eq!(stateless["isError"], true);
+
+    // A failing step keeps what it defined before the error.
+    let failing = run_in(&mut server, "a", "let y = 1\nlet z = 1 / 0");
+    assert_eq!(failing["isError"], true);
+    assert_eq!(text(&run_in(&mut server, "a", "say y")), "1\n");
+
+    // A timed-out step stops; the session survives.
+    let slow = server.call(
+        "run_forge",
+        json!({"code": "while true { }", "session_id": "a", "timeout_secs": 0.5}),
+    );
+    assert_eq!(structured(&slow)["error"]["kind"], "timeout");
+    assert_eq!(structured(&slow)["session"]["lost"], false);
+    assert_eq!(text(&run_in(&mut server, "a", "say x")), "41\n");
+
+    // The number of sessions is bounded.
+    let full = run_in(&mut server, "c", "say 1");
+    assert_eq!(structured(&full)["error"]["kind"], "session", "{full}");
+    assert!(text(&full).contains("at most 2 sessions"), "{full}");
+
+    // Reset drops the state and frees the slot.
+    let reset = server.call("reset_session", json!({"session_id": "a"}));
+    assert_eq!(structured(&reset), json!({"existed": true}));
+    let again = server.call("reset_session", json!({"session_id": "a"}));
+    assert_eq!(structured(&again), json!({"existed": false}));
+    let fresh = run_in(&mut server, "a", "say x");
+    assert_eq!(fresh["isError"], true);
+    assert_eq!(structured(&fresh)["session"]["created"], true);
+
+    // Resetting a session stops the call running in it; that call still
+    // gets a response (it was not cancelled by the client).
+    let running = server.send(
+        "tools/call",
+        json!({"name": "run_forge", "arguments": {"code": "say \"start\"\nwhile true { }", "session_id": "a"}}),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let busy = run_in(&mut server, "a", "say 1");
+    assert_eq!(structured(&busy)["error"]["kind"], "session", "{busy}");
+    let reset = server.send(
+        "tools/call",
+        json!({"name": "reset_session", "arguments": {"session_id": "a"}}),
+    );
+    let mut replies = vec![server.recv(), server.recv()];
+    replies.sort_by_key(|m| m["id"].as_i64());
+    assert_eq!(replies[0]["id"], json!(running));
+    assert_eq!(replies[1]["id"], json!(reset));
+    let stopped = replies[0]["result"].clone();
+    assert_eq!(
+        structured(&stopped)["error"]["kind"],
+        "cancelled",
+        "{stopped}"
+    );
+    assert_eq!(structured(&stopped)["session"]["lost"], true);
+    assert!(
+        text(&stopped).contains("reset while this call ran"),
+        "{stopped}"
+    );
+    assert_eq!(structured(&replies[1]["result"]), json!({"existed": true}));
+
+    let bad = run_in(&mut server, "not valid!", "say 1");
+    assert_eq!(bad["isError"], true);
     assert!(server.close_and_wait().success());
 }

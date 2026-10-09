@@ -102,9 +102,7 @@ pub(super) fn contains_of(
         (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(
             pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
         )),
-        _ => Err(RuntimeError::new(
-            "contains() requires (string, substring), (array, value), (object, key), or (map, key)",
-        )),
+        _ => Err(RuntimeError::new(crate::semantics::CONTAINS_USAGE)),
     }
 }
 
@@ -399,6 +397,9 @@ impl Interpreter {
         target: &Expr,
         value: &Expr,
     ) -> Option<Result<(), RuntimeError>> {
+        if let Some(result) = self.try_update_place(target, value) {
+            return Some(result);
+        }
         match target {
             Expr::Ident(x) => self.try_update_ident(x, value),
             Expr::FieldAccess { object, field } => match object.as_ref() {
@@ -497,6 +498,7 @@ impl Interpreter {
                     Err(e) => return Some(Err(e)),
                 };
                 let rhs = peel_frozen(&rhs);
+                let caps = self.caps;
                 Some(self.env.with_value_mut(x, |cur| {
                     if let (Value::String(s), BinOp::Add) = (&mut *cur, op) {
                         let concat = matches!(
@@ -509,7 +511,12 @@ impl Interpreter {
                         );
                         if concat {
                             use std::fmt::Write as _;
+                            let before = s.len();
                             let _ = write!(s, "{}", rhs);
+                            if let Err(m) = caps.check_string(s.len()) {
+                                s.truncate(before);
+                                return Err(RuntimeError::new(&m));
+                            }
                             return Ok(());
                         }
                     }
@@ -521,6 +528,88 @@ impl Interpreter {
             }
             _ => None,
         }
+    }
+
+    /// `p = p <op> e` (and `p <op>= e`) where `p` is a field/index place
+    /// rooted at a mutable variable (`o.n`, `a[i]`, `o.items[0].n`), `e`
+    /// and every index are effect-free: read, combine and store under one
+    /// scope lock.
+    ///
+    /// Besides skipping two copies of the container, this makes the update
+    /// atomic with respect to other tasks that share the variable's scope
+    /// (squad `spawn`s calling a shared closure): no other thread can write
+    /// the place between our read and our write, so concurrent `o.n += 1`
+    /// never loses an increment. [`try_update_ident`](Self::try_update_ident)
+    /// gives plain variables the same guarantee.
+    ///
+    /// Returns `None` (caller takes the general path, which reports the
+    /// precise error) when the shape does not match, an operand fails to
+    /// evaluate, or the place cannot be walked (missing key, frozen value,
+    /// immutable binding).
+    fn try_update_place(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+    ) -> Option<Result<(), RuntimeError>> {
+        let Expr::BinOp { left, op, right } = value else {
+            return None;
+        };
+        if matches!(op, BinOp::And | BinOp::Or) || !same_place(target, left) {
+            return None;
+        }
+        let mut exprs = Vec::new();
+        let mut cur = target;
+        let root = loop {
+            match cur {
+                Expr::FieldAccess { object, field } => {
+                    exprs.push(Ok(field.as_str()));
+                    cur = object;
+                }
+                Expr::Index { object, index } => {
+                    exprs.push(Err(index.as_ref()));
+                    cur = object;
+                }
+                Expr::Ident(name) => break name.as_str(),
+                _ => return None,
+            }
+        };
+        if exprs.is_empty() || self.env.is_mutable(root) != Some(true) {
+            return None;
+        }
+        exprs.reverse();
+        let indexes_pure = exprs.iter().all(|step| match step {
+            Ok(_) => true,
+            Err(index) => self.is_effect_free(index),
+        });
+        if !indexes_pure || !self.is_effect_free(right) {
+            return None;
+        }
+        // Effect-free operands may be evaluated early (and again by the
+        // general path on fallback) without any observable difference.
+        let rhs = self.eval_expr(right).ok()?;
+        let mut steps = Vec::with_capacity(exprs.len());
+        for step in &exprs {
+            steps.push(match step {
+                Ok(field) => PlaceStep::Field(field),
+                Err(index) => PlaceStep::Index(self.eval_expr(index).ok()?),
+            });
+        }
+        let rhs = peel_frozen(&rhs);
+        self.env
+            .with_binding_mut(root, |cur, mutable| {
+                if !mutable {
+                    return None;
+                }
+                let mut slot = cur;
+                for step in &steps {
+                    slot = place_child(root, slot, step).ok()?;
+                }
+                Some(
+                    self.eval_binop(peel_frozen(slot), op, rhs)
+                        .map(|updated| *slot = updated),
+                )
+            })
+            .flatten()
     }
 
     fn assign_field_in_place(
@@ -543,10 +632,14 @@ impl Interpreter {
                         name,
                     )));
                 }
-                if let Value::Object(map) = cur {
-                    map.insert(field.to_string(), val);
+                match cur {
+                    Value::Object(map) => {
+                        map.insert(field.to_string(), val);
+                        Ok(())
+                    }
+                    // Used to be silently ignored; the VM always errored.
+                    _ => Err(RuntimeError::new("cannot set field on non-object")),
                 }
-                Ok(())
             })
             .unwrap_or_else(|| Err(RuntimeError::new(&format!("undefined: {}", name))))
     }
@@ -609,6 +702,44 @@ impl Interpreter {
     }
 }
 
+/// True when `a` and `b` name the same place syntactically: the same
+/// variable followed by the same fields and literal (or same-variable)
+/// indexes. Conservative: anything else is "different".
+fn same_place(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::Ident(x), Expr::Ident(y)) => x == y,
+        (
+            Expr::FieldAccess {
+                object: o1,
+                field: f1,
+            },
+            Expr::FieldAccess {
+                object: o2,
+                field: f2,
+            },
+        ) => f1 == f2 && same_place(o1, o2),
+        (
+            Expr::Index {
+                object: o1,
+                index: i1,
+            },
+            Expr::Index {
+                object: o2,
+                index: i2,
+            },
+        ) => {
+            let same_index = match (i1.as_ref(), i2.as_ref()) {
+                (Expr::Int(x), Expr::Int(y)) => x == y,
+                (Expr::StringLit(x), Expr::StringLit(y)) => x == y,
+                (Expr::Ident(x), Expr::Ident(y)) => x == y,
+                _ => false,
+            };
+            same_index && same_place(o1, o2)
+        }
+        _ => false,
+    }
+}
+
 fn frozen_error(root: &str) -> RuntimeError {
     RuntimeError::new(&format!(
         "cannot modify frozen value '{}': nested assignment",
@@ -643,9 +774,8 @@ fn place_child<'v>(
         (Value::Array(_) | Value::Object(_), PlaceStep::Index(other)) => Err(RuntimeError::new(
             &crate::semantics::invalid_index(&type_name, other.type_name()),
         )),
-        (_, PlaceStep::Field(field)) => Err(RuntimeError::new(&format!(
-            "cannot access field '{}' on {}",
-            field, type_name
+        (_, PlaceStep::Field(field)) => Err(RuntimeError::new(&crate::semantics::field_access(
+            field, &type_name,
         ))),
         (_, PlaceStep::Index(_)) => Err(RuntimeError::new(
             &crate::semantics::invalid_index_assign(&type_name),

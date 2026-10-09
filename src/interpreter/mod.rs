@@ -1,4 +1,5 @@
 mod builtins; // call_builtin — extracted for readability
+mod heap; // cycle collection of closure-captured scopes
 mod places; // in-place reads and updates of variables
 use crate::parser::ast::*;
 /// Forge Tree-Walk Interpreter
@@ -232,6 +233,61 @@ impl PartialEq for Value {
 }
 
 impl Value {
+    /// Convert a shared string-method result (`semantics::string_method`).
+    pub(crate) fn from_str_method(v: crate::semantics::StrMethodValue) -> Value {
+        use crate::semantics::StrMethodValue as V;
+        match v {
+            V::Str(s) => Value::String(s),
+            V::Int(n) => Value::Int(n),
+            V::Bool(b) => Value::Bool(b),
+            V::Strs(items) => Value::Array(items.into_iter().map(Value::String).collect()),
+            V::Ints(items) => Value::Array(items.into_iter().map(Value::Int).collect()),
+            V::Null => Value::Null,
+        }
+    }
+
+    /// The language's `==`, mirroring the VM's `Value::equals`: numbers
+    /// compare numerically across Int/Float (IEEE-754, so NaN != NaN),
+    /// strings/bools/null by value, arrays, tuples and objects element-wise
+    /// with this same rule, sets/maps order-independently, and values of
+    /// different types are simply unequal (never an error).
+    pub fn lang_eq(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Frozen(x), _) => Value::lang_eq(x, b),
+            (_, Value::Frozen(y)) => Value::lang_eq(a, y),
+            (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => {
+                (*x as f64) == *y
+            }
+            (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| Value::lang_eq(p, q))
+            }
+            (Value::Object(x), Value::Object(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|(k, v)| y.get(k).is_some_and(|w| Value::lang_eq(v, w)))
+            }
+            (Value::ResultOk(x), Value::ResultOk(y))
+            | (Value::ResultErr(x), Value::ResultErr(y))
+            | (Value::Some(x), Value::Some(y)) => Value::lang_eq(x, y),
+            // Functions compare by identity, like the VM's closure
+            // references: a function value is equal to its copies.
+            (Value::Function(x), Value::Function(y)) => Arc::ptr_eq(x, y),
+            (
+                Value::Lambda {
+                    body: bx,
+                    closure: cx,
+                    ..
+                },
+                Value::Lambda {
+                    body: by,
+                    closure: cy,
+                    ..
+                },
+            ) => Arc::ptr_eq(bx, by) && Arc::ptr_eq(cx, cy),
+            _ => a == b,
+        }
+    }
+
     /// Container-aware equality used for set membership, set equality, and
     /// any other collection where we want NaN==NaN and Int↔Float promotion
     /// to agree with the VM's `Value::equals` semantics.
@@ -444,10 +500,31 @@ const SCOPE_INDEX_THRESHOLD: usize = 12;
 /// Value and mutability live in the same entry so a lookup touches one
 /// lock and one table. Bindings are never removed from a scope (a scope is
 /// dropped as a whole), so positions stay valid for the lazily built index.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct Scope {
     bindings: Vec<Binding>,
     index: Option<HashMap<String, usize>>,
+    /// Id of the [`heap::ScopeHeap`] this scope is registered with as a
+    /// cycle-collection candidate (0: none). Set when a closure captures it.
+    tracked_by: u64,
+    /// Counts live scopes for the leak tests; only its `Drop` matters.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    probe: heap::probe::ScopeProbe,
+}
+
+/// A copy is a new scope: it starts unregistered (the heap's registry
+/// holds the original, not the copy).
+impl Clone for Scope {
+    fn clone(&self) -> Self {
+        Scope {
+            bindings: self.bindings.clone(),
+            index: self.index.clone(),
+            tracked_by: 0,
+            #[cfg(test)]
+            probe: Default::default(),
+        }
+    }
 }
 
 impl Scope {
@@ -495,10 +572,6 @@ impl Scope {
 
     fn names(&self) -> impl Iterator<Item = &str> {
         self.bindings.iter().map(|b| b.name.as_str())
-    }
-
-    fn values(&self) -> impl Iterator<Item = &Value> {
-        self.bindings.iter().map(|b| &b.value)
     }
 }
 
@@ -715,6 +788,16 @@ impl Environment {
         Self::deep_clone_env(self, &mut scope_map)
     }
 
+    /// [`deep_clone_isolated`](Self::deep_clone_isolated), registering
+    /// every new scope with `heap` so the copy's function cycles are
+    /// collected when the fork that owns it is dropped.
+    fn deep_clone_isolated_into(&self, heap: &heap::ScopeHeap) -> Self {
+        let mut scope_map = ScopeMap::new();
+        let env = Self::deep_clone_env(self, &mut scope_map);
+        heap.track_cells(scope_map.values());
+        env
+    }
+
     fn deep_clone_env(env: &Environment, scope_map: &mut ScopeMap) -> Self {
         Self {
             scopes: env
@@ -822,44 +905,21 @@ impl Environment {
         }
     }
 
+    /// "Did you mean ...?" for an undefined `name`: the closest visible
+    /// name, innermost scope first (`semantics::errors::suggest_name`, the
+    /// rule the VM uses too).
     pub fn suggest_similar(&self, name: &str) -> Option<String> {
-        let mut best: Option<(String, usize)> = None;
-        for scope in &self.scopes {
-            let guard = lock_scope(scope);
-            for key in guard.names() {
-                let dist = levenshtein(name, key);
-                if dist <= 2 && dist < name.len() {
-                    match &best {
-                        Some((_, d)) if dist < *d => best = Some((key.to_string(), dist)),
-                        None => best = Some((key.to_string(), dist)),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        best.map(|(s, _)| s)
+        let groups: Vec<Vec<String>> = self
+            .scopes
+            .iter()
+            .rev()
+            .map(|scope| lock_scope(scope).names().map(str::to_string).collect())
+            .collect();
+        crate::semantics::errors::suggest_name(
+            name,
+            groups.iter().map(|g| g.iter().map(String::as_str)),
+        )
     }
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut matrix = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for i in 0..=a.len() {
-        matrix[i][0] = i;
-    }
-    for j in 0..=b.len() {
-        matrix[0][j] = j;
-    }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            matrix[i][j] = (matrix[i - 1][j] + 1)
-                .min(matrix[i][j - 1] + 1)
-                .min(matrix[i - 1][j - 1] + cost);
-        }
-    }
-    matrix[a.len()][b.len()]
 }
 
 /// Map an AST operator onto the shared arithmetic/ordering rules.
@@ -994,7 +1054,18 @@ pub struct Interpreter {
     /// Public so the HTTP server can swap in a per-request token wired to
     /// the response-future Drop guard for client-disconnect cancellation.
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancellation flags of the contexts that started this one (the
+    /// program around a `squad`, the caller of a `timeout` block). Setting
+    /// any of them cancels this interpreter too, so a host's cancel or
+    /// deadline reaches every task the program started. See
+    /// [`Interpreter::is_cancelled`] and [`Interpreter::child_context`].
+    ancestor_cancels: Vec<Arc<std::sync::atomic::AtomicBool>>,
     defer_host_runtime: bool,
+    /// Output byte budget shared by every interpreter of one sandboxed run:
+    /// `(bytes accepted so far, limit)`. Once the count passes the limit,
+    /// further output is dropped (the host reports the overflow), so a
+    /// print loop cannot grow the capture between host polls.
+    pub(crate) output_budget: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
     /// Instance methods: type_name -> { method_name -> Value::Function }
     pub method_tables: HashMap<String, IndexMap<String, Value>>,
     /// Static methods: type_name -> { method_name -> Value::Function }
@@ -1019,15 +1090,65 @@ pub struct Interpreter {
     pub call_stack: Vec<DebugFrame>,
     /// Squad handle collector: when Some, spawn_task pushes handles here
     squad_handles: Option<Vec<Value>>,
+    /// Steps (statements, calls, loop iterations) left before the next
+    /// resource-limit safe point; see [`Interpreter::tick`].
+    poll_countdown: u32,
+    /// Steps in the current safe-point window (`poll_countdown` it started
+    /// with + 1), charged to the fuel budget at the next safe point.
+    fuel_window: u64,
+    /// Fuel, memory and fatal-trip accounting against the run's budget
+    /// (`runtime::limits`).
+    meter: crate::runtime::limits::Meter,
+    /// Size caps for strings and collections this interpreter builds.
+    pub(crate) caps: crate::runtime::limits::Caps,
+    /// Cycle collector shared by every interpreter that can reach the same
+    /// scopes (see `heap.rs`). Imports, `timeout` bodies, spawned tasks
+    /// and background forks share their creator's heap; an HTTP request
+    /// fork gets its own.
+    heap: Arc<heap::ScopeHeap>,
 }
+
+/// Teardown: release this interpreter's own roots, and if it was the last
+/// interpreter on its heap, reclaim the scope cycles nothing else holds
+/// (recursive functions and the global scope they capture, closures
+/// stored where they were defined). Values that escaped — returned to a
+/// host, moved into an importer, held by a running task — are still
+/// referenced from outside the cycles and survive. See `heap.rs`.
+impl Drop for Interpreter {
+    fn drop(&mut self) {
+        self.env.scopes.clear();
+        self.method_tables.clear();
+        self.static_methods.clear();
+        self.struct_defaults.clear();
+        self.squad_handles = None;
+        if self.heap.detach() {
+            self.heap.collect(&[]);
+        }
+    }
+}
+
+/// Steps between two resource-limit safe points when only fuel (or
+/// nothing) is limited. With a memory limit the interpreter polls at every
+/// step.
+const INTERP_SAFEPOINT_INTERVAL: u32 = 1024;
 
 impl Interpreter {
     pub fn new() -> Self {
+        Self::new_in(heap::ScopeHeap::new())
+    }
+
+    /// A fresh interpreter attached to `heap` (its creator's, for children
+    /// that share scopes with it).
+    fn new_in(heap: Arc<heap::ScopeHeap>) -> Self {
+        heap.attach();
         let mut interp = Self {
+            heap,
             env: Environment::new(),
             call_depth: 0,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ancestor_cancels: Vec::new(),
             defer_host_runtime: false,
+            output_budget: None,
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
@@ -1040,13 +1161,142 @@ impl Interpreter {
             output_sink: None,
             call_stack: Vec::new(),
             squad_handles: None,
+            poll_countdown: 0,
+            fuel_window: 0,
+            meter: crate::runtime::limits::Meter::current().with_memory_polling(),
+            caps: crate::runtime::limits::Caps::current(),
         };
         interp.register_builtins();
         interp
     }
 
+    /// Count one step (statement, call or loop iteration) against the
+    /// run's resource budget. The hot path is a decrement and a branch;
+    /// every `INTERP_SAFEPOINT_INTERVAL` steps (every step under a memory
+    /// limit) it settles fuel and polls memory in [`Interpreter::safepoint`].
+    #[inline]
+    fn tick(&mut self) -> Result<(), RuntimeError> {
+        if self.poll_countdown == 0 {
+            return self.safepoint();
+        }
+        self.poll_countdown -= 1;
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn safepoint(&mut self) -> Result<(), RuntimeError> {
+        match self
+            .meter
+            .safepoint(self.fuel_window, INTERP_SAFEPOINT_INTERVAL)
+        {
+            Ok(next) => {
+                self.poll_countdown = next;
+                self.fuel_window = u64::from(next) + 1;
+                Ok(())
+            }
+            Err(message) => {
+                // The countdown stays at 0: every later step fails too.
+                self.fuel_window = 0;
+                Err(RuntimeError::fatal(&message))
+            }
+        }
+    }
+
+    /// The resource budget this interpreter charges (`runtime::limits`):
+    /// a server request fork's own fresh budget, which the host installs
+    /// on the handler thread.
+    pub(crate) fn resource_budget(&self) -> Option<Arc<crate::runtime::limits::Budget>> {
+        self.meter.budget().cloned()
+    }
+
+    /// The environment a new closure captures. Registers its scopes as
+    /// cycle-collection candidates (a closure stored in a scope it captures
+    /// is a reference cycle) and may run a collection; see `heap.rs`.
+    fn capture_env(&self) -> Environment {
+        self.heap.track(&self.env);
+        self.env.clone()
+    }
+
     pub(crate) fn set_defer_host_runtime(&mut self, defer: bool) {
         self.defer_host_runtime = defer;
+    }
+
+    /// Whether this interpreter, or any context that started it, has been
+    /// cancelled. Every safe point and every blocking wait polls this.
+    pub fn is_cancelled(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.cancelled.load(Ordering::Acquire)
+            || self
+                .ancestor_cancels
+                .iter()
+                .any(|flag| flag.load(Ordering::Acquire))
+    }
+
+    /// A fresh interpreter for code this one starts on its behalf: an
+    /// imported module, a `timeout` body, a spawned task.
+    ///
+    /// # Invariant
+    ///
+    /// Every such child must be created here (or get the same treatment) so
+    /// it carries the run's *containment*: the same cancellation (a host
+    /// deadline or cancel stops it), the same output capture and budget,
+    /// and the same "no host runtime" mode (a sandboxed run never starts
+    /// `schedule`/`watch` threads, even from an import or a task). A bare
+    /// `Interpreter::new()` would escape all three.
+    pub(crate) fn child_context(&self) -> Interpreter {
+        let mut child = Interpreter::new_in(self.heap.clone());
+        child.cancelled = self.cancelled.clone();
+        child.ancestor_cancels = self.ancestor_cancels.clone();
+        child.defer_host_runtime = self.defer_host_runtime;
+        child.output_sink = self.output_sink.clone();
+        child.output_budget = self.output_budget.clone();
+        // The same resource budget (`runtime::limits`), even when this
+        // interpreter's budget is not the thread's (a server request fork).
+        child.meter = crate::runtime::limits::Meter::for_budget(self.meter.budget().cloned())
+            .with_memory_polling();
+        child.caps = self.caps;
+        child
+    }
+
+    /// Block until a spawned task has stored its result, then take it.
+    /// Cancellable (see [`Interpreter::wait_cancellable`]).
+    pub(crate) fn take_task_result(
+        &self,
+        slot: &(std::sync::Mutex<Option<Value>>, std::sync::Condvar),
+    ) -> Result<Value, RuntimeError> {
+        let (lock, cvar) = slot;
+        self.wait_cancellable(|slice| {
+            let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = if guard.is_none() {
+                cvar.wait_timeout(guard, slice)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
+            } else {
+                guard
+            };
+            guard.take()
+        })
+    }
+
+    /// Wait for a task/channel result, waking every `CANCEL_POLL` to honour
+    /// cancellation. `ready` returns `Some` once the value is available.
+    pub(crate) fn wait_cancellable<T>(
+        &self,
+        mut ready: impl FnMut(std::time::Duration) -> Option<T>,
+    ) -> Result<T, RuntimeError> {
+        const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+        loop {
+            if self.is_cancelled() {
+                return Err(RuntimeError::new("cancelled"));
+            }
+            if let Some(v) = ready(CANCEL_POLL) {
+                return Ok(v);
+            }
+            if !crate::clock::HAS_THREADS {
+                return Err(RuntimeError::new(crate::clock::WAITS_FOREVER));
+            }
+        }
     }
 
     /// Debug-only safety check: walk the env and panic if any reachable
@@ -1056,30 +1306,84 @@ impl Interpreter {
     /// most once per request; release builds skip the check entirely.
     #[cfg(debug_assertions)]
     fn assert_no_streams_in_env(env: &Environment) {
-        fn walk(v: &Value) {
-            match v {
-                Value::Stream(_) => panic!(
-                    "Value::Stream found in template env; streams are single-use and \
-                     cannot be safely shared across per-request forks. Construct \
-                     streams inside handlers, not at the top level."
-                ),
-                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => a.iter().for_each(walk),
-                Value::Map(pairs) => pairs.iter().for_each(|(k, v)| {
-                    walk(k);
-                    walk(v);
-                }),
-                Value::Object(o) => o.values().for_each(walk),
-                Value::ResultOk(b) | Value::ResultErr(b) | Value::Some(b) | Value::Frozen(b) => {
-                    walk(b)
+        if let Some(path) = Self::find_stream_in_env(env) {
+            panic!(
+                "Value::Stream found in template env (reachable via `{}`); streams are \
+                 single-use and cannot be safely shared across per-request forks. \
+                 Construct streams inside handlers, not at the top level.",
+                path
+            );
+        }
+    }
+
+    /// Path (`name`, `name.field`, `name[2]`, `f.<closure>.s`, ...) to the
+    /// first `Value::Stream` reachable from `env`, including through the
+    /// captured scopes of functions and lambdas. Each scope is visited
+    /// once (keyed by `Arc` identity), which terminates the walk on the
+    /// recursive-function cycle and avoids re-walking scopes many closures
+    /// share. Available in every build so hosts that fork a template (the
+    /// MCP tool server) can reject such a program up front.
+    pub(crate) fn find_stream_in_env(env: &Environment) -> Option<String> {
+        type Seen = std::collections::HashSet<*const std::sync::Mutex<Scope>>;
+
+        fn walk_env(env: &Environment, prefix: &str, seen: &mut Seen) -> Option<String> {
+            for scope in &env.scopes {
+                if !seen.insert(Arc::as_ptr(scope)) {
+                    continue;
                 }
-                // Closure scopes are walked separately by deep_clone_isolated.
-                // Don't recurse into them here — that would re-walk the env.
-                _ => {}
+                // Snapshot the scope so no lock is held while descending
+                // (a closure may capture the scope being walked).
+                let bindings: Vec<(String, Value)> = {
+                    let guard = lock_scope(scope);
+                    guard
+                        .bindings
+                        .iter()
+                        .map(|b| (b.name.clone(), b.value.clone()))
+                        .collect()
+                };
+                for (name, value) in &bindings {
+                    let path = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}.{}", prefix, name)
+                    };
+                    if let Some(found) = walk(value, &path, seen) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        fn walk(v: &Value, path: &str, seen: &mut Seen) -> Option<String> {
+            match v {
+                Value::Stream(_) => Some(path.to_string()),
+                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => a
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, x)| walk(x, &format!("{}[{}]", path, i), seen)),
+                Value::Map(pairs) => pairs.iter().find_map(|(k, x)| {
+                    walk(k, &format!("{}.<key>", path), seen)
+                        .or_else(|| walk(x, &format!("{}[{}]", path, k), seen))
+                }),
+                Value::Object(o) => o
+                    .iter()
+                    .find_map(|(k, x)| walk(x, &format!("{}.{}", path, k), seen)),
+                Value::ResultOk(b) | Value::ResultErr(b) | Value::Some(b) | Value::Frozen(b) => {
+                    walk(b, path, seen)
+                }
+                Value::Function(func) => {
+                    walk_env(&func.closure, &format!("{}.<closure>", path), seen)
+                }
+                Value::Lambda { closure, .. } => {
+                    let captured = closure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                    walk_env(&captured, &format!("{}.<closure>", path), seen)
+                }
+                _ => None,
             }
         }
-        for scope in &env.scopes {
-            lock_scope(scope).values().for_each(walk);
-        }
+
+        walk_env(env, "", &mut Seen::new())
     }
 
     /// Fork this interpreter for serving a single HTTP request.
@@ -1133,7 +1437,7 @@ impl Interpreter {
         // The isolated variant walks values and gives every closure
         // its own scope graph, with cycle handling for the recursive
         // function pattern. See Environment::deep_clone_isolated.
-        interp.env = self.env.deep_clone_isolated();
+        interp.env = self.env.deep_clone_isolated_into(&interp.heap);
         interp.method_tables = self.method_tables.clone();
         interp.static_methods = self.static_methods.clone();
         interp.embedded_fields = self.embedded_fields.clone();
@@ -1152,11 +1456,23 @@ impl Interpreter {
         interp.output_sink = None;
         // DAP can attach across requests; keep the shared state.
         interp.debug_state = self.debug_state.clone();
+        // A fresh resource budget per request, with the template's limits:
+        // one request cannot spend another's fuel, and a long-running
+        // server never runs dry (`runtime::limits`).
+        if let Some(limits) = self.meter.budget().map(|b| b.limits().clone()) {
+            let budget = crate::runtime::limits::Budget::new(limits);
+            interp.caps = budget.limits().caps();
+            interp.meter =
+                crate::runtime::limits::Meter::for_budget(Some(budget)).with_memory_polling();
+            interp.poll_countdown = 0;
+            interp.fuel_window = 0;
+        }
         interp
     }
 
     pub(crate) fn fork_for_background_runtime(&self) -> Self {
-        let mut interp = Interpreter::new();
+        // Shares closure scopes with `self`, so it shares the heap too.
+        let mut interp = Interpreter::new_in(self.heap.clone());
         // CRITICAL: env.deep_clone(), not env.clone(). Environment is
         // Vec<Arc<Mutex<HashMap>>>, so a derived Clone shares the scope
         // storage by Arc. Two background tasks (or a background task +
@@ -1310,9 +1626,10 @@ impl Interpreter {
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Signal, RuntimeError> {
         // Cooperative cancellation check (used by timeout blocks)
-        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        if self.is_cancelled() {
             return Err(RuntimeError::new("cancelled"));
         }
+        self.tick()?;
         match stmt {
             Stmt::Let {
                 name,
@@ -1360,7 +1677,7 @@ impl Interpreter {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
-                    closure: self.env.clone(),
+                    closure: self.capture_env(),
                     decorators: decorators.clone(),
                 }));
                 self.env.define(name.clone(), func);
@@ -1488,7 +1805,7 @@ impl Interpreter {
                             name: qualified_name.clone(),
                             params: params.clone(),
                             body: body.clone(),
-                            closure: self.env.clone(),
+                            closure: self.capture_env(),
                             decorators: Vec::new(),
                         }));
 
@@ -1573,7 +1890,7 @@ impl Interpreter {
                         return result;
                     }
                 }
-                Err(RuntimeError::new("non-exhaustive match"))
+                Err(RuntimeError::new(crate::semantics::NON_EXHAUSTIVE_MATCH))
             }
 
             Stmt::For {
@@ -1662,16 +1979,21 @@ impl Interpreter {
                         }
                     }
                     Value::Channel(ch) => loop {
-                        let val = {
-                            let rx_guard = ch.rx.lock().expect("BUG: channel mutex poisoned");
+                        // `None` = channel closed; waits stay cancellable.
+                        let next = self.wait_cancellable(|slice| {
+                            let rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
                             match rx_guard.as_ref() {
-                                Some(rx) => match rx.recv() {
-                                    Ok(v) => v,
-                                    Err(_) => break,
+                                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
+                                    Ok(v) => Some(Some(v)),
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                        Some(None)
+                                    }
                                 },
-                                None => break,
+                                None => Some(None),
                             }
-                        };
+                        })?;
+                        let Some(val) = next else { break };
                         self.env.push_scope();
                         self.env.define(var.clone(), val);
                         match self.exec_loop_body(body)? {
@@ -1754,24 +2076,17 @@ impl Interpreter {
                     self.env.push_scope();
                     let mut err_obj = IndexMap::new();
                     err_obj.insert("message".to_string(), Value::String(e.message.clone()));
-                    let error_type = if e.message.contains("type") || e.message.contains("Type") {
-                        "TypeError"
-                    } else if e.message.contains("division by zero") {
-                        "ArithmeticError"
-                    } else if e.message.contains("assertion") {
-                        "AssertionError"
-                    } else if e.message.contains("index") || e.message.contains("out of bounds") {
-                        "IndexError"
-                    } else if e.message.contains("not found") || e.message.contains("undefined") {
-                        "ReferenceError"
-                    } else if e.message.contains("immutable")
-                        || e.message.contains("cannot reassign")
-                    {
-                        "TypeError"
-                    } else {
-                        "RuntimeError"
-                    };
-                    err_obj.insert("type".to_string(), Value::String(error_type.to_string()));
+                    // `type` (legacy) and `code` come from the shared table,
+                    // so both engines hand `catch` the same object.
+                    use crate::semantics::errors;
+                    err_obj.insert(
+                        "type".to_string(),
+                        Value::String(errors::legacy_error_type(&e.message).to_string()),
+                    );
+                    err_obj.insert(
+                        "code".to_string(),
+                        Value::String(errors::classify(&e.message).code.to_string()),
+                    );
                     self.env.define(catch_var.clone(), Value::Object(err_obj));
                     // FIX: was `result.unwrap_or(Signal::None);` — the semicolon
                     // silently discarded errors from the catch body itself.
@@ -1786,7 +2101,22 @@ impl Interpreter {
 
             Stmt::Import { path, names } => {
                 if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
-                    if self.env.get(path).is_some() {
+                    if let Some(module) = self.env.get(path) {
+                        // `import { sqrt } from "math"` binds `math.sqrt`.
+                        for name in names.iter().flatten() {
+                            crate::semantics::check_builtin_module_import(path, name)
+                                .map_err(|m| RuntimeError::new(&m))?;
+                            let member = match &module {
+                                Value::Object(members) => members.get(name).cloned(),
+                                _ => None,
+                            }
+                            .ok_or_else(|| {
+                                RuntimeError::new(&crate::semantics::import_missing_name(
+                                    path, name,
+                                ))
+                            })?;
+                            self.env.define(name.to_string(), member);
+                        }
                         return Ok(Signal::None);
                     }
                     return Err(RuntimeError::new(&format!(
@@ -1806,9 +2136,10 @@ impl Interpreter {
                         return Err(RuntimeError::new(&crate::semantics::import_not_found(path)));
                     }
                 };
-                crate::permissions::require_import(&file_path)
+                // Read the path that was checked (resolved under a scoped grant).
+                let checked = crate::permissions::require_import(&file_path)
                     .map_err(|e| RuntimeError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&file_path)
+                let source = std::fs::read_to_string(&checked)
                     .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
                 let mut lexer = crate::lexer::Lexer::new(&source);
                 let tokens = lexer.tokenize().map_err(|e| {
@@ -1823,10 +2154,10 @@ impl Interpreter {
                 // this module on the import chain while it runs.
                 let _import_guard = crate::runtime::imports::enter_import(&file_path)
                     .map_err(|msg| RuntimeError::new(&msg))?;
-                let mut import_interp = Interpreter::new();
+                // Same containment as ours: cancellation, output capture,
+                // and no host runtime (see `child_context`).
+                let mut import_interp = self.child_context();
                 import_interp.source_file = Some(file_path.clone());
-                // Module top-level output goes where ours goes (sandbox/DAP capture).
-                import_interp.output_sink = self.output_sink.clone();
                 import_interp.run(&program)?;
 
                 if let Some(name_list) = names {
@@ -1892,6 +2223,41 @@ impl Interpreter {
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                }
+                Ok(Signal::None)
+            }
+
+            Stmt::ImportNative { path, binding } => {
+                // Shared with the VM (`__forge_import_native`): resolution,
+                // the `ffi` check, loading and the namespace object.
+                let base_dir = self
+                    .source_file
+                    .as_ref()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                let names = match binding {
+                    NativeBinding::Names(names) => Some(names.as_slice()),
+                    NativeBinding::Namespace(_) => None,
+                };
+                let namespace = crate::plugins::import(path, base_dir.as_deref(), names)
+                    .map_err(|e| RuntimeError::new(&e))?;
+                match binding {
+                    NativeBinding::Namespace(alias) => self.env.define(alias.clone(), namespace),
+                    NativeBinding::Names(names) => {
+                        let Value::Object(mut members) = namespace else {
+                            return Err(RuntimeError::new(
+                                "BUG: native import did not return a namespace object",
+                            ));
+                        };
+                        for name in names {
+                            let f = members.shift_remove(name).ok_or_else(|| {
+                                RuntimeError::new(&format!(
+                                    "BUG: native library '{}' lost function '{}'",
+                                    path, name
+                                ))
+                            })?;
+                            self.env.define(name.clone(), f);
                         }
                     }
                 }
@@ -2045,20 +2411,51 @@ impl Interpreter {
                     _ => 5,
                 };
                 let body = body.clone();
+                let task = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Tasks)
+                    .map_err(|m| RuntimeError::new(&m))?;
                 let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let mut timeout_interp = Interpreter::new();
-                timeout_interp.env = self.env.clone();
+                // The body gets its own flag (the deadline below) *and* ours
+                // as an ancestor, so cancelling this program stops it too.
+                let mut timeout_interp = self.child_context();
+                timeout_interp.ancestor_cancels.push(self.cancelled.clone());
                 timeout_interp.cancelled = cancel_flag.clone();
-                timeout_interp.output_sink = self.output_sink.clone();
+                timeout_interp.env = self.env.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 let handle = crate::runtime::recursion::spawn_worker(move || {
                     let result = timeout_interp.exec_block(&body);
+                    drop(task);
                     let _ = tx.send(result);
                 })
                 .map_err(|e| {
                     RuntimeError::new(&format!("timeout: cannot start worker thread: {}", e))
                 })?;
-                match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+                // Wait for the body or the deadline, waking up regularly so
+                // a cancel of *this* program is not held up by a long limit.
+                let deadline =
+                    crate::clock::Instant::now().checked_add(std::time::Duration::from_secs(secs));
+                let outcome = loop {
+                    let slice = match deadline {
+                        Some(d) => d.saturating_duration_since(crate::clock::Instant::now()),
+                        None => std::time::Duration::from_millis(50),
+                    }
+                    .min(std::time::Duration::from_millis(50));
+                    match crate::clock::recv_timeout(&rx, slice) {
+                        Ok(result) => break Ok(result),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            break Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if self.is_cancelled() {
+                                cancel_flag.store(true, std::sync::atomic::Ordering::Release);
+                                return Err(RuntimeError::new("cancelled"));
+                            }
+                            if deadline.is_some_and(|d| crate::clock::Instant::now() >= d) {
+                                break Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+                            }
+                        }
+                    }
+                };
+                match outcome {
                     Ok(result) => {
                         let _ = handle.join();
                         result.map(|_| Signal::None)
@@ -2090,7 +2487,7 @@ impl Interpreter {
                         Err(e) => {
                             last_err = e.message.clone();
                             if attempt < max - 1 {
-                                std::thread::sleep(std::time::Duration::from_millis(
+                                crate::clock::sleep(std::time::Duration::from_millis(
                                     100 * (attempt as u64 + 1),
                                 ));
                             }
@@ -2267,7 +2664,7 @@ impl Interpreter {
                 then_body,
                 else_body,
             } => {
-                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                if self.is_cancelled() {
                     return Err(RuntimeError::new("cancelled"));
                 }
                 let cond = self.eval_expr(condition).map_err(patch_err)?;
@@ -2287,7 +2684,7 @@ impl Interpreter {
                 }
             }
             Stmt::Match { subject, arms } => {
-                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                if self.is_cancelled() {
                     return Err(RuntimeError::new("cancelled"));
                 }
                 let val = self.eval_expr(subject).map_err(patch_err)?;
@@ -2301,7 +2698,9 @@ impl Interpreter {
                         return result;
                     }
                 }
-                Err(patch_err(RuntimeError::new("non-exhaustive match")))
+                Err(patch_err(RuntimeError::new(
+                    crate::semantics::NON_EXHAUSTIVE_MATCH,
+                )))
             }
             stmt => Ok(match self.exec_stmt(stmt).map_err(patch_err)? {
                 Signal::Return(v) => BlockExit::Return(v),
@@ -2341,6 +2740,13 @@ impl Interpreter {
     /// a block expression (`RuntimeError::loop_escape`) ends here as the
     /// matching loop signal.
     fn exec_loop_body(&mut self, stmts: &[SpannedStmt]) -> Result<Signal, RuntimeError> {
+        // Safe point per iteration: an empty body (`while true { }`) runs no
+        // statement, so the per-statement check alone never fires.
+        if self.is_cancelled() {
+            return Err(RuntimeError::new("cancelled"));
+        }
+        // One step per iteration, so even `while true { }` spends fuel.
+        self.tick()?;
         match self.exec_body(stmts) {
             Err(e) => match e.loop_escape {
                 Some(LoopEscape::Break) => Ok(Signal::Break),
@@ -2468,7 +2874,7 @@ impl Interpreter {
                     .wait_timeout(resumed, std::time::Duration::from_millis(50))
                     .unwrap_or_else(|e| e.into_inner());
                 resumed = result.0;
-                if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                if self.is_cancelled() {
                     return;
                 }
             }
@@ -2478,19 +2884,32 @@ impl Interpreter {
     /// Write output to sink (for DAP) or stdout
     pub fn write_output(&self, text: &str, newline: bool) {
         if let Some(ref sink) = self.output_sink {
-            if let Ok(mut buf) = sink.lock() {
-                if newline {
-                    buf.push(format!("{}\n", text));
-                } else {
-                    buf.push(text.to_string());
+            if let Some((used, limit)) = &self.output_budget {
+                // Accept output until the budget is passed (the chunk that
+                // passes it is kept so the host sees the overflow), then
+                // drop everything and stop the program.
+                let len = text.len() + usize::from(newline);
+                let before = used.fetch_add(len, std::sync::atomic::Ordering::AcqRel);
+                if before > *limit {
+                    self.cancelled
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    return;
                 }
-                return;
             }
+            // A poisoned sink still captures: output must never fall back to
+            // the host's stdout once a capture is installed.
+            let mut buf = sink.lock().unwrap_or_else(|e| e.into_inner());
+            if newline {
+                buf.push(format!("{}\n", text));
+            } else {
+                buf.push(text.to_string());
+            }
+            return;
         }
         if newline {
-            println!("{}", text);
+            crate::runtime::stdio::out_line(text);
         } else {
-            print!("{}", text);
+            crate::runtime::stdio::out(text);
         }
     }
 
@@ -2615,7 +3034,11 @@ impl Interpreter {
                 let val = self.eval_expr(operand)?;
                 match op {
                     UnaryOp::Neg => match val {
-                        Value::Int(n) => Ok(Value::Int(-n)),
+                        // `-i64::MIN` does not fit: promote to float like
+                        // every other integer overflow (and like the VM).
+                        Value::Int(n) => Ok(n
+                            .checked_neg()
+                            .map_or(Value::Float(-(n as f64)), Value::Int)),
                         Value::Float(n) => Ok(Value::Float(-n)),
                         _ => Err(RuntimeError::new("cannot negate non-number")),
                     },
@@ -2840,125 +3263,23 @@ impl Interpreter {
                             )));
                         }
                         Value::String(s)
-                            if matches!(
-                                method_name,
-                                "upper"
-                                    | "lower"
-                                    | "trim"
-                                    | "trim_start"
-                                    | "trim_end"
-                                    | "len"
-                                    | "chars"
-                                    | "bytes"
-                                    | "words"
-                                    | "is_empty"
-                                    | "is_numeric"
-                                    | "is_alpha"
-                                    | "is_alphanumeric"
-                                    | "reverse"
-                                    | "char_at"
-                                    | "encode_uri"
-                                    | "decode_uri"
-                            ) =>
+                            if crate::semantics::STRING_METHODS.contains(&method_name) =>
                         {
-                            match method_name {
-                                "upper" => return Ok(Value::String(s.to_uppercase())),
-                                "lower" => return Ok(Value::String(s.to_lowercase())),
-                                "trim" => return Ok(Value::String(s.trim().to_string())),
-                                "trim_start" => {
-                                    return Ok(Value::String(s.trim_start().to_string()))
+                            // Shared with the VM (`semantics::string_method`).
+                            let index = if method_name == "char_at" {
+                                match args.first().map(|a| self.eval_expr(a)) {
+                                    Some(Ok(Value::Int(i))) => Some(i),
+                                    Some(Err(e)) => return Err(e),
+                                    _ => None,
                                 }
-                                "trim_end" => return Ok(Value::String(s.trim_end().to_string())),
-                                "len" => return Ok(Value::Int(s.chars().count() as i64)),
-                                "is_empty" => return Ok(Value::Bool(s.is_empty())),
-                                "is_numeric" => {
-                                    return Ok(Value::Bool(
-                                        s.chars()
-                                            .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
-                                    ))
-                                }
-                                "is_alpha" => {
-                                    return Ok(Value::Bool(
-                                        !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
-                                    ))
-                                }
-                                "is_alphanumeric" => {
-                                    return Ok(Value::Bool(
-                                        !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
-                                    ))
-                                }
-                                "reverse" => return Ok(Value::String(s.chars().rev().collect())),
-                                "chars" => {
-                                    return Ok(Value::Array(
-                                        s.chars().map(|c| Value::String(c.to_string())).collect(),
-                                    ))
-                                }
-                                "bytes" => {
-                                    return Ok(Value::Array(
-                                        s.bytes().map(|b| Value::Int(b as i64)).collect(),
-                                    ))
-                                }
-                                "words" => {
-                                    return Ok(Value::Array(
-                                        s.split_whitespace()
-                                            .map(|w| Value::String(w.to_string()))
-                                            .collect(),
-                                    ))
-                                }
-                                "char_at" => {
-                                    let idx = match args.first().map(|a| self.eval_expr(a)) {
-                                        Some(Ok(Value::Int(i))) => i as usize,
-                                        _ => {
-                                            return Err(RuntimeError::new(
-                                                "char_at() requires an integer index",
-                                            ))
-                                        }
-                                    };
-                                    return Ok(s
-                                        .chars()
-                                        .nth(idx)
-                                        .map(|c| Value::String(c.to_string()))
-                                        .unwrap_or(Value::Null));
-                                }
-                                "encode_uri" => {
-                                    let encoded: String = s
-                                        .chars()
-                                        .map(|c| match c {
-                                            'A'..='Z'
-                                            | 'a'..='z'
-                                            | '0'..='9'
-                                            | '-'
-                                            | '_'
-                                            | '.'
-                                            | '~' => c.to_string(),
-                                            _ => format!("%{:02X}", c as u32),
-                                        })
-                                        .collect();
-                                    return Ok(Value::String(encoded));
-                                }
-                                "decode_uri" => {
-                                    let mut result = String::new();
-                                    let mut chars = s.chars();
-                                    while let Some(c) = chars.next() {
-                                        if c == '%' {
-                                            let hex: String = chars.by_ref().take(2).collect();
-                                            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                                                result.push(byte as char);
-                                            } else {
-                                                result.push('%');
-                                                result.push_str(&hex);
-                                            }
-                                        } else if c == '+' {
-                                            result.push(' ');
-                                        } else {
-                                            result.push(c);
-                                        }
-                                    }
-                                    return Ok(Value::String(result));
-                                }
-                                _ => {}
-                            }
-                            return Ok(Value::Null);
+                            } else {
+                                None
+                            };
+                            return match crate::semantics::string_method(s, method_name, index) {
+                                Some(Ok(v)) => Ok(Value::from_str_method(v)),
+                                Some(Err(e)) => Err(RuntimeError::new(&e)),
+                                None => Ok(Value::Null),
+                            };
                         }
                         _ if {
                             let is_set_receiver = matches!(&obj, Value::Set(_))
@@ -3288,10 +3609,9 @@ impl Interpreter {
                             )));
                         }
                         _ => {
-                            return Err(RuntimeError::new(&format!(
-                                "cannot call '{}' on {}",
+                            return Err(RuntimeError::new(&crate::semantics::no_method(
                                 field,
-                                obj.type_name()
+                                obj.type_name(),
                             )))
                         }
                     };
@@ -3324,16 +3644,14 @@ impl Interpreter {
                 match result {
                     Value::ResultOk(value) => Ok(*value),
                     Value::ResultErr(err) => Err(RuntimeError::propagate(Value::ResultErr(err))),
-                    _ => Err(RuntimeError::new(
-                        "`?` expects Result value (Ok(...) or Err(...))",
-                    )),
+                    _ => Err(RuntimeError::new(crate::semantics::TRY_REQUIRES_RESULT)),
                 }
             }
 
             Expr::Lambda { params, body } => Ok(Value::Lambda {
                 params: Arc::from(params.as_slice()),
                 body: Arc::from(body.as_slice()),
-                closure: Arc::new(std::sync::Mutex::new(self.env.clone())),
+                closure: Arc::new(std::sync::Mutex::new(self.capture_env())),
             }),
 
             Expr::StructInit { name, fields } => {
@@ -3376,16 +3694,7 @@ impl Interpreter {
                 let val = self.eval_expr(inner)?;
                 match val {
                     Value::TaskHandle(slot) => {
-                        let (lock, cvar) = &*slot;
-                        let mut guard = lock
-                            .lock()
-                            .map_err(|_| RuntimeError::new("await: task handle lock poisoned"))?;
-                        while guard.is_none() {
-                            guard = cvar
-                                .wait(guard)
-                                .map_err(|_| RuntimeError::new("await: condvar wait failed"))?;
-                        }
-                        let result = guard.take().unwrap_or(Value::Null);
+                        let result = self.take_task_result(&slot)?;
                         match result {
                             Value::ResultOk(v) => Ok(*v),
                             Value::ResultErr(e) => {
@@ -3666,9 +3975,9 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(RuntimeError::new(&format!(
-                    "no field '{}' on object",
-                    field
+                Err(RuntimeError::new(&crate::semantics::no_field(
+                    field,
+                    map.keys().map(String::as_str),
                 )))
             }
             Value::String(s) => match field {
@@ -3727,10 +4036,9 @@ impl Interpreter {
                 "len" => Ok(Value::Int(items.len() as i64)),
                 _ => Err(RuntimeError::new(&format!("no method '{}' on Set", field))),
             },
-            _ => Err(RuntimeError::new(&format!(
-                "cannot access field '{}' on {}",
+            _ => Err(RuntimeError::new(&crate::semantics::field_access(
                 field,
-                obj.type_name()
+                obj.type_name(),
             ))),
         }
     }
@@ -3769,7 +4077,29 @@ impl Interpreter {
         }
     }
 
+    /// `left + right` as string concatenation, within the string size cap
+    /// (`runtime::limits`). Two strings are checked before allocating.
+    fn concat(&self, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
+        if let (Value::String(a), Value::String(b)) = (left, right) {
+            self.caps
+                .check_string(a.len() + b.len())
+                .map_err(|m| RuntimeError::new(&m))?;
+        }
+        let text = format!("{}{}", left, right);
+        self.caps
+            .check_string(text.len())
+            .map_err(|m| RuntimeError::new(&m))?;
+        Ok(Value::String(text))
+    }
+
     fn eval_binop(&self, left: &Value, op: &BinOp, right: &Value) -> Result<Value, RuntimeError> {
+        // `==` / `!=` are total: values of different types are unequal,
+        // never an error (same rule as the VM's `Value::equals`).
+        match op {
+            BinOp::Eq => return Ok(Value::Bool(Value::lang_eq(left, right))),
+            BinOp::NotEq => return Ok(Value::Bool(!Value::lang_eq(left, right))),
+            _ => {}
+        }
         // Arithmetic and ordering follow the rules shared with the VM.
         if let Some(shared_op) = shared_binary_op(op) {
             return match crate::semantics::binary(
@@ -3780,9 +4110,7 @@ impl Interpreter {
                 Ok(crate::semantics::Outcome::Int(n)) => Ok(Value::Int(n)),
                 Ok(crate::semantics::Outcome::Float(f)) => Ok(Value::Float(f)),
                 Ok(crate::semantics::Outcome::Bool(b)) => Ok(Value::Bool(b)),
-                Ok(crate::semantics::Outcome::Concat) => {
-                    Ok(Value::String(format!("{}{}", left, right)))
-                }
+                Ok(crate::semantics::Outcome::Concat) => self.concat(left, right),
                 Err(message) => Err(RuntimeError::new(&message)),
             };
         }
@@ -3844,7 +4172,7 @@ impl Interpreter {
             }
 
             (Value::String(a), Value::String(b)) => match op {
-                BinOp::Add => Ok(Value::String(format!("{}{}", a, b))),
+                BinOp::Add => self.concat(left, right),
                 BinOp::Eq => Ok(Value::Bool(a == b)),
                 BinOp::NotEq => Ok(Value::Bool(a != b)),
                 BinOp::Lt => Ok(Value::Bool(a < b)),
@@ -3862,12 +4190,12 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("invalid operator for Bool")),
             },
 
-            (Value::String(a), b) => match op {
-                BinOp::Add => Ok(Value::String(format!("{}{}", a, b))),
+            (Value::String(_), _) => match op {
+                BinOp::Add => self.concat(left, right),
                 _ => Err(RuntimeError::new("invalid operator")),
             },
-            (a, Value::String(b)) => match op {
-                BinOp::Add => Ok(Value::String(format!("{}{}", a, b))),
+            (_, Value::String(_)) => match op {
+                BinOp::Add => self.concat(left, right),
                 _ => Err(RuntimeError::new("invalid operator")),
             },
 
@@ -4514,6 +4842,7 @@ impl Interpreter {
         if let Err(msg) = crate::runtime::recursion::check_call_depth(self.call_depth + 1) {
             return Err(RuntimeError::new(&msg));
         }
+        self.tick()?;
         self.call_depth += 1;
         if self.debug_state.is_some() {
             let frame_name = match &func {
@@ -4625,26 +4954,25 @@ impl Interpreter {
 
             Value::BuiltIn(name) => self.call_builtin(&name, args),
 
-            _ => Err(RuntimeError::new(&format!(
-                "cannot call {}",
-                func.type_name()
+            _ => Err(RuntimeError::new(&crate::semantics::not_callable(
+                func.type_name(),
             ))),
         }
     }
 
     /// Spawn a block as a concurrent task, returning a TaskHandle.
     fn spawn_task(&mut self, body: &[SpannedStmt]) -> Result<Value, RuntimeError> {
+        let task = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Tasks)
+            .map_err(|m| RuntimeError::new(&m))?;
         let body = body.to_vec();
         let result_slot: Arc<(std::sync::Mutex<Option<Value>>, std::sync::Condvar)> =
             Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
         let slot_clone = result_slot.clone();
-        let mut spawn_interp = Interpreter::new();
+        // Same containment as the parent (see `child_context`): its
+        // cancellation token (so squad and the host can cancel the task),
+        // its output capture, and no host runtime.
+        let mut spawn_interp = self.child_context();
         spawn_interp.env = self.env.deep_clone();
-        // Propagate cancellation token so squad can cancel spawned tasks
-        spawn_interp.cancelled = self.cancelled.clone();
-        // Output from the task must reach the same capture (sandbox/DAP) as
-        // the parent's, never the host's stdout.
-        spawn_interp.output_sink = self.output_sink.clone();
 
         // A plain OS thread with the same recursion headroom as the CLI
         // (WORKER_STACK_SIZE, registered with the stack guard) and the
@@ -4658,6 +4986,8 @@ impl Interpreter {
                 Ok(_) => Value::ResultOk(Box::new(Value::Null)),
                 Err(e) => Value::ResultErr(Box::new(Value::String(e.message))),
             };
+            // Free the task slot before the result is observable.
+            drop(task);
             let (lock, cvar) = &*slot_clone;
             if let Ok(mut guard) = lock.lock() {
                 *guard = Some(val);
@@ -4681,9 +5011,12 @@ impl Interpreter {
         self.squad_handles = Some(Vec::new());
 
         // Create a fresh cancellation token for this squad's tasks
+        // The outer token stays an ancestor, so cancelling the program (a
+        // host deadline) still reaches the squad body and its tasks.
         let outer_cancelled = self.cancelled.clone();
         let squad_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.cancelled = squad_cancel.clone();
+        self.ancestor_cancels.push(outer_cancelled.clone());
 
         // Execute the body — spawns will register handles via squad_handles
         let body_result = self.exec_block(body);
@@ -4693,6 +5026,7 @@ impl Interpreter {
 
         // Restore outer state
         self.squad_handles = outer_handles;
+        self.ancestor_cancels.pop();
         self.cancelled = outer_cancelled;
 
         // If the body itself errored, cancel all tasks and join
@@ -4791,6 +5125,9 @@ impl Interpreter {
             Pattern::Literal(expr) => match (expr, value) {
                 (Expr::Int(a), Value::Int(b)) => a == b,
                 (Expr::Float(a), Value::Float(b)) => a == b,
+                // Numbers match numerically, like `==` (and the VM's `Eq`).
+                (Expr::Int(a), Value::Float(b)) => (*a as f64) == *b,
+                (Expr::Float(a), Value::Int(b)) => *a == (*b as f64),
                 (Expr::StringLit(a), Value::String(b)) => a == b,
                 (Expr::Bool(a), Value::Bool(b)) => a == b,
                 _ => false,
@@ -4952,6 +5289,10 @@ pub struct RuntimeError {
     /// like `early_return`, and becomes a plain "outside of loop" error at
     /// a function boundary (`outside_function_boundary`).
     loop_escape: Option<LoopEscape>,
+    /// A fatal resource limit (fuel, memory; see `runtime::limits`): it
+    /// passes through `try`/`safe`/`retry` like the control escapes above,
+    /// and through function boundaries, up to the host.
+    fatal: bool,
 }
 
 /// Which loop control a `RuntimeError::loop_escape` carries.
@@ -4970,12 +5311,24 @@ impl RuntimeError {
             propagated: None,
             early_return: false,
             loop_escape: None,
+            fatal: false,
         }
+    }
+
+    /// A fatal resource-limit error; see the `fatal` field.
+    pub fn fatal(msg: &str) -> Self {
+        let mut err = Self::new(msg);
+        err.fatal = true;
+        err
+    }
+
+    pub fn is_fatal(&self) -> bool {
+        self.fatal
     }
 
     pub fn propagate(value: Value) -> Self {
         let message = match &value {
-            Value::ResultErr(err) => format!("unhandled error: {}", err),
+            Value::ResultErr(err) => crate::semantics::unhandled_error(&err.to_string()),
             _ => format!("unhandled propagated value: {}", value),
         };
         Self {
@@ -4985,6 +5338,7 @@ impl RuntimeError {
             propagated: Some(value),
             early_return: false,
             loop_escape: None,
+            fatal: false,
         }
     }
 
@@ -5010,9 +5364,10 @@ impl RuntimeError {
     }
 
     /// True for control flow that unwinds through errors (`return`, `break`,
-    /// `continue` inside block expressions); `try`/`safe` must not catch it.
+    /// `continue` inside block expressions) and for fatal resource-limit
+    /// errors; `try`/`safe` must not catch it.
     pub fn is_control_escape(&self) -> bool {
-        self.early_return || self.loop_escape.is_some()
+        self.early_return || self.loop_escape.is_some() || self.is_fatal()
     }
 
     /// A loop escape that reaches a function boundary did not come from a
@@ -5034,5 +5389,7 @@ impl fmt::Display for RuntimeError {
     }
 }
 
+#[cfg(test)]
+mod leak_tests;
 #[cfg(test)]
 mod tests;

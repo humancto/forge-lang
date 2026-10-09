@@ -609,11 +609,17 @@ fn spacing(a: &Item, a_unary: Option<bool>, b: &Item, gap: &str) -> String {
         return keep();
     };
 
-    // Tokens whose role is ambiguous at the token level.
+    // Tokens whose role is ambiguous at the token level (`>>` is both the
+    // pipe-chain operator and the end of `Option<Option<Int>>`).
     let ambiguous = |t: &Token| {
         matches!(
             t,
-            Token::Lt | Token::Gt | Token::Question | Token::Bar | Token::Ampersand
+            Token::Lt
+                | Token::Gt
+                | Token::PipeRight
+                | Token::Question
+                | Token::Bar
+                | Token::Ampersand
         )
     };
     if ambiguous(ta) || ambiguous(tb) {
@@ -695,6 +701,16 @@ fn spacing(a: &Item, a_unary: Option<bool>, b: &Item, gap: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_type_annotations_intact() {
+        let src = "let f: fn(Int, String) -> Bool = g\nlet o: Option<Option<Int>> = None\nlet t: (Int, String) = (1, \"a\")\n";
+        assert_eq!(format_source(src), src);
+        assert_eq!(
+            format_source("let f:fn(Int,String)->Bool=g\n"),
+            "let f: fn(Int, String) -> Bool = g\n"
+        );
+    }
 
     #[test]
     fn formats_basic_indentation() {

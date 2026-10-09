@@ -15,7 +15,7 @@ Built-in HTTP, databases, crypto, AI, and a JIT compiler.<br>
 [![Stars](https://img.shields.io/github/stars/humancto/forge-lang?color=%23ff6b35&style=flat-square)](https://github.com/humancto/forge-lang/stargazers)
 [![crates.io](https://img.shields.io/crates/v/forge-lang?color=%23ff6b35&style=flat-square)](https://crates.io/crates/forge-lang)
 
-[📥 **Download Book**](https://github.com/humancto/forge-lang/releases/download/v0.4.1/programming-forge.pdf) · [🤖 **llms.txt**](llms.txt) · [📖 **Language Spec**](https://humancto.github.io/forge-lang/spec/) · [🌐 **Website**](https://humancto.github.io/forge-lang/) · [💬 **Discussions**](https://github.com/humancto/forge-lang/discussions) · [🐛 **Issues**](https://github.com/humancto/forge-lang/issues)
+[▶️ **Playground**](https://humancto.github.io/forge-lang/playground/) · [📥 **Download Book**](https://github.com/humancto/forge-lang/releases/download/v0.4.1/programming-forge.pdf) · [🤖 **llms.txt**](llms.txt) · [📖 **Language Spec**](https://humancto.github.io/forge-lang/spec/) · [🌐 **Website**](https://humancto.github.io/forge-lang/) · [💬 **Discussions**](https://github.com/humancto/forge-lang/discussions) · [🐛 **Issues**](https://github.com/humancto/forge-lang/issues)
 
 </div>
 
@@ -26,6 +26,8 @@ brew install humancto/tap/forge    # install
 forge learn                        # 30 interactive tutorials
 forge run app.fg                   # run a program
 ```
+
+No install needed to try it: the [**Forge Playground**](https://humancto.github.io/forge-lang/playground/) runs the language core in your browser (WebAssembly) with a 15-lesson guided tour. See [bindings/wasm](bindings/wasm/README.md) for what works there.
 
 ---
 
@@ -79,7 +81,7 @@ say crypto.sha256("password")
 | [📚 Standard Library](#-standard-library-22-modules) | [⚡ Performance](#-performance) | [🎮 GenZ Debug Kit](#-genz-debug-kit) |
 | [🔧 CLI](#-cli-commands)                             | [📂 Examples](#-examples)       | [🏛️ Architecture](#️-architecture)     |
 | [📕 Book](#-the-book)                                | [🗺️ Roadmap](#️-roadmap)         | [🤝 Contributing](#-contributing)     |
-| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) |                                 |                                       |
+| [🤖 AI agents (MCP)](#-use-forge-from-an-ai-agent-mcp) | [🐍 Python](#-use-forge-from-python) | [🦀 Calling Rust](#-calling-rust-from-forge) |
 
 ---
 
@@ -529,7 +531,7 @@ Three execution tiers — pick your tradeoff:
 | ---------------------- | ---------- | ---------------------------------------------------------------- |
 | ⚙️ Bytecode VM         | (default)  | General programs                                                 |
 | 🔥 VM + Cranelift JIT  | `--jit`    | Tight numeric leaf functions (Int/Float math, loops)             |
-| 📦 Tree-walking interp | `--interp` | Full feature surface; HTTP servers fall back to it automatically |
+| 📦 Tree-walking interp | `--interp` | Reference engine; programs the VM cannot run faithfully fall back to it automatically |
 
 Measured on one 4-vCPU x86_64 Linux VM (Intel Xeon @ 2.10GHz) with a release build, wall-clock including process startup. Numbers vary by machine — run them yourself.
 
@@ -552,9 +554,21 @@ The JIT compiles functions over `Int`/`Bool` values (arithmetic, comparisons, lo
 
 Forge's HTTP server is built on axum + tokio — the same stack powering production Rust services. For typical JSON API endpoints, Forge matches raw Rust throughput while giving you a 4-line handler instead of 40.
 
-Measured at v0.4 with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS. The server has since moved to a per-request fork model, so re-measure on your hardware:
+Measured at v0.4 with ApacheBench (`ab -n 20000 -c 200`) on localhost, macOS, when handlers ran on the interpreter.
+
+Since then handlers run on the bytecode VM, each request on its own fork (the interpreter still serves with `--interp`, with identical responses). `cargo bench --bench server_throughput` boots `forge run` on the example servers on both engines; one run on a shared, heavily loaded 4-core Linux VM (release build, closed-loop keep-alive clients):
+
+| Handler (`examples/`)                       | Clients | VM req/s | VM p99 | `--interp` req/s | `--interp` p99 |
+| ------------------------------------------- | ------: | -------: | -----: | ---------------: | -------------: |
+| `GET /ping` (`bench_server.fg`)             |      32 |   12,782 |  9.5 ms |            4,579 |        29.9 ms |
+| `GET /fib` — `fib(25)` (`bench_server_concurrent.fg`) | 8 |  1,030 |   47 ms |                5 |         1.83 s |
+| `GET /cpu` — 200k-iteration `repeat` loop   |       8 |       42 |  293 ms |               12 |         808 ms |
+
+Absolute numbers depend on the machine; compare the engines within one run. Re-measure on your hardware:
 
 ```bash
+cargo bench --bench server_throughput   # both engines, req/s + p50/p99
+
 # Terminal 1
 forge run examples/bench_server.fg
 
@@ -604,11 +618,12 @@ yolo { send_analytics(data) }    // 🚀 fire-and-forget async
 | `forge build <file>`          | Compile to `.fgc` bytecode                           |
 | `forge build --native <file>` | Native executable embedding source (servers work)    |
 | `forge build --aot <file>`    | Native executable embedding bytecode (VM programs)   |
-| `forge install` / `add` / `update` / `search` / `publish` | Package management       |
+| `forge install` / `add` / `update` / `search` / `publish` / `yank` | Package management (sparse registry, [RFC 0007](rfcs/0007-package-registry.md)) |
 | `forge watch <file>`          | Re-run on file changes                               |
 | `forge doc [paths]`           | Generate documentation                               |
 | `forge lsp` / `forge dap`     | Language server / debug adapter                      |
 | `forge mcp`                   | MCP server: AI agents run Forge in a sandbox         |
+| `forge mcp serve <file>`      | Serve a file's `@tool` functions as MCP tools        |
 | `forge chat`                  | AI assistant                                         |
 | `forge version`               | Version info                                         |
 
@@ -618,15 +633,56 @@ Native builds are standalone when `libforge_lang.a` is available (set `FORGE_LIB
 
 ---
 
+## 🦀 Calling Rust from Forge
+
+Write the fast or system-specific part in Rust (or C), build it as a shared library, and import its functions with typed values — no shelling out, no parsing text.
+
+```rust
+// Cargo.toml: [lib] crate-type = ["cdylib"]
+//             [dependencies] forge-plugin = { path = "crates/forge-plugin" }
+use forge_plugin::{export, forge_fn};
+
+#[forge_fn]
+fn add(a: i64, b: i64) -> i64 { a + b }
+
+#[forge_fn]
+fn divide(a: f64, b: f64) -> Result<f64, String> {
+    if b == 0.0 { Err("division by zero".into()) } else { Ok(a / b) }
+}
+
+export!(name = "hello", functions = [add, divide]);
+```
+
+```forge
+import native "target/release/libhello" as hello   // .so / .dylib / .dll added for you
+import { add } from native "target/release/libhello"
+
+say add(1, 2)                  // 3
+say hello.divide(7, 2)         // 3.5
+try { hello.divide(1, 0) } catch e { say e.message }   // division by zero
+```
+
+```bash
+forge --allow-ffi run app.fg              # or --allow-ffi=target/release
+```
+
+- Ints, floats, bools, strings, arrays, objects, `Option` and bytes cross the boundary as values through a small, versioned C ABI ([`forge_plugin.h`](crates/forge-plugin/include/forge_plugin.h)); `Result::Err` and panics become catchable Forge errors. Works on both engines.
+- C (or anything that can export C functions) implements the same ABI: see [`examples/plugins/hello_c`](examples/plugins/hello_c/hello.c). Full Rust example: [`examples/plugins/hello_rust`](examples/plugins/hello_rust).
+- **Loading native code is full trust**: the library runs outside every Forge permission, so `forge run` needs `--allow-ffi`, and `--sandbox` / `forge mcp` deny it unless granted. See [SECURITY.md](SECURITY.md#native-plugins-are-full-trust---allow-ffi).
+- Design and ABI rules: [RFC 0006](rfcs/0006-native-plugins.md).
+
+---
+
 ## 🤖 Use Forge from an AI agent (MCP)
 
 `forge mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. It gives an agent a sandboxed Forge runtime ("code mode"): instead of many tool calls, the agent writes one short script — fetch, filter, compute, print — and runs it.
 
 | Tool              | What it does                                                                                                    |
 | ----------------- | --------------------------------------------------------------------------------------------------------------- |
-| `run_forge`       | Runs `{code, timeout_secs?}` in the sandbox; returns what the script printed, or `isError` with a typed error (`syntax`, `permission_denied`, `runtime`, `timeout`, `output_limit`) and the output so far |
+| `run_forge`       | Runs `{code, timeout_secs?, max_fuel?, session_id?}` in the sandbox; returns what the script printed, or `isError` with a typed error (`syntax`, `permission_denied`, `runtime`, `timeout`, `output_limit`, `fuel_exhausted`, `memory_limit`, `resource_limit`) and the output so far |
 | `check_forge`     | Parses and type-checks `{code}` without running it; returns diagnostics with line numbers                      |
 | `forge_reference` | The compact language guide ([`llms.txt`](llms.txt)) so the agent can learn Forge                                |
+| `reset_session`   | Forgets a `run_forge` session (`{session_id}`) and stops a call still running in it                             |
 
 Scripts are **denied everything by default** — files, network, environment, databases, subprocesses, AI calls, `exit()`. Grant only what the agent needs with the usual flags (or `[permissions]` in a `forge.toml` in the server's working directory; flags win):
 
@@ -634,6 +690,7 @@ Scripts are **denied everything by default** — files, network, environment, da
 forge mcp                                         # pure computation only
 forge mcp --allow-net=api.example.com             # HTTP to one host
 forge mcp --allow-read=./data --allow-write=./out --max-time 10
+forge mcp --max-fuel 50000000 --max-memory 128MB  # tighter per-call resource limits
 ```
 
 Claude Desktop (`claude_desktop_config.json`) or a project `.mcp.json` for Claude Code:
@@ -649,9 +706,83 @@ Claude Desktop (`claude_desktop_config.json`) or a project `.mcp.json` for Claud
 or `claude mcp add forge -- forge mcp --allow-net=api.example.com`.
 
 - `--max-time` (default 30s) is the per-call limit; an agent's `timeout_secs` can only lower it. Output returned to the agent is capped at 64 KiB (a script printing over 1 MiB is stopped).
+- Each call also runs under deterministic resource limits: 200M steps of fuel (`--max-fuel`; an agent's `max_fuel` can only lower it), 256 MiB of memory (`--max-memory`), and caps on open files, sockets, subprocesses, tasks, value sizes and imports. A runaway loop fails with `fuel exhausted` at the same step every time; the server keeps serving. Details: [SECURITY.md — Resource limits](SECURITY.md#resource-limits).
 - Each call runs on its own thread: a stuck script times out while the server keeps answering, and `notifications/cancelled` stops it. `run` (shell) is never granted unless you pass `--allow-run`.
 - Nothing a script prints or reads can reach the protocol stream (stdin/stdout are moved off fds 0/1 on Unix).
 - Protocol: `2026-07-28` (stateless, `server/discover`) and the `initialize` handshake for `2025-11-25` back to `2024-11-05`. Rust hosts can embed the same server: `forge_lang::mcp::serve(reader, writer, config)`.
+- **Sessions:** pass `session_id` to `run_forge` and top-level variables, functions and types persist across calls with the same id, so an agent can build up state step by step (`reset_session` forgets one). Default is stateless. At most 16 sessions (`--max-sessions N`, `0` disables them), dropped after 15 idle minutes (`--session-idle SECS`); every step still runs under the full sandbox with a fresh fuel budget, the memory limit covers everything the session holds, and tasks a step spawns stop when it ends.
+
+### Write MCP tools in Forge
+
+`forge mcp serve tools.fg` turns the `@tool` functions of a Forge file into MCP tools. Typed parameters become the tool's JSON Schema, `@param` documents them, and the return type becomes its output schema (`Result<T, E>` describes `T`):
+
+```forge
+struct Report { city: String, temperature: Float, advice: String }
+
+@tool(description: "Convert a temperature between Celsius (C) and Fahrenheit (F).", idempotent: true)
+@param(value: "The temperature to convert", target: "Target unit: \"C\" or \"F\"")
+fn convert_temperature(value: Float, target: String = "F") -> Result<Float, String> {
+    if target == "F" { return Ok(value * 9.0 / 5.0 + 32.0) }
+    if target == "C" { return Ok((value - 32.0) * 5.0 / 9.0) }
+    return Err("`target` must be \"C\" or \"F\"")   // becomes a tool error
+}
+
+@resource(uri: "weather://cities", description: "Cities the weather tool knows")
+fn cities() { return ["Lisbon", "Oslo"] }
+```
+
+| Forge type | JSON Schema | | Forge type | JSON Schema |
+| --- | --- | --- | --- | --- |
+| `Int` | `integer` | | `[T]` / `Array<T>` | `array` of `T` |
+| `Float` | `number` | | `Object` / `Map<String, T>` | `object` |
+| `String` | `string` | | a `struct` | `object` with its fields (defaults optional) |
+| `Bool` | `boolean` | | `?T` / `Option<T>` | optional, `T` or `null` (`Option` arrives as `Some`/`None`) |
+| `Any` / no annotation | any value | | parameter with a default | optional, default shown |
+
+- `@tool(description: "...")` is required (a single string also works: `@tool("...")`); optional `name`, `title`, `timeout` (seconds, capped by `--max-time`) and the hints `read_only`, `destructive`, `idempotent`, `open_world`. Hints the policy already settles (no write grant ⇒ read-only) cannot be overridden.
+- Arguments are validated against the schema before any Forge code runs; a bad call is a tool error (`isError`) naming each problem (`` `value`: expected a number, got a string ``), so the model can fix it. Results come back as `structuredContent` (objects as is, anything else as `{"result": ...}`) plus text; `Err(x)` and runtime errors are tool errors. A declared return type is checked.
+- The file's top level runs once at start-up; **every call runs in a fresh fork of it** (like a per-request HTTP fork), in the same sandbox as `run_forge`: deny-all plus your `--allow-*` grants, `--max-time`, captured and capped output, no stdin. Modules next to the file can be imported. `say` output is returned alongside the result.
+- Only the file's tools are served; add `--with-code-tools` to also offer `run_forge` & co. Load errors (``tools.fg:12: @tool on `f` needs a description``) stop the server with exit code 2.
+
+```json
+{
+  "mcpServers": {
+    "weather": { "command": "forge", "args": ["mcp", "serve", "/abs/path/examples/mcp/weather_tools.fg"] }
+  }
+}
+```
+
+or `claude mcp add weather -- forge mcp serve /abs/path/examples/mcp/weather_tools.fg`. Full example: [`examples/mcp/weather_tools.fg`](examples/mcp/weather_tools.fg).
+
+> Engine: MCP code always runs on the tree-walking interpreter inside the sandbox. The VM does not yet capture or cap a program's output, which every MCP result depends on.
+
+---
+
+## 🐍 Use Forge from Python
+
+The same sandbox is available in-process to Python hosts (agent frameworks, notebooks, automation) as the `forge-lang` package: abi3 wheels for Linux, macOS and Windows, CPython 3.9+, no `forge` binary needed.
+
+```bash
+pip install forge-lang
+```
+
+```python
+from forge_lang import Sandbox, ForgeError
+
+sb = Sandbox(
+    allow_read=["./workspace"],          # everything else is denied
+    allow_net=["api.github.com"],
+    max_time=10,                         # seconds
+    max_output=32_000,                   # bytes
+)
+
+try:
+    print(sb.run('say "hello from Forge"').stdout)
+except ForgeError as e:                  # ForgeSyntaxError, ForgePermissionError,
+    print(e.kind, e, e.stdout)           # ForgeRuntimeError, ForgeTimeoutError, ...
+```
+
+`Sandbox` is immutable and thread-safe, `run()` releases the GIL, `check()` returns parse/type diagnostics without running anything, and a `CancelToken` (or Ctrl-C) stops a run. See [`bindings/python/README.md`](bindings/python/README.md) for the full API and an agent "code mode" tool handler. A Node.js package (napi-rs) is planned: [`bindings/node/README.md`](bindings/node/README.md).
 
 ---
 
@@ -801,14 +932,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the architecture guide and PR guideli
 
 ### Sandboxing and permissions
 
-Forge has a Deno-style capability model shared by both engines. Defaults are unchanged (`forge run` allows everything except subprocesses), and `--sandbox` turns it into default-deny:
+Forge has a Deno-style capability model shared by both engines. By default `forge run` allows everything except subprocesses and native plugins, and `--sandbox` turns it into default-deny:
 
 ```bash
 forge run --sandbox --allow-read=./data --allow-net=api.example.com agent.fg
 forge run --max-time 10 job.fg     # wall-clock limit (exit 124)
+forge run --max-fuel 50000000 --max-memory 256MB job.fg   # deterministic step budget + memory cap
 ```
 
-Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`. Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
+Capabilities: `fs.read`, `fs.write` (path-scoped, symlink- and `..`-safe), `net` (host allowlist), `env`, `db`, `run`, `ai`, `ffi` (native plugins, path-scoped, opt-in like `run`). Denials read `permission denied: fs.write (/etc/passwd) — run with --allow-write or grant it in the host policy`. The same policy can go in `forge.toml` under `[permissions]`.
 
 Embedding Forge in a Rust host (for AI agents and automation) starts from deny-all:
 

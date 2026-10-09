@@ -98,6 +98,7 @@ pub fn register_thread_stack(size: usize) {
 /// stack and register it with the guard. This covers the blocking pool,
 /// so HTTP handlers (run via `spawn_blocking`) get the same recursion
 /// headroom as other Forge code instead of tokio's 2 MiB default.
+#[cfg(feature = "host")]
 pub fn configure_runtime(builder: &mut tokio::runtime::Builder) -> &mut tokio::runtime::Builder {
     builder
         .thread_stack_size(WORKER_STACK_SIZE)
@@ -144,6 +145,65 @@ pub fn depth_exceeded_message(depth: usize) -> String {
         "maximum recursion depth exceeded (depth {}, limit {})\n  hint: check for infinite recursion or restructure to use iteration; the limit can be raised with FORGE_MAX_DEPTH or --max-depth",
         depth,
         max_depth()
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Value depth
+// ---------------------------------------------------------------------------
+
+/// Deepest value nesting that recursive value walkers (VM↔interpreter
+/// conversions, display, equality, JSON) will descend into. A script can
+/// build a value millions of levels deep in a loop (`a = [a]`); walking it
+/// recursively would overflow the native stack and abort the process.
+pub const MAX_VALUE_DEPTH: usize = 10_000;
+
+thread_local! {
+    static VALUE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static VALUE_TOO_DEEP: Cell<bool> = const { Cell::new(false) };
+}
+
+/// One level of a recursive value walk; leaving the level on drop.
+#[must_use = "the level is only entered while the guard lives"]
+pub struct ValueLevel(());
+
+impl Drop for ValueLevel {
+    fn drop(&mut self) {
+        VALUE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+/// Enter one more level of nesting in a recursive value walker. `None`
+/// means the value is too deep (more than [`MAX_VALUE_DEPTH`] levels, or the
+/// native stack is nearly exhausted): the walker must stop descending and
+/// produce a placeholder; the condition is recorded for
+/// [`take_value_too_deep`], which fallible callers turn into an error.
+#[inline]
+pub fn enter_value_level() -> Option<ValueLevel> {
+    let depth = VALUE_DEPTH.with(|d| {
+        let n = d.get() + 1;
+        d.set(n);
+        n
+    });
+    if depth > MAX_VALUE_DEPTH || native_stack_exhausted() {
+        VALUE_DEPTH.with(|d| d.set(d.get() - 1));
+        VALUE_TOO_DEEP.with(|f| f.set(true));
+        None
+    } else {
+        Some(ValueLevel(()))
+    }
+}
+
+/// Clear and return whether a walker on this thread hit the depth limit.
+pub fn take_value_too_deep() -> bool {
+    VALUE_TOO_DEEP.with(|f| f.replace(false))
+}
+
+/// The error for a value nested too deeply to process.
+pub fn value_too_deep_message() -> String {
+    format!(
+        "value nested too deeply (more than {} levels)",
+        MAX_VALUE_DEPTH
     )
 }
 

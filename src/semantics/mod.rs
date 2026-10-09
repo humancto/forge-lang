@@ -15,6 +15,10 @@
 //! make both engines call it. Never re-implement one of these rules inline in
 //! `interpreter/` or `vm/`.
 
+pub mod alloc;
+pub mod errors;
+pub mod types;
+
 /// Borrowed view of a binary-operator operand.
 #[derive(Clone, Copy, Debug)]
 pub enum Operand<'a> {
@@ -248,11 +252,65 @@ pub fn normalize_index(index: i64, len: usize) -> Option<usize> {
 }
 
 /// `container` is the lowercase container kind (`"array"`, `"tuple"`).
+/// The hint spells out the valid range, so off-by-one mistakes are obvious.
 pub fn index_out_of_bounds(index: i64, container: &str, len: usize) -> String {
+    let hint = if len == 0 {
+        format!("the {} is empty; check len() before indexing", container)
+    } else {
+        format!(
+            "valid indices are 0 to {} (or -{} to -1 from the end)",
+            len - 1,
+            len
+        )
+    };
     format!(
-        "index out of bounds: index {} on {} of length {}",
-        index, container, len
+        "index out of bounds: index {} on {} of length {}\n  hint: {}",
+        index, container, len, hint
     )
+}
+
+/// Calling a value that is not a function (`5()`, `null()`).
+pub fn not_callable(type_name: &str) -> String {
+    format!(
+        "cannot call a value of type {}\n  hint: only functions and lambdas can be called; check that the name is not shadowed by a variable",
+        errors::user_type_name(type_name)
+    )
+}
+
+/// Reading or writing `.field` on a value without fields. `type_name` is
+/// the engine's type name of the receiver.
+pub fn field_access(field: &str, type_name: &str) -> String {
+    if type_name == "Null" {
+        format!(
+            "cannot access field '{}' on Null\n  hint: the value is null here; it may come from a function without a `return`, a failed lookup or a missing argument; check it with `if x != null` first",
+            field
+        )
+    } else {
+        format!("cannot access field '{}' on {}", field, type_name)
+    }
+}
+
+/// Calling a method that a built-in type (String, Array, ...) lacks.
+pub fn no_method(method: &str, type_name: &str) -> String {
+    format!("no method '{}' on {}", method, type_name)
+}
+
+/// Reading a field an object does not have. `keys` are the object's
+/// fields (internal `__` fields are ignored). The hint suggests a close
+/// match, or lists the fields.
+pub fn no_field<'a>(field: &str, keys: impl IntoIterator<Item = &'a str>) -> String {
+    let mut keys: Vec<&str> = keys.into_iter().filter(|k| !k.starts_with("__")).collect();
+    keys.sort_unstable();
+    let hint = match errors::suggest_name(field, [keys.iter().copied()]) {
+        Some(similar) => format!("did you mean '{}'?", similar),
+        None if keys.is_empty() => "the object has no fields".to_string(),
+        None => {
+            let more = if keys.len() > 8 { ", ..." } else { "" };
+            let shown: Vec<&str> = keys.iter().copied().take(8).collect();
+            format!("available fields: {}{}", shown.join(", "), more)
+        }
+    };
+    format!("no field '{}' on object\n  hint: {}", field, hint)
 }
 
 pub fn missing_key(key: &str) -> String {
@@ -309,7 +367,26 @@ pub fn immutable_reassign(name: &str) -> String {
 }
 
 pub fn check_failed(displayed_value: &str) -> String {
-    format!("check failed: {} did not pass validation", displayed_value)
+    let shown = if displayed_value.is_empty() {
+        "\"\" (empty)"
+    } else {
+        displayed_value
+    };
+    format!("check failed: {} did not pass validation", shown)
+}
+
+/// A `match` (statement or expression) whose arms all failed to match.
+pub const NON_EXHAUSTIVE_MATCH: &str =
+    "non-exhaustive match: no arm matched the value\n  hint: add a `_ => ...` arm to handle every other value";
+
+/// `expr?` on a value that is not a Result.
+pub const TRY_REQUIRES_RESULT: &str =
+    "`?` expects a Result value (Ok(...) or Err(...))\n  hint: wrap the value in Ok(...), or use `?` only on calls that return a Result";
+
+/// An `Err` propagated with `?` out of the program's top level, where no
+/// caller can handle it. `shown` is the displayed error payload.
+pub fn unhandled_error(shown: &str) -> String {
+    format!("unhandled error: {}", shown)
 }
 
 /// `return` executed outside any function (top level of a program, inside
@@ -431,14 +508,218 @@ where
 /// the module is always in scope.
 pub const BUILTIN_MODULES: &[&str] = &[
     "math", "fs", "io", "crypto", "db", "pg", "env", "json", "regex", "log", "term", "http", "csv",
-    "exec", "time", "url", "toml", "npc", "ws", "jwt", "mysql", "os", "path",
+    "exec", "time", "url", "toml", "npc", "ws", "jwt", "mysql", "os", "path", "__types",
 ];
+
+/// Result of a built-in string method (see [`string_method`]), in a form
+/// each engine converts to its own value representation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrMethodValue {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+    Strs(Vec<String>),
+    Ints(Vec<i64>),
+    Null,
+}
+
+/// The built-in string methods (`s.upper()`, `s.chars()`, ...), shared by
+/// both engines. `index` is the integer argument of `char_at`.
+pub const STRING_METHODS: &[&str] = &[
+    "upper",
+    "lower",
+    "trim",
+    "trim_start",
+    "trim_end",
+    "len",
+    "chars",
+    "bytes",
+    "words",
+    "is_empty",
+    "is_numeric",
+    "is_alpha",
+    "is_alphanumeric",
+    "reverse",
+    "char_at",
+    "encode_uri",
+    "decode_uri",
+];
+
+/// Evaluate built-in string method `name` on `s`. `None` when `name` is
+/// not one of [`STRING_METHODS`].
+pub fn string_method(
+    s: &str,
+    name: &str,
+    index: Option<i64>,
+) -> Option<Result<StrMethodValue, String>> {
+    use StrMethodValue as V;
+    let strs = |it: &mut dyn Iterator<Item = String>| V::Strs(it.collect());
+    Some(Ok(match name {
+        "upper" => V::Str(s.to_uppercase()),
+        "lower" => V::Str(s.to_lowercase()),
+        "trim" => V::Str(s.trim().to_string()),
+        "trim_start" => V::Str(s.trim_start().to_string()),
+        "trim_end" => V::Str(s.trim_end().to_string()),
+        "len" => V::Int(s.chars().count() as i64),
+        "is_empty" => V::Bool(s.is_empty()),
+        "is_numeric" => V::Bool(
+            s.chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-'),
+        ),
+        "is_alpha" => V::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())),
+        "is_alphanumeric" => V::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphanumeric())),
+        "reverse" => V::Str(s.chars().rev().collect()),
+        "chars" => strs(&mut s.chars().map(|c| c.to_string())),
+        "bytes" => V::Ints(s.bytes().map(|b| b as i64).collect()),
+        "words" => strs(&mut s.split_whitespace().map(str::to_string)),
+        "char_at" => match index {
+            Some(i) if i >= 0 => s
+                .chars()
+                .nth(i as usize)
+                .map_or(V::Null, |c| V::Str(c.to_string())),
+            Some(_) => V::Null,
+            None => return Some(Err("char_at() requires an integer index".to_string())),
+        },
+        "encode_uri" => V::Str(
+            s.chars()
+                .map(|c| match c {
+                    'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+                    _ => format!("%{:02X}", c as u32),
+                })
+                .collect(),
+        ),
+        "decode_uri" => {
+            let mut result = String::new();
+            let mut chars = s.chars();
+            while let Some(c) = chars.next() {
+                if c == '%' {
+                    let hex: String = chars.by_ref().take(2).collect();
+                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        result.push(byte as char);
+                    } else {
+                        result.push('%');
+                        result.push_str(&hex);
+                    }
+                } else if c == '+' {
+                    result.push(' ');
+                } else {
+                    result.push(c);
+                }
+            }
+            V::Str(result)
+        }
+        _ => return None,
+    }))
+}
+
+/// Error for `contains()` arguments it cannot search (both engines).
+pub const CONTAINS_USAGE: &str =
+    "contains() requires (string, substring), (array, value), (object, key), or (map, key)";
+
+/// Most elements `range()` materializes. Larger ranges are a catchable
+/// error instead of a capacity-overflow panic or an out-of-memory abort.
+pub const MAX_RANGE_LEN: u64 = 100_000_000;
+
+/// Number of elements of `range(start, end)` (0 when `end <= start`), or
+/// the error both engines report when it exceeds [`MAX_RANGE_LEN`].
+pub fn range_len(start: i64, end: i64) -> Result<usize, String> {
+    let len = (end as i128 - start as i128).max(0) as u128;
+    if len > MAX_RANGE_LEN as u128 {
+        return Err(format!(
+            "range({}, {}): result too large ({} elements; the limit is {})",
+            start, end, len, MAX_RANGE_LEN
+        ));
+    }
+    Ok(len as usize)
+}
+
+/// Validate a user-supplied element/iteration count (`sample(xs, n)`,
+/// `slay(f, n)`): negative counts and counts above [`MAX_RANGE_LEN`] are
+/// errors rather than a capacity-overflow panic.
+pub fn checked_count(builtin: &str, n: i64) -> Result<usize, String> {
+    if n < 0 {
+        return Err(format!(
+            "{}() count must be non-negative, got {}",
+            builtin, n
+        ));
+    }
+    if n as u64 > MAX_RANGE_LEN {
+        return Err(format!(
+            "{}() count {} exceeds the limit of {}",
+            builtin, n, MAX_RANGE_LEN
+        ));
+    }
+    Ok(n as usize)
+}
+
+/// Largest string `repeat_str` / `pad_start` / `pad_end` build (1 GiB).
+pub const MAX_REPEAT_BYTES: usize = 1 << 30;
+
+/// Check that repeating a `byte_len`-byte string `n` times stays within
+/// [`MAX_REPEAT_BYTES`] (a huge count used to abort with a capacity
+/// overflow).
+pub fn check_repeat(builtin: &str, byte_len: usize, n: usize) -> Result<(), String> {
+    match byte_len.checked_mul(n) {
+        Some(total) if total <= MAX_REPEAT_BYTES => Ok(()),
+        _ => Err(format!(
+            "{}(): result too large (more than {} bytes)",
+            builtin, MAX_REPEAT_BYTES
+        )),
+    }
+}
+
+/// Seconds as a `Duration` for `wait`/`time.sleep`: negative and NaN mean
+/// zero, values too large for a `Duration` (including infinity) saturate to
+/// "forever" instead of panicking.
+pub fn seconds_f64(secs: f64) -> std::time::Duration {
+    std::time::Duration::try_from_secs_f64(secs.max(0.0)).unwrap_or(std::time::Duration::MAX)
+}
+
+/// `schedule every <n> <unit>` interval in seconds, saturating instead of
+/// overflowing for absurd `n`.
+pub fn schedule_interval_secs(n: u64, unit: &str) -> u64 {
+    match unit {
+        "minutes" => n.saturating_mul(60),
+        "hours" => n.saturating_mul(3600),
+        _ => n, // "seconds" or default
+    }
+}
+
+/// Deadline `secs` seconds after `now` for a `timeout` block. Saturates at
+/// a century, which outlives any program, rather than overflowing
+/// `Instant` (a panic) for absurd durations.
+pub fn timeout_deadline(now: crate::clock::Instant, secs: u64) -> crate::clock::Instant {
+    const CENTURY_SECS: u64 = 100 * 365 * 24 * 60 * 60;
+    let capped = std::time::Duration::from_secs(secs.min(CENTURY_SECS));
+    now.checked_add(capped).unwrap_or(now)
+}
 
 pub fn import_missing_name(path: &str, name: &str) -> String {
     format!(
         "import '{}' does not export '{}'\n  hint: only top-level `fn`, `let`, `type` and `struct` definitions can be imported",
         path, name
     )
+}
+
+/// `import { name } from "<module>"` for a built-in module: `Ok` when the
+/// module has that member (both engines then bind `name` to
+/// `module.name`), otherwise the same E0019 error as a missing file export.
+pub fn check_builtin_module_import(module: &str, name: &str) -> Result<(), String> {
+    let has_member = crate::builtins_registry::modules()
+        .iter()
+        .find(|m| m.name == module)
+        .is_some_and(|m| match (m.create)() {
+            crate::interpreter::Value::Object(members) => members.contains_key(name),
+            _ => false,
+        });
+    if has_member {
+        Ok(())
+    } else {
+        Err(format!(
+            "import '{}' does not export '{}'\n  hint: '{}' is a built-in module; check the member name (`{}.<name>`)",
+            module, name, module, module
+        ))
+    }
 }
 
 pub fn import_not_found(path: &str) -> String {
@@ -452,6 +733,44 @@ pub fn import_not_found(path: &str) -> String {
 mod tests {
     use super::*;
     use Operand::*;
+
+    #[test]
+    fn builtin_module_imports_check_members() {
+        assert_eq!(check_builtin_module_import("math", "sqrt"), Ok(()));
+        let err = check_builtin_module_import("math", "sqrtx").unwrap_err();
+        assert!(err.starts_with("import 'math' does not export 'sqrtx'"));
+        assert_eq!(crate::semantics::errors::classify(&err).code, "E0019");
+        // `exec` is accepted by `import "exec"` but has no members.
+        assert!(check_builtin_module_import("exec", "run_command").is_err());
+    }
+
+    #[test]
+    fn range_len_is_bounded() {
+        assert_eq!(range_len(0, 3), Ok(3));
+        assert_eq!(range_len(5, 2), Ok(0));
+        assert_eq!(range_len(-2, 2), Ok(4));
+        assert!(range_len(0, MAX_RANGE_LEN as i64).is_ok());
+        assert!(range_len(0, MAX_RANGE_LEN as i64 + 1).is_err());
+        let e = range_len(i64::MIN, i64::MAX).unwrap_err();
+        assert!(e.contains("limit"), "{e}");
+    }
+
+    #[test]
+    fn durations_saturate_instead_of_panicking() {
+        use std::time::{Duration, Instant};
+        assert_eq!(seconds_f64(1.5), Duration::from_millis(1500));
+        assert_eq!(seconds_f64(-3.0), Duration::ZERO);
+        assert_eq!(seconds_f64(f64::NAN), Duration::ZERO);
+        assert_eq!(seconds_f64(f64::INFINITY), Duration::MAX);
+        assert_eq!(seconds_f64(1e300), Duration::MAX);
+        assert_eq!(schedule_interval_secs(2, "minutes"), 120);
+        assert_eq!(schedule_interval_secs(2, "hours"), 7200);
+        assert_eq!(schedule_interval_secs(u64::MAX, "hours"), u64::MAX);
+        assert_eq!(schedule_interval_secs(7, "seconds"), 7);
+        let now = Instant::now();
+        assert_eq!(timeout_deadline(now, 2), now + Duration::from_secs(2));
+        assert!(timeout_deadline(now, u64::MAX) > now + Duration::from_secs(1 << 30));
+    }
 
     #[test]
     fn between_table() {
@@ -608,7 +927,16 @@ mod tests {
         assert_eq!(normalize_index(0, 0), None);
         assert_eq!(
             index_out_of_bounds(10, "array", 2),
-            "index out of bounds: index 10 on array of length 2"
+            "index out of bounds: index 10 on array of length 2\n  hint: valid indices are 0 to 1 (or -2 to -1 from the end)"
+        );
+        assert!(index_out_of_bounds(0, "array", 0).contains("the array is empty"));
+        assert_eq!(
+            no_field("nmae", ["name", "__type__"]),
+            "no field 'nmae' on object\n  hint: did you mean 'name'?"
+        );
+        assert_eq!(
+            no_field("zzz", ["b", "a"]),
+            "no field 'zzz' on object\n  hint: available fields: a, b"
         );
     }
 

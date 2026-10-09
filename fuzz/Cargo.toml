@@ -1,0 +1,57 @@
+[package]
+name = "forge-lang-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1"
+
+[dependencies.forge-lang]
+path = ".."
+# The JIT is part of the default VM; keep the database drivers out of the
+# fuzz build (they add nothing the targets reach).
+default-features = false
+features = ["host", "jit"]
+
+# Keep this crate out of any parent workspace (cargo-fuzz convention).
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compile"
+path = "fuzz_targets/compile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytecode"
+path = "fuzz_targets/bytecode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false

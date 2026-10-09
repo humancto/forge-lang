@@ -1,0 +1,7 @@
+// VM benchmark: `repeat n times` at the top level (counting-loop codegen;
+// top-level code is never JIT-compiled).
+let mut total = 0
+repeat 5000000 times {
+    total = total + 3
+}
+println(total)

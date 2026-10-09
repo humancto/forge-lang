@@ -199,6 +199,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         }
 
         "term.confirm" => {
+            // Like input()/io.prompt: without `process` the host's stdin is
+            // an empty stream (no prompt, no read), so a sandboxed script can
+            // never block on or consume it.
+            if !crate::permissions::host_stdin_allowed() {
+                return Ok(Value::Bool(false));
+            }
             let prompt = args
                 .first()
                 .map(|v| format!("{}", v))
@@ -285,7 +291,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             for i in (1..=secs).rev() {
                 crate::color::ceprint!("\r  {} ", i);
                 std::io::stderr().flush().ok();
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                crate::clock::sleep(std::time::Duration::from_secs(1));
             }
             crate::color::ceprintln!("\r  Go! 🚀");
             Ok(Value::Null)
@@ -319,13 +325,14 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             for ch in text.chars() {
                 crate::color::ceprint!("{}", ch);
                 std::io::stderr().flush().ok();
-                std::thread::sleep(std::time::Duration::from_millis(delay));
+                crate::clock::sleep(std::time::Duration::from_millis(delay));
             }
             crate::color::ceprintln!();
             Ok(Value::Null)
         }
 
         "term.menu" => match args.first() {
+            Some(Value::Array(_)) if !crate::permissions::host_stdin_allowed() => Ok(Value::Null),
             Some(Value::Array(options)) => {
                 let prompt = args
                     .get(1)

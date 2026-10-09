@@ -17,6 +17,8 @@ forge -e 'println(1 + 2)'        # evaluate inline
 forge test                       # run @test functions in tests/*.fg
 forge build --native app.fg      # native executable (also: fmt, new, lsp, add, install)
 forge mcp --allow-net=api.x.com  # MCP server: AI agents run Forge in a deny-all sandbox
+forge mcp serve tools.fg         # serve @tool functions as MCP tools
+forge run --max-fuel 1000000 --max-memory 64MB f.fg  # deterministic step budget + memory cap ("fuel exhausted" / "memory limit exceeded", not catchable)
 ```
 
 Engine flags go BEFORE the subcommand: `forge --interp run x.fg`, not `forge run x.fg --interp`. Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `+=`.
@@ -45,6 +47,19 @@ println(10 / 4)               // 2 (Int / Int is integer division)
 ```
 
 Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines.
+
+## Type annotations and checking
+
+Annotation syntax: `Int`, `[Int]`, `?String` (or `Option<String>`), `Result<Int, String>`, `Map<String, Int>`, `Set<Int>`, `(Int, String)`, `fn(Int, Int) -> Bool`, `Any`, user structs/types, generics `fn first<T>(xs: [T]) -> T`, `struct Box<T> { value: T }`.
+
+```forge
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { return f(x) }
+let twice: fn(Int) -> Int = fn(n) { n * 2 }   // n inferred as Int
+let names = ["ada", "bob"]
+let lens = map(names, fn(s) { len(s) })        // lens: [Int]
+```
+
+Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition. Default: warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
 
 ## Control flow
 
@@ -226,14 +241,29 @@ try {
 }
 ```
 
-There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `must expr` (both are catchable). `?` only works on `Result` values. `safe { ... }` runs a block and swallows its errors.
+There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `must expr` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. `safe { ... }` runs a block and swallows its errors.
+
+Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0018`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+
+```forge
+try {
+    let xs = [1, 2, 3]
+    println(xs[5])
+} catch e {
+    println(e.code)          // E0009
+}
+```
 
 ## Modules
 
 ```forge
 import { double, shout } from "utils.fg"   // selected names
 println(double(21))
+import { sqrt, pi } from "math"            // members of a built-in module
+println(sqrt(16))                          // math.* stays available too
 ```
+
+Native plugins (Rust/C shared libraries built with `crates/forge-plugin`): `import native "target/release/libfoo" as foo` then `foo.add(1, 2)`, or `import { add } from native "path/libfoo"`. The platform suffix is added; paths resolve like `.fg` imports. Needs `--allow-ffi` (full trust; denied under `--sandbox` and `forge mcp`). Plugin errors are catchable runtime errors.
 
 `import "utils.fg"` brings every top-level name into scope. Paths resolve relative to the current working directory, then `forge_modules/<name>/main.fg`. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
 
@@ -348,6 +378,8 @@ println(await_timeout(t, 10))  // null on timeout (milliseconds)
 
 Also: `try_send`, `try_receive`, `select(channels, timeout_ms?)`, `close(ch)`.
 
+Tasks communicate through return values (`squad` results, `await`) and channels. Do not mutate captured variables from inside `spawn` and expect the parent to see it: the default VM gives each task its own copy (the `--interp` engine shares closure state).
+
 ## HTTP server
 
 ```forge
@@ -369,11 +401,31 @@ fn echo(body: Json) -> Json {
 }
 ```
 
-Handler parameters bind by name: path params (`:name`), `body`/`data` (parsed JSON body), `query`/`qs` (all query params), or a single query param by its name. Return an object to send JSON. Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. Server programs always run on the interpreter (automatic).
+Handler parameters bind by name: path params (`:name`), `body`/`data` (parsed JSON body), `query`/`qs` (all query params), or a single query param by its name. Return an object to send JSON. Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. Server programs run on the bytecode VM by default (`forge --interp run` serves on the interpreter; responses are identical). Unknown decorators or non-literal `@server` arguments make the program fall back to the interpreter automatically.
 
 ## Tests
 
 Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and run `forge test` (`forge --allow-run test` if tests use the shell).
+
+## MCP tools (forge mcp serve)
+
+`forge mcp serve tools.fg` serves the file's `@tool` functions to AI agents over the Model Context Protocol. Parameter types become the JSON Schema (`Int` integer, `Float` number, `String`, `Bool`, `[T]` array, `Object`/`Map<String, T>` object, a struct object, `?T`/`Option<T>` or a default make it optional); the return type becomes the output schema (`Result<T, E>` describes `T`).
+
+```
+struct Report { city: String, temp_c: Float }
+
+@tool(description: "Weather for a city (sample data)", read_only: true)
+@param(city: "City name")
+fn weather(city: String, unit: String = "C") -> Result<Report, String> {
+    if city == "Oslo" { return Ok(Report { city: "Oslo", temp_c: -3.0 }) }
+    return Err("unknown city: " + city)
+}
+
+@resource(uri: "weather://cities", description: "Known cities")
+fn cities() { return ["Oslo"] }
+```
+
+`@tool` needs a description (`@tool("...")` also works); optional `name`, `title`, `timeout` (seconds), `read_only`, `destructive`, `idempotent`, `open_world`. `@param(name: "doc", ...)` documents parameters. Decorator arguments must be constants. Return `Err(msg)` for a tool error. The top level runs once at start-up; each call runs in a fresh sandboxed fork of it (deny-all plus the server's `--allow-*` grants, `--max-time`), so calls never share state. With plain `forge mcp`, `run_forge` takes an optional `session_id` that keeps top-level variables between calls; `reset_session` clears it.
 
 ## Common mistakes
 
@@ -391,4 +443,4 @@ Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and
 
 ## Engine notes (v0.9.x)
 
-The default bytecode VM and the reference interpreter run the full Forge test suite identically; `cargo test --test engine_diff` gates every example and fixture on both. Programs the VM compiler cannot handle, and `@server` programs, fall back to the interpreter automatically. Force the interpreter with `forge --interp run`.
+The default bytecode VM and the reference interpreter run the full Forge test suite identically; `cargo test --test engine_diff` gates every example and fixture on both. Programs the VM compiler cannot handle fall back to the interpreter automatically; `@server` programs are served by the VM. Force the interpreter with `forge --interp run`.

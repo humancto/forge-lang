@@ -83,6 +83,10 @@ pub struct Compiler {
     /// `0` for the line picks up a real source span instead.
     current_line: usize,
     current_col: usize,
+    /// Set when a branch distance did not fit the 16-bit sBx operand. The
+    /// branch is left as a placeholder and the function fails to compile in
+    /// `check_branches` (instead of silently jumping to the wrong place).
+    branch_overflow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +154,7 @@ impl Compiler {
             module_globals: HashSet::new(),
             current_line: 0,
             current_col: 0,
+            branch_overflow: false,
         }
     }
 
@@ -184,6 +189,7 @@ impl Compiler {
     /// captures that had to go through this compiler, mark captured locals
     /// and register the prototype. Returns the prototype index.
     fn finish_child(&mut self, mut fc: Compiler) -> Result<u16, CompileError> {
+        fc.check_branches()?;
         for (uv_idx, name) in std::mem::take(&mut fc.pending_captures) {
             let source = self.capture_for_child(&name).ok_or_else(|| {
                 CompileError::new(&format!("internal: cannot resolve captured '{}'", name))
@@ -317,13 +323,31 @@ impl Compiler {
 
     fn patch_jump(&mut self, offset: usize) {
         let target = self.chunk.code_len();
-        self.chunk.patch_jump(offset, target);
+        if !self.chunk.patch_jump(offset, target) {
+            self.branch_overflow = true;
+        }
     }
 
     fn emit_loop(&mut self, loop_start: usize, line: usize) {
         let current = self.chunk.code_len();
-        let offset = -(current as i16 - loop_start as i16) - 1;
+        let offset = branch_offset(current, loop_start).unwrap_or_else(|| {
+            self.branch_overflow = true;
+            0
+        });
         self.emit(encode_asbx(OpCode::Loop, 0, offset), line);
+    }
+
+    /// Fail when a branch in this function did not fit the 16-bit offset
+    /// (see `branch_overflow`). Called once a function's code is complete.
+    fn check_branches(&self) -> Result<(), CompileError> {
+        if self.branch_overflow {
+            return Err(CompileError::new(&format!(
+                "function '{}' is too large: a jump spans more than {} instructions. Try splitting it into smaller functions.",
+                self.chunk.name,
+                i16::MAX
+            )));
+        }
+        Ok(())
     }
 
     fn const_str(&mut self, s: &str) -> u16 {
@@ -454,6 +478,41 @@ impl Compiler {
         None
     }
 
+    /// For a name compiled as a global read: the closest local or captured
+    /// variable visible here (innermost block first, then enclosing
+    /// functions), recorded in `Chunk::global_hints` so an "undefined
+    /// variable" error can say "did you mean ...?" like the interpreter,
+    /// whose environment still holds those names at run time. Builtins and
+    /// stdlib modules always exist, so they need no hint.
+    fn visible_name_hint(&self, name: &str) -> Option<String> {
+        if crate::builtins_registry::global(name).is_some()
+            || crate::semantics::BUILTIN_MODULES.contains(&name)
+        {
+            return None;
+        }
+        let mut depths: Vec<usize> = self.locals.iter().map(|l| l.depth).collect();
+        depths.sort_unstable_by(|a, b| b.cmp(a));
+        depths.dedup();
+        let mut groups: Vec<Vec<&str>> = depths
+            .iter()
+            .map(|d| {
+                self.locals
+                    .iter()
+                    .filter(|l| l.depth == *d)
+                    .map(|l| l.name.as_str())
+                    .collect()
+            })
+            .collect();
+        let mut enclosing: Vec<&str> = self.upvalues.iter().map(|u| u.name.as_str()).collect();
+        enclosing.extend(self.parent_locals.iter().map(|(n, _, _)| n.as_str()));
+        enclosing.extend(self.parent_upvalues.iter().map(|(n, _, _)| n.as_str()));
+        enclosing.extend(self.outer_names.iter().map(String::as_str));
+        enclosing.sort_unstable();
+        enclosing.dedup();
+        groups.push(enclosing);
+        crate::semantics::errors::suggest_name(name, groups)
+    }
+
     fn resolve_upvalue(&self, name: &str) -> Option<u8> {
         for (i, uv) in self.upvalues.iter().enumerate() {
             if uv.name == name {
@@ -548,6 +607,8 @@ pub fn compile_with(program: &Program, options: &CompileOptions) -> Result<Chunk
     let mut c = Compiler::new("<main>");
     c.base_dir = options.base_dir.clone();
     compile_top_level(&mut c, program)?;
+    c.check_branches()?;
+    super::verify::debug_verify_compiled(&c.chunk);
     Ok(c.chunk)
 }
 
@@ -567,6 +628,8 @@ pub fn compile_module_with(
         c.module_globals = module_top_level_names(program);
     }
     compile_top_level(&mut c, program)?;
+    c.check_branches()?;
+    super::verify::debug_verify_compiled(&c.chunk);
     Ok(c.chunk)
 }
 
@@ -599,6 +662,8 @@ pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
         c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
     }
     c.chunk.max_registers = c.max_register;
+    c.check_branches()?;
+    super::verify::debug_verify_compiled(&c.chunk);
     Ok(c.chunk)
 }
 
@@ -615,6 +680,97 @@ fn is_output_expr(expr: &Expr) -> bool {
                     )
             )
     )
+}
+
+/// `for v in range(a)` / `range(a, b)` (also `repeat n times`): the shape
+/// `compile_for_range` turns into a counting loop.
+fn is_range_call(function: &Expr, args: &[Expr]) -> bool {
+    matches!(function, Expr::Ident(name) if name == "range")
+        && (1..=2).contains(&args.len())
+        && !args.iter().any(|a| matches!(a, Expr::Spread(_)))
+}
+
+/// Counting loop for `for var in range(..)`; see `vm::range_loop` for the
+/// code shape and why it is exact. The callee and arguments are evaluated
+/// once, in source order, exactly as for the call; whether the counting
+/// path applies is decided at run time by `ForRangePrep`.
+fn compile_for_range(
+    c: &mut Compiler,
+    var: &str,
+    range_fn: &Expr,
+    args: &[Expr],
+    body: &[SpannedStmt],
+) -> Result<(), CompileError> {
+    let saved = c.next_register;
+    // R(f) = callee / counter / iterable, R(f+1) = arg / end / index.
+    let f = c.alloc_reg()?;
+    compile_expr(c, range_fn, f)?;
+    for arg in args {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+    }
+    // A one-argument call still needs R(f+1) for the end / index.
+    while c.next_register < f + 2 {
+        c.alloc_reg()?;
+    }
+    let argc = args.len() as u8;
+    let mode = c.alloc_reg()?;
+    c.emit(encode_abc(OpCode::ForRangePrep, f, argc, mode), 0);
+    let to_fast = c.emit_jump(OpCode::JumpIfTrue, mode, 0);
+
+    // Generic path: call the callee and iterate whatever it returns.
+    c.emit(encode_abc(OpCode::Call, f, argc, f), 0);
+    let zero = c.const_int(0);
+    c.emit(encode_abx(OpCode::LoadConst, f + 1, zero), 0);
+    let generic_head = c.chunk.code_len();
+
+    // Each iteration gets a fresh binding (see the generic `for`).
+    c.push_loop(generic_head, false);
+    c.begin_scope();
+    let var_reg = c.add_local(var, false)?;
+    let cond = c.alloc_reg()?;
+    c.emit(encode_abc(OpCode::IterHas, cond, f, f + 1), 0);
+    let generic_exit = c.emit_jump(OpCode::JumpIfFalse, cond, 0);
+    c.free_to(cond);
+    c.emit(encode_abc(OpCode::IterGet, var_reg, f, f + 1), 0);
+    let generic_to_body = c.emit_jump(OpCode::Jump, 0, 0);
+
+    // Counting path.
+    c.patch_jump(to_fast);
+    let fast_head = c.chunk.code_len();
+    c.emit(encode_abc(OpCode::ForRangeNext, f, var_reg, 0), 0);
+    let fast_exit = c.emit_jump(OpCode::Jump, 0, 0);
+
+    c.patch_jump(generic_to_body);
+    for s in body {
+        c.set_span(s);
+        compile_stmt(c, &s.stmt)?;
+    }
+    c.end_scope();
+
+    let continue_jumps = c
+        .loops
+        .last_mut()
+        .and_then(|ctx| ctx.continue_jumps.take())
+        .unwrap_or_default();
+    for jump in continue_jumps {
+        c.patch_jump(jump);
+    }
+    let to_generic_step = c.emit_jump(OpCode::JumpIfFalse, mode, 0);
+    c.emit_loop(fast_head, 0);
+    c.patch_jump(to_generic_step);
+    let one = c.const_int(1);
+    let one_reg = c.alloc_reg()?;
+    c.emit(encode_abx(OpCode::LoadConst, one_reg, one), 0);
+    c.emit(encode_abc(OpCode::Add, f + 1, f + 1, one_reg), 0);
+    c.free_to(one_reg);
+    c.emit_loop(generic_head, 0);
+
+    c.patch_jump(generic_exit);
+    c.patch_jump(fast_exit);
+    c.pop_loop()?;
+    c.free_to(saved);
+    Ok(())
 }
 
 fn compile_hidden_call(
@@ -1001,9 +1157,25 @@ fn try_compile_mutating_call(
     }
     let saved = c.next_register;
     let pair_reg = c.alloc_reg()?;
-    let mut lowered = vec![receiver.clone(), Expr::StringLit(method.to_string())];
-    lowered.extend(args.iter().cloned());
-    compile_hidden_call(c, "__forge_method_mut", lowered, pair_reg)?;
+    // Arguments first, receiver last (like the interpreter): an argument
+    // may itself update the variable (`out.push(f())` where `f` pushes to
+    // a captured `out`), and reading the receiver first would discard that
+    // update when the result is stored back (found by the differential
+    // fuzzer).
+    let mut arg_regs = Vec::with_capacity(args.len() + 2);
+    let recv_reg = c.alloc_reg()?;
+    let method_reg = c.alloc_reg()?;
+    arg_regs.push(recv_reg);
+    arg_regs.push(method_reg);
+    for arg in args {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+        arg_regs.push(r);
+    }
+    compile_expr(c, receiver, recv_reg)?;
+    let method_idx = c.const_str(method);
+    c.emit(encode_abx(OpCode::LoadConst, method_reg, method_idx), 0);
+    compile_hidden_call_from_regs(c, "__forge_method_mut", &arg_regs, pair_reg)?;
     let idx_reg = c.alloc_reg()?;
     let new_value_reg = c.alloc_reg()?;
     let zero = c.const_int(0);
@@ -1197,6 +1369,7 @@ fn compile_match(
         c.emit(encode_abc(OpCode::LoadNull, dst, 0, 0), 0);
     }
     let mut end_jumps = Vec::new();
+    let mut has_catch_all = false;
 
     for arm in arms {
         match &arm.pattern {
@@ -1204,6 +1377,7 @@ fn compile_match(
                 c.begin_scope();
                 compile_arm_body(c, &arm.body, dst)?;
                 c.end_scope();
+                has_catch_all = true;
                 break;
             }
             Pattern::Binding(name) => {
@@ -1276,6 +1450,13 @@ fn compile_match(
                 c.patch_jump(skip);
             }
         }
+    }
+    if !has_catch_all {
+        // Every arm's test failed: same error as the interpreter (E0026).
+        let msg = c.alloc_reg()?;
+        let idx = c.const_str(crate::semantics::NON_EXHAUSTIVE_MATCH);
+        c.emit(encode_abx(OpCode::LoadConst, msg, idx), 0);
+        compile_hidden_call_from_regs(c, "__forge_raise_error", &[msg], msg)?;
     }
     for ej in end_jumps {
         c.patch_jump(ej);
@@ -1649,6 +1830,20 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::For {
             var,
+            var2: None,
+            iterable:
+                Expr::Call {
+                    function: range_fn,
+                    args: range_args,
+                },
+            body,
+            ..
+        } if is_range_call(range_fn, range_args) => {
+            compile_for_range(c, var, range_fn, range_args, body)
+        }
+
+        Stmt::For {
+            var,
             var2,
             iterable,
             body,
@@ -1824,10 +2019,16 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             )
         }
 
-        Stmt::DecoratorStmt(decorator) => Err(CompileError::unsupported(&format!(
-            "standalone decorator '@{}' (decorator-driven runtime features)",
-            decorator.name
-        ))),
+        // `@server(port: 8080, ...)` with literal arguments is pure metadata:
+        // the host runtime reads it from the AST (`runtime::metadata`) for
+        // both engines, so there is nothing to execute. Anything else keeps
+        // the program on the interpreter.
+        Stmt::DecoratorStmt(decorator) => {
+            match crate::runtime::metadata::vm_unsupported_decorator(decorator, true) {
+                None => Ok(()),
+                Some(issue) => Err(CompileError::unsupported(&issue)),
+            }
+        }
 
         Stmt::StructDef { name, fields, .. } => compile_hidden_stmt(
             c,
@@ -2224,6 +2425,25 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
         Stmt::Import { path, names } => {
             if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                // `import { sqrt } from "math"` binds `math.sqrt`, as in the
+                // interpreter.
+                if let Some(name_list) = names {
+                    for name in name_list {
+                        crate::semantics::check_builtin_module_import(path, name)
+                            .map_err(|m| CompileError::new(&m))?;
+                    }
+                    let module_reg = c.alloc_reg()?;
+                    let module_idx = c.const_str(&c.global_name(path));
+                    c.emit(encode_abx(OpCode::GetGlobal, module_reg, module_idx), 0);
+                    for name in name_list {
+                        let local_reg = c.add_local(name, false)?;
+                        emit_get_field(c, local_reg, module_reg, name)?;
+                        if c.scope_depth == 1 {
+                            let name_idx = c.const_str(&c.global_name(name));
+                            c.emit(encode_abx(OpCode::SetGlobal, local_reg, name_idx), 0);
+                        }
+                    }
+                }
                 return Ok(());
             }
 
@@ -2262,6 +2482,55 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     // looks them up by name).
                     let name_idx = c.const_str(&c.global_name(&name));
                     c.emit(encode_abx(OpCode::SetGlobal, local_reg, name_idx), 0);
+                }
+            }
+            Ok(())
+        }
+
+        Stmt::ImportNative { path, binding } => {
+            // Loading happens at run time in the shared `plugins::import`
+            // (resolution, `ffi` check, registry); the bound names are known
+            // now, so they compile to ordinary locals.
+            let base_dir = c
+                .base_dir
+                .as_ref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            let names_arg = match binding {
+                NativeBinding::Names(names) => Expr::Array(
+                    names
+                        .iter()
+                        .map(|name| Expr::StringLit(name.clone()))
+                        .collect(),
+                ),
+                NativeBinding::Namespace(_) => Expr::Bool(false),
+            };
+            let import_args = vec![
+                Expr::StringLit(path.clone()),
+                Expr::StringLit(base_dir),
+                names_arg,
+            ];
+            let namespace_reg = c.alloc_reg()?;
+            compile_hidden_call(c, "__forge_import_native", import_args, namespace_reg)?;
+            let bind_global = |c: &mut Compiler, name: &str, reg: u8| {
+                if c.scope_depth == 1 {
+                    // Top-level imports are also globals, as in the interpreter.
+                    let name_idx = c.const_str(&c.global_name(name));
+                    c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                }
+            };
+            match binding {
+                NativeBinding::Namespace(alias) => {
+                    let local_reg = c.add_local(alias, false)?;
+                    c.emit(encode_abc(OpCode::Move, local_reg, namespace_reg, 0), 0);
+                    bind_global(c, alias, local_reg);
+                }
+                NativeBinding::Names(names) => {
+                    for name in names {
+                        let local_reg = c.add_local(name, false)?;
+                        emit_get_field(c, local_reg, namespace_reg, name)?;
+                        bind_global(c, name, local_reg);
+                    }
                 }
             }
             Ok(())
@@ -2318,7 +2587,11 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 c.emit(encode_abc(OpCode::GetUpvalue, dst, uv_idx, 0), 0);
             } else {
                 let idx = c.const_str(&c.global_name(name));
+                let pc = c.chunk.code.len();
                 c.emit(encode_abx(OpCode::GetGlobal, dst, idx), 0);
+                if let Some(hint) = c.visible_name_hint(name) {
+                    c.chunk.global_hints.push((pc, hint));
+                }
             }
         }
         Expr::BinOp { left, op, right } => {

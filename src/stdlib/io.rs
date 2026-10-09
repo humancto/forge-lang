@@ -24,6 +24,17 @@ pub fn create_module() -> Value {
     Value::Object(m)
 }
 
+/// The host process's command line. Like stdin it belongs to the host:
+/// without the `process` capability (embedders, `forge mcp`) a script sees
+/// no arguments, so it cannot read secrets passed on the host's command line.
+fn host_args() -> Vec<String> {
+    if crate::permissions::require(crate::permissions::Capability::Process, "args").is_ok() {
+        std::env::args().collect()
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "io.prompt" => {
@@ -32,7 +43,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             }
             let prompt_text = args.first().map(|v| format!("{}", v)).unwrap_or_default();
             use std::io::Write;
-            print!("{}", prompt_text);
+            crate::runtime::stdio::out(&prompt_text);
             std::io::stdout().flush().ok();
             let mut input = String::new();
             std::io::stdin()
@@ -42,15 +53,15 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         }
         "io.print" => {
             let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
-            print!("{}", text.join(" "));
+            crate::runtime::stdio::out(&text.join(" "));
             Ok(Value::Null)
         }
         "io.args" => {
-            let args: Vec<Value> = std::env::args().map(Value::String).collect();
+            let args: Vec<Value> = host_args().into_iter().map(Value::String).collect();
             Ok(Value::Array(args))
         }
         "io.args_parse" => {
-            let cli_args: Vec<String> = std::env::args().collect();
+            let cli_args: Vec<String> = host_args();
             let mut result = IndexMap::new();
             let mut i = 0;
             while i < cli_args.len() {
@@ -75,7 +86,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Some(Value::String(s)) => s.clone(),
                 _ => return Err("io.args_get() requires a flag string".to_string()),
             };
-            let cli_args: Vec<String> = std::env::args().collect();
+            let cli_args: Vec<String> = host_args();
             for (i, arg) in cli_args.iter().enumerate() {
                 if *arg == flag {
                     if i + 1 < cli_args.len() && !cli_args[i + 1].starts_with("--") {
@@ -91,7 +102,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Some(Value::String(s)) => s.clone(),
                 _ => return Err("io.args_has() requires a flag string".to_string()),
             };
-            let cli_args: Vec<String> = std::env::args().collect();
+            let cli_args: Vec<String> = host_args();
             Ok(Value::Bool(cli_args.contains(&flag)))
         }
         _ => Err(format!("unknown io function: {}", name)),

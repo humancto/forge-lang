@@ -50,9 +50,47 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
 }
 
 impl Interpreter {
+    /// `range(start, end)` must not build more elements than the size cap
+    /// allows (`runtime::limits`); checked before allocating anything.
+    fn check_range_len(&self, start: i64, end: i64) -> Result<(), RuntimeError> {
+        let len = (end as i128 - start as i128).max(0);
+        self.caps
+            .check_collection(usize::try_from(len).unwrap_or(usize::MAX))
+            .map_err(|m| RuntimeError::new(&m))
+    }
+
+    /// Call builtin `name`. Argument errors raised by the builtin itself
+    /// are annotated with the argument types (`len() requires ... (got
+    /// Int)`), exactly as the VM does (`semantics::errors`).
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        crate::builtins_registry::warn_if_deprecated(name);
+        let mut types = [""; crate::semantics::errors::MAX_ANNOTATED_ARGS];
+        let argc = args.len().min(crate::semantics::errors::MAX_ANNOTATED_ARGS);
+        for (slot, arg) in types.iter_mut().zip(&args) {
+            *slot = crate::semantics::errors::user_type_name(arg.type_name());
+        }
+        self.call_builtin_unannotated(name, args).map_err(|mut e| {
+            if let Some(message) =
+                crate::semantics::errors::annotate_builtin_error(name, &e.message, &types[..argc])
+            {
+                e.message = message;
+            }
+            e
+        })
+    }
+
+    fn call_builtin_unannotated(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
         crate::builtins_registry::check_arity(name, args.len())
             .map_err(|e| RuntimeError::new(&e))?;
+        // Native plugin functions (`import native`) share one implementation
+        // with the VM.
+        if crate::plugins::is_plugin_fn(name) {
+            return crate::plugins::call(name, args).map_err(|e| RuntimeError::new(&e));
+        }
         match name {
             "print" => {
                 let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
@@ -281,10 +319,18 @@ impl Interpreter {
             },
             "range" => match (args.first(), args.get(1)) {
                 (Some(Value::Int(start)), Some(Value::Int(end))) => {
-                    Ok(Value::Array((*start..*end).map(Value::Int).collect()))
+                    self.check_range_len(*start, *end)?;
+                    Ok(Value::Array(
+                        crate::semantics::alloc::int_range(*start, *end, "range()", Value::Int)
+                            .map_err(|e| RuntimeError::new(&e))?,
+                    ))
                 }
                 (Some(Value::Int(end)), None) => {
-                    Ok(Value::Array((0..*end).map(Value::Int).collect()))
+                    self.check_range_len(0, *end)?;
+                    Ok(Value::Array(
+                        crate::semantics::alloc::int_range(0, *end, "range()", Value::Int)
+                            .map_err(|e| RuntimeError::new(&e))?,
+                    ))
                 }
                 _ => Err(RuntimeError::new("range() requires integer arguments")),
             },
@@ -487,14 +533,14 @@ impl Interpreter {
             }
             "wait" => match args.first() {
                 Some(Value::Int(secs)) => {
-                    let total_ms = ((*secs).max(0) as u64) * 1000;
+                    let total_ms = ((*secs).max(0) as u64).saturating_mul(1000);
                     let mut elapsed = 0u64;
                     while elapsed < total_ms {
-                        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        if self.is_cancelled() {
                             return Err(RuntimeError::new("cancelled"));
                         }
                         let chunk = std::cmp::min(100, total_ms - elapsed);
-                        std::thread::sleep(std::time::Duration::from_millis(chunk));
+                        crate::clock::sleep(std::time::Duration::from_millis(chunk));
                         elapsed += chunk;
                     }
                     Ok(Value::Null)
@@ -503,11 +549,11 @@ impl Interpreter {
                     let total_ms = (secs.max(0.0) * 1000.0) as u64;
                     let mut elapsed = 0u64;
                     while elapsed < total_ms {
-                        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        if self.is_cancelled() {
                             return Err(RuntimeError::new("cancelled"));
                         }
                         let chunk = std::cmp::min(100, total_ms - elapsed);
-                        std::thread::sleep(std::time::Duration::from_millis(chunk));
+                        crate::clock::sleep(std::time::Duration::from_millis(chunk));
                         elapsed += chunk;
                     }
                     Ok(Value::Null)
@@ -569,15 +615,23 @@ impl Interpreter {
                 };
                 match ch {
                     Value::Channel(inner) => {
-                        if let Ok(guard) = inner.rx.lock() {
-                            if let Some(ref receiver) = *guard {
-                                match receiver.recv() {
-                                    Ok(val) => return Ok(val),
-                                    Err(_) => return Ok(Value::Null),
-                                }
-                            }
-                        }
-                        Ok(Value::Null)
+                        // Block until a value arrives or the channel closes,
+                        // but stay cancellable (host deadline / squad).
+                        let inner = inner.clone();
+                        self.wait_cancellable(|slice| match inner.rx.lock() {
+                            Ok(guard) => match guard.as_ref() {
+                                Some(receiver) => match crate::clock::recv_timeout(receiver, slice)
+                                {
+                                    Ok(val) => Some(val),
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                        Some(Value::Null)
+                                    }
+                                },
+                                None => Some(Value::Null),
+                            },
+                            Err(_) => Some(Value::Null),
+                        })
                     }
                     _ => Err(RuntimeError::new(
                         "receive() requires a channel as first argument",
@@ -953,7 +1007,9 @@ impl Interpreter {
                         Some(Value::Int(n)) => (*n as usize).min(chars.len()),
                         _ => chars.len(),
                     };
-                    if start > chars.len() {
+                    // `end` is clamped to the length, so this also covers a
+                    // start past the end (and `start > end`, which used to panic).
+                    if start >= end {
                         return Ok(Value::String(String::new()));
                     }
                     Ok(Value::String(chars[start..end].iter().collect()))
@@ -995,14 +1051,22 @@ impl Interpreter {
                         Some(Value::String(c)) => c.chars().next().unwrap_or(' '),
                         _ => ' ',
                     };
-                    let target = *target_len as usize;
+                    // A negative length pads nothing (it used to wrap to a
+                    // huge usize and abort the process).
+                    let target = usize::try_from(*target_len).unwrap_or(0);
+                    self.caps
+                        .check_string(target)
+                        .map_err(|m| RuntimeError::new(&m))?;
                     let char_count = s.chars().count();
                     if char_count >= target {
                         Ok(Value::String(s.clone()))
                     } else {
-                        let padding: String = std::iter::repeat(pad_char)
-                            .take(target - char_count)
-                            .collect();
+                        let padding = crate::semantics::alloc::padding(
+                            pad_char,
+                            target - char_count,
+                            "pad_start()",
+                        )
+                        .map_err(|e| RuntimeError::new(&e))?;
                         Ok(Value::String(format!("{}{}", padding, s)))
                     }
                 }
@@ -1014,14 +1078,22 @@ impl Interpreter {
                         Some(Value::String(c)) => c.chars().next().unwrap_or(' '),
                         _ => ' ',
                     };
-                    let target = *target_len as usize;
+                    // A negative length pads nothing (it used to wrap to a
+                    // huge usize and abort the process).
+                    let target = usize::try_from(*target_len).unwrap_or(0);
+                    self.caps
+                        .check_string(target)
+                        .map_err(|m| RuntimeError::new(&m))?;
                     let char_count = s.chars().count();
                     if char_count >= target {
                         Ok(Value::String(s.clone()))
                     } else {
-                        let padding: String = std::iter::repeat(pad_char)
-                            .take(target - char_count)
-                            .collect();
+                        let padding = crate::semantics::alloc::padding(
+                            pad_char,
+                            target - char_count,
+                            "pad_end()",
+                        )
+                        .map_err(|e| RuntimeError::new(&e))?;
                         Ok(Value::String(format!("{}{}", s, padding)))
                     }
                 }
@@ -1068,7 +1140,12 @@ impl Interpreter {
                     if *n < 0 {
                         return Err(RuntimeError::new("repeat_str() count must be non-negative"));
                     }
-                    Ok(Value::String(s.repeat(*n as usize)))
+                    self.caps
+                        .check_string(s.len().saturating_mul(*n as usize))
+                        .map_err(|m| RuntimeError::new(&m))?;
+                    crate::semantics::alloc::repeat_str(s, *n as usize, "repeat_str()")
+                        .map(Value::String)
+                        .map_err(|e| RuntimeError::new(&e))
                 }
                 _ => Err(RuntimeError::new("repeat_str() requires (string, count)")),
             },
@@ -1408,7 +1485,7 @@ impl Interpreter {
                     Some(Value::Float(ms)) => Some(ms.max(0.0) as u128),
                     _ => None,
                 };
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 let len = channels.len();
                 let mut offset = 0usize;
                 loop {
@@ -1429,13 +1506,16 @@ impl Interpreter {
                     if all_closed {
                         return Ok(Value::Null);
                     }
+                    if self.is_cancelled() {
+                        return Err(RuntimeError::new("cancelled"));
+                    }
                     if let Some(ms) = timeout_ms {
                         if start.elapsed().as_millis() >= ms {
                             return Ok(Value::Null);
                         }
                     }
                     offset = (offset + 1) % len;
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    crate::clock::sleep(std::time::Duration::from_millis(1));
                 }
             }
             "close" => {
@@ -1468,12 +1548,7 @@ impl Interpreter {
                 for (i, handle) in handles.into_iter().enumerate() {
                     match handle {
                         Value::TaskHandle(slot) => {
-                            let (lock, cvar) = &*slot;
-                            let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                            while guard.is_none() {
-                                guard = cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
-                            }
-                            let result = guard.take().unwrap_or(Value::Null);
+                            let result = self.take_task_result(&slot)?;
                             match result {
                                 Value::ResultOk(v) => results.push(*v),
                                 Value::ResultErr(e) => {
@@ -1541,6 +1616,11 @@ impl Interpreter {
                 self.write_output(&text.join(" "), false);
                 Ok(Value::Null)
             }
+            // `time.sleep` blocks like `wait`, so it must stay cancellable
+            // (a sandbox deadline cannot otherwise reclaim the thread).
+            "time.sleep" if matches!(args.first(), Some(Value::Int(_) | Value::Float(_))) => {
+                self.call_builtin("wait", args)
+            }
             // Every stdlib module member is implemented once, in the shared
             // registry (`builtins_registry`), for both engines.
             _ if crate::builtins_registry::module_for(name).is_some() => {
@@ -1579,13 +1659,13 @@ impl Interpreter {
                 crate::stdlib::exec_module::call(args).map_err(|e| RuntimeError::new(&e))
             }
             "shell" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("shell() requires a command string")),
                 };
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("shell error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout)
                     .trim_end()
@@ -1604,13 +1684,13 @@ impl Interpreter {
                 Ok(Value::Object(result))
             }
             "sh" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh() requires a command string")),
                 };
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh error: {}", e)))?;
                 Ok(Value::String(
                     String::from_utf8_lossy(&output.stdout)
@@ -1619,13 +1699,13 @@ impl Interpreter {
                 ))
             }
             "sh_lines" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_lines() requires a command string")),
                 };
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_lines error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let lines: Vec<Value> = stdout
@@ -1636,46 +1716,42 @@ impl Interpreter {
                 Ok(Value::Array(lines))
             }
             "sh_json" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_json() requires a command string")),
                 };
-                let output = crate::runtime::shell::command(&cmd)
-                    .output()
+                let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let json: serde_json::Value = serde_json::from_str(stdout.trim())
                     .map_err(|e| RuntimeError::new(&format!("sh_json parse error: {}", e)))?;
-                Ok(crate::runtime::server::json_to_forge(json))
+                Ok(crate::stdlib::json_module::json_to_forge(json))
             }
             "sh_ok" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("sh_ok() requires a command string")),
                 };
-                let status = crate::runtime::shell::command(&cmd)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
+                let ok = crate::runtime::shell::succeeds(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_ok error: {}", e)))?;
-                Ok(Value::Bool(status.success()))
+                Ok(Value::Bool(ok))
             }
             "which" => {
+                // Searches the host's PATH and reveals installed tools; gated
+                // on `run` like the other shell helpers (SEC-08).
+                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
                 let cmd = match args.first() {
                     Some(Value::String(s)) => s.clone(),
                     _ => return Err(RuntimeError::new("which() requires a command name")),
                 };
-                let result = std::process::Command::new("/usr/bin/which")
-                    .arg(&cmd)
-                    .output();
-                match result {
-                    Ok(output) if output.status.success() => Ok(Value::String(
-                        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-                    )),
-                    _ => Ok(Value::Null),
-                }
+                Ok(match crate::runtime::shell::which(&cmd) {
+                    Some(path) => Value::String(path.display().to_string()),
+                    None => Value::Null,
+                })
             }
             "cwd" => {
                 let path = std::env::current_dir()
@@ -1702,7 +1778,8 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("lines() requires a string")),
             },
             "pipe_to" => {
-                crate::permissions::check_run_permission().map_err(|e| RuntimeError::new(&e))?;
+                let _subprocess =
+                    crate::permissions::begin_subprocess().map_err(|e| RuntimeError::new(&e))?;
                 let (input, cmd) = match (args.first(), args.get(1)) {
                     (Some(Value::String(data)), Some(Value::String(cmd))) => {
                         (data.clone(), cmd.clone())
@@ -1713,18 +1790,7 @@ impl Interpreter {
                         ))
                     }
                 };
-                use std::io::Write;
-                let mut child = crate::runtime::shell::command(&cmd)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|e| RuntimeError::new(&format!("pipe_to error: {}", e)))?;
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(input.as_bytes());
-                }
-                let output = child
-                    .wait_with_output()
+                let output = crate::runtime::shell::pipe(&cmd, input.as_bytes())
                     .map_err(|e| RuntimeError::new(&format!("pipe_to error: {}", e)))?;
                 let mut result = IndexMap::new();
                 result.insert(
@@ -1764,10 +1830,10 @@ impl Interpreter {
                     Value::String(s) => format!("\"{}\"", s),
                     other => format!("{}", other),
                 };
-                eprintln!(
+                crate::runtime::stdio::err_line(&format!(
                     "\x1b[33m🔍 SUS CHECK:\x1b[0m {} \x1b[2m({})\x1b[0m",
                     display, type_str
-                );
+                ));
                 Ok(args.into_iter().next().unwrap_or(Value::Null))
             }
             "bruh" => {
@@ -1836,21 +1902,21 @@ impl Interpreter {
                     Some(f @ Value::Lambda { .. }) | Some(f @ Value::Function(_)) => f.clone(),
                     _ => return Err(RuntimeError::new("cook() needs a function — let him cook!")),
                 };
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 let result = self.call_function(func, vec![])?;
                 let elapsed = start.elapsed();
                 let ms = elapsed.as_secs_f64() * 1000.0;
                 if ms < 1.0 {
-                    eprintln!(
+                    crate::runtime::stdio::err_line(&format!(
                         "\x1b[32m👨‍🍳 COOKED:\x1b[0m done in {:.2}µs — \x1b[2mspeed demon fr\x1b[0m",
                         elapsed.as_secs_f64() * 1_000_000.0
-                    );
+                    ));
                 } else if ms < 100.0 {
-                    eprintln!("\x1b[32m👨‍🍳 COOKED:\x1b[0m done in {:.2}ms — \x1b[2mno cap that was fast\x1b[0m", ms);
+                    crate::runtime::stdio::err_line(&format!("\x1b[32m👨‍🍳 COOKED:\x1b[0m done in {:.2}ms — \x1b[2mno cap that was fast\x1b[0m", ms));
                 } else if ms < 1000.0 {
-                    eprintln!("\x1b[33m👨‍🍳 COOKED:\x1b[0m done in {:.0}ms — \x1b[2mit's giving adequate\x1b[0m", ms);
+                    crate::runtime::stdio::err_line(&format!("\x1b[33m👨‍🍳 COOKED:\x1b[0m done in {:.0}ms — \x1b[2mit's giving adequate\x1b[0m", ms));
                 } else {
-                    eprintln!("\x1b[31m👨‍🍳 COOKED:\x1b[0m done in {:.2}s — \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64());
+                    crate::runtime::stdio::err_line(&format!("\x1b[31m👨‍🍳 COOKED:\x1b[0m done in {:.2}s — \x1b[2mbruh that took a minute\x1b[0m", elapsed.as_secs_f64()));
                 }
                 Ok(result)
             }
@@ -1884,13 +1950,15 @@ impl Interpreter {
                     _ => return Err(RuntimeError::new("slay() needs a function to benchmark")),
                 };
                 let n = match args.get(1) {
-                    Some(Value::Int(n)) => *n as usize,
+                    Some(Value::Int(n)) => crate::semantics::checked_count("slay", *n)
+                        .map_err(|e| RuntimeError::new(&e))?,
                     _ => 100,
                 };
-                let mut times: Vec<f64> = Vec::with_capacity(n);
+                let mut times: Vec<f64> = crate::semantics::alloc::vec_with_capacity(n, "slay()")
+                    .map_err(|e| RuntimeError::new(&e))?;
                 let mut last_result = Value::Null;
                 for _ in 0..n {
-                    let start = std::time::Instant::now();
+                    let start = crate::clock::Instant::now();
                     last_result = self.call_function(func.clone(), vec![])?;
                     times.push(start.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -1910,10 +1978,10 @@ impl Interpreter {
                 stats.insert("p99_ms".to_string(), Value::Float(p99));
                 stats.insert("runs".to_string(), Value::Int(n as i64));
                 stats.insert("result".to_string(), last_result);
-                eprintln!(
+                crate::runtime::stdio::err_line(&format!(
                     "\x1b[35m💅 SLAYED:\x1b[0m {}x runs — avg {:.3}ms, min {:.3}ms, max {:.3}ms, p99 {:.3}ms",
                     n, avg, min, max, p99
-                );
+                ));
                 Ok(Value::Object(stats))
             }
 
@@ -1998,18 +2066,20 @@ impl Interpreter {
                 match args.first() {
                     Some(Value::Array(items)) => {
                         let n = match args.get(1) {
-                            Some(Value::Int(n)) => *n as usize,
+                            Some(Value::Int(n)) => crate::semantics::checked_count("sample", *n)
+                                .map_err(|e| RuntimeError::new(&e))?,
                             _ => 1,
                         };
                         if items.is_empty() {
                             return Ok(Value::Array(vec![]));
                         }
-                        use std::time::{SystemTime, UNIX_EPOCH};
+                        use crate::clock::{SystemTime, UNIX_EPOCH};
                         let seed = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_nanos() as u64;
-                        let mut result = Vec::with_capacity(n);
+                        let mut result = crate::semantics::alloc::vec_with_capacity(n, "sample()")
+                            .map_err(|e| RuntimeError::new(&e))?;
                         for i in 0..n {
                             let mut x = seed.wrapping_add(i as u64);
                             x ^= x << 13;
@@ -2031,7 +2101,7 @@ impl Interpreter {
                 // shuffle(arr) — Fisher-Yates shuffle
                 match args.into_iter().next() {
                     Some(Value::Array(mut items)) => {
-                        use std::time::{SystemTime, UNIX_EPOCH};
+                        use crate::clock::{SystemTime, UNIX_EPOCH};
                         let mut seed = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()

@@ -262,6 +262,7 @@ fn parse_http_opts(opts: &IndexMap<String, Value>) -> (Option<u64>, Option<usize
 }
 
 fn do_download(args: &[Value]) -> Result<Value, String> {
+    let _socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
     let url = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => return Err("http.download() requires a URL string".to_string()),
@@ -289,7 +290,8 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
         opts.map(parse_http_opts).unwrap_or((None, None, None));
 
     crate::permissions::require_net(&url)?;
-    crate::stdlib::fs::confine_write(&dest)?;
+    // Write to the checked path, never the original string.
+    let dest_path = crate::stdlib::fs::confine_write(&dest)?;
     let validated = crate::runtime::client::validate_url_full(&url)?;
 
     crate::color::ceprintln!("  Downloading {}...", url);
@@ -300,15 +302,16 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
     let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(300));
     let redirects = max_redirects.unwrap_or(crate::runtime::client::DEFAULT_MAX_REDIRECTS);
     let cap = max_bytes.unwrap_or(crate::runtime::client::DEFAULT_DOWNLOAD_MAX_BYTES);
+    let span = crate::runtime::client::request_span("GET", &validated.url);
 
     run_async(async move {
         let client = crate::runtime::client::build_client(timeout, redirects, pinned)?;
 
-        let resp = client
-            .get(&url_string)
-            .send()
-            .await
-            .map_err(|e| format!("download error: {}", e))?;
+        let resp =
+            crate::runtime::client::inject_trace_context(client.get(&url_string), &span, None)
+                .send()
+                .await
+                .map_err(|e| format!("download error: {}", e))?;
 
         let status = resp.status().as_u16();
         if status >= 400 {
@@ -317,7 +320,7 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
 
         let bytes = crate::runtime::client::read_body_capped(resp, cap).await?;
 
-        std::fs::write(&dest_clone, &bytes).map_err(|e| format!("write error: {}", e))?;
+        std::fs::write(&dest_path, &bytes).map_err(|e| format!("write error: {}", e))?;
 
         crate::color::ceprintln!("  Saved to {} ({} bytes)", dest_clone, bytes.len());
 
@@ -330,6 +333,7 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
 }
 
 fn do_crawl(args: &[Value]) -> Result<Value, String> {
+    let _socket = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
     let url = match args.first() {
         Some(Value::String(s)) => s.clone(),
         _ => return Err("http.crawl() requires a URL string".to_string()),
@@ -348,15 +352,16 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
     let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(30));
     let redirects = max_redirects.unwrap_or(crate::runtime::client::DEFAULT_MAX_REDIRECTS);
     let cap = max_bytes.unwrap_or(crate::runtime::client::DEFAULT_CRAWL_MAX_BYTES);
+    let span = crate::runtime::client::request_span("GET", &validated.url);
 
     run_async(async move {
         let client = crate::runtime::client::build_client(timeout, redirects, pinned)?;
 
-        let resp = client
-            .get(&url_clone)
-            .send()
-            .await
-            .map_err(|e| format!("crawl error: {}", e))?;
+        let resp =
+            crate::runtime::client::inject_trace_context(client.get(&url_clone), &span, None)
+                .send()
+                .await
+                .map_err(|e| format!("crawl error: {}", e))?;
 
         let status = resp.status().as_u16();
         let body_bytes = crate::runtime::client::read_body_capped(resp, cap).await?;

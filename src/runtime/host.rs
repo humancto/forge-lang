@@ -1,4 +1,9 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::interpreter::{Interpreter, RuntimeError, Value};
+use crate::vm::machine::VM;
+use crate::vm::serve::VmTemplate;
 
 use super::metadata::{RuntimePlan, SchedulePlan, WatchPlan};
 
@@ -21,6 +26,34 @@ pub async fn launch(interpreter: Interpreter, plan: &RuntimePlan) -> Result<(), 
     } else {
         Ok(())
     }
+}
+
+/// The bytecode VM counterpart of [`launch`]. `vm` has run the program's
+/// top level with [`VM::defer_host_runtime`] on; this starts the deferred
+/// `schedule` / `watch` blocks from the final state, then serves
+/// `plan.server` with handlers on per-request VM forks
+/// ([`crate::vm::serve::VmTemplate`]). `fn_params` are the program's
+/// top-level function parameter names
+/// ([`super::metadata::top_level_fn_params`]).
+pub async fn launch_vm(
+    mut vm: VM,
+    plan: &RuntimePlan,
+    fn_params: HashMap<String, Vec<String>>,
+) -> Result<(), RuntimeError> {
+    vm.launch_deferred_host_tasks();
+
+    let Some(server) = &plan.server else {
+        return Ok(());
+    };
+    if server.routes.is_empty() {
+        return Err(RuntimeError::new(
+            "@server defined but no route handlers found. Add @get/@post functions.",
+        ));
+    }
+    let template = VmTemplate::new(&vm, fn_params).map_err(|e| RuntimeError::new(&e))?;
+    // Every request forks the template; the VM that built it is not needed.
+    drop(vm);
+    super::server::serve(Arc::new(template), server).await
 }
 
 pub(crate) fn spawn_schedule(
@@ -64,11 +97,10 @@ fn schedule_interval_seconds(
 ) -> Result<u64, RuntimeError> {
     let mut eval_interp = interpreter.fork_for_background_runtime();
     match eval_interp.eval_expr(&schedule.interval)? {
-        Value::Int(n) => Ok(match schedule.unit.as_str() {
-            "minutes" => n as u64 * 60,
-            "hours" => n as u64 * 3600,
-            _ => n as u64,
-        }),
+        Value::Int(n) => Ok(crate::semantics::schedule_interval_secs(
+            n as u64,
+            &schedule.unit,
+        )),
         _ => Ok(60),
     }
 }
@@ -76,9 +108,18 @@ fn schedule_interval_seconds(
 fn watch_path(interpreter: &Interpreter, watch: &WatchPlan) -> Result<String, RuntimeError> {
     let mut eval_interp = interpreter.fork_for_background_runtime();
     match eval_interp.eval_expr(&watch.path)? {
-        Value::String(path) => Ok(path),
+        Value::String(path) => checked_watch_path(&path).map_err(|e| RuntimeError::new(&e)),
         _ => Err(RuntimeError::new("watch requires a string path")),
     }
+}
+
+/// `watch "path"` polls the file's metadata, which reveals whether (and
+/// when) it changes: that is a read, so the path must pass `fs.read`. Both
+/// engines call this before starting the watcher and poll the returned
+/// (resolved, under a scoped grant) path.
+pub(crate) fn checked_watch_path(path: &str) -> Result<String, String> {
+    let checked = crate::permissions::checked_path(crate::permissions::Capability::Read, path)?;
+    Ok(checked.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
