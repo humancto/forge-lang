@@ -16,8 +16,8 @@
         <link rel="icon" href="favicon-de23e50b.svg">
         <link rel="shortcut icon" href="favicon-8114d1fc.png">
         <link rel="stylesheet" href="css/variables-8adf115d.css">
-        <link rel="stylesheet" href="css/general-2459343d.css">
-        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/general-e96d0476.css">
+        <link rel="stylesheet" href="css/chrome-d279d366.css">
         <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7ed87d68.js";
+            window.path_to_searchindex_js = "searchindex-72b9ea48.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-cb066ca3.js"></script>
+        <script src="toc-fdd2f5ad.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -180,7 +180,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
-<p>This document is the formal specification for the <strong>Forge</strong> programming language, version <strong>0.9.0</strong>.</p>
+<p>This document is the formal specification for the <strong>Forge</strong> programming language, version <strong>0.3.3</strong>.</p>
 <p>Forge is an internet-native, general-purpose programming language implemented in Rust. It is designed for application-layer work: web services, scripts, data pipelines, prototypes, and tooling. Forge ships with built-in support for HTTP clients and servers, databases (SQLite and PostgreSQL), cryptography, JSON, CSV, terminal UI, AI/LLM integration, and more — eliminating the need for third-party packages for common internet-oriented tasks.</p>
 <h2 id="design-philosophy"><a class="header" href="#design-philosophy">Design Philosophy</a></h2>
 <p>Forge is guided by three core principles:</p>
@@ -192,17 +192,17 @@
 <p><strong>Dual syntax.</strong> Every construct in Forge has two spellings: a <em>classic syntax</em> familiar to developers who have written JavaScript, Python, Rust, or Go; and a <em>natural-language syntax</em> that reads like English prose. Both forms compile to identical internal representations and may be mixed freely within the same source file.</p>
 </li>
 <li>
-<p><strong>Batteries included.</strong> Forge ships 18+ standard library modules with over 238 functions, 30 interactive tutorials, a built-in test runner, a formatter, an LSP server, and a project scaffolding tool. A single <code>cargo install</code> provides a complete development environment.</p>
+<p><strong>Batteries included.</strong> Forge ships 16 standard library modules with over 230 functions, 30 interactive tutorials, a built-in test runner, a formatter, an LSP server, and a project scaffolding tool. A single <code>cargo install</code> provides a complete development environment.</p>
 </li>
 </ol>
 <h2 id="language-overview"><a class="header" href="#language-overview">Language Overview</a></h2>
 <p>Forge is dynamically typed at runtime with optional type annotations (gradual typing). It supports first-class functions, closures, algebraic data types, pattern matching, Result/Option error handling, structural interfaces, composition via delegation, async/await concurrency, and channels. Programs are executed top-to-bottom without requiring a <code>main</code> function.</p>
-<p>The default execution engine is a bytecode VM (as of v0.7.0). A tree-walking interpreter (<code>--interp</code>) is available as a fallback for features like HTTP server decorators. A JIT compiler (<code>--jit</code>) is available for maximum performance on numeric workloads.</p>
+<p>The default execution engine is a tree-walking interpreter. A bytecode VM (<code>--vm</code>) and a JIT compiler (<code>--jit</code>) are available for performance-critical workloads but support fewer features.</p>
 <h2 id="how-to-read-this-specification"><a class="header" href="#how-to-read-this-specification">How to Read This Specification</a></h2>
 <p>This specification is organized into five parts:</p>
 <ul>
 <li><strong>Part I: Language Core</strong> covers lexical structure, types, expressions, statements, the type system, error handling, and concurrency.</li>
-<li><strong>Part II: Standard Library</strong> documents each of the 18+ built-in modules.</li>
+<li><strong>Part II: Standard Library</strong> documents each of the 16 built-in modules.</li>
 <li><strong>Part III: Built-in Functions</strong> catalogs all globally available functions.</li>
 <li><strong>Part IV: Dual Syntax Reference</strong> provides the complete mapping between classic and natural syntax forms.</li>
 <li><strong>Part V: Runtime and Internals</strong> describes the interpreter, bytecode VM, JIT compiler, and HTTP server runtime.</li>
@@ -956,6 +956,8 @@ let x = /* inline block comment */ 42
 <pre><code class="language-forge">/* outer /* inner */ this is NOT inside the comment */
 </code></pre>
 <p>In the example above, the comment ends at the first <code>*/</code>, and the text <code>this is NOT inside the comment */</code> would be parsed as code (and likely produce a syntax error).</p>
+<p>A block comment that is never closed is a lexical error reported at the comment’s opening <code>/*</code> (<code>unterminated block comment (missing `*/`)</code>).</p>
+<p>A block comment that spans several lines separates statements exactly like the line breaks inside it would: <code>let a = 1 /* ... (newline) ... */ let b = 2</code> is two statements. A block comment on a single line is just whitespace.</p>
 <h2 id="doc-comments"><a class="header" href="#doc-comments">Doc Comments</a></h2>
 <p>Forge does not currently have a dedicated doc comment syntax (such as <code>///</code> or <code>/** */</code>). Documentation is written using regular line comments or block comments by convention.</p>
 <h2 id="comments-in-string-literals"><a class="header" href="#comments-in-string-literals">Comments in String Literals</a></h2>
@@ -1615,7 +1617,18 @@ fn format_price(amount: Float) -&gt; String {
     return "${amount}"
 }
 </code></pre>
-<p>Annotations are optional and serve as documentation. The optional type checker can use them to report errors before execution.</p>
+<p>Annotations are optional. The type checker uses them to report mismatches before execution, and <code>--strict</code> also enforces them at run time (see <a href="#type-checking">Type Checking</a>).</p>
+<h2 id="function-types-1"><a class="header" href="#function-types-1">Function Types</a></h2>
+<p>A function-typed parameter, variable or field is annotated <code>fn(ParamTypes) -&gt; Result</code>. Without <code>-&gt; Result</code>, the result type is unconstrained:</p>
+<pre><code class="language-forge">fn apply(f: fn(Int) -&gt; Int, x: Int) -&gt; Int {
+    return f(x)
+}
+
+let twice: fn(Int) -&gt; Int = fn(n) { n * 2 }   // n is inferred as Int
+let callback: fn() = fn() { say "done" }
+apply(twice, 21)                                // 42
+</code></pre>
+<p>Function types are contravariant in their parameters and covariant in their result: a <code>fn(Float) -&gt; Int</code> may be passed where a <code>fn(Int) -&gt; Float</code> is expected.</p>
 <h2 id="return-values"><a class="header" href="#return-values">Return Values</a></h2>
 <p>Functions return a value via the <code>return</code> statement. If no <code>return</code> is executed, the function returns <code>null</code>:</p>
 <pre><code class="language-forge">fn greet(name) {
@@ -3928,7 +3941,7 @@ import "b.fg"       // also defines fn helper() -- overwrites a.fg's version
 <li><strong>Structural satisfaction</strong> (<code>satisfies</code>) — Test whether a value’s type fulfills an interface at runtime, regardless of explicit declaration.</li>
 </ol>
 <h2 id="dynamic-foundation"><a class="header" href="#dynamic-foundation">Dynamic Foundation</a></h2>
-<p>All Forge values are represented at runtime by the <code>Value</code> enum. There is no compile-time type erasure or monomorphization. Type annotations on struct fields and function parameters are documentation and future-proofing; the interpreter does not enforce them at assignment time in the current version.</p>
+<p>All Forge values are represented at runtime by the <code>Value</code> enum. There is no compile-time type erasure or monomorphization. Type annotations on variables, struct fields and function signatures are checked statically by the gradual type checker before a program runs (warnings by default, errors under <code>--strict</code>); under <code>--strict</code>, function argument and return annotations are also enforced at run time. See <a href="#type-checking">Type Checking</a>.</p>
 <p>The <code>typeof</code> builtin returns a string naming the runtime type:</p>
 <pre><code class="language-forge">typeof(42)        // "Int"
 typeof("hello")   // "String"
@@ -4741,6 +4754,94 @@ Math.sub(5, 3)    // 2
     }
 }
 </code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="type-checking"><a class="header" href="#type-checking">Type Checking</a></h1>
+<p>Every program is type-checked after parsing and before it runs. The checker is <strong>gradual</strong>: it infers types where the program determines them, checks values against the types the program <em>declares</em>, and treats everything else as <code>Any</code> — a type compatible with every other type. Unannotated code is never rejected for lacking annotations.</p>
+<h2 id="modes"><a class="header" href="#modes">Modes</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Mode</th><th>Static diagnostics</th><th>Runtime checks</th></tr>
+</thead>
+<tbody>
+<tr><td>default (<code>forge run app.fg</code>)</td><td>reported as <strong>warnings</strong>; the program still runs</td><td>none</td></tr>
+<tr><td><code>--strict</code> (<code>forge run --strict app.fg</code>)</td><td>reported as <strong>errors</strong>; the program does not run</td><td>annotated function arguments and results are checked on every call</td></tr>
+</tbody>
+</table>
+</div>
+<p>The same rules apply on every engine (<code>--interp</code>, the VM, <code>--jit</code>). Editors receive the same diagnostics through <code>forge lsp</code>, and AI agents through the <code>check_forge</code> tool of <code>forge mcp</code>.</p>
+<h2 id="types-1"><a class="header" href="#types-1">Types</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Written</th><th>Values</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Int</code>, <code>Float</code>, <code>String</code>, <code>Bool</code>, <code>Null</code></td><td>as shown (<code>int</code>, <code>str</code>, <code>boolean</code>, … are accepted aliases)</td><td>primitives</td></tr>
+<tr><td><code>Any</code></td><td><code>Any</code> (also <code>Json</code>)</td><td>anything</td></tr>
+<tr><td><code>Object</code></td><td><code>Object</code></td><td>object literals and struct instances</td></tr>
+<tr><td><code>[T]</code></td><td><code>[Int]</code>, <code>Array&lt;T&gt;</code></td><td>arrays whose elements are <code>T</code></td></tr>
+<tr><td><code>(A, B)</code></td><td><code>(Int, String)</code></td><td>tuples</td></tr>
+<tr><td><code>Set&lt;T&gt;</code>, <code>Map&lt;K, V&gt;</code></td><td>as shown</td><td>sets and maps</td></tr>
+<tr><td><code>?T</code></td><td><code>?Int</code>, <code>Option&lt;Int&gt;</code></td><td><code>T</code>, <code>null</code>, <code>None</code> or <code>Some(t)</code></td></tr>
+<tr><td><code>Result&lt;T, E&gt;</code></td><td>as shown</td><td><code>Ok(t)</code> / <code>Err(e)</code></td></tr>
+<tr><td><code>fn(A, B) -&gt; R</code></td><td><code>fn(Int) -&gt; Bool</code>, <code>fn()</code></td><td>functions and lambdas</td></tr>
+<tr><td>user types</td><td><code>Point</code>, <code>Box&lt;Int&gt;</code>, <code>Shape</code></td><td>structs, <code>type</code> definitions, interfaces</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>type Id = Int | String</code> declares a union alias; <code>type Shape = Circle(Float) | Rect(Float, Float)</code> declares an algebraic data type whose variants are constructors.</p>
+<p>Assignability: <code>Any</code> fits everything in both directions; <code>Int</code> fits <code>Float</code> (but not the reverse); <code>?T</code> accepts <code>null</code>, <code>T</code> and <code>?U</code> when <code>U</code> fits <code>T</code>; a union accepts any of its members; function types are contravariant in parameters and covariant in results; collections compare element-wise; an <code>Object</code> and a struct instance are interchangeable. A struct satisfies an interface structurally: it must provide every interface member as a field or method, with matching parameter counts and return types.</p>
+<h2 id="inference"><a class="header" href="#inference">Inference</a></h2>
+<p>The checker infers, without annotations:</p>
+<ul>
+<li>the type of every <code>let</code> from its value (<code>let n = 1</code> is <code>Int</code>, <code>let xs = [1, 2.5]</code> is <code>[Float]</code>);</li>
+<li>the result type of every function from its <code>return</code> statements and its final expression;</li>
+<li>the type arguments of generic functions at each call (<code>fn first&lt;T&gt;(xs: [T]) -&gt; T</code> called with <code>[String]</code> returns <code>String</code>) and of generic structs from their fields;</li>
+<li>the parameters of lambdas from the function type they are passed as: in <code>map(names, fn(n) { n.upper() })</code> with <code>names: [String]</code>, <code>n</code> is a <code>String</code>;</li>
+<li>field types of struct values, element types of arrays and maps, the payloads of <code>Some</code>, <code>Ok</code>, <code>Err</code> and ADT variants in <code>match</code> arms;</li>
+<li>narrowed types after <code>if x != null</code>, <code>if is_some(x)</code>, <code>if is_ok(r)</code> and early returns.</li>
+</ul>
+<p>A mutable variable without an annotation has the combined type of every value assigned to it anywhere in its scope: <code>let mut x = 0</code> later assigned <code>"done"</code> is <code>Any</code>, never a stale <code>Int</code>. Values are only ever checked against <strong>declared</strong> types — an inferred type never turns a later, different use into an error, because Forge arrays may hold mixed values and unannotated variables may change type.</p>
+<h2 id="diagnostics"><a class="header" href="#diagnostics">Diagnostics</a></h2>
+<p>Each diagnostic has a stable code, a precise source span, and often a help line and a quick fix (applied by editors as a code action).</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Code</th><th>Meaning</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td>T0001</td><td>value does not match a declared type</td><td><code>let n: Int = "a"</code></td></tr>
+<tr><td>T0002</td><td>argument does not match the parameter type</td><td><code>fn f(x: Int) {}</code> … <code>f("a")</code></td></tr>
+<tr><td>T0003</td><td>returned value does not match the return type</td><td><code>fn f() -&gt; Int { "a" }</code></td></tr>
+<tr><td>T0004</td><td>wrong number of arguments</td><td><code>len(1, 2)</code></td></tr>
+<tr><td>T0005</td><td>operator not defined for the operand types</td><td><code>"a" - 1</code></td></tr>
+<tr><td>T0006</td><td>unknown name (with “did you mean”)</td><td><code>say cuont</code></td></tr>
+<tr><td>T0007</td><td>unknown field or method of a struct</td><td><code>point.z</code></td></tr>
+<tr><td>T0008</td><td>unknown member of a stdlib module</td><td><code>math.sqr(2)</code></td></tr>
+<tr><td>T0009</td><td>function with a return type can finish without returning</td><td><code>fn f() -&gt; Int { let y = 1 }</code></td></tr>
+<tr><td>T0010</td><td>unreachable code</td><td>statements after <code>return</code></td></tr>
+<tr><td>T0011</td><td>non-exhaustive <code>match</code> (Option, Result, Bool, ADT)</td><td>missing <code>None</code> arm</td></tr>
+<tr><td>T0012</td><td>a struct does not satisfy an interface</td><td>missing method</td></tr>
+<tr><td>T0013</td><td>call of a value that is not a function</td><td><code>let c = 5</code> … <code>c()</code></td></tr>
+<tr><td>T0014</td><td><code>?T</code> used where <code>T</code> is required</td><td><code>opt + 1</code></td></tr>
+<tr><td>T0015</td><td>unknown type in an annotation</td><td><code>let s: Strng = ""</code></td></tr>
+<tr><td>T0016</td><td>struct literal leaves out a field without default</td><td><code>Point { x: 1 }</code></td></tr>
+<tr><td>T0017</td><td>assignment to an immutable binding</td><td><code>let x = 1</code> … <code>x = 2</code></td></tr>
+<tr><td>T0018</td><td>name read before its definition runs</td><td><code>say x</code> then <code>let x = 1</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Diagnostics derived from run-time rules use the engines’ own rules, so they agree with what would happen: operator validity comes from the shared arithmetic rules, argument counts from the shared arity rule, and module members from the stdlib registry. Code passed to <code>assert_throws(fn() { ... })</code> is expected to fail and is not reported.</p>
+<p>Name resolution follows the run-time scoping rules: blocks, function and lambda bodies, loop variables, <code>match</code> arms and <code>catch</code> clauses each introduce a scope; a <code>let</code> is visible after its statement; a function body may refer to names defined later in an enclosing scope (the body runs when called); <code>import "file"</code> brings in that file’s top-level functions, variables, structs and variants. When an imported file cannot be found, unknown-name diagnostics are suppressed for the importing file.</p>
+<h2 id="runtime-enforcement---strict"><a class="header" href="#runtime-enforcement---strict">Runtime enforcement (<code>--strict</code>)</a></h2>
+<p>Static checking cannot see values typed <code>Any</code> — data from <code>json.parse</code>, HTTP responses, unannotated parameters. Under <code>--strict</code>, every function or lambda whose parameters are annotated checks its arguments on entry, and every function with a declared return type checks each value it returns:</p>
+<pre><code class="language-forge">fn double(n: Int) -&gt; Int { return n * 2 }
+let v = json.parse("\"seven\"")   // Any
+double(v)
+// error: type error: argument 'n' of 'double' must be Int, got String
+</code></pre>
+<p>The checks are performed at run time on both engines with identical messages. They are structural and deep for collections (an <code>[Int]</code> argument is checked element by element), check struct and ADT values by their type name, accept <code>Int</code> for <code>Float</code>, and skip <code>Any</code>, generic parameters and interfaces. A correct program behaves identically with and without <code>--strict</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h1>
 <p>This chapter defines Forge’s error handling mechanisms. Forge uses a multi-layered approach: Result types for explicit error values, the <code>?</code> operator for propagation, <code>safe</code> blocks for error suppression, <code>must</code> for crash-on-error semantics, and <code>check</code> for declarative validation.</p>
@@ -5650,7 +5751,7 @@ parallel_sum(3, 4)    // 25
 <p>There is no semantic difference. Use whichever style matches your code’s convention.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="standard-library-overview"><a class="header" href="#standard-library-overview">Standard Library Overview</a></h1>
-<p>Forge ships with <strong>18+ built-in modules</strong> containing over 238 functions. All modules are available without any import statement. There is no <code>import math</code> or <code>require("fs")</code> – every module is pre-loaded into the global scope.</p>
+<p>Forge ships with <strong>18 built-in modules</strong> containing over 238 functions. All modules are available without any import statement. There is no <code>import math</code> or <code>require("fs")</code> – every module is pre-loaded into the global scope.</p>
 <h2 id="accessing-modules"><a class="header" href="#accessing-modules">Accessing Modules</a></h2>
 <p>Modules are accessed via dot notation:</p>
 <pre><code class="language-forge">let root = math.sqrt(144)       // 12.0
@@ -5674,6 +5775,8 @@ say m.pi    // 3.141592653589793
 <tr><td><a href="#crypto"><code>crypto</code></a></td><td>Hashing, encoding, and decoding</td><td>6</td></tr>
 <tr><td><a href="#db"><code>db</code></a></td><td>SQLite database operations</td><td>4</td></tr>
 <tr><td><a href="#pg"><code>pg</code></a></td><td>PostgreSQL database operations</td><td>4</td></tr>
+<tr><td><a href="#mysql"><code>mysql</code></a></td><td>MySQL database with parameterized queries</td><td>4</td></tr>
+<tr><td><a href="#jwt"><code>jwt</code></a></td><td>JSON Web Token authentication</td><td>4</td></tr>
 <tr><td><a href="#json"><code>json</code></a></td><td>JSON parsing and serialization</td><td>3</td></tr>
 <tr><td><a href="#csv"><code>csv</code></a></td><td>CSV parsing and serialization</td><td>4</td></tr>
 <tr><td><a href="#regex"><code>regex</code></a></td><td>Regular expression matching</td><td>5</td></tr>
@@ -5688,7 +5791,7 @@ say m.pi    // 3.141592653589793
 </table>
 </div>
 <h2 id="execution-tier-support"><a class="header" href="#execution-tier-support">Execution Tier Support</a></h2>
-<p>All modules are fully supported in the <strong>bytecode VM</strong> (default execution engine as of v0.7.0) and the <strong>interpreter</strong> (<code>--interp</code>). The JIT (<code>--jit</code>) supports numeric-heavy workloads using <code>math</code> and core arithmetic. Programs using HTTP server decorators (<code>@server</code>, <code>@get</code>, etc.) automatically fall back to the interpreter.</p>
+<p>All modules are fully supported in the <strong>interpreter</strong> (default execution mode). The bytecode VM (<code>--vm</code>) and JIT (<code>--jit</code>) support a subset of modules – primarily <code>math</code>, <code>fs</code>, <code>io</code>, and <code>npc</code>. For full module access, use the interpreter.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="math"><a class="header" href="#math">math</a></h1>
 <p>Mathematical operations and constants. All trigonometric functions use radians.</p>
@@ -6045,9 +6148,224 @@ pg.close()
 <li>The <code>pg</code> module requires the interpreter (default) execution mode. It is not available in the VM or JIT tiers.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="mysql"><a class="header" href="#mysql">mysql</a></h1>
+<p>MySQL/MariaDB database operations with parameterized queries and connection pooling. Uses <code>mysql_async</code> with <code>rustls</code> TLS under the hood. Supports multiple simultaneous connections via connection IDs.</p>
+<h2 id="functions-5"><a class="header" href="#functions-5">Functions</a></h2>
+<h3 id="mysqlconnecturl---string"><a class="header" href="#mysqlconnecturl---string">mysql.connect(url) -&gt; string</a></h3>
+<h3 id="mysqlconnecthost-user-pass-db---string"><a class="header" href="#mysqlconnecthost-user-pass-db---string">mysql.connect(host, user, pass, db) -&gt; string</a></h3>
+<p>Connects to a MySQL database and returns a connection ID string. Supports both URL and multi-argument forms.</p>
+<pre><code class="language-forge">// URL form
+let conn = mysql.connect("mysql://root:password@localhost:3306/mydb")
+
+// Multi-argument form
+let conn = mysql.connect("localhost", "root", "password", "mydb")
+</code></pre>
+<p>The returned connection ID (e.g., <code>"mysql_1"</code>) is used in all subsequent operations. Multiple connections can be open simultaneously.</p>
+<h3 id="mysqlqueryconn-sql-params---array"><a class="header" href="#mysqlqueryconn-sql-params---array">mysql.query(conn, sql, params?) -&gt; array</a></h3>
+<p>Executes a SQL SELECT query and returns an array of objects. Each object maps column names to values. Supports parameterized queries with <code>?</code> placeholders.</p>
+<pre><code class="language-forge">// Simple query
+let users = mysql.query(conn, "SELECT * FROM users")
+
+// Parameterized query (prevents SQL injection)
+let users = mysql.query(conn, "SELECT * FROM users WHERE age &gt; ? AND city = ?", [21, "Portland"])
+for user in users {
+    say user.name + " (age " + str(user.age) + ")"
+}
+</code></pre>
+<h3 id="mysqlexecuteconn-sql-params---int"><a class="header" href="#mysqlexecuteconn-sql-params---int">mysql.execute(conn, sql, params?) -&gt; int</a></h3>
+<p>Executes a SQL statement that does not return rows (INSERT, UPDATE, DELETE, CREATE, etc.). Returns the number of affected rows. Supports parameterized queries.</p>
+<pre><code class="language-forge">mysql.execute(conn, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", 30])
+
+let affected = mysql.execute(conn, "UPDATE users SET age = ? WHERE name = ?", [31, "Alice"])
+say affected  // 1
+
+mysql.execute(conn, "DELETE FROM users WHERE id = ?", [5])
+</code></pre>
+<h3 id="mysqlcloseconn---bool"><a class="header" href="#mysqlcloseconn---bool">mysql.close(conn) -&gt; bool</a></h3>
+<p>Closes the connection pool and removes it. Returns <code>true</code> if the connection was found and closed, <code>false</code> if the connection ID was not found.</p>
+<pre><code class="language-forge">mysql.close(conn)
+</code></pre>
+<h2 id="example-1"><a class="header" href="#example-1">Example</a></h2>
+<pre><code class="language-forge">// Connect to MySQL
+let conn = mysql.connect("mysql://root:password@localhost/mydb")
+
+// Create table
+mysql.execute(conn, "CREATE TABLE IF NOT EXISTS products (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    price DECIMAL(10,2),
+    in_stock BOOLEAN DEFAULT true
+)")
+
+// Insert with parameterized queries
+mysql.execute(conn, "INSERT INTO products (name, price) VALUES (?, ?)", ["Widget", 9.99])
+mysql.execute(conn, "INSERT INTO products (name, price) VALUES (?, ?)", ["Gadget", 24.99])
+mysql.execute(conn, "INSERT INTO products (name, price) VALUES (?, ?)", ["Gizmo", 14.50])
+
+// Query with parameters
+let cheap = mysql.query(conn, "SELECT * FROM products WHERE price &lt; ? ORDER BY price", [20.0])
+for p in cheap {
+    say p.name + " - $" + str(p.price)
+}
+// Widget - $9.99
+// Gizmo - $14.50
+
+// Update
+let updated = mysql.execute(conn, "UPDATE products SET price = ? WHERE name = ?", [12.99, "Widget"])
+say "Updated " + str(updated) + " row(s)"
+
+// Clean up
+mysql.execute(conn, "DROP TABLE products")
+mysql.close(conn)
+</code></pre>
+<h2 id="multiple-connections"><a class="header" href="#multiple-connections">Multiple Connections</a></h2>
+<pre><code class="language-forge">let prod = mysql.connect("mysql://root@prod-server/app")
+let analytics = mysql.connect("mysql://root@analytics-server/warehouse")
+
+let users = mysql.query(prod, "SELECT * FROM users")
+let events = mysql.query(analytics, "SELECT * FROM events")
+
+mysql.close(prod)
+mysql.close(analytics)
+</code></pre>
+<h2 id="type-mapping"><a class="header" href="#type-mapping">Type Mapping</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>MySQL Type</th><th>Forge Type</th></tr>
+</thead>
+<tbody>
+<tr><td>INT, BIGINT</td><td><code>int</code></td></tr>
+<tr><td>TINYINT(1), BOOLEAN</td><td><code>int</code></td></tr>
+<tr><td>FLOAT, DOUBLE, DECIMAL</td><td><code>float</code></td></tr>
+<tr><td>VARCHAR, TEXT, CHAR</td><td><code>string</code></td></tr>
+<tr><td>DATETIME, TIMESTAMP, DATE</td><td><code>string</code></td></tr>
+<tr><td>TIME</td><td><code>string</code></td></tr>
+<tr><td>BLOB, BINARY</td><td><code>string</code></td></tr>
+<tr><td>NULL</td><td><code>null</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="notes-2"><a class="header" href="#notes-2">Notes</a></h2>
+<ul>
+<li>All queries support parameterized placeholders (<code>?</code>) to prevent SQL injection. Always use parameters for user-provided data.</li>
+<li>Connection pooling is handled automatically — each <code>mysql.connect</code> call creates a pool that manages reconnection and connection reuse.</li>
+<li>TLS is supported via <code>rustls</code> when connecting to remote servers.</li>
+<li>The <code>mysql</code> module requires the interpreter (default) execution mode. It is not available in the VM or JIT tiers.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="jwt"><a class="header" href="#jwt">jwt</a></h1>
+<p>JSON Web Token (JWT) creation, verification, and decoding. Uses HMAC-SHA and RSA algorithms via the <code>jsonwebtoken</code> crate. Stateless module — no connections or state.</p>
+<h2 id="functions-6"><a class="header" href="#functions-6">Functions</a></h2>
+<h3 id="jwtsignclaims-secret-options---string"><a class="header" href="#jwtsignclaims-secret-options---string">jwt.sign(claims, secret, options?) -&gt; string</a></h3>
+<p>Creates a signed JWT from a claims object. Returns a dot-separated token string.</p>
+<pre><code class="language-forge">let token = jwt.sign({ user_id: 123, role: "admin" }, "my-secret")
+</code></pre>
+<p>With options:</p>
+<pre><code class="language-forge">let token = jwt.sign({ user_id: 123 }, "secret", {
+    expires: "1h",
+    issuer: "myapp",
+    audience: "users",
+    subject: "user-123",
+    algorithm: "HS256"
+})
+</code></pre>
+<p><strong>Options:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>expires</code></td><td>string</td><td>none</td><td>Duration: <code>"1h"</code>, <code>"30m"</code>, <code>"7d"</code>, <code>"365d"</code></td></tr>
+<tr><td><code>issuer</code></td><td>string</td><td>none</td><td>Sets the <code>iss</code> claim</td></tr>
+<tr><td><code>audience</code></td><td>string</td><td>none</td><td>Sets the <code>aud</code> claim</td></tr>
+<tr><td><code>subject</code></td><td>string</td><td>none</td><td>Sets the <code>sub</code> claim</td></tr>
+<tr><td><code>algorithm</code></td><td>string</td><td><code>HS256</code></td><td><code>HS256</code>, <code>HS384</code>, <code>HS512</code>, <code>RS256</code>, <code>ES256</code></td></tr>
+<tr><td><code>not_before</code></td><td>string</td><td>none</td><td>Duration before token becomes valid</td></tr>
+</tbody>
+</table>
+</div>
+<p>An <code>iat</code> (issued at) claim is automatically added if not already present in the claims object.</p>
+<h3 id="jwtverifytoken-secret---object"><a class="header" href="#jwtverifytoken-secret---object">jwt.verify(token, secret) -&gt; object</a></h3>
+<p>Verifies the token signature and expiration, then returns the decoded claims as an object. Returns an error if the token is expired, has an invalid signature, or is malformed.</p>
+<pre><code class="language-forge">let claims = jwt.verify(token, "my-secret")
+say claims.user_id  // 123
+say claims.role     // "admin"
+</code></pre>
+<h3 id="jwtdecodetoken---object"><a class="header" href="#jwtdecodetoken---object">jwt.decode(token) -&gt; object</a></h3>
+<p>Decodes the token <strong>without</strong> verifying the signature. Useful for debugging or inspecting tokens in middleware. Returns an object with <code>header</code> and <code>payload</code> fields.</p>
+<pre><code class="language-forge">let decoded = jwt.decode(token)
+say decoded.header.alg      // "HS256"
+say decoded.header.typ      // "JWT"
+say decoded.payload.user_id // 123
+</code></pre>
+<h3 id="jwtvalidtoken-secret---bool"><a class="header" href="#jwtvalidtoken-secret---bool">jwt.valid(token, secret) -&gt; bool</a></h3>
+<p>Convenience function that returns <code>true</code> if the token is valid, <code>false</code> otherwise. Never throws an error.</p>
+<pre><code class="language-forge">if jwt.valid(token, "secret") {
+    say "Token is valid"
+} else {
+    say "Token is invalid or expired"
+}
+</code></pre>
+<h2 id="example-2"><a class="header" href="#example-2">Example</a></h2>
+<pre><code class="language-forge">let secret = "my-super-secret-key-2024"
+
+// Create a token with claims and options
+let token = jwt.sign({
+    user_id: 123,
+    name: "Alice",
+    role: "admin"
+}, secret, {
+    expires: "1h",
+    issuer: "forge-app"
+})
+
+say "Token: " + token
+
+// Verify and extract claims
+let claims = jwt.verify(token, secret)
+say "User: " + claims.name    // Alice
+say "Role: " + claims.role    // admin
+
+// Decode without verification (for debugging)
+let decoded = jwt.decode(token)
+say "Algorithm: " + decoded.header.alg  // HS256
+
+// Quick validity check
+say jwt.valid(token, secret)         // true
+say jwt.valid(token, "wrong-key")    // false
+</code></pre>
+<h2 id="supported-algorithms"><a class="header" href="#supported-algorithms">Supported Algorithms</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Algorithm</th><th>Type</th><th>Key Format</th></tr>
+</thead>
+<tbody>
+<tr><td>HS256</td><td>HMAC</td><td>Secret string</td></tr>
+<tr><td>HS384</td><td>HMAC</td><td>Secret string</td></tr>
+<tr><td>HS512</td><td>HMAC</td><td>Secret string</td></tr>
+<tr><td>RS256</td><td>RSA</td><td>PEM string</td></tr>
+<tr><td>RS384</td><td>RSA</td><td>PEM string</td></tr>
+<tr><td>RS512</td><td>RSA</td><td>PEM string</td></tr>
+<tr><td>ES256</td><td>ECDSA</td><td>PEM string</td></tr>
+<tr><td>ES384</td><td>ECDSA</td><td>PEM string</td></tr>
+</tbody>
+</table>
+</div>
+<p>The <code>none</code> algorithm is explicitly rejected for security reasons.</p>
+<h2 id="notes-3"><a class="header" href="#notes-3">Notes</a></h2>
+<ul>
+<li>Duration strings support: <code>s</code> (seconds), <code>m</code> (minutes), <code>h</code> (hours), <code>d</code> (days), <code>w</code> (weeks).</li>
+<li><code>jwt.verify</code> validates the <code>exp</code> claim with zero leeway — expired tokens are immediately rejected.</li>
+<li>For RSA and ECDSA algorithms, the secret parameter should be a PEM-encoded key string.</li>
+<li>The <code>jwt</code> module is available in both interpreter and VM execution modes.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="json"><a class="header" href="#json">json</a></h1>
 <p>JSON parsing and serialization.</p>
-<h2 id="functions-5"><a class="header" href="#functions-5">Functions</a></h2>
+<h2 id="functions-7"><a class="header" href="#functions-7">Functions</a></h2>
 <h3 id="jsonparsestring---any"><a class="header" href="#jsonparsestring---any">json.parse(string) -&gt; any</a></h3>
 <p>Parses a JSON string and returns the corresponding Forge value. Objects become Forge objects, arrays become Forge arrays, and JSON primitives map to their Forge equivalents.</p>
 <pre><code class="language-forge">let data = json.parse('{"name": "Forge", "version": 3}')
@@ -6078,7 +6396,7 @@ say json.pretty(obj, 4)
 //     "version": 3
 // }
 </code></pre>
-<h2 id="type-mapping"><a class="header" href="#type-mapping">Type Mapping</a></h2>
+<h2 id="type-mapping-1"><a class="header" href="#type-mapping-1">Type Mapping</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -6098,7 +6416,7 @@ say json.pretty(obj, 4)
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="csv"><a class="header" href="#csv">csv</a></h1>
 <p>CSV parsing and serialization. Uses comma-separated values with automatic type inference for fields.</p>
-<h2 id="functions-6"><a class="header" href="#functions-6">Functions</a></h2>
+<h2 id="functions-8"><a class="header" href="#functions-8">Functions</a></h2>
 <h3 id="csvparsestring---array"><a class="header" href="#csvparsestring---array">csv.parse(string) -&gt; array</a></h3>
 <p>Parses a CSV string into an array of objects. The first line is treated as headers. Values are automatically converted to <code>int</code>, <code>float</code>, or <code>bool</code> where possible; otherwise they remain strings.</p>
 <pre><code class="language-forge">let data = csv.parse("name,age,active\nAlice,30,true\nBob,25,false")
@@ -6140,7 +6458,7 @@ csv.write("inventory.csv", data)
 <blockquote>
 <p><strong>Important:</strong> All <code>regex</code> functions take the <strong>text first, pattern second</strong>: <code>regex.test(text, pattern)</code>. This is the opposite of many other languages.</p>
 </blockquote>
-<h2 id="functions-7"><a class="header" href="#functions-7">Functions</a></h2>
+<h2 id="functions-9"><a class="header" href="#functions-9">Functions</a></h2>
 <h3 id="regextesttext-pattern---bool"><a class="header" href="#regextesttext-pattern---bool">regex.test(text, pattern) -&gt; bool</a></h3>
 <p>Returns <code>true</code> if <code>pattern</code> matches anywhere in <code>text</code>.</p>
 <pre><code class="language-forge">regex.test("hello world", "world")     // true
@@ -6180,7 +6498,7 @@ regex.split("hello   world  foo", "\\s+")
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="env"><a class="header" href="#env">env</a></h1>
 <p>Environment variable access.</p>
-<h2 id="functions-8"><a class="header" href="#functions-8">Functions</a></h2>
+<h2 id="functions-10"><a class="header" href="#functions-10">Functions</a></h2>
 <h3 id="envgetkey-default---string--null"><a class="header" href="#envgetkey-default---string--null">env.get(key, default?) -&gt; string | null</a></h3>
 <p>Returns the value of the environment variable <code>key</code>. Returns <code>null</code> if the variable is not set, or <code>default</code> if provided.</p>
 <pre><code class="language-forge">let home = env.get("HOME")
@@ -6207,7 +6525,7 @@ say len(all_keys)
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="log"><a class="header" href="#log">log</a></h1>
 <p>Structured logging with timestamps and severity levels. All log output is written to stderr with ANSI color formatting.</p>
-<h2 id="functions-9"><a class="header" href="#functions-9">Functions</a></h2>
+<h2 id="functions-11"><a class="header" href="#functions-11">Functions</a></h2>
 <h3 id="loginfoargs---null"><a class="header" href="#loginfoargs---null">log.info(…args) -&gt; null</a></h3>
 <p>Logs an informational message in green.</p>
 <pre><code class="language-forge">log.info("Server started on port", 8080)
@@ -6228,7 +6546,7 @@ say len(all_keys)
 <pre><code class="language-forge">log.debug("Request payload:", data)
 // [14:30:15 DEBUG] Request payload: {name: "Alice"}
 </code></pre>
-<h2 id="notes-2"><a class="header" href="#notes-2">Notes</a></h2>
+<h2 id="notes-4"><a class="header" href="#notes-4">Notes</a></h2>
 <ul>
 <li>All functions accept any number of arguments. Arguments are converted to strings and joined with spaces.</li>
 <li>Timestamps use the local time in <code>HH:MM:SS</code> format.</li>
@@ -6499,7 +6817,7 @@ fn delete_user(id) {
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="io"><a class="header" href="#io">io</a></h1>
 <p>Input/output operations and command-line argument handling.</p>
-<h2 id="functions-10"><a class="header" href="#functions-10">Functions</a></h2>
+<h2 id="functions-12"><a class="header" href="#functions-12">Functions</a></h2>
 <h3 id="ioprompttext---string"><a class="header" href="#ioprompttext---string">io.prompt(text?) -&gt; string</a></h3>
 <p>Displays <code>text</code> and reads a line of input from stdin. Returns the input with trailing newline removed.</p>
 <pre><code class="language-forge">let name = io.prompt("What is your name? ")
@@ -6539,7 +6857,7 @@ let verbose = io.args_get("--verbose")  // true or null
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="exec"><a class="header" href="#exec">exec</a></h1>
 <p>External command execution. The <code>exec</code> module provides a single function, <code>run_command</code>, which is also available as a top-level builtin.</p>
-<h2 id="functions-11"><a class="header" href="#functions-11">Functions</a></h2>
+<h2 id="functions-13"><a class="header" href="#functions-13">Functions</a></h2>
 <h3 id="run_commandcommand---object"><a class="header" href="#run_commandcommand---object">run_command(command) -&gt; object</a></h3>
 <p>Executes an external command and returns a result object. The command string is split by whitespace into the program name and arguments. The command is <strong>not</strong> executed through a shell, which prevents shell injection.</p>
 <p><strong>Returns:</strong></p>
@@ -6567,7 +6885,7 @@ if git.ok {
     say "Git error: " + git.stderr
 }
 </code></pre>
-<h2 id="notes-3"><a class="header" href="#notes-3">Notes</a></h2>
+<h2 id="notes-5"><a class="header" href="#notes-5">Notes</a></h2>
 <ul>
 <li>For shell features (pipes, redirects, globbing), use the <code>sh</code> builtin function instead, which executes through a shell.</li>
 <li>The command string is split by whitespace, so arguments with spaces are not supported. Use <code>sh</code> for complex commands.</li>
@@ -6599,7 +6917,7 @@ if git.ok {
 </tbody>
 </table>
 </div>
-<h2 id="functions-12"><a class="header" href="#functions-12">Functions</a></h2>
+<h2 id="functions-14"><a class="header" href="#functions-14">Functions</a></h2>
 <h3 id="timenowtimezone---object"><a class="header" href="#timenowtimezone---object">time.now(timezone?) -&gt; object</a></h3>
 <p>Returns the current time as a time object. Defaults to UTC. Pass a timezone string for a specific zone.</p>
 <pre><code class="language-forge">let now = time.now()
@@ -6747,7 +7065,7 @@ time.is_leap_year(2025)  // false
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="npc"><a class="header" href="#npc">npc</a></h1>
 <p>Fake data generation for testing, prototyping, and seeding databases. “NPC” stands for Non-Player Character – these are the background characters in your application.</p>
-<h2 id="functions-13"><a class="header" href="#functions-13">Functions</a></h2>
+<h2 id="functions-15"><a class="header" href="#functions-15">Functions</a></h2>
 <h3 id="npcname---string"><a class="header" href="#npcname---string">npc.name() -&gt; string</a></h3>
 <p>Returns a random full name (first + last).</p>
 <pre><code class="language-forge">say npc.name()  // e.g. "Luna Nakamura"
@@ -6862,7 +7180,7 @@ say "The answer is", 42
 <pre><code class="language-forge">whisper "QUIET PLEASE"
 // quiet please
 </code></pre>
-<h2 id="notes-4"><a class="header" href="#notes-4">Notes</a></h2>
+<h2 id="notes-6"><a class="header" href="#notes-6">Notes</a></h2>
 <ul>
 <li><code>print</code> and <code>println</code> are classic-style. <code>say</code>, <code>yell</code>, and <code>whisper</code> are Forge-style.</li>
 <li>All five functions write to stdout (not stderr). For stderr output, use the <code>log</code> module.</li>
@@ -7522,7 +7840,7 @@ set name to "Alice"
 set mut count to 0
 change count to count + 1
 </code></pre>
-<h2 id="functions-14"><a class="header" href="#functions-14">Functions</a></h2>
+<h2 id="functions-16"><a class="header" href="#functions-16">Functions</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -7811,36 +8129,36 @@ say data
 <tr><th>Tier</th><th>Flag</th><th>Implementation</th><th>Performance</th><th>Feature Coverage</th></tr>
 </thead>
 <tbody>
-<tr><td>Bytecode VM</td><td>(default)</td><td>Register-based VM</td><td>~10x faster than interpreter</td><td>Near-full (~95%)</td></tr>
-<tr><td>Interpreter</td><td><code>--interp</code></td><td>Tree-walking</td><td>Baseline</td><td>Full (100%)</td></tr>
+<tr><td>Interpreter</td><td>(default)</td><td>Tree-walking</td><td>Baseline</td><td>Full (100%)</td></tr>
+<tr><td>Bytecode VM</td><td><code>--vm</code></td><td>Register-based VM</td><td>~10x faster than interpreter</td><td>Partial (~60%)</td></tr>
 <tr><td>JIT Compiler</td><td><code>--jit</code></td><td>Cranelift native code</td><td>~50-100x faster than interpreter</td><td>Minimal (~30%)</td></tr>
 </tbody>
 </table>
 </div>
-<pre><code class="language-bash">forge run program.fg          # Bytecode VM (default)
-forge run program.fg --interp # Tree-walking interpreter
+<pre><code class="language-bash">forge run program.fg          # Interpreter (default)
+forge run program.fg --vm     # Bytecode VM
 forge run program.fg --jit    # JIT compiler
 </code></pre>
 <h2 id="when-to-use-each-tier"><a class="header" href="#when-to-use-each-tier">When to Use Each Tier</a></h2>
-<h3 id="bytecode-vm-default"><a class="header" href="#bytecode-vm-default">Bytecode VM (Default)</a></h3>
-<p>Use the VM for:</p>
-<ul>
-<li>All general-purpose development</li>
-<li>Database access (<code>db</code>, <code>pg</code>, <code>mysql</code>)</li>
-<li>AI integration (<code>ask</code>)</li>
-<li>File system, crypto, terminal UI</li>
-<li>Any code using the full standard library (238+ functions)</li>
-<li>Async/await, concurrency, channels</li>
-</ul>
-<p>The VM is the default execution engine as of v0.7.0. It supports the vast majority of Forge features. Programs using VM-incompatible features (HTTP server decorators) are auto-detected and fall back to the interpreter.</p>
-<h3 id="interpreter---interp"><a class="header" href="#interpreter---interp">Interpreter (<code>--interp</code>)</a></h3>
+<h3 id="interpreter-default"><a class="header" href="#interpreter-default">Interpreter (Default)</a></h3>
 <p>Use the interpreter for:</p>
 <ul>
-<li>HTTP servers (<code>@server</code>, <code>@get</code>, <code>@post</code>, <code>@ws</code>)</li>
-<li>DAP debugger sessions (<code>forge dap</code>)</li>
-<li>Any code that requires decorator-driven HTTP routing</li>
+<li>All general-purpose development</li>
+<li>HTTP servers (<code>@server</code>, <code>@get</code>, <code>@post</code>)</li>
+<li>Database access (<code>db</code>, <code>pg</code>)</li>
+<li>AI integration (<code>ask</code>)</li>
+<li>File system, crypto, terminal UI</li>
+<li>Any code using the full standard library</li>
 </ul>
-<p>The interpreter supports every feature of the language. It is the reference implementation and is available via the <code>--interp</code> flag.</p>
+<p>The interpreter supports every feature of the language. It is the reference implementation.</p>
+<h3 id="bytecode-vm---vm"><a class="header" href="#bytecode-vm---vm">Bytecode VM (<code>--vm</code>)</a></h3>
+<p>Use the VM for:</p>
+<ul>
+<li>Compute-intensive loops and numerical work</li>
+<li>Programs that primarily use <code>math</code>, <code>fs</code>, <code>io</code>, and basic control flow</li>
+<li>Benchmarking against the interpreter</li>
+</ul>
+<p>The VM compiles Forge source to a register-based bytecode and executes it in a virtual machine with mark-sweep garbage collection. It does not support HTTP servers, database connections, or several stdlib modules.</p>
 <h3 id="jit-compiler---jit"><a class="header" href="#jit-compiler---jit">JIT Compiler (<code>--jit</code>)</a></h3>
 <p>Use the JIT for:</p>
 <ul>
@@ -7852,12 +8170,12 @@ forge run program.fg --jit    # JIT compiler
 <h2 id="trade-off-summary"><a class="header" href="#trade-off-summary">Trade-off Summary</a></h2>
 <pre><code>Feature Coverage:  Interpreter &gt; VM &gt; JIT
 Performance:       JIT &gt; VM &gt; Interpreter
-Startup Time:      VM &lt; Interpreter &lt; JIT
+Startup Time:      Interpreter &lt; VM &lt; JIT
 </code></pre>
-<p>The bytecode VM is the default engine. Use <code>--interp</code> for HTTP server applications or debugger sessions. Use <code>--jit</code> for maximum numeric performance.</p>
+<p>The interpreter is always the safe default. Switch to <code>--vm</code> or <code>--jit</code> only when you need the performance and have verified your program works on that tier.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="interpreter"><a class="header" href="#interpreter">Interpreter</a></h1>
-<p>The Forge interpreter is a <strong>tree-walking interpreter</strong> implemented in Rust. It traverses the AST directly, evaluating each node as it encounters it. As of v0.7.0, the bytecode VM is the default engine; the interpreter is available via the <code>--interp</code> flag and serves as the fallback for features that require it (HTTP server decorators, DAP debugger integration). It remains the most complete execution engine.</p>
+<p>The Forge interpreter is a <strong>tree-walking interpreter</strong> implemented in Rust. It traverses the AST directly, evaluating each node as it encounters it. This is the default and most complete execution engine.</p>
 <h2 id="architecture"><a class="header" href="#architecture">Architecture</a></h2>
 <pre><code>Source (.fg) -&gt; Lexer -&gt; Parser -&gt; AST -&gt; Interpreter -&gt; Result
                                             |
@@ -7911,13 +8229,12 @@ Startup Time:      VM &lt; Interpreter &lt; JIT
 </ul>
 <h2 id="performance-characteristics"><a class="header" href="#performance-characteristics">Performance Characteristics</a></h2>
 <p>The tree-walking approach means the interpreter re-traverses the AST on every loop iteration and function call. This makes it approximately 20x slower than Python for deep recursion benchmarks like <code>fib(35)</code>.</p>
-<p>For most real-world scripts (file processing, HTTP handlers, database queries), interpreter overhead is negligible compared to I/O latency. While the VM is now the default for general-purpose work, the interpreter remains the recommended tier for HTTP server applications and debugger sessions.</p>
+<p>For most real-world scripts (file processing, HTTP handlers, database queries), interpreter overhead is negligible compared to I/O latency. The interpreter is the recommended tier for all general-purpose work.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="bytecode-vm"><a class="header" href="#bytecode-vm">Bytecode VM</a></h1>
-<p>The Forge bytecode VM is a <strong>register-based virtual machine</strong> that compiles Forge source to 32-bit instructions and executes them in a loop. As of v0.7.0, the VM is the <strong>default execution engine</strong>. It provides significantly better performance than the tree-walking interpreter and supports the vast majority of Forge features.</p>
+<p>The Forge bytecode VM is a <strong>register-based virtual machine</strong> that compiles Forge source to 32-bit instructions and executes them in a loop. It provides significantly better performance than the tree-walking interpreter at the cost of reduced feature coverage.</p>
 <h2 id="invocation-1"><a class="header" href="#invocation-1">Invocation</a></h2>
-<p>The VM is used by default. To explicitly use the interpreter instead:</p>
-<pre><code class="language-bash">forge run program.fg --interp
+<pre><code class="language-bash">forge run program.fg --vm
 </code></pre>
 <h2 id="architecture-1"><a class="header" href="#architecture-1">Architecture</a></h2>
 <pre><code>Source -&gt; Lexer -&gt; Parser -&gt; AST -&gt; Compiler -&gt; Bytecode Chunks -&gt; Machine -&gt; Result
@@ -7963,25 +8280,24 @@ Startup Time:      VM &lt; Interpreter &lt; JIT
 <h2 id="green-threads"><a class="header" href="#green-threads">Green Threads</a></h2>
 <p>The VM includes a cooperative green thread scheduler (<code>src/vm/green.rs</code>). Green threads are multiplexed over a single OS thread with explicit yield points.</p>
 <h2 id="supported-features"><a class="header" href="#supported-features">Supported Features</a></h2>
-<p>The VM supports the vast majority of Forge features:</p>
+<p>The VM supports core language features:</p>
 <ul>
-<li>Variables, functions, closures, lambdas</li>
-<li>Control flow (if/else, for, while, match, when guards)</li>
-<li>Arrays, objects, destructuring</li>
-<li>Arithmetic, comparison, and logical operators</li>
-<li>String operations and interpolation</li>
-<li>All 18+ stdlib modules (math, fs, io, crypto, db, pg, mysql, http, json, csv, regex, log, env, jwt, term, exec, npc, url, toml, ws)</li>
-<li>Try-catch error handling</li>
-<li>Async/await with spawn and channels</li>
-<li>Schedule and watch</li>
-<li>Must, ask, freeze expressions</li>
-<li>All built-in functions (238+)</li>
+<li>Variables, functions, closures</li>
+<li>Control flow (if/else, for, while, match)</li>
+<li>Arrays and objects</li>
+<li>Arithmetic and comparison operators</li>
+<li>String operations</li>
+<li><code>math</code>, <code>fs</code>, <code>io</code>, <code>npc</code> modules</li>
+<li>Basic built-in functions</li>
 </ul>
-<h2 id="interpreter-only-features"><a class="header" href="#interpreter-only-features">Interpreter-Only Features</a></h2>
-<p>The following features require the interpreter (<code>--interp</code> flag) and are auto-detected for fallback:</p>
+<h2 id="unsupported-features"><a class="header" href="#unsupported-features">Unsupported Features</a></h2>
+<p>The following require the interpreter:</p>
 <ul>
-<li>HTTP server decorators (<code>@server</code>, <code>@get</code>, <code>@post</code>, <code>@delete</code>, <code>@ws</code>)</li>
-<li>DAP debugger integration</li>
+<li>HTTP server and client</li>
+<li>Database connections</li>
+<li>AI integration</li>
+<li>Terminal UI widgets</li>
+<li>Most execution helpers</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="jit-compiler"><a class="header" href="#jit-compiler">JIT Compiler</a></h1>
@@ -8003,7 +8319,7 @@ Startup Time:      VM &lt; Interpreter &lt; JIT
 </ul>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h2>
 <ol>
-<li>The program is first compiled to bytecode (same as the default VM compilation path).</li>
+<li>The program is first compiled to bytecode (same as the <code>--vm</code> path).</li>
 <li>Functions selected for JIT compilation are translated from bytecode into Cranelift’s intermediate representation (IR).</li>
 <li>Cranelift compiles the IR to native machine code for the host architecture.</li>
 <li>The native code is loaded into memory and called directly, bypassing the bytecode interpreter.</li>
@@ -8432,7 +8748,7 @@ where_filter   = expr "where" IDENT comparison_op expr ;
 pipe_chain     = "from" expr ( "keep" expr | "sort" "by" IDENT | "take" expr )+ ;
 block_expr     = "{" statement* expr "}" ;
 </code></pre>
-<h2 id="types-1"><a class="header" href="#types-1">Types</a></h2>
+<h2 id="types-2"><a class="header" href="#types-2">Types</a></h2>
 <pre><code class="language-ebnf">type_ann       = simple_type
                | array_type
                | generic_type
@@ -8475,7 +8791,7 @@ COMMENT        = "//" CHAR* NEWLINE ;
 </tbody>
 </table>
 </div>
-<h2 id="notes-5"><a class="header" href="#notes-5">Notes</a></h2>
+<h2 id="notes-7"><a class="header" href="#notes-7">Notes</a></h2>
 <ul>
 <li>Newlines are significant. They terminate statements unless the line ends with an operator or open delimiter.</li>
 <li>Semicolons can be used as explicit statement terminators.</li>
@@ -8723,42 +9039,6 @@ let result = 5 + 3 |&gt; double  // double(8), not 5 + double(3)
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="changelog"><a class="header" href="#changelog">Changelog</a></h1>
-<h2 id="v070"><a class="header" href="#v070">v0.7.0</a></h2>
-<p><strong>VM as default engine, AOT compilation, DAP debugger</strong></p>
-<ul>
-<li>VM is now the default execution engine; interpreter available via <code>--interp</code></li>
-<li>Auto-detection of VM-incompatible features (decorators) with graceful fallback</li>
-<li>Cross-file LSP: go-to-definition and find-references follow imports across files</li>
-<li><code>forge test --coverage</code>: line coverage reporting with color-coded percentages</li>
-<li><code>forge build --aot</code>: ahead-of-time compilation embeds bytecode in native binary</li>
-<li><code>forge dap</code>: Debug Adapter Protocol server for VS Code integration (breakpoints, stepping, variable inspection, call stacks)</li>
-<li>948+ Rust tests passing</li>
-</ul>
-<h2 id="v060"><a class="header" href="#v060">v0.6.0</a></h2>
-<p><strong>Developer experience, package ecosystem, VM parity</strong></p>
-<ul>
-<li>Deep LSP: go-to-definition, find-references, hover (full signatures), signature help, type-check diagnostics</li>
-<li>Source spans with ariadne error reporting (exact line and column)</li>
-<li>REPL improvements: syntax highlighting, tab completion, <code>env</code> command</li>
-<li><code>forge publish</code>: local filesystem registry with SHA-256 checksums</li>
-<li>Cross-file module resolution</li>
-<li>VM parity: async/await with spawn, try-catch, destructuring, full stdlib, schedule/watch</li>
-<li>JIT expansion: logical operators, multi-arg functions, float operations</li>
-</ul>
-<h2 id="v050"><a class="header" href="#v050">v0.5.0</a></h2>
-<p><strong>Production-readiness hardening</strong></p>
-<ul>
-<li>JWT key-confusion defence: algorithm pinning</li>
-<li><code>http.download</code> / <code>http.crawl</code>: timeout, max_redirects, max_bytes options</li>
-<li>CSPRNG audit confirmed</li>
-</ul>
-<h2 id="v040"><a class="header" href="#v040">v0.4.0</a></h2>
-<p><strong>JWT, MySQL, expanded stdlib</strong></p>
-<ul>
-<li>JWT authentication module (HS256/384/512, RS256, ES256)</li>
-<li>MySQL/MariaDB module with parameterized queries and connection pooling</li>
-<li>21 stdlib modules, 280+ functions, 862 tests</li>
-</ul>
 <h2 id="v033"><a class="header" href="#v033">v0.3.3</a></h2>
 <p><strong>Type system – natural syntax</strong></p>
 <ul>
@@ -8881,11 +9161,11 @@ let result = 5 + 3 |&gt; double  // double(8), not 5 + double(3)
 
         <script src="elasticlunr-ef4e11c1.min.js"></script>
         <script src="mark-09e88c2c.min.js"></script>
-        <script src="searcher-c2a407aa.js"></script>
+        <script src="searcher-09f2665d.js"></script>
 
         <script src="clipboard-1626706a.min.js"></script>
         <script src="highlight-abc7f01d.js"></script>
-        <script src="book-a0b12cfe.js"></script>
+        <script src="book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
         <script src="theme/forge-9e99b408.js"></script>

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Method Calls - The Forge Language Specification</title>
+        <title>Type Checking - The Forge Language Specification</title>
 
 
         <!-- Custom HTML head -->
@@ -147,7 +147,7 @@
                         <a href="https://github.com/humancto/forge-lang" title="Git repository" aria-label="Git repository">
                             <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
                         </a>
-                        <a href="https://github.com/humancto/forge-lang/edit/main/spec/src/src/expressions/method-calls.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/humancto/forge-lang/edit/main/spec/src/src/type-system/type-checking.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
                         </a>
 
@@ -181,130 +181,103 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="method-calls"><a class="header" href="#method-calls">Method Calls</a></h1>
-<p>A method call uses dot notation to invoke a function on a receiver value. Forge resolves method calls through a multi-step dispatch process.</p>
-<h2 id="syntax"><a class="header" href="#syntax">Syntax</a></h2>
-<pre><code>expression.method(arguments)
-</code></pre>
-<p>The left operand (the <strong>receiver</strong>) is evaluated first, then the method is resolved, then arguments are evaluated left to right.</p>
-<h2 id="method-dispatch"><a class="header" href="#method-dispatch">Method Dispatch</a></h2>
-<p>When evaluating <code>obj.method(args)</code>, the interpreter follows this resolution order:</p>
-<h3 id="1-object-field-lookup"><a class="header" href="#1-object-field-lookup">1. Object Field Lookup</a></h3>
-<p>If the receiver is an object and has a field named <code>method</code> whose value is callable (a function or closure), that field is invoked directly.</p>
-<pre><code class="language-forge">let obj = {
-    greet: fn(name) { "hello, {name}" }
-}
-say obj.greet("world")      // "hello, world"
-</code></pre>
-<h3 id="2-static-method-lookup"><a class="header" href="#2-static-method-lookup">2. Static Method Lookup</a></h3>
-<p>If the receiver is a struct type reference (not an instance), static methods registered via <code>give</code>/<code>impl</code> blocks are checked.</p>
-<pre><code class="language-forge">thing Counter { value: int }
-
-give Counter {
-    fn new() {
-        Counter { value: 0 }
-    }
-}
-
-let c = Counter.new()   // static method call
-</code></pre>
-<h3 id="3-instance-method-lookup-method_tables"><a class="header" href="#3-instance-method-lookup-method_tables">3. Instance Method Lookup (method_tables)</a></h3>
-<p>If the receiver is a typed object (has a <code>__type__</code> field), the interpreter looks up the type name in the global method table. Methods registered via <code>give</code>/<code>impl</code> blocks are found here. The receiver is automatically passed as the first argument (<code>self</code>).</p>
-<pre><code class="language-forge">thing Circle { radius: float }
-
-give Circle {
-    fn area(self) {
-        3.14159 * self.radius * self.radius
-    }
-}
-
-let c = Circle { radius: 5.0 }
-say c.area()    // 78.53975
-</code></pre>
-<h3 id="4-embedded-field-delegation"><a class="header" href="#4-embedded-field-delegation">4. Embedded Field Delegation</a></h3>
-<p>If the receiver is a typed object and no method is found in step 3, the interpreter checks embedded fields (declared with <code>has</code>). For each embedded field, the interpreter looks up the embedded type’s method table. If a match is found, the embedded sub-object is passed as <code>self</code> instead of the outer object.</p>
-<pre><code class="language-forge">thing Animal { name: string }
-give Animal {
-    fn speak(self) { "{self.name} speaks" }
-}
-
-thing Pet {
-    has animal: Animal
-    owner: string
-}
-
-let p = Pet { animal: Animal { name: "Rex" }, owner: "Alice" }
-say p.speak()   // "Rex speaks" (delegated to Animal.speak)
-</code></pre>
-<h3 id="5-built-in-string-methods"><a class="header" href="#5-built-in-string-methods">5. Built-in String Methods</a></h3>
-<p>Strings have a small set of built-in methods that are resolved directly without going through the method table:</p>
+                        <h1 id="type-checking"><a class="header" href="#type-checking">Type Checking</a></h1>
+<p>Every program is type-checked after parsing and before it runs. The checker is <strong>gradual</strong>: it infers types where the program determines them, checks values against the types the program <em>declares</em>, and treats everything else as <code>Any</code> — a type compatible with every other type. Unannotated code is never rejected for lacking annotations.</p>
+<h2 id="modes"><a class="header" href="#modes">Modes</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Method</th><th>Return Type</th><th>Description</th></tr>
+<tr><th>Mode</th><th>Static diagnostics</th><th>Runtime checks</th></tr>
 </thead>
 <tbody>
-<tr><td><code>.upper()</code></td><td><code>string</code></td><td>Uppercase copy</td></tr>
-<tr><td><code>.lower()</code></td><td><code>string</code></td><td>Lowercase copy</td></tr>
-<tr><td><code>.trim()</code></td><td><code>string</code></td><td>Trimmed copy</td></tr>
-<tr><td><code>.len()</code></td><td><code>int</code></td><td>Byte length</td></tr>
-<tr><td><code>.chars()</code></td><td><code>array</code></td><td>Array of single-character strings</td></tr>
+<tr><td>default (<code>forge run app.fg</code>)</td><td>reported as <strong>warnings</strong>; the program still runs</td><td>none</td></tr>
+<tr><td><code>--strict</code> (<code>forge run --strict app.fg</code>)</td><td>reported as <strong>errors</strong>; the program does not run</td><td>annotated function arguments and results are checked on every call</td></tr>
 </tbody>
 </table>
 </div>
-<pre><code class="language-forge">say "hello".upper()     // "HELLO"
-say "  hi  ".trim()     // "hi"
-say "abc".chars()       // ["a", "b", "c"]
+<p>The same rules apply on every engine (<code>--interp</code>, the VM, <code>--jit</code>). Editors receive the same diagnostics through <code>forge lsp</code>, and AI agents through the <code>check_forge</code> tool of <code>forge mcp</code>.</p>
+<h2 id="types"><a class="header" href="#types">Types</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Written</th><th>Values</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Int</code>, <code>Float</code>, <code>String</code>, <code>Bool</code>, <code>Null</code></td><td>as shown (<code>int</code>, <code>str</code>, <code>boolean</code>, … are accepted aliases)</td><td>primitives</td></tr>
+<tr><td><code>Any</code></td><td><code>Any</code> (also <code>Json</code>)</td><td>anything</td></tr>
+<tr><td><code>Object</code></td><td><code>Object</code></td><td>object literals and struct instances</td></tr>
+<tr><td><code>[T]</code></td><td><code>[Int]</code>, <code>Array&lt;T&gt;</code></td><td>arrays whose elements are <code>T</code></td></tr>
+<tr><td><code>(A, B)</code></td><td><code>(Int, String)</code></td><td>tuples</td></tr>
+<tr><td><code>Set&lt;T&gt;</code>, <code>Map&lt;K, V&gt;</code></td><td>as shown</td><td>sets and maps</td></tr>
+<tr><td><code>?T</code></td><td><code>?Int</code>, <code>Option&lt;Int&gt;</code></td><td><code>T</code>, <code>null</code>, <code>None</code> or <code>Some(t)</code></td></tr>
+<tr><td><code>Result&lt;T, E&gt;</code></td><td>as shown</td><td><code>Ok(t)</code> / <code>Err(e)</code></td></tr>
+<tr><td><code>fn(A, B) -&gt; R</code></td><td><code>fn(Int) -&gt; Bool</code>, <code>fn()</code></td><td>functions and lambdas</td></tr>
+<tr><td>user types</td><td><code>Point</code>, <code>Box&lt;Int&gt;</code>, <code>Shape</code></td><td>structs, <code>type</code> definitions, interfaces</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>type Id = Int | String</code> declares a union alias; <code>type Shape = Circle(Float) | Rect(Float, Float)</code> declares an algebraic data type whose variants are constructors.</p>
+<p>Assignability: <code>Any</code> fits everything in both directions; <code>Int</code> fits <code>Float</code> (but not the reverse); <code>?T</code> accepts <code>null</code>, <code>T</code> and <code>?U</code> when <code>U</code> fits <code>T</code>; a union accepts any of its members; function types are contravariant in parameters and covariant in results; collections compare element-wise; an <code>Object</code> and a struct instance are interchangeable. A struct satisfies an interface structurally: it must provide every interface member as a field or method, with matching parameter counts and return types.</p>
+<h2 id="inference"><a class="header" href="#inference">Inference</a></h2>
+<p>The checker infers, without annotations:</p>
+<ul>
+<li>the type of every <code>let</code> from its value (<code>let n = 1</code> is <code>Int</code>, <code>let xs = [1, 2.5]</code> is <code>[Float]</code>);</li>
+<li>the result type of every function from its <code>return</code> statements and its final expression;</li>
+<li>the type arguments of generic functions at each call (<code>fn first&lt;T&gt;(xs: [T]) -&gt; T</code> called with <code>[String]</code> returns <code>String</code>) and of generic structs from their fields;</li>
+<li>the parameters of lambdas from the function type they are passed as: in <code>map(names, fn(n) { n.upper() })</code> with <code>names: [String]</code>, <code>n</code> is a <code>String</code>;</li>
+<li>field types of struct values, element types of arrays and maps, the payloads of <code>Some</code>, <code>Ok</code>, <code>Err</code> and ADT variants in <code>match</code> arms;</li>
+<li>narrowed types after <code>if x != null</code>, <code>if is_some(x)</code>, <code>if is_ok(r)</code> and early returns.</li>
+</ul>
+<p>A mutable variable without an annotation has the combined type of every value assigned to it anywhere in its scope: <code>let mut x = 0</code> later assigned <code>"done"</code> is <code>Any</code>, never a stale <code>Int</code>. Values are only ever checked against <strong>declared</strong> types — an inferred type never turns a later, different use into an error, because Forge arrays may hold mixed values and unannotated variables may change type.</p>
+<h2 id="diagnostics"><a class="header" href="#diagnostics">Diagnostics</a></h2>
+<p>Each diagnostic has a stable code, a precise source span, and often a help line and a quick fix (applied by editors as a code action).</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Code</th><th>Meaning</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td>T0001</td><td>value does not match a declared type</td><td><code>let n: Int = "a"</code></td></tr>
+<tr><td>T0002</td><td>argument does not match the parameter type</td><td><code>fn f(x: Int) {}</code> … <code>f("a")</code></td></tr>
+<tr><td>T0003</td><td>returned value does not match the return type</td><td><code>fn f() -&gt; Int { "a" }</code></td></tr>
+<tr><td>T0004</td><td>wrong number of arguments</td><td><code>len(1, 2)</code></td></tr>
+<tr><td>T0005</td><td>operator not defined for the operand types</td><td><code>"a" - 1</code></td></tr>
+<tr><td>T0006</td><td>unknown name (with “did you mean”)</td><td><code>say cuont</code></td></tr>
+<tr><td>T0007</td><td>unknown field or method of a struct</td><td><code>point.z</code></td></tr>
+<tr><td>T0008</td><td>unknown member of a stdlib module</td><td><code>math.sqr(2)</code></td></tr>
+<tr><td>T0009</td><td>function with a return type can finish without returning</td><td><code>fn f() -&gt; Int { let y = 1 }</code></td></tr>
+<tr><td>T0010</td><td>unreachable code</td><td>statements after <code>return</code></td></tr>
+<tr><td>T0011</td><td>non-exhaustive <code>match</code> (Option, Result, Bool, ADT)</td><td>missing <code>None</code> arm</td></tr>
+<tr><td>T0012</td><td>a struct does not satisfy an interface</td><td>missing method</td></tr>
+<tr><td>T0013</td><td>call of a value that is not a function</td><td><code>let c = 5</code> … <code>c()</code></td></tr>
+<tr><td>T0014</td><td><code>?T</code> used where <code>T</code> is required</td><td><code>opt + 1</code></td></tr>
+<tr><td>T0015</td><td>unknown type in an annotation</td><td><code>let s: Strng = ""</code></td></tr>
+<tr><td>T0016</td><td>struct literal leaves out a field without default</td><td><code>Point { x: 1 }</code></td></tr>
+<tr><td>T0017</td><td>assignment to an immutable binding</td><td><code>let x = 1</code> … <code>x = 2</code></td></tr>
+<tr><td>T0018</td><td>name read before its definition runs</td><td><code>say x</code> then <code>let x = 1</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Diagnostics derived from run-time rules use the engines’ own rules, so they agree with what would happen: operator validity comes from the shared arithmetic rules, argument counts from the shared arity rule, and module members from the stdlib registry. Code passed to <code>assert_throws(fn() { ... })</code> is expected to fail and is not reported.</p>
+<p>Name resolution follows the run-time scoping rules: blocks, function and lambda bodies, loop variables, <code>match</code> arms and <code>catch</code> clauses each introduce a scope; a <code>let</code> is visible after its statement; a function body may refer to names defined later in an enclosing scope (the body runs when called); <code>import "file"</code> brings in that file’s top-level functions, variables, structs and variants. When an imported file cannot be found, unknown-name diagnostics are suppressed for the importing file.</p>
+<h2 id="runtime-enforcement---strict"><a class="header" href="#runtime-enforcement---strict">Runtime enforcement (<code>--strict</code>)</a></h2>
+<p>Static checking cannot see values typed <code>Any</code> — data from <code>json.parse</code>, HTTP responses, unannotated parameters. Under <code>--strict</code>, every function or lambda whose parameters are annotated checks its arguments on entry, and every function with a declared return type checks each value it returns:</p>
+<pre><code class="language-forge">fn double(n: Int) -&gt; Int { return n * 2 }
+let v = json.parse("\"seven\"")   // Any
+double(v)
+// error: type error: argument 'n' of 'double' must be Int, got String
 </code></pre>
-<h3 id="6-known-built-in-methods"><a class="header" href="#6-known-built-in-methods">6. Known Built-in Methods</a></h3>
-<p>If none of the above steps match, Forge checks a set of known built-in method names. If the method name matches, the call is rewritten as a function call with the receiver prepended to the argument list: <code>obj.method(args)</code> becomes <code>method(obj, args)</code>.</p>
-<p>This allows calling built-in functions with method syntax:</p>
-<pre><code class="language-forge">let nums = [3, 1, 2]
-say nums.sort()             // [1, 2, 3]
-say nums.map(fn(x) { x * 2 })  // [6, 2, 4]
-say nums.filter(fn(x) { x &gt; 1 })   // [3, 2]
-
-let text = "hello world"
-say text.split(" ")        // ["hello", "world"]
-say text.starts_with("hello")  // true
-</code></pre>
-<p>The full list of known built-in methods includes: <code>map</code>, <code>filter</code>, <code>reduce</code>, <code>sort</code>, <code>reverse</code>, <code>push</code>, <code>pop</code>, <code>len</code>, <code>contains</code>, <code>keys</code>, <code>values</code>, <code>enumerate</code>, <code>split</code>, <code>join</code>, <code>replace</code>, <code>find</code>, <code>flat_map</code>, <code>has_key</code>, <code>get</code>, <code>pick</code>, <code>omit</code>, <code>merge</code>, <code>entries</code>, <code>from_entries</code>, <code>starts_with</code>, <code>ends_with</code>, <code>upper</code>, <code>lower</code>, <code>trim</code>, <code>substring</code>, <code>index_of</code>, <code>last_index_of</code>, <code>pad_start</code>, <code>pad_end</code>, <code>capitalize</code>, <code>title</code>, <code>repeat_str</code>, <code>count</code>, <code>sum</code>, <code>min_of</code>, <code>max_of</code>, <code>any</code>, <code>all</code>, <code>unique</code>, <code>zip</code>, <code>flatten</code>, <code>group_by</code>, <code>chunk</code>, <code>slice</code>, <code>slugify</code>, <code>snake_case</code>, <code>camel_case</code>, <code>sample</code>, <code>shuffle</code>, <code>partition</code>, <code>diff</code>.</p>
-<h2 id="self-parameter"><a class="header" href="#self-parameter">Self Parameter</a></h2>
-<p>Methods defined in <code>give</code>/<code>impl</code> blocks receive the receiver as their first argument, conventionally named <code>self</code>. This parameter must be declared explicitly.</p>
-<pre><code class="language-forge">thing Rect { w: int, h: int }
-
-give Rect {
-    fn area(self) {
-        self.w * self.h
-    }
-    fn scale(self, factor) {
-        Rect { w: self.w * factor, h: self.h * factor }
-    }
-}
-</code></pre>
-<h2 id="method-chaining"><a class="header" href="#method-chaining">Method Chaining</a></h2>
-<p>Method calls can be chained. Each call in the chain returns a value that becomes the receiver for the next call.</p>
-<pre><code class="language-forge">let result = [5, 2, 8, 1, 9]
-    .sort()
-    .filter(fn(x) { x &gt; 3 })
-    .map(fn(x) { x * 10 })
-// result: [50, 80, 90]
-</code></pre>
-<h2 id="resolution-failure"><a class="header" href="#resolution-failure">Resolution Failure</a></h2>
-<p>If method resolution exhausts all steps without finding a match, a runtime error is produced:</p>
-<pre><code class="language-forge">let x = 42
-say x.nonexistent()     // runtime error: unknown method 'nonexistent'
-</code></pre>
+<p>The checks are performed at run time on both engines with identical messages. They are structural and deep for collections (an <code>[Int]</code> argument is checked element by element), check struct and ADT values by their type name, accept <code>Int</code> for <code>Float</code>, and skip <code>Any</code>, generic parameters and interfaces. A correct program behaves identically with and without <code>--strict</code>.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../expressions/field-access.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../type-system/static-methods.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../expressions/closures.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../error-handling.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -314,11 +287,11 @@ say x.nonexistent()     // runtime error: unknown method 'nonexistent'
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../expressions/field-access.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../type-system/static-methods.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../expressions/closures.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../error-handling.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

@@ -15,8 +15,8 @@
         <link rel="icon" href="../favicon-de23e50b.svg">
         <link rel="shortcut icon" href="../favicon-8114d1fc.png">
         <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/general-e96d0476.css">
+        <link rel="stylesheet" href="../css/chrome-d279d366.css">
         <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -36,10 +36,10 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-7ed87d68.js";
+            window.path_to_searchindex_js = "../searchindex-72b9ea48.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-cb066ca3.js"></script>
+        <script src="../toc-fdd2f5ad.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -182,10 +182,9 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="bytecode-vm"><a class="header" href="#bytecode-vm">Bytecode VM</a></h1>
-<p>The Forge bytecode VM is a <strong>register-based virtual machine</strong> that compiles Forge source to 32-bit instructions and executes them in a loop. As of v0.7.0, the VM is the <strong>default execution engine</strong>. It provides significantly better performance than the tree-walking interpreter and supports the vast majority of Forge features. Programs that use VM-incompatible features (such as HTTP server decorators) are automatically detected and fall back to the interpreter.</p>
+<p>The Forge bytecode VM is a <strong>register-based virtual machine</strong> that compiles Forge source to 32-bit instructions and executes them in a loop. It provides significantly better performance than the tree-walking interpreter at the cost of reduced feature coverage.</p>
 <h2 id="invocation"><a class="header" href="#invocation">Invocation</a></h2>
-<p>The VM is used by default. To explicitly use the interpreter instead:</p>
-<pre><code class="language-bash">forge run program.fg --interp
+<pre><code class="language-bash">forge run program.fg --vm
 </code></pre>
 <h2 id="architecture"><a class="header" href="#architecture">Architecture</a></h2>
 <pre><code>Source -&gt; Lexer -&gt; Parser -&gt; AST -&gt; Compiler -&gt; Bytecode Chunks -&gt; Machine -&gt; Result
@@ -231,25 +230,24 @@
 <h2 id="green-threads"><a class="header" href="#green-threads">Green Threads</a></h2>
 <p>The VM includes a cooperative green thread scheduler (<code>src/vm/green.rs</code>). Green threads are multiplexed over a single OS thread with explicit yield points.</p>
 <h2 id="supported-features"><a class="header" href="#supported-features">Supported Features</a></h2>
-<p>The VM supports the vast majority of Forge features:</p>
+<p>The VM supports core language features:</p>
 <ul>
-<li>Variables, functions, closures, lambdas</li>
-<li>Control flow (if/else, for, while, match, when guards)</li>
-<li>Arrays, objects, destructuring</li>
-<li>Arithmetic, comparison, and logical operators</li>
-<li>String operations and interpolation</li>
-<li>All 18+ stdlib modules (math, fs, io, crypto, db, pg, mysql, http, json, csv, regex, log, env, jwt, term, exec, npc, url, toml, ws)</li>
-<li>Try-catch error handling</li>
-<li>Async/await with spawn and channels</li>
-<li>Schedule and watch</li>
-<li>Must, ask, freeze expressions</li>
-<li>All built-in functions (238+)</li>
+<li>Variables, functions, closures</li>
+<li>Control flow (if/else, for, while, match)</li>
+<li>Arrays and objects</li>
+<li>Arithmetic and comparison operators</li>
+<li>String operations</li>
+<li><code>math</code>, <code>fs</code>, <code>io</code>, <code>npc</code> modules</li>
+<li>Basic built-in functions</li>
 </ul>
-<h2 id="interpreter-only-features"><a class="header" href="#interpreter-only-features">Interpreter-Only Features</a></h2>
-<p>The following features require the interpreter (<code>--interp</code> flag) and are auto-detected for fallback:</p>
+<h2 id="unsupported-features"><a class="header" href="#unsupported-features">Unsupported Features</a></h2>
+<p>The following require the interpreter:</p>
 <ul>
-<li>HTTP server decorators (<code>@server</code>, <code>@get</code>, <code>@post</code>, <code>@delete</code>, <code>@ws</code>)</li>
-<li>DAP debugger integration</li>
+<li>HTTP server and client</li>
+<li>Database connections</li>
+<li>AI integration</li>
+<li>Terminal UI widgets</li>
+<li>Most execution helpers</li>
 </ul>
 
                     </main>
@@ -296,11 +294,11 @@
 
         <script src="../elasticlunr-ef4e11c1.min.js"></script>
         <script src="../mark-09e88c2c.min.js"></script>
-        <script src="../searcher-c2a407aa.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
 
         <script src="../clipboard-1626706a.min.js"></script>
         <script src="../highlight-abc7f01d.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="../book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
         <script src="../theme/forge-9e99b408.js"></script>
