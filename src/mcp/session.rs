@@ -15,6 +15,19 @@
 //! fails keeps whatever it defined before the error, like a REPL. Tasks a
 //! step `spawn`s stop when that step ends. A step whose worker had to be
 //! abandoned (it did not stop after a timeout or cancel) loses the session.
+//!
+//! Engine: session steps always run on the interpreter, whatever
+//! `forge mcp --engine` says (one-shot `run_forge` calls and Forge tools
+//! use the configured engine). The containment is the same either way
+//! (`Sandbox::run_interpreter` is `Sandbox::run_contained`). What the VM
+//! lacks is a faithful way to carry state between separately compiled
+//! steps: its compiler keeps top-level `let`s in registers of the step's
+//! chunk (captured by closures as upvalue cells) and only copies a binding
+//! to a global when it is defined, so a later step would read stale values
+//! (`let mut n = 0; fn bump() { n = n + 1 }` then `bump(); say n`). A
+//! session on the VM needs a compile mode where top-level bindings live in
+//! globals; the per-step state could then be kept as a frozen
+//! `vm::serve::VmTemplate` and thawed on each step's worker.
 
 use crate::interpreter::Interpreter;
 use crate::sandbox::CancelHandle;

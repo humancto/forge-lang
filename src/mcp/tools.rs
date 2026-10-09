@@ -31,19 +31,28 @@
 //! # Execution model
 //!
 //! The file's top level runs once at start-up, inside the same sandbox the
-//! tools get (policy, time limit, captured output, no host runtime). The
-//! resulting interpreter is a read-only template; every call runs in a
-//! fresh fork of it ([`Interpreter::fork_for_serving`], the per-request
-//! fork of the HTTP server), so calls never see each other's state.
+//! tools get (policy, time limit, captured output, no host runtime), on the
+//! server's engine. The result is a read-only template; every call runs in
+//! a fresh fork of it — the HTTP server's per-request fork:
+//! [`VmTemplate::fork`] on the VM (the default),
+//! [`Interpreter::fork_for_serving`] on the interpreter — so calls never
+//! see each other's state. A file the VM cannot run faithfully (an unknown
+//! decorator) is served by the interpreter.
 //! Arguments are validated against the schema in Rust before any Forge code
 //! runs.
 
 use super::{tool_error, truncate_utf8, CAPTURE_LIMIT};
 use crate::interpreter::{Interpreter, RuntimeError, Value};
-use crate::parser::ast::{Decorator, DecoratorArg, Expr, FieldDef, Param, Stmt, TypeAnn, UnaryOp};
+use crate::parser::ast::{
+    Decorator, DecoratorArg, Expr, FieldDef, Param, Program, Stmt, TypeAnn, UnaryOp,
+};
 use crate::permissions::{Capabilities, Capability};
 use crate::runtime::limits::Limits;
-use crate::sandbox::{parse_source, CancelHandle, Sandbox, SandboxError};
+use crate::sandbox::{
+    parse_source, CancelHandle, Engine, JobError, RunScope, Sandbox, SandboxError,
+};
+use crate::vm::embed;
+use crate::vm::serve::VmTemplate;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value as Json};
 use std::collections::HashMap;
@@ -58,7 +67,7 @@ const MAX_RESULT_DEPTH: usize = 128;
 pub struct ToolSet {
     /// The program after its top level ran. Never run directly: every call
     /// forks it (on the call's worker, under the call's budget).
-    template: Arc<Interpreter>,
+    template: Template,
     tools: Vec<ToolDef>,
     resources: Vec<ResourceDef>,
     /// Policy every tool call runs under.
@@ -463,6 +472,79 @@ fn value_to_json(v: &Value, depth: usize) -> Result<Json, String> {
             ))
         }
     })
+}
+
+/// A loaded tool file, ready to fork per call.
+enum Template {
+    /// The interpreter after the top level ran ([`Interpreter::fork_for_serving`]).
+    Interpreter(Arc<Interpreter>),
+    /// The VM after the top level ran, frozen ([`VmTemplate::fork`]).
+    Vm(Arc<VmTemplate>),
+}
+
+/// Prefix of the load error for a top-level stream (reported without the
+/// "top level failed" wrapper).
+const STREAM_PREFIX: &str = "stream in template: ";
+
+/// Run the tool file's top level on `engine` (the interpreter when the VM
+/// cannot run it faithfully) and freeze the result into a [`Template`].
+/// Also returns the first of `functions` that is not a function afterwards.
+fn build_template(
+    scope: &RunScope,
+    engine: Engine,
+    program: &Program,
+    source: String,
+    file: std::path::PathBuf,
+    functions: &[String],
+) -> Result<(Template, Option<String>), JobError> {
+    if engine == Engine::Vm {
+        match embed::compile_program(program, file.parent().map(Path::to_path_buf)) {
+            Ok(chunk) => {
+                let mut vm = crate::vm::machine::VM::new();
+                scope.contain_vm(&mut vm);
+                vm.execute(&chunk)?;
+                let template = VmTemplate::new(&vm, HashMap::new()).map_err(|_| {
+                    JobError::new(format!(
+                        "{}a top-level value is a stream; streams are single-use and cannot \
+                         be shared by tool calls (create it inside the tool)",
+                        STREAM_PREFIX
+                    ))
+                })?;
+                let missing = functions
+                    .iter()
+                    .find(|f| !template.has_function(f))
+                    .cloned();
+                return Ok((Template::Vm(Arc::new(template)), missing));
+            }
+            Err(embed::CompileFailure::Error(message)) => return Err(JobError::new(message)),
+            Err(embed::CompileFailure::Unsupported) => {}
+        }
+    }
+    let mut interp = Interpreter::new();
+    interp.source = Some(source);
+    interp.source_file = Some(file);
+    scope.contain_interpreter(&mut interp);
+    interp.run(program)?;
+    if let Some(path) = Interpreter::find_stream_in_env(&interp.env) {
+        return Err(JobError::new(format!(
+            "{}top-level value `{}` is a stream; streams are single-use and cannot be shared \
+             by tool calls (create it inside the tool)",
+            STREAM_PREFIX, path
+        )));
+    }
+    let missing = functions
+        .iter()
+        .find(|f| !matches!(interp.env.get(f), Some(Value::Function(_))))
+        .cloned();
+    Ok((Template::Interpreter(Arc::new(interp)), missing))
+}
+
+/// A tool function's return value as JSON: `Err(v)` is a tool error.
+fn produce(value: &Value) -> Result<Produced, String> {
+    match value {
+        Value::ResultErr(inner) => value_to_json(inner, 0).map(Produced::Err),
+        other => value_to_json(other, 0).map(Produced::Ok),
+    }
 }
 
 /// What a tool or resource function produced, converted on the worker.
@@ -991,6 +1073,7 @@ impl ToolSet {
         caps: Capabilities,
         max_time: Duration,
         limits: Limits,
+        engine: Engine,
     ) -> Result<(ToolSet, LoadReport), String> {
         let label = path.display().to_string();
         let program = parse_source(source).map_err(|e| format!("{}: {}", label, e))?;
@@ -1003,6 +1086,11 @@ impl ToolSet {
                 label
             ));
         }
+        let functions: Vec<String> = tools
+            .iter()
+            .map(|t| t.function.clone())
+            .chain(resources.iter().map(|r| r.function.clone()))
+            .collect();
 
         let sandbox = Sandbox::with_capabilities(caps.clone())
             .max_time(max_time)
@@ -1011,49 +1099,29 @@ impl ToolSet {
             .source_label(label.clone());
         let source = source.to_string();
         let file = path.to_path_buf();
-        let run = sandbox.run_interpreter(
-            move || {
-                let mut interp = Interpreter::new();
-                interp.source = Some(source);
-                interp.source_file = Some(file);
-                interp
-            },
+        let run = sandbox.run_contained(
+            || (),
             &CancelHandle::new(),
-            move |interp| {
-                let result = interp.run(&program).map(|_| ());
-                drop(program);
-                result
-            },
+            move |(), scope| build_template(scope, engine, &program, source, file, &functions),
         );
-        let stdout = match run.result {
-            Ok(((), stdout)) => stdout,
+        let (template, stdout) = match run.result {
+            Ok(((template, missing), stdout)) => match missing {
+                Some(function) => {
+                    return Err(format!(
+                        "{}: `{}` is not a function after the top level ran (was it redefined?)",
+                        label, function
+                    ))
+                }
+                None => (template, stdout),
+            },
+            Err(SandboxError::Runtime { message, .. }) if message.starts_with(STREAM_PREFIX) => {
+                return Err(format!("{}: {}", label, &message[STREAM_PREFIX.len()..]))
+            }
             Err(e) => return Err(format!("{}: top level failed: {}", label, e)),
         };
-        let Some(template) = run.interp else {
-            return Err(format!("{}: top level did not finish", label));
-        };
-        if let Some(path) = Interpreter::find_stream_in_env(&template.env) {
-            return Err(format!(
-                "{}: top-level value `{}` is a stream; streams are single-use and cannot be \
-                 shared by tool calls (create it inside the tool)",
-                label, path
-            ));
-        }
-        for function in tools
-            .iter()
-            .map(|t| &t.function)
-            .chain(resources.iter().map(|r| &r.function))
-        {
-            if !matches!(template.env.get(function), Some(Value::Function(_))) {
-                return Err(format!(
-                    "{}: `{}` is not a function after the top level ran (was it redefined?)",
-                    label, function
-                ));
-            }
-        }
         Ok((
             ToolSet {
-                template: Arc::new(template),
+                template,
                 tools,
                 resources,
                 caps,
@@ -1197,24 +1265,45 @@ impl ToolSet {
             .limits(self.limits.clone())
             .source_label(self.path.clone());
         let function = function.to_string();
-        let template = self.template.clone();
-        sandbox
-            .run_interpreter(
-                move || template.fork_for_serving(),
-                cancel,
-                move |interp| {
-                    let f = interp.env.get(&function).ok_or_else(|| {
-                        RuntimeError::new(&format!("BUG: tool function `{}` is missing", function))
-                    })?;
-                    let value = interp.call_function(f, args)?;
-                    let produced = match &value {
-                        Value::ResultErr(inner) => value_to_json(inner, 0).map(Produced::Err),
-                        other => value_to_json(other, 0).map(Produced::Ok),
-                    };
-                    produced.map_err(|e| RuntimeError::new(&e))
-                },
-            )
-            .result
+        match &self.template {
+            Template::Interpreter(template) => {
+                let template = template.clone();
+                sandbox
+                    .run_interpreter(
+                        move || template.fork_for_serving(),
+                        cancel,
+                        move |interp| {
+                            let f = interp.env.get(&function).ok_or_else(|| {
+                                RuntimeError::new(&format!(
+                                    "BUG: tool function `{}` is missing",
+                                    function
+                                ))
+                            })?;
+                            let value = interp.call_function(f, args)?;
+                            produce(&value).map_err(|e| RuntimeError::new(&e))
+                        },
+                    )
+                    .result
+            }
+            Template::Vm(template) => {
+                let template = template.clone();
+                sandbox
+                    .run_contained(
+                        || (),
+                        cancel,
+                        move |(), scope| {
+                            // The fork is built on the call's worker, under
+                            // the call's budget.
+                            let mut vm = template.fork_in_current_budget(scope.cancel_flag());
+                            scope.contain_vm(&mut vm);
+                            let value = embed::call_global(&mut vm, &function, &args)?;
+                            drop(vm);
+                            produce(&value).map_err(JobError::new)
+                        },
+                    )
+                    .result
+            }
+        }
     }
 
     /// Validate `args` against `tool`'s parameters and build the argument
@@ -1407,13 +1496,16 @@ fn failure(e: &SandboxError, max_response_bytes: usize) -> Json {
 mod tests {
     use super::*;
 
-    fn load(src: &str) -> Result<ToolSet, String> {
+    const ENGINES: [Engine; 2] = [Engine::Vm, Engine::Interpreter];
+
+    fn load(engine: Engine, src: &str) -> Result<ToolSet, String> {
         ToolSet::load(
             Path::new("t.fg"),
             src,
             Capabilities::deny_all(),
             Duration::from_secs(5),
             super::super::default_limits(),
+            engine,
         )
         .map(|(t, _)| t)
     }
@@ -1434,7 +1526,15 @@ mod tests {
 
     #[test]
     fn schemas_follow_type_annotations() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            schemas_follow_type_annotations_on(engine);
+        }
+    }
+
+    fn schemas_follow_type_annotations_on(engine: Engine) {
         let set = load(
+            engine,
             "struct Point { x: Float, y: Float, label: String = \"p\" }\n\
              @tool(description: \"d\")\n\
              @param(n: \"count\")\n\
@@ -1474,7 +1574,15 @@ mod tests {
 
     #[test]
     fn arguments_are_validated_and_converted() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            arguments_are_validated_and_converted_on(engine);
+        }
+    }
+
+    fn arguments_are_validated_and_converted_on(engine: Engine) {
         let set = load(
+            engine,
             "struct P { x: Int }\n\
              @tool(\"add\")\nfn add(a: Int, b: Float = 0.5, o: Option<Int>) -> Float {\n\
                let extra = if is_some(o) { unwrap(o) } else { 0 }\n  return a + b + extra }\n\
@@ -1512,7 +1620,15 @@ mod tests {
 
     #[test]
     fn results_errors_and_return_checks() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            results_errors_and_return_checks_on(engine);
+        }
+    }
+
+    fn results_errors_and_return_checks_on(engine: Engine) {
         let set = load(
+            engine,
             "@tool(\"e\")\nfn e(x: Int) { if x > 0 { return Err(\"too big\") }\n return Ok({ v: x }) }\n\
              @tool(\"lie\")\nfn lie() -> Int { return \"nope\" }\n\
              @tool(\"talk\")\nfn talk() { say \"hello\" }\n\
@@ -1539,6 +1655,13 @@ mod tests {
 
     #[test]
     fn calls_run_under_fresh_resource_budgets() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            calls_run_under_fresh_resource_budgets_on(engine);
+        }
+    }
+
+    fn calls_run_under_fresh_resource_budgets_on(engine: Engine) {
         let (set, _) = ToolSet::load(
             Path::new("t.fg"),
             "@tool(\"spin\")\nfn spin(n: Int) { let mut i = 0\n while i < n { i = i + 1 }\n return i }\n\
@@ -1549,6 +1672,7 @@ mod tests {
                 max_fuel: Some(10_000),
                 ..Limits::none()
             },
+            engine,
         )
         .expect("loads");
         // Each call gets its own fuel: many small calls all succeed...
@@ -1576,7 +1700,15 @@ mod tests {
 
     #[test]
     fn calls_are_isolated_forks() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            calls_are_isolated_forks_on(engine);
+        }
+    }
+
+    fn calls_are_isolated_forks_on(engine: Engine) {
         let set = load(
+            engine,
             "let mut hits = 0\n@tool(\"count\")\nfn count() -> Int { hits = hits + 1\n return hits }",
         )
         .expect("loads");
@@ -1590,6 +1722,13 @@ mod tests {
 
     #[test]
     fn load_errors_point_at_the_declaration() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            load_errors_point_at_the_declaration_on(engine);
+        }
+    }
+
+    fn load_errors_point_at_the_declaration_on(engine: Engine) {
         for (src, needle) in [
             ("say 1", "no @tool"),
             ("@tool\nfn f() {}", "needs a description"),
@@ -1628,12 +1767,12 @@ mod tests {
                 "permission denied: fs.read",
             ),
         ] {
-            match load(src) {
+            match load(engine, src) {
                 Ok(_) => panic!("{src:?} loaded"),
                 Err(e) => assert!(e.contains(needle), "{src:?}: {e}"),
             }
         }
-        let e = load("let a = 1\n\n@tool\nfn f() {}")
+        let e = load(engine, "let a = 1\n\n@tool\nfn f() {}")
             .err()
             .unwrap_or_default();
         assert!(e.starts_with("t.fg:3: "), "{e}");
@@ -1641,7 +1780,15 @@ mod tests {
 
     #[test]
     fn resources_are_read_through_a_fork() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            resources_are_read_through_a_fork_on(engine);
+        }
+    }
+
+    fn resources_are_read_through_a_fork_on(engine: Engine) {
         let set = load(
+            engine,
             "@resource(uri: \"forge://units\", description: \"units\")\nfn units() { return [\"C\", \"F\"] }\n\
              @resource(\"forge://readme\")\nfn readme() { return \"hi\" }",
         )

@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Every test runs against both engines (`forge mcp --engine`): the sandbox
+/// must contain scripts and tools identically on each.
+const ENGINES: [&str; 2] = ["vm", "interp"];
+
 struct McpServer {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -23,9 +27,10 @@ struct McpServer {
 }
 
 impl McpServer {
-    fn spawn(args: &[&str], dir: Option<&Path>) -> Self {
+    /// `forge mcp --engine <engine> <args>`.
+    fn spawn(engine: &str, args: &[&str], dir: Option<&Path>) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_forge"));
-        cmd.arg("mcp")
+        cmd.args(["mcp", "--engine", engine])
             .args(args)
             .env("NO_COLOR", "1")
             .stdin(Stdio::piped())
@@ -172,7 +177,14 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 #[test]
 fn mcp_full_session_over_stdio() {
-    let mut server = McpServer::spawn(&[], None);
+    for engine in ENGINES {
+        eprintln!("engine: {engine}");
+        mcp_full_session_over_stdio_on(engine);
+    }
+}
+
+fn mcp_full_session_over_stdio_on(engine: &str) {
+    let mut server = McpServer::spawn(engine, &[], None);
 
     let init = server.initialize();
     assert_eq!(init["protocolVersion"], "2025-11-25");
@@ -286,6 +298,13 @@ fn mcp_full_session_over_stdio() {
 
 #[test]
 fn mcp_grants_come_from_flags_and_forge_toml() {
+    for engine in ENGINES {
+        eprintln!("engine: {engine}");
+        mcp_grants_come_from_flags_and_forge_toml_on(engine);
+    }
+}
+
+fn mcp_grants_come_from_flags_and_forge_toml_on(engine: &str) {
     let dir = temp_dir("grants");
     let data = dir.join("data");
     std::fs::create_dir_all(&data).expect("mkdir");
@@ -298,7 +317,7 @@ fn mcp_grants_come_from_flags_and_forge_toml() {
     .expect("write forge.toml");
 
     let read_flag = format!("--allow-read={}", data.display());
-    let mut server = McpServer::spawn(&[&read_flag], Some(&dir));
+    let mut server = McpServer::spawn(engine, &[&read_flag], Some(&dir));
     server.initialize();
 
     let tools = server.request("tools/list", json!({}));
@@ -341,7 +360,14 @@ fn mcp_grants_come_from_flags_and_forge_toml() {
 
 #[test]
 fn mcp_modern_stateless_requests() {
-    let mut server = McpServer::spawn(&["--allow-run"], None);
+    for engine in ENGINES {
+        eprintln!("engine: {engine}");
+        mcp_modern_stateless_requests_on(engine);
+    }
+}
+
+fn mcp_modern_stateless_requests_on(engine: &str) {
+    let mut server = McpServer::spawn(engine, &["--allow-run"], None);
     let meta = json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {},
@@ -383,8 +409,19 @@ fn structured(result: &Value) -> Value {
 
 #[test]
 fn mcp_serve_example_tools() {
+    for engine in ENGINES {
+        eprintln!("engine: {engine}");
+        mcp_serve_example_tools_on(engine);
+    }
+}
+
+fn mcp_serve_example_tools_on(engine: &str) {
     let example = example_tools();
-    let mut server = McpServer::spawn(&["serve", example.to_str().expect("utf8 path")], None);
+    let mut server = McpServer::spawn(
+        engine,
+        &["serve", example.to_str().expect("utf8 path")],
+        None,
+    );
     let init = server.initialize();
     assert!(init["capabilities"]["resources"].is_object(), "{init}");
 
@@ -485,6 +522,13 @@ fn mcp_serve_example_tools() {
 
 #[test]
 fn mcp_serve_tools_keep_the_sandbox() {
+    for engine in ENGINES {
+        eprintln!("engine: {engine}");
+        mcp_serve_tools_keep_the_sandbox_on(engine);
+    }
+}
+
+fn mcp_serve_tools_keep_the_sandbox_on(engine: &str) {
     let dir = temp_dir("tools");
     let data = dir.join("data");
     std::fs::create_dir_all(&data).expect("mkdir");
@@ -529,6 +573,7 @@ fn spam() { while true { say "spam spam spam spam" } }
     .expect("write tools");
     let read_flag = format!("--allow-read={}", data.display());
     let mut server = McpServer::spawn(
+        engine,
         &[
             "serve",
             tools.to_str().expect("utf8"),
@@ -612,11 +657,24 @@ fn spam() { while true { say "spam spam spam spam" } }
 
 #[test]
 fn mcp_serve_rejects_bad_tool_files() {
+    for engine in ENGINES {
+        eprintln!("engine: {engine}");
+        mcp_serve_rejects_bad_tool_files_on(engine);
+    }
+}
+
+fn mcp_serve_rejects_bad_tool_files_on(engine: &str) {
     let dir = temp_dir("badtools");
     let file = dir.join("bad.fg");
     std::fs::write(&file, "let x = 1\n@tool\nfn f() {}\n").expect("write");
     let out = Command::new(env!("CARGO_BIN_EXE_forge"))
-        .args(["mcp", "serve", file.to_str().expect("utf8")])
+        .args([
+            "mcp",
+            "--engine",
+            engine,
+            "serve",
+            file.to_str().expect("utf8"),
+        ])
         .stdin(Stdio::null())
         .output()
         .expect("run forge");
@@ -636,7 +694,14 @@ fn run_in(server: &mut McpServer, session: &str, code: &str) -> Value {
 
 #[test]
 fn mcp_run_forge_sessions() {
-    let mut server = McpServer::spawn(&["--max-sessions", "2"], None);
+    for engine in ENGINES {
+        eprintln!("engine: {engine}");
+        mcp_run_forge_sessions_on(engine);
+    }
+}
+
+fn mcp_run_forge_sessions_on(engine: &str) {
+    let mut server = McpServer::spawn(engine, &["--max-sessions", "2"], None);
     server.initialize();
 
     let first = run_in(&mut server, "a", "let x = 41\nfn twice(n) { return n * 2 }");

@@ -86,6 +86,8 @@ class Sandbox:
     :param max_output: stop the program once it has printed more than this
         many bytes.
     :param label: name used for the source in error messages.
+    :param engine: ``"vm"`` (default, the bytecode VM) or ``"interp"`` (the
+        tree-walking interpreter). Both run under the same sandbox.
     """
 
     def __new__(
@@ -98,6 +100,7 @@ class Sandbox:
         max_time: Optional[float] = None,
         max_output: Optional[int] = None,
         label: Optional[str] = None,
+        engine: Optional[Literal["vm", "interp"]] = None,
     ) -> Sandbox: ...
     def run(self, code: str, *, cancel: Optional[CancelToken] = None) -> Result:
         """Run Forge source to completion with the GIL released.

@@ -38,6 +38,7 @@ sb = Sandbox(
     allow_net=["api.github.com"],      # net only to these hosts (*.x.com, host:port)
     max_time=5.0,                      # wall-clock limit per run, seconds
     max_output=64_000,                 # stop after printing this many bytes
+    engine="vm",                       # or "interp"; same sandbox either way
 )
 
 result = sb.run(f'''
@@ -167,8 +168,9 @@ reference written for models; include it in the system prompt.
 
 ## Current limits
 
-* Programs run on Forge's tree-walking interpreter. HTTP servers
-  (`@server`), `schedule` and `watch` blocks are not started.
+* Programs run on Forge's bytecode VM by default (`engine="interp"` picks
+  the tree-walking interpreter; the sandbox is the same on both). HTTP
+  servers (`@server`), `schedule` and `watch` blocks are not started.
 * There is a wall-clock limit and an output limit, but no memory or
   instruction ("fuel") limit yet; call depth is bounded by the engine's
   recursion limit. When the core sandbox gains them they will appear as

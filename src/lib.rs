@@ -57,7 +57,7 @@ pub mod vm;
 pub use permissions::{Capabilities, Capability, PermissionError};
 pub use runtime::limits::{CountingAllocator, Limits};
 #[cfg(feature = "host")]
-pub use sandbox::{CancelHandle, Output, Sandbox, SandboxError};
+pub use sandbox::{CancelHandle, Engine, Output, Sandbox, SandboxError};
 
 // The library's own tests exercise `Sandbox::max_memory`, which measures
 // the interpreter through the counting allocator.
