@@ -362,8 +362,20 @@ impl std::fmt::Display for VMError {
 }
 
 impl VM {
+    /// A VM with every builtin registered, in a fresh global-name domain
+    /// (`vm::globals`): the names it interns are freed with it.
     pub fn new() -> Self {
-        let mut vm = Self::bare(Profiler::new(false));
+        Self::new_in_domain(super::globals::GlobalNames::new())
+    }
+
+    /// [`VM::new`] interning global names into `names`, shared with the
+    /// VMs whose ids (and compiled chunks' cached ids) it must agree with.
+    pub(super) fn new_in_domain(names: Arc<super::globals::GlobalNames>) -> Self {
+        let mut vm = Self::bare_with_budget(
+            Profiler::new(false),
+            crate::runtime::limits::current(),
+            super::globals::Globals::in_domain(names),
+        );
         vm.register_builtins();
         vm
     }
@@ -391,20 +403,26 @@ impl VM {
     /// included, charges the resource budget active on the creating thread
     /// (`limits_state`).
     pub(super) fn bare(profiler: Profiler) -> Self {
-        Self::bare_with_budget(profiler, crate::runtime::limits::current())
+        Self::bare_with_budget(
+            profiler,
+            crate::runtime::limits::current(),
+            super::globals::Globals::new(),
+        )
     }
 
     /// [`VM::bare`] charging `budget` instead of the thread's active one
-    /// (the HTTP server gives every request fork its own budget).
+    /// (the HTTP server gives every request fork its own budget), starting
+    /// from `globals` (and so in their name domain).
     pub(super) fn bare_with_budget(
         profiler: Profiler,
         budget: Option<Arc<crate::runtime::limits::Budget>>,
+        globals: super::globals::Globals,
     ) -> Self {
         let (meter, caps, gc) = Self::limits_state(budget);
         Self {
             registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
-            globals: super::globals::Globals::new(),
+            globals,
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
@@ -610,10 +628,18 @@ impl VM {
     }
 
     /// Create a new VM for a spawn thread with copies of this VM's state.
-    /// Calls VM::new() for fresh builtins + empty JIT state, then copies
-    /// non-function globals and struct metadata from the parent.
+    /// Builds a VM with fresh builtins + empty JIT state in the parent's
+    /// global-name domain (so the chunks it shares with the parent keep
+    /// their cached ids), then copies non-function globals and struct
+    /// metadata from the parent.
+    /// The global-name domain of a `spawn` task's VM (test hook).
+    #[cfg(test)]
+    pub(super) fn spawn_fork_domain(&self) -> Arc<super::globals::GlobalNames> {
+        Arc::clone(self.fork_for_spawn().0.globals.names())
+    }
+
     fn fork_for_spawn(&self) -> SendableVM {
-        let mut child = VM::new();
+        let mut child = VM::new_in_domain(Arc::clone(self.globals.names()));
 
         // Copy non-function globals. Skip globals where value_to_shared returns
         // Null but the original wasn't Null (i.e., functions/closures/natives) —
@@ -1158,17 +1184,17 @@ impl VM {
                     OpCode::GetGlobal => {
                         // Slot lookup through the chunk's id cache; the name
                         // is only needed for the error (see `vm::globals`).
-                        if let Some(id) = chunk.global_id(bx) {
+                        if let Some(id) = chunk.global_id(bx, self.globals.names()) {
                             let Some(val) = self.globals.get_id(id) else {
                                 let pc = self.frames[frame_idx].ip - 1;
-                                let name = super::globals::name_of(id);
-                                return Err(self.undefined_global(chunk, pc, name));
+                                let name = self.globals.names().name_of(id);
+                                return Err(self.undefined_global(chunk, pc, &name));
                             };
                             self.registers[base + a as usize] = val;
                         }
                     }
                     OpCode::SetGlobal => {
-                        if let Some(id) = chunk.global_id(bx) {
+                        if let Some(id) = chunk.global_id(bx, self.globals.names()) {
                             let val = self.registers[base + a as usize];
                             self.globals.set_id(id, val);
                         }

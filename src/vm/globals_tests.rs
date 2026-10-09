@@ -5,6 +5,7 @@ use super::*;
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use std::sync::Arc;
 
 fn parse(source: &str) -> crate::parser::ast::Program {
     let tokens = Lexer::new(source).tokenize().expect("lexer error");
@@ -170,13 +171,109 @@ fn defining_a_global_registers_its_name() {
         .expect("define");
     assert!(vm.globals.contains_key("__slot_probe_fn"));
     assert!(vm.globals.keys().any(|k| k == "__slot_probe_fn"));
-    let id = globals::intern("__slot_probe_fn");
+    let id = vm.globals.names().intern("__slot_probe_fn");
     assert!(vm.globals.get_id(id).is_some());
     // Every defined global is reachable by name and by id, and vice versa.
     for (name, value) in vm.globals.iter() {
-        let by_id = vm.globals.get_id(globals::intern(name)).expect("slot");
+        let by_id = vm
+            .globals
+            .get_id(vm.globals.names().intern(name))
+            .expect("slot");
         assert_eq!(by_id.0.to_bits(), value.0.to_bits(), "{}", name);
     }
     assert_eq!(vm.globals.iter().count(), vm.globals.len());
     assert_eq!(vm.globals.values().count(), vm.globals.len());
+}
+
+/// One compiled chunk run by VMs of different name domains, interleaved:
+/// each VM must see its own globals, even when the other domain numbered
+/// the same names differently (a cached id is tagged with its domain).
+#[test]
+fn a_chunk_shared_by_vms_of_different_domains_uses_each_domains_ids() {
+    // Functions are globals (top-level `let`s are registers).
+    let define = compile(
+        "fn alpha() {\n    return 1\n}\nfn beta() {\n    return 2\n}\nfn pick() {\n    return alpha() * 10 + beta()\n}",
+    );
+    let call = compile("pick() + alpha()");
+
+    let mut a = VM::new();
+    let mut b = VM::new();
+    assert!(!Arc::ptr_eq(a.globals.names(), b.globals.names()));
+    // `b` interns extra names, in another order, before running the chunk:
+    // its ids for `beta`, `alpha` and `pick` differ from `a`'s.
+    b.execute(&compile(
+        "fn zz_pad_1() {}\nfn beta() {}\nfn zz_pad_2() {}\nfn alpha() {}",
+    ))
+    .expect("pad b");
+    a.execute(&define).expect("define in a");
+    assert_eq!(vm_value(&mut a, &call), "13");
+    let a_alpha = a.globals.names().intern("alpha");
+    let b_alpha = b.globals.names().intern("alpha");
+    assert_ne!(
+        a_alpha, b_alpha,
+        "the domains must number names differently"
+    );
+
+    b.execute(&define).expect("define in b");
+    for _ in 0..3 {
+        assert_eq!(vm_value(&mut b, &call), "13");
+        assert_eq!(vm_value(&mut a, &call), "13");
+    }
+    // Writes stay in their own VM.
+    let use_gamma = compile("gamma() + alpha()");
+    b.execute(&compile("fn gamma() {\n    return 5\n}"))
+        .expect("write b");
+    assert_eq!(vm_value(&mut b, &use_gamma), "6");
+    let err = a.execute(&use_gamma).expect_err("gamma is b's").message;
+    assert!(err.starts_with("undefined variable: 'gamma'"), "{}", err);
+    assert_eq!(vm_value(&mut b, &use_gamma), "6");
+    assert_eq!(vm_value(&mut a, &call), "13");
+    // The same chunk on threads, one VM (and domain) per thread.
+    let call = Arc::new(call);
+    let handles: Vec<_> = (0..4)
+        .map(|i| {
+            let (define, call) = (define.clone(), Arc::clone(&call));
+            std::thread::spawn(move || {
+                let mut vm = VM::new();
+                vm.execute(&compile(&format!("fn pad_{}() {{}}", i)))
+                    .expect("pad");
+                vm.execute(&define).expect("define");
+                (0..50)
+                    .map(|_| vm_value(&mut vm, &call))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    for h in handles {
+        assert!(h.join().expect("thread").iter().all(|v| v == "13"));
+    }
+}
+
+#[test]
+fn spawn_and_server_forks_share_the_domain() {
+    let mut vm = VM::new();
+    vm.execute(&compile("fn handler() {\n    return 1\n}"))
+        .expect("define");
+    assert!(Arc::ptr_eq(&vm.spawn_fork_domain(), vm.globals.names()));
+    let template = serve::VmTemplate::new(&vm, std::collections::HashMap::new()).expect("template");
+    let fork = template.fork(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    assert!(Arc::ptr_eq(fork.globals.names(), vm.globals.names()));
+}
+
+/// Fresh VMs do not inherit names other VMs interned: the slot table of a
+/// new VM has the same size however many unrelated globals were defined
+/// before (the old process-wide interner grew it without bound).
+#[test]
+fn fresh_vms_do_not_see_other_vms_names() {
+    let baseline = VM::new().globals.slot_count();
+    for i in 0..100 {
+        let mut vm = VM::new();
+        vm.execute(&compile(&format!(
+            "fn generated_{}() {{\n    return {}\n}}\nlet value_{} = generated_{}()",
+            i, i, i, i
+        )))
+        .expect("run");
+        assert_eq!(vm.globals.slot_count(), baseline + 1);
+    }
+    assert_eq!(VM::new().globals.slot_count(), baseline);
 }

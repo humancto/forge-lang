@@ -122,6 +122,7 @@ Severity is for the worst affected host (usually `forge mcp` or an embedder).
 | SEC-22 | Info | No issue | Parser, lexer and data-format nesting |
 | SEC-23 | Info | Accepted | Pre-existing hard links inside a grant |
 | SEC-24 | Medium | Fixed | Tasks a script spawns and never awaits outlive a successful run |
+| SEC-26 | Medium | Fixed | VM global names leaked process-wide: unbounded host memory across sandbox runs |
 
 ### SEC-01 SQLite reaches any file under `db` alone (High, fixed)
 
@@ -453,6 +454,38 @@ Output capture needed no engine change: `runtime::stdio` sinks are now
 shared and inherited by every thread started through
 `permissions::inherit`, so output from spawned VM tasks is captured and
 budgeted like the interpreter's.
+
+### SEC-26 VM global names leaked process-wide (Medium, fixed)
+
+Found in review of the indexed-globals change (0.10.0, before release).
+The VM gave every global name an id from one process-wide, append-only
+interner and leaked the name (`&'static str`), so the ids could be cached
+in compiled chunks and be valid in every VM. In a long-lived host that
+runs untrusted code on the VM — `forge mcp`, the Python `Sandbox`, any
+embedder — each run could define fresh names (`fn f_12345() {}` from a
+generated program) and every one stayed in the process after the run's
+VM was dropped. Memory budgets are per run, so each run stayed under its
+limit while host memory grew without bound; and because ids kept growing,
+every later VM's slot table (including every HTTP request fork) was sized
+to the accumulated high-water mark.
+
+**Fix** (`src/vm/globals.rs`): names are interned in a *domain*
+(`GlobalNames`, owned names, reference-counted) instead of the process.
+`VM::new` starts a fresh domain; only the VMs that must share ids share it
+(`spawn` forks, server template forks — HTTP requests, WebSocket
+connections, MCP `@tool` calls; imports and REPL steps run in the same
+VM). A sandbox run therefore interns into its own domain, on its worker
+thread (charged to its memory budget), and the domain is freed with the
+run's VM. The per-chunk id cache stores each id tagged with the domain
+that issued it in one atomic word; a chunk executed by a VM of another
+domain re-resolves the name in its own domain, so an id is never used
+outside the domain that issued it. Tests:
+`sandbox_runs_do_not_keep_their_global_names` (`tests/sandbox_global_names.rs`,
+its own binary because it reads process-wide counters: 200 sandbox runs,
+each defining new names, leave no interned name behind),
+`a_chunk_shared_by_vms_of_different_domains_uses_each_domains_ids`,
+`fresh_vms_do_not_see_other_vms_names` and
+`spawn_and_server_forks_share_the_domain` (`src/vm/globals_tests.rs`).
 
 ## 5. Coordination notes
 

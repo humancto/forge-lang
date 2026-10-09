@@ -1,4 +1,4 @@
-use super::globals::{GlobalId, GlobalIdCache};
+use super::globals::{GlobalId, GlobalIdCache, GlobalNames};
 
 /// Bytecode opcodes for the Forge register-based VM.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -265,14 +265,15 @@ impl Chunk {
     }
 
     /// The global named by string constant `index` (the operand of
-    /// `GetGlobal`/`SetGlobal`), resolved once per chunk and cached. `None`
-    /// when the constant is not a string.
+    /// `GetGlobal`/`SetGlobal`) in interner domain `names`, resolved once
+    /// per chunk and domain and cached. `None` when the constant is not a
+    /// string.
     #[inline]
-    pub fn global_id(&self, index: u16) -> Option<GlobalId> {
+    pub fn global_id(&self, index: u16, names: &GlobalNames) -> Option<GlobalId> {
         self.global_ids
-            .get_or_resolve(index as usize, self.constants.len(), || {
+            .get_or_resolve(names, index as usize, self.constants.len(), || {
                 match self.constants.get(index as usize)? {
-                    Constant::Str(name) => Some(super::globals::intern(name)),
+                    Constant::Str(name) => Some(names.intern(name)),
                     _ => None,
                 }
             })

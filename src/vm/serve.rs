@@ -166,7 +166,11 @@ impl VmTemplate {
         cancelled: Arc<AtomicBool>,
         budget: Option<Arc<crate::runtime::limits::Budget>>,
     ) -> VM {
-        let mut vm = VM::bare_with_budget(Profiler::new(false), budget);
+        let mut vm = VM::bare_with_budget(
+            Profiler::new(false),
+            budget,
+            super::globals::Globals::in_domain(Arc::clone(self.globals.names())),
+        );
         let refs = self.materialize(&mut vm.gc);
         let remap = |v: &Value| remap_value(*v, &refs);
         let remap_table = |table: &IndexMap<String, Value>| {
