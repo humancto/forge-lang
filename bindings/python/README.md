@@ -38,6 +38,8 @@ sb = Sandbox(
     allow_net=["api.github.com"],      # net only to these hosts (*.x.com, host:port)
     max_time=5.0,                      # wall-clock limit per run, seconds
     max_output=64_000,                 # stop after printing this many bytes
+    max_fuel=50_000_000,               # deterministic step budget per run
+    max_memory=256 * 1024 * 1024,      # bytes one run may hold
 )
 
 result = sb.run(f'''
@@ -68,8 +70,19 @@ Failures raise typed exceptions, all subclasses of `ForgeError`:
 | `ForgeTimeoutError` | `timeout` | `max_time` exceeded (`limit` in seconds) |
 | `ForgeOutputLimitError` | `output_limit` | `max_output` exceeded (`limit` in bytes) |
 | `ForgeCancelledError` | `cancelled` | A `CancelToken` was triggered |
+| `ForgeFuelExhaustedError` | `fuel_exhausted` | `max_fuel` steps used up (`limit` in steps) |
+| `ForgeMemoryLimitError` | `memory_limit` | `max_memory` exceeded (`limit` in bytes) |
+| `ForgeResourceLimitError` | `resource_limit` | Another resource cap (open handles, value size, imports) |
 
 Every exception carries `stdout`: what the program printed before it failed.
+Syntax, runtime and permission errors also carry `code`, the stable error
+code (`E0012`, ...; `forge explain <code>` documents it), and `hint`, how
+to fix it; both are `None` for the other kinds.
+
+A step is one statement, function call or loop iteration, so `max_fuel`
+stops a run at exactly the same point every time, independent of machine
+speed. Fuel and memory errors cannot be caught by `try`/`catch` inside the
+program.
 
 ```python
 from forge_lang import Sandbox, ForgePermissionError
@@ -91,8 +104,9 @@ for d in forge_lang.check("let x = 1\nlet y = ("):
 ```
 
 `check` lexes, parses and type-checks. It returns a list of `Diagnostic`
-(`line`, `column`, `is_error`, `severity`, `message`); an empty list means no
-problems. It is the same check `forge mcp` exposes as `check_forge`.
+(`line`, `column`, `is_error`, `severity`, `message`, `code`, `hint`); an
+empty list means no problems. It is the same check `forge mcp` exposes as
+`check_forge`.
 
 ## Cancelling
 
@@ -169,10 +183,8 @@ reference written for models; include it in the system prompt.
 
 * Programs run on Forge's tree-walking interpreter. HTTP servers
   (`@server`), `schedule` and `watch` blocks are not started.
-* There is a wall-clock limit and an output limit, but no memory or
-  instruction ("fuel") limit yet; call depth is bounded by the engine's
-  recursion limit. When the core sandbox gains them they will appear as
-  `Sandbox(...)` keyword arguments with their own exception classes.
+* Call depth is bounded by the engine's recursion limit (default 10,000;
+  `FORGE_MAX_DEPTH` in the host's environment).
 * stderr output (`log`, `term`) is not captured, and `input()` reads the
   host's stdin.
 
