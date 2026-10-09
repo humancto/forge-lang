@@ -436,6 +436,16 @@ impl VM {
         self.cancelled = flag;
     }
 
+    /// Also enforce the run's memory limit with the allocation meter
+    /// (`runtime::limits::CountingAllocator`), polled at safe points, on
+    /// this VM and every task it forks. The GC heap's own limit bounds one
+    /// heap; the meter bounds the whole run (all its threads), which is what
+    /// the sandbox promises. A no-op when memory is not limited.
+    #[cfg(feature = "host")]
+    pub(crate) fn poll_allocation_meter(&mut self) {
+        self.meter = self.meter.clone().with_safepoint_memory_polling();
+    }
+
     /// Record `schedule` / `watch` blocks instead of starting them when they
     /// execute. A program that will be served runs its whole top level
     /// first, then [`VM::launch_deferred_host_tasks`] starts the background
@@ -659,6 +669,16 @@ impl VM {
         // or timeout scope, is cancelled.
         child.cancelled = self.cancelled.clone();
         child.scope_cancels = self.scope_cancels.clone();
+        // ... and, like the interpreter's `child_context`, never starts
+        // `schedule` / `watch` threads while the run defers them (a
+        // sandboxed run, or a server's top level): a task's own host blocks
+        // are not launched.
+        if self.deferred_host_tasks.is_some() {
+            child.deferred_host_tasks = Some(Vec::new());
+        }
+        if self.meter.polls_memory() {
+            child.meter = child.meter.clone().with_safepoint_memory_polling();
+        }
 
         #[cfg(feature = "jit")]
         assert!(
@@ -905,27 +925,20 @@ impl VM {
         })
     }
 
-    pub(super) fn sleep_with_timeout_checks(&self, duration: Duration) -> Result<(), VMError> {
+    /// `wait` / `time.sleep`: sleep in short slices, stopping early (with
+    /// the same error as any blocking wait, see [`VM::wait_interrupted`])
+    /// when a `timeout` deadline passes or the run or an enclosing scope is
+    /// cancelled, so a sandbox deadline can reclaim the thread.
+    pub(super) fn sleep_with_timeout_checks(&mut self, duration: Duration) -> Result<(), VMError> {
         let total_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         let mut elapsed = 0u64;
         while elapsed < total_ms {
-            if let Some((_, guard)) = self.earliest_expired_timeout() {
-                return Err(VMError::new(&format!(
-                    "timeout: operation exceeded {} second limit",
-                    guard.seconds
-                )));
-            }
+            self.wait_interrupted()?;
             let chunk = std::cmp::min(50, total_ms - elapsed);
             crate::clock::sleep(Duration::from_millis(chunk));
             elapsed += chunk;
         }
-        if let Some((_, guard)) = self.earliest_expired_timeout() {
-            return Err(VMError::new(&format!(
-                "timeout: operation exceeded {} second limit",
-                guard.seconds
-            )));
-        }
-        Ok(())
+        self.wait_interrupted()
     }
 
     fn handle_timeout_expiry(&mut self) -> Result<usize, VMError> {

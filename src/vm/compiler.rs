@@ -1003,7 +1003,13 @@ fn resolve_import_path(c: &Compiler, path: &str) -> Result<PathBuf, CompileError
 }
 
 fn parse_import_program(path: &str, resolved: &Path) -> Result<Program, CompileError> {
-    let source = std::fs::read_to_string(resolved)
+    // Compiling reads the module to learn its exported names, so it needs
+    // the same permission as running the import (`fs.read` on the file):
+    // without it a sandboxed program could probe or leak (through lex and
+    // parse errors) files outside its grant. Read the path that was checked.
+    let checked = crate::permissions::require_import(resolved)
+        .map_err(|e| CompileError::new(&e.to_string()))?;
+    let source = std::fs::read_to_string(&checked)
         .map_err(|e| CompileError::new(&format!("cannot import '{}': {}", path, e)))?;
     let mut lexer = crate::lexer::Lexer::new(&source);
     let tokens = lexer
