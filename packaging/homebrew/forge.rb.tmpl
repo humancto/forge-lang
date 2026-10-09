@@ -1,0 +1,66 @@
+# Homebrew formula template for the humancto/homebrew-tap tap.
+#
+# Rendered by packaging/homebrew/fill.sh from a release's SHA256SUMS.txt:
+#
+#   packaging/homebrew/fill.sh 0.10.0 SHA256SUMS.txt > Formula/forge.rb
+#
+# The asset names and archive layout follow the contract at the top of
+# .github/workflows/release.yml: forge-v<version>-<target>.tar.gz holds one
+# top-level directory with `forge`, `libforge_lang.a` (the static runtime
+# that `forge build --native` / `--aot` link against), README.md, LICENSE
+# and CHANGELOG.md. Homebrew enters that directory before `install`.
+class Forge < Formula
+  desc "Internet-native programming language with dual syntax and built-in HTTP, DB, AI"
+  homepage "https://github.com/humancto/forge-lang"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/humancto/forge-lang/releases/download/v@VERSION@/forge-v@VERSION@-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA_aarch64-apple-darwin@"
+    end
+    on_intel do
+      url "https://github.com/humancto/forge-lang/releases/download/v@VERSION@/forge-v@VERSION@-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA_x86_64-apple-darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/humancto/forge-lang/releases/download/v@VERSION@/forge-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_aarch64-unknown-linux-gnu@"
+    end
+    on_intel do
+      url "https://github.com/humancto/forge-lang/releases/download/v@VERSION@/forge-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_x86_64-unknown-linux-gnu@"
+    end
+  end
+
+  def install
+    # The binary and its static runtime live side by side in libexec; the
+    # wrapper in bin points `forge build --native/--aot` at the runtime
+    # (a caller's own FORGE_LIB_DIR still wins).
+    libexec.install "forge", "libforge_lang.a"
+    (bin/"forge").write_env_script libexec/"forge",
+      FORGE_LIB_DIR: "${FORGE_LIB_DIR:-#{libexec}}"
+    doc.install "README.md", "CHANGELOG.md"
+  end
+
+  test do
+    assert_match "Forge v#{version}", shell_output("#{bin}/forge version")
+
+    (testpath/"hello.fg").write <<~EOS
+      let xs = [1, 2, 3]
+      say "sum " + str(sum(xs))
+    EOS
+    assert_equal "sum 6", shell_output("#{bin}/forge run #{testpath}/hello.fg").strip
+
+    # Shell access is denied unless granted with --allow-run: exit status 1.
+    (testpath/"denied.fg").write <<~EOS
+      say sh("echo ran")
+    EOS
+    output = shell_output("#{bin}/forge run #{testpath}/denied.fg 2>&1", 1)
+    assert_match "permission denied: run", output
+    refute_match(/^ran$/, output)
+  end
+end

@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`docs/STABILITY.md`** — the 1.0 stability policy: syntax, semantics, stdlib signatures, error codes, JSON diagnostics, CLI, bytecode format versioning, `forge_lang::Sandbox` semver, plugin ABI v1, editions and the deprecation policy.
 - `cargo bench --bench server_throughput` boots `forge run` on `examples/bench_server*.fg` on both engines and reports requests per second and latency percentiles; `benches/fork_for_serving.rs` also measures the VM's per-request fork.
 - `tests/server_engine_parity.rs` runs one `@server` program on the VM and on the interpreter and requires identical responses (routes, path/query/body binding, every method, 404/405/body rejections, handler errors, panics, isolation of globals and closures, deep recursion, WebSocket echo).
+- `packaging/homebrew/forge.rb.tmpl` — a Homebrew formula for macOS and Linux (arm64 and x86_64) that installs `forge` with `libforge_lang.a` (so `forge build --native`/`--aot` work) and tests `forge version`, a program run and a sandbox denial; `packaging/homebrew/fill.sh <version> SHA256SUMS.txt` renders it from a release's checksums.
 
 ### Changed
 
