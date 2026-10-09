@@ -530,10 +530,10 @@ impl VM {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
                 name: name.to_string(),
             }));
-            self.globals.insert(name.to_string(), Value::obj(name_ref));
+            self.globals.insert(name, Value::obj(name_ref));
         }
 
-        self.globals.insert("null".to_string(), Value::null());
+        self.globals.insert("null", Value::null());
 
         // Register stdlib modules
         self.register_stdlib();
@@ -564,8 +564,7 @@ impl VM {
                 map.insert("__call__".to_string(), time_call);
             }
             let module_ref = self.gc.alloc(ObjKind::Object(map));
-            self.globals
-                .insert(module.name.to_string(), Value::obj(module_ref));
+            self.globals.insert(module.name, Value::obj(module_ref));
         }
 
         // Option prelude
@@ -573,8 +572,7 @@ impl VM {
         none_obj.insert("__type__".to_string(), self.alloc_string("Option"));
         none_obj.insert("__variant__".to_string(), self.alloc_string("None"));
         let none_ref = self.gc.alloc(ObjKind::Object(none_obj));
-        self.globals
-            .insert("None".to_string(), Value::obj(none_ref));
+        self.globals.insert("None", Value::obj(none_ref));
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {

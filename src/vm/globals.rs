@@ -182,6 +182,7 @@ impl Globals {
         self.slots.get(id.index())?.as_ref()
     }
 
+    #[allow(dead_code)] // library API; the CLI binary does not call it
     pub fn contains_key(&self, name: &str) -> bool {
         self.index.contains_key(name)
     }
@@ -235,10 +236,12 @@ impl Globals {
         })
     }
 
+    #[allow(dead_code)] // library API; the CLI binary does not call it
     pub fn len(&self) -> usize {
         self.index.len()
     }
 
+    #[allow(dead_code)] // library API; the CLI binary does not call it
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
     }
