@@ -2,7 +2,7 @@
 # Forge installer.
 #
 #   curl -fsSL https://raw.githubusercontent.com/humancto/forge-lang/main/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- v0.9.0      # specific version
+#   curl -fsSL .../install.sh | sh -s -- v0.10.0      # specific version
 #
 # Environment:
 #   FORGE_INSTALL_DIR          install location (default: ~/.forge/bin)
@@ -95,12 +95,12 @@ main() {
             | sed 's/.*"tag_name": *"//;s/".*//')
         if [ -z "$VERSION" ]; then
             echo "Error: could not determine latest version."
-            echo "Install a specific version: curl -sSf ... | sh -s -- v0.9.0"
+            echo "Install a specific version: curl -sSf ... | sh -s -- v0.10.0"
             echo "Or install via cargo: cargo install forge-lang"
             exit 1
         fi
     fi
-    # Release tags carry a leading "v"; accept "0.9.0" as well.
+    # Release tags carry a leading "v"; accept "0.10.0" as well.
     case "$VERSION" in
         v*) ;;
         *) VERSION="v${VERSION}" ;;

@@ -73,6 +73,12 @@ pub fn runtime_error_code(message: &str) -> &'static str {
     crate::semantics::errors::classify(message).code
 }
 
+/// The hint for a runtime error message: the message's own `hint:` line,
+/// else the default hint of its code (what `forge run` shows as `Help:`).
+pub fn runtime_error_hint(message: &str) -> &str {
+    crate::semantics::errors::hint_for(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +110,16 @@ mod tests {
     fn runtime_errors_are_classified() {
         let code = runtime_error_code("division by zero");
         assert!(code.starts_with('E') && code.len() == 5, "{code}");
+    }
+
+    #[test]
+    fn runtime_error_hints_prefer_the_message_hint() {
+        assert_eq!(
+            runtime_error_hint("boom\n  hint: try this instead"),
+            "try this instead"
+        );
+        // Without its own hint line, the code's default hint applies.
+        assert!(!runtime_error_hint("division by zero").is_empty());
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use super::value::{GcRef, Value};
 use crate::clock::Instant;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub struct ExceptionHandler {
@@ -21,6 +20,59 @@ pub struct TimeoutGuard {
     pub scope_depth: usize,
 }
 
+/// The open upvalue cells of a frame, indexed by register. Captured locals
+/// are read and written through their cell on every access (`read_local` /
+/// `write_local`), which is hot in top-level code whose variables are
+/// captured by top-level functions, so this is a direct index rather than a
+/// hash map. Allocates nothing until the first capture.
+#[derive(Default)]
+pub struct OpenUpvalues {
+    cells: Vec<Option<GcRef>>,
+    count: usize,
+}
+
+impl OpenUpvalues {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    #[inline]
+    pub fn get(&self, reg: &u8) -> Option<&GcRef> {
+        self.cells.get(*reg as usize)?.as_ref()
+    }
+
+    #[inline]
+    pub fn contains_key(&self, reg: &u8) -> bool {
+        self.get(reg).is_some()
+    }
+
+    pub fn insert(&mut self, reg: u8, cell: GcRef) -> Option<GcRef> {
+        let i = reg as usize;
+        if self.cells.len() <= i {
+            self.cells.resize(i + 1, None);
+        }
+        let old = self.cells[i].replace(cell);
+        if old.is_none() {
+            self.count += 1;
+        }
+        old
+    }
+
+    pub fn remove(&mut self, reg: &u8) -> Option<GcRef> {
+        let old = self.cells.get_mut(*reg as usize)?.take();
+        if old.is_some() {
+            self.count -= 1;
+        }
+        old
+    }
+
+    /// Every open cell (GC roots).
+    pub fn values(&self) -> impl Iterator<Item = &GcRef> + '_ {
+        self.cells.iter().flatten()
+    }
+}
+
 /// A call frame representing one function invocation in the VM.
 /// Each frame has a window into the VM's flat register array.
 pub struct CallFrame {
@@ -37,7 +89,7 @@ pub struct CallFrame {
     /// Active timeout scopes for this frame, innermost last.
     pub timeouts: Vec<TimeoutGuard>,
     /// Shared cells for locals captured by closures created in this frame.
-    pub open_upvalues: HashMap<u8, GcRef>,
+    pub open_upvalues: OpenUpvalues,
     /// Number of arguments the caller passed (`JumpIfArg` uses it to decide
     /// whether a parameter's default value applies).
     pub argc: usize,
@@ -59,7 +111,7 @@ impl CallFrame {
             size,
             handlers: Vec::new(),
             timeouts: Vec::new(),
-            open_upvalues: HashMap::new(),
+            open_upvalues: OpenUpvalues::default(),
             argc: usize::MAX,
             entry_args: Vec::new(),
             back_edges: 0,

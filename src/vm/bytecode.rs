@@ -1,3 +1,5 @@
+use super::globals::{GlobalId, GlobalIdCache, GlobalNames};
+
 /// Bytecode opcodes for the Forge register-based VM.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -230,6 +232,10 @@ pub struct Chunk {
     /// turns out to be undefined. Not serialized: `.fgc` files carry no
     /// local names, so their errors suggest globals only.
     pub global_hints: Vec<(usize, String)>,
+    /// Lazily filled constant index → `GlobalId` cache for the name
+    /// constants of `GetGlobal`/`SetGlobal` (see `vm::globals`). Shared by
+    /// clones; not serialized.
+    pub global_ids: GlobalIdCache,
 }
 
 /// Allocate a fresh, process-unique `Chunk::proto_id`.
@@ -254,7 +260,23 @@ impl Chunk {
             min_arity: 0,
             upvalue_sources: Vec::new(),
             global_hints: Vec::new(),
+            global_ids: GlobalIdCache::default(),
         }
+    }
+
+    /// The global named by string constant `index` (the operand of
+    /// `GetGlobal`/`SetGlobal`) in interner domain `names`, resolved once
+    /// per chunk and domain and cached. `None` when the constant is not a
+    /// string.
+    #[inline]
+    pub fn global_id(&self, index: u16, names: &GlobalNames) -> Option<GlobalId> {
+        self.global_ids
+            .get_or_resolve(names, index as usize, self.constants.len(), || {
+                match self.constants.get(index as usize)? {
+                    Constant::Str(name) => Some(names.intern(name)),
+                    _ => None,
+                }
+            })
     }
 
     /// Emit with column 0. Kept for hand-built test chunks and compatibility
@@ -280,6 +302,8 @@ impl Chunk {
         }
         let idx = self.constants.len();
         self.constants.push(value);
+        // The id cache is sized and filled for the old constant pool.
+        self.global_ids = GlobalIdCache::default();
         idx as u16
     }
 

@@ -130,7 +130,7 @@ git clone https://github.com/humancto/forge-lang.git && cd forge-lang && cargo i
 **Verify:**
 
 ```bash
-forge version          # → Forge v0.9.0
+forge version          # → Forge v0.10.0
 forge learn            # 30 interactive tutorials
 forge                  # start REPL
 ```
@@ -706,7 +706,7 @@ Claude Desktop (`claude_desktop_config.json`) or a project `.mcp.json` for Claud
 or `claude mcp add forge -- forge mcp --allow-net=api.example.com`.
 
 - `--max-time` (default 30s) is the per-call limit; an agent's `timeout_secs` can only lower it. Output returned to the agent is capped at 64 KiB (a script printing over 1 MiB is stopped).
-- Each call also runs under deterministic resource limits: 200M steps of fuel (`--max-fuel`; an agent's `max_fuel` can only lower it), 256 MiB of memory (`--max-memory`), and caps on open files, sockets, subprocesses, tasks, value sizes and imports. A runaway loop fails with `fuel exhausted` at the same step every time; the server keeps serving. Details: [SECURITY.md — Resource limits](SECURITY.md#resource-limits).
+- Each call also runs under deterministic resource limits: 400M VM instructions of fuel, or 200M interpreter steps with `--engine interp` (`--max-fuel`; an agent's `max_fuel` can only lower it), 256 MiB of memory (`--max-memory`), and caps on open files, sockets, subprocesses, tasks, value sizes and imports. A runaway loop fails with `fuel exhausted` at the same step every time; the server keeps serving. Details: [SECURITY.md — Resource limits](SECURITY.md#resource-limits).
 - Each call runs on its own thread: a stuck script times out while the server keeps answering, and `notifications/cancelled` stops it. `run` (shell) is never granted unless you pass `--allow-run`.
 - Nothing a script prints or reads can reach the protocol stream (stdin/stdout are moved off fds 0/1 on Unix).
 - Protocol: `2026-07-28` (stateless, `server/discover`) and the `initialize` handshake for `2025-11-25` back to `2024-11-05`. Rust hosts can embed the same server: `forge_lang::mcp::serve(reader, writer, config)`.
@@ -754,7 +754,7 @@ fn cities() { return ["Lisbon", "Oslo"] }
 
 or `claude mcp add weather -- forge mcp serve /abs/path/examples/mcp/weather_tools.fg`. Full example: [`examples/mcp/weather_tools.fg`](examples/mcp/weather_tools.fg).
 
-> Engine: MCP code always runs on the tree-walking interpreter inside the sandbox. The VM does not yet capture or cap a program's output, which every MCP result depends on.
+> Engine: MCP code runs on the bytecode VM by default (`forge mcp --engine interp` picks the tree-walking interpreter). Both engines run under the same sandbox: policy, deadline, cancellation, output capture and cap, fuel/memory/handle limits, no `schedule`/`watch`/servers. `run_forge` sessions (`session_id`) always run on the interpreter.
 
 ---
 
@@ -858,7 +858,7 @@ Source (.fg) → Lexer → Tokens → Parser → AST → Type Checker
 
 ## 📊 Project Status
 
-Forge is **v0.9.0**. The bytecode VM is the default engine and matches the reference tree-walking interpreter on the full test suite; a guarded JIT tier compiles hot integer code.
+Forge is **v0.10.0**. The bytecode VM is the default engine (including for `@server` programs) and matches the reference tree-walking interpreter on the full test suite; a guarded JIT tier compiles hot Int and Float code.
 
 | Metric                   |                            Value |
 | ------------------------ | -------------------------------: |

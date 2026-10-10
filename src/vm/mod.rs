@@ -1,8 +1,11 @@
 mod builtins; // VM builtin dispatch — extracted from machine.rs
 pub mod bytecode;
 pub mod compiler;
+#[cfg(feature = "host")]
+pub(crate) mod embed; // compile / call helpers for the sandbox and `forge mcp`
 pub mod frame;
 pub mod gc;
+pub mod globals;
 pub mod green;
 #[cfg(feature = "jit")]
 pub mod jit;
@@ -45,6 +48,8 @@ pub fn run_repl(vm: &mut VM, program: &Program) -> Result<value::Value, VMError>
 mod async_tests;
 #[cfg(test)]
 mod enum_methods_tests;
+#[cfg(test)]
+mod globals_tests;
 #[cfg(all(test, feature = "jit"))]
 mod jit_tests;
 #[cfg(test)]

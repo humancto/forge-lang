@@ -266,6 +266,10 @@ pub fn run(source: &str, options: &RunOptions) -> RunResult {
         },
     };
     let captured = capture.finish();
+    let error = error.map(|mut e| {
+        e.message = browser_message(&e.message);
+        e
+    });
 
     RunResult {
         ok: error.is_none(),
@@ -402,14 +406,85 @@ fn run_interp(source: &str, program: &Program) -> Result<(), ErrorInfo> {
     })
 }
 
+/// The prefix the core puts before a hint inside an error message.
+const HINT_PREFIX: &str = "  hint: ";
+
+/// Rewrite one hint for the playground. The core's hints name CLI remedies
+/// (`--max-fuel`, `FORGE_MAX_DEPTH`, `--allow-*`, `--interp`) that a browser
+/// visitor cannot use; this maps each to what the playground offers, and
+/// drops a hint whose only advice is a CLI flag or `forge.toml` setting.
+/// `None` means "drop the hint". The core's error text is left unchanged;
+/// this only affects what the playground shows.
+pub fn browser_hint(hint: &str) -> Option<String> {
+    let run_locally = "or run the program locally with `forge run`";
+    if hint.contains("--max-fuel") {
+        return Some(format!(
+            "the playground stops each run after a fixed number of steps; do less work, {run_locally}"
+        ));
+    }
+    if hint.contains("--max-memory") {
+        return Some(format!(
+            "the playground limits each run's memory; process data in smaller pieces, {run_locally}"
+        ));
+    }
+    if hint.contains("FORGE_MAX_DEPTH") || hint.contains("--max-depth") {
+        return Some(
+            "check for infinite recursion or restructure to use iteration; the browser allows less recursion than `forge run`"
+                .to_string(),
+        );
+    }
+    if hint.contains("--interp") {
+        return Some(
+            "see the message above; switch the engine to the interpreter for a second opinion if it looks like an engine bug"
+                .to_string(),
+        );
+    }
+    // Permission grants (`--allow-*`, `[permissions]`) and any other CLI
+    // flag or environment variable cannot be applied in the browser.
+    let mentions_cli = hint.contains("--allow")
+        || hint.contains("[permissions]")
+        || hint.contains("forge.toml")
+        || hint.contains("FORGE_")
+        || hint.split_whitespace().any(|w| {
+            w.trim_start_matches(['(', '`'])
+                .strip_prefix("--")
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase()))
+        });
+    if mentions_cli {
+        None
+    } else {
+        Some(hint.to_string())
+    }
+}
+
+/// An error message with every `  hint: ` line passed through
+/// [`browser_hint`].
+pub fn browser_message(message: &str) -> String {
+    if !message.contains(HINT_PREFIX) {
+        return message.to_string();
+    }
+    let mut lines = Vec::new();
+    for line in message.split('\n') {
+        match line.strip_prefix(HINT_PREFIX) {
+            Some(hint) => {
+                if let Some(hint) = browser_hint(hint) {
+                    lines.push(format!("{HINT_PREFIX}{hint}"));
+                }
+            }
+            None => lines.push(line.to_string()),
+        }
+    }
+    lines.join("\n")
+}
+
 /// Lex, parse and type-check `source`.
 pub fn check(source: &str) -> Vec<CheckDiagnostic> {
     forge_lang::tooling::check_source(source)
         .into_iter()
         .map(|d| CheckDiagnostic {
             severity: if d.is_error { "error" } else { "warning" },
-            message: d.message,
-            help: d.help,
+            message: browser_message(&d.message),
+            help: d.help.and_then(|h| browser_hint(&h)),
             code: d.code,
             line: d.line,
             col: d.column,
@@ -706,6 +781,87 @@ say label
                 e.message
             );
         }
+    }
+
+    /// No error the playground shows may suggest a CLI flag or variable.
+    fn assert_no_cli_remedy(message: &str) {
+        for needle in [
+            "--max-fuel",
+            "--max-memory",
+            "--max-depth",
+            "FORGE_MAX_DEPTH",
+            "--allow",
+            "Sandbox::",
+        ] {
+            assert!(!message.contains(needle), "{needle} in: {message}");
+        }
+    }
+
+    #[test]
+    fn limit_and_depth_hints_are_rewritten_for_the_browser() {
+        for engine in ENGINES {
+            let r = run(
+                "let mut i = 0\nwhile true { i = i + 1 }\n",
+                &RunOptions {
+                    engine,
+                    max_instructions: Some(10_000),
+                    max_steps: Some(1_000),
+                    ..RunOptions::default()
+                },
+            );
+            let e = r.error.expect("limit");
+            assert_eq!(e.kind, ErrorKind::Limit, "{engine:?}");
+            assert!(e.message.starts_with("fuel exhausted"), "{}", e.message);
+            assert!(
+                e.message.contains("  hint: the playground stops each run"),
+                "{engine:?}: {}",
+                e.message
+            );
+            assert_no_cli_remedy(&e.message);
+
+            let r = run_on(engine, "fn down(n) { return down(n + 1) }\ndown(0)\n");
+            let e = r.error.expect("depth error");
+            assert!(
+                e.message.contains("the browser allows less recursion"),
+                "{engine:?}: {}",
+                e.message
+            );
+            assert_no_cli_remedy(&e.message);
+        }
+    }
+
+    #[test]
+    fn browser_message_maps_each_cli_hint() {
+        // The core's own texts (runtime/limits.rs, runtime/recursion.rs,
+        // semantics/errors.rs): each one is rewritten or dropped.
+        let fuel = forge_lang::runtime::limits::fuel_exhausted_message(5);
+        assert!(fuel.contains("--max-fuel"), "core text changed: {fuel}");
+        let mapped = browser_message(&fuel);
+        assert!(mapped.starts_with(fuel.lines().next().unwrap_or_default()));
+        assert_no_cli_remedy(&mapped);
+
+        let memory = forge_lang::runtime::limits::memory_exceeded_message(1 << 20);
+        assert!(
+            memory.contains("--max-memory"),
+            "core text changed: {memory}"
+        );
+        let mapped = browser_message(&memory);
+        assert!(mapped.contains("smaller pieces"), "{mapped}");
+        assert_no_cli_remedy(&mapped);
+
+        let denied = "fs.read is not permitted\n  hint: grant the capability with the --allow-* flag named in the message or in forge.toml [permissions]";
+        assert_eq!(browser_message(denied), "fs.read is not permitted");
+
+        let engine = browser_hint(
+            "see the message above; run with --interp for a second opinion if it looks like an engine bug",
+        )
+        .expect("kept");
+        assert!(engine.contains("switch the engine"), "{engine}");
+
+        // Hints without CLI advice, and messages without hints, are kept.
+        let plain = "cannot reassign\n  hint: declare the variable with `let mut` (or `set mut`) to allow reassignment";
+        assert_eq!(browser_message(plain), plain);
+        assert_eq!(browser_message("division by zero"), "division by zero");
     }
 
     #[test]

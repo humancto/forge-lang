@@ -13,14 +13,18 @@
 //! * **Stack.** Lexing, parsing and type-checking are recursive; Python's own
 //!   threads may have small stacks (512 KiB on macOS). Every call into Forge
 //!   therefore runs on a thread with [`FRONTEND_STACK_SIZE`] reserved (only
-//!   touched pages are committed). The interpreter itself runs on the
-//!   sandbox's own worker thread.
+//!   touched pages are committed). The engine itself runs on the sandbox's
+//!   own worker thread.
+//! * **Engine.** `engine="vm"` (the default, the bytecode VM) or
+//!   `engine="interp"` (the tree-walking interpreter). The core sandbox
+//!   applies the same containment to both.
 //! * **Thread safety.** [`Sandbox`] is an immutable (`frozen`) value. Each
-//!   `run` builds its own interpreter, so one `Sandbox` can be used from many
-//!   Python threads at once.
+//!   `run` builds its own engine instance, so one `Sandbox` can be used from
+//!   many Python threads at once.
 
 use forge_lang::mcp::{check_source, Diagnostic as ForgeDiagnostic};
-use forge_lang::{CancelHandle, Capability, Sandbox as ForgeSandbox, SandboxError};
+use forge_lang::tooling::{runtime_error_code, runtime_error_hint};
+use forge_lang::{CancelHandle, Capability, Engine, Sandbox as ForgeSandbox, SandboxError};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -28,6 +32,12 @@ use pyo3::types::PyType;
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
+
+// `Sandbox(max_memory=...)` measures the interpreter's heap through this
+// allocator. It only counts on threads whose run limits memory; elsewhere
+// it is the system allocator plus one thread-local check.
+#[global_allocator]
+static ALLOCATOR: forge_lang::CountingAllocator = forge_lang::CountingAllocator;
 
 /// Stack reserved for the thread that lexes/parses/checks a program.
 const FRONTEND_STACK_SIZE: usize = 256 * 1024 * 1024;
@@ -44,7 +54,7 @@ create_exception!(
     forge_lang,
     ForgeError,
     PyException,
-    "Base class for every error raised by a Forge run. Carries `kind` (stable string) and `stdout` (output printed before the failure)."
+    "Base class for every error raised by a Forge run. Carries `kind` (stable string), `stdout` (output printed before the failure), and `code`/`hint` (stable error code such as `E0012`, and how to fix it) when the error has them."
 );
 create_exception!(
     forge_lang,
@@ -81,6 +91,24 @@ create_exception!(
     ForgeCancelledError,
     ForgeError,
     "The run was cancelled through a CancelToken."
+);
+create_exception!(
+    forge_lang,
+    ForgeFuelExhaustedError,
+    ForgeError,
+    "The program ran more than `max_fuel` steps. `limit` is the step budget. Forge code cannot catch it."
+);
+create_exception!(
+    forge_lang,
+    ForgeMemoryLimitError,
+    ForgeError,
+    "The program needed more than `max_memory` bytes. `limit` is the limit in bytes. Forge code cannot catch it."
+);
+create_exception!(
+    forge_lang,
+    ForgeResourceLimitError,
+    ForgeError,
+    "The program exceeded another resource limit (open handles, value size, imports)."
 );
 
 /// Run `f` on a fresh thread with a large stack, waiting with the GIL
@@ -144,9 +172,12 @@ fn build_exception(py: Python<'_>, err: &SandboxError, source: &str) -> PyResult
         SandboxError::Timeout { .. } => py.get_type::<ForgeTimeoutError>(),
         SandboxError::OutputLimit { .. } => py.get_type::<ForgeOutputLimitError>(),
         SandboxError::Cancelled { .. } => py.get_type::<ForgeCancelledError>(),
-        // Forward compatibility: if SandboxError grows a variant (e.g. a
-        // memory or fuel limit) before this binding maps it, it surfaces as
-        // the base class with its own `kind`, instead of breaking the build.
+        SandboxError::FuelExhausted { .. } => py.get_type::<ForgeFuelExhaustedError>(),
+        SandboxError::MemoryLimit { .. } => py.get_type::<ForgeMemoryLimitError>(),
+        SandboxError::ResourceLimit { .. } => py.get_type::<ForgeResourceLimitError>(),
+        // Forward compatibility: if SandboxError grows a variant before this
+        // binding maps it, it surfaces as the base class with its own
+        // `kind`, instead of breaking the build.
         #[allow(unreachable_patterns)]
         _ => py.get_type::<ForgeError>(),
     };
@@ -155,11 +186,12 @@ fn build_exception(py: Python<'_>, err: &SandboxError, source: &str) -> PyResult
     exc.setattr("stdout", err.stdout())?;
     let none = py.None();
     let (mut line, mut column, mut limit) = (none.clone_ref(py), none.clone_ref(py), none);
+    let (mut code, mut hint): (Option<String>, Option<String>) = (None, None);
     match err {
         SandboxError::Syntax { .. } => {
             // The sandbox reports syntax errors as text; re-run the front
             // end (cheap, and on this already-failed path only) for a
-            // structured location.
+            // structured location, code and hint.
             if let Some(d) = check_source(source).into_iter().find(|d| d.is_error) {
                 if d.line > 0 {
                     line = d.line.into_pyobject(py)?.into_any().unbind();
@@ -167,10 +199,30 @@ fn build_exception(py: Python<'_>, err: &SandboxError, source: &str) -> PyResult
                 if d.column > 0 {
                     column = d.column.into_pyobject(py)?.into_any().unbind();
                 }
+                code = d.code;
+                hint = d.hint;
             }
         }
-        SandboxError::Runtime { line: l, .. } if *l > 0 => {
-            line = l.into_pyobject(py)?.into_any().unbind();
+        // Runtime and permission errors carry the same stable code and
+        // hint as `forge run --error-format json` (`forge explain <code>`).
+        SandboxError::Runtime {
+            message, line: l, ..
+        } => {
+            if *l > 0 {
+                line = l.into_pyobject(py)?.into_any().unbind();
+            }
+            code = Some(runtime_error_code(message).to_string());
+            hint = Some(runtime_error_hint(message).to_string());
+        }
+        SandboxError::PermissionDenied { message, .. } => {
+            code = Some(runtime_error_code(message).to_string());
+            hint = Some(runtime_error_hint(message).to_string());
+        }
+        SandboxError::FuelExhausted { limit: l, .. } => {
+            limit = l.into_pyobject(py)?.into_any().unbind();
+        }
+        SandboxError::MemoryLimit { limit: l, .. } => {
+            limit = l.into_pyobject(py)?.into_any().unbind();
         }
         SandboxError::Timeout { limit: l, .. } => {
             limit = l.as_secs_f64().into_pyobject(py)?.into_any().unbind();
@@ -183,6 +235,8 @@ fn build_exception(py: Python<'_>, err: &SandboxError, source: &str) -> PyResult
     exc.setattr("line", line)?;
     exc.setattr("column", column)?;
     exc.setattr("limit", limit)?;
+    exc.setattr("code", code.filter(|c| !c.is_empty()))?;
+    exc.setattr("hint", hint.filter(|h| !h.is_empty()))?;
     Ok(PyErr::from_value(exc))
 }
 
@@ -218,6 +272,13 @@ pub struct Diagnostic {
     is_error: bool,
     #[pyo3(get)]
     message: String,
+    /// Stable code (`E0002` for syntax errors, `T0006` for type
+    /// diagnostics; `forge explain <code>` documents it), when known.
+    #[pyo3(get)]
+    code: Option<String>,
+    /// How to fix it (did-you-mean, expected type), when there is a hint.
+    #[pyo3(get)]
+    hint: Option<String>,
 }
 
 #[pymethods]
@@ -234,10 +295,11 @@ impl Diagnostic {
 
     fn __repr__(&self) -> String {
         format!(
-            "Diagnostic(line={}, column={}, severity={:?}, message={:?})",
+            "Diagnostic(line={}, column={}, severity={:?}, code={:?}, message={:?})",
             self.line,
             self.column,
             self.severity(),
+            self.code.as_deref().unwrap_or(""),
             self.message
         )
     }
@@ -260,6 +322,8 @@ impl From<ForgeDiagnostic> for Diagnostic {
             column: d.column,
             is_error: d.is_error,
             message: d.message,
+            code: d.code,
+            hint: d.hint,
         }
     }
 }
@@ -318,6 +382,10 @@ pub struct Sandbox {
     allow_net: Vec<String>,
     max_time: Option<f64>,
     max_output: Option<usize>,
+    max_fuel: Option<u64>,
+    max_memory: Option<usize>,
+    /// Set only when the caller chose one (`__repr__`).
+    engine: Option<Engine>,
 }
 
 #[pymethods]
@@ -331,7 +399,10 @@ impl Sandbox {
         allow_net = Vec::new(),
         max_time = None,
         max_output = None,
+        max_fuel = None,
+        max_memory = None,
         label = None,
+        engine = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -341,7 +412,10 @@ impl Sandbox {
         allow_net: Vec<String>,
         max_time: Option<f64>,
         max_output: Option<usize>,
+        max_fuel: Option<u64>,
+        max_memory: Option<usize>,
         label: Option<String>,
+        engine: Option<String>,
     ) -> PyResult<Self> {
         let mut inner = ForgeSandbox::new();
         for name in &allow {
@@ -380,11 +454,34 @@ impl Sandbox {
         if let Some(label) = label {
             inner = inner.source_label(label);
         }
-        // EXTENSION POINT (resource limits): when the core Sandbox gains
-        // instruction fuel / a memory cap, add `max_fuel=` / `max_memory=`
-        // keyword arguments here, map the new SandboxError variants to
-        // dedicated exception classes in `build_exception` (they currently
-        // fall back to ForgeError), and update `_native.pyi`.
+        if let Some(steps) = max_fuel {
+            if steps == 0 {
+                return Err(PyValueError::new_err(
+                    "max_fuel must be a positive number of steps",
+                ));
+            }
+            inner = inner.max_fuel(steps);
+        }
+        if let Some(bytes) = max_memory {
+            if bytes == 0 {
+                return Err(PyValueError::new_err(
+                    "max_memory must be a positive number of bytes",
+                ));
+            }
+            inner = inner.max_memory(bytes);
+        }
+        let engine = engine
+            .map(|name| {
+                Engine::parse(&name).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "unknown engine {name:?}; expected \"vm\" or \"interp\""
+                    ))
+                })
+            })
+            .transpose()?;
+        if let Some(engine) = engine {
+            inner = inner.engine(engine);
+        }
         Ok(Sandbox {
             inner,
             allow,
@@ -393,6 +490,9 @@ impl Sandbox {
             allow_net,
             max_time,
             max_output,
+            max_fuel,
+            max_memory,
+            engine,
         })
     }
 
@@ -459,6 +559,15 @@ impl Sandbox {
         if let Some(b) = self.max_output {
             parts.push(format!("max_output={b}"));
         }
+        if let Some(f) = self.max_fuel {
+            parts.push(format!("max_fuel={f}"));
+        }
+        if let Some(m) = self.max_memory {
+            parts.push(format!("max_memory={m}"));
+        }
+        if let Some(e) = self.engine {
+            parts.push(format!("engine='{}'", e.name()));
+        }
         Ok(format!("Sandbox({})", parts.join(", ")))
     }
 }
@@ -484,6 +593,18 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<ForgeOutputLimitError>(),
     )?;
     m.add("ForgeCancelledError", py.get_type::<ForgeCancelledError>())?;
+    m.add(
+        "ForgeFuelExhaustedError",
+        py.get_type::<ForgeFuelExhaustedError>(),
+    )?;
+    m.add(
+        "ForgeMemoryLimitError",
+        py.get_type::<ForgeMemoryLimitError>(),
+    )?;
+    m.add(
+        "ForgeResourceLimitError",
+        py.get_type::<ForgeResourceLimitError>(),
+    )?;
     m.add(
         "CAPABILITIES",
         Capability::ALL

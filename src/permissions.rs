@@ -736,8 +736,9 @@ pub fn scope(caps: Arc<Capabilities>) -> PolicyGuard {
 
 /// Wrap `f` so that, wherever it runs, it runs under the policy that is
 /// current *here* — and charges the resource budget that is current here
-/// ([`crate::runtime::limits`]). Use for `tokio::task::spawn_blocking` and
-/// friends.
+/// ([`crate::runtime::limits`]) and writes its output into the capture that
+/// is current here ([`crate::runtime::stdio`]). Use for
+/// `tokio::task::spawn_blocking` and friends.
 pub fn inherit<F, T>(f: F) -> impl FnOnce() -> T + Send + 'static
 where
     F: FnOnce() -> T + Send + 'static,
@@ -745,9 +746,11 @@ where
 {
     let caps = current();
     let budget = crate::runtime::limits::current();
+    let output = crate::runtime::stdio::current_sink();
     move || {
         let _guard = scope(caps);
         let _limits = crate::runtime::limits::scope(budget);
+        let _output = crate::runtime::stdio::scope(output);
         f()
     }
 }

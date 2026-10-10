@@ -77,7 +77,8 @@ pub struct VmTemplate {
     cells: Vec<(usize, Value)>,
     /// Every other object, `(slot, object)`, children before parents.
     objects: Vec<(usize, FrozenObj)>,
-    globals: Vec<(String, Value)>,
+    /// Globals with frozen values (same names and slots as the VM's).
+    globals: super::globals::Globals,
     method_tables: FrozenTables,
     static_methods: FrozenTables,
     struct_defaults: FrozenTables,
@@ -105,7 +106,7 @@ impl VmTemplate {
     /// debug builds; the VM reports it before the server starts listening.)
     pub fn new(vm: &VM, fn_params: HashMap<String, Vec<String>>) -> Result<Self, String> {
         let mut freezer = Freezer::new(&vm.gc);
-        let globals = freezer.freeze_named(vm.globals.iter())?;
+        let globals = vm.globals.try_map_values(|v| freezer.freeze(*v))?;
         let method_tables = freezer.freeze_tables(&vm.method_tables)?;
         let static_methods = freezer.freeze_tables(&vm.static_methods)?;
         let struct_defaults = freezer.freeze_tables(&vm.struct_defaults)?;
@@ -139,12 +140,37 @@ impl VmTemplate {
         self.fork_with_budget(cancelled, self.fork_budget())
     }
 
+    /// A fork that charges the resource budget active on this thread instead
+    /// of a fresh one: the sandbox (`forge mcp` tool calls, `run_forge`
+    /// session steps) runs each call under its own budget and forks on the
+    /// call's worker, so building the fork is charged to the call.
+    pub(crate) fn fork_in_current_budget(&self, cancelled: Arc<AtomicBool>) -> VM {
+        self.fork_with_budget(cancelled, crate::runtime::limits::current())
+    }
+
+    /// Whether the global `name` is a function (named or anonymous).
+    pub(crate) fn has_function(&self, name: &str) -> bool {
+        let Some(value) = self.globals.get(name) else {
+            return false;
+        };
+        let Some(GcRef(slot)) = value.as_obj() else {
+            return false;
+        };
+        self.objects.iter().any(|(s, object)| {
+            *s == slot && matches!(object, FrozenObj::Function(_) | FrozenObj::Closure { .. })
+        })
+    }
+
     fn fork_with_budget(
         &self,
         cancelled: Arc<AtomicBool>,
         budget: Option<Arc<crate::runtime::limits::Budget>>,
     ) -> VM {
-        let mut vm = VM::bare_with_budget(Profiler::new(false), budget);
+        let mut vm = VM::bare_with_budget(
+            Profiler::new(false),
+            budget,
+            super::globals::Globals::in_domain(Arc::clone(self.globals.names())),
+        );
         let refs = self.materialize(&mut vm.gc);
         let remap = |v: &Value| remap_value(*v, &refs);
         let remap_table = |table: &IndexMap<String, Value>| {
@@ -155,9 +181,8 @@ impl VmTemplate {
         };
         vm.globals = self
             .globals
-            .iter()
-            .map(|(k, v)| (k.clone(), remap(v)))
-            .collect();
+            .try_map_values(|v| Ok::<_, std::convert::Infallible>(remap(v)))
+            .unwrap_or_else(|never| match never {});
         vm.method_tables = self
             .method_tables
             .iter()
@@ -492,15 +517,6 @@ impl<'a> Freezer<'a> {
             objects: Vec::new(),
             pending_cells: Vec::new(),
         }
-    }
-
-    fn freeze_named<'v>(
-        &mut self,
-        entries: impl Iterator<Item = (&'v String, &'v Value)>,
-    ) -> Result<Vec<(String, Value)>, String> {
-        entries
-            .map(|(k, v)| Ok((k.clone(), self.freeze(*v)?)))
-            .collect()
     }
 
     fn freeze_tables(

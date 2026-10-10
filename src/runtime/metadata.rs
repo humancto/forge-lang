@@ -299,3 +299,221 @@ mod tests {
         assert!(plan.server.is_none());
     }
 }
+
+/// Constructs the bytecode VM cannot run faithfully (today: decorators it
+/// cannot honor, see [`vm_unsupported_decorator`]). Hosts that pick the VM
+/// run such a program on the interpreter instead (`forge run`, the sandbox);
+/// combine with a trial compile, which reports the rest as `Unsupported`.
+pub fn vm_incompatibilities(program: &Program) -> Vec<String> {
+    let mut issues = std::collections::BTreeSet::new();
+    for stmt in &program.statements {
+        collect_vm_incompatible_stmt(&stmt.stmt, &mut issues);
+    }
+    issues.into_iter().collect()
+}
+
+fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut std::collections::BTreeSet<String>) {
+    match stmt {
+        Stmt::TypeDef { .. } => {}
+        Stmt::InterfaceDef { .. } => {}
+        Stmt::ImplBlock { methods, .. } => {
+            for method in methods {
+                collect_vm_incompatible_stmt(&method.stmt, issues);
+            }
+        }
+        Stmt::Destructure { pattern: _, value } => {
+            collect_vm_incompatible_expr(value, issues);
+        }
+        Stmt::TryCatch {
+            try_body,
+            catch_body,
+            ..
+        } => {
+            for s in try_body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+            for s in catch_body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Stmt::SafeBlock { body } => {
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Stmt::TimeoutBlock { body, .. } => {
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Stmt::RetryBlock { count, body } => {
+            collect_vm_incompatible_expr(count, issues);
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Stmt::ScheduleBlock { body, .. } => {
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Stmt::WatchBlock { body, .. } => {
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Stmt::PromptDef { .. } => {}
+        Stmt::AgentDef { .. } => {}
+        Stmt::DecoratorStmt(decorator) => {
+            issues.extend(vm_unsupported_decorator(decorator, true));
+        }
+        Stmt::Import { .. } | Stmt::ImportNative { .. } => {}
+        Stmt::FnDef {
+            body, decorators, ..
+        } => {
+            issues.extend(
+                decorators
+                    .iter()
+                    .filter_map(|d| vm_unsupported_decorator(d, false)),
+            );
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            for s in then_body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+            if let Some(else_body) = else_body {
+                for s in else_body {
+                    collect_vm_incompatible_stmt(&s.stmt, issues);
+                }
+            }
+        }
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                for s in &arm.body {
+                    collect_vm_incompatible_stmt(&s.stmt, issues);
+                }
+            }
+        }
+        Stmt::For { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::Spawn { body }
+        | Stmt::Squad { body } => {
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Stmt::Let { value, .. } | Stmt::Expression(value) | Stmt::YieldStmt(value) => {
+            collect_vm_incompatible_expr(value, issues)
+        }
+        Stmt::Assign { target, value } => {
+            collect_vm_incompatible_expr(target, issues);
+            collect_vm_incompatible_expr(value, issues);
+        }
+        Stmt::Return(Some(expr)) | Stmt::CheckStmt { expr, .. } => {
+            collect_vm_incompatible_expr(expr, issues)
+        }
+        Stmt::When { subject, arms } => {
+            collect_vm_incompatible_expr(subject, issues);
+            for arm in arms {
+                if let Some(value) = &arm.value {
+                    collect_vm_incompatible_expr(value, issues);
+                }
+                collect_vm_incompatible_expr(&arm.result, issues);
+            }
+        }
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::StructDef { .. } => {}
+    }
+}
+
+fn collect_vm_incompatible_expr(expr: &Expr, issues: &mut std::collections::BTreeSet<String>) {
+    match expr {
+        Expr::BinOp { left, right, .. } => {
+            collect_vm_incompatible_expr(left, issues);
+            collect_vm_incompatible_expr(right, issues);
+        }
+        Expr::UnaryOp { operand, .. } | Expr::Try(operand) => {
+            collect_vm_incompatible_expr(operand, issues)
+        }
+        Expr::FieldAccess { object, .. } => collect_vm_incompatible_expr(object, issues),
+        Expr::Index { object, index } => {
+            collect_vm_incompatible_expr(object, issues);
+            collect_vm_incompatible_expr(index, issues);
+        }
+        Expr::Call { function, args } => {
+            collect_vm_incompatible_expr(function, issues);
+            for arg in args {
+                collect_vm_incompatible_expr(arg, issues);
+            }
+        }
+        Expr::Pipeline { value, function } => {
+            collect_vm_incompatible_expr(value, issues);
+            collect_vm_incompatible_expr(function, issues);
+        }
+        Expr::Lambda { body, .. } | Expr::Block(body) => {
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Expr::Object(fields) | Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_vm_incompatible_expr(value, issues);
+            }
+        }
+        Expr::Array(items) => {
+            for item in items {
+                collect_vm_incompatible_expr(item, issues);
+            }
+        }
+        Expr::StringInterp(parts) => {
+            for part in parts {
+                if let StringPart::Expr(expr) = part {
+                    collect_vm_incompatible_expr(expr, issues);
+                }
+            }
+        }
+        Expr::MethodCall { object, args, .. } => {
+            collect_vm_incompatible_expr(object, issues);
+            for arg in args {
+                collect_vm_incompatible_expr(arg, issues);
+            }
+        }
+        Expr::WhereFilter { source, value, .. } => {
+            collect_vm_incompatible_expr(source, issues);
+            collect_vm_incompatible_expr(value, issues);
+        }
+        Expr::PipeChain { source, steps } => {
+            collect_vm_incompatible_expr(source, issues);
+            for step in steps {
+                match step {
+                    PipeStep::Keep(expr) | PipeStep::Take(expr) | PipeStep::Apply(expr) => {
+                        collect_vm_incompatible_expr(expr, issues);
+                    }
+                    PipeStep::Sort(_) => {}
+                }
+            }
+        }
+        Expr::Must(expr) | Expr::Ask(expr) | Expr::Freeze(expr) | Expr::Await(expr) => {
+            collect_vm_incompatible_expr(expr, issues);
+        }
+        Expr::Spread(expr) => collect_vm_incompatible_expr(expr, issues),
+        Expr::Spawn(body) | Expr::Squad(body) => {
+            for s in body {
+                collect_vm_incompatible_stmt(&s.stmt, issues);
+            }
+        }
+        Expr::Tuple(items) => {
+            for item in items {
+                collect_vm_incompatible_expr(item, issues);
+            }
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => {}
+    }
+}

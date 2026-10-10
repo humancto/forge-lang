@@ -35,12 +35,12 @@
 //! * **Cancellation.** [`Sandbox::run_source_cancellable`] takes a
 //!   [`CancelHandle`] the host can trigger from another thread.
 //! * **Resource limits** ([`Sandbox::limits`], `runtime::limits`):
-//!   - [`Sandbox::max_fuel`] — a deterministic step budget (one step per
-//!     statement, call and loop iteration). Running out is
+//!   - [`Sandbox::max_fuel`] — a deterministic step budget (see
+//!     [Engines](#engines) for what a step is). Running out is
 //!     [`SandboxError::FuelExhausted`], at exactly the same step every time
 //!     for a single-threaded program, whatever the machine's speed.
 //!   - [`Sandbox::max_memory`] — bytes the run's threads may hold, polled at
-//!     every step; exceeding it is [`SandboxError::MemoryLimit`]. Needs
+//!     the engine's safe points; exceeding it is [`SandboxError::MemoryLimit`]. Needs
 //!     [`crate::CountingAllocator`] as the host's global allocator (the run
 //!     fails with a clear error otherwise).
 //!   - caps on concurrently open files, sockets, subprocesses and tasks, on
@@ -51,10 +51,21 @@
 //!   process is unaffected either way: the run's memory is released when
 //!   its worker thread ends.
 //!
+//! # Engines
+//!
+//! [`Sandbox::engine`] picks the engine: the bytecode VM ([`Engine::Vm`],
+//! the default, like `forge run`) or the tree-walking interpreter
+//! ([`Engine::Interpreter`]). Every guarantee above holds on both: they are
+//! applied by one wrapper ([`Sandbox::run_contained`]) around either
+//! engine. A program the VM cannot run faithfully (an unknown decorator)
+//! runs on the interpreter inside the same sandbox. Fuel counts the
+//! engine's own steps (VM: instructions; interpreter: statements, calls and
+//! loop iterations), so a program spends different amounts on each.
+//!
 //! # Current limits (future work)
 //!
-//! * Runs on the tree-walking interpreter. HTTP servers, `schedule` and
-//!   `watch` blocks are host-runtime features and are not started.
+//! * HTTP servers, `schedule` and `watch` blocks are host-runtime features
+//!   and are not started.
 //! * Call depth is bounded by the engine's recursion limit.
 //! * stderr output (`log`, `term`, warnings) is not captured.
 //! * The host's stdin is only readable with the `process` capability
@@ -64,12 +75,16 @@
 
 use crate::interpreter::{Interpreter, RuntimeError};
 use crate::lexer::Lexer;
+use crate::parser::ast::Program;
 use crate::parser::Parser;
 use crate::permissions::{self, Capabilities, Capability};
 use crate::runtime::limits::{self, Budget, LimitKind, Limits, Trip};
+use crate::runtime::stdio;
+use crate::vm::embed;
+use crate::vm::machine::{VMError, VM};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 /// Stack reserved for a sandbox worker thread. Only touched pages are
@@ -93,6 +108,7 @@ pub struct Sandbox {
     source_label: String,
     /// See [`Sandbox::memory_baseline`].
     memory_baseline: usize,
+    engine: Engine,
 }
 
 /// Lets a host stop a running program from another thread. Cheap to clone;
@@ -241,6 +257,7 @@ impl Sandbox {
             limits: Limits::none(),
             source_label: "<sandbox>".to_string(),
             memory_baseline: 0,
+            engine: Engine::default(),
         }
     }
 
@@ -353,6 +370,18 @@ impl Sandbox {
         &self.caps
     }
 
+    /// Run programs on `engine` (default: [`Engine::Vm`]). The containment
+    /// is identical on both engines.
+    pub fn engine(mut self, engine: Engine) -> Self {
+        self.engine = engine;
+        self
+    }
+
+    /// The engine this sandbox runs programs on.
+    pub fn selected_engine(&self) -> Engine {
+        self.engine
+    }
+
     /// Run Forge source to completion under this sandbox's policy.
     pub fn run_source(&self, source: &str) -> Result<Output, SandboxError> {
         self.run_source_cancellable(source, &CancelHandle::new())
@@ -368,16 +397,12 @@ impl Sandbox {
         let program = parse_source(source)?;
         let source = source.to_string();
         let label = self.source_label.clone();
-        self.run_interpreter(
-            move || {
-                let mut interp = Interpreter::new();
-                interp.source = Some(source);
-                interp.source_file = Some(label.into());
-                interp
-            },
+        let engine = self.engine;
+        self.run_contained(
+            || (),
             cancel,
-            move |interp| {
-                let result = interp.run(&program).map(|_| ());
+            move |(), scope| {
+                let result = run_program(scope, engine, &program, source, label);
                 // Release the program while still under the run's budget.
                 drop(program);
                 result
@@ -388,73 +413,97 @@ impl Sandbox {
     }
 
     /// Run `job` on the interpreter `make_interp` returns, under this
-    /// sandbox: on a fresh worker thread, under the policy and a fresh
-    /// resource [`Budget`] (fuel, memory, handles, imports), with captured
-    /// and budgeted output, the wall-clock limit, the host's `cancel`
-    /// handle and no host runtime (`schedule`, `watch`, servers).
-    ///
-    /// This is the one place that applies a sandbox's containment, so every
-    /// way of running untrusted code (a whole program, a call into a loaded
-    /// program, one step of a persistent session) gets the same guarantees.
-    /// `make_interp` runs on the worker, under the budget, so building the
-    /// interpreter (e.g. forking a template) is charged to the run. When the
-    /// job ends, however it ends, its cancellation token is set, so tasks
-    /// the code `spawn`ed and never awaited stop instead of outliving the
-    /// run.
-    ///
-    /// The interpreter may carry state from earlier runs (it is handed back
-    /// in [`InterpreterRun::interp`]); its cancellation token, output
-    /// capture and budget are replaced for this run.
+    /// sandbox ([`Sandbox::run_contained`] with the interpreter contained
+    /// before the job starts). The interpreter may carry state from earlier
+    /// runs (it is handed back in [`InterpreterRun::interp`]); its
+    /// cancellation token, output capture and host-runtime mode are replaced
+    /// for this run.
     pub(crate) fn run_interpreter<T: Send + 'static>(
         &self,
         make_interp: impl FnOnce() -> Interpreter + Send + 'static,
         cancel: &CancelHandle,
         job: impl FnOnce(&mut Interpreter) -> Result<T, RuntimeError> + Send + 'static,
     ) -> InterpreterRun<T> {
-        let refuse = |error: SandboxError| InterpreterRun {
+        let run = self.run_contained(make_interp, cancel, move |interp, scope| {
+            scope.contain_interpreter(interp);
+            job(interp).map_err(JobError::from)
+        });
+        InterpreterRun {
+            result: run.result,
+            interp: run.state,
+            memory_held: run.memory_held,
+        }
+    }
+
+    /// Run `job` under this sandbox: on a fresh worker thread, under the
+    /// policy and a fresh resource [`Budget`] (fuel, memory, handles,
+    /// imports), with captured and budgeted output, the wall-clock limit,
+    /// the host's `cancel` handle and no host runtime (`schedule`, `watch`,
+    /// servers).
+    ///
+    /// This is the one place that applies a sandbox's containment, for
+    /// both engines, so every way of running untrusted code (a whole
+    /// program, a call into a loaded program, one step of a persistent
+    /// session) gets the same guarantees. The containment that is not
+    /// thread-scoped is the engine's: the job must hand every interpreter
+    /// or VM it runs to [`RunScope::contain_interpreter`] /
+    /// [`RunScope::contain_vm`] first, which installs the run's
+    /// cancellation token and turns the host runtime off.
+    ///
+    /// `make_state` runs on the worker, under the budget, so building the
+    /// engine (e.g. forking a template) is charged to the run; the state is
+    /// handed back in [`ContainedRun::state`]. When the job ends, however it
+    /// ends, the run's cancellation token is set, so tasks the code
+    /// `spawn`ed and never awaited stop instead of outliving the run.
+    pub(crate) fn run_contained<S: Send + 'static, T: Send + 'static>(
+        &self,
+        make_state: impl FnOnce() -> S + Send + 'static,
+        cancel: &CancelHandle,
+        job: impl FnOnce(&mut S, &RunScope) -> Result<T, JobError> + Send + 'static,
+    ) -> ContainedRun<T, S> {
+        let refuse = |error: SandboxError, state: Option<S>| ContainedRun {
             result: Err(error),
-            interp: None,
+            state,
             memory_held: self.memory_baseline,
         };
-        let sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let host_cancel = cancel;
         if host_cancel.is_cancelled() {
-            return InterpreterRun {
-                interp: Some(make_interp()),
-                ..refuse(SandboxError::Cancelled {
-                    stdout: String::new(),
-                })
-            };
+            let stdout = String::new();
+            return refuse(SandboxError::Cancelled { stdout }, Some(make_state()));
         }
         if self.limits.max_memory.is_some() && !limits::allocation_meter_installed() {
-            return InterpreterRun {
-                interp: Some(make_interp()),
-                ..refuse(SandboxError::Runtime {
+            return refuse(
+                SandboxError::Runtime {
                     message: "Sandbox::max_memory needs forge_lang::CountingAllocator as the \
-                              global allocator to measure the interpreter's memory"
+                              global allocator to measure the program's memory"
                         .to_string(),
                     line: 0,
                     stdout: String::new(),
-                })
-            };
+                },
+                Some(make_state()),
+            );
         }
         // A fresh budget per run: fuel, memory and handles are never shared
-        // between runs or sandboxes. Memory a caller says the interpreter
-        // already holds (a session's state) counts from the start.
+        // between runs or sandboxes. Memory a caller says the state already
+        // holds (a session's interpreter) counts from the start.
         let budget = Budget::new(self.limits.clone());
         budget.preload_memory(self.memory_baseline);
-        // The flag the interpreter polls. Separate from the host's handle,
-        // so a timeout or output-limit stop is not reported as a cancel.
-        let cancel = Arc::new(AtomicBool::new(false));
+        // The flag the engines poll. Separate from the host's handle, so a
+        // timeout or output-limit stop is not reported as a cancel.
+        let run_cancel = Arc::new(AtomicBool::new(false));
+        // The output capture, shared by every thread of the run (it is
+        // inherited like the policy and the budget). Past `max_output` it
+        // drops output and stops the run at its next safe point.
+        let capture_limit = self.max_output.map_or(usize::MAX, |l| l.saturating_add(1));
+        let sink = stdio::Sink::stdout_only(capture_limit, Some(run_cancel.clone()));
         let caps = Arc::new(self.caps.clone());
-        let (tx, rx) = mpsc::channel::<(Result<T, RuntimeError>, Interpreter)>();
+        let (tx, rx) = mpsc::channel::<(Result<T, JobError>, S)>();
 
+        let scope = RunScope {
+            cancel: run_cancel.clone(),
+        };
         let worker_sink = sink.clone();
-        let worker_cancel = cancel.clone();
         let worker_budget = budget.clone();
-        let output_budget = self
-            .max_output
-            .map(|limit| (Arc::new(std::sync::atomic::AtomicUsize::new(0)), limit));
         let spawned = std::thread::Builder::new()
             .name("forge-sandbox".to_string())
             .stack_size(WORKER_STACK_SIZE)
@@ -462,46 +511,50 @@ impl Sandbox {
                 crate::runtime::recursion::register_thread_stack(WORKER_STACK_SIZE);
                 let _policy = permissions::scope(caps);
                 let _limits = limits::scope(Some(worker_budget));
-                let mut interp = make_interp();
-                interp.output_sink = Some(worker_sink);
-                interp.output_budget = output_budget;
-                interp.cancelled = worker_cancel;
-                interp.set_defer_host_runtime(true);
-                let result = job(&mut interp);
+                let _output = stdio::scope(Some(worker_sink));
+                let mut state = make_state();
+                let result = job(&mut state, &scope);
                 // The run is over: stop anything it started and left running.
-                interp.cancelled.store(true, Ordering::Release);
-                let _ = tx.send((result, interp));
+                scope.cancel.store(true, Ordering::Release);
+                let _ = tx.send((result, state));
             });
         if let Err(e) = spawned {
-            return refuse(SandboxError::Runtime {
-                message: format!("failed to start sandbox thread: {}", e),
-                line: 0,
-                stdout: String::new(),
-            });
+            let message = format!("failed to start sandbox thread: {}", e);
+            let stdout = String::new();
+            return refuse(
+                SandboxError::Runtime {
+                    message,
+                    line: 0,
+                    stdout,
+                },
+                None,
+            );
         }
 
-        let collect = |sink: &Arc<Mutex<Vec<String>>>| -> String {
-            sink.lock()
-                .map(|b| b.concat())
-                .unwrap_or_else(|e| e.into_inner().concat())
-        };
-        let printed = |sink: &Arc<Mutex<Vec<String>>>| -> usize {
-            let count = |b: &Vec<String>| b.iter().map(String::len).sum();
-            sink.lock()
-                .map(|b| count(&b))
-                .unwrap_or_else(|e| count(&e.into_inner()))
+        let collect = || sink.snapshot().text(stdio::Stream::Stdout);
+        // The sink keeps one byte more than the limit, so "printed more
+        // than the limit" is visible in its byte count, or in its
+        // truncation flag when the cut fell inside a multibyte character
+        // (the byte count then backs down to the previous boundary).
+        let over_output = || {
+            self.max_output
+                .is_some_and(|limit| sink.truncated() || sink.bytes() > limit)
         };
         // Stop the worker cooperatively and give it a moment to unwind;
-        // either way the host gets control back now. The interpreter comes
-        // back only if the worker stopped within the grace period.
-        let stop = |cancel: &AtomicBool| -> Option<Interpreter> {
-            cancel.store(true, Ordering::Release);
-            rx.recv_timeout(CANCEL_GRACE).ok().map(|(_, interp)| interp)
+        // either way the host gets control back now. The state comes back
+        // only if the worker stopped within the grace period.
+        let stop = || -> Option<S> {
+            run_cancel.store(true, Ordering::Release);
+            rx.recv_timeout(CANCEL_GRACE).ok().map(|(_, state)| state)
         };
-        let finish = |result, interp| InterpreterRun {
+        let finish = |result, state| ContainedRun {
             result,
-            interp,
+            state,
             memory_held: budget.memory_used(),
+        };
+        let output_limit = |limit: usize| SandboxError::OutputLimit {
+            limit,
+            stdout: truncate_utf8(collect(), limit),
         };
 
         let deadline = self.max_time.map(|limit| (limit, Instant::now() + limit));
@@ -512,43 +565,36 @@ impl Sandbox {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
             if host_cancel.is_cancelled() {
-                let interp = stop(&cancel);
-                let stdout = collect(&sink);
-                return finish(Err(SandboxError::Cancelled { stdout }), interp);
+                let state = stop();
+                let stdout = collect();
+                return finish(Err(SandboxError::Cancelled { stdout }), state);
             }
             if let Some((limit, at)) = deadline {
                 if Instant::now() >= at {
-                    let interp = stop(&cancel);
-                    let stdout = collect(&sink);
-                    return finish(Err(SandboxError::Timeout { limit, stdout }), interp);
+                    let state = stop();
+                    let stdout = collect();
+                    return finish(Err(SandboxError::Timeout { limit, stdout }), state);
                 }
             }
-            if let Some(limit) = self.max_output {
-                if printed(&sink) > limit {
-                    let interp = stop(&cancel);
-                    let stdout = truncate_utf8(collect(&sink), limit);
-                    return finish(Err(SandboxError::OutputLimit { limit, stdout }), interp);
-                }
+            if let Some(limit) = self.max_output.filter(|_| over_output()) {
+                let state = stop();
+                return finish(Err(output_limit(limit)), state);
             }
         };
-        let (outcome, interp) = match outcome {
-            Some((result, interp)) => (Some(result), Some(interp)),
+        let (outcome, state) = match outcome {
+            Some((result, state)) => (Some(result), Some(state)),
             None => (None, None),
         };
-        let stdout = collect(&sink);
-        let over_limit = self.max_output.filter(|limit| stdout.len() > *limit);
-        let result = if let Some(limit) = over_limit {
-            Err(SandboxError::OutputLimit {
-                limit,
-                stdout: truncate_utf8(stdout, limit),
-            })
+        let result = if let Some(limit) = self.max_output.filter(|_| over_output()) {
+            Err(output_limit(limit))
         } else if host_cancel.is_cancelled() && outcome.as_ref().is_some_and(|r| r.is_err()) {
-            Err(SandboxError::Cancelled { stdout })
+            Err(SandboxError::Cancelled { stdout: collect() })
         } else if let Some(trip) = budget.tripped() {
             // A fatal limit is reported even if a builtin swallowed the
             // error (the budget remembers the trip).
-            Err(self.limit_error(trip, stdout))
+            Err(self.limit_error(trip, collect()))
         } else {
+            let stdout = collect();
             match outcome {
                 Some(Ok(value)) => Ok((value, stdout)),
                 Some(Err(e)) => Err(self.classify_error(e.message, e.line, stdout)),
@@ -559,7 +605,7 @@ impl Sandbox {
                 }),
             }
         };
-        finish(result, interp)
+        finish(result, state)
     }
 
     /// Bytes the interpreter handed to [`Sandbox::run_interpreter`] already
@@ -603,6 +649,164 @@ pub(crate) struct InterpreterRun<T> {
     /// allocation meter, including the [`Sandbox::memory_baseline`] (0 when
     /// memory is not limited or the meter is not installed).
     pub memory_held: usize,
+}
+
+/// What [`Sandbox::run_contained`] produced.
+pub(crate) struct ContainedRun<T, S> {
+    /// The job's value and everything the run printed, or why it failed.
+    pub result: Result<(T, String), SandboxError>,
+    /// The job's state, as the run left it. `None` when the worker had to
+    /// be abandoned (it did not stop within the grace period after a
+    /// timeout or cancel) or panicked.
+    pub state: Option<S>,
+    /// Bytes the run holds at the end according to the allocation meter,
+    /// including the [`Sandbox::memory_baseline`] (0 when memory is not
+    /// limited or the meter is not installed).
+    pub memory_held: usize,
+}
+
+/// The engine that runs sandboxed code.
+///
+/// Both engines run under exactly the same containment
+/// ([`Sandbox::run_contained`]): policy, resource budget, output capture
+/// and budget, deadline, cancellation, no host runtime. A program the VM
+/// cannot run faithfully (e.g. an unknown decorator) runs on the
+/// interpreter instead, inside the same sandbox, as `forge run` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Engine {
+    /// The bytecode VM, the default engine of `forge run`.
+    #[default]
+    Vm,
+    /// The tree-walking interpreter.
+    Interpreter,
+}
+
+impl Engine {
+    /// `"vm"` or `"interp"`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Engine::Vm => "vm",
+            Engine::Interpreter => "interp",
+        }
+    }
+
+    /// Parse `vm` or `interp` / `interpreter`.
+    pub fn parse(s: &str) -> Option<Engine> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "vm" => Some(Engine::Vm),
+            "interp" | "interpreter" => Some(Engine::Interpreter),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The containment a [`Sandbox::run_contained`] job applies to every
+/// engine instance it runs. Policy, budget and output capture are scoped to
+/// the worker thread (and inherited by every thread the engines start);
+/// these are the parts that live in the engine.
+pub(crate) struct RunScope {
+    /// The run's cancellation token: set by a deadline, a host cancel, the
+    /// output budget, and when the job ends.
+    cancel: Arc<AtomicBool>,
+}
+
+impl RunScope {
+    /// The run's cancellation token.
+    pub(crate) fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
+    }
+
+    /// Contain an interpreter for this run: the run's cancellation token,
+    /// output through the run's capture, no host runtime (`schedule`,
+    /// `watch`). Children it creates (`child_context`) inherit all three.
+    pub(crate) fn contain_interpreter(&self, interp: &mut Interpreter) {
+        interp.cancelled = self.cancel.clone();
+        // Output goes through `runtime::stdio`, i.e. the run's capture.
+        interp.output_sink = None;
+        interp.output_budget = None;
+        interp.set_defer_host_runtime(true);
+    }
+
+    /// Contain a VM for this run: the run's cancellation token (forked
+    /// tasks share it), no host runtime, and the run's memory limit
+    /// enforced across all its threads.
+    pub(crate) fn contain_vm(&self, vm: &mut VM) {
+        vm.set_cancel_flag(self.cancel.clone());
+        vm.defer_host_runtime();
+        vm.poll_allocation_meter();
+    }
+}
+
+/// How a [`Sandbox::run_contained`] job failed, on either engine.
+pub(crate) struct JobError {
+    pub message: String,
+    /// 1-based source line, 0 when unknown.
+    pub line: usize,
+}
+
+impl JobError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        JobError {
+            message: message.into(),
+            line: 0,
+        }
+    }
+}
+
+impl From<RuntimeError> for JobError {
+    fn from(e: RuntimeError) -> Self {
+        JobError {
+            message: e.message,
+            line: e.line,
+        }
+    }
+}
+
+impl From<VMError> for JobError {
+    fn from(e: VMError) -> Self {
+        JobError {
+            line: embed::error_line(&e),
+            message: e.message,
+        }
+    }
+}
+
+/// Run a whole program on `engine` (falling back to the interpreter for
+/// programs the VM cannot run faithfully), contained by `scope`. Compiling
+/// happens here, on the worker, because it reads imported modules under
+/// the run's policy.
+fn run_program(
+    scope: &RunScope,
+    engine: Engine,
+    program: &Program,
+    source: String,
+    label: String,
+) -> Result<(), JobError> {
+    if engine == Engine::Vm {
+        match embed::compile_program(program, None) {
+            Ok(chunk) => {
+                let mut vm = VM::new();
+                scope.contain_vm(&mut vm);
+                let result = vm.execute(&chunk).map(|_| ()).map_err(JobError::from);
+                // Release the heap while still under the run's budget.
+                drop(vm);
+                return result;
+            }
+            Err(embed::CompileFailure::Error(message)) => return Err(JobError::new(message)),
+            Err(embed::CompileFailure::Unsupported) => {}
+        }
+    }
+    let mut interp = Interpreter::new();
+    interp.source = Some(source);
+    interp.source_file = Some(label.into());
+    scope.contain_interpreter(&mut interp);
+    interp.run(program).map(|_| ()).map_err(JobError::from)
 }
 
 /// Lex and parse `source`, reporting failures as [`SandboxError::Syntax`].
@@ -650,6 +854,8 @@ pub(crate) fn truncate_utf8(mut s: String, limit: usize) -> String {
 mod tests {
     use super::*;
 
+    const ENGINES: [Engine; 2] = [Engine::Vm, Engine::Interpreter];
+
     fn tmpdir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
             "forge_sandbox_{}_{}_{}",
@@ -676,7 +882,15 @@ mod tests {
 
     #[test]
     fn captures_stdout() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            captures_stdout_on(engine);
+        }
+    }
+
+    fn captures_stdout_on(engine: Engine) {
         let out = Sandbox::new()
+            .engine(engine)
             .run_source("say \"hi\"\nprint(\"a\")\nprintln(1 + 2)")
             .expect("runs");
         assert_eq!(out.stdout, "hi\na3\n");
@@ -684,11 +898,21 @@ mod tests {
 
     #[test]
     fn syntax_and_runtime_errors() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            syntax_and_runtime_errors_on(engine);
+        }
+    }
+
+    fn syntax_and_runtime_errors_on(engine: Engine) {
         assert!(matches!(
-            Sandbox::new().run_source("let = ="),
+            Sandbox::new().engine(engine).run_source("let = ="),
             Err(SandboxError::Syntax { .. })
         ));
-        match Sandbox::new().run_source("say \"before\"\nlet x = 1 / 0") {
+        match Sandbox::new()
+            .engine(engine)
+            .run_source("say \"before\"\nlet x = 1 / 0")
+        {
             Err(SandboxError::Runtime { stdout, .. }) => assert_eq!(stdout, "before\n"),
             other => panic!("{other:?}"),
         }
@@ -696,7 +920,14 @@ mod tests {
 
     #[test]
     fn default_deny_every_capability() {
-        let sb = Sandbox::new();
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            default_deny_every_capability_on(engine);
+        }
+    }
+
+    fn default_deny_every_capability_on(engine: Engine) {
+        let sb = Sandbox::new().engine(engine);
         denied(sb.run_source(r#"fs.read("/etc/hostname")"#), "fs.read");
         denied(sb.run_source(r#"fs.write("x.txt", "y")"#), "fs.write");
         denied(sb.run_source(r#"http.get("https://example.com")"#), "net");
@@ -712,7 +943,14 @@ mod tests {
 
     #[test]
     fn grants_are_honoured() {
-        let out = Sandbox::new()
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            grants_are_honoured_on(engine);
+        }
+    }
+
+    fn grants_are_honoured_on(engine: Engine) {
+        let out = Sandbox::new().engine(engine)
             .allow(Capability::Env)
             .allow(Capability::Db)
             .run_source(
@@ -724,9 +962,17 @@ mod tests {
 
     #[test]
     fn host_stdin_is_not_readable_without_process() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            host_stdin_is_not_readable_without_process_on(engine);
+        }
+    }
+
+    fn host_stdin_is_not_readable_without_process_on(engine: Engine) {
         // Must return immediately (empty stream), never block on or consume
         // the host's stdin; the prompt is not printed either.
         let out = Sandbox::new()
+            .engine(engine)
             .run_source("let a = io.prompt(\"name? \")\nlet b = input()\nsay \"[\" + a + b + \"]\"")
             .expect("stdin reads are not errors");
         assert_eq!(out.stdout, "[]\n");
@@ -734,12 +980,22 @@ mod tests {
 
     #[test]
     fn scoped_filesystem() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            scoped_filesystem_on(engine);
+        }
+    }
+
+    fn scoped_filesystem_on(engine: Engine) {
         let root = tmpdir("fs");
         let data = root.join("data");
         std::fs::create_dir_all(&data).expect("mkdir");
         std::fs::write(data.join("in.txt"), "hello").expect("write");
         std::fs::write(root.join("secret.txt"), "s3cret").expect("write");
-        let sb = Sandbox::new().allow_read([&data]).allow_write([&data]);
+        let sb = Sandbox::new()
+            .engine(engine)
+            .allow_read([&data])
+            .allow_write([&data]);
         // Forge string literals treat `\` as an escape (Windows paths).
         let d = data.display().to_string().replace('\\', "\\\\");
         let root_lit = root.display().to_string().replace('\\', "\\\\");
@@ -776,12 +1032,19 @@ mod tests {
 
     #[test]
     fn unawaited_tasks_stop_when_the_run_ends() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            unawaited_tasks_stop_when_the_run_ends_on(engine);
+        }
+    }
+
+    fn unawaited_tasks_stop_when_the_run_ends_on(engine: Engine) {
         // A task the program never awaits must not keep running (and
         // burning CPU or writing files) after the run returns.
         let dir = tmpdir("leak");
         let file = dir.join("ticks.txt");
         let lit = file.display().to_string().replace('\\', "\\\\");
-        let out = Sandbox::new()
+        let out = Sandbox::new().engine(engine)
             .allow_write([&dir])
             .allow_read([&dir])
             .run_source(&format!(
@@ -854,7 +1117,15 @@ mod tests {
 
     #[test]
     fn spawned_tasks_inherit_the_sandbox() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            spawned_tasks_inherit_the_sandbox_on(engine);
+        }
+    }
+
+    fn spawned_tasks_inherit_the_sandbox_on(engine: Engine) {
         let r = Sandbox::new()
+            .engine(engine)
             .run_source("let h = spawn { return sh(\"echo escaped\") }\nlet v = await h\nsay v");
         // The task's own thread must still be under the sandbox: the shell
         // call fails with the standard denial, whichever way the engine
@@ -869,8 +1140,16 @@ mod tests {
 
     #[test]
     fn max_time_stops_infinite_loop() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            max_time_stops_infinite_loop_on(engine);
+        }
+    }
+
+    fn max_time_stops_infinite_loop_on(engine: Engine) {
         let start = std::time::Instant::now();
         let r = Sandbox::new()
+            .engine(engine)
             .max_time(Duration::from_millis(300))
             .run_source("say \"start\"\nlet mut i = 0\nwhile true { i = i + 1 }");
         match r {
@@ -882,8 +1161,16 @@ mod tests {
 
     #[test]
     fn max_time_does_not_wait_for_blocking_sleep() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            max_time_does_not_wait_for_blocking_sleep_on(engine);
+        }
+    }
+
+    fn max_time_does_not_wait_for_blocking_sleep_on(engine: Engine) {
         let start = std::time::Instant::now();
         let r = Sandbox::new()
+            .engine(engine)
             .max_time(Duration::from_millis(200))
             .run_source("wait(30)");
         assert!(matches!(r, Err(SandboxError::Timeout { .. })), "{r:?}");
@@ -892,7 +1179,14 @@ mod tests {
 
     #[test]
     fn output_from_tasks_timeouts_and_io_print_is_captured() {
-        let out = Sandbox::new()
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            output_from_tasks_timeouts_and_io_print_is_captured_on(engine);
+        }
+    }
+
+    fn output_from_tasks_timeouts_and_io_print_is_captured_on(engine: Engine) {
+        let out = Sandbox::new().engine(engine)
             .run_source(
                 "io.print(\"a\")\nlet h = spawn { say \"from task\" }\nawait h\ntimeout 5 seconds { say \"in timeout\" }",
             )
@@ -902,8 +1196,16 @@ mod tests {
 
     #[test]
     fn max_output_stops_runaway_printing() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            max_output_stops_runaway_printing_on(engine);
+        }
+    }
+
+    fn max_output_stops_runaway_printing_on(engine: Engine) {
         let start = std::time::Instant::now();
         let r = Sandbox::new()
+            .engine(engine)
             .max_output(1000)
             .max_time(Duration::from_secs(20))
             .run_source("while true { say \"spam spam spam\" }");
@@ -920,13 +1222,41 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(10));
         // Under the limit is fine.
         assert!(Sandbox::new()
+            .engine(engine)
             .max_output(10)
             .run_source("say \"ok\"")
             .is_ok());
     }
 
     #[test]
+    fn output_limit_cut_inside_a_multibyte_char_is_reported() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            // The capture keeps limit + 1 = 2 bytes, inside the 4-byte
+            // emoji: nothing is stored, but output still overflowed.
+            match Sandbox::new()
+                .engine(engine)
+                .max_output(1)
+                .run_source("say \"\u{1F600}\"")
+            {
+                Err(SandboxError::OutputLimit { limit, stdout }) => {
+                    assert_eq!(limit, 1);
+                    assert_eq!(stdout, "");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn cancel_handle_stops_a_run() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            cancel_handle_stops_a_run_on(engine);
+        }
+    }
+
+    fn cancel_handle_stops_a_run_on(engine: Engine) {
         let handle = CancelHandle::new();
         let remote = handle.clone();
         let t = std::thread::spawn(move || {
@@ -934,7 +1264,9 @@ mod tests {
             remote.cancel();
         });
         let start = std::time::Instant::now();
-        let r = Sandbox::new().run_source_cancellable("say \"started\"\nwhile true { }", &handle);
+        let r = Sandbox::new()
+            .engine(engine)
+            .run_source_cancellable("say \"started\"\nwhile true { }", &handle);
         t.join().expect("canceller");
         match r {
             Err(e @ SandboxError::Cancelled { .. }) => {
@@ -946,7 +1278,9 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(5));
         // An already-cancelled handle never starts the program.
         assert!(matches!(
-            Sandbox::new().run_source_cancellable("say 1", &handle),
+            Sandbox::new()
+                .engine(engine)
+                .run_source_cancellable("say 1", &handle),
             Err(SandboxError::Cancelled { .. })
         ));
     }
@@ -997,6 +1331,154 @@ mod tests {
         }
     }
 
+    /// The same check through the sandbox, on either engine: cancel the
+    /// run after a moment and require its worker to finish (the job sends
+    /// once the engine has returned), not just the host to stop waiting.
+    #[track_caller]
+    fn assert_sandbox_cancel_unblocks(engine: Engine, src: &str) {
+        let program = parse_source(src).expect("parse");
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = CancelHandle::new();
+        let remote = handle.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            remote.cancel();
+        });
+        let run = Sandbox::new().engine(engine).run_contained(
+            || (),
+            &handle,
+            move |(), scope| {
+                let r = run_program(scope, engine, &program, String::new(), String::new());
+                let _ = done_tx.send(());
+                r
+            },
+        );
+        canceller.join().expect("canceller");
+        assert!(
+            matches!(run.result, Err(SandboxError::Cancelled { .. })),
+            "{engine} {src}: {:?}",
+            run.result.err()
+        );
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "{engine} {src}: worker still running 5s after cancel"
+        );
+    }
+
+    #[test]
+    fn sandbox_cancellation_reaches_blocked_and_nested_work() {
+        for engine in ENGINES {
+            for src in [
+                "let ch = channel()\nreceive(ch)",
+                "let ch = channel()\nfor x in ch { say x }",
+                "let ch = channel()\nselect([ch])",
+                "let ch = channel()\nlet h = spawn { return receive(ch) }\nawait h",
+                "let ch = channel()\nlet h = spawn { receive(ch) }\nawait_all([h])",
+                "squad { spawn { while true { } } }",
+                "squad { while true { } }",
+                "timeout 100000 seconds { while true { } }",
+                "timeout 100000 seconds { let h = spawn { while true { } }\nawait h }",
+                "time.sleep(100000)",
+                "wait(100000)",
+                "while true { }",
+            ] {
+                assert_sandbox_cancel_unblocks(engine, src);
+            }
+        }
+    }
+
+    #[test]
+    fn vm_imports_are_read_under_the_policy() {
+        // Compiling an import reads the module (for its exported names):
+        // that read needs `fs.read` like running it, so a sandboxed program
+        // cannot probe files outside its grant or leak them through lex and
+        // parse errors.
+        let dir = tmpdir("vm_import");
+        let secret = dir.join("secret.fg");
+        std::fs::write(&secret, "root:x:0:0:secret line\n").expect("write");
+        let lit = secret.display().to_string().replace('\\', "/");
+        for engine in ENGINES {
+            let r = Sandbox::new()
+                .engine(engine)
+                .run_source(&format!("import \"{lit}\""));
+            match &r {
+                Err(SandboxError::PermissionDenied { message, .. }) => {
+                    assert!(message.contains("fs.read"), "{engine}: {message}");
+                    assert!(!message.contains("secret line"), "{engine}: {message}");
+                }
+                other => panic!("{engine}: {other:?}"),
+            }
+        }
+        // With the grant, the import works on both engines.
+        std::fs::write(dir.join("m.fg"), "fn helper() { return 41 + 1 }").expect("write");
+        let dir_lit = dir.display().to_string().replace('\\', "/");
+        for engine in ENGINES {
+            let out = Sandbox::new()
+                .engine(engine)
+                .allow_read([&dir])
+                .run_source(&format!("import \"{dir_lit}/m.fg\"\nsay helper()"))
+                .unwrap_or_else(|e| panic!("{engine}: {e}"));
+            assert_eq!(out.stdout, "42\n", "{engine}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsupported_programs_fall_back_to_the_contained_interpreter() {
+        // An unknown decorator: the VM cannot honor it, so the program runs
+        // on the interpreter, still inside the sandbox.
+        let r = Sandbox::new()
+            .engine(Engine::Vm)
+            .run_source("@cache\nfn f() { return 1 }\nsay f()\nsh(\"echo escaped\")");
+        match r {
+            Err(SandboxError::PermissionDenied { message, stdout }) => {
+                assert_eq!(stdout, "1\n");
+                assert!(message.starts_with("permission denied: run"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_limit_covers_every_task_of_the_run() {
+        // Four tasks holding ~12 MB each: none alone passes 32 MB, together
+        // they do. On the VM every task has its own GC heap (which only
+        // bounds itself); the run-wide allocation meter catches the sum.
+        let src = "let mut hs = []\n\
+                   for t in range(0, 4) {\n\
+                     hs.push(spawn {\n\
+                       let mut k = []\n\
+                       let mut j = 0\n\
+                       while j < 12000 { k.push(repeat_str(\"x\", 1000) + str(j))\n j = j + 1 }\n\
+                       wait(2)\n\
+                       return len(k)\n\
+                     })\n\
+                   }\n\
+                   for h in hs { say await h }";
+        for engine in ENGINES {
+            let r = Sandbox::new()
+                .engine(engine)
+                .max_memory(32 << 20)
+                .max_time(Duration::from_secs(60))
+                .run_source(src);
+            assert!(
+                matches!(r, Err(SandboxError::MemoryLimit { .. })),
+                "{engine}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn engine_names() {
+        assert_eq!(Engine::default(), Engine::Vm);
+        assert_eq!(Engine::parse("vm"), Some(Engine::Vm));
+        assert_eq!(Engine::parse("interp"), Some(Engine::Interpreter));
+        assert_eq!(Engine::parse("Interpreter"), Some(Engine::Interpreter));
+        assert_eq!(Engine::parse("jit"), None);
+        assert_eq!(Engine::Interpreter.to_string(), "interp");
+        assert_eq!(Sandbox::new().selected_engine(), Engine::Vm);
+    }
+
     #[test]
     fn truncate_utf8_respects_char_boundaries() {
         assert_eq!(truncate_utf8("héllo".to_string(), 2), "h");
@@ -1017,7 +1499,14 @@ mod tests {
 
     #[test]
     fn fuel_exhaustion_is_typed_and_deterministic() {
-        let sb = Sandbox::new().max_fuel(20_000);
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            fuel_exhaustion_is_typed_and_deterministic_on(engine);
+        }
+    }
+
+    fn fuel_exhaustion_is_typed_and_deterministic_on(engine: Engine) {
+        let sb = Sandbox::new().engine(engine).max_fuel(20_000);
         let first = sb.run_source(COUNTER);
         let second = sb.run_source(COUNTER);
         match (&first, &second) {
@@ -1039,7 +1528,14 @@ mod tests {
 
     #[test]
     fn fuel_cannot_be_caught_or_swallowed() {
-        let sb = Sandbox::new().max_fuel(5_000);
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            fuel_cannot_be_caught_or_swallowed_on(engine);
+        }
+    }
+
+    fn fuel_cannot_be_caught_or_swallowed_on(engine: Engine) {
+        let sb = Sandbox::new().engine(engine).max_fuel(5_000);
         for src in [
             "try { while true { } } catch e { say \"caught\" }\nsay \"after\"",
             "safe { while true { } }\nsay \"after\"",
@@ -1061,7 +1557,14 @@ mod tests {
 
     #[test]
     fn fuel_counts_recursion_and_empty_loops() {
-        let sb = Sandbox::new().max_fuel(10_000);
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            fuel_counts_recursion_and_empty_loops_on(engine);
+        }
+    }
+
+    fn fuel_counts_recursion_and_empty_loops_on(engine: Engine) {
+        let sb = Sandbox::new().engine(engine).max_fuel(10_000);
         for src in [
             "while true { }",
             "loop { }",
@@ -1077,8 +1580,16 @@ mod tests {
 
     #[test]
     fn memory_limit_is_typed_and_the_host_survives() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            memory_limit_is_typed_and_the_host_survives_on(engine);
+        }
+    }
+
+    fn memory_limit_is_typed_and_the_host_survives_on(engine: Engine) {
         let start = std::time::Instant::now();
         let sb = Sandbox::new()
+            .engine(engine)
             .max_memory(16 << 20)
             .max_time(Duration::from_secs(60));
         let r = sb.run_source(
@@ -1099,19 +1610,27 @@ mod tests {
             .expect("runs");
         assert_eq!(out.stdout, "1000\n");
         // Uncatchable, like fuel.
-        assert!(matches!(
-            sb.run_source(
-                "try { let mut k = []\nwhile true { k.push(\"xxxxxxxxxxxxxxxxxxxxxxxx\") } } catch e { say \"caught\" }"
-            ),
-            Err(SandboxError::MemoryLimit { .. })
-        ));
+        let r = sb.run_source(
+            // Distinct strings: the VM shares one constant string between
+            // elements, so pushing a literal would hit the (catchable)
+            // collection-length cap long before the memory limit.
+            "try { let mut k = []\nwhile true { k.push(\"xxxxxxxxxxxxxxxxxxxxxxxx\" + str(len(k))) } } catch e { say \"caught\" }",
+        );
+        assert!(matches!(r, Err(SandboxError::MemoryLimit { .. })), "{r:?}");
     }
 
     #[test]
     fn size_caps_reject_single_huge_allocations() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            size_caps_reject_single_huge_allocations_on(engine);
+        }
+    }
+
+    fn size_caps_reject_single_huge_allocations_on(engine: Engine) {
         // With a memory limit the caps default to what it could hold, so
         // these fail fast instead of trying to allocate terabytes.
-        let sb = Sandbox::new().max_memory(32 << 20);
+        let sb = Sandbox::new().engine(engine).max_memory(32 << 20);
         for src in [
             "let s = repeat_str(\"x\", 1000000000000)",
             "let r = range(1000000000000)",
@@ -1131,7 +1650,7 @@ mod tests {
             .expect("caught");
         assert_eq!(out.stdout, "too big\n");
         // An explicit cap stops doubling concatenation at the cap.
-        let capped = Sandbox::new().limits(Limits {
+        let capped = Sandbox::new().engine(engine).limits(Limits {
             max_string_bytes: Some(1 << 20),
             ..Limits::none()
         });
@@ -1145,7 +1664,14 @@ mod tests {
 
     #[test]
     fn handle_and_import_limits() {
-        let tasks = Sandbox::new().limits(Limits {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            handle_and_import_limits_on(engine);
+        }
+    }
+
+    fn handle_and_import_limits_on(engine: Engine) {
+        let tasks = Sandbox::new().engine(engine).limits(Limits {
             max_tasks: Some(1),
             ..Limits::none()
         });
@@ -1159,10 +1685,13 @@ mod tests {
             .run_source("let a = spawn { return 1 }\nawait a\nlet b = spawn { return 2 }\nawait b")
             .is_ok());
 
-        let procs = Sandbox::new().allow(Capability::Run).limits(Limits {
-            max_processes: Some(0),
-            ..Limits::none()
-        });
+        let procs = Sandbox::new()
+            .engine(engine)
+            .allow(Capability::Run)
+            .limits(Limits {
+                max_processes: Some(0),
+                ..Limits::none()
+            });
         assert!(matches!(
             procs.run_source("sh(\"echo hi\")"),
             Err(SandboxError::ResourceLimit { .. })
@@ -1170,10 +1699,13 @@ mod tests {
 
         let dir = tmpdir("imports");
         std::fs::write(dir.join("m.fg"), "fn helper() { return 1 }").expect("write");
-        let imports = Sandbox::new().allow_read([&dir]).limits(Limits {
-            max_imports: Some(0),
-            ..Limits::none()
-        });
+        let imports = Sandbox::new()
+            .engine(engine)
+            .allow_read([&dir])
+            .limits(Limits {
+                max_imports: Some(0),
+                ..Limits::none()
+            });
         // Forward slashes: a Windows path's backslashes would be string escapes.
         let dir_lit = dir.display().to_string().replace('\\', "/");
         let src = format!("import \"{dir_lit}/m.fg\"\nsay helper()");
@@ -1190,9 +1722,20 @@ mod tests {
 
     #[test]
     fn normal_programs_run_unchanged_under_limits() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            normal_programs_run_unchanged_under_limits_on(engine);
+        }
+    }
+
+    fn normal_programs_run_unchanged_under_limits_on(engine: Engine) {
         let src = "fn fib(n) { if n < 2 { return n }\nreturn fib(n - 1) + fib(n - 2) }\nlet xs = map(range(0, 50), fn(x) { return x * x })\nlet mut s = \"\"\nfor x in xs { s = s + str(x) }\nsay fib(15)\nsay len(s)\nlet h = spawn { return 7 }\nsay await h";
-        let free = Sandbox::new().run_source(src).expect("unlimited");
+        let free = Sandbox::new()
+            .engine(engine)
+            .run_source(src)
+            .expect("unlimited");
         let limited = Sandbox::new()
+            .engine(engine)
             .limits(Limits {
                 max_fuel: Some(10_000_000),
                 max_memory: Some(64 << 20),

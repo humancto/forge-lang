@@ -168,7 +168,8 @@ const COMPILER_INTRINSICS: &[&str] = &[
 pub struct VM {
     pub registers: Vec<Value>,
     pub frames: Vec<CallFrame>,
-    pub globals: HashMap<String, Value>,
+    /// Global variables: indexed slots, see `vm::globals`.
+    pub globals: super::globals::Globals,
     pub method_tables: HashMap<String, IndexMap<String, Value>>,
     pub static_methods: HashMap<String, IndexMap<String, Value>>,
     pub embedded_fields: HashMap<String, Vec<(String, String)>>,
@@ -361,8 +362,20 @@ impl std::fmt::Display for VMError {
 }
 
 impl VM {
+    /// A VM with every builtin registered, in a fresh global-name domain
+    /// (`vm::globals`): the names it interns are freed with it.
     pub fn new() -> Self {
-        let mut vm = Self::bare(Profiler::new(false));
+        Self::new_in_domain(super::globals::GlobalNames::new())
+    }
+
+    /// [`VM::new`] interning global names into `names`, shared with the
+    /// VMs whose ids (and compiled chunks' cached ids) it must agree with.
+    pub(super) fn new_in_domain(names: Arc<super::globals::GlobalNames>) -> Self {
+        let mut vm = Self::bare_with_budget(
+            Profiler::new(false),
+            crate::runtime::limits::current(),
+            super::globals::Globals::in_domain(names),
+        );
         vm.register_builtins();
         vm
     }
@@ -390,20 +403,26 @@ impl VM {
     /// included, charges the resource budget active on the creating thread
     /// (`limits_state`).
     pub(super) fn bare(profiler: Profiler) -> Self {
-        Self::bare_with_budget(profiler, crate::runtime::limits::current())
+        Self::bare_with_budget(
+            profiler,
+            crate::runtime::limits::current(),
+            super::globals::Globals::new(),
+        )
     }
 
     /// [`VM::bare`] charging `budget` instead of the thread's active one
-    /// (the HTTP server gives every request fork its own budget).
+    /// (the HTTP server gives every request fork its own budget), starting
+    /// from `globals` (and so in their name domain).
     pub(super) fn bare_with_budget(
         profiler: Profiler,
         budget: Option<Arc<crate::runtime::limits::Budget>>,
+        globals: super::globals::Globals,
     ) -> Self {
         let (meter, caps, gc) = Self::limits_state(budget);
         Self {
             registers: vec![Value::null(); 256],
             frames: Vec::with_capacity(INITIAL_FRAME_CAPACITY),
-            globals: HashMap::new(),
+            globals,
             method_tables: HashMap::new(),
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
@@ -434,6 +453,16 @@ impl VM {
     /// handler with a `task cancelled` error.
     pub fn set_cancel_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
         self.cancelled = flag;
+    }
+
+    /// Also enforce the run's memory limit with the allocation meter
+    /// (`runtime::limits::CountingAllocator`), polled at safe points, on
+    /// this VM and every task it forks. The GC heap's own limit bounds one
+    /// heap; the meter bounds the whole run (all its threads), which is what
+    /// the sandbox promises. A no-op when memory is not limited.
+    #[cfg(feature = "host")]
+    pub(crate) fn poll_allocation_meter(&mut self) {
+        self.meter = self.meter.clone().with_safepoint_memory_polling();
     }
 
     /// Record `schedule` / `watch` blocks instead of starting them when they
@@ -519,10 +548,10 @@ impl VM {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
                 name: name.to_string(),
             }));
-            self.globals.insert(name.to_string(), Value::obj(name_ref));
+            self.globals.insert(name, Value::obj(name_ref));
         }
 
-        self.globals.insert("null".to_string(), Value::null());
+        self.globals.insert("null", Value::null());
 
         // Register stdlib modules
         self.register_stdlib();
@@ -553,8 +582,7 @@ impl VM {
                 map.insert("__call__".to_string(), time_call);
             }
             let module_ref = self.gc.alloc(ObjKind::Object(map));
-            self.globals
-                .insert(module.name.to_string(), Value::obj(module_ref));
+            self.globals.insert(module.name, Value::obj(module_ref));
         }
 
         // Option prelude
@@ -562,8 +590,7 @@ impl VM {
         none_obj.insert("__type__".to_string(), self.alloc_string("Option"));
         none_obj.insert("__variant__".to_string(), self.alloc_string("None"));
         let none_ref = self.gc.alloc(ObjKind::Object(none_obj));
-        self.globals
-            .insert("None".to_string(), Value::obj(none_ref));
+        self.globals.insert("None", Value::obj(none_ref));
     }
 
     pub(super) fn alloc_string(&mut self, s: &str) -> Value {
@@ -601,21 +628,29 @@ impl VM {
     }
 
     /// Create a new VM for a spawn thread with copies of this VM's state.
-    /// Calls VM::new() for fresh builtins + empty JIT state, then copies
-    /// non-function globals and struct metadata from the parent.
+    /// Builds a VM with fresh builtins + empty JIT state in the parent's
+    /// global-name domain (so the chunks it shares with the parent keep
+    /// their cached ids), then copies non-function globals and struct
+    /// metadata from the parent.
+    /// The global-name domain of a `spawn` task's VM (test hook).
+    #[cfg(test)]
+    pub(super) fn spawn_fork_domain(&self) -> Arc<super::globals::GlobalNames> {
+        Arc::clone(self.fork_for_spawn().0.globals.names())
+    }
+
     fn fork_for_spawn(&self) -> SendableVM {
-        let mut child = VM::new();
+        let mut child = VM::new_in_domain(Arc::clone(self.globals.names()));
 
         // Copy non-function globals. Skip globals where value_to_shared returns
         // Null but the original wasn't Null (i.e., functions/closures/natives) —
         // these would overwrite the child's freshly-registered builtins.
-        for (name, val) in &self.globals {
+        for (name, val) in self.globals.iter() {
             let shared = value_to_shared(&self.gc, val);
             if matches!(shared, SharedValue::Null) && !val.is_null() {
                 continue;
             }
             let child_val = shared_to_value(&mut child.gc, &shared);
-            child.globals.insert(name.clone(), child_val);
+            child.globals.insert(name, child_val);
         }
 
         for (name, methods) in &self.method_tables {
@@ -659,6 +694,16 @@ impl VM {
         // or timeout scope, is cancelled.
         child.cancelled = self.cancelled.clone();
         child.scope_cancels = self.scope_cancels.clone();
+        // ... and, like the interpreter's `child_context`, never starts
+        // `schedule` / `watch` threads while the run defers them (a
+        // sandboxed run, or a server's top level): a task's own host blocks
+        // are not launched.
+        if self.deferred_host_tasks.is_some() {
+            child.deferred_host_tasks = Some(Vec::new());
+        }
+        if self.meter.polls_memory() {
+            child.meter = child.meter.clone().with_safepoint_memory_polling();
+        }
 
         #[cfg(feature = "jit")]
         assert!(
@@ -905,27 +950,20 @@ impl VM {
         })
     }
 
-    pub(super) fn sleep_with_timeout_checks(&self, duration: Duration) -> Result<(), VMError> {
+    /// `wait` / `time.sleep`: sleep in short slices, stopping early (with
+    /// the same error as any blocking wait, see [`VM::wait_interrupted`])
+    /// when a `timeout` deadline passes or the run or an enclosing scope is
+    /// cancelled, so a sandbox deadline can reclaim the thread.
+    pub(super) fn sleep_with_timeout_checks(&mut self, duration: Duration) -> Result<(), VMError> {
         let total_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         let mut elapsed = 0u64;
         while elapsed < total_ms {
-            if let Some((_, guard)) = self.earliest_expired_timeout() {
-                return Err(VMError::new(&format!(
-                    "timeout: operation exceeded {} second limit",
-                    guard.seconds
-                )));
-            }
+            self.wait_interrupted()?;
             let chunk = std::cmp::min(50, total_ms - elapsed);
             crate::clock::sleep(Duration::from_millis(chunk));
             elapsed += chunk;
         }
-        if let Some((_, guard)) = self.earliest_expired_timeout() {
-            return Err(VMError::new(&format!(
-                "timeout: operation exceeded {} second limit",
-                guard.seconds
-            )));
-        }
-        Ok(())
+        self.wait_interrupted()
     }
 
     fn handle_timeout_expiry(&mut self) -> Result<usize, VMError> {
@@ -1144,20 +1182,21 @@ impl VM {
                         self.registers[base + a as usize] = Value::bool_val(!val);
                     }
                     OpCode::GetGlobal => {
-                        let name_const = &chunk.constants[bx as usize];
-                        if let Constant::Str(name) = name_const {
-                            let Some(val) = self.globals.get(name).cloned() else {
+                        // Slot lookup through the chunk's id cache; the name
+                        // is only needed for the error (see `vm::globals`).
+                        if let Some(id) = chunk.global_id(bx, self.globals.names()) {
+                            let Some(val) = self.globals.get_id(id) else {
                                 let pc = self.frames[frame_idx].ip - 1;
-                                return Err(self.undefined_global(chunk, pc, name));
+                                let name = self.globals.names().name_of(id);
+                                return Err(self.undefined_global(chunk, pc, &name));
                             };
                             self.registers[base + a as usize] = val;
                         }
                     }
                     OpCode::SetGlobal => {
-                        let name_const = &chunk.constants[bx as usize];
-                        if let Constant::Str(name) = name_const {
+                        if let Some(id) = chunk.global_id(bx, self.globals.names()) {
                             let val = self.registers[base + a as usize];
-                            self.globals.insert(name.clone(), val);
+                            self.globals.set_id(id, val);
                         }
                     }
                     OpCode::GetLocal => {
@@ -2347,7 +2386,7 @@ impl VM {
             name,
             [
                 local.into_iter().collect::<Vec<_>>(),
-                self.globals.keys().map(String::as_str).collect(),
+                self.globals.keys().collect(),
             ],
         );
         VMError::new(&crate::semantics::undefined_variable(
@@ -3016,7 +3055,7 @@ impl VM {
 /// The VM's globals as seen by the JIT verifier and entry guards.
 #[cfg(feature = "jit")]
 struct JitGlobals<'a> {
-    globals: &'a HashMap<String, Value>,
+    globals: &'a super::globals::Globals,
     gc: &'a super::gc::Gc,
 }
 

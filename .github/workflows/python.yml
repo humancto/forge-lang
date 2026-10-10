@@ -12,7 +12,7 @@ name: Python
 #   2. In the GitHub repository, create the `pypi` environment and set the
 #      repository variable PYPI_PUBLISH=true (Settings -> Variables).
 # Then push a tag matching the version in bindings/python/Cargo.toml, e.g.
-#   git tag py-v0.9.0 && git push origin py-v0.9.0
+#   git tag py-v0.10.0 && git push origin py-v0.10.0
 # (`py-v*` tags do not match the CLI release workflow's `v*` trigger.)
 
 on:
