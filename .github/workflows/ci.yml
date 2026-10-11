@@ -124,6 +124,30 @@ jobs:
       - name: Run the edition 2027 tests on the ${{ matrix.engine }} engine
         run: ./bin/forge --edition 2027 --allow-run test tests/edition2027 --engine ${{ matrix.engine }}
 
+  eval-tasks:
+    name: Eval tasks (references on both engines, both editions)
+    needs: build-forge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Oldest Python the harness supports (no tomllib: exercises the
+          # built-in TOML parser).
+          python-version: "3.9"
+      - uses: actions/download-artifact@v4
+        with:
+          name: forge-cli-linux
+          path: bin
+      - run: chmod +x bin/forge
+      - name: Validate every task's references (eval/README.md)
+        # Forge on vm + interp, editions 2026 + 2027, plus the type checker;
+        # Python references too.
+        run: python eval/forge_eval.py validate --forge bin/forge
+      - name: Self-test the harness's scoring and failure classification
+        run: python eval/forge_eval.py selftest --forge bin/forge
+
   examples:
     name: Examples (default engine)
     needs: build-forge
