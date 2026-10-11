@@ -49,7 +49,7 @@ use crate::parser::ast::{
 use crate::permissions::{Capabilities, Capability};
 use crate::runtime::limits::Limits;
 use crate::sandbox::{
-    parse_source, CancelHandle, Engine, JobError, RunScope, Sandbox, SandboxError,
+    prepare_source, CancelHandle, Engine, JobError, RunScope, Sandbox, SandboxError,
 };
 use crate::vm::embed;
 use crate::vm::serve::VmTemplate;
@@ -1076,7 +1076,7 @@ impl ToolSet {
         engine: Engine,
     ) -> Result<(ToolSet, LoadReport), String> {
         let label = path.display().to_string();
-        let program = parse_source(source).map_err(|e| format!("{}: {}", label, e))?;
+        let program = prepare_source(source).map_err(|e| format!("{}: {}", label, e))?;
         let (tools, resources) =
             declarations(&program).map_err(|e| format!("{}:{}: {}", label, e.line, e.message))?;
         if tools.is_empty() && resources.is_empty() {

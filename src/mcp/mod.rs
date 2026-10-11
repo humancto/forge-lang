@@ -46,7 +46,7 @@ pub use tools::ToolSet;
 use crate::permissions::Capabilities;
 use crate::runtime::limits::Limits;
 use crate::sandbox::{
-    parse_source, truncate_utf8, CancelHandle, Engine, Output, Sandbox, SandboxError,
+    prepare_source, truncate_utf8, CancelHandle, Engine, Output, Sandbox, SandboxError,
 };
 
 use serde_json::{json, Map, Value};
@@ -1180,6 +1180,9 @@ fn spawn_call(server: &Arc<Server>, id: Value, era: Era, job: Job) {
     let worker_server = server.clone();
     let worker_handle = handle.clone();
     let worker_id = id.clone();
+    // Calls run under the serving thread's edition override, if any (else
+    // the process default: `--edition` / forge.toml).
+    let edition = crate::semantics::edition::current_override();
     let spawned = std::thread::Builder::new()
         .name("forge-mcp-call".to_string())
         .stack_size(crate::runtime::recursion::WORKER_STACK_SIZE)
@@ -1187,6 +1190,7 @@ fn spawn_call(server: &Arc<Server>, id: Value, era: Era, job: Job) {
             crate::runtime::recursion::register_thread_stack(
                 crate::runtime::recursion::WORKER_STACK_SIZE,
             );
+            let _edition = crate::semantics::edition::scope(edition);
             let server = worker_server;
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 job.run(&server, &worker_handle)
@@ -1275,8 +1279,13 @@ fn run_in_session(
         created,
         lost,
     };
-    // A syntax error never touches (or creates) the session.
-    let program = match parse_source(code) {
+    // A syntax (or, from edition 2027, declared-type) error never touches
+    // (or creates) the session.
+    let prepared = {
+        let _edition = crate::semantics::edition::scope(Some(sandbox.selected_edition()));
+        prepare_source(code)
+    };
+    let program = match prepared {
         Ok(p) => p,
         Err(e) => return Ok((Err(e), note(false, false))),
     };
@@ -1460,6 +1469,26 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
                 // Stable code and hint (`forge explain <code>`).
                 error["code"] = json!(crate::semantics::errors::classify(message).code);
                 error["hint"] = json!(crate::semantics::errors::hint_for(message));
+            }
+            if let SandboxError::Type { diagnostics } = e {
+                // Same shape as check_forge's diagnostics.
+                let items: Vec<Value> = diagnostics
+                    .iter()
+                    .map(|d| {
+                        let mut item = json!({
+                            "line": d.line,
+                            "column": d.column,
+                            "severity": "error",
+                            "code": d.code,
+                            "message": d.message,
+                        });
+                        if let Some(hint) = &d.hint {
+                            item["hint"] = json!(hint);
+                        }
+                        item
+                    })
+                    .collect();
+                error["diagnostics"] = json!(items);
             }
             (text, error)
         }
@@ -2143,5 +2172,49 @@ mod tests {
             by_id(&msgs, 6)["result"]["structuredContent"]["stdout"],
             "42\n"
         );
+    }
+
+    #[test]
+    fn edition_2027_reports_declared_type_errors_as_structured_errors() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            edition_2027_declared_type_errors_on(engine);
+        }
+    }
+
+    fn edition_2027_declared_type_errors_on(engine: Engine) {
+        use crate::semantics::edition::{self, Edition};
+        let code = r#"say \"before\"\nfn twice(n: Int) -> Int { return n * 2 }\nsay twice(\"x\")"#;
+        let input = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"check_forge\",\"arguments\":{{\"code\":\"{code}\"}}}}}}\n\
+             {{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{{\"code\":\"{code}\"}}}}}}\n"
+        );
+        let msgs = {
+            let _edition = edition::scope(Some(Edition::E2027));
+            session(&input, deny_all(engine))
+        };
+        let check = by_id(&msgs, 1)["result"]["structuredContent"].clone();
+        assert_eq!(check["ok"], false, "{check}");
+        assert_eq!(check["diagnostics"][0]["severity"], "error");
+        assert_eq!(check["diagnostics"][0]["code"], "T0002");
+        let run = by_id(&msgs, 2)["result"].clone();
+        assert_eq!(run["isError"], true, "{run}");
+        let error = &run["structuredContent"]["error"];
+        assert_eq!(error["kind"], "type", "{run}");
+        assert_eq!(run["structuredContent"]["stdout"], "");
+        assert_eq!(error["diagnostics"][0]["severity"], "error");
+        assert_eq!(error["diagnostics"][0]["code"], "T0002");
+        assert_eq!(error["diagnostics"][0]["line"], 3);
+        // Edition 2026: a warning, and the program runs.
+        let msgs = {
+            let _edition = edition::scope(Some(Edition::E2026));
+            session(&input, deny_all(engine))
+        };
+        let check = by_id(&msgs, 1)["result"]["structuredContent"].clone();
+        assert_eq!(check["ok"], true, "{check}");
+        assert_eq!(check["diagnostics"][0]["severity"], "warning");
+        let run = by_id(&msgs, 2)["result"].clone();
+        assert_eq!(run["structuredContent"]["stdout"], "before\n", "{run}");
+        assert_eq!(run["structuredContent"]["error"]["kind"], "runtime");
     }
 }
