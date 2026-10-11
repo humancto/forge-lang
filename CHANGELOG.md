@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Evaluation harness `eval/`** ([RFC 0008](rfcs/0008-edition-2027.md), section 1) — measures how often a model writes a correct Forge program on the first try (pass@1), compared with Python on the same tasks. 103 tasks in 11 categories (basics, strings, collections, structs/ADTs, errors, JSON/CSV, functional, algorithms, concurrency, HTTP, files), each with a language-neutral prompt and Forge and Python reference solutions. `eval/forge_eval.py` (Python 3.9+, stdlib only) validates the references (Forge on the VM and the interpreter, editions 2026 and 2027, type-checker clean), generates solutions (`anthropic`, `command` or `dir` provider; `none`, `llms` or `llms+errors` context, the last with one repair round fed the `--error-format json` diagnostics and reported as pass@2), scores runs in the sandbox with every failure classified (syntax, type, runtime with its error code, wrong output, timeout, no code) into `report.json`/`report.md`, compares runs, and writes blind task packs for agents acting as models. CI validates every task (`eval-tasks` job) and `cargo test --test eval_tasks` runs the quick validation and the harness self-test. See `eval/README.md`.
+
 ## [0.10.0] - 2026-10-09
 
 ### Added
