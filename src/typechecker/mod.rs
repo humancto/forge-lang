@@ -278,10 +278,20 @@ fn name_diagnostics(
                     severity,
                     message: format!("unknown name '{}'", occ.name),
                     span: occ.span,
-                    help: Some(match suggestion {
-                        Some(s) => format!("did you mean '{}'?", s),
-                        None => "define it with `let` (or `fn`) before using it".to_string(),
-                    }),
+                    // A builtin removed by the edition (`say` in 2027)
+                    // names its replacement instead of a near spelling.
+                    help: Some(
+                        match (
+                            crate::builtins_registry::removal_hint(&occ.name),
+                            suggestion,
+                        ) {
+                            (Some(hint), _) => hint,
+                            (None, Some(s)) => format!("did you mean '{}'?", s),
+                            (None, None) => {
+                                "define it with `let` (or `fn`) before using it".to_string()
+                            }
+                        },
+                    ),
                     fixes: suggestion
                         .map(|s| Fix {
                             title: format!("Change to '{}'", s),

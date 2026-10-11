@@ -1527,7 +1527,9 @@ impl Interpreter {
                 .define("__type_Option__".to_string(), Value::Object(type_meta));
         }
 
-        for builtin in crate::builtins_registry::GLOBALS {
+        // A builtin removed by the run's edition is not defined at all.
+        let edition = crate::semantics::edition::current();
+        for builtin in crate::builtins_registry::globals_in(edition) {
             self.env.define(
                 builtin.name.to_string(),
                 Value::BuiltIn(builtin.name.to_string()),
