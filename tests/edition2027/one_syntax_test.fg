@@ -1,0 +1,71 @@
+// Edition 2027: one way to write each thing (RFC 0008 section 5).
+// Run with: forge --edition 2027 test tests/edition2027 --engine both
+// The removed forms are syntax errors and the removed builtins unknown
+// names; tests/edition_one_syntax.rs pins that (a test file cannot observe
+// its own parse error).
+
+@test
+fn canonical_forms_replace_the_natural_ones() {
+    let mut count = 0
+    count = count + 1
+    for _ in range(3) {
+        count += 1
+    }
+    assert_eq(count, 4)
+    if count > 10 {
+        assert(false, "unreachable")
+    } else {
+        assert(count == 4)
+    }
+}
+
+@test
+fn let_destructures_objects_and_arrays() {
+    let {a, b: renamed} = { a: 1, b: 2 }
+    let [x, y, ...rest] = [10, 20, 30, 40]
+    assert_eq(a + renamed, 3)
+    assert_eq(x + y, 30)
+    assert_eq(rest, [30, 40])
+    let mut [p, q] = [1, 2]
+    p = p + q
+    assert_eq(p, 3)
+    let (t1, t2) = (5, 6)
+    assert_eq(t1 * t2, 30)
+}
+
+@test
+fn errors_use_try_unwrap_and_assert() {
+    let mut caught = false
+    try {
+        let boom = unwrap(Err("bad"))
+    } catch e {
+        caught = true
+    }
+    assert(caught)
+    assert_eq(unwrap(Ok(7)), 7)
+    assert_throws(fn() { assert(false, "no") })
+}
+
+@test
+fn removed_words_are_ordinary_names() {
+    let set = 1
+    let check = 2
+    let say = 3
+    let must = 4
+    fn hold(x) { return x * 2 }
+    let safe = { repeat: 5 }
+    assert_eq(set + check + say + must, 10)
+    assert_eq(hold(21), 42)
+    assert_eq(safe.repeat, 5)
+}
+
+@test
+fn removed_builtins_are_not_defined() {
+    let mut message = ""
+    try {
+        let f = sus
+    } catch e {
+        message = e.message
+    }
+    assert(contains(message, "undefined variable: 'sus'"), message)
+}

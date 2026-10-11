@@ -297,7 +297,8 @@ fn unknown_edition_is_rejected() {
     let dir = std::env::temp_dir().join(format!("forge-edition-cli-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("main.fg"), "say \"hi\"\n").unwrap();
+    // Valid in every edition (`say` is removed in 2027).
+    std::fs::write(dir.join("main.fg"), "println(\"hi\")\n").unwrap();
     std::fs::write(
         dir.join("forge.toml"),
         "[project]\nname = \"e\"\nedition = \"2026\"\nentry = \"main.fg\"\n",
