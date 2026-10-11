@@ -747,8 +747,10 @@ where
     let caps = current();
     let budget = crate::runtime::limits::current();
     let output = crate::runtime::stdio::current_sink();
+    let edition = crate::semantics::edition::current_override();
     move || {
         let _guard = scope(caps);
+        let _edition = crate::semantics::edition::scope(edition);
         let _limits = crate::runtime::limits::scope(budget);
         let _output = crate::runtime::stdio::scope(output);
         f()
@@ -857,6 +859,16 @@ pub fn begin_subprocess() -> Result<crate::runtime::limits::Slot, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn inherit_carries_the_edition_override() {
+        use crate::semantics::edition::{self, Edition};
+        let _g = edition::scope(Some(Edition::E2027));
+        let seen = std::thread::spawn(inherit(edition::current))
+            .join()
+            .unwrap();
+        assert_eq!(seen, Edition::E2027);
+    }
     use super::*;
 
     fn tmpdir(tag: &str) -> PathBuf {

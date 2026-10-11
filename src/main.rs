@@ -115,6 +115,11 @@ struct Cli {
     #[arg(long = "strict")]
     strict: bool,
 
+    /// Language edition to run under (overrides `edition` in forge.toml).
+    /// "2027" is in development: docs/editions/2027.md
+    #[arg(long = "edition", value_name = "YEAR", global = true)]
+    edition: Option<String>,
+
     /// Allow shell execution (sh, shell, run_command, sh_lines, sh_json, sh_ok, pipe_to).
     /// Without this flag, these builtins return a permission error.
     #[arg(long = "allow-run")]
@@ -751,6 +756,33 @@ async fn async_main() {
     if let Some(format) = cli.error_format {
         errors::set_error_format(format.into());
     }
+    // The edition is fixed before any source is parsed: `--edition` wins
+    // over forge.toml, which wins over the default.
+    // Only commands that run or check code fail on a bad manifest edition.
+    let edition = match &cli.edition {
+        Some(text) => semantics::edition::Edition::parse(text),
+        None if matches!(
+            cli.command,
+            None | Some(
+                Command::Run { .. }
+                    | Command::Test { .. }
+                    | Command::Mcp { .. }
+                    | Command::Check { .. }
+                    | Command::Repl
+            )
+        ) =>
+        {
+            manifest::load_edition()
+        }
+        None => Ok(manifest::load_edition().unwrap_or(semantics::edition::Edition::DEFAULT)),
+    };
+    match edition {
+        Ok(e) => semantics::edition::set_default(e),
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e));
+            process::exit(1);
+        }
+    }
     if let Some(n) = cli.max_depth {
         runtime::recursion::set_max_depth(n);
     }
@@ -779,10 +811,6 @@ async fn async_main() {
         cli.command,
         Some(Command::Run { .. } | Command::Test { .. } | Command::Mcp { .. })
     ) {
-        if let Err(e) = manifest::load_edition() {
-            eprintln!("{}", errors::format_simple_error(&e));
-            process::exit(1);
-        }
         match manifest::load_permissions() {
             Ok(p) => p,
             Err(e) => {
@@ -943,10 +971,6 @@ async fn async_main() {
             run_source(&source, &path_str, use_vm, profile, strict).await;
         }
         Some(Command::Check { file, format }) => {
-            if let Err(e) = manifest::load_edition() {
-                eprintln!("{}", errors::format_simple_error(&e));
-                process::exit(1);
-            }
             check_file(file, format, strict);
         }
         Some(Command::Explain { code }) => explain(code),

@@ -318,5 +318,16 @@ fn unknown_edition_is_rejected() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("unknown edition \"2099\""), "{}", stderr);
     }
+    // `--edition` overrides forge.toml, and is validated the same way.
+    let out = forge(&dir, &["--edition", "2026", "run", "main.fg"]);
+    assert!(out.status.success(), "{:?}", out);
+    let out = forge(&dir, &["--edition", "2027", "run", "main.fg"]);
+    assert!(out.status.success(), "{:?}", out);
+    let out = forge(&dir, &["--edition", "1999", "run", "main.fg"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown edition \"1999\""));
+    // Commands that do not run code still work with a bad manifest.
+    let out = forge(&dir, &["version"]);
+    assert!(out.status.success(), "{:?}", out);
     let _ = std::fs::remove_dir_all(&dir);
 }

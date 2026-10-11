@@ -80,6 +80,7 @@ use crate::parser::Parser;
 use crate::permissions::{self, Capabilities, Capability};
 use crate::runtime::limits::{self, Budget, LimitKind, Limits, Trip};
 use crate::runtime::stdio;
+use crate::semantics::edition::{self, Edition};
 use crate::vm::embed;
 use crate::vm::machine::{VMError, VM};
 use std::path::Path;
@@ -109,6 +110,8 @@ pub struct Sandbox {
     /// See [`Sandbox::memory_baseline`].
     memory_baseline: usize,
     engine: Engine,
+    /// `None`: the edition in effect where the run starts.
+    edition: Option<Edition>,
 }
 
 /// Lets a host stop a running program from another thread. Cheap to clone;
@@ -258,6 +261,7 @@ impl Sandbox {
             source_label: "<sandbox>".to_string(),
             memory_baseline: 0,
             engine: Engine::default(),
+            edition: None,
         }
     }
 
@@ -382,6 +386,18 @@ impl Sandbox {
         self.engine
     }
 
+    /// Parse and run programs under `edition` (default: the edition in
+    /// effect on the calling thread — the CLI's `--edition` / forge.toml).
+    pub fn edition(mut self, edition: Edition) -> Self {
+        self.edition = Some(edition);
+        self
+    }
+
+    /// The edition programs are parsed and run under.
+    pub fn selected_edition(&self) -> Edition {
+        self.edition.unwrap_or_else(edition::current)
+    }
+
     /// Run Forge source to completion under this sandbox's policy.
     pub fn run_source(&self, source: &str) -> Result<Output, SandboxError> {
         self.run_source_cancellable(source, &CancelHandle::new())
@@ -394,7 +410,10 @@ impl Sandbox {
         source: &str,
         cancel: &CancelHandle,
     ) -> Result<Output, SandboxError> {
-        let program = parse_source(source)?;
+        let program = {
+            let _edition = edition::scope(Some(self.selected_edition()));
+            parse_source(source)?
+        };
         let source = source.to_string();
         let label = self.source_label.clone();
         let engine = self.engine;
@@ -504,12 +523,14 @@ impl Sandbox {
         };
         let worker_sink = sink.clone();
         let worker_budget = budget.clone();
+        let run_edition = self.selected_edition();
         let spawned = std::thread::Builder::new()
             .name("forge-sandbox".to_string())
             .stack_size(WORKER_STACK_SIZE)
             .spawn(move || {
                 crate::runtime::recursion::register_thread_stack(WORKER_STACK_SIZE);
                 let _policy = permissions::scope(caps);
+                let _edition = edition::scope(Some(run_edition));
                 let _limits = limits::scope(Some(worker_budget));
                 let _output = stdio::scope(Some(worker_sink));
                 let mut state = make_state();

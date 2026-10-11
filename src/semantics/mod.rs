@@ -16,6 +16,7 @@
 //! `interpreter/` or `vm/`.
 
 pub mod alloc;
+pub mod edition;
 pub mod errors;
 pub mod types;
 

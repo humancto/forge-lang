@@ -99,46 +99,7 @@ pub struct ProjectConfig {
     pub edition: Option<String>,
 }
 
-/// A language edition: the unit in which Forge may make source-breaking
-/// changes after 1.0 (docs/STABILITY.md). A project opts into an edition
-/// with `edition = "..."` under `[project]`; projects without the key use
-/// [`Edition::DEFAULT`]. Every edition stays supported, so code never
-/// breaks by upgrading the toolchain — only by changing its edition.
-///
-/// Only one edition exists today. Adding one means adding a variant here,
-/// a row in docs/STABILITY.md, and gating each breaking change on
-/// `edition >= Edition::Eyyyy` at the point where the behaviour differs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Edition {
-    E2026,
-}
-
-impl Edition {
-    pub const DEFAULT: Edition = Edition::E2026;
-    pub const ALL: &'static [Edition] = &[Edition::E2026];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Edition::E2026 => "2026",
-        }
-    }
-
-    pub fn parse(text: &str) -> Result<Edition, String> {
-        Edition::ALL
-            .iter()
-            .copied()
-            .find(|e| e.as_str() == text)
-            .ok_or_else(|| {
-                let known: Vec<&str> = Edition::ALL.iter().map(|e| e.as_str()).collect();
-                format!(
-                    "unknown edition \"{}\" in forge.toml (known editions: {}); this Forge v{} may be too old for the project",
-                    text,
-                    known.join(", "),
-                    env!("CARGO_PKG_VERSION")
-                )
-            })
-    }
-}
+pub use crate::semantics::edition::Edition;
 
 /// The edition of the project in `./forge.toml` (the default when there is
 /// no manifest or no `edition` key). An unknown or malformed edition is an
@@ -158,7 +119,9 @@ pub fn load_edition_from(path: &Path) -> Result<Edition, String> {
         toml::from_str(&content).map_err(|e| format!("invalid {}: {}", path.display(), e))?;
     match table.get("project").and_then(|p| p.get("edition")) {
         None => Ok(Edition::DEFAULT),
-        Some(toml::Value::String(s)) => Edition::parse(s),
+        Some(toml::Value::String(s)) => {
+            Edition::parse(s).map_err(|e| format!("{} in {}", e, path.display()))
+        }
         Some(other) => Err(format!(
             "invalid edition in {}: expected a string like \"2026\", got {}",
             path.display(),
