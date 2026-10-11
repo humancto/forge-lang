@@ -2082,12 +2082,18 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                         fields.iter().map(|(_, name)| name).collect(),
                         None,
                     ),
-                    DestructurePattern::Array { items, rest } => {
-                        ("array", items.iter().collect(), items.iter().collect(), rest.as_ref())
-                    }
-                    DestructurePattern::Tuple(names) => {
-                        ("tuple", names.iter().collect(), names.iter().collect(), None)
-                    }
+                    DestructurePattern::Array { items, rest } => (
+                        "array",
+                        items.iter().collect(),
+                        items.iter().collect(),
+                        rest.as_ref(),
+                    ),
+                    DestructurePattern::Tuple(names) => (
+                        "tuple",
+                        names.iter().collect(),
+                        names.iter().collect(),
+                        None,
+                    ),
                 };
             let parts_reg = c.alloc_reg()?;
             let saved = c.next_register;

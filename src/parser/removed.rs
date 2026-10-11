@@ -32,7 +32,10 @@ impl Parser {
 
     /// The token `offset` ahead is on the same line as the current token.
     fn on_same_line(&self, offset: usize) -> bool {
-        match (self.tokens.get(self.pos), self.tokens.get(self.pos + offset)) {
+        match (
+            self.tokens.get(self.pos),
+            self.tokens.get(self.pos + offset),
+        ) {
             (Some(a), Some(b)) => a.line == b.line,
             _ => false,
         }
@@ -122,25 +125,23 @@ impl Parser {
             }
             "forge"
                 if self.on_same_line(1)
-                    && (self.ident_at(1).is_some() || matches!(self.token_at(1), Some(Token::Fn))) =>
+                    && (self.ident_at(1).is_some()
+                        || matches!(self.token_at(1), Some(Token::Fn))) =>
             {
                 let n = if matches!(self.token_at(1), Some(Token::Fn)) {
                     name(2)
                 } else {
                     name(1)
                 };
-                self.removed(
-                    &format!("forge {n}(...)"),
-                    &format!("async fn {n}(...)"),
-                )
+                self.removed(&format!("forge {n}(...)"), &format!("async fn {n}(...)"))
             }
-            "otherwise" | "nah"
-                if matches!(self.token_at(1), Some(Token::LBrace | Token::If)) =>
-            {
+            "otherwise" | "nah" if matches!(self.token_at(1), Some(Token::LBrace | Token::If)) => {
                 self.removed(word, "else")
             }
             "emit" if self.operand_follows(1) => self.removed("emit value", "yield value"),
-            "grab" if self.ident_at(1).is_some() && matches!(self.token_at(2), Some(Token::From)) => {
+            "grab"
+                if self.ident_at(1).is_some() && matches!(self.token_at(2), Some(Token::From)) =>
+            {
                 let n = name(1);
                 self.removed(
                     &format!("grab {n} from url"),

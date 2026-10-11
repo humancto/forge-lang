@@ -59,13 +59,19 @@ const REMOVED_FORMS: &[(&str, &str)] = &[
     ("forge f() { return 1 }\nprintln(\"ok\")", "async fn f(...)"),
     ("if false { } otherwise { println(\"ok\") }", "else"),
     ("if false { } nah { println(\"ok\") }", "else"),
-    ("fn f() { return 1 }\nlet v = hold f()\nprintln(\"ok\")", "await expr"),
+    (
+        "fn f() { return 1 }\nlet v = hold f()\nprintln(\"ok\")",
+        "await expr",
+    ),
     ("fn g() { emit 1 }\nprintln(\"ok\")", "yield value"),
     (
         "fn g() { grab r from \"http://127.0.0.1:1\" }\nprintln(\"ok\")",
         "let r = fetch(url)",
     ),
-    ("repeat 1 times { println(\"ok\") }", "for _ in range(n) { }"),
+    (
+        "repeat 1 times { println(\"ok\") }",
+        "for _ in range(n) { }",
+    ),
     (
         "unpack {a} from {a: 1}\nprintln(\"ok\")",
         "let {...} = value",
@@ -75,7 +81,10 @@ const REMOVED_FORMS: &[(&str, &str)] = &[
         "let [...] = value",
     ),
     ("safe { println(\"ok\") }", "try { ... } catch e { }"),
-    ("let v = safe { 1 }\nprintln(\"ok\")", "try { ... } catch e { }"),
+    (
+        "let v = safe { 1 }\nprintln(\"ok\")",
+        "try { ... } catch e { }",
+    ),
     ("let v = must Ok(1)\nprintln(\"ok\")", "unwrap(expr)"),
     ("check 1 > 0\nprintln(\"ok\")", "assert(condition, message)"),
     ("say \"ok\"", "println(value)"),

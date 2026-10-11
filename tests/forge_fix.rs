@@ -143,7 +143,11 @@ fn unrewritable_forms_are_reported_and_kept() {
     let out = forge(&work, &["fix", "a.fg"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("a.fg:1:9: cannot rewrite `safe { }`"), "{}", stderr);
+    assert!(
+        stderr.contains("a.fg:1:9: cannot rewrite `safe { }`"),
+        "{}",
+        stderr
+    );
     assert!(stderr.contains("a.fg:2:1: `sus` was removed"), "{}", stderr);
     assert_eq!(
         fs::read_to_string(work.join("a.fg")).unwrap(),

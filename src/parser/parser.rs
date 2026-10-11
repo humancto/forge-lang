@@ -881,7 +881,9 @@ impl Parser {
     fn parse_unpack(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Unpack)?;
         let mut defs = Vec::new();
-        if !(self.check(&Token::LBrace) || self.check(&Token::LBracket) || self.check(&Token::LParen))
+        if !(self.check(&Token::LBrace)
+            || self.check(&Token::LBracket)
+            || self.check(&Token::LParen))
         {
             return Err(self.error("expected {, [, or ( after 'unpack'"));
         }

@@ -267,7 +267,10 @@ pub static REMOVED: &[Removal] = &[
         "cook",
         "`f()` timed with `time.now()` (cook called `f` and printed how long it took)",
     ),
-    removed("yolo", "`try { f() } catch e { }` (yolo returned None on error)"),
+    removed(
+        "yolo",
+        "`try { f() } catch e { }` (yolo returned None on error)",
+    ),
     removed("ghost", "`f()` (ghost only called `f`)"),
     removed(
         "slay",

@@ -363,7 +363,11 @@ impl Fixer<'_> {
     /// Whether token `i` is a keyword used as a name (`obj.check`,
     /// `{safe: 1}`, `fn check()`), not the keyword.
     fn used_as_name(&self, i: usize) -> bool {
-        let prev = if i == 0 { &Token::Newline } else { self.tok(i - 1) };
+        let prev = if i == 0 {
+            &Token::Newline
+        } else {
+            self.tok(i - 1)
+        };
         matches!(
             prev,
             Token::Dot | Token::Fn | Token::Define | Token::Let | Token::Mut | Token::Async
@@ -478,14 +482,18 @@ impl Fixer<'_> {
     }
 
     fn fix_grab(&mut self, i: usize) {
-        let ok = matches!(self.tok(i + 1), Token::Ident(_)) && matches!(self.tok(i + 2), Token::From);
+        let ok =
+            matches!(self.tok(i + 1), Token::Ident(_)) && matches!(self.tok(i + 2), Token::From);
         let url_end = if ok {
             self.expr_end(i + 3, &|t| ident_is(t, "with"))
         } else {
             None
         };
         let Some(url_end) = url_end else {
-            self.report(i, "cannot rewrite this `grab`: write `let name = fetch(url)`");
+            self.report(
+                i,
+                "cannot rewrite this `grab`: write `let name = fetch(url)`",
+            );
             return;
         };
         let opts = if ident_is(self.tok(url_end + 1), "with") {
@@ -525,7 +533,10 @@ impl Fixer<'_> {
                 let (s, e) = (self.end(end), self.start(brace));
                 self.replace(s, e, ") ");
             }
-            _ => self.report(i, "cannot rewrite this `repeat`: write `for _ in range(n) { ... }`"),
+            _ => self.report(
+                i,
+                "cannot rewrite this `repeat`: write `for _ in range(n) { ... }`",
+            ),
         }
     }
 
@@ -540,7 +551,10 @@ impl Fixer<'_> {
                 self.replace_tok(i, "let");
                 self.replace_tok(from, "=");
             }
-            None => self.report(i, "cannot rewrite this `unpack`: write `let {a, b} = value`"),
+            None => self.report(
+                i,
+                "cannot rewrite this `unpack`: write `let {a, b} = value`",
+            ),
         }
     }
 
@@ -586,7 +600,8 @@ impl Fixer<'_> {
             }
         } else if ident_is(&next, "between") {
             // The subject is repeated, so it must be free of effects.
-            let simple = (i + 1..=e_end).all(|j| matches!(self.tok(j), Token::Ident(_) | Token::Dot))
+            let simple = (i + 1..=e_end)
+                .all(|j| matches!(self.tok(j), Token::Ident(_) | Token::Dot))
                 || (i + 1 == e_end
                     && matches!(
                         self.tok(e_end),
@@ -594,9 +609,9 @@ impl Fixer<'_> {
                     ));
             let lo = e_end + 2;
             let lo_end = self.expr_end(lo, &|t| ident_is(t, "and") || matches!(t, Token::And));
-            let and = lo_end.map(|l| l + 1).filter(|&a| {
-                ident_is(self.tok(a), "and") || matches!(self.tok(a), Token::And)
-            });
+            let and = lo_end
+                .map(|l| l + 1)
+                .filter(|&a| ident_is(self.tok(a), "and") || matches!(self.tok(a), Token::And));
             let hi_end = and.and_then(|a| self.expr_end(a + 1, &|_| false));
             match (simple, lo_end, and, hi_end) {
                 (true, Some(lo_end), Some(and), Some(hi_end)) => {
@@ -620,11 +635,14 @@ impl Fixer<'_> {
 
     fn fix_say(&mut self, i: usize, which: &Token) {
         let Some(end) = self.expr_end(i + 1, &|_| false) else {
-            self.report(i, "cannot rewrite this output statement: write `println(value)`");
+            self.report(
+                i,
+                "cannot rewrite this output statement: write `println(value)`",
+            );
             return;
         };
-        let single_string = i + 1 == end
-            && matches!(self.tok(end), Token::StringLit(_) | Token::RawStringLit(_));
+        let single_string =
+            i + 1 == end && matches!(self.tok(end), Token::StringLit(_) | Token::RawStringLit(_));
         let one_group = matches!(self.tok(i + 1), Token::LParen)
             && self.matching(i + 1) == Some(end)
             && !self.has_top_level_comma(i + 1, end);
@@ -979,10 +997,7 @@ fn set_project_edition(dir: &Path, options: &FixOptions) -> Result<(), String> {
         return Ok(());
     }
     if options.diff {
-        print!(
-            "{}",
-            unified_diff(&path.to_string_lossy(), &text, &updated)
-        );
+        print!("{}", unified_diff(&path.to_string_lossy(), &text, &updated));
     }
     if !options.check && !options.diff {
         std::fs::write(&path, updated).map_err(|e| format!("{}: error: {}", path.display(), e))?;
@@ -1017,24 +1032,30 @@ mod tests {
             ("if true { } nah { }", "if true { } else { }"),
             ("let r = hold f()", "let r = await f()"),
             ("emit 5", "yield 5"),
-            (
-                "grab r from \"http://x\"",
-                "let r = fetch(\"http://x\")",
-            ),
+            ("grab r from \"http://x\"", "let r = fetch(\"http://x\")"),
             (
                 "grab r from url with { method: \"POST\" }",
                 "let r = fetch(url, { method: \"POST\" })",
             ),
-            ("repeat 3 times { say \"hi\" }", "for _ in range(3) { println(\"hi\") }"),
+            (
+                "repeat 3 times { say \"hi\" }",
+                "for _ in range(3) { println(\"hi\") }",
+            ),
             ("repeat n + 1 { }", "for _ in range(n + 1) { }"),
             ("unpack {a, b} from obj", "let {a, b} = obj"),
             ("unpack [x, ...rest] from arr", "let [x, ...rest] = arr"),
             ("safe { risky() }", "try { risky() } catch _ { }"),
-            ("let v = must parse(s).value", "let v = unwrap(parse(s).value)"),
+            (
+                "let v = must parse(s).value",
+                "let v = unwrap(parse(s).value)",
+            ),
             ("let v = must f() + 1", "let v = unwrap(f()) + 1"),
             ("check x > 0", "assert(x > 0)"),
             ("check name is not empty", "assert(len(name) > 0)"),
-            ("check age between 1 and 10", "assert(age >= 1 && age <= 10)"),
+            (
+                "check age between 1 and 10",
+                "assert(age >= 1 && age <= 10)",
+            ),
             ("say \"hi\"", "println(\"hi\")"),
             ("say(\"hi\")", "println(\"hi\")"),
             ("say (1, 2)", "println((1, 2))"),
@@ -1045,7 +1066,10 @@ mod tests {
             ("bruh(\"stop\")", "assert(false, \"stop\")"),
             ("bruh()", "assert(false, \"something ain't right\")"),
             ("ick(x == 1)", "assert(!(x == 1))"),
-            ("fn g() { return 1 }\nlet v = ghost(g)", "fn g() { return 1 }\nlet v = g()"),
+            (
+                "fn g() { return 1 }\nlet v = ghost(g)",
+                "fn g() { return 1 }\nlet v = g()",
+            ),
             (
                 "when x { < 1 -> \"a\", otherwise -> \"b\" }",
                 "when x { < 1 -> \"a\", else -> \"b\" }",
@@ -1116,7 +1140,10 @@ mod tests {
     fn diff_shows_changed_lines() {
         let d = unified_diff("a.fg", "a\nb\nc\n", "a\nB\nc\n");
         assert!(d.contains("-b\n+B\n"), "{d}");
-        assert!(d.starts_with("--- a/a.fg\n+++ b/a.fg\n@@ -1,3 +1,3 @@"), "{d}");
+        assert!(
+            d.starts_with("--- a/a.fg\n+++ b/a.fg\n@@ -1,3 +1,3 @@"),
+            "{d}"
+        );
         assert_eq!(unified_diff("a.fg", "x\n", "x\n"), "");
     }
 }

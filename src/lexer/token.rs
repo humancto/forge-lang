@@ -175,8 +175,23 @@ pub enum Token {
 /// From 2027 on they are ordinary identifiers; the parser recognises the old
 /// forms only to report them (`parser::removed`).
 pub const REMOVED_IN_2027: &[&str] = &[
-    "set", "change", "define", "otherwise", "nah", "forge", "hold", "emit", "grab", "repeat",
-    "unpack", "safe", "must", "check", "say", "yell", "whisper",
+    "set",
+    "change",
+    "define",
+    "otherwise",
+    "nah",
+    "forge",
+    "hold",
+    "emit",
+    "grab",
+    "repeat",
+    "unpack",
+    "safe",
+    "must",
+    "check",
+    "say",
+    "yell",
+    "whisper",
 ];
 
 impl Token {
