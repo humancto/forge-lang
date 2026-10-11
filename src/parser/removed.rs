@@ -8,9 +8,10 @@
 //! replacement, instead of the confusing error the classic grammar would
 //! give. Code `E0034` (`semantics::errors`).
 //!
-//! The checks look only at `Token::Ident`, which the lexer produces for
-//! these words only in edition 2027, so they cannot fire on 2026 code and
-//! the parser itself needs no edition switch. A removed word used as an
+//! The checks look only at `Token::Ident` and run only when the parser was
+//! created under edition 2027 or later (`Parser::report_removed`): in 2026
+//! these words are keywords, or soft keywords used as names
+//! (`parser::soft`). A removed word used as an
 //! ordinary name (`let set = 1`, `check(x)`, `safe.x`) is not one of the
 //! shapes below and parses normally.
 
@@ -101,6 +102,9 @@ impl Parser {
     /// A removed statement form starting at the cursor (an identifier in
     /// edition 2027), as an error naming its replacement.
     pub(super) fn removed_statement_form(&self) -> Option<ParseError> {
+        if !self.report_removed {
+            return None;
+        }
         let word = self.ident_at(0)?;
         let name = |offset: usize| self.ident_at(offset).unwrap_or("x").to_string();
         match word {
@@ -189,6 +193,9 @@ impl Parser {
     /// A removed prefix form in expression position: `hold e`, `must e`,
     /// `safe { }`.
     pub(super) fn removed_expression_form(&self) -> Option<ParseError> {
+        if !self.report_removed {
+            return None;
+        }
         match self.ident_at(0)? {
             "hold" if self.operand_follows(1) => self.removed("hold expr", "await expr"),
             "must" if self.operand_follows(1) => self.removed("must expr", "unwrap(expr)"),
@@ -201,6 +208,9 @@ impl Parser {
 
     /// `otherwise ->` / `nah ->` as a `when` arm.
     pub(super) fn removed_else_arm(&self) -> Option<ParseError> {
+        if !self.report_removed {
+            return None;
+        }
         match self.ident_at(0)? {
             word @ ("otherwise" | "nah")
                 if matches!(self.token_at(1), Some(Token::Arrow | Token::FatArrow)) =>

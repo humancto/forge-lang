@@ -215,3 +215,43 @@ fn removed_builtins_are_unknown_in_2027() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Natural and query words are soft keywords in every edition: names
+/// outside their constructs (parser/soft.rs).
+#[test]
+fn soft_keywords_are_names_in_every_edition() {
+    let source = "let order = 1\nlet from = 2\nlet emit = 3\nlet to = 4\nfn safe(x) { return x * 10 }\nlet limit = { where: 5, select: 6 }\nlet mut times = 0\ntimes += 1\nprintln(order + from + emit + to, safe(2), limit.where + limit.select, times)";
+    for edition in ["2026", "2027"] {
+        for engine in ENGINES {
+            let mut args: Vec<&str> = engine.to_vec();
+            args.extend(["--edition", edition, "run"]);
+            let out = run(source, &args);
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                "10 20 11 1\n",
+                "{} {:?}: {}",
+                edition,
+                engine,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+/// The constructs of those words still parse and run (edition 2026).
+#[test]
+fn soft_keyword_constructs_still_work() {
+    let source = "let xs = [{ n: 1 }, { n: 5 }]\nlet big = xs where n > 2\nprintln(len(big))\nretry 2 times { println(\"r\") }\nsafe {\n    println(\"s\")\n}\nlet v = must Ok(7)\nlet label = when v { < 5 -> \"low\", otherwise -> \"high\" }\nif v > 9 { println(\"no\") } otherwise { println(label) }\nset w to v\ncheck w > 0\nrepeat 1 times { say w }\nunpack {n} from xs[1]\nsay n";
+    for engine in ENGINES {
+        let mut args: Vec<&str> = engine.to_vec();
+        args.push("run");
+        let out = run(source, &args);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "1\nr\ns\nhigh\n7\n5\n",
+            "{:?}: {}",
+            engine,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

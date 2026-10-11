@@ -434,6 +434,7 @@ fn cities() { return ["Oslo"] }
 ## Common mistakes
 
 - Destructure with `let`: `let {a, b} = obj`, `let {a: x} = obj` (renames), `let [x, ...rest] = arr`, `let (a, b) = tuple`; add `mut` for mutable bindings. Missing fields/items bind `null`.
+- Words like `order`, `from`, `to`, `limit`, `where`, `select`, `table`, `take`, `times`, `safe` are fine as variable, function, parameter and field names. Reserved: `let mut fn return if else match for in while loop break continue struct type interface impl pub import spawn squad try catch async await yield true false null`.
 - `for i, x in array` does not work. Use `for e in enumerate(array) { e.index, e.value }`.
 - No `|x| ...` closures and no arrow functions. Write `fn(x) { return ... }`.
 - No `throw`, no `elif`, no `??` operator. Use `Err`/`?`, `else if`, and `get(obj, key, default)`.

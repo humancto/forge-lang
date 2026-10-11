@@ -1,0 +1,19 @@
+// expect: [10, 20, 11, [1, 2, 3, 4], 2, 7, 3]
+
+// Natural-syntax and query words are keywords only in their constructs;
+// elsewhere they are ordinary names (parser/soft.rs), in every edition.
+let order = 1
+let from = 2
+let emit = 3
+let to = 4
+fn safe(x) { return x * 10 }
+fn check(x) { return x * 10 }
+let limit = { where: 5, select: 6 }
+let items = [order, from, emit, to]
+let mut times = 0
+times += 2
+let wait = limit.where + to - emit + 1
+let total = { order: order, take: 2 }
+fn sum_with(by, until) { return by + until }
+
+[safe(1), check(2), limit.where + limit.select, items, times, wait, sum_with(total.order, total.take)]

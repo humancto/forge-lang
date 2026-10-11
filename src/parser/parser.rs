@@ -8,6 +8,7 @@ use crate::lexer::Lexer;
 
 #[path = "removed.rs"]
 mod removed;
+use super::soft;
 
 pub struct Parser {
     tokens: Vec<Spanned>,
@@ -23,6 +24,9 @@ pub struct Parser {
     /// Set while parsing the methods of an `impl`/`give` block: function
     /// definitions there are methods of this type, not variables.
     impl_owner: Option<String>,
+    /// Edition 2027 or later: report the removed natural-syntax forms
+    /// (`parser/removed.rs`). Read once, when the parser is created.
+    report_removed: bool,
 }
 
 /// Deepest nesting of expressions, statements, patterns and type
@@ -40,6 +44,8 @@ impl Parser {
             index: None,
             source: None,
             impl_owner: None,
+            report_removed: crate::semantics::edition::current()
+                >= crate::semantics::edition::Edition::E2027,
         }
     }
 
@@ -218,7 +224,18 @@ impl Parser {
         result
     }
 
+    /// At an operand position: a soft keyword used as a name (`order`,
+    /// `safe(x)`, `from = 1`) becomes an identifier token (`parser::soft`).
+    fn soften_keyword(&mut self, statement: bool) {
+        if let Some(word) = soft::soft_word(&self.current_token()) {
+            if soft::keyword_is_name(&self.tokens, self.pos, statement) {
+                self.tokens[self.pos].token = Token::Ident(word.to_string());
+            }
+        }
+    }
+
     fn parse_statement_kind(&mut self) -> Result<Stmt, ParseError> {
+        self.soften_keyword(true);
         match self.current_token() {
             Token::Let => self.parse_let(),
             // `set` is context-sensitive: `set(...)` is the set() constructor call,
@@ -912,7 +929,9 @@ impl Parser {
             if let Some(err) = self.removed_else_arm() {
                 return Err(err);
             }
-            if self.check(&Token::Else) || self.check(&Token::Otherwise) || self.check(&Token::Nah)
+            if self.check(&Token::Else)
+                || ((self.check(&Token::Otherwise) || self.check(&Token::Nah))
+                    && matches!(self.peek_token(1), Token::Arrow | Token::FatArrow))
             {
                 self.advance();
                 if self.check(&Token::Arrow) || self.check(&Token::FatArrow) {
@@ -1435,7 +1454,10 @@ impl Parser {
     }
 
     fn check_else_keyword(&self) -> bool {
-        self.check(&Token::Else) || self.check(&Token::Otherwise) || self.check(&Token::Nah)
+        // `otherwise`/`nah` are soft: only `else` aliases before `{` / `if`.
+        self.check(&Token::Else)
+            || ((self.check(&Token::Otherwise) || self.check(&Token::Nah))
+                && matches!(self.peek_token(1), Token::LBrace | Token::If))
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
@@ -1989,6 +2011,7 @@ impl Parser {
     }
 
     fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
+        self.soften_keyword(false);
         if let Some(err) = self.removed_expression_form() {
             return Err(err);
         }
@@ -2462,7 +2485,9 @@ impl Parser {
         }
 
         // Peek ahead: if we see `ident:` or `"string":` it's an object literal
-        if matches!(self.current_token(), Token::Ident(_) | Token::StringLit(_)) {
+        if matches!(self.current_token(), Token::StringLit(_))
+            || soft::name_word(&self.current_token()).is_some()
+        {
             let saved = self.pos;
             self.advance();
             if self.check(&Token::Colon) {
@@ -2783,47 +2808,9 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<String, ParseError> {
-        let name = match self.current_token() {
-            Token::Ident(name) => Some(name),
-            // Allow keywords as field/method names
-            Token::Set => Some("set".to_string()),
-            Token::Type => Some("type".to_string()),
-            Token::Match => Some("match".to_string()),
-            Token::From => Some("from".to_string()),
-            Token::To => Some("to".to_string()),
-            Token::In => Some("in".to_string()),
-            Token::Import => Some("import".to_string()),
-            Token::Table => Some("table".to_string()),
-            Token::Check => Some("check".to_string()),
-            Token::Where => Some("where".to_string()),
-            Token::Watch => Some("watch".to_string()),
-            Token::Transform => Some("transform".to_string()),
-            Token::Select => Some("select".to_string()),
-            Token::Order => Some("order".to_string()),
-            Token::Limit => Some("limit".to_string()),
-            Token::Crawl => Some("crawl".to_string()),
-            Token::Download => Some("download".to_string()),
-            Token::Ask => Some("ask".to_string()),
-            Token::Prompt => Some("prompt".to_string()),
-            Token::Agent => Some("agent".to_string()),
-            Token::Schedule => Some("schedule".to_string()),
-            Token::Retry => Some("retry".to_string()),
-            Token::Timeout => Some("timeout".to_string()),
-            Token::Safe => Some("safe".to_string()),
-            Token::Must => Some("must".to_string()),
-            Token::Freeze => Some("freeze".to_string()),
-            Token::Keep => Some("keep".to_string()),
-            Token::Take => Some("take".to_string()),
-            Token::Every => Some("every".to_string()),
-            Token::Any => Some("any".to_string()),
-            Token::By => Some("by".to_string()),
-            Token::Thing => Some("thing".to_string()),
-            Token::Power => Some("power".to_string()),
-            Token::Give => Some("give".to_string()),
-            Token::Craft => Some("craft".to_string()),
-            Token::The => Some("the".to_string()),
-            _ => None,
-        };
+        // Identifiers, soft keywords (`parser::soft`) and the few reserved
+        // words always accepted as names here (`x.type`, `x.match`).
+        let name = soft::name_word(&self.current_token());
         match name {
             Some(n) => {
                 self.advance();

@@ -361,17 +361,50 @@ impl Fixer<'_> {
     }
 
     /// Whether token `i` is a keyword used as a name (`obj.check`,
-    /// `{safe: 1}`, `fn check()`), not the keyword.
+    /// `{safe: 1}`, `fn check()`, `safe(x)`), not the keyword.
     fn used_as_name(&self, i: usize) -> bool {
         let prev = if i == 0 {
             &Token::Newline
         } else {
             self.tok(i - 1)
         };
-        matches!(
+        if matches!(
             prev,
-            Token::Dot | Token::Fn | Token::Define | Token::Let | Token::Mut | Token::Async
+            Token::Dot
+                | Token::Fn
+                | Token::Define
+                | Token::Let
+                | Token::Mut
+                | Token::Async
+                | Token::ForgeKw
+                | Token::Catch
+                | Token::For
+                | Token::Each
         ) || matches!(self.tok(i + 1), Token::Colon)
+        {
+            return true;
+        }
+        match self.tok(i) {
+            // `else` aliases only before a block, `if` or a `when` arrow.
+            Token::Otherwise | Token::Nah => !matches!(
+                self.tok(i + 1),
+                Token::LBrace | Token::If | Token::Arrow | Token::FatArrow
+            ),
+            // The parser's rule for soft keywords (`parser::soft`).
+            _ => crate::parser::soft::keyword_is_name(
+                self.toks,
+                i,
+                i == 0
+                    || matches!(
+                        prev,
+                        Token::Newline
+                            | Token::Semicolon
+                            | Token::LBrace
+                            | Token::RBrace
+                            | Token::FatArrow
+                    ),
+            ),
+        }
     }
 
     fn at_statement_start(&self, i: usize) -> bool {
