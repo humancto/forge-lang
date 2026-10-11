@@ -162,6 +162,24 @@ fn unrewritable_forms_are_reported_and_kept() {
 /// Programs whose output legitimately changes after `forge fix`, because a
 /// replacement is not exactly equivalent (docs/editions/2027.md lists the
 /// differences).
+/// Files that use a 2027 *semantic* change `forge fix` does not rewrite
+/// (it migrates syntax only): they are syntactically 2027 after fixing but
+/// fail the 2027 type check on purpose.
+const NOT_2027_CODE: &[(&str, &str)] = &[
+    (
+        "tests/parity/supported/string_ordering.fg",
+        "`\"n\" + 1`: strict `+` (E0034) is a semantic change",
+    ),
+    (
+        "tests/safety_test.fg",
+        "`1 + \"x\"` inside `safe`: strict `+` (E0034) is a semantic change",
+    ),
+    (
+        "tests/string_concat_2026_test.fg",
+        "pins edition 2026 string + value conversion",
+    ),
+];
+
 const KNOWN_DIFFERENCES: &[(&str, &str)] = &[
     (
         "examples/squad.fg",
@@ -336,6 +354,9 @@ fn fixed_corpus_parses_under_2027_and_behaves_the_same() {
         }
         fully_fixed += 1;
         let copy_str = copy.to_string_lossy().to_string();
+        if NOT_2027_CODE.iter().any(|(p, _)| p == rel) {
+            continue;
+        }
         let parses = forge(&work, &["--edition", "2027", "check", &copy_str]);
         if !parses.status.success() {
             problems.push(format!(
