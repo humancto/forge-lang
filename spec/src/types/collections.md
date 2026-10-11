@@ -46,13 +46,21 @@ items[0] = 10
 say items  // [10, 2, 3]
 ```
 
-The `push()` built-in appends an element:
+The `push()` built-in returns a new array with an element appended; assign
+it back to append. The `.push()` method appends in place:
 
 ```forge
 let mut items = [1, 2]
-push(items, 3)
-say items  // [1, 2, 3]
+items = push(items, 3)
+items.push(4)
+say items  // [1, 2, 3, 4]
 ```
+
+In edition 2026 a statement `push(items, 3)` on a mutable variable also
+appends in place (and `let b = push(items, 3)` changes `items` too); in
+edition 2027 `push` never modifies its argument, and a statement whose
+result is discarded is a type error (T0019). See
+[`push`](../builtins/collections.md).
 
 The `pop()` built-in removes and returns the last element:
 

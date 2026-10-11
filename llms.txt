@@ -79,7 +79,7 @@ let names = ["ada", "bob"]
 let lens = map(names, fn(s) { len(s) })        // lens: [Int]
 ```
 
-Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition. Edition 2026 (default): warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
+Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition, T0019 discarded `push(xs, v)` result (edition 2027). Edition 2026 (default): warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
 
 Edition 2027 (`edition = "2027"` in forge.toml, or `forge --edition 2027`): annotations are enforced. A contradiction of a declared type (T0001, T0002, T0003, T0012, T0015, T0016) is an error and nothing runs; annotated function arguments and results are checked at run time on every call (E0017); unannotated code is not checked and costs nothing. Generic parameters must agree within a call: `fn pair<T>(a: T, b: T)` accepts `pair(1, 2)` and `pair(1, 2.5)` (T is Float) but not `pair(1, "x")`. So annotate function signatures with the types you mean (`fn total(xs: [Int]) -> Int`), and leave unknowns unannotated rather than guessing.
 
@@ -292,7 +292,7 @@ try {
 
 There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 
-Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0018`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0019`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
 ```forge
 try {
@@ -321,7 +321,9 @@ Native plugins (Rust/C shared libraries built with `crates/forge-plugin`): `impo
 ```forge
 let nums = [5, 3, 8, 1]
 let mut xs = [1, 2]
-xs = push(xs, 3)              // portable: reassign the result
+xs = push(xs, 3)              // push returns a new array: reassign it
+xs.push(4)                    // or append in place (method form)
+let top = pop(xs)             // pop(xs) / xs.pop() remove and return the last element
 println(map(nums, fn(x) { return x * 2 }))
 println(filter(nums, fn(x) { return x > 2 }))
 println(reduce(nums, 0, fn(acc, x) { return acc + x }))   // (array, initial, fn)
@@ -486,6 +488,7 @@ fn cities() { return ["Oslo"] }
 - Method chains cannot start a line with `.`; keep `a.filter(...).map(...)` on one line.
 - `regex.*` takes `(text, pattern)`, not `(pattern, text)`. Escape backslashes in patterns: `"\\d+"`.
 - `reduce(array, initial, fn)` — the initial value comes second.
+- `push(xs, v)` returns a new array: write `xs = push(xs, v)` or `xs.push(v)`, never a bare `push(xs, v)` statement (edition 2027 rejects it, T0019). In 2027 `let ys = push(xs, v)` leaves `xs` unchanged (safe in backtracking); edition 2026 also updated a mutable `xs` there.
 - Put non-String values into text with interpolation (`"total: {n}"`) or `str(n)`, never `"total: " + n`: edition 2027 rejects `+` between a String and a non-String (E0034; edition 2026 converts silently).
 - Mutating a field or index requires a `let mut` binding.
 - `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.

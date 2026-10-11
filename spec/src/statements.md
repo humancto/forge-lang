@@ -67,9 +67,11 @@ See [Import and Export](./statements/modules.md).
 Any expression can appear as a statement. The expression is evaluated and its result is discarded. This is how function calls with side effects are written.
 
 ```forge
-say "hello"             // function call as statement
-push(items, 42)         // side-effecting call
+println("hello")        // function call as statement
+items.push(42)          // method call that appends to `items` in place
 ```
+
+A call whose only effect is its result is useless as a statement. In edition 2027 the type checker rejects one such case, `push(items, 42)` (it returns a new array and changes nothing, T0019); in edition 2026 that statement still appends to a mutable `items`.
 
 ## Statement Terminators
 
