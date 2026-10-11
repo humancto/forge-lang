@@ -689,6 +689,7 @@ mod tests {
         // Code count, right after the constants.
         let bytes = serialize_chunk(&chunk).unwrap();
         let code_at = bytes.len()
+            - 1 // edition (v1.4+)
             - (4 + 4 * chunk.code.len()) // cols
             - (4 + 4 * chunk.lines.len()) // lines
             - (4 * chunk.code.len()) // code
