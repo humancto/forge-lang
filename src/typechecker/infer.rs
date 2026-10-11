@@ -206,6 +206,14 @@ pub struct Checker<'a> {
     type_params: Vec<Vec<String>>,
     current_stmt: Pos,
     loop_depth: usize,
+    /// Set by a caller right before `check_stmts` when the block's last
+    /// statement is not used as a value (loop bodies, branches of a
+    /// statement whose own value is unused). `check_stmts` takes it, so any
+    /// other block defaults to "the tail is used" (no false T0019).
+    tail_discarded: bool,
+    /// Whether the statement `check_stmt` is about to check has its value
+    /// thrown away (set by `check_stmts`, taken by `check_stmt`).
+    stmt_discarded: bool,
     /// > 0 inside code that is expected to fail (`assert_throws(fn ...)`).
     suppress: usize,
     /// Pass 1 and return-type inference run without diagnostics.
@@ -256,6 +264,8 @@ impl<'a> Checker<'a> {
             type_params: Vec::new(),
             current_stmt: Pos::default(),
             loop_depth: 0,
+            tail_discarded: false,
+            stmt_discarded: false,
             suppress: 0,
             mute: false,
             binding_counter: 0,
@@ -976,6 +986,7 @@ impl<'a> Checker<'a> {
     /// Check statements in the current scope; report unreachable code.
     /// Returns the type of the block's value (its tail) and its flow.
     fn check_stmts(&mut self, stmts: &[SpannedStmt]) -> (Ty, Flow) {
+        let tail_discarded = std::mem::take(&mut self.tail_discarded);
         let mut flow = Flow::Normal;
         let mut tail = Ty::Null;
         let mut reported_unreachable = false;
@@ -994,6 +1005,7 @@ impl<'a> Checker<'a> {
                 );
             }
             let is_last = i + 1 == stmts.len();
+            self.stmt_discarded = !is_last || tail_discarded;
             let (ty, f) = self.check_stmt(&s.stmt);
             if is_last {
                 tail = ty;
@@ -1009,6 +1021,13 @@ impl<'a> Checker<'a> {
         (tail, flow)
     }
 
+    /// [`Checker::check_body`] for the body of a statement: `discarded`
+    /// says whether the body's last statement is used as a value.
+    fn check_stmt_body(&mut self, stmts: &[SpannedStmt], discarded: bool) -> (Ty, Flow) {
+        self.tail_discarded = discarded;
+        self.check_body(stmts)
+    }
+
     /// A `{ ... }` body in a fresh scope.
     fn check_body(&mut self, stmts: &[SpannedStmt]) -> (Ty, Flow) {
         self.push_scope();
@@ -1020,6 +1039,9 @@ impl<'a> Checker<'a> {
     /// Check one statement. Returns the statement's value (meaningful for
     /// the tail of a function or block expression) and its flow.
     fn check_stmt(&mut self, stmt: &Stmt) -> (Ty, Flow) {
+        let discarded = std::mem::take(&mut self.stmt_discarded);
+        // Blocks inside this statement's expressions use their tail.
+        self.tail_discarded = false;
         match stmt {
             Stmt::Let {
                 name,
@@ -1237,8 +1259,8 @@ impl<'a> Checker<'a> {
                 condition,
                 then_body,
                 else_body,
-            } => self.check_if(condition, then_body, else_body.as_deref()),
-            Stmt::Match { subject, arms } => self.check_match(subject, arms),
+            } => self.check_if(condition, then_body, else_body.as_deref(), discarded),
+            Stmt::Match { subject, arms } => self.check_match(subject, arms, discarded),
             Stmt::For {
                 var,
                 var2,
@@ -1260,7 +1282,7 @@ impl<'a> Checker<'a> {
                     self.bind(v2, t2, None, BindKind::Other);
                 }
                 self.loop_depth += 1;
-                self.check_body(body);
+                self.check_stmt_body(body, true);
                 self.loop_depth -= 1;
                 self.pop_scope();
                 (Ty::Null, Flow::Normal)
@@ -1268,7 +1290,7 @@ impl<'a> Checker<'a> {
             Stmt::While { condition, body } => {
                 self.infer(condition, None);
                 self.loop_depth += 1;
-                self.check_body(body);
+                self.check_stmt_body(body, true);
                 self.loop_depth -= 1;
                 let forever = matches!(condition, Expr::Bool(true)) && !contains_break(body);
                 (
@@ -1282,7 +1304,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Loop { body } => {
                 self.loop_depth += 1;
-                self.check_body(body);
+                self.check_stmt_body(body, true);
                 self.loop_depth -= 1;
                 let forever = !contains_break(body);
                 (
@@ -1314,10 +1336,10 @@ impl<'a> Checker<'a> {
                 catch_var,
                 catch_body,
             } => {
-                let (t1, f1) = self.check_body(try_body);
+                let (t1, f1) = self.check_stmt_body(try_body, discarded);
                 self.push_scope();
                 self.bind(catch_var, Ty::Any, None, BindKind::Other);
-                let (t2, f2) = self.check_body(catch_body);
+                let (t2, f2) = self.check_stmt_body(catch_body, discarded);
                 self.pop_scope();
                 let flow = if f1 == Flow::Diverges && f2 == Flow::Diverges {
                     Flow::Diverges
@@ -1402,6 +1424,9 @@ impl<'a> Checker<'a> {
                 (Ty::Null, Flow::Normal)
             }
             Stmt::Expression(expr) => {
+                if discarded {
+                    self.check_discarded_call(expr);
+                }
                 let ty = self.infer(expr, None);
                 let flow = if matches!(self.cx.resolve(&ty), Ty::Never) {
                     Flow::Diverges
@@ -1620,6 +1645,7 @@ impl<'a> Checker<'a> {
         condition: &Expr,
         then_body: &[SpannedStmt],
         else_body: Option<&[SpannedStmt]>,
+        discarded: bool,
     ) -> (Ty, Flow) {
         self.infer(condition, None);
         let facts = self.narrowing_facts(condition);
@@ -1643,13 +1669,13 @@ impl<'a> Checker<'a> {
         };
 
         narrow(self, false);
-        let (t1, f1) = self.check_body(then_body);
+        let (t1, f1) = self.check_stmt_body(then_body, discarded);
         restore(self);
 
         let (t2, f2) = match else_body {
             Some(else_body) => {
                 narrow(self, true);
-                let r = self.check_body(else_body);
+                let r = self.check_stmt_body(else_body, discarded);
                 restore(self);
                 r
             }
@@ -1721,7 +1747,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_match(&mut self, subject: &Expr, arms: &[MatchArm]) -> (Ty, Flow) {
+    fn check_match(&mut self, subject: &Expr, arms: &[MatchArm], discarded: bool) -> (Ty, Flow) {
         let st = self.infer(subject, None);
         let st = self.cx.resolve(&st);
         let subject_name = match subject {
@@ -1756,7 +1782,7 @@ impl<'a> Checker<'a> {
             if let Some(guard) = &arm.guard {
                 self.infer(guard, None);
             }
-            let (t, f) = self.check_body(&arm.body);
+            let (t, f) = self.check_stmt_body(&arm.body, discarded);
             if let (Some(name), Some(orig)) = (&subject_name, &original) {
                 self.set_binding_type(name, orig.clone());
             }
@@ -2687,6 +2713,47 @@ impl<'a> Checker<'a> {
                 self.call_value(&ft, "fn", args, has_spread, self.expr_span(other), true)
             }
         }
+    }
+
+    /// T0019 (edition 2027): an expression statement whose value is thrown
+    /// away is a call of the builtin `push`, which from 2027 returns a new
+    /// array and changes nothing, so the statement does nothing. (In 2026
+    /// the statement also updated a mutable first argument.)
+    fn check_discarded_call(&mut self, expr: &Expr) {
+        if self.policy.edition < Code::DiscardedResult.since() {
+            return;
+        }
+        let Expr::Call { function, args } = expr else {
+            return;
+        };
+        let Expr::Ident(name) = function.as_ref() else {
+            return;
+        };
+        if name != "push" || args.len() != 2 || !self.names_builtin(name) {
+            return;
+        }
+        let span = self.name_span(name, NameClass::Value);
+        let help = match &args[0] {
+            Expr::Ident(xs) => format!(
+                "use `{xs} = push({xs}, value)` to keep the new array, or `{xs}.push(value)` to append in place"
+            ),
+            _ => "assign the new array to something, e.g. `xs = push(xs, value)`".to_string(),
+        };
+        self.report_error(
+            Code::DiscardedResult,
+            span,
+            "the result of push() is discarded: push returns a new array and does not change its argument (edition 2027)",
+            Some(help),
+        );
+    }
+
+    /// Whether a call of `name` here calls the builtin (no local binding,
+    /// user function or variant of that name).
+    fn names_builtin(&self, name: &str) -> bool {
+        self.lookup(name).is_none()
+            && !self.functions.contains_key(name)
+            && self.variant_value_type(name).is_none()
+            && self.is_global_here(name)
     }
 
     fn infer_named_call(&mut self, name: &str, args: &[Expr], has_spread: bool) -> Ty {
