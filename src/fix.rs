@@ -613,6 +613,61 @@ impl Fixer<'_> {
         false
     }
 
+    /// Whether the value of the statement ending at token `last` is
+    /// certainly discarded. Not when it is the tail of a block whose value
+    /// may be used (`let y = if c { push(xs, 1) } else { xs }`); only loop
+    /// bodies and `if` statements whose own value is discarded qualify.
+    fn value_discarded(&self, last: usize) -> bool {
+        let mut j = last + 1;
+        while matches!(self.tok(j), Token::Newline | Token::Semicolon) {
+            j += 1;
+        }
+        if !matches!(self.tok(j), Token::RBrace) {
+            return true; // not a block tail
+        }
+        let Some(open) = self.matching_back(j) else {
+            return false;
+        };
+        // The start of the statement the block belongs to.
+        let mut k = open;
+        while k > 0 {
+            match self.tok(k - 1) {
+                Token::Newline | Token::Semicolon | Token::LBrace => break,
+                t if is_close(t) => match self.matching_back(k - 1) {
+                    Some(m) => k = m,
+                    None => return false,
+                },
+                _ => k -= 1,
+            }
+        }
+        match self.tok(k) {
+            Token::For | Token::While | Token::Loop | Token::Repeat => true,
+            Token::If => {
+                // The whole `if ... else ...` chain, then its own value.
+                let mut end = j;
+                while matches!(self.tok(end + 1), Token::Else) {
+                    let mut b = end + 2;
+                    while !matches!(self.tok(b), Token::LBrace | Token::Eof) {
+                        b = if is_open(self.tok(b)) {
+                            match self.matching(b) {
+                                Some(m) => m + 1,
+                                None => return false,
+                            }
+                        } else {
+                            b + 1
+                        };
+                    }
+                    match self.matching(b) {
+                        Some(m) => end = m,
+                        None => return false,
+                    }
+                }
+                !self.ends_function_body(end) && self.value_discarded(end)
+            }
+            _ => false,
+        }
+    }
+
     /// `push(xs, v)`: in edition 2026 a mutable `xs` was also updated; in
     /// 2027 `push` only returns the new array.
     fn fix_push(&mut self, i: usize) {
@@ -631,14 +686,16 @@ impl Fixer<'_> {
         };
         if self.at_statement_start(i) && self.ends_statement(close) {
             match arg {
-                Some((x, ArgBinding::Mutable { .. })) if !self.ends_function_body(close) => {
+                Some((x, ArgBinding::Mutable { .. }))
+                    if !self.ends_function_body(close) && self.value_discarded(close) =>
+                {
                     let s = self.start(i);
                     self.replace(s, s, format!("{x} = "));
                 }
                 Some((x, ArgBinding::Mutable { .. })) => self.report(
                     i,
                     format!(
-                        "cannot rewrite this `push({x}, ...)`: it is the function's result and also updated `{x}` in edition 2026; in 2027 write `{x} = push({x}, value)` (or `{x}.push(value)`) and return what you need"
+                        "cannot rewrite this `push({x}, ...)`: its value is used (a function's or block's result) and it also updated `{x}` in edition 2026; in 2027 write `{x} = push({x}, value)` (or `{x}.push(value)`) and use what you need"
                     ),
                 ),
                 Some((x, ArgBinding::Other)) => self.report(
@@ -1326,6 +1383,10 @@ mod tests {
                 "fn f(items) {\n    items = push(items, 1)\n    return items\n}\n",
             ),
             (
+                "let mut xs = []\nwhile len(xs) < 2 {\n    if true { push(xs, 1) }\n}\nlet c = 0\nif c == 0 { push(xs, 9) } else if c == 1 { push(xs, 8) }\nprintln(xs)\n",
+                "let mut xs = []\nwhile len(xs) < 2 {\n    if true { xs = push(xs, 1) }\n}\nlet c = 0\nif c == 0 { xs = push(xs, 9) } else if c == 1 { xs = push(xs, 8) }\nprintln(xs)\n",
+            ),
+            (
                 "let mut out = []\nfor x in [1] { if x > 0 { push(out, x * 2) } else { push(out, 0) } }\n",
                 "let mut out = []\nfor x in [1] { if x > 0 { out = push(out, x * 2) } else { out = push(out, 0) } }\n",
             ),
@@ -1358,6 +1419,10 @@ mod tests {
             "fn f(cols) { let a = push(cols, 1)\n return cols }\n",
             // The function's result, and an update.
             "let mut acc = []\nlet add = fn(x) { push(acc, x) }\n",
+            // The tail of a block whose value is used.
+            "let mut xs = []\nlet ys = if true { push(xs, 1) } else { xs }\n",
+            "fn f(xs) {\n    if len(xs) > 0 { push(xs, 1) } else { xs }\n}\n",
+            "let mut xs = []\nlet n = match 1 { _ => { push(xs, 1) } }\n",
             // A no-op in both editions, and a T0019 error in 2027.
             "let xs = [1]\npush(xs, 2)\n",
             "let mut o = { a: [] }\npush(o.a, 1)\n",
