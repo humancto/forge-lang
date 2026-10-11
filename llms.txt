@@ -150,6 +150,8 @@ println(c())                  // 2
 
 Always write an explicit `return`.
 
+Top-level `fn` definitions are hoisted: `let avg = mean(nums)` may come before `fn mean(xs) { ... }` in the file (also in imported modules and test files). A function that reads a top-level variable becomes callable once that variable is defined. A name defined twice (or a builtin's name) is not hoisted.
+
 ## Structs, methods, interfaces
 
 ```forge

@@ -590,9 +590,21 @@ fn module_top_level_names(program: &Program) -> HashSet<String> {
     names
 }
 
+/// Top-level statements in the order they run: function definitions are
+/// hoisted (`semantics::hoist`, shared with the interpreter).
+fn hoisted<'a>(
+    program: &'a Program,
+    predefined: &dyn Fn(&str) -> bool,
+) -> impl Iterator<Item = &'a SpannedStmt> {
+    crate::semantics::hoist::plan(&program.statements, predefined)
+        .order
+        .into_iter()
+        .map(|i| &program.statements[i])
+}
+
 fn compile_top_level(c: &mut Compiler, program: &Program) -> Result<(), CompileError> {
     c.begin_scope();
-    for spanned in &program.statements {
+    for spanned in hoisted(program, &crate::semantics::hoist::is_predefined) {
         c.set_span(spanned);
         compile_stmt(c, &spanned.stmt)?;
     }
@@ -640,14 +652,27 @@ pub fn module_global_prefix(resolved_path: &str) -> String {
     format!("__module[{}]::", resolved_path)
 }
 
+/// A REPL step with no earlier steps (tests; `vm::run_repl` passes the
+/// session's names to [`compile_repl_with`]).
+#[allow(dead_code)]
 pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
+    compile_repl_with(program, &crate::semantics::hoist::is_predefined)
+}
+
+/// [`compile_repl`] for a session whose earlier steps defined names:
+/// `predefined` says which names exist already (they are not hoisted, so a
+/// step that calls `f` above its new `fn f` still calls the old one).
+pub fn compile_repl_with(
+    program: &Program,
+    predefined: &dyn Fn(&str) -> bool,
+) -> Result<Chunk, CompileError> {
     let mut c = Compiler::new("<repl>");
     c.begin_scope();
 
     let result_reg = c.alloc_reg()?;
     let mut has_result = false;
 
-    for spanned in &program.statements {
+    for spanned in hoisted(program, predefined) {
         c.set_span(spanned);
         match &spanned.stmt {
             Stmt::Expression(expr) if !is_output_expr(expr) => {

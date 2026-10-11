@@ -1,0 +1,104 @@
+// hoisting_test.fg — top-level functions can be called above their
+// definitions (semantics::hoist; both engines, every edition).
+
+// Call before definition.
+let nums = [2, 4, 6]
+let avg = mean(nums)
+
+// Mutual recursion, both called above both definitions.
+let ten_is_even = is_even(10)
+let seven_is_odd = is_odd(7)
+
+// A hoisted function reading a top-level `let` defined before the call.
+let rate = 3
+let charged = with_rate(5)
+
+// The not-yet-initialized edge: `late_reader` reads `late`, so it is only
+// defined once `late` is. Calling it above that is the ordinary
+// undefined-variable error, naming the function — on both engines.
+let mut early_error = ""
+try {
+    late_reader()
+} catch e {
+    early_error = e.message
+}
+let late = "ready"
+let late_value = late_reader()
+
+// Decorated functions are hoisted too (`@test` below is one).
+let decorated_value = test_decorated_function_is_hoisted_too()
+
+// Redefinition keeps its meaning: a name defined twice is not hoisted.
+fn version() { return 1 }
+let first_version = version()
+fn version() { return 2 }
+let second_version = version()
+
+// Closures defined above a function call it through the hoisted binding.
+let call_twice = fn(x) { return twice(twice(x)) }
+let quadrupled = call_twice(3)
+
+fn mean(xs) {
+    // `total` and `xs` are this function's own names.
+    let total = sum(xs)
+    return total / len(xs)
+}
+
+fn is_even(n) {
+    if n == 0 { return true }
+    return is_odd(n - 1)
+}
+
+fn is_odd(n) {
+    if n == 0 { return false }
+    return is_even(n - 1)
+}
+
+fn with_rate(x) { return x * rate }
+
+fn late_reader() { return late }
+
+fn twice(x) { return x * 2 }
+
+@test
+define test_call_before_definition() {
+    assert_eq(avg, 4)
+}
+
+@test
+define test_mutual_recursion_across_order() {
+    assert(ten_is_even)
+    assert(seven_is_odd)
+}
+
+@test
+define test_hoisted_function_reads_earlier_let() {
+    assert_eq(charged, 15)
+}
+
+@test
+define test_reading_a_later_let_is_undefined_until_it_runs() {
+    assert(contains(early_error, "late_reader"))
+    assert_eq(late_value, "ready")
+}
+
+@test
+define test_decorated_function_is_hoisted_too() {
+    return "decorated"
+}
+
+@test
+define test_decorated_value() {
+    assert_eq(decorated_value, "decorated")
+}
+
+@test
+define test_redefinition_is_unchanged() {
+    assert_eq(first_version, 1)
+    assert_eq(second_version, 2)
+}
+
+@test
+define test_closure_calls_later_function() {
+    assert_eq(quadrupled, 12)
+}
