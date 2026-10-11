@@ -1185,6 +1185,11 @@ impl Interpreter {
             "abs" => crate::stdlib::math::global_abs(num_arg(args.first()))
                 .map(|n| n.into_interp())
                 .map_err(|e| RuntimeError::new(&e)),
+            "floor" | "ceil" => {
+                crate::stdlib::math::global_floor_ceil(num_arg(args.first()), name == "ceil")
+                    .map(|n| n.into_interp())
+                    .map_err(|e| RuntimeError::new(&e))
+            }
             "min" | "max" => {
                 use crate::stdlib::math::MinMaxArgs;
                 let first = match args.first() {

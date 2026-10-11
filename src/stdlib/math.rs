@@ -120,6 +120,23 @@ pub(crate) fn global_abs(x: Option<Num>) -> Result<Num, String> {
     }
 }
 
+/// `floor(x)` / `ceil(x)`: same as `math.floor` / `math.ceil` (an Int
+/// result, or a Float when it does not fit in an Int).
+pub(crate) fn global_floor_ceil(x: Option<Num>, ceil: bool) -> Result<Num, String> {
+    match x {
+        Some(Num::Int(n)) => Ok(Num::Int(n)),
+        Some(Num::Float(f)) => Ok(rounded_float_to_num(if ceil {
+            f.ceil()
+        } else {
+            f.floor()
+        })),
+        None => Err(format!(
+            "{}() requires a number",
+            if ceil { "ceil" } else { "floor" }
+        )),
+    }
+}
+
 /// Arguments of `min` / `max`: one array, or the values themselves.
 pub(crate) enum MinMaxArgs {
     /// `min(xs)`: the elements of the array.

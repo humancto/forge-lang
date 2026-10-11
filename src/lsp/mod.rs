@@ -1520,6 +1520,8 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
         "round",
         "fn round(x, digits?) -> Number — Int without digits; Float rounded to digits decimals",
     ),
+    ("floor", "fn floor(x) -> Number — Round down to an Int (like math.floor)"),
+    ("ceil", "fn ceil(x) -> Number — Round up to an Int (like math.ceil)"),
     (
         "to_fixed",
         "fn to_fixed(x, digits) -> String — x with exactly digits decimals: to_fixed(2.5, 2) is \"2.50\"",

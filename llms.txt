@@ -71,7 +71,7 @@ let [first, ...rest] = nums
 println("{who} {age} {first} {rest}")
 ```
 
-Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max` and `round` keep Ints as Ints.
+Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
 
 Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
 
@@ -367,7 +367,7 @@ println(m.get("k"))
 println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
 ```
 
-Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
 
 ## Standard library (always in scope)
 

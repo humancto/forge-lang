@@ -37,6 +37,8 @@ const SIGNATURES: &[&str] = &[
     "max(Any, ...Any) -> Any",
     "round(Any, Int?) -> Any",
     "to_fixed(Any, Int?) -> String",
+    "floor(Any) -> Any",
+    "ceil(Any) -> Any",
     // Collections
     "push<T>([T], T) -> [T]",
     "pop<T>([T]) -> T",

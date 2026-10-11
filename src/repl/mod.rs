@@ -59,6 +59,8 @@ const BUILTINS: &[&str] = &[
     "min",
     "max",
     "round",
+    "floor",
+    "ceil",
     "to_fixed",
     "unique",
     "zip",

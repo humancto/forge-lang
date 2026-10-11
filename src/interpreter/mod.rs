@@ -3320,6 +3320,8 @@ impl Interpreter {
                         // Numbers
                         "abs",
                         "round",
+                        "floor",
+                        "ceil",
                         "to_fixed",
                     ];
                     let func = match &obj {

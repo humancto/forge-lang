@@ -102,6 +102,8 @@ pub static GLOBALS: &[Builtin] = &[
     variadic("min", 1),
     variadic("max", 1),
     b("round", 1, 2),
+    b("floor", 1, 1),
+    b("ceil", 1, 1),
     b("to_fixed", 1, 2),
     // Collections
     b("push", 2, 2),

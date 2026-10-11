@@ -1341,6 +1341,12 @@ impl VM {
                 let n = crate::stdlib::math::global_abs(x).map_err(|e| VMError::new(&e))?;
                 Ok(self.num_value(n))
             }
+            "floor" | "ceil" => {
+                let x = self.num_arg(args.first());
+                let n = crate::stdlib::math::global_floor_ceil(x, name == "ceil")
+                    .map_err(|e| VMError::new(&e))?;
+                Ok(self.num_value(n))
+            }
             "min" | "max" => {
                 use crate::stdlib::math::MinMaxArgs;
                 let first = args.first().and_then(|v| v.as_obj()).and_then(|r| {
@@ -5070,6 +5076,8 @@ impl VM {
                 | "for_each"
                 | "abs"
                 | "round"
+                | "floor"
+                | "ceil"
                 | "to_fixed"
         )
     }

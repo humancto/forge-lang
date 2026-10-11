@@ -229,7 +229,11 @@ impl Imports {
 /// than 2 GiB apart, which made `cranelift-jit` panic while patching the
 /// call (`TryFromIntError` in `compiled_blob.rs`). Only a function's call to
 /// itself stays near (same code blob).
-fn far_func_ref<M: Module>(module: &mut M, id: FuncId, func: &mut cranelift_codegen::ir::Function) -> FuncRef {
+fn far_func_ref<M: Module>(
+    module: &mut M,
+    id: FuncId,
+    func: &mut cranelift_codegen::ir::Function,
+) -> FuncRef {
     let r = module.declare_func_in_func(id, func);
     func.dfg.ext_funcs[r].colocated = false;
     r
