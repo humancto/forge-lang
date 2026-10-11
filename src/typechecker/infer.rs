@@ -183,6 +183,9 @@ const EXTRA_VALUE_METHODS: &[&str] = &[
 
 pub struct Checker<'a> {
     strict: bool,
+    /// Edition the program is checked under (read at construction, like
+    /// the engines): edition-gated rules, e.g. `String + Int` (E0034).
+    edition: crate::semantics::edition::Edition,
     index: Option<&'a SyntaxIndex>,
     resolution: Option<&'a Resolution>,
     by_stmt: HashMap<Pos, Vec<OccId>>,
@@ -236,6 +239,7 @@ impl<'a> Checker<'a> {
         }
         Self {
             strict,
+            edition: crate::semantics::edition::current(),
             index,
             resolution,
             by_stmt,
@@ -355,6 +359,22 @@ impl<'a> Checker<'a> {
             help,
             fixes,
         });
+    }
+
+    /// [`Checker::report`] with error severity whatever the strictness:
+    /// for edition rules that make the program fail at run time.
+    fn report_error(
+        &mut self,
+        code: Code,
+        span: Span,
+        message: impl Into<String>,
+        help: Option<String>,
+    ) {
+        let before = self.diagnostics.len();
+        self.report(code, span, message, help, Vec::new());
+        if let Some(d) = self.diagnostics.get_mut(before) {
+            d.severity = Severity::Error;
+        }
     }
 
     fn simple(&mut self, code: Code, span: Span, message: impl Into<String>) {
@@ -2267,13 +2287,28 @@ impl<'a> Checker<'a> {
         // Evaluate the operator with the engines' own rules on
         // representative operands of the known types.
         match (operand_of(&lt), operand_of(&rt)) {
-            (Some(l), Some(r)) => match crate::semantics::binary(shared, l, r) {
+            (Some(l), Some(r)) => match crate::semantics::binary(shared, l, r, self.edition) {
                 Ok(outcome) => match outcome {
                     crate::semantics::Outcome::Int(_) => Ty::Int,
                     crate::semantics::Outcome::Float(_) => Ty::Float,
                     crate::semantics::Outcome::Bool(_) => Ty::Bool,
                     crate::semantics::Outcome::Concat => Ty::String,
                 },
+                // Edition 2027: a certain run-time error (E0034), so an
+                // error in every mode.
+                Err(_) if crate::semantics::is_mixed_concat(shared, l, r) => {
+                    let span = self.expr_span(whole);
+                    self.report_error(
+                        Code::InvalidOperator,
+                        span,
+                        format!("operator '+' cannot be applied to {} and {}", lt, rt),
+                        Some(
+                            "edition 2027 does not convert to String implicitly: use str(x), or interpolation \"{x}\""
+                                .into(),
+                        ),
+                    );
+                    Ty::String
+                }
                 Err(message) => {
                     let span = self.expr_span(whole);
                     self.report(

@@ -1106,6 +1106,10 @@ pub struct Interpreter {
     /// and background forks share their creator's heap; an HTTP request
     /// fork gets its own.
     heap: Arc<heap::ScopeHeap>,
+    /// Language edition the program runs under (`semantics::edition`):
+    /// read once at construction, carried to children (`child_context`)
+    /// and forks, and passed to the shared operator rules.
+    edition: crate::semantics::edition::Edition,
 }
 
 /// Teardown: release this interpreter's own roots, and if it was the last
@@ -1165,6 +1169,7 @@ impl Interpreter {
             fuel_window: 0,
             meter: crate::runtime::limits::Meter::current().with_memory_polling(),
             caps: crate::runtime::limits::Caps::current(),
+            edition: crate::semantics::edition::current(),
         };
         interp.register_builtins();
         interp
@@ -1256,7 +1261,13 @@ impl Interpreter {
         child.meter = crate::runtime::limits::Meter::for_budget(self.meter.budget().cloned())
             .with_memory_polling();
         child.caps = self.caps;
+        child.edition = self.edition;
         child
+    }
+
+    /// The language edition this interpreter runs programs under.
+    pub fn edition(&self) -> crate::semantics::edition::Edition {
+        self.edition
     }
 
     /// Block until a spawned task has stored its result, then take it.
@@ -1444,6 +1455,7 @@ impl Interpreter {
         interp.struct_defaults = self.struct_defaults.clone();
         interp.source = self.source.clone();
         interp.source_file = self.source_file.clone();
+        interp.edition = self.edition;
         // Per-request fresh state. The cancel flag is created per-request
         // and replaced by the caller with one wired to a Drop guard on the
         // response future, so client disconnect can stop the handler.
@@ -1490,6 +1502,7 @@ impl Interpreter {
         interp.source_file = self.source_file.clone();
         interp.debug_state = self.debug_state.clone();
         interp.output_sink = self.output_sink.clone();
+        interp.edition = self.edition;
         interp
     }
 
@@ -4139,6 +4152,7 @@ impl Interpreter {
                 shared_op,
                 semantic_operand(left),
                 semantic_operand(right),
+                self.edition,
             ) {
                 Ok(crate::semantics::Outcome::Int(n)) => Ok(Value::Int(n)),
                 Ok(crate::semantics::Outcome::Float(f)) => Ok(Value::Float(f)),

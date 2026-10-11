@@ -331,3 +331,107 @@ fn unknown_edition_is_rejected() {
     assert!(out.status.success(), "{:?}", out);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Edition 2027 strict `+`: a statically known `String + Int` is a type
+/// error (T0005) without `--strict`; an unknown one fails at run time with
+/// E0034; a compiled `.fgc` keeps the edition it was compiled under.
+#[test]
+fn edition_2027_strict_string_concat() {
+    let dir = std::env::temp_dir().join(format!("forge-strict-concat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("static.fg"), "println(\"n=\" + 1)\n").unwrap();
+    std::fs::write(
+        dir.join("dynamic.fg"),
+        "fn plus(a, b) { return a + b }\nprintln(plus(\"a\", 1))\n",
+    )
+    .unwrap();
+    let stdout = |out: &Output| String::from_utf8_lossy(&out.stdout).to_string();
+
+    // Edition 2026 (default): implicit conversion, at most a warning.
+    for file in ["static.fg", "dynamic.fg"] {
+        for engine in [None, Some("--interp")] {
+            let mut args: Vec<&str> = engine.into_iter().collect();
+            args.extend(["run", file]);
+            let out = forge(&dir, &args);
+            assert!(out.status.success(), "{:?}", out);
+        }
+    }
+    assert_eq!(stdout(&forge(&dir, &["run", "static.fg"])), "n=1\n");
+
+    // Edition 2027, statically known: T0005 error before running.
+    let out = forge(
+        &dir,
+        &[
+            "--edition",
+            "2027",
+            "--error-format",
+            "json",
+            "run",
+            "static.fg",
+        ],
+    );
+    assert!(!out.status.success());
+    assert_eq!(stdout(&out), "", "must not run");
+    let errors = json_errors(&out.stderr);
+    assert_eq!(errors.len(), 1, "{:?}", errors);
+    assert_eq!(errors[0]["code"], "T0005");
+    let out = forge(
+        &dir,
+        &[
+            "--edition",
+            "2027",
+            "check",
+            "--format",
+            "json",
+            "static.fg",
+        ],
+    );
+    let diags: Vec<serde_json::Value> = stdout(&out)
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["code"] == "T0005" && d["severity"] == "error"),
+        "{:?}",
+        diags
+    );
+
+    // Edition 2027, known only at run time: E0034 on both engines.
+    for engine in [None, Some("--interp")] {
+        let mut args: Vec<&str> = engine.into_iter().collect();
+        args.extend([
+            "--edition",
+            "2027",
+            "--error-format",
+            "json",
+            "run",
+            "dynamic.fg",
+        ]);
+        let out = forge(&dir, &args);
+        assert!(!out.status.success(), "{:?}", out);
+        let errors = json_errors(&out.stderr);
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert_eq!(errors[0]["code"], "E0034", "{:?}", errors);
+    }
+
+    // `.fgc` files record their edition: the compiled program's meaning
+    // does not depend on the edition it is later run under.
+    let out = forge(&dir, &["--edition", "2027", "build", "dynamic.fg"]);
+    assert!(out.status.success(), "{:?}", out);
+    let out = forge(&dir, &["--error-format", "json", "run", "dynamic.fgc"]);
+    assert!(!out.status.success(), "{:?}", out);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot add String and Int"),
+        "{:?}",
+        out
+    );
+    let out = forge(&dir, &["--edition", "2026", "build", "dynamic.fg"]);
+    assert!(out.status.success(), "{:?}", out);
+    let out = forge(&dir, &["--edition", "2027", "run", "dynamic.fgc"]);
+    assert!(out.status.success(), "{:?}", out);
+    assert_eq!(stdout(&out), "a1\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

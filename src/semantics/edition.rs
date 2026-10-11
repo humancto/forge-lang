@@ -61,14 +61,16 @@ impl Edition {
             })
     }
 
-    fn to_u8(self) -> u8 {
+    /// Stable one-byte encoding (also used by `.fgc` files; never reuse a
+    /// value).
+    pub fn to_u8(self) -> u8 {
         match self {
             Edition::E2026 => 1,
             Edition::E2027 => 2,
         }
     }
 
-    fn from_u8(n: u8) -> Option<Edition> {
+    pub fn from_u8(n: u8) -> Option<Edition> {
         match n {
             1 => Some(Edition::E2026),
             2 => Some(Edition::E2027),

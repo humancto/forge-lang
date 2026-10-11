@@ -236,6 +236,11 @@ pub struct Chunk {
     /// constants of `GetGlobal`/`SetGlobal` (see `vm::globals`). Shared by
     /// clones; not serialized.
     pub global_ids: GlobalIdCache,
+    /// Language edition the chunk was compiled under (the compiler records
+    /// `semantics::edition::current()`). `.fgc` files carry it (format
+    /// v1.4+; older files are edition 2026) so a compiled program keeps its
+    /// meaning: the CLI and AOT binaries run it under this edition.
+    pub edition: crate::semantics::edition::Edition,
 }
 
 /// Allocate a fresh, process-unique `Chunk::proto_id`.
@@ -261,6 +266,7 @@ impl Chunk {
             upvalue_sources: Vec::new(),
             global_hints: Vec::new(),
             global_ids: GlobalIdCache::default(),
+            edition: crate::semantics::edition::Edition::DEFAULT,
         }
     }
 

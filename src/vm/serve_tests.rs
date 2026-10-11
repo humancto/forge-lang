@@ -268,3 +268,43 @@ fn fork_does_not_reregister_builtins() {
         (StatusCode::OK, json!([4.0, 3, "{\"a\": 1}"]))
     );
 }
+
+#[test]
+fn forks_run_under_the_template_edition() {
+    use crate::interpreter::Interpreter;
+    use crate::runtime::server::InterpreterTemplate;
+    use crate::semantics::edition::{self, Edition};
+    let source = "fn plus(a, b) { return a + b }\nfn h() { return plus(\"a\", 1) }\n";
+    for (edition, expect_ok) in [(Edition::E2026, true), (Edition::E2027, false)] {
+        let (vm_template, interp_template) = {
+            let _scope = edition::scope(Some(edition));
+            let tokens = Lexer::new(source).tokenize().expect("lex");
+            let program = Parser::new(tokens).parse_program().expect("parse");
+            let mut interp = Interpreter::new();
+            interp.run(&program).expect("top level");
+            (template(source), InterpreterTemplate::new(interp))
+        };
+        // Requests are forked on threads without the edition override.
+        let (vm_status, vm_body) = std::thread::spawn(move || get(&vm_template, "h"))
+            .join()
+            .expect("vm request");
+        let (interp_status, interp_body) = std::thread::spawn(move || {
+            interp_template
+                .fork_request(flag())
+                .call_http("h", &HandlerRequest::default())
+        })
+        .join()
+        .expect("interpreter request");
+        for (status, body) in [(vm_status, vm_body), (interp_status, interp_body)] {
+            if expect_ok {
+                assert_eq!((status, body), (StatusCode::OK, json!("a1")));
+            } else {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+                assert!(
+                    body.to_string().contains("cannot add String and Int"),
+                    "{body}"
+                );
+            }
+        }
+    }
+}

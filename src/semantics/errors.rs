@@ -257,7 +257,8 @@ or bind a new name instead of reassigning. Reported statically as T0017.",
 An arithmetic, comparison or unary operator was applied to values it does
 not support: `null + 1`, `\"a\" * 3`, `true < false`, `[1] - [2]`, ...
 Numbers mix freely (an Int and a Float give a Float) and `+` with a string
-on either side concatenates, but no other operator converts implicitly.
+on either side concatenates (edition 2026; edition 2027 requires two
+strings, see E0034), but no other operator converts implicitly.
 
 Example:
 
@@ -788,6 +789,27 @@ Fix: give each task its own stream (call `.stream()` per task), or collect
 it into an array first (`let xs = s.collect()`) and share the array.",
         matches: |h| h.starts_with("stream already in use") || h.starts_with("stream "),
     },
+    ErrorCode {
+        code: "E0034",
+        title: "implicit string conversion",
+        hint: "convert explicitly with str(x), or use interpolation: \"text {x}\"",
+        explanation: "\
+Edition 2027: `+` was applied to a String and a value of another type.
+Edition 2026 converted the other operand to text silently (`\"a\" + 1` is
+`\"a1\"`), which hides bugs such as adding a number read from input to a
+label. In edition 2027, `+` concatenates only two strings; numbers still add
+as numbers.
+
+Example:
+
+    let n = 3
+    println(\"items: \" + n)      // cannot add String and Int
+
+Fix: interpolate — `println(\"items: {n}\")` — or convert explicitly with
+`str(n)`: `\"items: \" + str(n)`. Reported statically as T0005 (an error
+in edition 2027). See docs/editions/2027.md.",
+        matches: |h| h.starts_with("cannot add ") && !h.starts_with("cannot add to "),
+    },
 ];
 
 /// The code for a runtime error message.
@@ -970,11 +992,23 @@ mod tests {
             ),
             (s::immutable_reassign("x"), "E0006"),
             (
-                s::binary(s::BinaryOp::Sub, s::Operand::Str("a"), s::Operand::Int(1)).unwrap_err(),
+                s::binary(
+                    s::BinaryOp::Sub,
+                    s::Operand::Str("a"),
+                    s::Operand::Int(1),
+                    s::edition::Edition::E2026,
+                )
+                .unwrap_err(),
                 "E0007",
             ),
             (
-                s::binary(s::BinaryOp::Add, s::Operand::Null, s::Operand::Int(1)).unwrap_err(),
+                s::binary(
+                    s::BinaryOp::Add,
+                    s::Operand::Null,
+                    s::Operand::Int(1),
+                    s::edition::Edition::E2027,
+                )
+                .unwrap_err(),
                 "E0007",
             ),
             (s::DIVISION_BY_ZERO.to_string(), "E0008"),
@@ -1033,6 +1067,17 @@ mod tests {
             (
                 "stream already in use (re-entrant advance)".to_string(),
                 "E0033",
+            ),
+            (s::mixed_concat_error("String", "Int"), "E0034"),
+            (
+                s::binary(
+                    s::BinaryOp::Add,
+                    s::Operand::Int(1),
+                    s::Operand::Str("a"),
+                    s::edition::Edition::E2027,
+                )
+                .unwrap_err(),
+                "E0034",
             ),
             (
                 "task error: index out of bounds: index 1 on array of length 0".to_string(),
