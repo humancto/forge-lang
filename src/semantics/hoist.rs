@@ -101,34 +101,66 @@ pub fn plan(statements: &[SpannedStmt], predefined: &dyn Fn(&str) -> bool) -> Pl
         }
     }
 
+    let hoistable: Vec<bool> = statements
+        .iter()
+        .map(|s| match &s.stmt {
+            Stmt::FnDef { name, .. } => {
+                !predefined(name) && bound_by.get(name.as_str()).copied() == Some(1)
+            }
+            _ => false,
+        })
+        .collect();
+    // Hoisted definitions by name (each is bound exactly once).
+    let mut hoisted_fn: HashMap<&str, usize> = HashMap::new();
+    for (i, spanned) in statements.iter().enumerate() {
+        if let (true, Stmt::FnDef { name, .. }) = (hoistable[i], &spanned.stmt) {
+            hoisted_fn.insert(name.as_str(), i);
+        }
+    }
+    // Names some non-hoisted statement binds, and the last statement that
+    // may bind any name.
+    let bound_somewhere: HashSet<&str> = binders
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !hoistable[*i])
+        .flat_map(|(_, b)| b.names.iter().map(String::as_str))
+        .collect();
+    let last_everything = binders
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| !hoistable[*i] && b.everything)
+        .map(|(i, _)| i)
+        .last();
+
     // Each hoisted statement is placed in the "bucket" of the statement it
     // runs before (`anchor`); buckets keep source order.
     let mut anchors: Vec<Option<usize>> = vec![None; n];
+    // Hoisted definitions each hoisted definition reads.
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); n];
     // Lowest bucket a statement reading `name` may be placed in.
     let mut ready: HashMap<String, usize> = HashMap::new();
     // Lowest bucket for anything (after a statement that may bind any name).
     let mut barrier = 0usize;
     for (i, spanned) in statements.iter().enumerate() {
-        let hoist = match &spanned.stmt {
-            Stmt::FnDef { name, .. } => {
-                !predefined(name) && bound_by.get(name.as_str()).copied() == Some(1)
+        if hoistable[i] {
+            let mut anchor = barrier;
+            for name in needed_names(&spanned.stmt) {
+                if let Some(&j) = hoisted_fn.get(name.as_str()) {
+                    if j != i {
+                        deps[i].push(j);
+                    }
+                } else if let Some(&r) = ready.get(name.as_str()) {
+                    anchor = anchor.max(r);
+                } else if !predefined(&name)
+                    && (bound_somewhere.contains(name.as_str())
+                        || last_everything.is_some_and(|e| e > i))
+                {
+                    // Only defined below this definition: moving it up
+                    // would expose it where what it reads does not exist.
+                    anchor = i;
+                }
             }
-            _ => false,
-        };
-        if hoist {
-            let needs = needed_names(&spanned.stmt);
-            let anchor = needs
-                .iter()
-                .filter_map(|name| ready.get(name.as_str()).copied())
-                .fold(barrier, usize::max)
-                .min(i);
-            anchors[i] = Some(anchor);
-            // Definitions that read this one go below it (in the same
-            // bucket, later statements are placed after it).
-            if let Stmt::FnDef { name, .. } = &spanned.stmt {
-                let slot = ready.entry(name.clone()).or_default();
-                *slot = (*slot).max(anchor);
-            }
+            anchors[i] = Some(anchor.min(i));
         } else {
             let b = &binders[i];
             if b.everything {
@@ -136,6 +168,24 @@ pub fn plan(statements: &[SpannedStmt], predefined: &dyn Fn(&str) -> bool) -> Pl
             }
             for name in &b.names {
                 ready.insert(name.clone(), i + 1);
+            }
+        }
+    }
+    // A definition goes no higher than the definitions it reads, wherever
+    // they are written (transitively; anchors only grow, so this ends).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..n {
+            let Some(current) = anchors[i] else { continue };
+            let wanted = deps[i]
+                .iter()
+                .filter_map(|&j| anchors[j])
+                .fold(current, usize::max)
+                .min(i);
+            if wanted != current {
+                anchors[i] = Some(wanted);
+                changed = true;
             }
         }
     }
@@ -895,6 +945,23 @@ mod tests {
         let src = "say g()\nlet k = 1\nfn f() { k }\nfn g() { f() }";
         // f needs k; g needs f (placed after it).
         assert_eq!(order(src), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn names_defined_only_below_keep_the_definition_in_place() {
+        // `late` exists only after `f`: hoisting `f` would make it callable
+        // where `late` is still undefined.
+        let src = "say f()\nfn f() { return late }\nlet late = 1";
+        assert_eq!(order(src), vec![0, 1, 2]);
+        // Transitively, through a definition written later.
+        let src = "say f()\nfn f() { return g() }\nfn g() { return late }\nlet late = 1";
+        assert_eq!(order(src), vec![0, 1, 2, 3]);
+        // A later wildcard import may define it too.
+        let src = "say f()\nfn f() { return late }\nimport \"x.fg\"";
+        assert_eq!(order(src), vec![0, 1, 2]);
+        // A function written later that needs nothing still hoists both.
+        let src = "say f()\nfn f() { return g() }\nfn g() { return 1 }";
+        assert_eq!(order(src), vec![1, 2, 0]);
     }
 
     #[test]
