@@ -210,3 +210,46 @@ fn forge_test_checks_test_files_in_2027() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[test]
+fn imported_modules_are_checked_like_the_entry_program_in_2027() {
+    let files = [
+        ("static_mod.fg", "fn bad() -> Int { return \"x\" }\n"),
+        ("dyn_mod.fg", "fn twice(n: Int) -> Int { return n * 2 }\n"),
+        ("a.fg", "import \"static_mod.fg\"\nprintln(bad())\n"),
+        (
+            "b.fg",
+            "import \"dyn_mod.fg\"\nprintln(twice(2))\nprintln(twice(json.parse(\"\\\"x\\\"\")))\n",
+        ),
+    ];
+    for edition in ["2026", "2027"] {
+        let dir = project(&format!("imports{}", edition), edition, &files);
+        for engine in ENGINES {
+            let a = forge(&dir, &with_engine(engine, &["run", "a.fg"]));
+            let a_err = String::from_utf8_lossy(&a.stderr);
+            let b = forge(&dir, &with_engine(engine, &["run", "b.fg"]));
+            let b_err = String::from_utf8_lossy(&b.stderr);
+            if edition == "2026" {
+                // Unchanged: annotations in modules are not enforced.
+                assert!(a.status.success(), "{engine:?} {a_err}");
+                assert_eq!(String::from_utf8_lossy(&a.stdout), "x\n");
+            } else {
+                // A declared-type contradiction refuses the import...
+                assert!(!a.status.success(), "{engine:?}");
+                assert!(
+                    a_err.contains("import 'static_mod.fg' type error"),
+                    "{engine:?} {a_err}"
+                );
+                assert!(a_err.contains("T0003"), "{engine:?} {a_err}");
+                // ...and the module's annotated boundaries are checked.
+                assert!(!b.status.success(), "{engine:?}");
+                assert_eq!(String::from_utf8_lossy(&b.stdout), "4\n");
+                assert!(
+                    b_err.contains("argument 'n' of 'twice' must be Int"),
+                    "{engine:?} {b_err}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

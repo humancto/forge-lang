@@ -804,14 +804,8 @@ impl VM {
                 let source = std::fs::read_to_string(&checked)
                     .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
 
-                let mut lexer = crate::lexer::Lexer::new(&source);
-                let tokens = lexer.tokenize().map_err(|e| {
-                    VMError::new(&format!("import '{}' lex error: {}", path, e.message))
-                })?;
-                let mut parser = crate::parser::Parser::new(tokens);
-                let program = parser.parse_program().map_err(|e| {
-                    VMError::new(&format!("import '{}' parse error: {}", path, e.message))
-                })?;
+                let program = crate::typechecker::prepare_module(&source, &path, &file_path)
+                    .map_err(|e| VMError::new(&e))?;
 
                 let export_names = requested_names
                     .unwrap_or_else(|| crate::vm::compiler::import_export_names(&program));

@@ -1001,9 +1001,13 @@ pub fn run(paths: &[PathBuf], options: &FixOptions) -> i32 {
             } else {
                 continue;
             };
-            if let Err(e) = set_project_edition(dir, options) {
-                eprintln!("{}", e);
-                failed = true;
+            match set_project_edition(dir, options) {
+                Ok(true) => changed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("{}", e);
+                    failed = true;
+                }
             }
         }
     }
@@ -1020,14 +1024,17 @@ pub fn run(paths: &[PathBuf], options: &FixOptions) -> i32 {
     }
 }
 
-fn set_project_edition(dir: &Path, options: &FixOptions) -> Result<(), String> {
+/// Set `edition = "2027"` in `dir/forge.toml` (or, with `--check` /
+/// `--diff`, report it). Returns whether the manifest needs the change, so
+/// `--check` fails for a project whose only remaining change is the edition.
+fn set_project_edition(dir: &Path, options: &FixOptions) -> Result<bool, String> {
     let path = dir.join("forge.toml");
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(()); // not a project root
+        return Ok(false); // not a project root
     };
     let updated = set_manifest_edition(&text, Edition::E2027);
     if updated == text {
-        return Ok(());
+        return Ok(false);
     }
     if options.diff {
         print!("{}", unified_diff(&path.to_string_lossy(), &text, &updated));
@@ -1036,7 +1043,7 @@ fn set_project_edition(dir: &Path, options: &FixOptions) -> Result<(), String> {
         std::fs::write(&path, updated).map_err(|e| format!("{}: error: {}", path.display(), e))?;
         println!("  set edition = \"2027\" in {}", path.display());
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

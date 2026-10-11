@@ -166,6 +166,50 @@ pub fn prepare(
     Ok((program, diagnostics))
 }
 
+/// Lex and parse an imported module (`path` as written in the `import`,
+/// for messages) for both engines. From edition 2027 the module gets the
+/// same treatment as the entry program ([`prepare`]): a contradiction of a
+/// declared type refuses the import, and annotated boundaries are checked
+/// at run time. The check never reads other files (`skip_imports`): the
+/// module's own imports are prepared when they are loaded, under the
+/// run's permission policy. Edition 2026 parses exactly as before.
+pub fn prepare_module(source: &str, path: &str, file: &Path) -> Result<Program, String> {
+    let options = CheckOptions {
+        file: Some(file.to_path_buf()),
+        skip_imports: true,
+        ..Default::default()
+    };
+    if !options.policy().enforces_at_run_time() {
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .map_err(|e| format!("import '{}' lex error: {}", path, e.message))?;
+        return crate::parser::Parser::new(tokens)
+            .parse_program()
+            .map_err(|e| format!("import '{}' parse error: {}", path, e.message));
+    }
+    match prepare(source, &options) {
+        Ok((program, _warnings)) => Ok(program),
+        Err(PrepareError::Frontend(FrontendError::Lex { message, .. })) => {
+            Err(format!("import '{}' lex error: {}", path, message))
+        }
+        Err(PrepareError::Frontend(FrontendError::Parse { message, .. })) => {
+            Err(format!("import '{}' parse error: {}", path, message))
+        }
+        Err(PrepareError::Type(diagnostics)) => {
+            let errors: Vec<String> = diagnostics
+                .iter()
+                .filter(|d| d.is_error())
+                .map(|d| format!("{}:{}: [{}] {}", path, d.line(), d.code, d.message))
+                .collect();
+            Err(format!(
+                "import '{}' type error: {}",
+                path,
+                errors.join("; ")
+            ))
+        }
+    }
+}
+
 /// The closing line of a run refused by type errors (`forge run`), naming
 /// the rule that made them errors.
 pub fn refusal_summary(errors: usize, policy: SeverityPolicy) -> String {

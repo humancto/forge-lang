@@ -313,7 +313,11 @@ fn unknown_edition_is_rejected() {
         "[project]\nname = \"e\"\nedition = \"2099\"\n",
     )
     .unwrap();
-    for args in [&["run", "main.fg"][..], &["check", "main.fg"][..]] {
+    for args in [
+        &["run", "main.fg"][..],
+        &["check", "main.fg"][..],
+        &["build", "main.fg"][..],
+    ] {
         let out = forge(&dir, args);
         assert!(!out.status.success(), "{:?}", args);
         let stderr = String::from_utf8_lossy(&out.stderr);

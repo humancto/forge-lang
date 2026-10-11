@@ -777,7 +777,8 @@ async fn async_main() {
     }
     // The edition is fixed before any source is parsed: `--edition` wins
     // over forge.toml, which wins over the default.
-    // Only commands that run or check code fail on a bad manifest edition.
+    // Commands that run, check or compile code fail on a bad manifest
+    // edition; the others (version, new, fmt, ...) fall back to the default.
     let edition = match &cli.edition {
         Some(text) => semantics::edition::Edition::parse(text),
         None if matches!(
@@ -787,6 +788,8 @@ async fn async_main() {
                     | Command::Test { .. }
                     | Command::Mcp { .. }
                     | Command::Check { .. }
+                    | Command::Build { .. }
+                    | Command::Watch { .. }
                     | Command::Repl
             )
         ) =>

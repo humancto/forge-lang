@@ -129,6 +129,17 @@ fn check_diff_and_set_edition() {
     let run = forge(&work, &["run", "main.fg"]);
     assert_eq!(String::from_utf8_lossy(&run.stdout), "1\n");
 
+    // Source already migrated, only the manifest still needs the edition:
+    // --check must fail, since applying the fix would change forge.toml.
+    fs::write(work.join("forge.toml"), "[project]\nname = \"demo\"\n").unwrap();
+    let manifest_only = forge(&work, &["fix", "--check", "--set-edition", "."]);
+    assert_eq!(manifest_only.status.code(), Some(1), "{:?}", manifest_only);
+    assert_eq!(
+        fs::read_to_string(work.join("forge.toml")).unwrap(),
+        "[project]\nname = \"demo\"\n",
+        "--check does not write"
+    );
+
     // Only 2026 -> 2027 exists.
     let wrong = forge(&work, &["fix", "--edition", "2026", "main.fg"]);
     assert!(!wrong.status.success());

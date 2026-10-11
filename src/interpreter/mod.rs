@@ -2154,14 +2154,8 @@ impl Interpreter {
                     .map_err(|e| RuntimeError::new(&e.to_string()))?;
                 let source = std::fs::read_to_string(&checked)
                     .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
-                let mut lexer = crate::lexer::Lexer::new(&source);
-                let tokens = lexer.tokenize().map_err(|e| {
-                    RuntimeError::new(&format!("import '{}' lex error: {}", path, e.message))
-                })?;
-                let mut parser = crate::parser::Parser::new(tokens);
-                let program = parser.parse_program().map_err(|e| {
-                    RuntimeError::new(&format!("import '{}' parse error: {}", path, e.message))
-                })?;
+                let program = crate::typechecker::prepare_module(&source, path, &file_path)
+                    .map_err(|e| RuntimeError::new(&e))?;
 
                 // Shared cycle detection (runtime/imports.rs); the guard keeps
                 // this module on the import chain while it runs.

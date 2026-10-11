@@ -1013,14 +1013,7 @@ fn parse_import_program(path: &str, resolved: &Path) -> Result<Program, CompileE
         .map_err(|e| CompileError::new(&e.to_string()))?;
     let source = std::fs::read_to_string(&checked)
         .map_err(|e| CompileError::new(&format!("cannot import '{}': {}", path, e)))?;
-    let mut lexer = crate::lexer::Lexer::new(&source);
-    let tokens = lexer
-        .tokenize()
-        .map_err(|e| CompileError::new(&format!("import '{}' lex error: {}", path, e.message)))?;
-    let mut parser = crate::parser::Parser::new(tokens);
-    parser
-        .parse_program()
-        .map_err(|e| CompileError::new(&format!("import '{}' parse error: {}", path, e.message)))
+    crate::typechecker::prepare_module(&source, path, resolved).map_err(|e| CompileError::new(&e))
 }
 
 /// Names a bare `import` (no name list) binds in the importer.
