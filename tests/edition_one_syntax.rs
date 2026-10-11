@@ -20,13 +20,11 @@ fn scratch() -> PathBuf {
 
 fn run(source: &str, args: &[&str]) -> Output {
     let dir = scratch();
-    let file = dir.join(format!(
-        "p{}.fg",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
+    // Unique per call: tests run on parallel threads, and two calls in the
+    // same nanosecond would share (and delete) one file.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = dir.join(format!("p{}.fg", n));
     std::fs::write(&file, source).expect("write program");
     let mut cmd = Command::new(FORGE);
     cmd.args(["--error-format", "json"])
