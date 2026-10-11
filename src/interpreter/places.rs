@@ -500,6 +500,16 @@ impl Interpreter {
                 let rhs = peel_frozen(&rhs);
                 let caps = self.caps;
                 Some(self.env.with_value_mut(x, |cur| {
+                    if let (Value::Array(items), BinOp::Add, Value::Array(more)) =
+                        (&mut *cur, op, rhs)
+                    {
+                        // `xs = xs + [v]`: append in place (the result is
+                        // the same new array the assignment would store).
+                        caps.check_collection(items.len() + more.len())
+                            .map_err(|m| RuntimeError::new(&m))?;
+                        items.extend(more.iter().cloned());
+                        return Ok(());
+                    }
                     if let (Value::String(s), BinOp::Add) = (&mut *cur, op) {
                         let concat = matches!(
                             crate::semantics::binary(

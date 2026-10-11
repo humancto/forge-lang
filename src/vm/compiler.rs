@@ -1194,12 +1194,14 @@ fn try_compile_mutating_call(
 }
 
 /// An operand whose evaluation has no side effects and runs no user code
-/// (literals, variable reads, arithmetic on those). Evaluating it before
-/// rather than after reading a local therefore cannot change the result,
-/// which lets `AddLocal` / `PushLocal` read the local last.
+/// (literals, variable reads, arithmetic on those, array literals of
+/// those). Evaluating it before rather than after reading a local
+/// therefore cannot change the result, which lets `AddLocal` / `PushLocal`
+/// read the local last.
 fn is_simple_operand(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
+        Expr::Array(items) => items.iter().all(is_simple_operand),
         Expr::BinOp { left, right, .. } => is_simple_operand(left) && is_simple_operand(right),
         Expr::UnaryOp { operand, .. } => is_simple_operand(operand),
         _ => false,
@@ -1207,7 +1209,8 @@ fn is_simple_operand(expr: &Expr) -> bool {
 }
 
 /// `x = x + e` (and `x += e`) on a mutable local with a simple `e`:
-/// one `AddLocal`, which appends in place to a string the local owns.
+/// one `AddLocal`, which appends in place to a string or array the local
+/// owns (`s = s + "x"`, `xs = xs + [v]`).
 fn try_compile_add_local(
     c: &mut Compiler,
     target: &Expr,

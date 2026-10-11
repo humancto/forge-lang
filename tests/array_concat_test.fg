@@ -1,0 +1,82 @@
+// `+` on two arrays builds a new array (every edition).
+
+@test
+fn plus_concatenates_arrays() {
+    assert_eq([1, 2] + [3], [1, 2, 3])
+    assert_eq([] + [1], [1])
+    assert_eq([1] + [], [1])
+    assert_eq([] + [], [])
+    assert_eq(["a"] + [1, [2]], ["a", 1, [2]])
+    assert_eq(freeze([1]) + [2], [1, 2])
+}
+
+@test
+fn operands_are_not_changed() {
+    let a = [1, 2]
+    let b = [3]
+    let c = a + b
+    assert_eq(a, [1, 2])
+    assert_eq(b, [3])
+    assert_eq(c, [1, 2, 3])
+}
+
+@test
+fn append_in_a_loop() {
+    let mut xs = []
+    for i in range(5) {
+        xs = xs + [i]
+    }
+    assert_eq(xs, [0, 1, 2, 3, 4])
+    let mut ys = [0]
+    ys += [1, 2]
+    assert_eq(ys, [0, 1, 2])
+}
+
+@test
+fn aliases_do_not_see_appends() {
+    let mut xs = [1]
+    xs = xs + [2]
+    let snapshot = xs
+    xs = xs + [3]
+    xs += [4]
+    assert_eq(snapshot, [1, 2])
+    assert_eq(xs, [1, 2, 3, 4])
+    // Appending an array to itself reads the old value.
+    let mut zs = [1, 2]
+    zs = zs + zs
+    assert_eq(zs, [1, 2, 1, 2])
+    zs = zs + [zs]
+    assert_eq(len(zs), 5)
+    assert_eq(zs[4], [1, 2, 1, 2])
+}
+
+@test
+fn captured_and_field_appends() {
+    let mut log = []
+    let add = fn(x) { log = log + [x] }
+    add(1)
+    add(2)
+    assert_eq(log, [1, 2])
+    let mut state = { items: [1] }
+    state.items = state.items + [2]
+    state.items += [3]
+    assert_eq(state.items, [1, 2, 3])
+}
+
+fn message_of(f) {
+    try {
+        f()
+    } catch e {
+        return e.message
+    }
+    return "no error"
+}
+
+@test
+fn other_operators_and_mixes_stay_errors() {
+    assert(starts_with(message_of(fn() { [1] - [1] }), "cannot apply Sub to Array and Array"))
+    assert(starts_with(message_of(fn() { [1] * [1] }), "cannot apply Mul to Array and Array"))
+    assert(starts_with(message_of(fn() { [1] + 1 }), "cannot apply Add to Array and Int"))
+    assert(starts_with(message_of(fn() { [1] + (1, 2) }), "cannot apply Add to Array and Tuple"))
+    assert(starts_with(message_of(fn() { [1] + { a: 1 } }), "cannot apply Add to Array and Object"))
+}

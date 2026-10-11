@@ -2316,6 +2316,8 @@ impl<'a> Checker<'a> {
                     crate::semantics::Outcome::Float(_) => Ty::Float,
                     crate::semantics::Outcome::Bool(_) => Ty::Bool,
                     crate::semantics::Outcome::Concat => Ty::String,
+                    // Both are arrays: the join of their element types.
+                    crate::semantics::Outcome::ArrayConcat => self.cx.join(&lt, &rt),
                 },
                 // Edition 2027: a certain run-time error (E0034), so an
                 // error in every mode.

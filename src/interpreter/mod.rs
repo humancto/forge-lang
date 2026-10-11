@@ -940,6 +940,15 @@ fn shared_binary_op(op: &BinOp) -> Option<crate::semantics::BinaryOp> {
 }
 
 /// Project an interpreter value onto the shared operand view.
+/// Length of an array (or frozen array); 0 for anything else.
+fn array_len(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => items.len(),
+        Value::Frozen(inner) => array_len(inner),
+        _ => 0,
+    }
+}
+
 fn semantic_operand(value: &Value) -> crate::semantics::Operand<'_> {
     use crate::semantics::Operand;
     match value {
@@ -4219,6 +4228,28 @@ impl Interpreter {
         Ok(Value::String(text))
     }
 
+    /// `left + right` for two arrays (frozen ones included): a new array,
+    /// within the collection size cap.
+    fn concat_arrays(&self, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
+        let items = |v: &'_ Value| -> Vec<Value> {
+            match v {
+                Value::Array(items) => items.clone(),
+                Value::Frozen(inner) => match inner.as_ref() {
+                    Value::Array(items) => items.clone(),
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            }
+        };
+        let (a, b) = (array_len(left), array_len(right));
+        self.caps
+            .check_collection(a + b)
+            .map_err(|m| RuntimeError::new(&m))?;
+        let mut out = items(left);
+        out.extend(items(right));
+        Ok(Value::Array(out))
+    }
+
     fn eval_binop(&self, left: &Value, op: &BinOp, right: &Value) -> Result<Value, RuntimeError> {
         // `==` / `!=` are total: values of different types are unequal,
         // never an error (same rule as the VM's `Value::equals`).
@@ -4239,6 +4270,7 @@ impl Interpreter {
                 Ok(crate::semantics::Outcome::Float(f)) => Ok(Value::Float(f)),
                 Ok(crate::semantics::Outcome::Bool(b)) => Ok(Value::Bool(b)),
                 Ok(crate::semantics::Outcome::Concat) => self.concat(left, right),
+                Ok(crate::semantics::Outcome::ArrayConcat) => self.concat_arrays(left, right),
                 Err(message) => Err(RuntimeError::new(&message)),
             };
         }

@@ -113,19 +113,22 @@ impl VM {
             }
         }
 
-        let concat = matches!(
-            crate::semantics::binary(
-                crate::semantics::BinaryOp::Add,
-                Self::semantic_operand(&self.gc, &cur),
-                Self::semantic_operand(&self.gc, &rhs),
-                self.edition(),
-            ),
-            Ok(crate::semantics::Outcome::Concat)
+        let outcome = crate::semantics::binary(
+            crate::semantics::BinaryOp::Add,
+            Self::semantic_operand(&self.gc, &cur),
+            Self::semantic_operand(&self.gc, &rhs),
+            self.edition(),
         );
-        if !concat {
-            let result = self.arith_op(&cur, &rhs, super::bytecode::OpCode::Add)?;
-            self.write_local(frame_idx, base, slot, result);
-            return Ok(());
+        match outcome {
+            Ok(crate::semantics::Outcome::Concat) => {}
+            Ok(crate::semantics::Outcome::ArrayConcat) => {
+                return self.add_local_array(frame_idx, base, slot, cur, rhs)
+            }
+            _ => {
+                let result = self.arith_op(&cur, &rhs, super::bytecode::OpCode::Add)?;
+                self.write_local(frame_idx, base, slot, result);
+                return Ok(());
+            }
         }
 
         let suffix = rhs.display(&self.gc);
@@ -157,6 +160,43 @@ impl VM {
             Value::obj(self.gc.alloc_string(text))
         };
         self.write_local(frame_idx, base, slot, result);
+        Ok(())
+    }
+
+    /// `AddLocal` on two arrays: `xs = xs + ys` appends in place when the
+    /// local owns its array, otherwise stores a fresh (owned) copy.
+    fn add_local_array(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        cur: Value,
+        rhs: Value,
+    ) -> Result<(), VMError> {
+        if let Some(r) = self.owned_by_local(frame_idx, slot, cur) {
+            let more = self.concat_operand_items(&rhs).to_vec();
+            let caps = self.caps;
+            let mut grown = None;
+            if let Some(obj) = self.gc.get_mut(r) {
+                if let ObjKind::Array(items) = &mut obj.kind {
+                    caps.check_collection(items.len() + more.len())
+                        .map_err(|m| VMError::new(&m))?;
+                    let before = items.capacity();
+                    items.extend(more);
+                    grown = Some((items.capacity() - before) * std::mem::size_of::<Value>());
+                }
+            }
+            if let Some(bytes) = grown {
+                self.gc.note_growth(bytes);
+                return Ok(());
+            }
+        }
+        let items = self.concat_array_items(&cur, &rhs)?;
+        let r = self.gc.alloc(ObjKind::Array(items));
+        if self.local_can_own(frame_idx, slot) {
+            self.gc.set_unique(r);
+        }
+        self.write_local(frame_idx, base, slot, Value::obj(r));
         Ok(())
     }
 

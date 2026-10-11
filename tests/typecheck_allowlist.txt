@@ -6,6 +6,11 @@
 # that a test deliberately runs to assert the engines raise the error the
 # checker predicts (inside `try`, `safe` or a parity fixture).
 
+tests/array_concat_test.fg:77 T0005  # asserts `[1] - [1]` stays a run-time error next to array `+`
+tests/array_concat_test.fg:78 T0005  # asserts `[1] * [1]` stays a run-time error next to array `+`
+tests/array_concat_test.fg:79 T0005  # asserts `[1] + 1` stays a run-time error next to array `+`
+tests/array_concat_test.fg:80 T0005  # asserts `[1] + (1, 2)` stays a run-time error next to array `+`
+tests/array_concat_test.fg:81 T0005  # asserts `[1] + {a: 1}` stays a run-time error next to array `+`
 tests/block_values_test.fg:110 T0004  # asserts the run-time "method add expects 1 argument" error
 tests/block_values_test.fg:117 T0004  # asserts the run-time "method get expects 0 arguments" error
 tests/interpreter_behavior_test.fg:388 T0006  # asserts a block-local binding is not visible after the block
