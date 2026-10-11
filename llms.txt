@@ -4,7 +4,7 @@
 
 This file is the canonical, compact guide for AI models writing Forge. Every code block below was run on Forge v0.9.x with the default engine (`forge run file.fg`). Prefer the forms shown here.
 
-Forge also has an optional "natural" syntax (`set x to 5`, `say`, `define`, `otherwise`, ...). It is sugar for the classic syntax below. Write classic syntax unless asked otherwise.
+Write only the forms shown here. Edition 2026 (the default) also accepts an older "natural" syntax (`set x to 5`, `say`, `define`, `otherwise`, `repeat n times`, `unpack`, `must`, `safe`, `check`, ...) and joke builtins (`sus`, `bruh`, ...); edition 2027 (`forge --edition 2027`, or `edition = "2027"` under `[project]` in forge.toml) removes them, and `forge fix --edition 2027` rewrites old code.
 
 ## Running
 
@@ -14,6 +14,7 @@ forge --interp run app.fg        # tree-walking interpreter (reference semantics
 forge --jit run app.fg           # VM + Cranelift JIT for numeric functions
 forge --allow-run run app.fg     # allow sh/run_command and other shell builtins
 forge -e 'println(1 + 2)'        # evaluate inline
+forge --edition 2027 run app.fg  # edition 2027 (preview); `forge fix --edition 2027 .` migrates 2026 code
 forge test                       # run @test functions in tests/*.fg
 forge build --native app.fg      # native executable (also: fmt, new, lsp, add, install)
 forge mcp --allow-net=api.x.com  # MCP server: AI agents run Forge in a deny-all sandbox (VM; --engine interp)
@@ -44,6 +45,9 @@ println(len(nums))
 println(str(42) + "!")
 println(int("7") + 1)
 println(10 / 4)               // 2 (Int / Int is integer division)
+let {name: who, age} = user     // destructuring (also `let [first, ...rest] = nums`, `let (a, b) = pair`)
+let [first, ...rest] = nums
+println("{who} {age} {first} {rest}")
 ```
 
 Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines.
@@ -235,13 +239,13 @@ try {
     println("caught {e.type}: {e.message}")   // ArithmeticError: division by zero
 }
 try {
-    must Err("bad config")       // must: unwrap or raise
+    unwrap(Err("bad config"))    // unwrap: the value, or raise the error
 } catch e {
     println(e.message)
 }
 ```
 
-There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `must expr` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. `safe { ... }` runs a block and swallows its errors.
+There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 
 Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0018`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
@@ -429,7 +433,7 @@ fn cities() { return ["Oslo"] }
 
 ## Common mistakes
 
-- `let {a, b} = obj` does not parse. Use `unpack {a, b} from obj` or `unpack [x, ...rest] from arr`; `let (a, b) = tuple` works for tuples.
+- Destructure with `let`: `let {a, b} = obj`, `let {a: x} = obj` (renames), `let [x, ...rest] = arr`, `let (a, b) = tuple`; add `mut` for mutable bindings. Missing fields/items bind `null`.
 - `for i, x in array` does not work. Use `for e in enumerate(array) { e.index, e.value }`.
 - No `|x| ...` closures and no arrow functions. Write `fn(x) { return ... }`.
 - No `throw`, no `elif`, no `??` operator. Use `Err`/`?`, `else if`, and `get(obj, key, default)`.

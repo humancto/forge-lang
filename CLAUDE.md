@@ -32,6 +32,8 @@ forge fmt                    # format code
 
 ## Dual Syntax (Classic + Natural)
 
+Edition 2026 only: edition 2027 (`--edition 2027`, `rfcs/0008-edition-2027.md`) removes every natural form in this table (E0034, `src/parser/removed.rs`; the lexer stops reserving the words, `lexer::token::REMOVED_IN_2027`) and the builtins `say`/`yell`/`whisper` and the GenZ kit (`builtins_registry::REMOVED`, filtered per edition by `globals_in`). `forge fix --edition 2027` (`src/fix.rs`) rewrites 2026 code. Destructuring is `let {a, b: c} = obj` / `let [x, ...rest] = arr` in every edition.
+
 | Feature     | Classic            | Forge-Unique                |
 | ----------- | ------------------ | --------------------------- |
 | Variables   | `let x = 5`        | `set x to 5`                |
@@ -43,7 +45,7 @@ forge fmt                    # format code
 | Async fn    | `async fn x() { }` | `forge x() { }`             |
 | Await       | `await expr`       | `hold expr`                 |
 | Yield       | `yield value`      | `emit value`                |
-| Destructure | `let (a, b) = tuple` (tuples only) | `unpack {a, b} from obj` / `unpack [x, ...rest] from arr` |
+| Destructure | `let (a, b) = tuple`, `let {a, b} = obj`, `let [x, ...rest] = arr` | `unpack {a, b} from obj` / `unpack [x, ...rest] from arr` |
 | Fetch       | `fetch("url")`     | `grab resp from "url"`      |
 
 ## Innovation Keywords (unique to Forge)
@@ -66,7 +68,7 @@ forge fmt                    # format code
 
 Source of truth: `forge help` (clap `Command` enum in `src/main.rs`).
 
-run, check, explain, repl, version, fmt, test, new, build, install, add, update, publish, yank, search, lsp, dap, mcp, learn, chat, watch, doc, help, plus `-e` for inline eval.
+run, check, explain, repl, version, fmt, fix, test, new, build, install, add, update, publish, yank, search, lsp, dap, mcp, learn, chat, watch, doc, help, plus `-e` for inline eval.
 
 `forge mcp` (`src/mcp/`, test `tests/mcp_stdio.rs`) is a stdio MCP server for AI agents: tools `run_forge` (optional `session_id`, `src/mcp/session.rs`) / `reset_session` / `check_forge` / `forge_reference`; `forge mcp serve tools.fg` serves `@tool`/`@resource` functions written in Forge (`src/mcp/tools.rs`). Scripts run in `Sandbox` (VM by default, `--engine interp`) under deny-all plus the `--allow-*` / `[permissions]` grants (`build_mcp_policy` in `main.rs`). Both the binary and the lib compile `mcp/` and `sandbox.rs`.
 
@@ -485,7 +487,8 @@ call `tracing_init::init_subscriber()` on first use.
 - **`sort()` with custom comparator:** `sort_by` closure borrows `self` immutably but calling `self.call_value()` needs `&mut self`. Work around by collecting items first (releasing the `gc` borrow), then sort with `call_value` on cloned items.
 - **GC borrow in closures:** Never call `self.alloc_string()` or `self.call_value()` inside a closure that still holds `self.gc.get()`. Always collect into a `Vec<String>` or `Vec<Value>` first to drop the GC borrow.
 - **VM `TryCatch` (resolved):** The compiler used to drop the catch block (M1.2.2), so the VM did not catch runtime errors. It is now compiled; `try { } catch e { }` works on the default VM engine.
-- **VM `Destructure` (resolved):** Also once dropped by the compiler (M1.2.1). `unpack {a, b} from obj`, `unpack [x, ...rest] from arr` and `let (a, b) = tuple` now work on the VM. Note there is no `let {a, b} = obj` form — object destructuring is `unpack` only.
+- **VM `Destructure` (resolved):** Also once dropped by the compiler (M1.2.1). `let {a, b: c} = obj`, `let [x, ...rest] = arr`, `let (a, b) = tuple` (and the 2026 `unpack ... from`) work on the VM; `Stmt::Destructure::mutable` decides mutability on both engines.
+- **Edition-gated syntax lives in the lexer's keyword set.** In edition 2027 the removed natural words lex as `Token::Ident` (`Token::keyword_in`), so 2027 programs may use them as names. `parser/removed.rs` recognises the old shapes built from those identifiers (only possible in 2027, so the parser needs no edition flag) and raises `semantics::edition::removed_syntax` (E0034). A new removed form needs: the word in `REMOVED_IN_2027`, a shape in `removed.rs`, a rewrite in `src/fix.rs`, a row in docs/editions/2027.md and a case in `tests/edition_one_syntax.rs`.
 - **VM GC rooting is structural — keep it that way.** GC only runs at safe points in `run_until`, so the danger is a native builtin holding `Value`s in Rust locals while it calls back into Forge code. `VM::call_native` wraps every builtin in a GC *native scope* (`Gc::enter_native`/`exit_native`): args are pinned and every allocation made by native code is auto-pinned until the builtin returns; `VM::call_value` suspends auto-pinning while bytecode runs and pins the callback's return value into the caller's scope. The one manual duty: if a builtin snapshots values *out of* a heap object and then calls back, pin the snapshot (`self.gc.pin_values(&items)`) because the callback may mutate the source. Never call the private `dispatch_native` directly. Test with `FORGE_GC_STRESS=1` / `vm.gc.set_stress(true)` (collects at every safe point after an allocation); `vm::runtime_safety_tests` runs all parity fixtures under stress. Invariants are documented in `src/vm/gc.rs`.
 - **VM integers: only `Value::int(n, gc)`.** There is no public panicking inline-int constructor any more (`NanBoxedValue::from_small_int` is `#[cfg(test)]`). Values outside 48 bits become `ObjKind::BoxedInt`; use `Value::try_inline_int` when no GC is available. Integer overflow policy (both engines): results that don't fit in i64 promote to float, like `i64::MAX + 1` — shared helpers live in `stdlib/math.rs` (`int_pow`, `int_abs`, `rounded_float_to_num`).
 - **Recursion limits live in `runtime/recursion.rs`.** Every engine calls `check_call_depth(depth)` per Forge call: a configurable depth limit (default 10000, `FORGE_MAX_DEPTH` / `--max-depth`) plus a native-stack guard (red zone below the thread's stack end), and reports `depth_exceeded_message` so the text is identical everywhere. The CLI runs on a `forge-main` thread with a 1 GiB (lazily committed) stack; unregistered threads are assumed to have 2 MiB. Measured cost per Forge call: ~16 KB interpreter, ~4 KB VM. JIT'd self-recursion receives the remaining depth budget and deopts to the VM before exceeding the limit, so the error is identical.
