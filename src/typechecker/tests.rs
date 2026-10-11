@@ -1371,8 +1371,9 @@ fn check_in(source: &str, strict: bool, edition: Edition) -> Vec<Diagnostic> {
     .diagnostics
 }
 
-/// Every code's `forge explain` example: a warning in 2026, and in 2027 an
-/// error exactly when the code contradicts a declaration.
+/// Every code's `forge explain` example: a warning in 2026 (or not reported,
+/// for a code new in 2027), and in 2027 an error exactly when the code
+/// contradicts a declaration or is an edition rule.
 #[test]
 fn edition_2027_promotes_exactly_the_declared_type_codes() {
     use crate::typechecker::diagnostics::tests::example_of;
@@ -1392,7 +1393,7 @@ fn edition_2027_promotes_exactly_the_declared_type_codes() {
             .unwrap_or_else(|| panic!("{} example does not report {}", code, code));
         assert_eq!(
             d.is_error(),
-            code.contradicts_declaration(),
+            code.contradicts_declaration() || code.is_edition_error(),
             "{} in 2027: {:?}",
             code,
             d
@@ -1551,5 +1552,75 @@ fn prepare_refuses_declared_type_errors_from_2027() {
     match prepare(src, &options(Edition::E2027)) {
         Err(PrepareError::Type(d)) => assert!(d[0].is_error() && d[0].code == Code::ArgumentType),
         other => panic!("expected a type error, got {:?}", other.map(|(_, d)| d)),
+    }
+}
+
+// Edition 2027: `push` is pure, so a discarded `push(xs, v)` does nothing
+// (T0019, docs/editions/2027.md).
+
+fn discarded_push(source: &str, edition: Edition) -> Vec<Diagnostic> {
+    check_in(source, false, edition)
+        .into_iter()
+        .filter(|d| d.code == Code::DiscardedResult)
+        .collect()
+}
+
+#[test]
+fn edition_2027_discarded_push_is_an_error() {
+    for src in [
+        "let mut xs = [1]\npush(xs, 2)\nprintln(xs)",
+        "let mut xs = []\nfor i in range(3) { push(xs, i) }",
+        "let mut xs = []\nwhile len(xs) < 3 { push(xs, 1) }",
+        "fn f(xs) {\n    push(xs, 1)\n    return xs\n}",
+        "let mut xs = []\nfor i in range(3) { if i > 1 { push(xs, i) } else { push(xs, 0) } }",
+        "let mut o = { a: [] }\npush(o.a, 1)\nprintln(o)",
+        "let xs = [1]\npush(xs, 2)\nprintln(xs)",
+        "let mut xs = []\ntry { push(xs, 1) } catch e { }\nprintln(xs)",
+    ] {
+        let ds = discarded_push(src, Edition::E2027);
+        assert_eq!(ds.len(), src.matches("push(").count(), "{src}: {ds:?}");
+        assert!(ds.iter().all(|d| d.is_error()), "{src}: {ds:?}");
+        assert!(ds[0].message.contains("push"), "{:?}", ds[0]);
+    }
+    let ds = discarded_push(
+        "let mut cols = []\npush(cols, 1)\nprintln(cols)",
+        Edition::E2027,
+    );
+    assert_eq!(ds[0].line(), 2);
+    let help = ds[0].help.clone().unwrap_or_default();
+    assert!(help.contains("cols = push(cols, value)"), "{help}");
+    assert!(help.contains("cols.push(value)"), "{help}");
+}
+
+#[test]
+fn edition_2027_used_push_results_are_not_reported() {
+    for src in [
+        "let mut xs = []\nxs = push(xs, 1)\nprintln(xs)",
+        "let xs = [1]\nlet ys = push(xs, 2)\nprintln(ys)",
+        "fn f(xs) { return push(xs, 1) }",
+        // The last statement of a function or lambda is its result.
+        "fn f(xs) { push(xs, 1) }",
+        "let acc = [1]\nlet rows = map([2], fn(x) { push(acc, x) })\nprintln(rows)",
+        // The method form appends in place.
+        "let mut xs = []\nxs.push(1)\nprintln(xs)",
+        // A user function named push.
+        "fn push(a, b) { return a }\nlet xs = []\npush(xs, 1)\nprintln(xs)",
+        // The last top-level statement (the REPL prints it).
+        "let xs = [1]\npush(xs, 2)",
+    ] {
+        let ds = discarded_push(src, Edition::E2027);
+        assert!(ds.is_empty(), "{src}: {ds:?}");
+    }
+}
+
+#[test]
+fn edition_2026_statement_push_is_not_reported() {
+    for strict in [false, true] {
+        let ds = check_in(
+            "let mut xs = [1]\npush(xs, 2)\nprintln(xs)",
+            strict,
+            Edition::E2026,
+        );
+        assert!(ds.iter().all(|d| d.code != Code::DiscardedResult), "{ds:?}");
     }
 }

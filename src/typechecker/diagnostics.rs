@@ -48,6 +48,9 @@ pub enum Code {
     ImmutableAssign,
     /// A name read before the statement that defines it has run.
     UseBeforeDefinition,
+    /// The result of a pure call that only produces a new value is thrown
+    /// away (`push(xs, v)` as a statement in edition 2027).
+    DiscardedResult,
 }
 
 impl Code {
@@ -71,6 +74,7 @@ impl Code {
         Code::MissingField,
         Code::ImmutableAssign,
         Code::UseBeforeDefinition,
+        Code::DiscardedResult,
     ];
 
     /// The stable identifier, e.g. `"T0006"`.
@@ -94,6 +98,7 @@ impl Code {
             Code::MissingField => "T0016",
             Code::ImmutableAssign => "T0017",
             Code::UseBeforeDefinition => "T0018",
+            Code::DiscardedResult => "T0019",
         }
     }
 }
@@ -128,6 +133,7 @@ impl Code {
             Code::MissingField => "missing struct field",
             Code::ImmutableAssign => "assignment to an immutable variable",
             Code::UseBeforeDefinition => "name used before its definition",
+            Code::DiscardedResult => "result of a pure call discarded",
         }
     }
 
@@ -362,11 +368,43 @@ Example:
 Fix: move the definition above its first use. Functions declared with `fn`
 at the top level may be called before their definition; variables may not."
             }
+            Code::DiscardedResult => {
+                "\
+A call that only computes a new value is used as a statement, so its result
+is thrown away. From edition 2027 `push(xs, v)` returns a new array and
+never changes `xs`, so a bare `push(xs, v)` does nothing.
+
+Example:
+
+    let mut xs = [1, 2]
+    push(xs, 3)
+    println(xs)
+
+Fix: keep the result (`xs = push(xs, 3)`), or append in place with the
+method form (`xs.push(3)`). In edition 2026 the statement also updated a
+mutable `xs`, so this is reported only from edition 2027, always as an
+error; `forge fix --edition 2027` rewrites it to `xs = push(xs, 3)`."
+            }
         }
     }
 }
 
 impl Code {
+    /// The first edition in which this code is reported at all.
+    pub fn since(self) -> Edition {
+        match self {
+            Code::DiscardedResult => Edition::E2027,
+            _ => Edition::E2026,
+        }
+    }
+
+    /// Whether this code reports an edition rule that is always an error
+    /// in the editions that report it (`T0019`: in edition 2026 the
+    /// statement `push(xs, v)` still updates `xs`, so it is not reported).
+    pub fn is_edition_error(self) -> bool {
+        matches!(self, Code::DiscardedResult)
+    }
+
     /// Whether this code reports a contradiction of something the program
     /// *declared* (a type annotation, a struct or interface declaration),
     /// as opposed to a fact the checker inferred or an engine rule. From
@@ -427,7 +465,7 @@ impl SeverityPolicy {
         let enforced = self.edition >= Edition::E2027
             && basis == Basis::Declared
             && code.contradicts_declaration();
-        if self.strict || enforced {
+        if self.strict || enforced || code.is_edition_error() {
             Severity::Error
         } else {
             Severity::Warning
@@ -538,9 +576,12 @@ pub(crate) mod tests {
             assert!(text.contains("Fix"), "{} explanation needs a fix", code);
             let example = example_of(text);
             assert!(!example.is_empty(), "{} explanation needs an example", code);
-            let analysis =
-                crate::typechecker::analyze(&example, &crate::typechecker::CheckOptions::default())
-                    .unwrap_or_else(|_| panic!("{} example does not parse:\n{}", code, example));
+            let options = crate::typechecker::CheckOptions {
+                edition: Some(code.since()),
+                ..crate::typechecker::CheckOptions::default()
+            };
+            let analysis = crate::typechecker::analyze(&example, &options)
+                .unwrap_or_else(|_| panic!("{} example does not parse:\n{}", code, example));
             assert!(
                 analysis.diagnostics.iter().any(|d| d.code == *code),
                 "{} example does not produce {}:\n{}\ngot: {:?}",

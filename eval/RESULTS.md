@@ -43,7 +43,9 @@ previous run, not in advance.
   well as returning the new array, so `let a = push(cols, c)` in a
   backtracking search changes `cols` (n_queens). The builtins spec says
   the original is not modified; the statements spec calls it
-  side-effecting. **Needs a decision**: candidate edition 2027 change.
+  side-effecting. **Resolved in edition 2027**: `push` is pure (a
+  discarded `push(xs, v)` statement is T0019); 2026 is unchanged
+  (docs/editions/2027.md).
 - `abs(x)` is not a global (`math.abs`), mode_and_median.
 - No compact `json.stringify` (always `", "` and `": "`), compact_json.
 - Top-level functions are not hoisted (calling one above its

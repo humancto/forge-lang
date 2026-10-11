@@ -67,6 +67,7 @@ Each diagnostic has a stable code, a precise source span, and often a help line 
 | T0016 | struct literal leaves out a field without default | `Point { x: 1 }` |
 | T0017 | assignment to an immutable binding | `let x = 1` … `x = 2` |
 | T0018 | name read before its definition runs | `say x` then `let x = 1` |
+| T0019 | result of `push(xs, v)` discarded (edition 2027 only, always an error) | `push(xs, 3)` as a statement |
 
 Diagnostics derived from run-time rules use the engines' own rules, so they agree with what would happen: operator validity comes from the shared arithmetic rules, argument counts from the shared arity rule, and module members from the stdlib registry. Code passed to `assert_throws(fn() { ... })` is expected to fail and is not reported.
 

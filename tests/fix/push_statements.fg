@@ -1,0 +1,23 @@
+// Edition 2026: a statement push(xs, v) also stored the new array in xs.
+let mut xs = [1]
+push(xs, 2)
+
+fn collect(items) {
+    let mut out = []
+    for x in items {
+        if x > 1 {
+            push(out, x * 10)   // keep this comment
+        } else { push(out, 0) }
+    }
+    push(items, 99)
+    push(out, len(items))
+    return out
+}
+
+xs = push(xs, 3)
+let ys = push([1], 2)
+fn longer(list) { return push(list, 0) }
+println(xs)
+println(ys)
+println(collect([1, 2, 3]))
+println(longer(ys))
