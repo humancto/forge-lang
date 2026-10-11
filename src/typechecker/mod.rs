@@ -248,6 +248,8 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
         })
         .collect();
 
+    let mut index = index;
+    apply_hoisting(&program, &mut index);
     let resolution = resolve::resolve(&index, &wildcard_imports);
 
     let policy = options.policy();
@@ -276,6 +278,35 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
         wildcard_imports,
         diagnostics,
         facts,
+    }
+}
+
+/// Top-level functions run before the statements written above them
+/// (`semantics::hoist`, the plan both engines use): make each hoisted
+/// definition visible from the first statement it now runs before, so a
+/// call above it is not reported as a use before definition (T0018).
+fn apply_hoisting(program: &Program, index: &mut SyntaxIndex) {
+    let plan =
+        crate::semantics::hoist::plan(&program.statements, &crate::semantics::hoist::is_predefined);
+    for &(moved, before) in &plan.moved {
+        let (Stmt::FnDef { name, .. }, Some(target)) = (
+            &program.statements[moved].stmt,
+            program.statements.get(before),
+        ) else {
+            continue;
+        };
+        let visible_from = crate::parser::index::Pos::new(target.line, target.col);
+        // A hoisted name is bound once in the file, so its definition is
+        // the only file-scope function definition with that name.
+        for occ in index.occurrences.iter_mut() {
+            if occ.name == *name
+                && matches!(occ.def_kind(), Some(DefKind::Function))
+                && occ.scope == 0
+                && occ.visible_from > visible_from
+            {
+                occ.visible_from = visible_from;
+            }
+        }
     }
 }
 
@@ -432,10 +463,16 @@ fn name_diagnostics(
                         what, occ.name, def_occ.span.start.line
                     ),
                     span: occ.span,
-                    help: Some(format!(
-                        "move the definition of '{}' above this use",
-                        occ.name
-                    )),
+                    help: Some(if def_occ.visible_from < def_occ.span.start {
+                        // A hoisted function waits for the top-level names
+                        // it reads (`apply_hoisting`).
+                        format!(
+                            "'{}' is available from line {} on, once the top-level names it reads are defined: move this use below that line",
+                            occ.name, def_occ.visible_from.line
+                        )
+                    } else {
+                        format!("move the definition of '{}' above this use", occ.name)
+                    }),
                     fixes: Vec::new(),
                 });
             }

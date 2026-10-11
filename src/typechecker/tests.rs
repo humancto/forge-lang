@@ -972,6 +972,31 @@ fn use_before_definition_only_in_the_same_frame() {
 }
 
 #[test]
+fn hoisted_functions_are_not_used_before_definition() {
+    // Top-level functions run before the statements above them
+    // (semantics::hoist), so these calls are fine.
+    assert!(codes("let a = mean([1, 2])\nfn mean(xs) { return sum(xs) / len(xs) }").is_empty());
+    assert!(codes("say is_even(4)\nfn is_even(n) { if n == 0 { return true } return is_odd(n - 1) }\nfn is_odd(n) { if n == 0 { return false } return is_even(n - 1) }").is_empty());
+    assert!(codes("let k = 2\nsay f()\nfn f() { return k }").is_empty());
+    // A function reading a later top-level variable runs after it: a call
+    // above that variable is still reported, with where it becomes usable.
+    let w = warnings_for("say f()\nlet k = 2\nsay f()\nfn f() { return k }");
+    assert_eq!(w.len(), 1, "{:?}", w);
+    assert_eq!(w[0].code, Code::UseBeforeDefinition);
+    assert_eq!(w[0].span.start.line, 1);
+    assert!(
+        w[0].help.as_deref().is_some_and(|h| h.contains("line 3")),
+        "{:?}",
+        w[0].help
+    );
+    // A name defined twice is not hoisted.
+    assert_eq!(
+        codes("say f()\nfn f() { return 1 }\nfn f() { return 2 }"),
+        vec![Code::UseBeforeDefinition]
+    );
+}
+
+#[test]
 fn invalid_operators_follow_the_shared_rules() {
     assert_eq!(codes("say \"a\" - 1"), vec![Code::InvalidOperator]);
     assert_eq!(codes("say [1] + [2]"), vec![Code::InvalidOperator]);
