@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`match` as an expression, guards and or-patterns** (all editions; [RFC 0008](rfcs/0008-edition-2027.md) §3) — `let size = match n { 0 => "none", 1 | 2 => "few", x if x < 10 => "some {x}", _ => "many" }` works anywhere an expression does (`let`, `return`, arguments, lambdas, interpolation); an arm's value is its expression or its block's last expression. Guards (`pattern if cond`) see the pattern's bindings and fall through to the next arm when false. Or-patterns (`Rect(w, h) | Square(w, h)`, also nested: `Some(1 | 2)`) must bind the same names in every alternative (a parse error otherwise). Negative number literals are patterns (`-1 => ...`). A `match` that no arm takes raises E0026 on both engines, as statement `match` already did. The type checker types a `match` expression as the join of its arms, and its exhaustiveness check (T0011) treats guarded arms as covering nothing and or-patterns as covering every alternative. `forge fmt` spaces `|`. On the VM, nested patterns inside constructor fields (literals, constructors, variant names) are now tested like on the interpreter instead of being ignored.
+
 ## [0.10.0] - 2026-10-09
 
 ### Added

@@ -195,7 +195,34 @@ match v {
 }
 ```
 
-`match` is a statement. Patterns: literals, `_`, bindings, and constructors `Name(a, b)`. There are no guard clauses (`n if ...`) or or-patterns (`1 | 2`).
+`match` is also an expression: its value is the taken arm's value (an arm body is an expression or a `{ ... }` block whose last expression is the value), so it works in `let`, `return`, arguments and lambdas.
+
+```forge
+fn size(n) {
+    return match n {
+        0 => "none",
+        1 | 2 => "few",                  // or-pattern
+        x if x < 10 => "some {x}",       // guard: a false guard tries the next arm
+        _ => "many",
+    }
+}
+println(size(2))
+println(size(7))
+
+type Shape = Circle(Float) | Rect(Float, Float) | Square(Float, Float)
+let s = Square(2.0, 2.0)
+let label = match s {
+    Circle(r) if r > 10.0 => "big circle",
+    Circle(r) => "circle {r}",
+    Rect(w, h) | Square(w, h) => {
+        let area = w * h
+        "box of area {area}"
+    },
+}
+println(label)
+```
+
+Patterns: literals (including negative numbers), `_`, bindings, constructors `Name(a, b)` (nested: `Ok(Some(x))`), and or-patterns `p1 | p2` whose alternatives bind the same names. A guard `pattern if cond` sees the pattern's bindings. If no arm matches, it is a runtime error (E0026); end with `_ => ...` when the cases are open.
 
 ## Result, Option, errors
 
