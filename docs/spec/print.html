@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-eac2764e.js";
+            window.path_to_searchindex_js = "searchindex-75c1437f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-fdd2f5ad.js"></script>
@@ -2942,125 +2942,143 @@ let discount = when items {
 <p>See <a href="#match-expressions-1">Match Expressions</a> for structural pattern matching.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="match-expressions-1"><a class="header" href="#match-expressions-1">Match Expressions</a></h1>
-<p>A <strong>match expression</strong> performs structural pattern matching on a value. Each arm specifies a pattern; the first arm whose pattern matches the scrutinee has its body evaluated.</p>
+<p>A <strong>match expression</strong> performs structural pattern matching on a value. Each arm has a pattern and an optional guard; the first arm whose pattern matches the scrutinee (and whose guard holds) is taken.</p>
 <h2 id="syntax-6"><a class="header" href="#syntax-6">Syntax</a></h2>
 <pre><code>match expression {
     pattern =&gt; body,
-    pattern =&gt; body,
+    pattern if guard =&gt; body,
+    pattern | pattern =&gt; body,
     ...
 }
 </code></pre>
-<p>The <strong>scrutinee</strong> is the expression after <code>match</code>. Each <strong>arm</strong> consists of a pattern, the <code>=&gt;</code> arrow, and a body (one or more statements). Arms are separated by commas.</p>
+<p>The <strong>scrutinee</strong> is the expression after <code>match</code>. Each <strong>arm</strong> consists of a pattern, an optional guard (<code>if</code> followed by an expression), the <code>=&gt;</code> arrow, and a body. The body is either one statement (usually an expression) or a block <code>{ ... }</code>. Arms are separated by commas or newlines.</p>
 <h2 id="patterns"><a class="header" href="#patterns">Patterns</a></h2>
-<p>Forge supports the following pattern forms:</p>
 <h3 id="wildcard-pattern-1"><a class="header" href="#wildcard-pattern-1">Wildcard Pattern</a></h3>
 <p>The underscore <code>_</code> matches any value and binds nothing.</p>
-<pre><code class="language-forge">match x {
-    _ =&gt; say "matched anything"
+<pre><code class="language-forge">let x = 42
+match x {
+    _ =&gt; println("matched anything")
 }
 </code></pre>
 <h3 id="literal-pattern"><a class="header" href="#literal-pattern">Literal Pattern</a></h3>
-<p>A literal value matches if the scrutinee is equal to that value.</p>
-<pre><code class="language-forge">match color {
-    "red" =&gt; say "stop",
-    "green" =&gt; say "go",
-    "yellow" =&gt; say "caution",
-    _ =&gt; say "unknown"
+<p>A literal — an integer (optionally negative), a float, a string, <code>true</code> or <code>false</code> — matches if the scrutinee equals it (<code>1</code> matches <code>1.0</code>, as with <code>==</code>).</p>
+<pre><code class="language-forge">let color = "green"
+match color {
+    "red" =&gt; println("stop"),
+    "green" =&gt; println("go"),
+    _ =&gt; println("unknown")
 }
 </code></pre>
 <h3 id="binding-pattern"><a class="header" href="#binding-pattern">Binding Pattern</a></h3>
-<p>A bare identifier binds the matched value to that name within the arm body.</p>
-<pre><code class="language-forge">match value {
-    x =&gt; say "got: {x}"
+<p>A bare identifier matches any value and binds it to that name within the guard and the body. A bare name that is a unit variant of an algebraic type in scope (such as <code>Dot</code> below) or <code>None</code> is instead a test for that variant.</p>
+<pre><code class="language-forge">let value = 7
+match value {
+    x =&gt; println("got: {x}")
 }
 </code></pre>
 <h3 id="constructor-pattern"><a class="header" href="#constructor-pattern">Constructor Pattern</a></h3>
-<p>A constructor pattern matches an algebraic data type (ADT) variant and destructures its fields. The pattern names the variant and provides sub-patterns for each field.</p>
-<pre><code class="language-forge">type Shape {
-    Circle(float)
-    Rect(float, float)
-    Point
-}
+<p>A constructor pattern matches an algebraic data type (ADT) variant — or <code>Ok</code>, <code>Err</code>, <code>Some</code> — and matches its fields against sub-patterns, which may be any pattern, including nested constructors.</p>
+<pre><code class="language-forge">type Shape = Circle(Float) | Rect(Float, Float) | Dot
 
 let s = Circle(5.0)
-
 match s {
-    Circle(r) =&gt; say "circle with radius {r}",
-    Rect(w, h) =&gt; say "rectangle {w} x {h}",
-    Point =&gt; say "a point",
-    _ =&gt; say "unknown shape"
+    Circle(r) =&gt; println("circle with radius {r}"),
+    Rect(w, h) =&gt; println("rectangle {w} x {h}"),
+    Dot =&gt; println("a dot"),
+}
+
+let r = Ok(Some(3))
+match r {
+    Ok(Some(n)) =&gt; println("value {n}"),
+    Ok(None) =&gt; println("empty"),
+    Err(e) =&gt; println("error {e}"),
 }
 </code></pre>
-<p>Nested constructor patterns are supported:</p>
-<pre><code class="language-forge">type Expr {
-    Num(int)
-    Add(Expr, Expr)
-}
+<h3 id="or-pattern"><a class="header" href="#or-pattern">Or-Pattern</a></h3>
+<p><code>p1 | p2 | ...</code> matches when any alternative matches. Every alternative must bind the same names (a parse error otherwise), so the guard and body can use them whichever alternative matched. Or-patterns may also appear inside constructor fields: <code>Some(1 | 2)</code>.</p>
+<pre><code class="language-forge">type Shape = Rect(Float, Float) | Square(Float, Float)
 
-match expr {
-    Add(Num(a), Num(b)) =&gt; say "sum: {a + b}",
-    Num(n) =&gt; say "number: {n}",
-    _ =&gt; say "complex expression"
+let day = "sun"
+let kind = match day {
+    "sat" | "sun" =&gt; "weekend",
+    _ =&gt; "weekday",
 }
+println(kind)
+
+let s = Square(2.0, 2.0)
+match s {
+    Rect(w, h) | Square(w, h) =&gt; println("area {w * h}"),
+}
+</code></pre>
+<h2 id="guards"><a class="header" href="#guards">Guards</a></h2>
+<p><code>pattern if condition</code> takes the arm only when the pattern matches <strong>and</strong> the condition is truthy. The condition is evaluated after the pattern’s bindings are made, so it can use them. When the guard is false, matching continues with the next arm.</p>
+<pre><code class="language-forge">fn classify(n) {
+    return match n {
+        x if x &lt; 0 =&gt; "negative",
+        0 =&gt; "zero",
+        x if x % 2 == 0 =&gt; "even",
+        _ =&gt; "odd",
+    }
+}
+println(classify(-3))
+println(classify(8))
+println(classify(9))
 </code></pre>
 <h2 id="evaluation-semantics-1"><a class="header" href="#evaluation-semantics-1">Evaluation Semantics</a></h2>
 <ol>
 <li>The scrutinee expression is evaluated exactly once.</li>
-<li>Arms are tested top to bottom.</li>
+<li>Arms are tried top to bottom.</li>
 <li>For each arm, the pattern is matched against the scrutinee:
 <ul>
-<li><strong>Wildcard</strong>: Always matches.</li>
-<li><strong>Literal</strong>: Matches if the scrutinee equals the literal value.</li>
-<li><strong>Binding</strong>: Always matches; binds the scrutinee to the identifier.</li>
-<li><strong>Constructor</strong>: Matches if the scrutinee is an ADT value with the same variant name and the correct number of fields, and all sub-patterns recursively match.</li>
+<li><strong>Wildcard</strong>: always matches.</li>
+<li><strong>Literal</strong>: matches if the scrutinee equals the literal.</li>
+<li><strong>Binding</strong>: matches (unless the name is a unit variant, see above) and binds the scrutinee.</li>
+<li><strong>Constructor</strong>: matches if the scrutinee is that variant and every field sub-pattern matches.</li>
+<li><strong>Or-pattern</strong>: matches if any alternative matches; the first matching alternative supplies the bindings.</li>
 </ul>
 </li>
-<li>The first matching arm’s body is evaluated. Bindings introduced by the pattern are in scope for the body.</li>
-<li>If no arm matches, the match expression evaluates to <code>null</code>.</li>
+<li>If the pattern matches and the arm has a guard, the guard is evaluated with the bindings in scope; a falsy guard moves on to the next arm.</li>
+<li>The taken arm’s body runs with the bindings in scope. Its value is the value of the <code>match</code>.</li>
+<li>If no arm is taken, it is a runtime error: <code>non-exhaustive match: no arm matched the value</code> (code E0026). This applies to statement and expression <code>match</code> alike.</li>
 </ol>
 <h2 id="match-as-an-expression"><a class="header" href="#match-as-an-expression">Match as an Expression</a></h2>
-<p><code>match</code> produces a value and can be used in expression position:</p>
-<pre><code class="language-forge">let area = match shape {
+<p><code>match</code> produces a value and can be used anywhere an expression can: a <code>let</code> initializer, a <code>return</code>, a function argument, a lambda body, an arm of another <code>match</code>.</p>
+<pre><code class="language-forge">type Shape = Circle(Float) | Rect(Float, Float)
+
+let shape = Rect(2.0, 3.0)
+let area = match shape {
     Circle(r) =&gt; 3.14159 * r * r,
     Rect(w, h) =&gt; w * h,
-    _ =&gt; 0.0
 }
+println(area)
+println(map([1, 2, 3], fn(n) { match n { 1 =&gt; "one", _ =&gt; "more" } }))
 </code></pre>
+<p>The value of an arm is the value of its body: an expression arm gives the expression’s value; a block arm gives the value of its last statement (an expression, or a nested <code>if</code> / <code>match</code> / <code>when</code>), or <code>null</code> when that is another kind of statement. A <code>return</code> inside an arm returns from the enclosing function.</p>
 <h2 id="match-as-a-statement"><a class="header" href="#match-as-a-statement">Match as a Statement</a></h2>
-<p><code>match</code> can appear at the statement level:</p>
-<pre><code class="language-forge">match event {
-    Click(x, y) =&gt; handle_click(x, y),
-    KeyPress(key) =&gt; handle_key(key),
+<p><code>match</code> at the start of a statement is a statement; its arms run for their effects.</p>
+<pre><code class="language-forge">let event = "click"
+match event {
+    "click" =&gt; println("clicked"),
+    "key" =&gt; println("key pressed"),
     _ =&gt; {}
 }
 </code></pre>
+<p>A <code>match</code> that ends a function body is the function’s result, like any other trailing expression.</p>
 <h2 id="multi-statement-arm-bodies"><a class="header" href="#multi-statement-arm-bodies">Multi-Statement Arm Bodies</a></h2>
 <p>Arm bodies can contain multiple statements. The last expression in the block is the value of the arm.</p>
-<pre><code class="language-forge">let result = match data {
+<pre><code class="language-forge">let data = Some(20)
+let result = match data {
     Some(value) =&gt; {
-        let processed = transform(value)
-        validate(processed)
-        processed
+        let doubled = value * 2
+        doubled + 1
     },
-    None =&gt; default_value()
+    None =&gt; 0
 }
+println(result)
 </code></pre>
-<h2 id="adt-matching"><a class="header" href="#adt-matching">ADT Matching</a></h2>
-<p>Match is the primary mechanism for working with algebraic data types (see <a href="#algebraic-data-types">Algebraic Data Types</a>).</p>
-<pre><code class="language-forge">type Result {
-    Ok(any)
-    Err(string)
-}
-
-fn handle(r) {
-    match r {
-        Ok(value) =&gt; say "success: {value}",
-        Err(msg) =&gt; say "error: {msg}"
-    }
-}
-</code></pre>
+<p>A block arm body is always a block: to produce an object literal, wrap it in parentheses: <code>x =&gt; ({ value: x })</code>.</p>
 <h2 id="exhaustiveness-1"><a class="header" href="#exhaustiveness-1">Exhaustiveness</a></h2>
-<p>Forge does not currently enforce exhaustive matching. If no arm matches the scrutinee, the match expression evaluates to <code>null</code>. Use a wildcard <code>_</code> arm as the final arm to ensure all cases are handled.</p>
+<p>The type checker reports a match on an ADT, <code>Option</code>, <code>Result</code> or <code>Bool</code> subject that misses a case (T0011, a warning by default). An arm with a guard covers nothing for this check, since its guard may be false; an or-pattern covers each of its alternatives. Add a final <code>_ =&gt; ...</code> arm when the cases are open. At run time a value that no arm takes raises E0026.</p>
 <h2 id="differences-from-when-guards"><a class="header" href="#differences-from-when-guards">Differences from When Guards</a></h2>
 <div class="table-wrapper">
 <table>
@@ -3069,7 +3087,7 @@ fn handle(r) {
 </thead>
 <tbody>
 <tr><td>Arrow syntax</td><td><code>=&gt;</code></td><td><code>-&gt;</code></td></tr>
-<tr><td>Matching style</td><td>Structural patterns</td><td>Comparison operators</td></tr>
+<tr><td>Matching style</td><td>Structural patterns and guards</td><td>Comparison operators</td></tr>
 <tr><td>Destructuring</td><td>Yes (ADT variants)</td><td>No</td></tr>
 <tr><td>Use case</td><td>ADT variants, literal dispatch</td><td>Numeric ranges, comparisons</td></tr>
 </tbody>
