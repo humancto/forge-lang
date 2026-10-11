@@ -1,0 +1,38 @@
+// User definitions shadow global builtins, including the numeric ones
+// added later (abs, min, max, round, to_fixed): programs that defined
+// their own keep working.
+
+fn abs(x) {
+    return "mine: {x}"
+}
+
+fn round(x, places) {
+    return "rounded {x} to {places}"
+}
+
+@test
+fn user_functions_shadow_builtins() {
+    assert_eq(abs(-3), "mine: -3")
+    assert_eq(round(2.5, 1), "rounded 2.5 to 1")
+}
+
+@test
+fn user_variables_shadow_builtins() {
+    let max = 10
+    let mut min = 0
+    min = min + 1
+    assert_eq(max + min, 11)
+    let to_fixed = fn(x) { return x * 2 }
+    assert_eq(to_fixed(4), 8)
+}
+
+@test
+fn parameters_shadow_builtins() {
+    let clamp = fn(x, min, max) {
+        if x < min { return min }
+        if x > max { return max }
+        return x
+    }
+    assert_eq(clamp(15, 0, 10), 10)
+    assert_eq(clamp(-1, 0, 10), 0)
+}

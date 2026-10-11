@@ -31,6 +31,12 @@ const SIGNATURES: &[&str] = &[
     "str(Any) -> String",
     "int(Any) -> Int",
     "float(Any) -> Float",
+    // Numbers
+    "abs<T>(T) -> T",
+    "min(Any, ...Any) -> Any",
+    "max(Any, ...Any) -> Any",
+    "round(Any, Int?) -> Any",
+    "to_fixed(Any, Int?) -> String",
     // Collections
     "push<T>([T], T) -> [T]",
     "pop<T>([T]) -> T",

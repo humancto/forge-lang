@@ -3306,6 +3306,10 @@ impl Interpreter {
                         "skip",
                         "frequencies",
                         "for_each",
+                        // Numbers
+                        "abs",
+                        "round",
+                        "to_fixed",
                     ];
                     let func = match &obj {
                         Value::Object(map) if map.get(field).is_some() => {

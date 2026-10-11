@@ -1336,6 +1336,47 @@ impl VM {
                 }
                 Err(VMError::new("sum() requires an array"))
             }
+            "abs" => {
+                let x = self.num_arg(args.first());
+                let n = crate::stdlib::math::global_abs(x).map_err(|e| VMError::new(&e))?;
+                Ok(self.num_value(n))
+            }
+            "min" | "max" => {
+                use crate::stdlib::math::MinMaxArgs;
+                let first = args.first().and_then(|v| v.as_obj()).and_then(|r| {
+                    match self.gc.get(r).map(|o| &o.kind) {
+                        Some(ObjKind::Array(items)) => Some(items.clone()),
+                        Some(ObjKind::Frozen(inner)) => {
+                            match inner.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+                                Some(ObjKind::Array(items)) => Some(items.clone()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                });
+                let spread = match first {
+                    Some(items) if args.len() == 1 => {
+                        MinMaxArgs::Array(items.iter().map(|v| self.num_arg(Some(v))).collect())
+                    }
+                    _ => MinMaxArgs::Values(args.iter().map(|v| self.num_arg(Some(v))).collect()),
+                };
+                let n = crate::stdlib::math::global_min_max(name, spread, name == "min")
+                    .map_err(|e| VMError::new(&e))?;
+                Ok(self.num_value(n))
+            }
+            "round" => {
+                let (x, digits) = (self.num_arg(args.first()), self.digits_arg(args.get(1)));
+                let n =
+                    crate::stdlib::math::global_round(x, digits).map_err(|e| VMError::new(&e))?;
+                Ok(self.num_value(n))
+            }
+            "to_fixed" => {
+                let (x, digits) = (self.num_arg(args.first()), self.digits_arg(args.get(1)));
+                let text = crate::stdlib::math::global_to_fixed(x, digits)
+                    .map_err(|e| VMError::new(&e))?;
+                Ok(self.alloc_string(&text))
+            }
             "min_of" => self.min_max_of(&args, "min_of", true),
             "max_of" => self.min_max_of(&args, "max_of", false),
             "map" => {
@@ -3868,6 +3909,32 @@ impl VM {
     /// `min_of` / `max_of`, mirroring the interpreter: a non-empty array;
     /// Int/Int stays Int, any Float makes the result Float; a non-number
     /// after the first element is an error.
+    /// A numeric argument of the global math builtins; `None` when it is
+    /// not an Int or a Float.
+    fn num_arg(&self, v: Option<&Value>) -> Option<crate::stdlib::math::Num> {
+        use crate::stdlib::math::Num;
+        match v?.classify(&self.gc) {
+            ValueKind::Int(n) => Some(Num::Int(n)),
+            ValueKind::Float(f) => Some(Num::Float(f)),
+            _ => None,
+        }
+    }
+
+    /// The optional Int `digits` argument of `round` / `to_fixed`.
+    fn digits_arg(&self, v: Option<&Value>) -> Option<Option<i64>> {
+        v.map(|d| match d.classify(&self.gc) {
+            ValueKind::Int(n) => Some(n),
+            _ => None,
+        })
+    }
+
+    fn num_value(&mut self, n: crate::stdlib::math::Num) -> Value {
+        match n {
+            crate::stdlib::math::Num::Int(i) => Value::int(i, &mut self.gc),
+            crate::stdlib::math::Num::Float(f) => Value::float(f),
+        }
+    }
+
     fn min_max_of(&mut self, args: &[Value], name: &str, min: bool) -> Result<Value, VMError> {
         let items = match args
             .first()
@@ -5002,6 +5069,9 @@ impl VM {
                 | "skip"
                 | "frequencies"
                 | "for_each"
+                | "abs"
+                | "round"
+                | "to_fixed"
         )
     }
 }
