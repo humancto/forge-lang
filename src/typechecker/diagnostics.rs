@@ -145,9 +145,9 @@ Example:
     let age: Int = \"forty\"
 
 Fix: assign a value of the declared type (`let age: Int = 40`), convert it
-(`int(text)`), or change the annotation. Under `--strict` this is an error;
-otherwise a warning, and `--strict` also checks annotations at run time
-(E0017)."
+(`int(text)`), or change the annotation. An error from edition 2027 and
+under `--strict`, otherwise a warning; both also check annotated function
+boundaries at run time (E0017)."
             }
             Code::ArgumentType => {
                 "\
@@ -160,7 +160,8 @@ Example:
     greet(42)
 
 Fix: pass a value of the parameter's type (`greet(str(42))`) or widen the
-annotation. The run-time counterpart under `--strict` is E0017."
+annotation. An error from edition 2027 and under `--strict`; the run-time
+counterpart (edition 2027, `--strict`) is E0017."
             }
             Code::ReturnType => {
                 "\
