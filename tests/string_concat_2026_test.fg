@@ -1,0 +1,29 @@
+// Edition 2026 (the default) pin: `+` with one String operand converts
+// the other operand to text. Edition 2027 makes this an error (E0034,
+// tests/edition2027/strict_concat_test.fg); 2026 code keeps working.
+
+fn plus(a, b) {
+    return a + b
+}
+
+@test
+fn string_plus_non_string_concatenates() {
+    assert_eq(plus("a", 1), "a1")
+    assert_eq(plus(1, "a"), "1a")
+    assert_eq(plus("x", 1.5), "x1.5")
+    assert_eq(plus("x", true), "xtrue")
+    assert_eq(plus("x", null), "xnull")
+    assert_eq(plus("x", [1]), "x[1]")
+    assert_eq("n=" + 2, "n=2")
+}
+
+@test
+fn compound_assignment_concatenates() {
+    let mut s = "n="
+    s += 1
+    assert_eq(s, "n=1")
+    let mut t = "x"
+    let n = 2
+    t = t + n
+    assert_eq(t, "x2")
+}

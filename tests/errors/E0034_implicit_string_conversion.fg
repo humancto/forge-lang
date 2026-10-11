@@ -1,0 +1,5 @@
+// forge-args: --edition 2027
+fn label(n) {
+    return "count: " + n
+}
+println(label(3))

@@ -918,6 +918,53 @@ mod tests {
     }
 
     #[test]
+    fn edition_2027_rejects_mixed_string_concat() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            edition_2027_rejects_mixed_string_concat_on(engine);
+        }
+    }
+
+    fn edition_2027_rejects_mixed_string_concat_on(engine: Engine) {
+        let plus = "fn plus(a, b) { return a + b }\n";
+        // Edition 2026 converts implicitly.
+        let out = Sandbox::new()
+            .engine(engine)
+            .edition(Edition::E2026)
+            .run_source(&format!("{plus}println(plus(\"a\", 1))"))
+            .expect("2026 runs");
+        assert_eq!(out.stdout, "a1\n");
+        // Edition 2027: an E0034 error, at top level ...
+        match Sandbox::new()
+            .engine(engine)
+            .edition(Edition::E2027)
+            .run_source(&format!(
+                "{plus}println(\"before\")\nprintln(plus(\"a\", 1))"
+            )) {
+            Err(SandboxError::Runtime {
+                message, stdout, ..
+            }) => {
+                assert!(
+                    message.starts_with("cannot add String and Int"),
+                    "{message}"
+                );
+                assert_eq!(crate::semantics::errors::classify(&message).code, "E0034");
+                assert_eq!(stdout, "before\n");
+            }
+            other => panic!("{other:?}"),
+        }
+        // ... and inside a spawned task, which runs on another thread.
+        let out = Sandbox::new()
+            .engine(engine)
+            .edition(Edition::E2027)
+            .run_source(&format!(
+                "{plus}let h = spawn {{\n  let mut code = \"none\"\n  try {{ plus(1, \"a\") }} catch e {{ code = e.code }}\n  return code\n}}\nprintln(await h)\nprintln(plus(\"a\", \"b\"))"
+            ))
+            .expect("2027 runs");
+        assert_eq!(out.stdout, "E0034\nab\n");
+    }
+
+    #[test]
     fn syntax_and_runtime_errors() {
         for engine in ENGINES {
             eprintln!("engine: {engine}");

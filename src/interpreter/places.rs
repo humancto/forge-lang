@@ -506,6 +506,7 @@ impl Interpreter {
                                 crate::semantics::BinaryOp::Add,
                                 crate::semantics::Operand::Str(s),
                                 semantic_operand(rhs),
+                                self.edition(),
                             ),
                             Ok(crate::semantics::Outcome::Concat)
                         );
