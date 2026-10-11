@@ -266,10 +266,33 @@ fn write(stream: Stream, text: &str) -> bool {
     }
 }
 
+/// Write to the process's stdout. When the reader has gone away
+/// (`forge run app.fg | head`), exit quietly like other command-line
+/// tools instead of panicking with a backtrace (`print!` panics).
+fn process_stdout(text: &str, newline: bool) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    let result = stdout.write_all(text.as_bytes()).and_then(|()| {
+        if newline {
+            stdout.write_all(b"\n")?;
+        }
+        if newline || text.contains('\n') {
+            stdout.flush()?;
+        }
+        Ok(())
+    });
+    if let Err(e) = result {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            #[cfg(not(target_arch = "wasm32"))]
+            std::process::exit(0);
+        }
+    }
+}
+
 /// Write `text` to the program's stdout.
 pub fn out(text: &str) {
     if !write(Stream::Stdout, text) {
-        print!("{}", text);
+        process_stdout(text, false);
     }
 }
 
@@ -279,7 +302,7 @@ pub fn out_line(text: &str) {
         // One write, so another thread's output cannot land between the
         // text and its newline.
         Some(sink) if sink.write(Stream::Stdout, &format!("{}\n", text)) => {}
-        _ => println!("{}", text),
+        _ => process_stdout(text, true),
     }
 }
 

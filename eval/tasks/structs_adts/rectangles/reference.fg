@@ -1,0 +1,38 @@
+struct Rectangle {
+    name: String,
+    width: Int,
+    height: Int
+}
+
+impl Rectangle {
+    fn area(it) -> Int {
+        return it.width * it.height
+    }
+
+    fn perimeter(it) -> Int {
+        return 2 * (it.width + it.height)
+    }
+}
+
+let rects = [
+    Rectangle { name: "door", width: 2, height: 7 },
+    Rectangle { name: "window", width: 4, height: 3 },
+    Rectangle { name: "table", width: 3, height: 3 },
+    Rectangle { name: "poster", width: 6, height: 1 },
+    Rectangle { name: "rug", width: 5, height: 4 },
+]
+let ordered = sort(rects, fn(a, b) {
+    if a.area() != b.area() {
+        return a.area() - b.area()
+    }
+    if a.name < b.name {
+        return -1
+    }
+    return 1
+})
+for r in ordered {
+    println("{r.name} {r.width}x{r.height} area={r.area()} perimeter={r.perimeter()}")
+}
+println("largest: {ordered[len(ordered) - 1].name}")
+let squares = filter(rects, fn(r) { return r.width == r.height })
+println("squares: " + join(map(squares, fn(r) { return r.name }), ", "))

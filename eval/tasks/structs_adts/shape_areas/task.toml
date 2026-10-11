@@ -1,0 +1,20 @@
+id = "shape_areas"
+category = "structs_adts"
+title = "Shapes as a sum type"
+prompt = """
+Model shapes as a sum type (tagged union / enum with data) with three variants: a circle with
+a radius, a rectangle with width and height, and a right triangle with its two legs. Use
+pi = 3.14159. For the shapes circle r=1.5, rectangle 2x3.5, triangle 3,4, circle r=0.5,
+rectangle 10x0.25, print `<kind>: <area>` with the area rounded to two decimals (always two
+digits after the point), where kind is `circle`, `rectangle` or `triangle`. Then print
+`total: <t>` with the sum of the exact areas, rounded to two decimals.
+"""
+needs = []
+expected_stdout = """
+circle: 7.07
+rectangle: 7.00
+triangle: 6.00
+circle: 0.79
+rectangle: 2.50
+total: 23.35
+"""

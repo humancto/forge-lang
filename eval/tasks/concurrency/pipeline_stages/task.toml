@@ -1,0 +1,27 @@
+id = "pipeline_stages"
+category = "concurrency"
+title = "Three-stage pipeline"
+prompt = """
+Build a pipeline of three concurrent stages connected by channels (queues):
+stage 1 emits the lines of standard input (non-empty ones, trimmed);
+stage 2 turns each line into its uppercase form with the number of characters appended as
+`<LINE> (<n>)`;
+stage 3 (the main program) prints every result as it arrives, in order, prefixed with its
+1-based sequence number as `<i>: `. Each stage must signal the end of its stream to the next.
+Finally print `done: <count>`.
+"""
+stdin = """
+alpha
+  beta gamma 
+
+delta
+epsilon zeta eta
+"""
+needs = []
+expected_stdout = """
+1: ALPHA (5)
+2: BETA GAMMA (10)
+3: DELTA (5)
+4: EPSILON ZETA ETA (16)
+done: 4
+"""

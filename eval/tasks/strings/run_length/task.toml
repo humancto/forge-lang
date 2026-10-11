@@ -1,0 +1,26 @@
+id = "run_length"
+category = "strings"
+title = "Run-length encoding"
+prompt = """
+Read lines from standard input. Each line starts with `E ` (encode) or `D ` (decode) followed
+by a string. Encoding writes each run of the same character as the character followed by the
+run length (`aaab` becomes `a3b1`). Decoding reverses that (counts may have several digits;
+the encoded characters are never digits). Print the result of each line.
+"""
+stdin = """
+E aaabccdddd
+E abc
+E zzzzzzzzzzzz
+D a3b1c2
+D x12y1
+E 
+"""
+needs = []
+expected_stdout = """
+a3b1c2d4
+a1b1c1
+z12
+aaabcc
+xxxxxxxxxxxxy
+
+"""

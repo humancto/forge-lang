@@ -1,0 +1,32 @@
+let data = [1, [2, [3, [4, 5]], 6], [], [[7], 8], [[[9]]], 10]
+
+fn flat(xs) {
+    let mut out = []
+    for v in xs {
+        if typeof(v) == "Array" {
+            for inner in flat(v) {
+                out = push(out, inner)
+            }
+        } else {
+            out = push(out, v)
+        }
+    }
+    return out
+}
+
+fn depth(x) -> Int {
+    if typeof(x) != "Array" {
+        return 0
+    }
+    let mut deepest = 0
+    for v in x {
+        let d = depth(v)
+        if d > deepest {
+            deepest = d
+        }
+    }
+    return 1 + deepest
+}
+
+println(join(map(flat(data), fn(v) { return str(v) }), " "))
+println("depth: {depth(data)}")

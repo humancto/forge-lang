@@ -109,8 +109,8 @@ fn doc_from(uri: &str, text: String) -> Option<Arc<Doc>> {
     }
     let path = uri_to_path(uri);
     let options = CheckOptions {
-        strict: false,
         file: path.clone().filter(|p| p.exists()),
+        ..CheckOptions::default()
     };
     let analysis = analyze(&text, &options).ok()?;
     let doc = Arc::new(Doc {

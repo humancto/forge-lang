@@ -191,9 +191,23 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
             headers_map.insert("Cookie".to_string(), cookie_str.join("; "));
         }
         if let Some(body_val) = opt_map.get("body") {
-            body_str = Some(body_val.to_json_string());
+            // A String body is sent as is (`body: json.stringify(x)` must
+            // not be encoded twice); any other value is encoded as JSON.
+            let (text, is_json) = match body_val {
+                Value::String(s) => (
+                    s.clone(),
+                    serde_json::from_str::<serde_json::Value>(s).is_ok(),
+                ),
+                other => (other.to_json_string(), true),
+            };
+            body_str = Some(text);
             if !headers_map.contains_key("Content-Type") {
-                headers_map.insert("Content-Type".to_string(), "application/json".to_string());
+                let content_type = if is_json {
+                    "application/json"
+                } else {
+                    "text/plain; charset=utf-8"
+                };
+                headers_map.insert("Content-Type".to_string(), content_type.to_string());
             }
         }
         if let Some(Value::Int(t)) = opt_map.get("timeout") {

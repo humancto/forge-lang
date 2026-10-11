@@ -1,0 +1,9 @@
+let words = input().words()
+let handles = map(words, fn(w) {
+    return spawn {
+        return "{w}={len(unique(w.lower().chars()))}"
+    }
+})
+let results = await_all(handles)
+println(join(results, ", "))
+println("tasks: {len(handles)}")

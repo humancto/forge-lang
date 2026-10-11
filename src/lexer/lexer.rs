@@ -2,6 +2,7 @@
 /// Hand-rolled for full control over string interpolation and error reporting.
 /// Will migrate to `logos` in Phase 3 for performance.
 use super::token::{Spanned, Token};
+use crate::semantics::edition::Edition;
 
 /// A comment found while lexing. The parser never sees comments; tools that
 /// must preserve them (the formatter) ask for them with
@@ -27,16 +28,28 @@ pub struct Lexer {
     col: usize,
     /// Collected comments, when the caller asked for them.
     comments: Option<Vec<Comment>>,
+    /// Edition whose keyword set applies (words removed in edition 2027
+    /// lex as plain identifiers there; see [`Token::keyword_in`]).
+    edition: Edition,
 }
 
 impl Lexer {
+    /// A lexer for the edition in effect on this thread
+    /// (`semantics::edition::current`).
     pub fn new(source: &str) -> Self {
+        Self::with_edition(source, crate::semantics::edition::current())
+    }
+
+    /// A lexer for an explicit edition (`forge fix` reads 2026 source
+    /// whatever edition the process runs under).
+    pub fn with_edition(source: &str, edition: Edition) -> Self {
         Self {
             source: source.chars().collect(),
             pos: 0,
             line: 1,
             col: 1,
             comments: None,
+            edition,
         }
     }
 
@@ -335,6 +348,31 @@ impl Lexer {
         while self.pos < self.source.len() {
             let ch = self.current();
             match ch {
+                // `{expr}`: the expression is copied as written (the parser
+                // lexes it again), so it may contain string literals:
+                // `"{join(xs, ", ")}"`.
+                '{' => {
+                    // A `{` that cannot start an interpolation is literal
+                    // text, as before: one followed by a quote (`"{"`,
+                    // `"{" + body + "}"`, `"{\"key\": "`) or one that does not close on
+                    // this line (`"{not json"`).
+                    let (start, col, line, len) = (self.pos, self.col, self.line, result.len());
+                    let mut ahead = self.pos + 1;
+                    while ahead < self.source.len() && self.source[ahead] == ' ' {
+                        ahead += 1;
+                    }
+                    let quote_next = match self.source.get(ahead) {
+                        Some('"') => true,
+                        Some('\\') => self.source.get(ahead + 1) == Some(&'"'),
+                        _ => false,
+                    };
+                    if quote_next || self.lex_interpolation(&mut result).is_err() {
+                        (self.pos, self.col, self.line) = (start, col, line);
+                        result.truncate(len);
+                        result.push('{');
+                        self.advance();
+                    }
+                }
                 '"' => {
                     self.advance();
                     return Ok(Token::StringLit(result));
@@ -391,6 +429,92 @@ impl Lexer {
         Err(self.error("unterminated string"))
     }
 
+    /// At the `{` of an interpolation inside a `"..."` string: append the
+    /// whole `{...}` to `out`, tracking nested braces and string literals.
+    /// A nested string opened with `"` ends at the next unescaped `"`; one
+    /// opened with `\"` (the older way to quote inside an interpolation)
+    /// ends at the next `\"` and is copied with plain quotes.
+    fn lex_interpolation(&mut self, out: &mut String) -> Result<(), LexError> {
+        out.push('{');
+        self.advance();
+        let mut depth = 1usize;
+        while self.pos < self.source.len() {
+            let ch = self.current();
+            match ch {
+                '\n' => return Err(self.error("unterminated string (newline in string literal)")),
+                '{' => {
+                    depth += 1;
+                    out.push(ch);
+                    self.advance();
+                }
+                '}' => {
+                    depth -= 1;
+                    out.push(ch);
+                    self.advance();
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                '"' => {
+                    out.push('"');
+                    self.advance();
+                    self.copy_nested_string(out, false)?;
+                }
+                '\\' if self.peek() == Some('"') => {
+                    out.push('"');
+                    self.advance();
+                    self.advance();
+                    self.copy_nested_string(out, true)?;
+                }
+                _ => {
+                    out.push(ch);
+                    self.advance();
+                }
+            }
+        }
+        Err(self.error("unterminated string"))
+    }
+
+    /// Copy a string literal nested in an interpolation, up to and
+    /// including its closing quote (written as `"`), keeping escapes as
+    /// written for the parser's second lexing pass.
+    fn copy_nested_string(
+        &mut self,
+        out: &mut String,
+        escaped_quotes: bool,
+    ) -> Result<(), LexError> {
+        while self.pos < self.source.len() {
+            let ch = self.current();
+            match ch {
+                '\n' => return Err(self.error("unterminated string (newline in string literal)")),
+                '\\' if escaped_quotes && self.peek() == Some('"') => {
+                    out.push('"');
+                    self.advance();
+                    self.advance();
+                    return Ok(());
+                }
+                '\\' => {
+                    out.push(ch);
+                    self.advance();
+                    if self.pos < self.source.len() {
+                        out.push(self.current());
+                        self.advance();
+                    }
+                }
+                '"' if !escaped_quotes => {
+                    out.push('"');
+                    self.advance();
+                    return Ok(());
+                }
+                _ => {
+                    out.push(ch);
+                    self.advance();
+                }
+            }
+        }
+        Err(self.error("unterminated string"))
+    }
+
     fn lex_triple_string(&mut self) -> Result<Token, LexError> {
         // Skip opening """
         self.advance(); // "
@@ -427,7 +551,7 @@ impl Lexer {
         let word: String = self.source[start..self.pos].iter().collect();
 
         // Check for keywords
-        Token::keyword_from_str(&word).unwrap_or(Token::Ident(word))
+        Token::keyword_in(&word, self.edition).unwrap_or(Token::Ident(word))
     }
 
     // --- Navigation helpers ---

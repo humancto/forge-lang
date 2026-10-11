@@ -1,0 +1,21 @@
+id = "spiral_matrix"
+category = "algorithms"
+title = "Spiral order"
+prompt = """
+Read R and C from standard input (one line, `R C`). Build an R x C matrix filled row by row with
+1, 2, 3, ... and print its elements in clockwise spiral order starting from the top-left corner,
+separated by spaces. Then print the matrix filled in spiral order instead (the spiral position
+k gets value k), one row per line with each number right-aligned to the width of the largest
+number, separated by single spaces.
+"""
+stdin = """
+4 5
+"""
+needs = []
+expected_stdout = """
+1 2 3 4 5 10 15 20 19 18 17 16 11 6 7 8 9 14 13 12
+ 1  2  3  4  5
+14 15 16 17  6
+13 20 19 18  7
+12 11 10  9  8
+"""

@@ -1,0 +1,19 @@
+id = "max_window_sum"
+category = "collections"
+title = "Best sliding window"
+prompt = """
+The first line of standard input is a window size k, the second line a list of integers
+separated by spaces. Find the contiguous window of k numbers with the largest sum (the first
+one if several tie). Print three lines: `sum: <s>`, then `start: <index>` (0-based), then
+`window: <numbers>` with the window's numbers separated by spaces.
+"""
+stdin = """
+3
+4 -2 7 1 -5 8 3 2 -1 6 0 4
+"""
+needs = []
+expected_stdout = """
+sum: 13
+start: 5
+window: 8 3 2
+"""

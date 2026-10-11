@@ -1,0 +1,31 @@
+fn convert(v: String) {
+    if v == "" {
+        return null
+    }
+    if regex.test(v, "^-?[0-9]+$") {
+        return int(v)
+    }
+    if v == "true" {
+        return true
+    }
+    if v == "false" {
+        return false
+    }
+    return v
+}
+
+let lines = split(input(), "\n")
+let header = split(lines[0], ",")
+let mut rows = []
+for line in slice(lines, 1, len(lines)) {
+    if line == "" {
+        continue
+    }
+    let cells = split(line, ",")
+    let mut obj = {}
+    for i in range(0, len(header)) {
+        obj[header[i]] = convert(cells[i])
+    }
+    rows = push(rows, obj)
+}
+println(json.pretty(rows))

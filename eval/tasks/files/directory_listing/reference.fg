@@ -1,0 +1,29 @@
+let mut rows = []
+for name in fs.list("data") {
+    let p = path.join("data", name)
+    if fs.is_file(p) {
+        rows = push(rows, { name: name, size: fs.size(p) })
+    }
+}
+let ordered = sort(rows, fn(a, b) {
+    if a.size != b.size {
+        return b.size - a.size
+    }
+    if a.name < b.name {
+        return -1
+    }
+    return 1
+})
+let mut total = 0
+let mut by_ext = {}
+for r in ordered {
+    println("{r.name} {r.size}")
+    total += r.size
+    let dot = last_index_of(r.name, ".")
+    let ext = if dot > 0 { substring(r.name, dot) } else { "none" }
+    // get() reads dotted keys as paths, so test with has_key instead.
+    by_ext[ext] = if has_key(by_ext, ext) { by_ext[ext] + 1 } else { 1 }
+}
+println("files: {len(ordered)}, total bytes: {total}")
+let pairs = map(sort(keys(by_ext)), fn(e) { return "{e}={by_ext[e]}" })
+println("by extension: " + join(pairs, " "))

@@ -1740,3 +1740,101 @@ say b(10)
     let (_, _, vm) = run_mode(source, JitMode::Auto);
     assert!(vm.jit.native_runs("<lambda>") > 0);
 }
+
+// ---------------------------------------------------------------------------
+// Annotation checks (`typechecker::enforce`: `--strict`, edition 2027).
+// ---------------------------------------------------------------------------
+
+/// Run `source` instrumented as edition 2027 runs it, in `mode`.
+fn run_instrumented(source: &str, mode: JitMode) -> (Vec<String>, Option<String>, VM) {
+    let mut program = Parser::new(Lexer::new(source).tokenize().unwrap())
+        .parse_program()
+        .unwrap();
+    crate::typechecker::enforce::instrument(&mut program);
+    let chunk = compiler::compile(&program).unwrap();
+    let mut vm = VM::new();
+    vm.set_jit_mode(mode);
+    let err = vm.execute(&chunk).err().map(|e| e.message);
+    let out = vm.output.clone();
+    (out, err, vm)
+}
+
+/// Instrumented parity across JIT modes (the VM with the JIT off is the
+/// reference); returns the output and error.
+fn instrumented_parity(source: &str) -> (Vec<String>, Option<String>) {
+    let (vm_out, vm_err, _) = run_instrumented(source, JitMode::Off);
+    for mode in [JitMode::Auto, JitMode::Eager] {
+        let (out, err, _) = run_instrumented(source, mode);
+        assert_eq!(out, vm_out, "{:?} output differs from the VM", mode);
+        assert_eq!(err, vm_err, "{:?} error differs from the VM", mode);
+    }
+    (vm_out, vm_err)
+}
+
+#[test]
+fn jit_compiles_annotation_checks_that_always_hold() {
+    let source = r#"
+fn fib(n: Int) -> Int {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+fn half(x: Float) -> Float { return x / 2.0 }
+fn bigger<T>(a: T, b: T) -> T {
+    if a > b { return a }
+    return b
+}
+fn either<T>(c: Bool, a: T, b: T) -> T {
+    if c { return a }
+    return b
+}
+say fib(20)
+say half(3)
+say half(2.5)
+say bigger(3, 4)
+say bigger(1, 2.5)
+say either(false, true, false)
+"#;
+    let (out, err) = instrumented_parity(source);
+    assert!(err.is_none(), "{:?}", err);
+    assert_eq!(out, vec!["6765", "1.5", "1.25", "4", "2.5", "false"]);
+    let (_, _, vm) = run_instrumented(source, JitMode::Eager);
+    for f in ["fib", "half", "bigger", "either"] {
+        assert!(
+            vm.jit.native_runs(f) > 0,
+            "expected `{}` to run natively; compiled: {:?}",
+            f,
+            vm.jit.compiled_function_names()
+        );
+    }
+}
+
+#[test]
+fn jit_leaves_failing_annotation_checks_to_the_vm() {
+    // A String never fits Int, and Bool does not agree with Int: those
+    // specializations are rejected and the VM raises the type error,
+    // identically in every JIT mode.
+    let (out, err) = instrumented_parity(
+        r#"
+fn twice(n: Int) -> Int { return n * 2 }
+fn bigger<T>(a: T, b: T) -> T {
+    if a > b { return a }
+    return b
+}
+let mut k = 0
+while k < 150 { twice(k)
+bigger(k, 1)
+k = k + 1 }
+say bigger(1, 2)
+try { bigger(1, true) } catch e { say e.message }
+say twice(json.parse("\"x\""))
+"#,
+    );
+    assert_eq!(out[0], "2");
+    assert_eq!(
+        out[1],
+        "type error: argument 'b' of 'bigger' must be Int like argument 'a' (type parameter T), got Bool"
+    );
+    assert!(err
+        .unwrap_or_default()
+        .contains("type error: argument 'n' of 'twice' must be Int, got String"));
+}

@@ -61,9 +61,13 @@ pub enum Stmt {
         decorators: Vec<Decorator>,
         is_async: bool,
     },
+    /// `let [mut] {a, b: c} = v`, `let [mut] [x, ...rest] = v`,
+    /// `let [mut] (a, b) = v`, and the 2026 `unpack ... from v`.
     Destructure {
         pattern: DestructurePattern,
         value: Expr,
+        /// `let mut` patterns bind mutable variables (`unpack`: immutable).
+        mutable: bool,
     },
     StructDef {
         name: String,
@@ -347,6 +351,10 @@ pub enum DecoratorArg {
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
+    /// `pattern if guard => body`: the arm is taken only when the pattern
+    /// matches and the guard (evaluated with the pattern's bindings in
+    /// scope) is truthy; otherwise matching continues with the next arm.
+    pub guard: Option<Expr>,
     pub body: Vec<SpannedStmt>,
 }
 
@@ -375,7 +383,8 @@ pub enum PipeStep {
 
 #[derive(Debug, Clone)]
 pub enum DestructurePattern {
-    Object(Vec<String>),
+    /// `(field, binding)` pairs: `{a, b: c}` is `[("a", "a"), ("b", "c")]`.
+    Object(Vec<(String, String)>),
     Array {
         items: Vec<String>,
         rest: Option<String>,
@@ -388,5 +397,52 @@ pub enum Pattern {
     Wildcard,
     Literal(Expr),
     Binding(String),
-    Constructor { name: String, fields: Vec<Pattern> },
+    Constructor {
+        name: String,
+        fields: Vec<Pattern>,
+    },
+    /// `p1 | p2 | ...`: matches when any alternative matches; the first
+    /// matching alternative supplies the bindings. The parser requires
+    /// every alternative to bind the same names.
+    Or(Vec<Pattern>),
+}
+
+impl Pattern {
+    /// Every name a binding pattern introduces, in order of first
+    /// appearance (each name once). Bare names that the engines may treat
+    /// as unit variants (`Red`, `None`) are included: whether they bind
+    /// is only known at run time.
+    pub fn binding_names(&self) -> Vec<&str> {
+        fn walk<'a>(p: &'a Pattern, out: &mut Vec<&'a str>) {
+            match p {
+                Pattern::Wildcard | Pattern::Literal(_) => {}
+                Pattern::Binding(name) => {
+                    if !out.contains(&name.as_str()) {
+                        out.push(name);
+                    }
+                }
+                Pattern::Constructor { fields, .. } => fields.iter().for_each(|f| walk(f, out)),
+                Pattern::Or(alts) => alts.iter().for_each(|a| walk(a, out)),
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut out);
+        out
+    }
+
+    /// The alternatives of a top-level or-pattern, or the pattern itself.
+    pub fn alternatives(&self) -> &[Pattern] {
+        match self {
+            Pattern::Or(alts) => alts,
+            other => std::slice::from_ref(other),
+        }
+    }
+}
+
+/// Whether a bare name in a pattern reads as a variant (`Red`, `None`)
+/// rather than a new binding: it starts with an uppercase letter or is
+/// `null`. Used for the or-pattern rule "every alternative binds the same
+/// names", which cannot know at parse time which names are variants.
+pub fn looks_like_variant(name: &str) -> bool {
+    name == "null" || name.chars().next().is_some_and(|c| c.is_uppercase())
 }

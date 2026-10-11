@@ -1,0 +1,31 @@
+id = "rpn_calculator"
+category = "structs_adts"
+title = "RPN calculator with a stack"
+prompt = """
+Implement a stack-based calculator for Reverse Polish Notation. Each line of standard input is
+one expression of integers and the operators `+ - * /` separated by spaces (`/` is integer
+division truncating toward zero). Print `<expression> = <result>` for each line, or
+`<expression> = error: <reason>` where reason is `stack underflow` (an operator without two
+operands), `division by zero`, or `leftover operands` (more than one value left at the end).
+"""
+stdin = """
+3 4 +
+5 1 2 + 4 * + 3 -
+2 3 4 * +
+7 -2 /
+1 +
+4 0 /
+1 2 3 +
+-7 2 /
+"""
+needs = []
+expected_stdout = """
+3 4 + = 7
+5 1 2 + 4 * + 3 - = 14
+2 3 4 * + = 14
+7 -2 / = -3
+1 + = error: stack underflow
+4 0 / = error: division by zero
+1 2 3 + = error: leftover operands
+-7 2 / = -3
+"""

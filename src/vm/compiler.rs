@@ -135,8 +135,10 @@ pub struct CompileOptions {
 
 impl Compiler {
     fn new(name: &str) -> Self {
+        let mut chunk = Chunk::new(name);
+        chunk.edition = crate::semantics::edition::current();
         Self {
-            chunk: Chunk::new(name),
+            chunk,
             locals: Vec::new(),
             scope_depth: 0,
             next_register: 0,
@@ -1011,14 +1013,7 @@ fn parse_import_program(path: &str, resolved: &Path) -> Result<Program, CompileE
         .map_err(|e| CompileError::new(&e.to_string()))?;
     let source = std::fs::read_to_string(&checked)
         .map_err(|e| CompileError::new(&format!("cannot import '{}': {}", path, e)))?;
-    let mut lexer = crate::lexer::Lexer::new(&source);
-    let tokens = lexer
-        .tokenize()
-        .map_err(|e| CompileError::new(&format!("import '{}' lex error: {}", path, e.message)))?;
-    let mut parser = crate::parser::Parser::new(tokens);
-    parser
-        .parse_program()
-        .map_err(|e| CompileError::new(&format!("import '{}' parse error: {}", path, e.message)))
+    crate::typechecker::prepare_module(&source, path, resolved).map_err(|e| CompileError::new(&e))
 }
 
 /// Names a bare `import` (no name list) binds in the importer.
@@ -1359,9 +1354,14 @@ fn compile_stmt_value(c: &mut Compiler, stmt: &Stmt, dst: u8) -> Result<(), Comp
     }
 }
 
-/// `match subject { pattern => body, ... }`. With `dst`, the taken arm's
-/// body is compiled as a block value into `dst` (null when no arm matches),
-/// so a `match` that ends a function body is its return value.
+/// `match subject { pattern [if guard] => body, ... }`. With `dst`, the
+/// taken arm's body is compiled as a block value into `dst`, so a `match`
+/// expression (and a `match` that ends a function body) has the taken
+/// arm's value. When no arm matches, it raises E0026, like the interpreter.
+///
+/// Each arm: a scope with one local per name its pattern binds, the
+/// pattern test (`compile_pattern`, which also fills the locals), the
+/// guard, then the body. Every failed test jumps to the next arm.
 fn compile_match(
     c: &mut Compiler,
     subject: &Expr,
@@ -1369,6 +1369,7 @@ fn compile_match(
     dst: Option<u8>,
 ) -> Result<(), CompileError> {
     let saved = c.next_register;
+    let span = (c.current_line, c.current_col);
     let subj = c.alloc_reg()?;
     compile_expr(c, subject, subj)?;
     if let Some(dst) = dst {
@@ -1378,87 +1379,57 @@ fn compile_match(
     let mut has_catch_all = false;
 
     for arm in arms {
-        match &arm.pattern {
-            Pattern::Wildcard => {
-                c.begin_scope();
-                compile_arm_body(c, &arm.body, dst)?;
-                c.end_scope();
-                has_catch_all = true;
-                break;
+        let irrefutable = arm.guard.is_none() && matches!(arm.pattern, Pattern::Wildcard);
+        c.begin_scope();
+        let names = arm.pattern.binding_names();
+        for name in &names {
+            let reg = c.add_local(name, false)?;
+            // A name some alternative of an or-pattern does not bind (only
+            // possible for variant-like names) must not keep a stale value.
+            let bound_everywhere = arm
+                .pattern
+                .alternatives()
+                .iter()
+                .all(|alt| alt.binding_names().contains(name));
+            if !bound_everywhere {
+                c.emit(encode_abc(OpCode::LoadNull, reg, 0, 0), 0);
             }
-            Pattern::Binding(name) => {
-                let saved = c.next_register;
-                let fn_reg = c.alloc_reg()?;
-                let fn_idx = c.const_str("__forge_binding_matches");
-                c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
-
-                let name_reg = c.alloc_reg()?;
-                let name_idx = c.const_str(&c.global_name(name));
-                c.emit(encode_abx(OpCode::LoadConst, name_reg, name_idx), 0);
-
-                let value_reg = c.alloc_reg()?;
-                c.emit(encode_abc(OpCode::Move, value_reg, subj, 0), 0);
-
-                let check_reg = c.alloc_reg()?;
-                c.emit(encode_abc(OpCode::Call, fn_reg, 2, check_reg), 0);
-                let skip = c.emit_jump(OpCode::JumpIfFalse, check_reg, 0);
-                c.free_to(saved);
-
-                c.begin_scope();
-                let vr = c.add_local(name, false)?;
-                c.emit(encode_abc(OpCode::Move, vr, subj, 0), 0);
-                compile_arm_body(c, &arm.body, dst)?;
-                c.end_scope();
-
-                let ej = c.emit_jump(OpCode::Jump, 0, 0);
-                end_jumps.push(ej);
-                c.patch_jump(skip);
+        }
+        let mut fails = Vec::new();
+        compile_pattern(c, &arm.pattern, subj, true, &mut fails)?;
+        let mut guard_fails = Vec::new();
+        if let Some(guard) = &arm.guard {
+            let before = c.next_register;
+            let g = c.alloc_reg()?;
+            compile_expr(c, guard, g)?;
+            guard_fails.push(c.emit_jump(OpCode::JumpIfFalse, g, 0));
+            c.free_to(before);
+        }
+        compile_arm_body(c, &arm.body, dst)?;
+        let closed = c.end_scope();
+        if irrefutable {
+            has_catch_all = true;
+            break;
+        }
+        end_jumps.push(c.emit_jump(OpCode::Jump, 0, 0));
+        if !guard_fails.is_empty() {
+            // A guard may have created a closure over a binding: close
+            // those upvalues on the way out, as the body's exit does.
+            for j in guard_fails {
+                c.patch_jump(j);
             }
-            Pattern::Literal(lit) => {
-                let lr = c.alloc_reg()?;
-                compile_expr(c, lit, lr)?;
-                let cr = c.alloc_reg()?;
-                c.emit(encode_abc(OpCode::Eq, cr, subj, lr), 0);
-                let skip = c.emit_jump(OpCode::JumpIfFalse, cr, 0);
-                c.free_to(lr);
-
-                c.begin_scope();
-                compile_arm_body(c, &arm.body, dst)?;
-                c.end_scope();
-
-                let ej = c.emit_jump(OpCode::Jump, 0, 0);
-                end_jumps.push(ej);
-                c.patch_jump(skip);
+            if let Some(range) = closed {
+                c.emit_close(range);
             }
-            Pattern::Constructor { name, fields } => {
-                let variant_idx = c.const_str(name);
-                let vr = c.alloc_reg()?;
-                emit_get_field(c, vr, subj, "__variant__")?;
-                let nr = c.alloc_reg()?;
-                c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
-                let cr = c.alloc_reg()?;
-                c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
-                let skip = c.emit_jump(OpCode::JumpIfFalse, cr, 0);
-                c.free_to(vr);
-
-                c.begin_scope();
-                for (i, fp) in fields.iter().enumerate() {
-                    if let Pattern::Binding(bname) = fp {
-                        let fr = c.add_local(bname, false)?;
-                        c.emit(encode_abc(OpCode::ExtractField, fr, subj, i as u8), 0);
-                    }
-                }
-                compile_arm_body(c, &arm.body, dst)?;
-                c.end_scope();
-
-                let ej = c.emit_jump(OpCode::Jump, 0, 0);
-                end_jumps.push(ej);
-                c.patch_jump(skip);
-            }
+        }
+        for j in fails {
+            c.patch_jump(j);
         }
     }
     if !has_catch_all {
-        // Every arm's test failed: same error as the interpreter (E0026).
+        // Every arm's test failed: same error (and position: the `match`)
+        // as the interpreter (E0026).
+        c.set_current_span(span.0, span.1);
         let msg = c.alloc_reg()?;
         let idx = c.const_str(crate::semantics::NON_EXHAUSTIVE_MATCH);
         c.emit(encode_abx(OpCode::LoadConst, msg, idx), 0);
@@ -1468,6 +1439,111 @@ fn compile_match(
         c.patch_jump(ej);
     }
     c.free_to(saved);
+    Ok(())
+}
+
+/// Test `value` against `pattern`, appending to `fails` the jumps taken
+/// when it does not match; on the fall-through path every name the
+/// pattern binds holds its value (in the locals `compile_match` declared).
+/// `top` is true for the arm's own pattern (not a constructor field).
+///
+/// Matches the interpreter's `match_pattern`: a bare name is a unit-variant
+/// test when it names one (`__forge_binding_matches`, checked for the
+/// top-level pattern and for variant-like names inside constructors),
+/// otherwise a binding; literals compare with `==`; a constructor compares
+/// `__variant__` and then its fields; an or-pattern tries each alternative.
+fn compile_pattern(
+    c: &mut Compiler,
+    pattern: &Pattern,
+    value: u8,
+    top: bool,
+    fails: &mut Vec<usize>,
+) -> Result<(), CompileError> {
+    match pattern {
+        Pattern::Wildcard => {}
+        Pattern::Binding(name) => {
+            if top || looks_like_variant(name) {
+                let saved = c.next_register;
+                let fn_reg = c.alloc_reg()?;
+                let fn_idx = c.const_str("__forge_binding_matches");
+                c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
+                let name_reg = c.alloc_reg()?;
+                let name_idx = c.const_str(&c.global_name(name));
+                c.emit(encode_abx(OpCode::LoadConst, name_reg, name_idx), 0);
+                let value_reg = c.alloc_reg()?;
+                c.emit(encode_abc(OpCode::Move, value_reg, value, 0), 0);
+                let check_reg = c.alloc_reg()?;
+                c.emit(encode_abc(OpCode::Call, fn_reg, 2, check_reg), 0);
+                fails.push(c.emit_jump(OpCode::JumpIfFalse, check_reg, 0));
+                c.free_to(saved);
+            }
+            let (reg, _) = c
+                .resolve_local(name)
+                .ok_or_else(|| CompileError::new("BUG: pattern binding has no local"))?;
+            if reg != value {
+                c.emit(encode_abc(OpCode::Move, reg, value, 0), 0);
+            }
+        }
+        Pattern::Literal(lit) => {
+            let saved = c.next_register;
+            let lr = c.alloc_reg()?;
+            compile_expr(c, lit, lr)?;
+            let cr = c.alloc_reg()?;
+            c.emit(encode_abc(OpCode::Eq, cr, value, lr), 0);
+            fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
+            c.free_to(saved);
+        }
+        Pattern::Constructor { name, fields } => {
+            let saved = c.next_register;
+            let variant_idx = c.const_str(name);
+            let vr = c.alloc_reg()?;
+            emit_get_field(c, vr, value, "__variant__")?;
+            let nr = c.alloc_reg()?;
+            c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
+            let cr = c.alloc_reg()?;
+            c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
+            fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
+            c.free_to(saved);
+            for (i, field) in fields.iter().enumerate() {
+                let index = u8::try_from(i).map_err(|_| {
+                    CompileError::new("constructor pattern has more than 256 fields")
+                })?;
+                match field {
+                    Pattern::Wildcard => {}
+                    // The common case: extract straight into the binding.
+                    Pattern::Binding(b) if !looks_like_variant(b) => {
+                        let (reg, _) = c.resolve_local(b).ok_or_else(|| {
+                            CompileError::new("BUG: pattern binding has no local")
+                        })?;
+                        c.emit(encode_abc(OpCode::ExtractField, reg, value, index), 0);
+                    }
+                    _ => {
+                        let fr = c.alloc_reg()?;
+                        c.emit(encode_abc(OpCode::ExtractField, fr, value, index), 0);
+                        compile_pattern(c, field, fr, false, fails)?;
+                        c.free_to(saved);
+                    }
+                }
+            }
+        }
+        Pattern::Or(alts) => {
+            let mut matched = Vec::new();
+            if let Some((last, init)) = alts.split_last() {
+                for alt in init {
+                    let mut alt_fails = Vec::new();
+                    compile_pattern(c, alt, value, top, &mut alt_fails)?;
+                    matched.push(c.emit_jump(OpCode::Jump, 0, 0));
+                    for j in alt_fails {
+                        c.patch_jump(j);
+                    }
+                }
+                compile_pattern(c, last, value, top, fails)?;
+            }
+            for j in matched {
+                c.patch_jump(j);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2062,17 +2138,39 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             )
         }
 
-        Stmt::Destructure { pattern, value } => {
+        Stmt::Destructure {
+            pattern,
+            value,
+            mutable,
+        } => {
             // `__forge_destructure` applies the interpreter's rules (missing
             // fields / items become null, wrong container type is an error)
             // and returns the bound values in order.
             let value_reg = c.alloc_reg()?;
             compile_expr(c, value, value_reg)?;
-            let (kind, names, rest): (&str, &[String], Option<&String>) = match pattern {
-                DestructurePattern::Object(names) => ("object", names, None),
-                DestructurePattern::Array { items, rest } => ("array", items, rest.as_ref()),
-                DestructurePattern::Tuple(names) => ("tuple", names, None),
-            };
+            // `keys`: what `__forge_destructure` reads (object fields);
+            // `names`: the locals bound, in the same order.
+            let (kind, keys, names, rest): (&str, Vec<&String>, Vec<&String>, Option<&String>) =
+                match pattern {
+                    DestructurePattern::Object(fields) => (
+                        "object",
+                        fields.iter().map(|(field, _)| field).collect(),
+                        fields.iter().map(|(_, name)| name).collect(),
+                        None,
+                    ),
+                    DestructurePattern::Array { items, rest } => (
+                        "array",
+                        items.iter().collect(),
+                        items.iter().collect(),
+                        rest.as_ref(),
+                    ),
+                    DestructurePattern::Tuple(names) => (
+                        "tuple",
+                        names.iter().collect(),
+                        names.iter().collect(),
+                        None,
+                    ),
+                };
             let parts_reg = c.alloc_reg()?;
             let saved = c.next_register;
             let kind_reg = c.alloc_reg()?;
@@ -2081,7 +2179,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             let names_reg = c.alloc_reg()?;
             compile_expr(
                 c,
-                &Expr::Array(names.iter().map(|n| Expr::StringLit(n.clone())).collect()),
+                &Expr::Array(keys.iter().map(|n| Expr::StringLit((*n).clone())).collect()),
                 names_reg,
             )?;
             let rest_flag_reg = c.alloc_reg()?;
@@ -2099,10 +2197,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             )?;
             c.free_to(saved);
 
-            let targets: Vec<&String> = names.iter().chain(rest).collect();
+            let targets: Vec<&String> = names.into_iter().chain(rest).collect();
             let target_regs: Vec<u8> = targets
                 .iter()
-                .map(|name| c.add_local(name, false))
+                .map(|name| c.add_local(name, *mutable))
                 .collect::<Result<_, _>>()?;
             let idx_reg = c.alloc_reg()?;
             for (index, target_reg) in target_regs.into_iter().enumerate() {

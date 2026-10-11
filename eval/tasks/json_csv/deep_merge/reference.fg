@@ -1,0 +1,30 @@
+fn merge_into(base, over) {
+    let mut out = base
+    for key in keys(over) {
+        let v = over[key]
+        if v == null {
+            out = omit(out, [key])
+        } else if typeof(v) == "Object" && typeof(get(out, key)) == "Object" {
+            out[key] = merge_into(out[key], v)
+        } else {
+            out[key] = v
+        }
+    }
+    return out
+}
+
+fn print_leaves(obj, prefix: String) {
+    for key in sort(keys(obj)) {
+        let v = obj[key]
+        let path = prefix + key
+        if typeof(v) == "Object" && len(keys(v)) > 0 {
+            print_leaves(v, path + ".")
+        } else {
+            println("{path} = {json.stringify(v)}")
+        }
+    }
+}
+
+let parts = split(input(), "\n---\n")
+let merged = merge_into(json.parse(parts[0]), json.parse(parts[1]))
+print_leaves(merged, "")

@@ -1,0 +1,14 @@
+id = "flatten_nested"
+category = "collections"
+title = "Flatten nested lists"
+prompt = """
+Given the nested list [1, [2, [3, [4, 5]], 6], [], [[7], 8], [[[9]]], 10] written as a literal
+in your program, flatten it completely (any depth) and print the values separated by spaces.
+Then print `depth: <d>` with the maximum nesting depth (a flat list of numbers has depth 1;
+empty lists count as a level).
+"""
+needs = []
+expected_stdout = """
+1 2 3 4 5 6 7 8 9 10
+depth: 4
+"""

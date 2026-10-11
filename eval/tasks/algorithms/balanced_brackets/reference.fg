@@ -1,0 +1,29 @@
+let closing = { ")": "(", "]": "[", "}": "{" }
+
+fn check_line(line: String) -> String {
+    let cs = line.chars()
+    let mut stack = []
+    for i in range(0, len(cs)) {
+        let c = cs[i]
+        if c == "(" || c == "[" || c == "{" {
+            stack = push(stack, { ch: c, pos: i + 1 })
+        } else if has_key(closing, c) {
+            let n = len(stack)
+            if n == 0 || stack[n - 1].ch != closing[c] {
+                return "error at {i + 1}: unexpected {c}"
+            }
+            stack = slice(stack, 0, n - 1)
+        }
+    }
+    if len(stack) > 0 {
+        let top = stack[len(stack) - 1]
+        return "error at {top.pos}: unclosed {top.ch}"
+    }
+    return "ok"
+}
+
+for line in split(input(), "\n") {
+    if line != "" {
+        println("{check_line(line)} | {line}")
+    }
+}

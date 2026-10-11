@@ -118,6 +118,7 @@ impl VM {
                 crate::semantics::BinaryOp::Add,
                 Self::semantic_operand(&self.gc, &cur),
                 Self::semantic_operand(&self.gc, &rhs),
+                self.edition(),
             ),
             Ok(crate::semantics::Outcome::Concat)
         );

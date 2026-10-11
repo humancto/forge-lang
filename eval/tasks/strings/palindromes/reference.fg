@@ -1,0 +1,8 @@
+for line in split(input(), "\n") {
+    if line == "" {
+        continue
+    }
+    let cleaned = regex.replace(line.lower(), "[^a-z0-9]", "")
+    let verdict = if cleaned == cleaned.reverse() { "yes" } else { "no" }
+    println("{verdict} {line}")
+}

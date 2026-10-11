@@ -1,0 +1,13 @@
+for line in ["INFO job started", "WARN disk at 91%", "INFO job finished"] {
+    fs.append("app.log", line + "\n")
+}
+let lines = filter(split(fs.read("app.log"), "\n"), fn(l) { return l != "" })
+println("lines: {len(lines)}")
+let mut counts = {}
+for line in lines {
+    let level = line.words()[0]
+    counts[level] = get(counts, level, 0) + 1
+}
+for level in sort(keys(counts)) {
+    println("{level}={counts[level]}")
+}

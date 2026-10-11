@@ -1,0 +1,25 @@
+id = "palindromes"
+category = "strings"
+title = "Palindrome lines"
+prompt = """
+Read lines from standard input. For each non-empty line print `yes` if it is a palindrome when
+only letters and digits are kept and case is ignored, otherwise `no`, followed by a space and
+the original line.
+"""
+stdin = """
+A man, a plan, a canal: Panama
+hello
+Was it a car or a cat I saw?
+12321
+12 3 4 21
+No lemon, no melon
+"""
+needs = []
+expected_stdout = """
+yes A man, a plan, a canal: Panama
+no hello
+yes Was it a car or a cat I saw?
+yes 12321
+no 12 3 4 21
+yes No lemon, no melon
+"""

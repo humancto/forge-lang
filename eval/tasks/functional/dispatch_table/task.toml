@@ -1,0 +1,37 @@
+id = "dispatch_table"
+category = "functional"
+title = "Calculator dispatch table"
+prompt = """
+Build a dispatch table (a map from operator name to function) for the binary integer
+operations add, sub, mul, div (integer division truncating toward zero), mod (remainder with
+the sign of the dividend), pow and max. Each line of standard input is `<op> <a> <b>`. Print
+`<op>(<a>, <b>) = <result>`; for an unknown operator print `unknown op: <op>`, and for div or
+mod by zero print `<op>(<a>, <b>) = undefined`.
+"""
+stdin = """
+add 2 3
+sub 10 25
+mul -4 6
+div 17 5
+div -17 5
+mod -17 5
+pow 2 10
+max 3 9
+root 9 2
+div 1 0
+mod 4 0
+"""
+needs = []
+expected_stdout = """
+add(2, 3) = 5
+sub(10, 25) = -15
+mul(-4, 6) = -24
+div(17, 5) = 3
+div(-17, 5) = -3
+mod(-17, 5) = -2
+pow(2, 10) = 1024
+max(3, 9) = 9
+unknown op: root
+div(1, 0) = undefined
+mod(4, 0) = undefined
+"""

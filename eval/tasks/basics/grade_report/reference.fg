@@ -1,0 +1,29 @@
+fn letter(score: Int) -> String {
+    if score >= 90 {
+        return "A"
+    } else if score >= 80 {
+        return "B"
+    } else if score >= 70 {
+        return "C"
+    } else if score >= 60 {
+        return "D"
+    }
+    return "F"
+}
+
+let students = [
+    { name: "Ada", score: 93 },
+    { name: "Brian", score: 78 },
+    { name: "Chen", score: 85 },
+    { name: "Dora", score: 61 },
+    { name: "Eli", score: 88 },
+    { name: "Fay", score: 54 },
+]
+let mut total = 0
+for s in students {
+    println("{s.name}: {s.score} {letter(s.score)}")
+    total += s.score
+}
+// One decimal place with integer arithmetic: tenths, rounded half up.
+let tenths = (total * 10 * 2 + len(students)) / (2 * len(students))
+println("average: {tenths / 10}.{tenths % 10}")

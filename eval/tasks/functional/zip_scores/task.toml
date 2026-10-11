@@ -1,0 +1,23 @@
+id = "zip_scores"
+category = "functional"
+title = "Zip and enumerate"
+prompt = """
+Standard input has two lines: names separated by spaces, and scores separated by spaces (there
+may be more of one than the other; ignore the extras). Pair them up in order and print each
+pair with its 1-based position as `<pos>. <name>: <score>`. Then print `best: <name>` for the
+highest score (first on a tie) and `above average: <names with a score strictly above the
+average of the paired scores, in order, separated by spaces>`.
+"""
+stdin = """
+ada bob cy di ed
+71 94 88 94
+"""
+needs = []
+expected_stdout = """
+1. ada: 71
+2. bob: 94
+3. cy: 88
+4. di: 94
+best: bob
+above average: bob cy di
+"""

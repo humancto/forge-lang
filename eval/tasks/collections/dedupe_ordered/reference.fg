@@ -1,0 +1,11 @@
+let tokens = input().words()
+let mut seen = set()
+let mut out: [String] = []
+for t in tokens {
+    if !seen.has(t) {
+        seen = seen.add(t)
+        out = push(out, t)
+    }
+}
+println(join(out, " "))
+println("removed: {len(tokens) - len(out)}")

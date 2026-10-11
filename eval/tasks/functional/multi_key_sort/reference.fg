@@ -1,0 +1,52 @@
+let people = [
+    { name: "Ada", dept: "eng", salary: 120, age: 36 },
+    { name: "Bob", dept: "ops", salary: 85, age: 45 },
+    { name: "Cy", dept: "eng", salary: 120, age: 29 },
+    { name: "Di", dept: "sales", salary: 70, age: 31 },
+    { name: "Ed", dept: "ops", salary: 85, age: 38 },
+    { name: "Flo", dept: "eng", salary: 95, age: 52 },
+    { name: "Gus", dept: "sales", salary: 70, age: 31 },
+    { name: "Hal", dept: "eng", salary: 95, age: 40 },
+]
+
+fn compare_str(a: String, b: String) -> Int {
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    return 0
+}
+
+fn by_dept_salary_name(a, b) -> Int {
+    let d = compare_str(a.dept, b.dept)
+    if d != 0 {
+        return d
+    }
+    if a.salary != b.salary {
+        return b.salary - a.salary
+    }
+    return compare_str(a.name, b.name)
+}
+
+println("by department, then salary descending, then name:")
+let ranked = sort(people, by_dept_salary_name)
+for p in ranked {
+    println("  {p.name} {p.dept} {p.salary}")
+}
+println("by age descending, then name:")
+let by_age = sort(people, fn(a, b) {
+    if a.age != b.age {
+        return b.age - a.age
+    }
+    return compare_str(a.name, b.name)
+})
+for p in by_age {
+    println("  {p.name} {p.age}")
+}
+println("top earner per department:")
+for dept in sort(unique(map(people, fn(p) { return p.dept }))) {
+    let best = find(ranked, fn(p) { return p.dept == dept })
+    println("  {dept}: {best.name}")
+}

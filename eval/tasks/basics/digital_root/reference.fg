@@ -1,0 +1,22 @@
+fn digit_sum(n: Int) -> Int {
+    let mut rest = n
+    let mut total = 0
+    while rest > 0 {
+        total += rest % 10
+        rest = rest / 10
+    }
+    return total
+}
+
+for line in split(input(), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    let n = int(line.trim())
+    let s = digit_sum(n)
+    let mut r = n
+    while r >= 10 {
+        r = digit_sum(r)
+    }
+    println("{n}: sum={s} root={r}")
+}

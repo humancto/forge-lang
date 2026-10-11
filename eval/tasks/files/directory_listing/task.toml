@@ -1,0 +1,20 @@
+id = "directory_listing"
+category = "files"
+title = "List a directory"
+prompt = """
+The current directory contains a subdirectory `data`. List the regular files directly inside
+`data` (ignore subdirectories), sorted by size descending and then by name, printing
+`<name> <size in bytes>` for each. Then print `files: <n>, total bytes: <sum>` and
+`by extension: ` followed by `<ext>=<count>` pairs sorted by extension and separated by spaces
+(the extension is the part after the last dot including the dot, or `none`).
+"""
+needs = ["read"]
+expected_stdout = """
+notes 18
+b.json 17
+c.txt 11
+z.csv 8
+a.txt 6
+files: 5, total bytes: 60
+by extension: .csv=1 .json=1 .txt=2 none=1
+"""

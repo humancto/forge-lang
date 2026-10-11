@@ -4,7 +4,7 @@
 
 This file is the canonical, compact guide for AI models writing Forge. Every code block below was run on Forge v0.9.x with the default engine (`forge run file.fg`). Prefer the forms shown here.
 
-Forge also has an optional "natural" syntax (`set x to 5`, `say`, `define`, `otherwise`, ...). It is sugar for the classic syntax below. Write classic syntax unless asked otherwise.
+Write only the forms shown here. Edition 2026 (the default) also accepts an older "natural" syntax (`set x to 5`, `say`, `define`, `otherwise`, `repeat n times`, `unpack`, `must`, `safe`, `check`, ...) and joke builtins (`sus`, `bruh`, ...); edition 2027 (`forge --edition 2027`, or `edition = "2027"` under `[project]` in forge.toml) removes them, and `forge fix --edition 2027` rewrites old code.
 
 ## Running
 
@@ -14,6 +14,7 @@ forge --interp run app.fg        # tree-walking interpreter (reference semantics
 forge --jit run app.fg           # VM + Cranelift JIT for numeric functions
 forge --allow-run run app.fg     # allow sh/run_command and other shell builtins
 forge -e 'println(1 + 2)'        # evaluate inline
+forge --edition 2027 run app.fg  # edition 2027 (preview); `forge fix --edition 2027 .` migrates 2026 code
 forge test                       # run @test functions in tests/*.fg
 forge build --native app.fg      # native executable (also: fmt, new, lsp, add, install)
 forge mcp --allow-net=api.x.com  # MCP server: AI agents run Forge in a deny-all sandbox (VM; --engine interp)
@@ -22,6 +23,21 @@ forge run --max-fuel 1000000 --max-memory 64MB f.fg  # deterministic step budget
 ```
 
 Engine flags go BEFORE the subcommand: `forge --interp run x.fg`, not `forge run x.fg --interp`. Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `+=`.
+
+## Reading input
+
+Programs read piped standard input with `fs.lines("/dev/stdin")` (an array of lines, without the newlines) or `fs.read("/dev/stdin")` (all of it as one string). `input()` also returns all of stdin, with trailing whitespace trimmed. Command-line arguments after the file name are not passed to the program: take input from stdin.
+
+```forge
+let lines = fs.lines("/dev/stdin")
+let mut total = 0
+for line in lines {
+    if trim(line) != "" {
+        total += int(trim(line))
+    }
+}
+println("lines={len(lines)} total={total}")
+```
 
 ## Values, variables, strings
 
@@ -37,16 +53,20 @@ let nums = [1, 2, 3]          // Array
 let user = { name: "Ada", age: 36 }   // Object (string keys, insertion-ordered)
 let pair = (1, "one")         // Tuple
 println("Hello, {name}! count={count}")   // "{expr}" interpolates inside double-quoted strings
+println("{join(["a", "b"], ", ")}")       // any expression, including string literals: a, b
 println(typeof(pi))           // Float
 println(user.name)
 println(nums[0])
 println(len(nums))
-println(str(42) + "!")
+println(str(42) + "!")        // + joins two Strings; convert other values with str() or "{x}"
 println(int("7") + 1)
 println(10 / 4)               // 2 (Int / Int is integer division)
+let {name: who, age} = user     // destructuring (also `let [first, ...rest] = nums`, `let (a, b) = pair`)
+let [first, ...rest] = nums
+println("{who} {age} {first} {rest}")
 ```
 
-Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines.
+Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
 
 ## Type annotations and checking
 
@@ -59,7 +79,9 @@ let names = ["ada", "bob"]
 let lens = map(names, fn(s) { len(s) })        // lens: [Int]
 ```
 
-Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition. Default: warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
+Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition. Edition 2026 (default): warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
+
+Edition 2027 (`edition = "2027"` in forge.toml, or `forge --edition 2027`): annotations are enforced. A contradiction of a declared type (T0001, T0002, T0003, T0012, T0015, T0016) is an error and nothing runs; annotated function arguments and results are checked at run time on every call (E0017); unannotated code is not checked and costs nothing. Generic parameters must agree within a call: `fn pair<T>(a: T, b: T)` accepts `pair(1, 2)` and `pair(1, 2.5)` (T is Float) but not `pair(1, "x")`. So annotate function signatures with the types you mean (`fn total(xs: [Int]) -> Int`), and leave unknowns unannotated rather than guessing.
 
 ## Control flow
 
@@ -195,7 +217,34 @@ match v {
 }
 ```
 
-`match` is a statement. Patterns: literals, `_`, bindings, and constructors `Name(a, b)`. There are no guard clauses (`n if ...`) or or-patterns (`1 | 2`).
+`match` is also an expression: its value is the taken arm's value (an arm body is an expression or a `{ ... }` block whose last expression is the value), so it works in `let`, `return`, arguments and lambdas.
+
+```forge
+fn size(n) {
+    return match n {
+        0 => "none",
+        1 | 2 => "few",                  // or-pattern
+        x if x < 10 => "some {x}",       // guard: a false guard tries the next arm
+        _ => "many",
+    }
+}
+println(size(2))
+println(size(7))
+
+type Shape = Circle(Float) | Rect(Float, Float) | Square(Float, Float)
+let s = Square(2.0, 2.0)
+let label = match s {
+    Circle(r) if r > 10.0 => "big circle",
+    Circle(r) => "circle {r}",
+    Rect(w, h) | Square(w, h) => {
+        let area = w * h
+        "box of area {area}"
+    },
+}
+println(label)
+```
+
+Patterns: literals (including negative numbers), `_`, bindings, constructors `Name(a, b)` (nested: `Ok(Some(x))`), and or-patterns `p1 | p2` whose alternatives bind the same names. A guard `pattern if cond` sees the pattern's bindings. If no arm matches, it is a runtime error (E0026); end with `_ => ...` when the cases are open.
 
 ## Result, Option, errors
 
@@ -235,13 +284,13 @@ try {
     println("caught {e.type}: {e.message}")   // ArithmeticError: division by zero
 }
 try {
-    must Err("bad config")       // must: unwrap or raise
+    unwrap(Err("bad config"))    // unwrap: the value, or raise the error
 } catch e {
     println(e.message)
 }
 ```
 
-There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `must expr` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. `safe { ... }` runs a block and swallows its errors.
+There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 
 Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0018`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
@@ -318,7 +367,7 @@ Other builtins: `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a
 | `json` | `parse(text)`, `stringify(value)` |
 | `regex` | `test(text, pattern)`, `find(text, pattern)`, `find_all(text, pattern)`, `replace(text, pattern, repl)`, `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
-| `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }`; response: `{ status, ok, body, json, headers }` |
+| `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body) |
 | `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `close()` |
 | `pg`, `mysql` | `connect(url)`, `query(conn, sql, params?)`, `execute(conn, sql, params?)`, `close(conn)`; mysql adds `begin/commit/rollback` |
 | `jwt` | `sign(claims, secret, opts?)`, `verify(token, secret)`, `decode(token)`, `valid(token, secret)` |
@@ -429,13 +478,15 @@ fn cities() { return ["Oslo"] }
 
 ## Common mistakes
 
-- `let {a, b} = obj` does not parse. Use `unpack {a, b} from obj` or `unpack [x, ...rest] from arr`; `let (a, b) = tuple` works for tuples.
+- Destructure with `let`: `let {a, b} = obj`, `let {a: x} = obj` (renames), `let [x, ...rest] = arr`, `let (a, b) = tuple`; add `mut` for mutable bindings. Missing fields/items bind `null`.
+- Words like `order`, `from`, `to`, `limit`, `where`, `select`, `table`, `take`, `times`, `safe` are fine as variable, function, parameter and field names. Reserved: `let mut fn return if else match for in while loop break continue struct type interface impl pub import spawn squad try catch async await yield true false null`.
 - `for i, x in array` does not work. Use `for e in enumerate(array) { e.index, e.value }`.
 - No `|x| ...` closures and no arrow functions. Write `fn(x) { return ... }`.
 - No `throw`, no `elif`, no `??` operator. Use `Err`/`?`, `else if`, and `get(obj, key, default)`.
 - Method chains cannot start a line with `.`; keep `a.filter(...).map(...)` on one line.
 - `regex.*` takes `(text, pattern)`, not `(pattern, text)`. Escape backslashes in patterns: `"\\d+"`.
 - `reduce(array, initial, fn)` — the initial value comes second.
+- Put non-String values into text with interpolation (`"total: {n}"`) or `str(n)`, never `"total: " + n`: edition 2027 rejects `+` between a String and a non-String (E0034; edition 2026 converts silently).
 - Mutating a field or index requires a `let mut` binding.
 - `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.

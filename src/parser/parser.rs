@@ -6,6 +6,10 @@ use super::index::{DefKind, IndexBuilder, OccId, Pos, Role, ScopeKind, Span, Syn
 use crate::lexer::token::{Spanned, Token};
 use crate::lexer::Lexer;
 
+#[path = "removed.rs"]
+mod removed;
+use super::soft;
+
 pub struct Parser {
     tokens: Vec<Spanned>,
     pos: usize,
@@ -20,6 +24,13 @@ pub struct Parser {
     /// Set while parsing the methods of an `impl`/`give` block: function
     /// definitions there are methods of this type, not variables.
     impl_owner: Option<String>,
+    /// Set while parsing the second and later alternatives of an
+    /// or-pattern: their bindings are recorded in the index as references
+    /// to the first alternative's definitions, so a rename edits them all.
+    or_alternative: bool,
+    /// Edition 2027 or later: report the removed natural-syntax forms
+    /// (`parser/removed.rs`). Read once, when the parser is created.
+    report_removed: bool,
 }
 
 /// Deepest nesting of expressions, statements, patterns and type
@@ -37,6 +48,9 @@ impl Parser {
             index: None,
             source: None,
             impl_owner: None,
+            or_alternative: false,
+            report_removed: crate::semantics::edition::current()
+                >= crate::semantics::edition::Edition::E2027,
         }
     }
 
@@ -215,7 +229,18 @@ impl Parser {
         result
     }
 
+    /// At an operand position: a soft keyword used as a name (`order`,
+    /// `safe(x)`, `from = 1`) becomes an identifier token (`parser::soft`).
+    fn soften_keyword(&mut self, statement: bool) {
+        if let Some(word) = soft::soft_word(&self.current_token()) {
+            if soft::keyword_is_name(&self.tokens, self.pos, statement) {
+                self.tokens[self.pos].token = Token::Ident(word.to_string());
+            }
+        }
+    }
+
     fn parse_statement_kind(&mut self) -> Result<Stmt, ParseError> {
+        self.soften_keyword(true);
         match self.current_token() {
             Token::Let => self.parse_let(),
             // `set` is context-sensitive: `set(...)` is the set() constructor call,
@@ -268,6 +293,11 @@ impl Parser {
             Token::Agent => self.parse_agent_def(),
             Token::Download => self.parse_download(),
             Token::Crawl => self.parse_crawl(),
+            // Edition 2027: a removed natural-syntax form (`set x to 1`, ...).
+            Token::Ident(_) => match self.removed_statement_form() {
+                Some(err) => Err(err),
+                None => self.parse_expr_or_assign(),
+            },
             _ => self.parse_expr_or_assign(),
         }
     }
@@ -282,20 +312,12 @@ impl Parser {
             false
         };
 
-        // Tuple destructuring: let (a, b, c) = expr
-        if self.check(&Token::LParen) {
-            self.advance();
-            let mut names = Vec::new();
+        // Destructuring: let (a, b) = tuple, let {a, b: c} = obj,
+        // let [x, ...rest] = arr
+        if self.check(&Token::LParen) || self.check(&Token::LBrace) || self.check(&Token::LBracket)
+        {
             let mut defs = Vec::new();
-            while !self.check(&Token::RParen) {
-                let name = self.expect_ident()?;
-                defs.push(self.note_def(&name, DefKind::Variable { mutable }));
-                names.push(name);
-                if self.check(&Token::Comma) {
-                    self.advance();
-                }
-            }
-            self.expect(Token::RParen)?;
+            let pattern = self.parse_destructure_pattern(mutable, &mut defs)?;
             self.expect(Token::Eq)?;
             let value = self.parse_expr()?;
             let end = self.prev_end();
@@ -303,8 +325,9 @@ impl Parser {
                 self.set_visible(def, end);
             }
             return Ok(Stmt::Destructure {
-                pattern: DestructurePattern::Tuple(names),
+                pattern,
                 value,
+                mutable,
             });
         }
 
@@ -446,6 +469,9 @@ impl Parser {
 
         let mut methods = Vec::new();
         while !self.check(&Token::RBrace) {
+            if let Some(err) = self.removed_statement_form() {
+                return Err(err);
+            }
             if self.check(&Token::Fn) || self.check(&Token::Define) {
                 self.advance();
             }
@@ -543,6 +569,9 @@ impl Parser {
         methods: &mut Vec<SpannedStmt>,
     ) -> Result<(), ParseError> {
         while !self.check(&Token::RBrace) {
+            if let Some(err) = self.removed_statement_form() {
+                return Err(err);
+            }
             let (line, col) = self.current_pos();
             // `parse_fn_def` takes this, so functions nested in a method
             // body are ordinary functions again.
@@ -788,61 +817,99 @@ impl Parser {
         Ok(Stmt::YieldStmt(expr))
     }
 
-    /// Parses: unpack { a, b } from expr  /  unpack [ a, ...rest ] from expr
-    /// An identifier bound by destructuring (`unpack`).
-    fn expect_bound_ident(&mut self, defs: &mut Vec<Option<OccId>>) -> Result<String, ParseError> {
+    /// An identifier bound by destructuring.
+    fn expect_bound_ident(
+        &mut self,
+        mutable: bool,
+        defs: &mut Vec<Option<OccId>>,
+    ) -> Result<String, ParseError> {
         let name = self.expect_ident()?;
-        defs.push(self.note_def(&name, DefKind::Variable { mutable: false }));
+        defs.push(self.note_def(&name, DefKind::Variable { mutable }));
         Ok(name)
     }
 
-    fn parse_unpack(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(Token::Unpack)?;
-        let mut defs = Vec::new();
-
-        let pattern = if self.check(&Token::LBrace) {
+    /// A destructuring pattern at the cursor: `{a, b: c}`, `[x, ...rest]`
+    /// or `(a, b)` (shared by `let` and `unpack`). The bound names are
+    /// recorded in `defs`; the caller makes them visible after the value.
+    fn parse_destructure_pattern(
+        &mut self,
+        mutable: bool,
+        defs: &mut Vec<Option<OccId>>,
+    ) -> Result<DestructurePattern, ParseError> {
+        if self.check(&Token::LBrace) {
             self.advance();
-            let mut names = Vec::new();
+            self.skip_newlines();
+            let mut fields = Vec::new();
             while !self.check(&Token::RBrace) {
-                names.push(self.expect_bound_ident(&mut defs)?);
+                // `field` binds `field`; `field: name` binds `name`.
+                let field = self.expect_ident()?;
+                let binding = if self.check(&Token::Colon) {
+                    self.note_prev(&field, Role::Field);
+                    self.advance();
+                    self.expect_bound_ident(mutable, defs)?
+                } else {
+                    defs.push(self.note_def(&field, DefKind::Variable { mutable }));
+                    field.clone()
+                };
+                fields.push((field, binding));
+                self.skip_newlines();
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
+                self.skip_newlines();
             }
             self.expect(Token::RBrace)?;
-            DestructurePattern::Object(names)
+            Ok(DestructurePattern::Object(fields))
         } else if self.check(&Token::LBracket) {
             self.advance();
+            self.skip_newlines();
             let mut items = Vec::new();
             let mut rest = None;
             while !self.check(&Token::RBracket) {
+                if rest.is_some() {
+                    return Err(self.error("`...rest` must be the last element of the pattern"));
+                }
                 if self.check(&Token::DotDotDot) {
                     self.advance();
-                    rest = Some(self.expect_bound_ident(&mut defs)?);
+                    rest = Some(self.expect_bound_ident(mutable, defs)?);
                 } else {
-                    items.push(self.expect_bound_ident(&mut defs)?);
+                    items.push(self.expect_bound_ident(mutable, defs)?);
                 }
+                self.skip_newlines();
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
+                self.skip_newlines();
             }
             self.expect(Token::RBracket)?;
-            DestructurePattern::Array { items, rest }
+            Ok(DestructurePattern::Array { items, rest })
         } else if self.check(&Token::LParen) {
             self.advance();
             let mut names = Vec::new();
             while !self.check(&Token::RParen) {
-                names.push(self.expect_bound_ident(&mut defs)?);
+                names.push(self.expect_bound_ident(mutable, defs)?);
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
             }
             self.expect(Token::RParen)?;
-            DestructurePattern::Tuple(names)
+            Ok(DestructurePattern::Tuple(names))
         } else {
-            return Err(self.error("expected {, [, or ( after 'unpack'"));
-        };
+            Err(self.error("expected {, [, or ( to start a destructuring pattern"))
+        }
+    }
 
+    /// Parses (edition 2026): unpack { a, b } from expr  /  unpack [ a, ...rest ] from expr
+    fn parse_unpack(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(Token::Unpack)?;
+        let mut defs = Vec::new();
+        if !(self.check(&Token::LBrace)
+            || self.check(&Token::LBracket)
+            || self.check(&Token::LParen))
+        {
+            return Err(self.error("expected {, [, or ( after 'unpack'"));
+        }
+        let pattern = self.parse_destructure_pattern(false, &mut defs)?;
         self.expect(Token::From)?;
         let value = self.parse_expr()?;
         let end = self.prev_end();
@@ -850,7 +917,11 @@ impl Parser {
             self.set_visible(def, end);
         }
 
-        Ok(Stmt::Destructure { pattern, value })
+        Ok(Stmt::Destructure {
+            pattern,
+            value,
+            mutable: false,
+        })
     }
 
     fn parse_when(&mut self) -> Result<Stmt, ParseError> {
@@ -860,7 +931,12 @@ impl Parser {
         self.skip_newlines();
         let mut arms = Vec::new();
         while !self.check(&Token::RBrace) {
-            if self.check(&Token::Else) || self.check(&Token::Otherwise) || self.check(&Token::Nah)
+            if let Some(err) = self.removed_else_arm() {
+                return Err(err);
+            }
+            if self.check(&Token::Else)
+                || ((self.check(&Token::Otherwise) || self.check(&Token::Nah))
+                    && matches!(self.peek_token(1), Token::Arrow | Token::FatArrow))
             {
                 self.advance();
                 if self.check(&Token::Arrow) || self.check(&Token::FatArrow) {
@@ -1383,7 +1459,10 @@ impl Parser {
     }
 
     fn check_else_keyword(&self) -> bool {
-        self.check(&Token::Else) || self.check(&Token::Otherwise) || self.check(&Token::Nah)
+        // `otherwise`/`nah` are soft: only `else` aliases before `{` / `if`.
+        self.check(&Token::Else)
+            || ((self.check(&Token::Otherwise) || self.check(&Token::Nah))
+                && matches!(self.peek_token(1), Token::LBrace | Token::If))
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
@@ -1439,9 +1518,15 @@ impl Parser {
         Ok(Stmt::Match { subject, arms })
     }
 
-    /// `pattern => { body }` or `pattern => statement`.
+    /// `pattern [if guard] => { body }` or `pattern [if guard] => statement`.
     fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
-        let pattern = self.parse_pattern()?;
+        let pattern = self.parse_or_pattern()?;
+        let guard = if self.check(&Token::If) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
         self.expect(Token::FatArrow)?;
 
         let body = if self.check(&Token::LBrace) {
@@ -1452,10 +1537,81 @@ impl Parser {
             } else {
                 (0, 0)
             };
-            let stmt = self.parse_statement()?;
+            // `fn(...) { ... }` here is a lambda value, not a definition.
+            let stmt = if self.check(&Token::Fn) && self.peek_token(1) == Token::LParen {
+                Stmt::Expression(self.parse_expr()?)
+            } else {
+                self.parse_statement()?
+            };
             vec![SpannedStmt::new(stmt, line, col)]
         };
-        Ok(MatchArm { pattern, body })
+        Ok(MatchArm {
+            pattern,
+            guard,
+            body,
+        })
+    }
+
+    /// `p1 | p2 | ...` (or a single pattern). Every alternative must bind
+    /// the same names, since the arm's guard and body may use any of them.
+    fn parse_or_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let first = self.parse_pattern()?;
+        if !self.check(&Token::Bar) {
+            return Ok(first);
+        }
+        let start = self.pos;
+        let outer = std::mem::replace(&mut self.or_alternative, true);
+        let mut alts = vec![first];
+        let mut result = Ok(());
+        while self.check(&Token::Bar) {
+            self.advance();
+            self.skip_newlines();
+            match self.parse_pattern() {
+                Ok(p) => alts.push(p),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        self.or_alternative = outer;
+        result?;
+
+        let names = |p: &Pattern| -> Vec<String> {
+            let mut names: Vec<String> = p
+                .binding_names()
+                .into_iter()
+                .filter(|n| !looks_like_variant(n))
+                .map(str::to_string)
+                .collect();
+            names.sort();
+            names
+        };
+        let expected = names(&alts[0]);
+        for alt in &alts[1..] {
+            let got = names(alt);
+            if got != expected {
+                let show = |ns: &[String]| {
+                    if ns.is_empty() {
+                        "no names".to_string()
+                    } else {
+                        ns.join(", ")
+                    }
+                };
+                let mut err = self.error(&format!(
+                    "every alternative of an or-pattern must bind the same names: the first binds {}, another binds {}",
+                    show(&expected),
+                    show(&got)
+                ));
+                // Point at the first `|`.
+                if let Some(t) = self.tokens.get(start) {
+                    err.line = t.line;
+                    err.col = t.col;
+                }
+                return Err(err);
+            }
+        }
+        Ok(Pattern::Or(alts))
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
@@ -1478,17 +1634,37 @@ impl Parser {
                     self.advance();
                     let mut fields = Vec::new();
                     while !self.check(&Token::RParen) {
-                        fields.push(self.parse_pattern()?);
+                        fields.push(self.parse_or_pattern()?);
                         if self.check(&Token::Comma) {
                             self.advance();
                         }
                     }
                     self.expect(Token::RParen)?;
                     Ok(Pattern::Constructor { name, fields })
+                } else if self.or_alternative {
+                    // The first alternative defines this name (checked by
+                    // `parse_or_pattern`): it is the same variable.
+                    self.note_prev(&name, Role::Ref);
+                    Ok(Pattern::Binding(name))
                 } else {
                     let def = self.note_def(&name, DefKind::PatternBinding);
                     self.hoist(def);
                     Ok(Pattern::Binding(name))
+                }
+            }
+            // Negative number literal: `-1 => ...`.
+            Token::Minus => {
+                self.advance();
+                match self.current_token() {
+                    Token::Int(n) => {
+                        self.advance();
+                        Ok(Pattern::Literal(Expr::Int(n.wrapping_neg())))
+                    }
+                    Token::Float(n) => {
+                        self.advance();
+                        Ok(Pattern::Literal(Expr::Float(-n)))
+                    }
+                    _ => Err(self.error("expected a number after '-' in pattern")),
                 }
             }
             Token::Int(n) => {
@@ -1937,6 +2113,10 @@ impl Parser {
     }
 
     fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
+        self.soften_keyword(false);
+        if let Some(err) = self.removed_expression_form() {
+            return Err(err);
+        }
         match self.current_token() {
             Token::Await | Token::Hold => {
                 self.advance();
@@ -2128,6 +2308,7 @@ impl Parser {
                 // Check for struct init: Name { field: value }
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
                     && self.check(&Token::LBrace)
+                    && self.brace_opens_struct_fields()
                 {
                     self.note_prev(&name, Role::TypeRef);
                     self.advance();
@@ -2244,6 +2425,14 @@ impl Parser {
                 })
             }
 
+            Token::Match => {
+                // match-expression: its value is the taken arm's value
+                // (`eval_block_value` / `compile_block_value`).
+                let (line, col) = self.current_pos();
+                let match_stmt = self.parse_match()?;
+                Ok(Expr::Block(vec![SpannedStmt::new(match_stmt, line, col)]))
+            }
+
             Token::When => {
                 let when_stmt = self.parse_when()?;
                 Ok(Expr::Block(vec![SpannedStmt::unspanned(when_stmt)]))
@@ -2265,7 +2454,22 @@ impl Parser {
         let mut current = String::new();
 
         while let Some((_, ch)) = chars.next() {
-            if ch == '{' {
+            if ch == '{' && chars.peek().map(|(_, c)| *c) == Some('}') {
+                // `"{}"` (an empty JSON object, a format placeholder) is
+                // text: there is no expression to interpolate.
+                chars.next();
+                current.push_str("{}");
+            } else if ch == '{' && Self::is_quantifier_braces(chars.clone().map(|(_, c)| c)) {
+                // `{4}`, `{2,}`, `{1,3}`: a regex quantifier, not an
+                // expression (interpolating a bare number is pointless).
+                current.push('{');
+                for (_, inner) in chars.by_ref() {
+                    current.push(inner);
+                    if inner == '}' {
+                        break;
+                    }
+                }
+            } else if ch == '{' {
                 if !current.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut current)));
                 }
@@ -2317,6 +2521,25 @@ impl Parser {
         }
 
         Ok(Expr::StringInterp(parts))
+    }
+
+    /// After a `{` in a string: whether `digits[,digits]}` follows.
+    fn is_quantifier_braces(rest: impl Iterator<Item = char>) -> bool {
+        let mut digits_before = 0;
+        let mut comma = false;
+        for c in rest {
+            match c {
+                '0'..='9' => {
+                    if !comma {
+                        digits_before += 1;
+                    }
+                }
+                ',' if !comma => comma = true,
+                '}' => return digits_before > 0,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// Parse one `{expr}` of an interpolated string. `token` is the string
@@ -2407,7 +2630,9 @@ impl Parser {
         }
 
         // Peek ahead: if we see `ident:` or `"string":` it's an object literal
-        if matches!(self.current_token(), Token::Ident(_) | Token::StringLit(_)) {
+        if matches!(self.current_token(), Token::StringLit(_))
+            || soft::name_word(&self.current_token()).is_some()
+        {
             let saved = self.pos;
             self.advance();
             if self.check(&Token::Colon) {
@@ -2672,6 +2897,22 @@ impl Parser {
             .unwrap_or(Token::Eof)
     }
 
+    /// At `{` after a capitalised name: whether it opens struct-literal
+    /// fields (`}` or `field:` next, newlines skipped) rather than a block.
+    /// `if c == QUOTE {` followed by a statement is a block, so a
+    /// capitalised constant can end an `if`/`while` condition.
+    fn brace_opens_struct_fields(&self) -> bool {
+        let mut offset = 1;
+        while self.peek_token(offset) == Token::Newline {
+            offset += 1;
+        }
+        match self.peek_token(offset) {
+            Token::RBrace => true,
+            Token::Eof => false,
+            _ => self.peek_token(offset + 1) == Token::Colon,
+        }
+    }
+
     fn peek_token(&self, offset: usize) -> Token {
         self.tokens
             .get(self.pos + offset)
@@ -2728,47 +2969,9 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<String, ParseError> {
-        let name = match self.current_token() {
-            Token::Ident(name) => Some(name),
-            // Allow keywords as field/method names
-            Token::Set => Some("set".to_string()),
-            Token::Type => Some("type".to_string()),
-            Token::Match => Some("match".to_string()),
-            Token::From => Some("from".to_string()),
-            Token::To => Some("to".to_string()),
-            Token::In => Some("in".to_string()),
-            Token::Import => Some("import".to_string()),
-            Token::Table => Some("table".to_string()),
-            Token::Check => Some("check".to_string()),
-            Token::Where => Some("where".to_string()),
-            Token::Watch => Some("watch".to_string()),
-            Token::Transform => Some("transform".to_string()),
-            Token::Select => Some("select".to_string()),
-            Token::Order => Some("order".to_string()),
-            Token::Limit => Some("limit".to_string()),
-            Token::Crawl => Some("crawl".to_string()),
-            Token::Download => Some("download".to_string()),
-            Token::Ask => Some("ask".to_string()),
-            Token::Prompt => Some("prompt".to_string()),
-            Token::Agent => Some("agent".to_string()),
-            Token::Schedule => Some("schedule".to_string()),
-            Token::Retry => Some("retry".to_string()),
-            Token::Timeout => Some("timeout".to_string()),
-            Token::Safe => Some("safe".to_string()),
-            Token::Must => Some("must".to_string()),
-            Token::Freeze => Some("freeze".to_string()),
-            Token::Keep => Some("keep".to_string()),
-            Token::Take => Some("take".to_string()),
-            Token::Every => Some("every".to_string()),
-            Token::Any => Some("any".to_string()),
-            Token::By => Some("by".to_string()),
-            Token::Thing => Some("thing".to_string()),
-            Token::Power => Some("power".to_string()),
-            Token::Give => Some("give".to_string()),
-            Token::Craft => Some("craft".to_string()),
-            Token::The => Some("the".to_string()),
-            _ => None,
-        };
+        // Identifiers, soft keywords (`parser::soft`) and the few reserved
+        // words always accepted as names here (`x.type`, `x.match`).
+        let name = soft::name_word(&self.current_token());
         match name {
             Some(n) => {
                 self.advance();
@@ -3461,5 +3664,72 @@ mod tests {
         let mut parser = Parser::new(tokens);
         parser.parse_program().expect("parses");
         assert!(parser.take_index().is_none());
+    }
+
+    #[test]
+    fn match_is_an_expression_with_guards_and_or_patterns() {
+        let program = parse_program(
+            "let size = match n {\n  0 => \"none\",\n  1 | 2 => \"few\",\n  x if x < 10 => \"some\",\n  -1 => \"neg\",\n  _ => \"many\",\n}",
+        );
+        let Stmt::Let {
+            value: Expr::Block(body),
+            ..
+        } = &program.statements[0].stmt
+        else {
+            panic!("expected `let` of a block expression");
+        };
+        let Stmt::Match { arms, .. } = &body[0].stmt else {
+            panic!("expected a match inside the block");
+        };
+        assert_eq!(arms.len(), 5);
+        assert!(matches!(&arms[1].pattern, Pattern::Or(alts) if alts.len() == 2));
+        assert!(arms[1].guard.is_none());
+        assert!(matches!(&arms[2].pattern, Pattern::Binding(n) if n == "x"));
+        assert!(matches!(
+            &arms[2].guard,
+            Some(Expr::BinOp { op: BinOp::Lt, .. })
+        ));
+        assert!(matches!(&arms[3].pattern, Pattern::Literal(Expr::Int(-1))));
+        // Statement position is still a statement; nested or-patterns parse.
+        let program = parse_program("match r {\n  Ok(Some(1 | 2)) => say 1\n  _ => say 2\n}");
+        let Stmt::Match { arms, .. } = &program.statements[0].stmt else {
+            panic!("expected a match statement");
+        };
+        assert_eq!(arms[0].pattern.binding_names(), Vec::<&str>::new());
+        // A lambda arm body is a value, not a function definition.
+        let program = parse_program("let f = match n { 0 => fn() { 1 }, _ => fn() { 2 } }");
+        assert!(matches!(&program.statements[0].stmt, Stmt::Let { .. }));
+    }
+
+    #[test]
+    fn or_pattern_alternatives_bind_the_same_names() {
+        parse_program("match s {\n  Rect(w, h) | Square(h, w) => say w\n  Red | Green => say 1\n}");
+        let err = parse_err("match s {\n  Rect(w, h) | Square(w) => say w\n}");
+        assert!(
+            err.message.contains("must bind the same names")
+                && err.message.contains("h, w")
+                && err.message.contains("binds w"),
+            "{}",
+            err.message
+        );
+        assert_eq!((err.line, err.col), (2, 14));
+        let err = parse_err("match v {\n  x | 1 => say x\n}");
+        assert!(
+            err.message.contains("another binds no names"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn index_records_later_or_alternatives_as_references() {
+        let ix = indexed("match s {\n  A(w) | B(w) if w > 1 => w\n  _ => 0\n}");
+        let kinds: Vec<String> = ix
+            .occurrences
+            .iter()
+            .filter(|o| o.name == "w")
+            .map(|o| format!("{:?}", o.role))
+            .collect();
+        assert_eq!(kinds, vec!["Def(PatternBinding)", "Ref", "Ref", "Ref"]);
     }
 }

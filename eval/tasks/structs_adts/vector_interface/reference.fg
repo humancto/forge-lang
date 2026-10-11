@@ -1,0 +1,42 @@
+struct Vec2 {
+    x: Int,
+    y: Int
+}
+
+interface Describable {
+    fn describe() -> String
+}
+
+impl Vec2 {
+    fn add(it, o: Vec2) -> Vec2 {
+        return Vec2 { x: it.x + o.x, y: it.y + o.y }
+    }
+
+    fn scale(it, k: Int) -> Vec2 {
+        return Vec2 { x: it.x * k, y: it.y * k }
+    }
+
+    fn dot(it, o: Vec2) -> Int {
+        return it.x * o.x + it.y * o.y
+    }
+
+    fn len2(it) -> Int {
+        return it.dot(it)
+    }
+}
+
+impl Describable for Vec2 {
+    fn describe(it) -> String {
+        return "Vec({it.x}, {it.y})"
+    }
+}
+
+let a = Vec2 { x: 3, y: -4 }
+let b = Vec2 { x: 1, y: 2 }
+println("a = {a.describe()}")
+println("b = {b.describe()}")
+println("a + b = {a.add(b).describe()}")
+println("3 * b = {b.scale(3).describe()}")
+println("a . b = {a.dot(b)}")
+println("|a|^2 = {a.len2()}")
+println("a + 2b = {a.add(b.scale(2)).describe()}")

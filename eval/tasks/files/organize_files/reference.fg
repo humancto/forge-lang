@@ -1,0 +1,17 @@
+let mut folders = []
+for name in sort(fs.list("inbox")) {
+    let dot = last_index_of(name, ".")
+    let folder = if dot > 0 { substring(name, dot + 1) } else { "misc" }
+    if !fs.exists(folder) {
+        fs.mkdir(folder)
+        folders = push(folders, folder)
+    }
+    fs.rename("inbox/" + name, folder + "/" + name)
+    println("inbox/{name} -> {folder}/{name}")
+}
+let remaining = fs.list("inbox")
+println("inbox empty: {len(remaining) == 0}")
+for folder in sort(folders) {
+    let names = join(sort(fs.list(folder)), " ")
+    println("{folder}: {names}")
+}

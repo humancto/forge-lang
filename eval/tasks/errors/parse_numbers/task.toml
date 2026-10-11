@@ -1,0 +1,32 @@
+id = "parse_numbers"
+category = "errors"
+title = "Sum valid numbers, report bad lines"
+prompt = """
+Read lines from standard input. Each non-empty line should contain one integer (optionally
+negative, surrounding spaces allowed). Write a parsing function that returns either the number
+or an error (use your language's result/error type, not a magic value). Sum the valid numbers;
+for every invalid line print `line <n>: invalid number '<text>'` (n is the 1-based line number
+counting all lines, text is the line with surrounding spaces removed). Skip empty lines
+silently. Finally print `sum: <s>` and `valid: <k>`.
+"""
+stdin = """
+12
+  7 
+abc
+-5
+
+3.5
+100
++
+-0
+12x
+"""
+needs = []
+expected_stdout = """
+line 3: invalid number 'abc'
+line 6: invalid number '3.5'
+line 8: invalid number '+'
+line 10: invalid number '12x'
+sum: 114
+valid: 5
+"""

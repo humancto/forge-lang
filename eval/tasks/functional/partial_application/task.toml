@@ -1,0 +1,17 @@
+id = "partial_application"
+category = "functional"
+title = "Adders and multipliers"
+prompt = """
+Write `make_adder(n)` and `make_multiplier(n)` that return functions, and `apply_all(fns, x)`
+that returns the list of results of applying each function to x. With
+fns = [add 1, add 10, multiply by 3, multiply by -1, add 1 then multiply by 2 (composed)]
+print `<x> -> <results separated by spaces>` for x in 0, 5 and -3. Then print
+`sum of results for 7: <s>`.
+"""
+needs = []
+expected_stdout = """
+0 -> 1 10 0 0 2
+5 -> 6 15 15 -5 12
+-3 -> -2 7 -9 3 -4
+sum of results for 7: 55
+"""

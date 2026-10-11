@@ -1,0 +1,14 @@
+id = "collatz_longest"
+category = "basics"
+title = "Longest Collatz chain"
+prompt = """
+For each starting number n from 1 to 30, count the steps of the Collatz sequence until it
+reaches 1 (n even: n / 2, n odd: 3n + 1; the start 1 takes 0 steps). Print the starting number
+with the most steps and its step count as `<n> <steps>` (on a tie, the smaller n), then print
+the total number of steps over all 30 starts as `total <t>`.
+"""
+needs = []
+expected_stdout = """
+27 111
+total 441
+"""

@@ -1,0 +1,33 @@
+let xs = map(input().words(), fn(w) { return int(w) })
+let mut counts = {}
+for x in xs {
+    let k = str(x)
+    counts[k] = get(counts, k, 0) + 1
+}
+let mut mode = 0
+let mut best = 0
+for x in xs {
+    let n = counts[str(x)]
+    if n > best || (n == best && x < mode) {
+        best = n
+        mode = x
+    }
+}
+let s = sort(xs)
+let n = len(s)
+let mut median = ""
+if n % 2 == 1 {
+    median = str(s[n / 2])
+} else {
+    let total = s[n / 2 - 1] + s[n / 2]
+    if total % 2 == 0 {
+        median = str(total / 2)
+    } else {
+        median = "{total / 2}.5"
+    }
+}
+println("count: {n}")
+println("mode: {mode}")
+println("median: {median}")
+println("min: {s[0]}")
+println("max: {s[n - 1]}")

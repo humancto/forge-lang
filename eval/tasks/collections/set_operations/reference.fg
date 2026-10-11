@@ -1,0 +1,14 @@
+let lines = split(input(), "\n")
+let a = unique(map(lines[0].words(), fn(w) { return int(w) }))
+let b = unique(map(lines[1].words(), fn(w) { return int(w) }))
+
+fn show(label: String, xs) {
+    let sorted = sort(xs)
+    let text = join(map(sorted, fn(x) { return str(x) }), " ")
+    println(("{label}: {text}").trim())
+}
+
+show("union", unique(flatten([a, b])))
+show("intersection", filter(a, fn(x) { return contains(b, x) }))
+show("only first", filter(a, fn(x) { return !contains(b, x) }))
+show("only second", filter(b, fn(x) { return !contains(a, x) }))

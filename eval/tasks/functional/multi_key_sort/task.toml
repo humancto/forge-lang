@@ -1,0 +1,39 @@
+id = "multi_key_sort"
+category = "functional"
+title = "Sorting by several keys"
+prompt = """
+People (name, department, salary, age):
+Ada eng 120 36, Bob ops 85 45, Cy eng 120 29, Di sales 70 31, Ed ops 85 38, Flo eng 95 52,
+Gus sales 70 31, Hal eng 95 40.
+Print three listings, each preceded by a header line:
+`by department, then salary descending, then name:` and the people as
+`  <name> <dept> <salary>`;
+`by age descending, then name:` as `  <name> <age>`;
+`top earner per department:` as `  <dept>: <name>` (highest salary, the alphabetically first
+name on a tie), departments in alphabetical order.
+"""
+needs = []
+expected_stdout = """
+by department, then salary descending, then name:
+  Ada eng 120
+  Cy eng 120
+  Flo eng 95
+  Hal eng 95
+  Bob ops 85
+  Ed ops 85
+  Di sales 70
+  Gus sales 70
+by age descending, then name:
+  Flo 52
+  Bob 45
+  Hal 40
+  Ed 38
+  Ada 36
+  Di 31
+  Gus 31
+  Cy 29
+top earner per department:
+  eng: Ada
+  ops: Bob
+  sales: Di
+"""

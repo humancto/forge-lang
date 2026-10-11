@@ -1,0 +1,30 @@
+type Expr = Num(Int) | Var | Add(Expr, Expr) | Mul(Expr, Expr) | Neg(Expr)
+
+fn show(e: Expr) -> String {
+    match e {
+        Num(n) => { return str(n) }
+        Var => { return "x" }
+        Add(a, b) => { return "(" + show(a) + " + " + show(b) + ")" }
+        Mul(a, b) => { return "(" + show(a) + " * " + show(b) + ")" }
+        Neg(a) => { return "-" + show(a) }
+    }
+}
+
+fn eval_expr(e: Expr, x: Int) -> Int {
+    match e {
+        Num(n) => { return n }
+        Var => { return x }
+        Add(a, b) => { return eval_expr(a, x) + eval_expr(b, x) }
+        Mul(a, b) => { return eval_expr(a, x) * eval_expr(b, x) }
+        Neg(a) => { return 0 - eval_expr(a, x) }
+    }
+}
+
+let exprs = [
+    Mul(Add(Num(2), Num(3)), Num(4)),
+    Add(Neg(Mul(Var, Var)), Num(10)),
+    Mul(Add(Var, Num(1)), Add(Var, Num(-2))),
+]
+for e in exprs {
+    println("{show(e)} = {eval_expr(e, 5)}")
+}

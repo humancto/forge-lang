@@ -1,0 +1,45 @@
+// Control flow and error handling in edition 2026 natural syntax.
+let n = 3
+if n > 5 {
+    println("big")
+} else if n > 2 {
+    println("medium")
+} else {
+    println("small")
+}
+
+for _ in range(n) {
+    println("tick")
+}
+for _ in range(2) {
+    println("tock")
+}
+
+let label = when n {
+    < 2 -> "low",
+    else -> "high"
+}
+println(label)
+
+try {
+    let boom = 1 / 0
+} catch _ { }
+
+fn parse(s) {
+    if s == "" { return Err("empty") }
+    return Ok(int(s))
+}
+let v = unwrap(parse("41")) + 1
+println(v)
+
+assert(v > 0)
+assert(len(label) > 0)
+assert(v >= 1 && v <= 100)
+
+let {a, b} = { a: 1, b: 2 }
+let [first, ...rest] = [1, 2, 3]
+println(a + b + first + len(rest))
+
+fn numbers() {
+    yield 1
+}

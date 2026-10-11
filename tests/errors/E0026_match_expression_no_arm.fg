@@ -1,0 +1,6 @@
+let n = 3
+let size = match n {
+    0 => "none",
+    x if x > 9 => "big",
+}
+println(size)

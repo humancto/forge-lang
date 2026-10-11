@@ -1,0 +1,24 @@
+id = "append_log"
+category = "files"
+title = "Append to a log and read it back"
+prompt = """
+The current directory contains `app.log` with some existing lines. Append three new lines to it
+(without rewriting the existing content): `INFO job started`, `WARN disk at 91%` and
+`INFO job finished`. Then read the whole file back and print `lines: <n>` followed by the count
+per level (the first word of each line) as `<LEVEL>=<count>` sorted by level, one per line.
+"""
+needs = ["read", "write"]
+output_files = ["app.log"]
+expected_stdout = """
+lines: 6
+ERROR=1
+INFO=4
+WARN=1
+--- app.log ---
+INFO boot
+ERROR cache miss storm
+INFO ready
+INFO job started
+WARN disk at 91%
+INFO job finished
+"""

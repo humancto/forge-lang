@@ -1,0 +1,31 @@
+let text = input()
+let first = channel()
+let second = channel()
+spawn {
+    for line in split(text, "\n") {
+        if line.trim() != "" {
+            send(first, line.trim())
+        }
+    }
+    close(first)
+}
+spawn {
+    loop {
+        let line = receive(first)
+        if line == null {
+            break
+        }
+        send(second, "{line.upper()} ({len(line)})")
+    }
+    close(second)
+}
+let mut i = 0
+loop {
+    let result = receive(second)
+    if result == null {
+        break
+    }
+    i += 1
+    println("{i}: {result}")
+}
+println("done: {i}")

@@ -1,0 +1,34 @@
+let digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+fn convert(number: Int, base: Int) -> String {
+    if number == 0 {
+        return "0"
+    }
+    let mut n = number
+    let mut out = ""
+    while n > 0 {
+        out = digits.char_at(n % base) + out
+        n = n / base
+    }
+    return out
+}
+
+fn parse_base(text: String, base: Int) -> Int {
+    let mut value = 0
+    for c in text.chars() {
+        value = value * base + index_of(digits, c)
+    }
+    return value
+}
+
+let mut last = 0
+for line in split(input(), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    let n = int(line.trim())
+    last = n
+    println("{n}: bin={convert(n, 2)} oct={convert(n, 8)} hex={convert(n, 16)} b36={convert(n, 36)}")
+}
+let back = parse_base(convert(last, 36), 36)
+println("roundtrip: " + (if back == last { "ok" } else { "fail" }))

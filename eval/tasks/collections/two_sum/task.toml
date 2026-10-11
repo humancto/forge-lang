@@ -1,0 +1,26 @@
+id = "two_sum"
+category = "collections"
+title = "Two sum"
+prompt = """
+Each line of standard input has a target integer, a `|`, and a list of integers, e.g.
+`9 | 2 7 11 15`. For each line print the 0-based indices `i j` (i < j) of the first pair whose
+values add up to the target, where pairs are ordered by j and then by i; print `none` if there
+is no such pair.
+"""
+stdin = """
+9 | 2 7 11 15
+6 | 3 2 4
+6 | 3 3
+10 | 1 2 3
+0 | -3 4 3 90
+8 | 4 4 4 4
+"""
+needs = []
+expected_stdout = """
+0 1
+1 2
+0 1
+none
+0 2
+0 1
+"""

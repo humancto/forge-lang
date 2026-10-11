@@ -551,8 +551,8 @@ fn lsp_range(source: &str, span: crate::parser::index::Span) -> serde_json::Valu
 fn get_diagnostics_for(source: &str, path: Option<std::path::PathBuf>) -> Vec<serde_json::Value> {
     use crate::typechecker::{analyze, CheckOptions, FrontendError};
     let options = CheckOptions {
-        strict: false,
         file: path,
+        ..CheckOptions::default()
     };
     match analyze(source, &options) {
         Ok(analysis) => analysis
@@ -2411,6 +2411,48 @@ mod tests {
 
     fn note(method: &str, params: serde_json::Value) -> Message {
         Notification::new(method.to_string(), params).into()
+    }
+
+    /// Pattern bindings of a `match` expression resolve in the guard and the
+    /// body, and an or-pattern's alternatives bind one variable: renaming it
+    /// anywhere edits every alternative, the guard and the body.
+    #[test]
+    fn rename_match_or_pattern_binding_edits_every_alternative() {
+        let uri = "file:///tmp/forge-lsp-match-rename-test.fg";
+        let text = "type S = A(Int) | B(Int)\n\
+                    let v = A(3)\n\
+                    let r = match v {\n\
+                    \x20   A(w) | B(w) if w > 1 => w * 2,\n\
+                    \x20   _ => 0,\n\
+                    }\n";
+        store_document(uri, text);
+        // From the body occurrence of `w` (line 3, `=> w * 2`).
+        let col = text.lines().nth(3).unwrap().find("=> w").unwrap() + 3;
+        let edit = semantic::rename(uri, 3, col, "width").expect("rename succeeds");
+        let edits = edit["changes"][uri].as_array().expect("edits for the file");
+        let cols: Vec<u64> = edits
+            .iter()
+            .map(|e| {
+                assert_eq!(e["range"]["start"]["line"], 3, "{}", edit);
+                e["range"]["start"]["character"].as_u64().unwrap()
+            })
+            .collect();
+        // A(w), B(w), the guard and the body.
+        assert_eq!(cols.len(), 4, "{}", edit);
+        let analysis = crate::typechecker::analyze(
+            text,
+            &crate::typechecker::CheckOptions {
+                strict: true,
+                file: None,
+                ..Default::default()
+            },
+        )
+        .expect("parses");
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
     }
 
     #[test]

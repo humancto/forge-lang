@@ -1,0 +1,35 @@
+id = "maze_bfs"
+category = "algorithms"
+title = "Shortest path in a maze"
+prompt = """
+Standard input is a rectangular maze: `#` is a wall, `.` is open, `S` the start and `E` the
+exit. You can move up, down, left and right. Print `shortest path: <n> steps` and then the maze
+with the cells of one shortest path (excluding S and E) replaced by `*`. When several shortest
+paths exist, prefer the one found by a breadth-first search that explores neighbours in the
+order up, down, left, right and records the first time each cell is reached. If there is no
+path print `no path`.
+"""
+stdin = """
+##########
+#S...#...#
+#.##.#.#.#
+#.#..#.#.#
+#.#.##.#.#
+#...#..#E#
+###...##.#
+#....#...#
+##########
+"""
+needs = []
+expected_stdout = """
+shortest path: 21 steps
+##########
+#S...#***#
+#*##.#*#*#
+#*#..#*#*#
+#*#.##*#*#
+#***#**#E#
+###***##.#
+#....#...#
+##########
+"""

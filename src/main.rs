@@ -5,6 +5,7 @@ mod color;
 mod dap;
 mod doc;
 mod errors;
+mod fix;
 mod formatter;
 mod interpreter;
 /// Forge — Internet-Native Programming Language
@@ -67,7 +68,8 @@ enum FrontendError {
         col: usize,
         message: String,
     },
-    Type(Vec<typechecker::Diagnostic>),
+    /// Type errors, with the policy that made them errors.
+    Type(Vec<typechecker::Diagnostic>, typechecker::SeverityPolicy),
 }
 
 #[derive(Parser)]
@@ -114,6 +116,11 @@ struct Cli {
     /// run time on both engines
     #[arg(long = "strict")]
     strict: bool,
+
+    /// Language edition to run under (overrides `edition` in forge.toml).
+    /// "2027" is in development: docs/editions/2027.md
+    #[arg(long = "edition", value_name = "YEAR", global = true)]
+    edition: Option<String>,
 
     /// Allow shell execution (sh, shell, run_command, sh_lines, sh_json, sh_ok, pipe_to).
     /// Without this flag, these builtins return a permission error.
@@ -565,6 +572,23 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Migrate code to a newer edition: `forge fix --edition 2027 [paths]`
+    /// rewrites every removed 2026 form (set/change/define/otherwise/say/
+    /// ...) in place, keeping comments and layout, and reports what it
+    /// cannot rewrite (docs/editions/2027.md)
+    Fix {
+        /// Files or directories (defaults to the current directory)
+        paths: Vec<PathBuf>,
+        /// Do not write; exit 1 when a file needs changes
+        #[arg(long)]
+        check: bool,
+        /// Print a unified diff of the changes instead of writing them
+        #[arg(long)]
+        diff: bool,
+        /// Also set `edition = "2027"` in forge.toml of each directory given
+        #[arg(long = "set-edition")]
+        set_edition: bool,
+    },
     /// Run tests in the tests/ directory
     Test {
         /// Test directory (defaults to "tests")
@@ -751,6 +775,36 @@ async fn async_main() {
     if let Some(format) = cli.error_format {
         errors::set_error_format(format.into());
     }
+    // The edition is fixed before any source is parsed: `--edition` wins
+    // over forge.toml, which wins over the default.
+    // Commands that run, check or compile code fail on a bad manifest
+    // edition; the others (version, new, fmt, ...) fall back to the default.
+    let edition = match &cli.edition {
+        Some(text) => semantics::edition::Edition::parse(text),
+        None if matches!(
+            cli.command,
+            None | Some(
+                Command::Run { .. }
+                    | Command::Test { .. }
+                    | Command::Mcp { .. }
+                    | Command::Check { .. }
+                    | Command::Build { .. }
+                    | Command::Watch { .. }
+                    | Command::Repl
+            )
+        ) =>
+        {
+            manifest::load_edition()
+        }
+        None => Ok(manifest::load_edition().unwrap_or(semantics::edition::Edition::DEFAULT)),
+    };
+    match edition {
+        Ok(e) => semantics::edition::set_default(e),
+        Err(e) => {
+            eprintln!("{}", errors::format_simple_error(&e));
+            process::exit(1);
+        }
+    }
     if let Some(n) = cli.max_depth {
         runtime::recursion::set_max_depth(n);
     }
@@ -779,10 +833,6 @@ async fn async_main() {
         cli.command,
         Some(Command::Run { .. } | Command::Test { .. } | Command::Mcp { .. })
     ) {
-        if let Err(e) = manifest::load_edition() {
-            eprintln!("{}", errors::format_simple_error(&e));
-            process::exit(1);
-        }
         match manifest::load_permissions() {
             Ok(p) => p,
             Err(e) => {
@@ -943,10 +993,6 @@ async fn async_main() {
             run_source(&source, &path_str, use_vm, profile, strict).await;
         }
         Some(Command::Check { file, format }) => {
-            if let Err(e) = manifest::load_edition() {
-                eprintln!("{}", errors::format_simple_error(&e));
-                process::exit(1);
-            }
             check_file(file, format, strict);
         }
         Some(Command::Explain { code }) => explain(code),
@@ -957,6 +1003,29 @@ async fn async_main() {
             println!("Forge v{}", VERSION);
             println!("Internet-native programming language");
             println!("Bytecode VM with mark-sweep GC");
+        }
+        Some(Command::Fix {
+            paths,
+            check,
+            diff,
+            set_edition,
+        }) => {
+            // The only migration is 2026 -> 2027.
+            if cli.edition.as_deref().is_some_and(|e| e != "2027") {
+                eprintln!(
+                    "{}",
+                    errors::format_simple_error(
+                        "forge fix migrates edition 2026 code to edition 2027: use --edition 2027"
+                    )
+                );
+                process::exit(1);
+            }
+            let options = fix::FixOptions {
+                check,
+                diff,
+                set_edition,
+            };
+            process::exit(fix::run(&paths, &options));
         }
         Some(Command::Fmt { files, check }) => {
             formatter::format_files(&files, check);
@@ -992,6 +1061,7 @@ async fn async_main() {
                     engine,
                     vm_compat: &vm_compat,
                     timeout: (timeout > 0).then(|| std::time::Duration::from_secs(timeout)),
+                    strict,
                 },
             );
         }
@@ -1134,6 +1204,11 @@ async fn async_main() {
             unreachable!("BUG: forge mcp is dispatched before the CLI policy is installed")
         }
         Some(Command::Learn { lesson }) => {
+            // The lessons are edition 2026 code (they teach the natural
+            // syntax too), whatever edition the current project uses.
+            if cli.edition.is_none() {
+                semantics::edition::set_default(semantics::edition::Edition::E2026);
+            }
             learn::run_learn(lesson);
         }
         Some(Command::Chat) => {
@@ -1161,9 +1236,10 @@ async fn async_main() {
 }
 
 /// Lex, parse and type-check `source` (from `filename`, which locates
-/// imports). With `strict`, type diagnostics are errors and stop the run,
-/// and annotations are additionally enforced at run time (see
-/// `typechecker::enforce`).
+/// imports) under the current edition. Type errors stop the run: every
+/// diagnostic under `--strict`, contradictions of declared types from
+/// edition 2027. Annotations are then also enforced at run time (see
+/// `typechecker::enforce` and `typechecker::prepare`).
 fn prepare_program(
     source: &str,
     filename: &str,
@@ -1173,44 +1249,28 @@ fn prepare_program(
     let options = typechecker::CheckOptions {
         strict,
         file: path.exists().then(|| path.to_path_buf()),
+        edition: None,
+        skip_imports: false,
     };
-    let analysis = typechecker::analyze(source, &options).map_err(|e| match e {
-        typechecker::FrontendError::Lex { line, col, message } => {
-            FrontendError::Lex { line, col, message }
-        }
-        typechecker::FrontendError::Parse { line, col, message } => {
-            FrontendError::Parse { line, col, message }
-        }
-    })?;
-    let diagnostics = analysis.diagnostics;
-    if diagnostics.iter().any(|d| d.is_error()) {
-        return Err(FrontendError::Type(diagnostics));
-    }
-    let mut program = analysis.program;
-    if strict {
-        typechecker::enforce::instrument(&mut program);
-    }
-    Ok((program, diagnostics))
+    let policy = options.policy();
+    typechecker::prepare(source, &options).map_err(|e| match e {
+        typechecker::PrepareError::Frontend(typechecker::FrontendError::Lex {
+            line,
+            col,
+            message,
+        }) => FrontendError::Lex { line, col, message },
+        typechecker::PrepareError::Frontend(typechecker::FrontendError::Parse {
+            line,
+            col,
+            message,
+        }) => FrontendError::Parse { line, col, message },
+        typechecker::PrepareError::Type(diagnostics) => FrontendError::Type(diagnostics, policy),
+    })
 }
 
 /// A type-checker diagnostic as a program diagnostic (`T0006` ...).
 fn type_diagnostic(filename: &str, d: &typechecker::Diagnostic) -> errors::ProgramDiagnostic {
-    let len = if d.span.end.line == d.span.start.line {
-        d.span.end.col.saturating_sub(d.span.start.col).max(1)
-    } else {
-        1
-    };
-    errors::ProgramDiagnostic {
-        code: d.code.as_str().to_string(),
-        is_error: d.is_error(),
-        message: d.message.clone(),
-        file: errors::display_path(filename),
-        line: d.line(),
-        col: d.col().max(1),
-        len,
-        hint: d.help.clone(),
-        phase: errors::Phase::Type,
-    }
+    errors::ProgramDiagnostic::type_check(&errors::display_path(filename), d)
 }
 
 /// Syntax errors (E0001 lexer, E0002 parser) or the type diagnostics of a
@@ -1224,7 +1284,7 @@ fn frontend_diagnostics(filename: &str, err: &FrontendError) -> Vec<errors::Prog
         FrontendError::Parse { line, col, message } => vec![errors::ProgramDiagnostic::syntax(
             false, message, &file, *line, *col,
         )],
-        FrontendError::Type(diagnostics) => diagnostics
+        FrontendError::Type(diagnostics, _) => diagnostics
             .iter()
             .map(|d| type_diagnostic(filename, d))
             .collect(),
@@ -1235,16 +1295,12 @@ fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
     for d in frontend_diagnostics(filename, &err) {
         eprintln!("{}", d.render(source));
     }
-    if let FrontendError::Type(diagnostics) = &err {
+    if let FrontendError::Type(diagnostics, policy) = &err {
         if errors::error_format() == errors::ErrorFormat::Human {
             let errors = diagnostics.iter().filter(|d| d.is_error()).count();
             eprintln!(
                 "{}",
-                errors::format_simple_error(&format!(
-                    "type checking failed with {} error{} (--strict)",
-                    errors,
-                    if errors == 1 { "" } else { "s" }
-                ))
+                errors::format_simple_error(&typechecker::refusal_summary(errors, *policy))
             );
         }
     }
@@ -1793,6 +1849,9 @@ fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
         }
     };
 
+    // A compiled program keeps the edition it was compiled under (the VM
+    // and any module it imports read it at preparation).
+    let _edition = semantics::edition::scope(Some(chunk.edition));
     let mut vm = if profile {
         vm::machine::VM::with_profiling()
     } else {
@@ -1892,7 +1951,7 @@ mod tests {
         "#;
 
         match prepare_program(source, "<test>", true) {
-            Err(FrontendError::Type(warnings)) => {
+            Err(FrontendError::Type(warnings, _)) => {
                 assert!(warnings.iter().any(|w| w.is_error()));
                 assert!(warnings.iter().any(|w| w.message.contains("expected Int")));
             }

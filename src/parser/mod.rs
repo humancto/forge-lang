@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod index;
 mod parser;
+pub mod soft;
 
 pub use parser::{ParseError, Parser, MAX_NESTING};
 

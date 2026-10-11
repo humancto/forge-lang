@@ -1,0 +1,8 @@
+// expect: [1, x, null, 2, [3, 4], 9]
+
+let {a, b: bee, missing} = { a: 1, b: "x" }
+let [p, q, ...rest] = [2, 5, 3, 4]
+let mut [m] = [0]
+m = 9
+
+[a, bee, missing, p, rest, m]

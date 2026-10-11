@@ -1,0 +1,18 @@
+// Removed builtins with an exact replacement are renamed.
+let x = 4
+bet(x > 1, "x is big enough")
+bet(x == 4)
+no_cap(x * 2, 8)
+ick(x == 5, "x must not be 5")
+fn work() { return 7 }
+let w = ghost(work)
+if w != 7 {
+    bruh("ghost changed the result")
+}
+if false {
+    bruh()
+}
+
+// A user definition named like a removed builtin is left alone.
+fn sus(v) { return v }
+println(sus(w))

@@ -16,8 +16,11 @@
 //! `interpreter/` or `vm/`.
 
 pub mod alloc;
+pub mod edition;
 pub mod errors;
 pub mod types;
+
+use edition::Edition;
 
 /// Borrowed view of a binary-operator operand.
 #[derive(Clone, Copy, Debug)]
@@ -145,17 +148,43 @@ fn float_op(op: BinaryOp, a: f64, b: f64) -> Outcome {
     }
 }
 
-/// Evaluate `l <op> r` for the shared operators.
+/// Whether `l <op> r` is `+` with exactly one String operand: implicit
+/// concatenation of the displayed values in edition 2026, an error
+/// ([`mixed_concat_error`], E0034) from edition 2027 on.
+pub fn is_mixed_concat(op: BinaryOp, l: Operand<'_>, r: Operand<'_>) -> bool {
+    op == BinaryOp::Add && (matches!(l, Operand::Str(_)) != matches!(r, Operand::Str(_)))
+}
+
+/// Edition 2027: `+` with a String and a non-String operand (E0034).
+pub fn mixed_concat_error(left_type: &str, right_type: &str) -> String {
+    format!(
+        "cannot add {} and {}\n  hint: + does not convert to String implicitly (edition 2027); \
+         convert with str(x), or interpolate: \"{{x}}\"",
+        left_type, right_type
+    )
+}
+
+/// Evaluate `l <op> r` for the shared operators under `edition` (the
+/// edition the engine recorded when the program was prepared).
 ///
 /// Rules (in priority order):
 /// * numbers: int/int stays int (overflow promotes to float), any float
 ///   operand makes the operation float;
 /// * `String op String`: `+` concatenates, ordering is lexicographic;
-/// * `String + anything` / `anything + String` concatenates the displayed
-///   values; no other operator accepts a string next to a non-string;
+/// * `String + anything` / `anything + String`: edition 2026 concatenates
+///   the displayed values; edition 2027 is an error ([`is_mixed_concat`]).
+///   No other operator accepts a string next to a non-string;
 /// * everything else (bools, null, collections, ...) is a type error.
-pub fn binary(op: BinaryOp, l: Operand<'_>, r: Operand<'_>) -> Result<Outcome, String> {
+pub fn binary(
+    op: BinaryOp,
+    l: Operand<'_>,
+    r: Operand<'_>,
+    edition: Edition,
+) -> Result<Outcome, String> {
     use Operand::*;
+    if edition >= Edition::E2027 && is_mixed_concat(op, l, r) {
+        return Err(mixed_concat_error(l.type_name(), r.type_name()));
+    }
     match (l, r) {
         (Int(a), Int(b)) => int_op(op, a, b),
         (Float(a), Float(b)) => Ok(float_op(op, a, b)),
@@ -205,7 +234,11 @@ pub fn when_matches(
     if !numeric(&subject) || !numeric(&value) {
         return false;
     }
-    matches!(binary(cmp, subject, value), Ok(Outcome::Bool(true)))
+    // Ordering only: no edition-dependent rule applies.
+    matches!(
+        binary(cmp, subject, value, Edition::DEFAULT),
+        Ok(Outcome::Bool(true))
+    )
 }
 
 /// Coarse shape of a value for truthiness.
@@ -344,7 +377,13 @@ pub const YIELD_UNSUPPORTED: &str =
 
 /// Reading a name that is bound nowhere. `similar` is an optional
 /// did-you-mean suggestion.
+///
+/// A builtin removed by an edition (`say` in 2027) is only ever undefined
+/// in an edition that removed it, so its hint names the replacement.
 pub fn undefined_variable(name: &str, similar: Option<&str>) -> String {
+    if let Some(hint) = crate::builtins_registry::removal_hint(name) {
+        return format!("undefined variable: '{}'\n  hint: {}", name, hint);
+    }
     match similar {
         Some(similar) => format!(
             "undefined variable: '{}'\n  hint: did you mean '{}'?",
@@ -904,8 +943,73 @@ mod tests {
             ),
         ];
         for (op, l, r, expected) in cases {
-            assert_eq!(binary(op, l, r), expected, "{:?} {:?} {:?}", l, op, r);
+            assert_eq!(
+                binary(op, l, r, Edition::E2026),
+                expected,
+                "{:?} {:?} {:?}",
+                l,
+                op,
+                r
+            );
+            // Edition 2027 differs only for `+` with exactly one String.
+            if !is_mixed_concat(op, l, r) {
+                assert_eq!(
+                    binary(op, l, r, Edition::E2027),
+                    expected,
+                    "2027 {:?} {:?} {:?}",
+                    l,
+                    op,
+                    r
+                );
+            }
         }
+    }
+
+    #[test]
+    fn edition_2027_rejects_mixed_concat() {
+        let e27 = Edition::E2027;
+        // Exactly one String operand: an error naming both types.
+        for (l, r, types) in [
+            (Str("a"), Int(1), ("String", "Int")),
+            (Int(1), Str("a"), ("Int", "String")),
+            (Str("a"), Float(1.5), ("String", "Float")),
+            (Str("a"), Bool, ("String", "Bool")),
+            (Str("a"), Null, ("String", "Null")),
+            (Null, Str("a"), ("Null", "String")),
+            (Str("a"), Other("Array"), ("String", "Array")),
+            (Other("Object"), Str("a"), ("Object", "String")),
+        ] {
+            assert!(is_mixed_concat(BinaryOp::Add, l, r));
+            let err = binary(BinaryOp::Add, l, r, e27).unwrap_err();
+            assert_eq!(err, mixed_concat_error(types.0, types.1));
+            assert!(
+                err.starts_with(&format!("cannot add {} and {}\n  hint: ", types.0, types.1)),
+                "{}",
+                err
+            );
+            assert!(err.contains("str(x)") && err.contains("\"{x}\""), "{}", err);
+            // Edition 2026 keeps the implicit conversion.
+            assert_eq!(
+                binary(BinaryOp::Add, l, r, Edition::E2026),
+                Ok(Outcome::Concat)
+            );
+        }
+        // String + String still concatenates; other operators are unchanged.
+        assert_eq!(
+            binary(BinaryOp::Add, Str("a"), Str("b"), e27),
+            Ok(Outcome::Concat)
+        );
+        assert!(!is_mixed_concat(BinaryOp::Add, Str("a"), Str("b")));
+        assert!(!is_mixed_concat(BinaryOp::Mul, Str("a"), Int(3)));
+        assert!(!is_mixed_concat(BinaryOp::Add, Int(1), Int(2)));
+        assert_eq!(
+            binary(BinaryOp::Mul, Str("a"), Int(3), e27),
+            Err("invalid operator".into())
+        );
+        assert_eq!(
+            binary(BinaryOp::Add, Int(1), Int(2), e27),
+            Ok(Outcome::Int(3))
+        );
     }
 
     #[test]

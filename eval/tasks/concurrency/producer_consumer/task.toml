@@ -1,0 +1,21 @@
+id = "producer_consumer"
+category = "concurrency"
+title = "Producer and consumer over a channel"
+prompt = """
+Start a producer task that sends the integers 1 to 20 over a channel (queue) and then signals
+that it is done (close the channel or send a sentinel). The main program consumes the values as
+they arrive, keeps a running total of the squares of the values that are divisible by 3, and
+prints `got <v>` for each such value. When the producer is done, print `received: <count of all
+values>` and `sum of squares: <total>`.
+"""
+needs = []
+expected_stdout = """
+got 3
+got 6
+got 9
+got 12
+got 15
+got 18
+received: 20
+sum of squares: 819
+"""

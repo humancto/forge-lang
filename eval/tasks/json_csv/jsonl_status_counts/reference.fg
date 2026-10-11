@@ -1,0 +1,23 @@
+let mut stats = {}
+let mut slowest = null
+for line in split(input(), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    let r = json.parse(line)
+    let mut s = get(stats, r.path, { count: 0, errors: 0, total: 0 })
+    s.count += 1
+    if r.status >= 500 {
+        s.errors += 1
+    }
+    s.total += r.ms
+    stats[r.path] = s
+    if slowest == null || r.ms > slowest.ms {
+        slowest = r
+    }
+}
+for path in sort(keys(stats)) {
+    let s = stats[path]
+    println("{path}: {s.count} requests, {s.errors} errors, avg {s.total / s.count}ms")
+}
+println("slowest: {slowest.path} {slowest.ms}ms")

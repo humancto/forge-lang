@@ -1,0 +1,21 @@
+let mut cache = {}
+let mut calls = 0
+
+fn fib(n: Int) -> Int {
+    let key = str(n)
+    if has_key(cache, key) {
+        return cache[key]
+    }
+    calls += 1
+    let mut value = n
+    if n >= 2 {
+        value = fib(n - 1) + fib(n - 2)
+    }
+    cache[key] = value
+    return value
+}
+
+for n in [10, 50, 90] {
+    println("fib({n}) = {fib(n)}")
+}
+println("calls: {calls}")

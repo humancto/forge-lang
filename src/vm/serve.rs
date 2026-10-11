@@ -93,6 +93,9 @@ pub struct VmTemplate {
     /// gets a fresh budget with these limits, so one request cannot spend
     /// another's fuel and a long-running server never runs dry.
     limits: crate::runtime::limits::Limits,
+    /// Edition of the run that built the template; every fork runs under
+    /// it, whatever thread the fork is made on.
+    edition: crate::semantics::edition::Edition,
 }
 
 impl VmTemplate {
@@ -125,6 +128,7 @@ impl VmTemplate {
             limits: crate::runtime::limits::current()
                 .map(|b| b.limits().clone())
                 .unwrap_or_default(),
+            edition: vm.edition(),
         })
     }
 
@@ -171,6 +175,7 @@ impl VmTemplate {
             budget,
             super::globals::Globals::in_domain(Arc::clone(self.globals.names())),
         );
+        vm.set_edition(self.edition);
         let refs = self.materialize(&mut vm.gc);
         let remap = |v: &Value| remap_value(*v, &refs);
         let remap_table = |table: &IndexMap<String, Value>| {

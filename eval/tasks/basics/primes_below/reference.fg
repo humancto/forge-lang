@@ -1,0 +1,18 @@
+fn is_prime(n: Int) -> Bool {
+    if n < 2 {
+        return false
+    }
+    let mut d = 2
+    while d * d <= n {
+        if n % d == 0 {
+            return false
+        }
+        d += 1
+    }
+    return true
+}
+
+let upper = int(input().trim())
+let primes = filter(range(2, upper), fn(n) { return is_prime(n) })
+println(join(map(primes, fn(p) { return str(p) }), " "))
+println("count: {len(primes)}")

@@ -1,0 +1,21 @@
+let pattern = "(?i)" + input().trim()
+let mut matches = 0
+let mut matched_files = 0
+for name in sort(fs.list("notes")) {
+    if !ends_with(name, ".md") {
+        continue
+    }
+    let lines = split(fs.read("notes/" + name), "\n")
+    let mut hit = false
+    for i in range(0, len(lines)) {
+        if regex.test(lines[i], pattern) {
+            println("{name}:{i + 1}: {lines[i]}")
+            matches += 1
+            hit = true
+        }
+    }
+    if hit {
+        matched_files += 1
+    }
+}
+println("{matches} matches in {matched_files} files")

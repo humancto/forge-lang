@@ -1,0 +1,17 @@
+fn two(n: Int) -> String {
+    if n < 10 {
+        return "0{n}"
+    }
+    return str(n)
+}
+
+for line in split(input(), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    let total = int(line.trim())
+    let h = total / 3600
+    let m = (total % 3600) / 60
+    let s = total % 60
+    println("{h}:{two(m)}:{two(s)}")
+}

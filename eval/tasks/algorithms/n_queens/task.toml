@@ -1,0 +1,25 @@
+id = "n_queens"
+category = "algorithms"
+title = "Counting N-Queens solutions"
+prompt = """
+For n from 1 to 8, count the ways to place n queens on an n x n chessboard so that no two
+attack each other. Print `n=<n>: <count>` for each n, then print the first solution for n = 6
+in lexicographic order of the column positions row by row, as 6 lines of `Q` and `.`.
+"""
+needs = []
+expected_stdout = """
+n=1: 1
+n=2: 0
+n=3: 0
+n=4: 2
+n=5: 10
+n=6: 4
+n=7: 40
+n=8: 92
+.Q....
+...Q..
+.....Q
+Q.....
+..Q...
+....Q.
+"""

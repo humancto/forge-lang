@@ -5,6 +5,7 @@
 //! reused for a different problem. Add new codes at the end.
 
 use crate::parser::index::Span;
+use crate::semantics::edition::Edition;
 use std::fmt;
 
 /// A stable diagnostic code (`T0001` ...).
@@ -144,9 +145,9 @@ Example:
     let age: Int = \"forty\"
 
 Fix: assign a value of the declared type (`let age: Int = 40`), convert it
-(`int(text)`), or change the annotation. Under `--strict` this is an error;
-otherwise a warning, and `--strict` also checks annotations at run time
-(E0017)."
+(`int(text)`), or change the annotation. An error from edition 2027 and
+under `--strict`, otherwise a warning; both also check annotated function
+boundaries at run time (E0017)."
             }
             Code::ArgumentType => {
                 "\
@@ -159,7 +160,8 @@ Example:
     greet(42)
 
 Fix: pass a value of the parameter's type (`greet(str(42))`) or widen the
-annotation. The run-time counterpart under `--strict` is E0017."
+annotation. An error from edition 2027 and under `--strict`; the run-time
+counterpart (edition 2027, `--strict`) is E0017."
             }
             Code::ReturnType => {
                 "\
@@ -364,6 +366,82 @@ at the top level may be called before their definition; variables may not."
     }
 }
 
+impl Code {
+    /// Whether this code reports a contradiction of something the program
+    /// *declared* (a type annotation, a struct or interface declaration),
+    /// as opposed to a fact the checker inferred or an engine rule. From
+    /// edition 2027 these are errors without `--strict`
+    /// (docs/editions/2027.md). A report of such a code that rests on an
+    /// inferred type instead (e.g. `unwrap_or` with an inferred `Option`)
+    /// is made with [`Basis::Inferred`] and stays a warning.
+    ///
+    /// Not here, on purpose: `MissingReturn` (flow analysis is
+    /// conservative; falling off the end is caught at run time by the
+    /// return check), `UnknownField` (rests on the inferred struct type of
+    /// the object) and the engine rules (`Arity`, `InvalidOperator`,
+    /// `UnknownName`, ...), which fail at run time when they matter.
+    pub fn contradicts_declaration(self) -> bool {
+        matches!(
+            self,
+            Code::TypeMismatch
+                | Code::ArgumentType
+                | Code::ReturnType
+                | Code::InterfaceNotSatisfied
+                | Code::UnknownType
+                | Code::MissingField
+        )
+    }
+}
+
+/// What a diagnostic rests on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// A declaration in the program (see [`Code::contradicts_declaration`]).
+    Declared,
+    /// An inferred type or an engine rule.
+    Inferred,
+}
+
+/// How diagnostics are graded: by `--strict` and the edition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeverityPolicy {
+    /// `--strict`: every diagnostic is an error.
+    pub strict: bool,
+    pub edition: Edition,
+}
+
+impl SeverityPolicy {
+    pub fn new(strict: bool, edition: Edition) -> Self {
+        Self { strict, edition }
+    }
+
+    /// Edition 2026 without `--strict`: everything is a warning.
+    pub fn lenient() -> Self {
+        Self::new(false, Edition::E2026)
+    }
+
+    /// The severity of a diagnostic with `code`. From edition 2027, a
+    /// contradiction of a declaration is an error; everything else is a
+    /// warning unless `--strict`.
+    pub fn severity(self, code: Code, basis: Basis) -> Severity {
+        let enforced = self.edition >= Edition::E2027
+            && basis == Basis::Declared
+            && code.contradicts_declaration();
+        if self.strict || enforced {
+            Severity::Error
+        } else {
+            Severity::Warning
+        }
+    }
+
+    /// Whether annotated function boundaries are also checked at run time
+    /// (`typechecker::enforce`): under `--strict`, and by default from
+    /// edition 2027.
+    pub fn enforces_at_run_time(self) -> bool {
+        self.strict || self.edition >= Edition::E2027
+    }
+}
+
 impl fmt::Display for Code {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -421,7 +499,7 @@ impl Diagnostic {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashSet;
 
@@ -460,14 +538,9 @@ mod tests {
             assert!(text.contains("Fix"), "{} explanation needs a fix", code);
             let example = example_of(text);
             assert!(!example.is_empty(), "{} explanation needs an example", code);
-            let analysis = crate::typechecker::analyze(
-                &example,
-                &crate::typechecker::CheckOptions {
-                    strict: false,
-                    file: None,
-                },
-            )
-            .unwrap_or_else(|_| panic!("{} example does not parse:\n{}", code, example));
+            let analysis =
+                crate::typechecker::analyze(&example, &crate::typechecker::CheckOptions::default())
+                    .unwrap_or_else(|_| panic!("{} example does not parse:\n{}", code, example));
             assert!(
                 analysis.diagnostics.iter().any(|d| d.code == *code),
                 "{} example does not produce {}:\n{}\ngot: {:?}",

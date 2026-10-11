@@ -1,0 +1,5 @@
+for c in range(0, 6) {
+    let celsius: Int = c * 20
+    let fahrenheit: Int = celsius * 9 / 5 + 32
+    println("{celsius}C = {fahrenheit}F")
+}

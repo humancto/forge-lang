@@ -1,0 +1,25 @@
+id = "csv_column_stats"
+category = "json_csv"
+title = "Column statistics"
+prompt = """
+Standard input is CSV with a header row; some fields are quoted and may contain commas.
+For the numeric column named `temp` (integers, possibly negative; skip empty cells) print
+`count=<n> min=<a> max=<b> mean=<m>` with the mean rounded to one decimal (round half away
+from zero; always one decimal digit). Then print the `station` names of the rows with the
+minimum and maximum temperature as `coldest: <name>` and `warmest: <name>` (first occurrence).
+"""
+stdin = """
+station,temp,notes
+"Oslo, NO",-7,"windy, dry"
+Lisbon,18,
+"Reykjavik, IS",-2,"snow"
+Cairo,31,"hot, ""very"" sunny"
+Quito,,missing reading
+Lima,19,
+"""
+needs = []
+expected_stdout = """
+count=5 min=-7 max=31 mean=11.8
+coldest: Oslo, NO
+warmest: Cairo
+"""

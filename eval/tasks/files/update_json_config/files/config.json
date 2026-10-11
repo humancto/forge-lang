@@ -1,0 +1,7 @@
+{
+  "name": "forge-app",
+  "version": "1.4.9",
+  "features": ["auth", "search"],
+  "deprecated": true,
+  "limits": {"rps": 100, "burst": 20}
+}

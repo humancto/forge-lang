@@ -235,7 +235,7 @@ Fix: pass every required argument, or give the parameter a default:
     ErrorCode {
         code: "E0006",
         title: "assignment to an immutable variable",
-        hint: "declare the variable with `let mut` (or `set mut`) to allow reassignment",
+        hint: "declare the variable with `let mut` to allow reassignment",
         explanation: "\
 A variable declared without `mut` was reassigned. Forge bindings are
 immutable by default so that values do not change behind your back.
@@ -257,7 +257,8 @@ or bind a new name instead of reassigning. Reported statically as T0017.",
 An arithmetic, comparison or unary operator was applied to values it does
 not support: `null + 1`, `\"a\" * 3`, `true < false`, `[1] - [2]`, ...
 Numbers mix freely (an Int and a Float give a Float) and `+` with a string
-on either side concatenates, but no other operator converts implicitly.
+on either side concatenates (edition 2026; edition 2027 requires two
+strings, see E0034), but no other operator converts implicitly.
 
 Example:
 
@@ -460,9 +461,11 @@ in `try { ... } catch e { ... }`.",
         title: "value does not match its type annotation",
         hint: "pass a value of the annotated type, or loosen the annotation",
         explanation: "\
-Under `forge run --strict`, annotated parameters and return types are also
-checked while the program runs. A value that does not fit its annotation
-stops the program at the call or return.
+From edition 2027 (and under `forge run --strict` in 2026), annotated
+parameters and return types are also checked while the program runs. A
+value that does not fit its annotation stops the program at the call or
+return; a generic parameter declared exactly `T` must get the same type
+from every argument of one call.
 
 Example:
 
@@ -635,11 +638,14 @@ Fix: this is intentional — address the condition the message describes.",
         title: "non-exhaustive match",
         hint: "add a `_ => ...` arm to handle every other value",
         explanation: "\
-A `match` statement ran with a value that none of its arms matched.
+A `match` (statement or expression) ran with a value that none of its
+arms matched. An arm whose guard (`pattern if condition`) is false does not
+match.
 
 Example:
 
     match status { \"ok\" => say \"fine\" }      // status is \"error\"
+    let size = match n { x if x > 9 => \"big\" }   // n is 3
 
 Fix: add the missing arms, or a wildcard arm: `_ => say \"unexpected\"`.
 The type checker reports missing ADT variants statically (T0011).",
@@ -785,7 +791,64 @@ Fix: give each task its own stream (call `.stream()` per task), or collect
 it into an array first (`let xs = s.collect()`) and share the array.",
         matches: |h| h.starts_with("stream already in use") || h.starts_with("stream "),
     },
+    ErrorCode {
+        code: "E0034",
+        title: "implicit string conversion",
+        hint: "convert explicitly with str(x), or use interpolation: \"text {x}\"",
+        explanation: "\
+Edition 2027: `+` was applied to a String and a value of another type.
+Edition 2026 converted the other operand to text silently (`\"a\" + 1` is
+`\"a1\"`), which hides bugs such as adding a number read from input to a
+label. In edition 2027, `+` concatenates only two strings; numbers still add
+as numbers.
+
+Example:
+
+    let n = 3
+    println(\"items: \" + n)      // cannot add String and Int
+
+Fix: interpolate — `println(\"items: {n}\")` — or convert explicitly with
+`str(n)`: `\"items: \" + str(n)`. Reported statically as T0005 (an error
+in edition 2027). See docs/editions/2027.md.",
+        matches: |h| h.starts_with("cannot add ") && !h.starts_with("cannot add to "),
+    },
+    ErrorCode {
+        code: "E0035",
+        title: "removed in edition 2027",
+        hint: "use the replacement named in the message; `forge fix --edition 2027` rewrites 2026 code",
+        explanation: "\
+A syntax error: the program runs under edition 2027 (`edition = \"2027\"` in
+forge.toml, or `forge --edition 2027`), which has one way to write each
+thing. The natural-syntax forms of edition 2026 (`set x to`, `change x to`,
+`define`, `otherwise`/`nah`, `forge` functions, `hold`, `emit`, `grab ...
+from`, `repeat n times`, `unpack ... from`, `safe { }`, `must`, `check`,
+`say`/`yell`/`whisper`) are removed; their words are ordinary names again.
+The message names the exact replacement. (The removed builtins `sus`,
+`bruh`, `slay`, ... are unknown names, E0003.)
+
+Example:
+
+    set total to 0          // removed in edition 2027: `set total to ...`
+
+Fix: write the replacement (`let total = 0`), or run
+`forge fix --edition 2027 file.fg`, which rewrites every removed form.
+docs/editions/2027.md lists each form and its replacement.",
+        matches: |h| h.starts_with(crate::semantics::edition::REMOVED_PREFIX),
+    },
 ];
+
+/// The code of a syntax error: `E0001` for the lexer, `E0002` for the
+/// parser, or a more specific syntax class the parser's message names
+/// (`E0035`, a form removed in edition 2027).
+pub fn syntax_code(lexer: bool, message: &str) -> &'static str {
+    if lexer {
+        return "E0001";
+    }
+    if headline(message).starts_with(crate::semantics::edition::REMOVED_PREFIX) {
+        return "E0035";
+    }
+    "E0002"
+}
 
 /// The code for a runtime error message.
 pub fn classify(message: &str) -> &'static ErrorCode {
@@ -967,11 +1030,23 @@ mod tests {
             ),
             (s::immutable_reassign("x"), "E0006"),
             (
-                s::binary(s::BinaryOp::Sub, s::Operand::Str("a"), s::Operand::Int(1)).unwrap_err(),
+                s::binary(
+                    s::BinaryOp::Sub,
+                    s::Operand::Str("a"),
+                    s::Operand::Int(1),
+                    s::edition::Edition::E2026,
+                )
+                .unwrap_err(),
                 "E0007",
             ),
             (
-                s::binary(s::BinaryOp::Add, s::Operand::Null, s::Operand::Int(1)).unwrap_err(),
+                s::binary(
+                    s::BinaryOp::Add,
+                    s::Operand::Null,
+                    s::Operand::Int(1),
+                    s::edition::Edition::E2027,
+                )
+                .unwrap_err(),
                 "E0007",
             ),
             (s::DIVISION_BY_ZERO.to_string(), "E0008"),
@@ -1030,6 +1105,17 @@ mod tests {
             (
                 "stream already in use (re-entrant advance)".to_string(),
                 "E0033",
+            ),
+            (s::mixed_concat_error("String", "Int"), "E0034"),
+            (
+                s::binary(
+                    s::BinaryOp::Add,
+                    s::Operand::Int(1),
+                    s::Operand::Str("a"),
+                    s::edition::Edition::E2027,
+                )
+                .unwrap_err(),
+                "E0034",
             ),
             (
                 "task error: index out of bounds: index 1 on array of length 0".to_string(),

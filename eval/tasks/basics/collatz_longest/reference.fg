@@ -1,0 +1,27 @@
+fn steps(start: Int) -> Int {
+    let mut n = start
+    let mut count = 0
+    while n != 1 {
+        if n % 2 == 0 {
+            n = n / 2
+        } else {
+            n = 3 * n + 1
+        }
+        count += 1
+    }
+    return count
+}
+
+let mut best = -1
+let mut best_n = 0
+let mut total = 0
+for n in range(1, 31) {
+    let s = steps(n)
+    total += s
+    if s > best {
+        best = s
+        best_n = n
+    }
+}
+println("{best_n} {best}")
+println("total {total}")

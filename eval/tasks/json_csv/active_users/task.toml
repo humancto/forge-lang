@@ -1,0 +1,26 @@
+id = "active_users"
+category = "json_csv"
+title = "Filter users from JSON"
+prompt = """
+Standard input is a JSON array of user objects with fields `name` (string), `age` (integer) and
+`active` (boolean). Print the names of the active users sorted by age ascending (by name for
+equal ages), one per line as `<name> (<age>)`, then `active: <n> of <total>`.
+"""
+stdin = """
+[
+  {"name": "Ada", "age": 36, "active": true},
+  {"name": "Bob", "age": 25, "active": false},
+  {"name": "Cy", "age": 41, "active": true},
+  {"name": "Di", "age": 19, "active": true},
+  {"name": "Ed", "age": 36, "active": true},
+  {"name": "Flo", "age": 52, "active": false}
+]
+"""
+needs = []
+expected_stdout = """
+Di (19)
+Ada (36)
+Ed (36)
+Cy (41)
+active: 4 of 6
+"""

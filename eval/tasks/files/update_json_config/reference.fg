@@ -1,0 +1,18 @@
+let mut cfg = json.parse(fs.read("config.json"))
+let old = cfg.version
+let parts = split(old, ".")
+let new_version = "{parts[0]}.{parts[1]}.{int(parts[2]) + 1}"
+cfg.version = new_version
+if !contains(cfg.features, "beta") {
+    cfg.features = push(cfg.features, "beta")
+}
+cfg.updated_by = "eval"
+cfg = omit(cfg, ["deprecated"])
+// json.parse already orders keys; the keys added above go last, so re-sort.
+let mut ordered = {}
+for key in sort(keys(cfg)) {
+    ordered[key] = cfg[key]
+}
+fs.write("config.json", json.pretty(ordered) + "\n")
+println("version: {old} -> {new_version}")
+println("features: {len(cfg.features)}")

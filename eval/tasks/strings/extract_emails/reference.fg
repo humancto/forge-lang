@@ -1,0 +1,8 @@
+let text = input()
+// Triple-quoted strings are raw: no escapes and no {interpolation}.
+let found = regex.find_all(text, """[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}""")
+let emails = sort(unique(map(found, fn(e) { return e.lower() })))
+for e in emails {
+    println(e)
+}
+println("total: {len(emails)}")

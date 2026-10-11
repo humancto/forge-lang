@@ -239,6 +239,11 @@ pub struct VM {
     /// `Some` while `schedule` / `watch` start-up is deferred (see
     /// [`VM::defer_host_runtime`]). The queued closures are GC roots.
     deferred_host_tasks: Option<Vec<HostTask>>,
+    /// Language edition the program runs under (`semantics::edition`):
+    /// read once when the VM is created, inherited by every VM forked from
+    /// this one (`spawn` tasks, HTTP/WS forks of a `VmTemplate`), and
+    /// passed to the shared operator rules (`semantics::binary`).
+    edition: crate::semantics::edition::Edition,
 }
 
 /// A `schedule` or `watch` block waiting to be started on its own thread.
@@ -444,7 +449,19 @@ impl VM {
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scope_cancels: Vec::new(),
             deferred_host_tasks: None,
+            edition: crate::semantics::edition::current(),
         }
+    }
+
+    /// The language edition this VM runs programs under.
+    pub fn edition(&self) -> crate::semantics::edition::Edition {
+        self.edition
+    }
+
+    /// Run under `edition` instead of the one in effect when the VM was
+    /// created (forks copy their parent's).
+    pub(crate) fn set_edition(&mut self, edition: crate::semantics::edition::Edition) {
+        self.edition = edition;
     }
 
     /// Install the cooperative cancellation flag polled at safe points
@@ -543,7 +560,9 @@ impl VM {
     fn register_builtins(&mut self) {
         // User-visible globals come from the shared registry, so the VM and
         // the interpreter expose exactly the same builtins.
-        let globals = crate::builtins_registry::GLOBALS.iter().map(|b| b.name);
+        // A builtin removed by the run's edition is not defined at all.
+        let edition = crate::semantics::edition::current();
+        let globals = crate::builtins_registry::globals_in(edition).map(|b| b.name);
         for name in globals.chain(COMPILER_INTRINSICS.iter().copied()) {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
                 name: name.to_string(),
@@ -640,6 +659,7 @@ impl VM {
 
     fn fork_for_spawn(&self) -> SendableVM {
         let mut child = VM::new_in_domain(Arc::clone(self.globals.names()));
+        child.edition = self.edition;
 
         // Copy non-function globals. Skip globals where value_to_shared returns
         // Null but the original wasn't Null (i.e., functions/closures/natives) —
@@ -2593,6 +2613,30 @@ impl VM {
                 let r = self.gc.alloc(ObjKind::Map(vm_pairs));
                 Value::obj(r)
             }
+            crate::interpreter::Value::ResultOk(inner) => {
+                let v = self.convert_interp_value(inner);
+                Value::obj(self.gc.alloc(ObjKind::ResultOk(v)))
+            }
+            crate::interpreter::Value::ResultErr(inner) => {
+                let v = self.convert_interp_value(inner);
+                Value::obj(self.gc.alloc(ObjKind::ResultErr(v)))
+            }
+            // Options are ADT objects on the VM (see `Some`/the `None`
+            // prelude global).
+            crate::interpreter::Value::Some(inner) => {
+                let v = self.convert_interp_value(inner);
+                let mut obj = IndexMap::new();
+                obj.insert("__type__".to_string(), self.alloc_string("Option"));
+                obj.insert("__variant__".to_string(), self.alloc_string("Some"));
+                obj.insert("_0".to_string(), v);
+                Value::obj(self.gc.alloc(ObjKind::Object(obj)))
+            }
+            crate::interpreter::Value::None => {
+                let mut obj = IndexMap::new();
+                obj.insert("__type__".to_string(), self.alloc_string("Option"));
+                obj.insert("__variant__".to_string(), self.alloc_string("None"));
+                Value::obj(self.gc.alloc(ObjKind::Object(obj)))
+            }
             // Callable builtins returned by shared code (native plugin
             // namespaces from `plugins::import`).
             crate::interpreter::Value::BuiltIn(name) => self.alloc_builtin(name),
@@ -2980,6 +3024,7 @@ impl VM {
             op,
             Self::semantic_operand(&self.gc, left),
             Self::semantic_operand(&self.gc, right),
+            self.edition,
         )
         .map_err(|message| VMError::new(&message))?;
         Ok(match outcome {

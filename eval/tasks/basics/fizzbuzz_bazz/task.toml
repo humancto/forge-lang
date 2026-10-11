@@ -1,0 +1,47 @@
+id = "fizzbuzz_bazz"
+category = "basics"
+title = "FizzBuzz with a third rule"
+prompt = """
+Print the numbers from 1 to 35, one per line, with these replacements: a multiple of 3 is
+replaced by `Fizz`, a multiple of 5 by `Buzz` and a multiple of 7 by `Bazz`. When several rules
+apply, concatenate the words in that order (for example 15 is `FizzBuzz`, 21 is `FizzBazz`,
+35 is `BuzzBazz`).
+"""
+needs = []
+expected_stdout = """
+1
+2
+Fizz
+4
+Buzz
+Fizz
+Bazz
+8
+Fizz
+Buzz
+11
+Fizz
+13
+Bazz
+FizzBuzz
+16
+17
+Fizz
+19
+Buzz
+FizzBazz
+22
+23
+Fizz
+Buzz
+26
+Fizz
+Bazz
+29
+FizzBuzz
+31
+32
+Fizz
+34
+BuzzBazz
+"""

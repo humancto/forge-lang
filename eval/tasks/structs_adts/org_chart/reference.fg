@@ -1,0 +1,44 @@
+struct Employee {
+    name: String,
+    title: String,
+    manager: String = ""
+}
+
+let staff = [
+    Employee { name: "Ada", title: "CEO" },
+    Employee { name: "Bob", title: "CTO", manager: "Ada" },
+    Employee { name: "Cy", title: "Engineering Lead", manager: "Bob" },
+    Employee { name: "Di", title: "Engineer", manager: "Cy" },
+    Employee { name: "Ed", title: "Engineer", manager: "Cy" },
+    Employee { name: "Flo", title: "CFO", manager: "Ada" },
+    Employee { name: "Gus", title: "Accountant", manager: "Flo" },
+]
+
+// find() returns the first match, or null when there is none.
+fn lookup(name: String) {
+    return find(staff, fn(e) { return e.name == name })
+}
+
+for start in ["Di", "Gus", "Ada"] {
+    let mut chain = []
+    let mut current = lookup(start)
+    while current != null {
+        chain = push(chain, "{current.name} ({current.title})")
+        if current.manager == "" {
+            current = null
+        } else {
+            current = lookup(current.manager)
+        }
+    }
+    println(join(chain, " -> "))
+}
+
+let mut reports = {}
+for e in staff {
+    if e.manager != "" {
+        reports[e.manager] = get(reports, e.manager, 0) + 1
+    }
+}
+for name in sort(keys(reports)) {
+    println("{name}: {reports[name]}")
+}

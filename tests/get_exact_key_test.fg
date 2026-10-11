@@ -1,0 +1,18 @@
+// get(obj, key, default): an exact key wins over the dot-path reading.
+
+@test
+fn exact_keys_with_dots_win() {
+    let mut counts = {}
+    counts[".txt"] = 2
+    counts["a.b"] = 7
+    assert_eq(get(counts, ".txt", 0), 2)
+    assert_eq(get(counts, "a.b", 0), 7)
+    assert_eq(get(counts, ".csv", 0), 0)
+}
+
+@test
+fn dot_paths_still_walk_nested_objects() {
+    let user = { profile: { city: "Oslo" } }
+    assert_eq(get(user, "profile.city", "?"), "Oslo")
+    assert_eq(get(user, "profile.zip", "?"), "?")
+}

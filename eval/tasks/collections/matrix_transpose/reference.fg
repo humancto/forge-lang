@@ -1,0 +1,24 @@
+let mut matrix = []
+for line in split(input(), "\n") {
+    if line.trim() != "" {
+        matrix = push(matrix, map(line.words(), fn(w) { return int(w) }))
+    }
+}
+let rows = len(matrix)
+let cols = len(matrix[0])
+let mut transposed = []
+for c in range(0, cols) {
+    let mut row = []
+    for r in range(0, rows) {
+        row = push(row, matrix[r][c])
+    }
+    transposed = push(transposed, row)
+}
+fn show(row) {
+    return join(map(row, fn(x) { return str(x) }), " ")
+}
+for row in transposed {
+    println(show(row))
+}
+println("row sums: " + show(map(matrix, fn(r) { return sum(r) })))
+println("col sums: " + show(map(transposed, fn(r) { return sum(r) })))

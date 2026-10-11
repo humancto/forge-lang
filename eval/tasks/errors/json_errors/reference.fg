@@ -1,0 +1,21 @@
+let mut total = 0
+let lines = split(input(), "\n")
+for i in range(0, len(lines)) {
+    let line = lines[i]
+    let n = i + 1
+    if line.trim() == "" {
+        continue
+    }
+    try {
+        let record = json.parse(line)
+        if typeof(record) != "Object" || typeof(get(record, "sku")) != "String" || typeof(get(record, "qty")) != "Int" {
+            println("{n}: bad record")
+        } else {
+            total += record.qty
+            println("{n}: {record.sku} x{record.qty}")
+        }
+    } catch e {
+        println("{n}: invalid json")
+    }
+}
+println("total qty: {total}")

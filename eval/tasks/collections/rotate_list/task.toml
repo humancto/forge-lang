@@ -1,0 +1,26 @@
+id = "rotate_list"
+category = "collections"
+title = "Rotate a list"
+prompt = """
+Each line of standard input has an integer k, a colon, and a space-separated list, e.g.
+`2: a b c d e`. Rotate the list right by k positions (k may be negative, meaning left, or
+larger than the list) and print the result separated by spaces. An empty list prints an empty
+line.
+"""
+stdin = """
+2: a b c d e
+-1: a b c d e
+7: 1 2 3
+0: x y
+3:
+-10: p q r s
+"""
+needs = []
+expected_stdout = """
+d e a b c
+b c d e a
+3 1 2
+x y
+
+r s p q
+"""

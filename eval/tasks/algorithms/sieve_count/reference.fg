@@ -1,0 +1,36 @@
+let n = int(input().trim())
+let mut is_prime = []
+for i in range(0, n) {
+    is_prime = push(is_prime, i >= 2)
+}
+let mut i = 2
+while i * i < n {
+    if is_prime[i] {
+        let mut j = i * i
+        while j < n {
+            is_prime[j] = false
+            j += i
+        }
+    }
+    i += 1
+}
+let mut count = 0
+let mut largest = 0
+let mut total = 0
+let mut twins = 0
+let mut previous = -10
+for k in range(2, n) {
+    if is_prime[k] {
+        count += 1
+        largest = k
+        total += k
+        if k - previous == 2 {
+            twins += 1
+        }
+        previous = k
+    }
+}
+println("primes below {n}: {count}")
+println("largest: {largest}")
+println("sum: {total}")
+println("twin pairs: {twins}")

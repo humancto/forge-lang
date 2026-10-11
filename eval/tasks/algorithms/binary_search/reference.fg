@@ -1,0 +1,31 @@
+let lines = split(input(), "\n")
+let xs = map(lines[0].words(), fn(w) { return int(w) })
+let mut comparisons = 0
+for line in slice(lines, 1, len(lines)) {
+    if line.trim() == "" {
+        continue
+    }
+    let q = int(line.trim())
+    let mut lo = 0
+    let mut hi = len(xs)
+    let mut found = -1
+    while lo < hi {
+        comparisons += 1
+        let mid = (lo + hi) / 2
+        if xs[mid] == q {
+            found = mid
+            break
+        }
+        if xs[mid] < q {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if found >= 0 {
+        println("{q}: found at {found}")
+    } else {
+        println("{q}: not found, insert at {lo}")
+    }
+}
+println("comparisons: {comparisons}")

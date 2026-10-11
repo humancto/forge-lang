@@ -1,0 +1,17 @@
+let words = regex.find_all(input().lower(), "[a-z]+")
+let mut counts = {}
+for w in words {
+    counts[w] = get(counts, w, 0) + 1
+}
+let ranked = sort(keys(counts), fn(a, b) {
+    if counts[a] != counts[b] {
+        return counts[b] - counts[a]
+    }
+    if a < b {
+        return -1
+    }
+    return 1
+})
+for w in slice(ranked, 0, 5) {
+    println("{w} {counts[w]}")
+}

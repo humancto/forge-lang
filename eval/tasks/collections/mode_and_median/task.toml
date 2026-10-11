@@ -1,0 +1,20 @@
+id = "mode_and_median"
+category = "collections"
+title = "Mode and median"
+prompt = """
+Read integers from standard input (separated by whitespace). Print `count: <n>`,
+`mode: <m>` (the most frequent value; the smallest one on a tie), `median: <x>` (for an even
+count, the mean of the two middle values; print it as an integer when it is whole, otherwise
+with `.5`), `min: <a>` and `max: <b>`.
+"""
+stdin = """
+7 3 9 3 12 7 1 8 3 7 10 2
+"""
+needs = []
+expected_stdout = """
+count: 12
+mode: 3
+median: 7
+min: 1
+max: 12
+"""

@@ -1,0 +1,29 @@
+id = "retry_operation"
+category = "errors"
+title = "Retry until success"
+prompt = """
+Simulate an unreliable operation: `fetch(job, attempt)` fails with the error
+`<job>: attempt <attempt> failed` when attempt is smaller than the job's required attempts,
+and otherwise succeeds with the value `<job> done`. The jobs and their required attempts are:
+alpha 1, beta 3, gamma 6, delta 2. Retry each job up to 4 attempts. Print every failure as
+`  retry: <error>` and finally either `<job>: <value> after <n> attempt(s)` or
+`<job>: gave up after 4 attempts`. Print a heading line `== <job> ==` before each job.
+"""
+needs = []
+expected_stdout = """
+== alpha ==
+alpha: alpha done after 1 attempt(s)
+== beta ==
+  retry: beta: attempt 1 failed
+  retry: beta: attempt 2 failed
+beta: beta done after 3 attempt(s)
+== gamma ==
+  retry: gamma: attempt 1 failed
+  retry: gamma: attempt 2 failed
+  retry: gamma: attempt 3 failed
+  retry: gamma: attempt 4 failed
+gamma: gave up after 4 attempts
+== delta ==
+  retry: delta: attempt 1 failed
+delta: delta done after 2 attempt(s)
+"""

@@ -1,0 +1,25 @@
+id = "edit_distance"
+category = "algorithms"
+title = "Levenshtein distance"
+prompt = """
+Each line of standard input holds two words separated by a comma. Print
+`<a> -> <b>: <distance>` with the Levenshtein edit distance (insertions, deletions and
+substitutions each cost 1). Words may be empty (e.g. `,abc`); print an empty word as `""`.
+"""
+stdin = """
+kitten,sitting
+flaw,lawn
+intention,execution
+,abc
+same,same
+forge,forget
+"""
+needs = []
+expected_stdout = """
+kitten -> sitting: 3
+flaw -> lawn: 2
+intention -> execution: 5
+"" -> abc: 3
+same -> same: 0
+forge -> forget: 1
+"""

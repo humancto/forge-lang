@@ -1,0 +1,17 @@
+id = "await_factorials"
+category = "concurrency"
+title = "Await a batch of tasks"
+prompt = """
+For n in 5, 10, 15, 20 and 25, start a concurrent task that computes n! modulo 1000000007
+(multiplying step by step and reducing modulo at each step). Wait for all tasks and print
+`<n>! mod p = <value>` in that order, then `max: <largest value>`.
+"""
+needs = []
+expected_stdout = """
+5! mod p = 120
+10! mod p = 3628800
+15! mod p = 674358851
+20! mod p = 146326063
+25! mod p = 440732388
+max: 674358851
+"""

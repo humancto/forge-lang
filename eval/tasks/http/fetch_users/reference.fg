@@ -1,0 +1,14 @@
+let base = input().trim()
+let resp = http.get(base + "/users.json")
+let users = json.parse(resp.body)
+let older = sort(filter(users, fn(u) { return u.age > 30 }), fn(a, b) {
+    if a.name < b.name {
+        return -1
+    }
+    return 1
+})
+for u in older {
+    println("{u.name} ({u.team})")
+}
+let teams = sort(unique(map(older, fn(u) { return u.team })))
+println("teams: " + join(teams, ","))

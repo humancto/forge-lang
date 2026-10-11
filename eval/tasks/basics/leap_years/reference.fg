@@ -1,0 +1,16 @@
+fn is_leap(y: Int) -> Bool {
+    return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+for line in split(input(), "\n") {
+    let text = line.trim()
+    if text == "" {
+        continue
+    }
+    let y = int(text)
+    if is_leap(y) {
+        println("{y} leap")
+    } else {
+        println("{y} common")
+    }
+}

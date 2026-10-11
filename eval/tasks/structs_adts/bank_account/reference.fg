@@ -1,0 +1,34 @@
+struct Account {
+    owner: String,
+    balance: Int
+}
+
+fn apply(account: Account, op: String, amount: Int) -> Result<Account, String> {
+    if op == "deposit" {
+        return Ok(Account { owner: account.owner, balance: account.balance + amount })
+    }
+    if amount > account.balance {
+        return Err("insufficient funds")
+    }
+    return Ok(Account { owner: account.owner, balance: account.balance - amount })
+}
+
+let ops = [
+    ["deposit", 2500], ["withdraw", 4000], ["withdraw", 9000],
+    ["deposit", 125], ["withdraw", 8625], ["withdraw", 1],
+]
+let mut account = Account { owner: "Ada", balance: 10000 }
+let mut succeeded = 0
+for entry in ops {
+    let op = entry[0]
+    let amount = entry[1]
+    let result = apply(account, op, amount)
+    if is_ok(result) {
+        account = unwrap(result)
+        succeeded += 1
+        println("{op} {amount}: ok, balance {account.balance}")
+    } else {
+        println("{op} {amount}: rejected ({unwrap_err(result)}), balance {account.balance}")
+    }
+}
+println("{account.owner}: {account.balance} cents after {succeeded} successful operations")

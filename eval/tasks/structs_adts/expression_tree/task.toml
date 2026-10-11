@@ -1,0 +1,19 @@
+id = "expression_tree"
+category = "structs_adts"
+title = "Evaluate an expression tree"
+prompt = """
+Represent arithmetic expressions as a tree with node kinds: number (integer literal),
+addition, multiplication, negation and a variable `x`. Build these expressions:
+1. (2 + 3) * 4
+2. -(x * x) + 10
+3. (x + 1) * (x + -2)
+For x = 5, print each expression fully parenthesised and its value as `<text> = <value>`, where
+a number prints as itself, a variable as `x`, addition as `(<a> + <b>)`, multiplication as
+`(<a> * <b>)` and negation as `-<a>`.
+"""
+needs = []
+expected_stdout = """
+((2 + 3) * 4) = 20
+(-(x * x) + 10) = -15
+((x + 1) * (x + -2)) = 18
+"""

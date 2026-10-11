@@ -1,0 +1,20 @@
+id = "grep_files"
+category = "files"
+title = "Search files for a pattern"
+prompt = """
+The current directory contains a folder `notes` with `.md` files. Standard input holds a regular
+expression. Search every `.md` file in `notes` (sorted by file name) line by line,
+case-insensitively, and print each match as `<file>:<line number>: <line>`. Then print
+`<n> matches in <k> files`.
+"""
+stdin = """
+todo|fix(me)?
+"""
+needs = ["read"]
+expected_stdout = """
+a.md:2: TODO: write the eval
+b.md:1: Fix the parser
+b.md:2: fixme later
+b.md:3: prefix is not a match? it is: preFIX
+4 matches in 2 files
+"""

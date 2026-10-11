@@ -1,0 +1,9 @@
+let mut cents = 100000
+for year in range(1, 7) {
+    // 3.5% = 35 / 1000, rounded half up to the nearest cent
+    let interest = (cents * 35 + 500) / 1000
+    cents += interest
+    let whole = cents / 100
+    let frac = pad_start(str(cents % 100), 2, "0")
+    println("year {year}: {whole}.{frac}")
+}

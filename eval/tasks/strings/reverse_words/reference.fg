@@ -1,0 +1,7 @@
+for line in split(input(), "\n") {
+    let words = line.words()
+    if len(words) == 0 {
+        continue
+    }
+    println(join(reverse(words), " ") + " ({len(words)} words)")
+}

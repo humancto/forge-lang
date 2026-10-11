@@ -1,0 +1,20 @@
+id = "fetch_users"
+category = "http"
+title = "Fetch and filter a JSON API"
+prompt = """
+The first line of standard input is the base URL of a JSON API (for example
+`http://127.0.0.1:8000/api`). `GET <base>/users.json` returns an array of users with `id`,
+`name`, `age` and `team`. Fetch it and print `<name> (<team>)` for every user older than 30,
+sorted by name, then `teams: <distinct teams of those users, sorted, separated by ,>`.
+"""
+stdin = """
+{base_url}
+"""
+needs = ["net"]
+expected_stdout = """
+Ada (core)
+Cy (core)
+Di (data)
+Ed (web)
+teams: core,data,web
+"""

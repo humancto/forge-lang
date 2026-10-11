@@ -1,0 +1,18 @@
+id = "parallel_map_ordered"
+category = "concurrency"
+title = "Concurrent map preserving order"
+prompt = """
+Read words from standard input (whitespace-separated). Process every word in its own concurrent
+task: the task computes `<word>=<n>`, where `<word>` is the word exactly as given and `<n>` is
+the number of distinct letters, counting upper and lower case as the same letter. Collect the
+results in the original input order (regardless of which task finishes first) and print them
+joined by `, `. Then print `tasks: <n>`.
+"""
+stdin = """
+Mississippi banana Forge concurrency aaa Zebra
+"""
+needs = []
+expected_stdout = """
+Mississippi=4, banana=3, Forge=5, concurrency=7, aaa=1, Zebra=5
+tasks: 6
+"""

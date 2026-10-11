@@ -1,0 +1,87 @@
+// Edition 2027: `+` with exactly one String operand is an error (E0034).
+// Run with:
+//   forge --edition 2027 test tests/edition2027 --engine both
+// Edition 2026 behaviour is pinned in tests/string_concat_2026_test.fg.
+
+// The operands come through an unannotated parameter so the type checker
+// cannot see them; statically known cases are rejected before running.
+fn plus(a, b) {
+    return a + b
+}
+
+fn add_error(a, b) {
+    let mut message = ""
+    let mut code = ""
+    try {
+        plus(a, b)
+    } catch e {
+        message = e.message
+        code = e.code
+    }
+    return [code, message]
+}
+
+@test
+fn string_plus_int_is_an_error() {
+    let r = add_error("a", 1)
+    assert_eq(r[0], "E0034")
+    assert(starts_with(r[1], "cannot add String and Int"))
+    assert(contains(r[1], "str(x)"))
+}
+
+@test
+fn int_plus_string_is_an_error() {
+    let r = add_error(1, "a")
+    assert_eq(r[0], "E0034")
+    assert(starts_with(r[1], "cannot add Int and String"))
+}
+
+@test
+fn every_non_string_operand_is_rejected() {
+    assert_eq(add_error("x", 1.5)[0], "E0034")
+    assert_eq(add_error("x", true)[0], "E0034")
+    assert_eq(add_error("x", null)[0], "E0034")
+    assert_eq(add_error(null, "x")[0], "E0034")
+    assert_eq(add_error("x", [1])[0], "E0034")
+    assert_eq(add_error({ a: 1 }, "x")[0], "E0034")
+}
+
+@test
+fn assert_throws_sees_the_error() {
+    assert_throws(fn() { "a" + 1 })
+    assert_throws(fn() { 1 + "a" })
+}
+
+@test
+fn compound_assignment_is_checked_too() {
+    let mut s = "n="
+    let mut failed = false
+    try {
+        s += plus(0, 1)
+    } catch e {
+        failed = true
+        assert_eq(e.code, "E0034")
+    }
+    assert(failed)
+    // The in-place append path (`s = s + x` on a local) is checked as well.
+    let mut t = "x"
+    let n = plus(1, 1)
+    let mut failed2 = false
+    try {
+        t = t + n
+    } catch e {
+        failed2 = true
+    }
+    assert(failed2)
+    assert_eq(t, "x")
+}
+
+@test
+fn explicit_conversion_and_interpolation_work() {
+    let n = 3
+    assert_eq("count: " + str(n), "count: 3")
+    assert_eq("count: {n}", "count: 3")
+    assert_eq(plus("a", "b"), "ab")
+    assert_eq(plus(1, 2), 3)
+    assert_eq(plus(1, 2.5), 3.5)
+}

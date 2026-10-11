@@ -1,0 +1,11 @@
+let text = fs.read("poem.txt")
+let all_lines = split(text, "\n")
+let newlines = len(all_lines) - 1
+println("lines={newlines} words={len(text.words())} chars={len(text)}")
+let mut longest = ""
+for line in all_lines {
+    if len(line) > len(longest) {
+        longest = line
+    }
+}
+println("longest: {longest}")

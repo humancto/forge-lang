@@ -1106,6 +1106,10 @@ pub struct Interpreter {
     /// and background forks share their creator's heap; an HTTP request
     /// fork gets its own.
     heap: Arc<heap::ScopeHeap>,
+    /// Language edition the program runs under (`semantics::edition`):
+    /// read once at construction, carried to children (`child_context`)
+    /// and forks, and passed to the shared operator rules.
+    edition: crate::semantics::edition::Edition,
 }
 
 /// Teardown: release this interpreter's own roots, and if it was the last
@@ -1165,6 +1169,7 @@ impl Interpreter {
             fuel_window: 0,
             meter: crate::runtime::limits::Meter::current().with_memory_polling(),
             caps: crate::runtime::limits::Caps::current(),
+            edition: crate::semantics::edition::current(),
         };
         interp.register_builtins();
         interp
@@ -1256,7 +1261,13 @@ impl Interpreter {
         child.meter = crate::runtime::limits::Meter::for_budget(self.meter.budget().cloned())
             .with_memory_polling();
         child.caps = self.caps;
+        child.edition = self.edition;
         child
+    }
+
+    /// The language edition this interpreter runs programs under.
+    pub fn edition(&self) -> crate::semantics::edition::Edition {
+        self.edition
     }
 
     /// Block until a spawned task has stored its result, then take it.
@@ -1444,6 +1455,7 @@ impl Interpreter {
         interp.struct_defaults = self.struct_defaults.clone();
         interp.source = self.source.clone();
         interp.source_file = self.source_file.clone();
+        interp.edition = self.edition;
         // Per-request fresh state. The cancel flag is created per-request
         // and replaced by the caller with one wired to a Drop guard on the
         // response future, so client disconnect can stop the handler.
@@ -1490,6 +1502,7 @@ impl Interpreter {
         interp.source_file = self.source_file.clone();
         interp.debug_state = self.debug_state.clone();
         interp.output_sink = self.output_sink.clone();
+        interp.edition = self.edition;
         interp
     }
 
@@ -1527,7 +1540,9 @@ impl Interpreter {
                 .define("__type_Option__".to_string(), Value::Object(type_meta));
         }
 
-        for builtin in crate::builtins_registry::GLOBALS {
+        // A builtin removed by the run's edition is not defined at all.
+        let edition = crate::semantics::edition::current();
+        for builtin in crate::builtins_registry::globals_in(edition) {
             self.env.define(
                 builtin.name.to_string(),
                 Value::BuiltIn(builtin.name.to_string()),
@@ -1881,16 +1896,14 @@ impl Interpreter {
 
                 self.check_match_exhaustive(&val, arms)?;
 
-                for arm in arms {
-                    if self.match_pattern(&arm.pattern, &val) {
-                        self.env.push_scope();
-                        self.bind_pattern(&arm.pattern, &val);
+                match self.select_match_arm(&val, arms)? {
+                    Some(arm) => {
                         let result = self.exec_body(&arm.body);
                         self.env.pop_scope();
-                        return result;
+                        result
                     }
+                    None => Err(RuntimeError::new(crate::semantics::NON_EXHAUSTIVE_MATCH)),
                 }
-                Err(RuntimeError::new(crate::semantics::NON_EXHAUSTIVE_MATCH))
             }
 
             Stmt::For {
@@ -2141,14 +2154,8 @@ impl Interpreter {
                     .map_err(|e| RuntimeError::new(&e.to_string()))?;
                 let source = std::fs::read_to_string(&checked)
                     .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
-                let mut lexer = crate::lexer::Lexer::new(&source);
-                let tokens = lexer.tokenize().map_err(|e| {
-                    RuntimeError::new(&format!("import '{}' lex error: {}", path, e.message))
-                })?;
-                let mut parser = crate::parser::Parser::new(tokens);
-                let program = parser.parse_program().map_err(|e| {
-                    RuntimeError::new(&format!("import '{}' parse error: {}", path, e.message))
-                })?;
+                let program = crate::typechecker::prepare_module(&source, path, &file_path)
+                    .map_err(|e| RuntimeError::new(&e))?;
 
                 // Shared cycle detection (runtime/imports.rs); the guard keeps
                 // this module on the import chain while it runs.
@@ -2283,14 +2290,19 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
-            Stmt::Destructure { pattern, value } => {
+            Stmt::Destructure {
+                pattern,
+                value,
+                mutable,
+            } => {
                 let val = self.eval_expr(value)?;
+                let mutable = *mutable;
                 match pattern {
-                    DestructurePattern::Object(names) => {
+                    DestructurePattern::Object(fields) => {
                         if let Value::Object(map) = &val {
-                            for name in names {
-                                let v = map.get(name).cloned().unwrap_or(Value::Null);
-                                self.env.define(name.clone(), v);
+                            for (field, name) in fields {
+                                let v = map.get(field).cloned().unwrap_or(Value::Null);
+                                self.env.define_with_mutability(name.clone(), v, mutable);
                             }
                         } else {
                             return Err(RuntimeError::new("cannot destructure non-object"));
@@ -2300,7 +2312,7 @@ impl Interpreter {
                         if let Value::Array(arr) = &val {
                             for (i, name) in items.iter().enumerate() {
                                 let v = arr.get(i).cloned().unwrap_or(Value::Null);
-                                self.env.define(name.clone(), v);
+                                self.env.define_with_mutability(name.clone(), v, mutable);
                             }
                             if let Some(rest_name) = rest {
                                 let rest_items = if items.len() < arr.len() {
@@ -2308,7 +2320,11 @@ impl Interpreter {
                                 } else {
                                     Vec::new()
                                 };
-                                self.env.define(rest_name.clone(), Value::Array(rest_items));
+                                self.env.define_with_mutability(
+                                    rest_name.clone(),
+                                    Value::Array(rest_items),
+                                    mutable,
+                                );
                             }
                         } else {
                             return Err(RuntimeError::new("cannot destructure non-array"));
@@ -2318,7 +2334,7 @@ impl Interpreter {
                         if let Value::Tuple(items) = &val {
                             for (i, name) in names.iter().enumerate() {
                                 let v = items.get(i).cloned().unwrap_or(Value::Null);
-                                self.env.define(name.clone(), v);
+                                self.env.define_with_mutability(name.clone(), v, mutable);
                             }
                         } else {
                             return Err(RuntimeError::new("cannot destructure non-tuple"));
@@ -2564,8 +2580,45 @@ impl Interpreter {
         }
     }
 
+    /// The arm of a `match` that takes `val`: its pattern matches and its
+    /// guard, evaluated with the pattern's bindings in scope, is truthy. On
+    /// `Some`, the scope holding the bindings is still pushed: the caller
+    /// runs the body and pops it. A failing guard falls through to the
+    /// next arm.
+    fn select_match_arm<'a>(
+        &mut self,
+        val: &Value,
+        arms: &'a [MatchArm],
+    ) -> Result<Option<&'a MatchArm>, RuntimeError> {
+        for arm in arms {
+            if !self.match_pattern(&arm.pattern, val) {
+                continue;
+            }
+            self.env.push_scope();
+            self.bind_pattern(&arm.pattern, val);
+            if let Some(guard) = &arm.guard {
+                match self.eval_expr(guard) {
+                    Ok(v) if v.is_truthy() => {}
+                    Ok(_) => {
+                        self.env.pop_scope();
+                        continue;
+                    }
+                    Err(e) => {
+                        self.env.pop_scope();
+                        return Err(e);
+                    }
+                }
+            }
+            return Ok(Some(arm));
+        }
+        Ok(None)
+    }
+
     /// A `match` on an ADT value must cover every variant unless it has a
-    /// wildcard or catch-all binding arm.
+    /// wildcard or catch-all binding arm. Or-patterns cover each of their
+    /// alternatives. Guarded arms count as covering here (the run-time
+    /// check only rejects variants no arm mentions); the type checker
+    /// treats them as non-covering (T0011).
     fn check_match_exhaustive(&self, val: &Value, arms: &[MatchArm]) -> Result<(), RuntimeError> {
         // Check exhaustiveness for ADT values
         if let Value::Object(obj) = val {
@@ -2573,8 +2626,8 @@ impl Interpreter {
                 let type_key = format!("__type_{}__", type_name);
                 if let Some(Value::Object(type_meta)) = self.env.get(&type_key) {
                     if let Some(Value::Array(variant_list)) = type_meta.get("variants") {
-                        let has_wildcard =
-                            arms.iter().any(|a| matches!(a.pattern, Pattern::Wildcard));
+                        let alternatives = || arms.iter().flat_map(|a| a.pattern.alternatives());
+                        let has_wildcard = alternatives().any(|p| matches!(p, Pattern::Wildcard));
                         let variant_names: Vec<&str> = variant_list
                             .iter()
                             .filter_map(|v| {
@@ -2585,8 +2638,8 @@ impl Interpreter {
                                 }
                             })
                             .collect();
-                        let has_true_catchall = arms.iter().any(|a| {
-                            if let Pattern::Binding(bname) = &a.pattern {
+                        let has_true_catchall = alternatives().any(|p| {
+                            if let Pattern::Binding(bname) = p {
                                 !variant_names.contains(&bname.as_str())
                             } else {
                                 false
@@ -2594,7 +2647,7 @@ impl Interpreter {
                         });
                         if !has_wildcard && !has_true_catchall {
                             for vname in &variant_names {
-                                let covered = arms.iter().any(|a| match &a.pattern {
+                                let covered = alternatives().any(|p| match p {
                                     Pattern::Constructor { name, .. } => name == vname,
                                     Pattern::Binding(bname) => bname == vname,
                                     _ => false,
@@ -2689,18 +2742,16 @@ impl Interpreter {
                 }
                 let val = self.eval_expr(subject).map_err(patch_err)?;
                 self.check_match_exhaustive(&val, arms).map_err(patch_err)?;
-                for arm in arms {
-                    if self.match_pattern(&arm.pattern, &val) {
-                        self.env.push_scope();
-                        self.bind_pattern(&arm.pattern, &val);
+                match self.select_match_arm(&val, arms).map_err(patch_err)? {
+                    Some(arm) => {
                         let result = self.eval_block_value(&arm.body);
                         self.env.pop_scope();
-                        return result;
+                        result
                     }
+                    None => Err(patch_err(RuntimeError::new(
+                        crate::semantics::NON_EXHAUSTIVE_MATCH,
+                    ))),
                 }
-                Err(patch_err(RuntimeError::new(
-                    crate::semantics::NON_EXHAUSTIVE_MATCH,
-                )))
             }
             stmt => Ok(match self.exec_stmt(stmt).map_err(patch_err)? {
                 Signal::Return(v) => BlockExit::Return(v),
@@ -2934,6 +2985,79 @@ impl Interpreter {
 
     // ========== Expression Evaluation ==========
 
+    /// The annotation checks `typechecker::enforce` inserts (`--strict`,
+    /// edition 2027) run on every call of an annotated function:
+    /// `__types.check(value, type, "<context>")` and `__types.bind("T",
+    /// "<fn>", "<names>", args..)` are decided here without cloning the
+    /// hidden module or going through builtin dispatch. Same rule and
+    /// messages as the module members (`stdlib::types_module`); any other
+    /// shape takes the normal call path.
+    fn try_types_check(
+        &mut self,
+        function: &Expr,
+        args: &[Expr],
+    ) -> Option<Result<Value, RuntimeError>> {
+        let Expr::FieldAccess { object, field } = function else {
+            return None;
+        };
+        if !matches!(object.as_ref(), Expr::Ident(m) if m == crate::typechecker::enforce::MODULE) {
+            return None;
+        }
+        match (field.as_str(), args) {
+            ("check", [value, ty, Expr::StringLit(context)]) => {
+                let value = match self.eval_expr(value) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let ty = match ty {
+                    Expr::StringLit(ty) => crate::semantics::types::parse_cached(ty),
+                    // A generic parameter's binding (a local).
+                    other => match self.eval_expr(other) {
+                        Ok(Value::String(ty)) => crate::semantics::types::parse_cached(&ty),
+                        Ok(_) => return None,
+                        Err(e) => return Some(Err(e)),
+                    },
+                };
+                let expected = match ty {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(RuntimeError::new(&e))),
+                };
+                Some(if crate::semantics::types::fits(&value, &expected) {
+                    Ok(value)
+                } else {
+                    Err(RuntimeError::new(&crate::semantics::types::violation(
+                        context, &expected, &value,
+                    )))
+                })
+            }
+            ("bind", [Expr::StringLit(_), Expr::StringLit(_), Expr::StringLit(_), values @ ..]) => {
+                let mut evaluated = Vec::with_capacity(values.len());
+                for v in values {
+                    match self.eval_expr(v) {
+                        Ok(v) => evaluated.push(v),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                if let Ok(bound) = crate::semantics::types::bind_param(&evaluated) {
+                    return Some(Ok(Value::String(bound)));
+                }
+                // The module member words the error.
+                let mut all = Vec::with_capacity(args.len());
+                for a in &args[..3] {
+                    if let Expr::StringLit(s) = a {
+                        all.push(Value::String(s.clone()));
+                    }
+                }
+                all.extend(evaluated);
+                Some(
+                    crate::stdlib::types_module::call("__types.bind", all)
+                        .map_err(|e| RuntimeError::new(&e)),
+                )
+            }
+            _ => None,
+        }
+    }
+
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
         match expr {
             Expr::Int(n) => Ok(Value::Int(*n)),
@@ -3079,6 +3203,9 @@ impl Interpreter {
             }
 
             Expr::Call { function, args } => {
+                if let Some(result) = self.try_types_check(function, args) {
+                    return result;
+                }
                 // Method call: obj.method(args) -> method(obj, args)
                 // In-place forms on variables: mutating collection methods
                 // (`a.push(x)`, `push(a, x)`, `s.add(x)`, ...) and cheap
@@ -4106,6 +4233,7 @@ impl Interpreter {
                 shared_op,
                 semantic_operand(left),
                 semantic_operand(right),
+                self.edition,
             ) {
                 Ok(crate::semantics::Outcome::Int(n)) => Ok(Value::Int(n)),
                 Ok(crate::semantics::Outcome::Float(f)) => Ok(Value::Float(f)),
@@ -5185,11 +5313,18 @@ impl Interpreter {
                 }
                 false
             }
+            Pattern::Or(alts) => alts.iter().any(|p| self.match_pattern(p, value)),
         }
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, value: &Value) {
         match pattern {
+            Pattern::Or(alts) => {
+                // The first matching alternative supplies the bindings.
+                if let Some(alt) = alts.iter().find(|p| self.match_pattern(p, value)) {
+                    self.bind_pattern(alt, value);
+                }
+            }
             Pattern::Binding(name) => {
                 self.env.define(name.clone(), value.clone());
             }

@@ -55,3 +55,6 @@ docs/ARCHITECTURE_AUDIT.md
 
 # Built by bindings/wasm/build.sh (CI deploys it with the playground)
 /docs/playground/pkg/
+
+# Eval task fixtures are data, whatever their extension.
+!eval/tasks/**/files/**

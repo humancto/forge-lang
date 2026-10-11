@@ -57,7 +57,8 @@ pub mod vm;
 pub use permissions::{Capabilities, Capability, PermissionError};
 pub use runtime::limits::{CountingAllocator, Limits};
 #[cfg(feature = "host")]
-pub use sandbox::{CancelHandle, Engine, Output, Sandbox, SandboxError};
+pub use sandbox::{CancelHandle, Engine, Output, Sandbox, SandboxError, TypeError};
+pub use semantics::edition::Edition;
 
 // The library's own tests exercise `Sandbox::max_memory`, which measures
 // the interpreter through the counting allocator.
@@ -92,6 +93,8 @@ pub extern "C" fn forge_execute_bytecode(bytecode_ptr: *const u8, bytecode_len: 
             }
         };
 
+        // Run under the edition the program was compiled with.
+        let _edition = semantics::edition::scope(Some(chunk.edition));
         let mut machine = vm::machine::VM::new();
         match machine.execute(&chunk) {
             Ok(_) => 0,

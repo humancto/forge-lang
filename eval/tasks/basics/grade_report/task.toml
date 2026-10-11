@@ -1,0 +1,20 @@
+id = "grade_report"
+category = "basics"
+title = "Average and letter grades"
+prompt = """
+Students and scores: Ada 93, Brian 78, Chen 85, Dora 61, Eli 88, Fay 54.
+Print one line per student in the given order: `<name>: <score> <letter>` where the letter is
+A for 90 and above, B for 80-89, C for 70-79, D for 60-69 and F below 60.
+Then print `average: <avg>` with the average score rounded to one decimal place
+(always show one decimal digit).
+"""
+needs = []
+expected_stdout = """
+Ada: 93 A
+Brian: 78 C
+Chen: 85 B
+Dora: 61 D
+Eli: 88 B
+Fay: 54 F
+average: 76.5
+"""

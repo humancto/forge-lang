@@ -1,0 +1,48 @@
+let numerals = [
+    [1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"],
+    [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"],
+]
+let single = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 }
+
+fn to_roman(number: Int) -> String {
+    let mut n = number
+    let mut out = ""
+    for pair in numerals {
+        while n >= pair[0] {
+            out += pair[1]
+            n -= pair[0]
+        }
+    }
+    return out
+}
+
+fn from_roman(s: String) -> Int {
+    let cs = s.chars()
+    let mut total = 0
+    for i in range(0, len(cs)) {
+        let v = single[cs[i]]
+        if i + 1 < len(cs) && single[cs[i + 1]] > v {
+            total -= v
+        } else {
+            total += v
+        }
+    }
+    return total
+}
+
+for line in split(input(), "\n") {
+    let t = line.trim()
+    if t == "" {
+        continue
+    }
+    if regex.test(t, "^[0-9]+$") {
+        println("{t} -> {to_roman(int(t))}")
+    } else {
+        let n = from_roman(t)
+        if to_roman(n) == t {
+            println("{t} -> {n}")
+        } else {
+            println("{t} -> invalid")
+        }
+    }
+}

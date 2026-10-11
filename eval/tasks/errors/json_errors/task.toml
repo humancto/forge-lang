@@ -1,0 +1,32 @@
+id = "json_errors"
+category = "errors"
+title = "Tolerant JSON lines"
+prompt = """
+Each line of standard input should be a JSON object with an integer field `qty` and a string
+field `sku`. For each line print `<line>: <sku> x<qty>` if it is valid. If the line is not valid
+JSON print `<line>: invalid json`; if it is valid JSON but not an object or the fields are
+missing or have the wrong type, print `<line>: bad record`. Line numbers are 1-based. At the
+end print `total qty: <sum of qty of valid records>`.
+"""
+stdin = """
+{"sku": "A-1", "qty": 3}
+{"sku": "B-2", "qty": 10}
+{sku: "C-3", qty: 1}
+[1, 2, 3]
+{"sku": "D-4"}
+{"sku": "E-5", "qty": "7"}
+not json at all
+{"qty": 2, "sku": "F-6", "extra": true}
+"""
+needs = []
+expected_stdout = """
+1: A-1 x3
+2: B-2 x10
+3: invalid json
+4: bad record
+5: bad record
+6: bad record
+7: invalid json
+8: F-6 x2
+total qty: 15
+"""

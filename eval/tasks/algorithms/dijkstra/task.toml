@@ -1,0 +1,34 @@
+id = "dijkstra"
+category = "algorithms"
+title = "Cheapest routes"
+prompt = """
+Standard input lists undirected weighted roads, one per line as `<city> <city> <cost>`, then a
+line `from <city>`. Compute the cheapest cost from that city to every city using Dijkstra's
+algorithm. Print `<city>: <cost> via <path>` for every city in alphabetical order, where path is
+the cities of a cheapest route joined by `>` (the start itself prints `0 via <start>`).
+All cheapest routes are unique in the input. Print `<city>: unreachable` for cities that cannot
+be reached.
+"""
+stdin = """
+amsterdam berlin 7
+amsterdam paris 5
+paris berlin 4
+paris madrid 10
+berlin vienna 6
+vienna rome 8
+madrid rome 15
+paris rome 14
+oslo helsinki 3
+from amsterdam
+"""
+needs = []
+expected_stdout = """
+amsterdam: 0 via amsterdam
+berlin: 7 via amsterdam>berlin
+helsinki: unreachable
+madrid: 15 via amsterdam>paris>madrid
+oslo: unreachable
+paris: 5 via amsterdam>paris
+rome: 19 via amsterdam>paris>rome
+vienna: 13 via amsterdam>berlin>vienna
+"""

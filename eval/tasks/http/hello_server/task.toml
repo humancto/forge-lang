@@ -1,0 +1,42 @@
+id = "hello_server"
+category = "http"
+title = "A small JSON HTTP server"
+prompt = """
+Write an HTTP server that listens on 127.0.0.1 port 18471 and serves JSON:
+- `GET /hello/<name>` returns `{"greeting": "Hello, <name>!"}`
+- `GET /add?a=<int>&b=<int>` returns `{"sum": <a + b>}`
+- `POST /reverse` with a JSON body `{"items": [...]}` returns `{"items": [<the items reversed>],
+  "count": <number of items>}`
+The server runs until it is stopped.
+"""
+needs = ["net"]
+timeout = 20
+mode = "server"
+port = 18471
+expected_stdout = """
+STATUS 200
+{"greeting": "Hello, Ada!"}
+STATUS 200
+{"sum": 42}
+STATUS 200
+{"count": 4, "items": [null, 3.5, "two", 1]}
+STATUS 200
+{"greeting": "Hello, Grace Hopper!"}
+"""
+
+[[request]]
+method = "GET"
+path = "/hello/Ada"
+
+[[request]]
+method = "GET"
+path = "/add?a=19&b=23"
+
+[[request]]
+method = "POST"
+path = "/reverse"
+body = "{\"items\": [1, \"two\", 3.5, null]}"
+
+[[request]]
+method = "GET"
+path = "/hello/Grace%20Hopper"

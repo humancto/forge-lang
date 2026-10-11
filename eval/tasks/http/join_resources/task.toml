@@ -1,0 +1,22 @@
+id = "join_resources"
+category = "http"
+title = "Join two API resources"
+prompt = """
+The first line of standard input is a base URL. `GET <base>/users.json` returns users
+(`id`, `name`, `age`, `team`) and `GET <base>/orders.json` returns orders (`id`, `user_id`,
+`total_cents`). Print, for every user with at least one order, sorted by the summed order total
+descending, `<name>: <number of orders> orders, <total in dollars with two decimals>`. Then
+print `no orders: <names of users without orders, sorted, separated by , >` and
+`unknown user ids: <sorted distinct user_ids that match no user, separated by ,>` (or `none`).
+"""
+stdin = """
+{base_url}
+"""
+needs = ["net"]
+expected_stdout = """
+Cy: 2 orders, 140.00
+Ada: 2 orders, 45.00
+Di: 1 orders, 2.50
+no orders: Bob, Ed
+unknown user ids: 7,9
+"""

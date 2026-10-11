@@ -1,0 +1,13 @@
+let mut groups = {}
+for line in split(input(), "\n") {
+    let parts = line.words()
+    if len(parts) == 2 {
+        let grade = parts[1]
+        groups[grade] = push(get(groups, grade, []), parts[0])
+    }
+}
+for grade in sort(keys(groups)) {
+    let names = sort(groups[grade])
+    let listed = join(names, ", ")
+    println("{grade}: {listed} ({len(names)})")
+}

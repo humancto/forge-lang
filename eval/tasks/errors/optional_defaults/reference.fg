@@ -1,0 +1,35 @@
+fn field(record, key: String, fallback: String) -> String {
+    let value = get(record, key, "")
+    if value == "" {
+        return fallback
+    }
+    return value
+}
+
+let mut ages: [Int] = []
+for line in split(input(), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    let mut record = {}
+    for pair in split(line, ";") {
+        let eq = index_of(pair, "=")
+        if eq >= 0 {
+            record[substring(pair, 0, eq)] = substring(pair, eq + 1)
+        }
+    }
+    let name = field(record, "name", "anonymous")
+    let mut age = field(record, "age", "?")
+    if !regex.test(age, "^[0-9]+$") {
+        age = "?"
+    } else {
+        ages = push(ages, int(age))
+    }
+    let city = field(record, "city", "unknown")
+    println("{name} | {age} | {city}")
+}
+if len(ages) == 0 {
+    println("average known age: n/a")
+} else {
+    println("average known age: {sum(ages) / len(ages)}")
+}

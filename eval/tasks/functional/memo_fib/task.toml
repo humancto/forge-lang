@@ -1,0 +1,16 @@
+id = "memo_fib"
+category = "functional"
+title = "Memoised recursion"
+prompt = """
+Write a generic `memoize` helper that wraps a one-argument function with a cache, and use it
+for a recursive Fibonacci (fib(0) = 0, fib(1) = 1). Print fib(n) for n = 10, 50 and 90 as
+`fib(<n>) = <value>` and then `calls: <k>` where k is how many times the underlying
+(un-memoised) function body ran in total.
+"""
+needs = []
+expected_stdout = """
+fib(10) = 55
+fib(50) = 12586269025
+fib(90) = 2880067194370816120
+calls: 91
+"""

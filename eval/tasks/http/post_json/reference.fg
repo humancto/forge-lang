@@ -1,0 +1,14 @@
+let base = input().trim()
+let payload = { user: "ada", items: [3, 1, 2], express: true }
+// `body` takes the value itself; http.post encodes it as JSON.
+let resp = http.post(base + "/echo?ref=eval", {
+    body: payload,
+    headers: { "Content-Type": "application/json" },
+})
+let reply = json.parse(resp.body)
+println("method: {reply.method}")
+println("ref: {reply.query.ref}")
+println("items sum: {sum(reply.body.items)}")
+println("express: {reply.body.express}")
+let is_json = if starts_with(reply.content_type, "application/json") { "yes" } else { "no" }
+println("json content type: {is_json}")

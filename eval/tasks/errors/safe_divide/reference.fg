@@ -1,0 +1,22 @@
+fn divide(a: Int, b: Int) -> Result<(Int, Int), String> {
+    if b == 0 {
+        return Err("division by zero")
+    }
+    return Ok((a / b, a % b))
+}
+
+for line in split(input(), "\n") {
+    let p = line.words()
+    if len(p) != 2 {
+        continue
+    }
+    let a = int(p[0])
+    let b = int(p[1])
+    let result = divide(a, b)
+    if is_err(result) {
+        println("{a} / {b}: error: {unwrap_err(result)}")
+    } else {
+        let (q, r) = unwrap(result)
+        println("{a} / {b} = {q} remainder {r}")
+    }
+}

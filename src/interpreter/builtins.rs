@@ -176,7 +176,10 @@ impl Interpreter {
             "get" => match (args.first(), args.get(1)) {
                 (Some(obj @ Value::Object(_)), Some(Value::String(key))) => {
                     let default = args.get(2).cloned().unwrap_or(Value::Null);
-                    if key.contains('.') {
+                    // An exact key wins over the dot-path reading
+                    // (`get(counts, ".txt", 0)`).
+                    let exact = matches!(obj, Value::Object(m) if m.contains_key(key.as_str()));
+                    if key.contains('.') && !exact {
                         let parts: Vec<&str> = key.split('.').collect();
                         let mut current = obj.clone();
                         for part in &parts {

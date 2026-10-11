@@ -27,7 +27,7 @@
 //! caller provides one; without it diagnostics point at statement starts.
 
 use super::builtins;
-use super::diagnostics::{Code, Diagnostic, Fix, Severity};
+use super::diagnostics::{Basis, Code, Diagnostic, Fix, SeverityPolicy};
 use super::resolve::{Resolution, Resolved};
 use super::suggest;
 use super::types::{FnTy, InferCtx, Ty};
@@ -182,7 +182,10 @@ const EXTRA_VALUE_METHODS: &[&str] = &[
 ];
 
 pub struct Checker<'a> {
-    strict: bool,
+    policy: SeverityPolicy,
+    /// > 0 while reporting a diagnostic that rests on an inferred type
+    /// (see `report_inferred`).
+    inferred_basis: usize,
     index: Option<&'a SyntaxIndex>,
     resolution: Option<&'a Resolution>,
     by_stmt: HashMap<Pos, Vec<OccId>>,
@@ -224,7 +227,7 @@ pub struct Checker<'a> {
 
 impl<'a> Checker<'a> {
     pub fn new(
-        strict: bool,
+        policy: SeverityPolicy,
         index: Option<&'a SyntaxIndex>,
         resolution: Option<&'a Resolution>,
     ) -> Self {
@@ -235,7 +238,8 @@ impl<'a> Checker<'a> {
             }
         }
         Self {
-            strict,
+            policy,
+            inferred_basis: 0,
             index,
             resolution,
             by_stmt,
@@ -345,11 +349,14 @@ impl<'a> Checker<'a> {
         }
         self.diagnostics.push(Diagnostic {
             code,
-            severity: if self.strict {
-                Severity::Error
-            } else {
-                Severity::Warning
-            },
+            severity: self.policy.severity(
+                code,
+                if self.inferred_basis > 0 {
+                    Basis::Inferred
+                } else {
+                    Basis::Declared
+                },
+            ),
             message,
             span,
             help,
@@ -357,8 +364,33 @@ impl<'a> Checker<'a> {
         });
     }
 
+    /// [`Checker::report`] with error severity whatever the strictness:
+    /// for edition rules that make the program fail at run time.
+    fn report_error(
+        &mut self,
+        code: Code,
+        span: Span,
+        message: impl Into<String>,
+        help: Option<String>,
+    ) {
+        let before = self.diagnostics.len();
+        self.report(code, span, message, help, Vec::new());
+        if let Some(d) = self.diagnostics.get_mut(before) {
+            d.severity = crate::typechecker::diagnostics::Severity::Error;
+        }
+    }
+
     fn simple(&mut self, code: Code, span: Span, message: impl Into<String>) {
         self.report(code, span, message, None, Vec::new());
+    }
+
+    /// Report a diagnostic whose code usually contradicts a declaration
+    /// but that here rests on an inferred type: it stays a warning in
+    /// every edition unless `--strict` (`SeverityPolicy::severity`).
+    fn simple_inferred(&mut self, code: Code, span: Span, message: impl Into<String>) {
+        self.inferred_basis += 1;
+        self.simple(code, span, message);
+        self.inferred_basis -= 1;
     }
 
     fn stmt_span(&self) -> Span {
@@ -634,7 +666,7 @@ impl<'a> Checker<'a> {
         params: &[Param],
         return_type: &Option<TypeAnn>,
     ) -> Callable {
-        let mut me = Checker::new(self.strict, None, None);
+        let mut me = Checker::new(self.policy, None, None);
         me.structs = self.structs.clone();
         me.adts = self.adts.clone();
         me.aliases = self.aliases.clone();
@@ -1043,14 +1075,23 @@ impl<'a> Checker<'a> {
                 );
                 (Ty::Null, Flow::Normal)
             }
-            Stmt::Destructure { pattern, value } => {
+            Stmt::Destructure {
+                pattern,
+                value,
+                mutable,
+            } => {
                 let vt = self.infer(value, None);
                 let vt = self.cx.resolve(&vt);
+                let kind = if *mutable {
+                    BindKind::Mutable
+                } else {
+                    BindKind::Immutable
+                };
                 match pattern {
-                    DestructurePattern::Object(names) => {
-                        for n in names {
-                            let ty = self.field_type(&vt, n).unwrap_or(Ty::Any);
-                            self.bind(n, ty, None, BindKind::Immutable);
+                    DestructurePattern::Object(fields) => {
+                        for (field, n) in fields {
+                            let ty = self.field_type(&vt, field).unwrap_or(Ty::Any);
+                            self.bind(n, ty, None, kind);
                         }
                     }
                     DestructurePattern::Array { items, rest } => {
@@ -1059,10 +1100,10 @@ impl<'a> Checker<'a> {
                             _ => Ty::Any,
                         };
                         for n in items {
-                            self.bind(n, elem.clone(), None, BindKind::Immutable);
+                            self.bind(n, elem.clone(), None, kind);
                         }
                         if let Some(r) = rest {
-                            self.bind(r, Ty::array(elem), None, BindKind::Immutable);
+                            self.bind(r, Ty::array(elem), None, kind);
                         }
                     }
                     DestructurePattern::Tuple(names) => {
@@ -1071,7 +1112,7 @@ impl<'a> Checker<'a> {
                                 Ty::Tuple(items) => items.get(i).cloned().unwrap_or(Ty::Null),
                                 _ => Ty::Any,
                             };
-                            self.bind(n, ty, None, BindKind::Immutable);
+                            self.bind(n, ty, None, kind);
                         }
                     }
                 }
@@ -1712,6 +1753,9 @@ impl<'a> Checker<'a> {
                     self.set_binding_type(name, t);
                 }
             }
+            if let Some(guard) = &arm.guard {
+                self.infer(guard, None);
+            }
             let (t, f) = self.check_body(&arm.body);
             if let (Some(name), Some(orig)) = (&subject_name, &original) {
                 self.set_binding_type(name, orig.clone());
@@ -1734,15 +1778,33 @@ impl<'a> Checker<'a> {
         (result, flow)
     }
 
-    /// Bind the names a pattern introduces, typed from the subject.
+    /// Bind the names a pattern introduces, typed from the subject. A name
+    /// bound by several alternatives of an or-pattern gets the join of its
+    /// types.
     fn bind_pattern(&mut self, pattern: &Pattern, subject: &Ty) {
+        let mut bindings: Vec<(String, Ty)> = Vec::new();
+        self.pattern_bindings(pattern, subject, &mut bindings);
+        for (name, ty) in bindings {
+            self.bind(&name, ty, None, BindKind::Other);
+        }
+    }
+
+    fn pattern_bindings(&mut self, pattern: &Pattern, subject: &Ty, out: &mut Vec<(String, Ty)>) {
         match pattern {
             Pattern::Wildcard | Pattern::Literal(_) => {}
             Pattern::Binding(name) => {
                 if self.is_unit_variant_pattern(name) {
                     return;
                 }
-                self.bind(name, subject.clone(), None, BindKind::Other);
+                match out.iter_mut().find(|(n, _)| n == name) {
+                    Some((_, ty)) => *ty = self.cx.join(ty, subject),
+                    None => out.push((name.clone(), subject.clone())),
+                }
+            }
+            Pattern::Or(alts) => {
+                for alt in alts {
+                    self.pattern_bindings(alt, subject, out);
+                }
             }
             Pattern::Constructor { name, fields } => {
                 let field_types: Vec<Ty> = match (name.as_str(), subject) {
@@ -1759,7 +1821,7 @@ impl<'a> Checker<'a> {
                 };
                 for (i, f) in fields.iter().enumerate() {
                     let ty = field_types.get(i).cloned().unwrap_or(Ty::Any);
-                    self.bind_pattern(f, &ty);
+                    self.pattern_bindings(f, &ty, out);
                 }
             }
         }
@@ -1770,9 +1832,16 @@ impl<'a> Checker<'a> {
     }
 
     /// Report a non-exhaustive match; returns whether the match is
-    /// exhaustive.
+    /// exhaustive. A guarded arm covers nothing (its guard may fail); an
+    /// or-pattern covers what each of its alternatives covers.
     fn check_exhaustiveness(&mut self, subject: &Ty, arms: &[MatchArm]) -> bool {
-        let catch_all = arms.iter().any(|a| match &a.pattern {
+        // Top-level patterns of the unguarded arms, or-patterns flattened.
+        let covering: Vec<&Pattern> = arms
+            .iter()
+            .filter(|a| a.guard.is_none())
+            .flat_map(|a| a.pattern.alternatives())
+            .collect();
+        let catch_all = covering.iter().any(|p| match p {
             Pattern::Wildcard => true,
             Pattern::Binding(n) => !self.is_unit_variant_pattern(n),
             _ => false,
@@ -1781,7 +1850,7 @@ impl<'a> Checker<'a> {
             return true;
         }
         let has_ctor = |name: &str| {
-            arms.iter().any(|a| match &a.pattern {
+            covering.iter().any(|p| match p {
                 Pattern::Constructor { name: c, .. } => c == name,
                 Pattern::Binding(b) => b == name,
                 _ => false,
@@ -1789,7 +1858,7 @@ impl<'a> Checker<'a> {
         };
         let (label, missing): (String, Vec<String>) = match subject {
             Ty::Option(_) => {
-                let has_none = arms.iter().any(|a| match &a.pattern {
+                let has_none = covering.iter().any(|p| match p {
                     Pattern::Literal(Expr::Ident(n)) => n == "null" || n == "None",
                     Pattern::Binding(n) => n == "None" || n == "null",
                     _ => false,
@@ -1813,8 +1882,9 @@ impl<'a> Checker<'a> {
             }
             Ty::Bool => {
                 let has = |v: bool| {
-                    arms.iter()
-                        .any(|a| matches!(&a.pattern, Pattern::Literal(Expr::Bool(b)) if *b == v))
+                    covering
+                        .iter()
+                        .any(|p| matches!(p, Pattern::Literal(Expr::Bool(b)) if *b == v))
                 };
                 let mut missing = Vec::new();
                 if !has(true) {
@@ -1974,7 +2044,8 @@ impl<'a> Checker<'a> {
                 self.cx.rollback(snap);
                 if !fits {
                     ok = false;
-                    self.simple(
+                    // The method's return type may be inferred.
+                    self.simple_inferred(
                         Code::InterfaceNotSatisfied,
                         span,
                         format!(
@@ -2238,13 +2309,29 @@ impl<'a> Checker<'a> {
         // Evaluate the operator with the engines' own rules on
         // representative operands of the known types.
         match (operand_of(&lt), operand_of(&rt)) {
-            (Some(l), Some(r)) => match crate::semantics::binary(shared, l, r) {
+            (Some(l), Some(r)) => match crate::semantics::binary(shared, l, r, self.policy.edition)
+            {
                 Ok(outcome) => match outcome {
                     crate::semantics::Outcome::Int(_) => Ty::Int,
                     crate::semantics::Outcome::Float(_) => Ty::Float,
                     crate::semantics::Outcome::Bool(_) => Ty::Bool,
                     crate::semantics::Outcome::Concat => Ty::String,
                 },
+                // Edition 2027: a certain run-time error (E0034), so an
+                // error in every mode.
+                Err(_) if crate::semantics::is_mixed_concat(shared, l, r) => {
+                    let span = self.expr_span(whole);
+                    self.report_error(
+                        Code::InvalidOperator,
+                        span,
+                        format!("operator '+' cannot be applied to {} and {}", lt, rt),
+                        Some(
+                            "edition 2027 does not convert to String implicitly: use str(x), or interpolation \"{x}\""
+                                .into(),
+                        ),
+                    );
+                    Ty::String
+                }
                 Err(message) => {
                     let span = self.expr_span(whole);
                     self.report(
@@ -2701,7 +2788,8 @@ impl<'a> Checker<'a> {
                             self.cx.rollback(snap);
                             if !fits && !inner.is_unknown() {
                                 let span = args.get(1).map_or(span, |a| self.expr_span(a));
-                                self.simple(
+                                // The Option's inner type is usually inferred.
+                                self.simple_inferred(
                                     Code::TypeMismatch,
                                     span,
                                     format!(
@@ -2876,6 +2964,9 @@ impl<'a> Checker<'a> {
         kind: CallKind,
     ) -> Ty {
         let subst = self.instantiate(sig);
+        if kind != CallKind::Builtin {
+            self.widen_numeric_type_params(sig, &subst, args);
+        }
         let params: Vec<Ty> = sig.params.iter().map(|p| p.subst_params(&subst)).collect();
 
         if !has_spread
@@ -2953,6 +3044,53 @@ impl<'a> Checker<'a> {
         let ret = self.cx.resolve(&ret);
         // Unsolved type variables in the result mean "unknown".
         self.cx.finalize(&ret)
+    }
+
+    /// A type parameter given both `Int` and `Float` arguments in one call
+    /// (`fn max<T>(a: T, b: T)` called as `max(1, 2.5)`) is `Float`, as an
+    /// Int fits Float everywhere else; without this the first argument
+    /// would fix `T` to `Int` and the call would be checked depending on
+    /// argument order. Only simple arguments (literals, names, operators,
+    /// field and index reads) at positions typed exactly `T` are looked at.
+    fn widen_numeric_type_params(
+        &mut self,
+        sig: &FnTy,
+        subst: &BTreeMap<String, Ty>,
+        args: &[Expr],
+    ) {
+        fn simple(e: &Expr) -> bool {
+            match e {
+                Expr::Int(_) | Expr::Float(_) | Expr::Ident(_) => true,
+                Expr::UnaryOp { operand, .. } => simple(operand),
+                Expr::BinOp { left, right, .. } => simple(left) && simple(right),
+                Expr::FieldAccess { object, .. } => simple(object),
+                Expr::Index { object, index } => simple(object) && simple(index),
+                _ => false,
+            }
+        }
+        for tp in &sig.type_params {
+            let Some(var) = subst.get(tp) else { continue };
+            let (mut ints, mut floats) = (false, false);
+            for (param, arg) in sig.params.iter().zip(args) {
+                if !matches!(param, Ty::Param(p) if p == tp) || !simple(arg) {
+                    continue;
+                }
+                let mute = std::mem::replace(&mut self.mute, true);
+                let t = self.infer(arg, None);
+                self.mute = mute;
+                match self.cx.resolve(&t) {
+                    Ty::Int => ints = true,
+                    Ty::Float => floats = true,
+                    _ => {}
+                }
+            }
+            if ints && floats {
+                let snap = self.cx.snapshot();
+                if !self.cx.assign(var, &Ty::Float) {
+                    self.cx.rollback(snap);
+                }
+            }
+        }
     }
 
     fn infer_method_call(

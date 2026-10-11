@@ -1,0 +1,28 @@
+id = "safe_divide"
+category = "errors"
+title = "Division returning a result"
+prompt = """
+Write a function that divides two integers and returns a result value: the quotient (integer
+division truncating toward zero) and remainder on success, or the error `division by zero`.
+For each line `a b` of standard input print `<a> / <b> = <q> remainder <r>` or
+`<a> / <b>: error: division by zero`. The remainder has the sign of a (as in C, Rust or Java).
+"""
+stdin = """
+17 5
+-17 5
+17 -5
+4 0
+0 3
+-9 -4
+100 7
+"""
+needs = []
+expected_stdout = """
+17 / 5 = 3 remainder 2
+-17 / 5 = -3 remainder -2
+17 / -5 = -3 remainder 2
+4 / 0: error: division by zero
+0 / 3 = 0 remainder 0
+-9 / -4 = 2 remainder -1
+100 / 7 = 14 remainder 2
+"""

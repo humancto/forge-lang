@@ -1,0 +1,16 @@
+@server(port: 18471)
+
+@get("/hello/:name")
+fn hello(name: String) -> Json {
+    return { greeting: "Hello, {name}!" }
+}
+
+@get("/add")
+fn add(a: String, b: String) -> Json {
+    return { sum: int(a) + int(b) }
+}
+
+@post("/reverse")
+fn reverse_items(body: Json) -> Json {
+    return { items: reverse(body.items), count: len(body.items) }
+}

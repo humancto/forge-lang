@@ -1,0 +1,7 @@
+[
+  {"id": 1, "name": "Ada", "age": 36, "team": "core"},
+  {"id": 2, "name": "Bob", "age": 28, "team": "web"},
+  {"id": 3, "name": "Cy", "age": 45, "team": "core"},
+  {"id": 4, "name": "Di", "age": 31, "team": "data"},
+  {"id": 5, "name": "Ed", "age": 52, "team": "web"}
+]

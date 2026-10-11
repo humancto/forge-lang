@@ -1,0 +1,42 @@
+id = "csv_to_json"
+category = "json_csv"
+title = "CSV rows to JSON"
+prompt = """
+Standard input is CSV with a header row. Convert it to a JSON array of objects (keys from the
+header, in header order). Values that look like integers (optional `-`, digits only) become
+JSON numbers, `true`/`false` become booleans, empty fields become null, everything else stays a
+string. Print the JSON array with 2-space indentation, one key per line, like Python's
+`json.dumps(value, indent=2)` (`"key": value`, no trailing spaces).
+"""
+stdin = """
+id,name,score,admin,note
+1,Ada,93,true,
+2,Bob,-4,false,needs review
+3,Cy,07,false,x
+"""
+needs = []
+expected_stdout = """
+[
+  {
+    "id": 1,
+    "name": "Ada",
+    "score": 93,
+    "admin": true,
+    "note": null
+  },
+  {
+    "id": 2,
+    "name": "Bob",
+    "score": -4,
+    "admin": false,
+    "note": "needs review"
+  },
+  {
+    "id": 3,
+    "name": "Cy",
+    "score": 7,
+    "admin": false,
+    "note": "x"
+  }
+]
+"""

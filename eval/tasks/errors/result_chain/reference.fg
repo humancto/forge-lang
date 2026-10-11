@@ -1,0 +1,53 @@
+struct Person {
+    name: String,
+    age: Int,
+    email: String
+}
+
+fn split_fields(line: String) -> Result<[String], String> {
+    let parts = split(line, ",")
+    if len(parts) != 3 {
+        return Err("expected 3 fields, got {len(parts)}")
+    }
+    return Ok(parts)
+}
+
+fn parse_age(text: String) -> Result<Int, String> {
+    if !regex.test(text, "^[0-9]+$") || int(text) > 150 {
+        return Err("bad age '{text}'")
+    }
+    return Ok(int(text))
+}
+
+fn check_email(text: String) -> Result<String, String> {
+    let parts = split(text, "@")
+    if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+        return Err("bad email '{text}'")
+    }
+    return Ok(text)
+}
+
+fn parse_person(line: String) -> Result<Person, String> {
+    let f = split_fields(line)?
+    let age = parse_age(f[1])?
+    let email = check_email(f[2])?
+    return Ok(Person { name: f[0], age: age, email: email })
+}
+
+let mut good = 0
+let mut total = 0
+for line in split(input(), "\n") {
+    if line == "" {
+        continue
+    }
+    total += 1
+    let result = parse_person(line)
+    if is_ok(result) {
+        let p = unwrap(result)
+        println("ok: {p.name} ({p.age}) {p.email}")
+        good += 1
+    } else {
+        println("error: {unwrap_err(result)}")
+    }
+}
+println("{good}/{total} valid")

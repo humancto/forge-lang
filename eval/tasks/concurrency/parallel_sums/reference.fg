@@ -1,0 +1,21 @@
+fn sum_squares(lo: Int, hi: Int) -> Int {
+    let mut total = 0
+    let mut x = lo
+    while x <= hi {
+        total += x * x
+        x += 1
+    }
+    return total
+}
+
+let size = 250000
+let sums = squad {
+    spawn { sum_squares(1, size) }
+    spawn { sum_squares(size + 1, 2 * size) }
+    spawn { sum_squares(2 * size + 1, 3 * size) }
+    spawn { sum_squares(3 * size + 1, 4 * size) }
+}
+for i in range(0, 4) {
+    println("chunk {i + 1}: {sums[i]}")
+}
+println("total: {sum(sums)}")

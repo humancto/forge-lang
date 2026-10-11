@@ -80,6 +80,7 @@ use crate::parser::Parser;
 use crate::permissions::{self, Capabilities, Capability};
 use crate::runtime::limits::{self, Budget, LimitKind, Limits, Trip};
 use crate::runtime::stdio;
+use crate::semantics::edition::{self, Edition};
 use crate::vm::embed;
 use crate::vm::machine::{VMError, VM};
 use std::path::Path;
@@ -109,6 +110,8 @@ pub struct Sandbox {
     /// See [`Sandbox::memory_baseline`].
     memory_baseline: usize,
     engine: Engine,
+    /// `None`: the edition in effect where the run starts.
+    edition: Option<Edition>,
 }
 
 /// Lets a host stop a running program from another thread. Cheap to clone;
@@ -149,6 +152,10 @@ pub enum SandboxError {
     /// The program tried something its policy does not grant. `message` is
     /// the standard `permission denied: ...` text.
     PermissionDenied { message: String, stdout: String },
+    /// The program contradicts types it declares (edition 2027:
+    /// docs/editions/2027.md), so it did not run. `diagnostics` lists every
+    /// type error, in source order.
+    Type { diagnostics: Vec<TypeError> },
     /// Any other runtime error.
     Runtime {
         message: String,
@@ -172,11 +179,35 @@ pub enum SandboxError {
     ResourceLimit { message: String, stdout: String },
 }
 
+/// One type error that kept a program from running ([`SandboxError::Type`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeError {
+    /// 1-based line (0 when unknown).
+    pub line: usize,
+    /// 1-based column (0 when unknown).
+    pub column: usize,
+    /// Stable code, e.g. `T0002` (`forge explain T0002`).
+    pub code: String,
+    pub message: String,
+    /// How to fix it (did-you-mean, ...), when there is a hint.
+    pub hint: Option<String>,
+}
+
+impl std::fmt::Display for TypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "line {}:{}: [{}] {}",
+            self.line, self.column, self.code, self.message
+        )
+    }
+}
+
 impl SandboxError {
     /// Output printed before the failure (empty for syntax errors).
     pub fn stdout(&self) -> &str {
         match self {
-            SandboxError::Syntax { .. } => "",
+            SandboxError::Syntax { .. } | SandboxError::Type { .. } => "",
             SandboxError::PermissionDenied { stdout, .. }
             | SandboxError::Runtime { stdout, .. }
             | SandboxError::Timeout { stdout, .. }
@@ -188,12 +219,13 @@ impl SandboxError {
         }
     }
 
-    /// Stable machine-readable kind: `syntax`, `permission_denied`,
+    /// Stable machine-readable kind: `syntax`, `type`, `permission_denied`,
     /// `runtime`, `timeout`, `output_limit`, `cancelled`, `fuel_exhausted`,
     /// `memory_limit` or `resource_limit`.
     pub fn kind(&self) -> &'static str {
         match self {
             SandboxError::Syntax { .. } => "syntax",
+            SandboxError::Type { .. } => "type",
             SandboxError::PermissionDenied { .. } => "permission_denied",
             SandboxError::Runtime { .. } => "runtime",
             SandboxError::Timeout { .. } => "timeout",
@@ -210,6 +242,21 @@ impl std::fmt::Display for SandboxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SandboxError::Syntax { message } => write!(f, "syntax error: {}", message),
+            SandboxError::Type { diagnostics } => {
+                write!(
+                    f,
+                    "type checking failed with {} error{} (edition 2027: declared types are enforced)",
+                    diagnostics.len(),
+                    if diagnostics.len() == 1 { "" } else { "s" }
+                )?;
+                for d in diagnostics {
+                    write!(f, "\n{}", d)?;
+                    if let Some(hint) = &d.hint {
+                        write!(f, "\n  help: {}", hint)?;
+                    }
+                }
+                Ok(())
+            }
             SandboxError::PermissionDenied { message, .. } => f.write_str(message),
             SandboxError::Runtime { message, line, .. } if *line > 0 => {
                 write!(f, "runtime error on line {}: {}", line, message)
@@ -258,6 +305,7 @@ impl Sandbox {
             source_label: "<sandbox>".to_string(),
             memory_baseline: 0,
             engine: Engine::default(),
+            edition: None,
         }
     }
 
@@ -382,6 +430,18 @@ impl Sandbox {
         self.engine
     }
 
+    /// Parse and run programs under `edition` (default: the edition in
+    /// effect on the calling thread — the CLI's `--edition` / forge.toml).
+    pub fn edition(mut self, edition: Edition) -> Self {
+        self.edition = Some(edition);
+        self
+    }
+
+    /// The edition programs are parsed and run under.
+    pub fn selected_edition(&self) -> Edition {
+        self.edition.unwrap_or_else(edition::current)
+    }
+
     /// Run Forge source to completion under this sandbox's policy.
     pub fn run_source(&self, source: &str) -> Result<Output, SandboxError> {
         self.run_source_cancellable(source, &CancelHandle::new())
@@ -394,7 +454,10 @@ impl Sandbox {
         source: &str,
         cancel: &CancelHandle,
     ) -> Result<Output, SandboxError> {
-        let program = parse_source(source)?;
+        let program = {
+            let _edition = edition::scope(Some(self.selected_edition()));
+            prepare_source(source)?
+        };
         let source = source.to_string();
         let label = self.source_label.clone();
         let engine = self.engine;
@@ -504,12 +567,14 @@ impl Sandbox {
         };
         let worker_sink = sink.clone();
         let worker_budget = budget.clone();
+        let run_edition = self.selected_edition();
         let spawned = std::thread::Builder::new()
             .name("forge-sandbox".to_string())
             .stack_size(WORKER_STACK_SIZE)
             .spawn(move || {
                 crate::runtime::recursion::register_thread_stack(WORKER_STACK_SIZE);
                 let _policy = permissions::scope(caps);
+                let _edition = edition::scope(Some(run_edition));
                 let _limits = limits::scope(Some(worker_budget));
                 let _output = stdio::scope(Some(worker_sink));
                 let mut state = make_state();
@@ -809,6 +874,44 @@ fn run_program(
     interp.run(program).map(|_| ()).map_err(JobError::from)
 }
 
+/// The program a sandbox runs: parsed and, from edition 2027 (the edition
+/// in effect on this thread), type-checked and instrumented like `forge
+/// run` does (`typechecker::prepare`): a contradiction of a declared type
+/// is [`SandboxError::Type`] and annotated function boundaries are checked
+/// at run time. The checker does not read imported files here (they are
+/// read under the run's policy when it imports them), so it knows nothing
+/// about imported declarations.
+pub(crate) fn prepare_source(source: &str) -> Result<crate::parser::ast::Program, SandboxError> {
+    use crate::typechecker::{self, CheckOptions, PrepareError};
+    let edition = edition::current();
+    if edition < Edition::E2027 {
+        return parse_source(source);
+    }
+    let options = CheckOptions {
+        edition: Some(edition),
+        skip_imports: true,
+        ..CheckOptions::default()
+    };
+    match typechecker::prepare(source, &options) {
+        Ok((program, _warnings)) => Ok(program),
+        // Same message as a plain parse.
+        Err(PrepareError::Frontend(_)) => parse_source(source),
+        Err(PrepareError::Type(diagnostics)) => Err(SandboxError::Type {
+            diagnostics: diagnostics
+                .into_iter()
+                .filter(|d| d.is_error())
+                .map(|d| TypeError {
+                    line: d.line(),
+                    column: d.col(),
+                    code: d.code.as_str().to_string(),
+                    message: d.message.clone(),
+                    hint: d.help.clone(),
+                })
+                .collect(),
+        }),
+    }
+}
+
 /// Lex and parse `source`, reporting failures as [`SandboxError::Syntax`].
 pub(crate) fn parse_source(source: &str) -> Result<crate::parser::ast::Program, SandboxError> {
     let tokens = Lexer::new(source)
@@ -894,6 +997,53 @@ mod tests {
             .run_source("say \"hi\"\nprint(\"a\")\nprintln(1 + 2)")
             .expect("runs");
         assert_eq!(out.stdout, "hi\na3\n");
+    }
+
+    #[test]
+    fn edition_2027_rejects_mixed_string_concat() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            edition_2027_rejects_mixed_string_concat_on(engine);
+        }
+    }
+
+    fn edition_2027_rejects_mixed_string_concat_on(engine: Engine) {
+        let plus = "fn plus(a, b) { return a + b }\n";
+        // Edition 2026 converts implicitly.
+        let out = Sandbox::new()
+            .engine(engine)
+            .edition(Edition::E2026)
+            .run_source(&format!("{plus}println(plus(\"a\", 1))"))
+            .expect("2026 runs");
+        assert_eq!(out.stdout, "a1\n");
+        // Edition 2027: an E0034 error, at top level ...
+        match Sandbox::new()
+            .engine(engine)
+            .edition(Edition::E2027)
+            .run_source(&format!(
+                "{plus}println(\"before\")\nprintln(plus(\"a\", 1))"
+            )) {
+            Err(SandboxError::Runtime {
+                message, stdout, ..
+            }) => {
+                assert!(
+                    message.starts_with("cannot add String and Int"),
+                    "{message}"
+                );
+                assert_eq!(crate::semantics::errors::classify(&message).code, "E0034");
+                assert_eq!(stdout, "before\n");
+            }
+            other => panic!("{other:?}"),
+        }
+        // ... and inside a spawned task, which runs on another thread.
+        let out = Sandbox::new()
+            .engine(engine)
+            .edition(Edition::E2027)
+            .run_source(&format!(
+                "{plus}let h = spawn {{\n  let mut code = \"none\"\n  try {{ plus(1, \"a\") }} catch e {{ code = e.code }}\n  return code\n}}\nprintln(await h)\nprintln(plus(\"a\", \"b\"))"
+            ))
+            .expect("2027 runs");
+        assert_eq!(out.stdout, "E0034\nab\n");
     }
 
     #[test]
@@ -1747,5 +1897,100 @@ mod tests {
             .expect("limited");
         assert_eq!(free, limited);
         assert!(limited.stdout.starts_with("610\n"), "{}", limited.stdout);
+    }
+
+    #[test]
+    fn edition_2027_rejects_declared_type_errors_before_running() {
+        let src =
+            "println(\"before\")\nfn twice(n: Int) -> Int { return n * 2 }\nprintln(twice(\"x\"))";
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            match Sandbox::new()
+                .engine(engine)
+                .edition(Edition::E2027)
+                .run_source(src)
+            {
+                Err(SandboxError::Type { diagnostics }) => {
+                    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+                    let d = &diagnostics[0];
+                    assert_eq!((d.code.as_str(), d.line), ("T0002", 3));
+                    assert!(d.message.contains("expected Int but got String"));
+                    let err = SandboxError::Type {
+                        diagnostics: diagnostics.clone(),
+                    };
+                    assert_eq!(err.kind(), "type");
+                    assert_eq!(err.stdout(), "");
+                    assert!(err.to_string().contains("[T0002]"), "{err}");
+                }
+                other => panic!("expected a type error, got {other:?}"),
+            }
+            // Edition 2026 warns (silently here) and runs.
+            let r = Sandbox::new()
+                .engine(engine)
+                .edition(Edition::E2026)
+                .run_source(src);
+            match r {
+                Err(SandboxError::Runtime { stdout, .. }) => assert_eq!(stdout, "before\n"),
+                other => panic!("2026 runs until \"x\" * 2: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn edition_2027_checks_annotated_boundaries_at_run_time() {
+        let src =
+            "fn same(n: Int) -> Int { return n }\nprintln(same(2))\nprintln(same(json.parse(\"\\\"x\\\"\")))";
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            match Sandbox::new()
+                .engine(engine)
+                .edition(Edition::E2027)
+                .run_source(src)
+            {
+                Err(SandboxError::Runtime {
+                    message, stdout, ..
+                }) => {
+                    assert_eq!(stdout, "2\n");
+                    assert!(
+                        message
+                            .contains("type error: argument 'n' of 'same' must be Int, got String"),
+                        "{message}"
+                    );
+                }
+                other => panic!("expected a run-time type error, got {other:?}"),
+            }
+            let out = Sandbox::new()
+                .engine(engine)
+                .edition(Edition::E2026)
+                .run_source(src)
+                .expect("2026 does not check");
+            assert_eq!(out.stdout, "2\nx\n");
+        }
+    }
+
+    #[test]
+    fn edition_2027_type_check_does_not_read_imported_files() {
+        // The checker must not open files outside the run's policy (it
+        // would see `hidden`'s declared type and report T0002); the import
+        // itself is then denied when the program runs.
+        let dir = tmpdir("ed2027_import");
+        let module = dir.join("secret.fg");
+        std::fs::write(&module, "fn hidden(n: Int) -> Int { return n }").expect("write");
+        let src = format!(
+            "import \"{}\"\nprintln(hidden(\"x\"))",
+            module.display().to_string().replace('\\', "/")
+        );
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            let r = Sandbox::new()
+                .engine(engine)
+                .edition(Edition::E2027)
+                .run_source(&src);
+            assert!(
+                matches!(r, Err(SandboxError::PermissionDenied { .. })),
+                "{r:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

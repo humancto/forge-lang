@@ -1,0 +1,27 @@
+id = "leaderboard"
+category = "collections"
+title = "Leaderboard with ties"
+prompt = """
+Standard input has lines `<player> <score>`. Print a leaderboard sorted by score descending,
+then by name ascending. Use standard competition ranking: players with equal scores share a
+rank and the next rank skips (1, 2, 2, 4). Print each line as `<rank>. <player> <score>`.
+"""
+stdin = """
+mallory 50
+alice 90
+bob 75
+carol 90
+dave 75
+erin 60
+frank 75
+"""
+needs = []
+expected_stdout = """
+1. alice 90
+1. carol 90
+3. bob 75
+3. dave 75
+3. frank 75
+6. erin 60
+7. mallory 50
+"""

@@ -1,0 +1,23 @@
+id = "topo_sort"
+category = "algorithms"
+title = "Build order"
+prompt = """
+Each line of standard input is `<task>: <dependencies separated by spaces>` (possibly none).
+Print a build order in which every task comes after all of its dependencies; when several tasks
+are ready, take the alphabetically smallest first. Dependencies that never appear on the left
+side are tasks with no dependencies themselves. Print the order joined by ` -> `. If there is
+a cycle, print `cycle detected` followed by ` among: ` and the alphabetically sorted tasks that
+could not be scheduled, separated by `, `.
+"""
+stdin = """
+app: lib utils
+lib: core
+utils: core log
+tests: app mock
+core:
+docs:
+"""
+needs = []
+expected_stdout = """
+core -> docs -> lib -> log -> mock -> utils -> app -> tests
+"""

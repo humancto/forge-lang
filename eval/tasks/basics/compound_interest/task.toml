@@ -1,0 +1,18 @@
+id = "compound_interest"
+category = "basics"
+title = "Compound interest in cents"
+prompt = """
+A savings account starts at 1000.00 and earns 3.5% interest per year, compounded yearly.
+At the end of each year the interest is rounded to the nearest cent (round half up) and added
+to the balance. Print the balance after each of the first 6 years as `year <n>: <balance>`
+with exactly two decimals.
+"""
+needs = []
+expected_stdout = """
+year 1: 1035.00
+year 2: 1071.23
+year 3: 1108.72
+year 4: 1147.53
+year 5: 1187.69
+year 6: 1229.26
+"""

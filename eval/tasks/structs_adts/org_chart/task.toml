@@ -1,0 +1,22 @@
+id = "org_chart"
+category = "structs_adts"
+title = "Chain of command"
+prompt = """
+Employees are records with a name, a title and an optional manager name:
+Ada (CEO, no manager), Bob (CTO, manager Ada), Cy (Engineering Lead, manager Bob),
+Di (Engineer, manager Cy), Ed (Engineer, manager Cy), Flo (CFO, manager Ada),
+Gus (Accountant, manager Flo).
+For each of Di, Gus and Ada print the chain from that employee up to the top as
+`<name> (<title>) -> <name> (<title>) -> ...`. Then print the number of direct reports of every
+employee that has at least one, as `<name>: <n>`, sorted by name.
+"""
+needs = []
+expected_stdout = """
+Di (Engineer) -> Cy (Engineering Lead) -> Bob (CTO) -> Ada (CEO)
+Gus (Accountant) -> Flo (CFO) -> Ada (CEO)
+Ada (CEO)
+Ada: 2
+Bob: 1
+Cy: 2
+Flo: 1
+"""

@@ -1,0 +1,16 @@
+let lines = split(input(), "\n")
+let k = int(lines[0].trim())
+let xs = map(lines[1].words(), fn(w) { return int(w) })
+let mut current = sum(slice(xs, 0, k))
+let mut best = current
+let mut start = 0
+for i in range(1, len(xs) - k + 1) {
+    current = current + xs[i + k - 1] - xs[i - 1]
+    if current > best {
+        best = current
+        start = i
+    }
+}
+println("sum: {best}")
+println("start: {start}")
+println("window: " + join(map(slice(xs, start, start + k), fn(x) { return str(x) }), " "))

@@ -81,6 +81,107 @@ impl VM {
         crate::semantics::errors::user_type_name(value.type_name(&self.gc))
     }
 
+    /// `__types.check(value, type, context)` without converting values:
+    /// `Some(value)` when `value` certainly fits `type`
+    /// (`semantics::types::fits`), `None` when the shared implementation
+    /// must decide (a violation, or a case not handled here).
+    fn types_check_fast(&self, args: &[Value]) -> Option<Value> {
+        let [value, ty, _context] = args else {
+            return None;
+        };
+        let ty = match self.gc.get(ty.as_obj()?).map(|o| &o.kind) {
+            Some(ObjKind::String(s)) => crate::semantics::types::parse_cached(s).ok()?,
+            _ => return None,
+        };
+        self.fits_fast(*value, &ty, 0).then_some(*value)
+    }
+
+    /// `__types.bind(type_param, function, names, values...)` on VM values
+    /// (`semantics::types::bind_param`): the bound type when every value's
+    /// shape is known here and they agree; `None` to let the shared
+    /// implementation decide (and word the error).
+    fn types_bind_fast(&self, args: &[Value]) -> Option<String> {
+        let values = args.get(3..)?;
+        let mut shapes = Vec::with_capacity(values.len());
+        for v in values {
+            shapes.push(self.param_shape_fast(*v)?);
+        }
+        crate::semantics::types::bind_shapes(shapes).ok()
+    }
+
+    /// `semantics::types::param_shape` for the common VM values;
+    /// `None` when not handled here, `Some(None)` for "no shape".
+    fn param_shape_fast(&self, value: Value) -> Option<Option<String>> {
+        if value.is_int(&self.gc) {
+            return Some(Some("Int".into()));
+        }
+        if value.as_float().is_some() {
+            return Some(Some("Float".into()));
+        }
+        if value.as_bool().is_some() {
+            return Some(Some("Bool".into()));
+        }
+        if value.is_null() {
+            return Some(Some("Null".into()));
+        }
+        match self.gc.get(value.as_obj()?).map(|o| &o.kind)? {
+            ObjKind::String(_) => Some(Some("String".into())),
+            ObjKind::Array(_) => Some(Some("[Any]".into())),
+            ObjKind::Object(map) => {
+                let tag = match map.get("__type__") {
+                    None => return Some(Some("Object".into())),
+                    Some(t) => match self.gc.get(t.as_obj()?).map(|o| &o.kind) {
+                        Some(ObjKind::String(s)) => s,
+                        _ => return None,
+                    },
+                };
+                // `Option` values are ADT objects on the VM (the
+                // interpreter's `Some`/`None`): no shape.
+                if tag == "Option" {
+                    return Some(None);
+                }
+                Some(Some(format!("Named:{}", tag)))
+            }
+            _ => None,
+        }
+    }
+
+    /// A conservative `semantics::types::fits` on VM values: `true` only
+    /// when the value fits.
+    fn fits_fast(
+        &self,
+        value: Value,
+        ty: &crate::semantics::types::RuntimeType,
+        depth: usize,
+    ) -> bool {
+        use crate::semantics::types::RuntimeType as T;
+        if depth > 64 {
+            return false;
+        }
+        let kind = value.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
+        match (ty, kind) {
+            (T::Any, _) => true,
+            (T::Int, _) => value.is_int(&self.gc),
+            (T::Float, _) => value.is_int(&self.gc) || value.as_float().is_some(),
+            (T::Bool, _) => value.as_bool().is_some(),
+            (T::Null, _) => value.is_null(),
+            (T::Option(_), _) if value.is_null() => true,
+            (T::String, Some(ObjKind::String(_))) => true,
+            (T::Array(elem), Some(ObjKind::Array(items))) => {
+                items.iter().all(|v| self.fits_fast(*v, elem, depth + 1))
+            }
+            (T::Named(name), Some(ObjKind::Object(map))) => map
+                .get("__type__")
+                .and_then(|t| t.as_obj())
+                .and_then(|r| self.gc.get(r))
+                .is_some_and(|o| matches!(&o.kind, ObjKind::String(s) if s == name)),
+            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.fits_fast(*v, ok, depth + 1),
+            (T::Result(_, err), Some(ObjKind::ResultErr(e))) => self.fits_fast(*e, err, depth + 1),
+            (T::Union(members), _) => members.iter().any(|m| self.fits_fast(value, m, depth + 1)),
+            _ => false,
+        }
+    }
+
     /// Run a stdlib module member through the shared implementation in
     /// `builtins_registry`, converting values at the boundary.
     fn call_shared_module(&mut self, name: &str, args: &[Value]) -> Result<Value, VMError> {
@@ -100,6 +201,26 @@ impl VM {
             return self.from_interp_checked(&result);
         }
         match name {
+            // Annotation checks (`--strict`, edition 2027) run on every call
+            // of an annotated function: decide the common cases on VM values
+            // directly; anything else (and every violation, for its message)
+            // takes the shared implementation.
+            "__types.check" => match self.types_check_fast(&args) {
+                Some(value) => Ok(value),
+                None => {
+                    // The shared check raises on a violation; on success
+                    // it returns its argument, which must stay the
+                    // original VM value: a round trip through interpreter
+                    // values does not preserve every kind (`Ok(1)` came
+                    // back as null).
+                    self.call_shared_module(name, &args)?;
+                    Ok(args.first().copied().unwrap_or(Value::null()))
+                }
+            },
+            "__types.bind" => match self.types_bind_fast(&args) {
+                Some(bound) => Ok(self.alloc_string(&bound)),
+                None => self.call_shared_module(name, &args),
+            },
             "__forge_register_struct" => {
                 if args.len() != 3 {
                     return Err(VMError::new(
@@ -683,14 +804,8 @@ impl VM {
                 let source = std::fs::read_to_string(&checked)
                     .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
 
-                let mut lexer = crate::lexer::Lexer::new(&source);
-                let tokens = lexer.tokenize().map_err(|e| {
-                    VMError::new(&format!("import '{}' lex error: {}", path, e.message))
-                })?;
-                let mut parser = crate::parser::Parser::new(tokens);
-                let program = parser.parse_program().map_err(|e| {
-                    VMError::new(&format!("import '{}' parse error: {}", path, e.message))
-                })?;
+                let program = crate::typechecker::prepare_module(&source, &path, &file_path)
+                    .map_err(|e| VMError::new(&e))?;
 
                 let export_names = requested_names
                     .unwrap_or_else(|| crate::vm::compiler::import_export_names(&program));
@@ -2013,7 +2128,9 @@ impl VM {
                     let default = args.get(2).cloned().unwrap_or(Value::null());
                     if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
-                            if key.contains('.') {
+                            // An exact key wins over the dot-path reading
+                            // (`get(counts, ".txt", 0)`).
+                            if key.contains('.') && !map.contains_key(key.as_str()) {
                                 let parts: Vec<&str> = key.split('.').collect();
                                 let mut current_map = map.clone();
                                 for (i, part) in parts.iter().enumerate() {

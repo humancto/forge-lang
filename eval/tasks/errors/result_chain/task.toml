@@ -1,0 +1,32 @@
+id = "result_chain"
+category = "errors"
+title = "Propagating errors through steps"
+prompt = """
+Each line of standard input is a record `name,age,email`. Process it through three steps,
+each a function that returns a success value or an error, and stop at the first failing step:
+1. split: the line must have exactly 3 comma-separated fields, else `expected 3 fields, got <n>`
+2. age: the age must be a whole number from 0 to 150, else `bad age '<age>'`
+3. email: the email must contain exactly one `@` with text on both sides, else `bad email '<email>'`
+Use your language's error propagation (e.g. `?`, exceptions or early returns) between the steps.
+Print `ok: <name> (<age>) <email>` or `error: <message>` per line, then `<ok>/<total> valid`.
+"""
+stdin = """
+Ada,36,ada@example.com
+Bob,abc,bob@example.com
+Cy,200,cy@example.com
+Di,41
+Ed,29,ed.example.com
+Flo,0,flo@x.io
+Gus,52,gus@@x.io
+"""
+needs = []
+expected_stdout = """
+ok: Ada (36) ada@example.com
+error: bad age 'abc'
+error: bad age '200'
+error: expected 3 fields, got 2
+error: bad email 'ed.example.com'
+ok: Flo (0) flo@x.io
+error: bad email 'gus@@x.io'
+2/7 valid
+"""

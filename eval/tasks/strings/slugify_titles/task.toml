@@ -1,0 +1,23 @@
+id = "slugify_titles"
+category = "strings"
+title = "URL slugs"
+prompt = """
+Read article titles from standard input, one per line. For each, print a URL slug: lowercase
+the title, replace every run of characters that are not ASCII letters or digits with a single
+`-`, and remove leading and trailing `-`.
+"""
+stdin = """
+Hello, World!
+  10 Tips & Tricks for Rust  
+C'est la vie
+---Already--slugged---
+Forge 0.10: What's New?
+"""
+needs = []
+expected_stdout = """
+hello-world
+10-tips-tricks-for-rust
+c-est-la-vie
+already-slugged
+forge-0-10-what-s-new
+"""

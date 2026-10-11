@@ -486,6 +486,13 @@ pub fn run_repl() {
                     }
                 };
 
+                // Edition 2027: declared-type errors reject the input and
+                // annotated functions check their boundaries at run time.
+                let program = match check_step(&source, program) {
+                    Some(program) => program,
+                    None => continue,
+                };
+
                 match interpreter.run_repl(&program) {
                     Ok(value) => {
                         match &value {
@@ -532,6 +539,36 @@ pub fn run_repl() {
     }
 
     let _ = rl.save_history(&history_path);
+}
+
+/// From edition 2027, type-check one REPL input (on its own: names from
+/// earlier inputs are unknown to the checker, so only contradictions of
+/// types declared in this input are found statically; functions defined in
+/// earlier inputs still check their annotated arguments at run time).
+/// Prints the errors and returns `None` when the input must not run.
+fn check_step(
+    source: &str,
+    parsed: crate::parser::ast::Program,
+) -> Option<crate::parser::ast::Program> {
+    use crate::semantics::edition::{self, Edition};
+    use crate::typechecker::{self, CheckOptions, PrepareError};
+    if edition::current() < Edition::E2027 {
+        return Some(parsed);
+    }
+    match typechecker::prepare(source, &CheckOptions::default()) {
+        Ok((program, _)) => Some(program),
+        // Already parsed above; nothing new to report.
+        Err(PrepareError::Frontend(_)) => Some(parsed),
+        Err(PrepareError::Type(diagnostics)) => {
+            for d in diagnostics.iter().filter(|d| d.is_error()) {
+                eprintln!(
+                    "{}",
+                    crate::errors::ProgramDiagnostic::type_check("<repl>", d).render(source)
+                );
+            }
+            None
+        }
+    }
 }
 
 fn dirs_home() -> std::path::PathBuf {

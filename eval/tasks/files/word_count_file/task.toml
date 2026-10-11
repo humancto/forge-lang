@@ -1,0 +1,14 @@
+id = "word_count_file"
+category = "files"
+title = "wc for a file"
+prompt = """
+The current directory contains a text file `poem.txt`. Print its number of lines, words and
+characters like `lines=<l> words=<w> chars=<c>`, where lines counts newline characters, words
+are whitespace-separated, and chars counts all characters including newlines. Then print the
+longest line (the first on a tie) as `longest: <line>`.
+"""
+needs = ["read"]
+expected_stdout = """
+lines=7 words=21 chars=110
+longest: over harbor and city
+"""

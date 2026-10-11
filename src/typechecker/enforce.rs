@@ -10,10 +10,21 @@
 //! VM knows about annotations, and the rule itself lives once in
 //! `semantics::types`.
 //!
+//! Generic functions bind each type parameter once per call from the
+//! arguments declared exactly as that parameter (`fn pair<T>(a: T, b: T)`:
+//! `__types.bind("T", "pair", "a,b", a, b)`, which also checks they
+//! agree), and a
+//! return declared exactly `T` is checked against that binding. A type
+//! parameter that only appears inside another type (`[T]`, `Box<T>`) is
+//! checked statically only (it is `Any` at run time), as are interfaces.
+//!
 //! Instrumentation never changes what a correct program does: checks return
 //! their value, argument checks are inserted before the body (an empty body
-//! keeps returning `null`), and `Any`, generic parameters and interfaces
-//! are not checked at run time.
+//! keeps returning `null`), and `Any` is not checked at run time.
+//!
+//! Used by `--strict` and, from edition 2027, by every run of annotated
+//! code (`typechecker::prepare`). Unannotated functions are left as they
+//! are, so they pay nothing.
 
 use super::infer::Checker;
 use super::types::Ty;
@@ -24,7 +35,7 @@ pub const MODULE: &str = "__types";
 
 /// Instrument `program` in place.
 pub fn instrument(program: &mut Program) {
-    let mut env = Checker::new(false, None, None);
+    let mut env = Checker::new(super::SeverityPolicy::lenient(), None, None);
     env.collect_declarations(&program.statements);
     let mut ins = Instrumenter { env };
     ins.stmts(&mut program.statements);
@@ -34,19 +45,29 @@ struct Instrumenter<'a> {
     env: Checker<'a>,
 }
 
-/// `__types.check(value, "<type>", "<context>")`.
-fn check_call(value: Expr, ty: &str, context: &str) -> Expr {
+/// `__types.<member>(args...)`.
+fn module_call(member: &str, args: Vec<Expr>) -> Expr {
     Expr::Call {
         function: Box::new(Expr::FieldAccess {
             object: Box::new(Expr::Ident(MODULE.to_string())),
-            field: "check".to_string(),
+            field: member.to_string(),
         }),
-        args: vec![
-            value,
-            Expr::StringLit(ty.to_string()),
-            Expr::StringLit(context.to_string()),
-        ],
+        args,
     }
+}
+
+/// `__types.check(value, <type>, "<context>")`: `ty` is a canonical type
+/// string literal, or the local holding a generic parameter's binding.
+fn check_call(value: Expr, ty: &Expr, context: &str) -> Expr {
+    module_call(
+        "check",
+        vec![value, ty.clone(), Expr::StringLit(context.to_string())],
+    )
+}
+
+/// The local that holds what type parameter `tp` stands for in this call.
+fn binding_local(tp: &str) -> String {
+    format!("__forge_type_{}", tp)
 }
 
 impl Instrumenter<'_> {
@@ -162,6 +183,9 @@ impl Instrumenter<'_> {
             Stmt::Match { subject, arms } => {
                 self.expr(subject);
                 for arm in arms {
+                    if let Some(g) = &mut arm.guard {
+                        self.expr(g);
+                    }
                     self.stmts(&mut arm.body);
                 }
             }
@@ -320,22 +344,66 @@ impl Instrumenter<'_> {
         line: usize,
         col: usize,
     ) {
+        // Generic parameters bound from the arguments declared exactly `T`.
+        let mut checks = Vec::new();
+        let mut bound: Vec<&String> = Vec::new();
+        for tp in type_params {
+            let at: Vec<&Param> = params
+                .iter()
+                .filter(|p| {
+                    p.type_ann.as_ref().is_some_and(
+                        |a| matches!(self.env.lower_with(a, type_params), Ty::Param(x) if x == *tp),
+                    )
+                })
+                .collect();
+            if at.is_empty() {
+                continue;
+            }
+            // `__types.bind("T", "<function>", "a,b", a, b)`: constants and
+            // the arguments themselves, so nothing is allocated per call.
+            let names: Vec<&str> = at.iter().map(|p| p.name.as_str()).collect();
+            let mut args = vec![
+                Expr::StringLit(tp.clone()),
+                Expr::StringLit(label.to_string()),
+                Expr::StringLit(names.join(",")),
+            ];
+            args.extend(at.iter().map(|p| Expr::Ident(p.name.clone())));
+            let bind = module_call("bind", args);
+            checks.push(SpannedStmt::new(
+                Stmt::Let {
+                    name: binding_local(tp),
+                    mutable: false,
+                    type_ann: None,
+                    value: bind,
+                },
+                line,
+                col,
+            ));
+            bound.push(tp);
+        }
         if let Some(ann) = return_type {
             let ty = self.env.lower_with(ann, type_params);
-            if let Some(canon) = self.canonical(&ty) {
+            let check = match &ty {
+                Ty::Param(tp) if bound.contains(&tp) => Some(Expr::Ident(binding_local(tp))),
+                _ => self.canonical(&ty).map(Expr::StringLit),
+            };
+            if let Some(check) = check {
                 let context = format!("return value of '{}'", label);
-                wrap_returns(body, &canon, &context);
-                wrap_tail(body, &canon, &context, line, col);
+                wrap_returns(body, &check, &context);
+                wrap_tail(body, &check, &context, line, col);
             }
         }
-        let mut checks = Vec::new();
         for p in params {
             let Some(ann) = &p.type_ann else { continue };
             let ty = self.env.lower_with(ann, type_params);
             if let Some(canon) = self.canonical(&ty) {
                 let context = format!("argument '{}' of '{}'", p.name, label);
                 checks.push(SpannedStmt::new(
-                    Stmt::Expression(check_call(Expr::Ident(p.name.clone()), &canon, &context)),
+                    Stmt::Expression(check_call(
+                        Expr::Ident(p.name.clone()),
+                        &Expr::StringLit(canon),
+                        &context,
+                    )),
                     line,
                     col,
                 ));
@@ -357,13 +425,13 @@ impl Instrumenter<'_> {
 
 /// Wrap every `return` of this function (not of nested functions, lambdas
 /// or detached bodies) in a check.
-fn wrap_returns(body: &mut [SpannedStmt], ty: &str, context: &str) {
+fn wrap_returns(body: &mut [SpannedStmt], ty: &Expr, context: &str) {
     for s in body.iter_mut() {
         wrap_returns_stmt(&mut s.stmt, ty, context);
     }
 }
 
-fn wrap_returns_stmt(stmt: &mut Stmt, ty: &str, context: &str) {
+fn wrap_returns_stmt(stmt: &mut Stmt, ty: &Expr, context: &str) {
     match stmt {
         Stmt::Return(value) => {
             let v = value.take().unwrap_or(Expr::Ident("null".to_string()));
@@ -383,6 +451,9 @@ fn wrap_returns_stmt(stmt: &mut Stmt, ty: &str, context: &str) {
         Stmt::Match { subject, arms } => {
             wrap_returns_expr(subject, ty, context);
             for arm in arms {
+                if let Some(g) = &mut arm.guard {
+                    wrap_returns_expr(g, ty, context);
+                }
                 wrap_returns(&mut arm.body, ty, context);
             }
         }
@@ -409,14 +480,14 @@ fn wrap_returns_stmt(stmt: &mut Stmt, ty: &str, context: &str) {
 
 /// `return` inside a block expression (`let x = if c { return 1 } else {
 /// 2 }`) returns from the function too.
-fn wrap_returns_expr(expr: &mut Expr, ty: &str, context: &str) {
+fn wrap_returns_expr(expr: &mut Expr, ty: &Expr, context: &str) {
     if let Expr::Block(body) = expr {
         wrap_returns(body, ty, context);
     }
 }
 
 /// Check the implicit result (the tail) of a body.
-fn wrap_tail(body: &mut Vec<SpannedStmt>, ty: &str, context: &str, line: usize, col: usize) {
+fn wrap_tail(body: &mut Vec<SpannedStmt>, ty: &Expr, context: &str, line: usize, col: usize) {
     let Some(last) = body.last_mut() else {
         body.push(SpannedStmt::new(
             Stmt::Expression(check_call(Expr::Ident("null".to_string()), ty, context)),

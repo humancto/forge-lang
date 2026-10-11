@@ -1,0 +1,33 @@
+type Shape = Circle(Float) | Rect(Float, Float) | Triangle(Float, Float)
+
+fn area(s: Shape) -> Float {
+    match s {
+        Circle(r) => { return 3.14159 * r * r }
+        Rect(w, h) => { return w * h }
+        Triangle(a, b) => { return a * b / 2.0 }
+    }
+}
+
+fn kind(s: Shape) -> String {
+    match s {
+        Circle(r) => { return "circle" }
+        Rect(w, h) => { return "rectangle" }
+        Triangle(a, b) => { return "triangle" }
+    }
+}
+
+// Two decimals: round to hundredths, then print the integer parts.
+fn fmt2(x: Float) -> String {
+    let cents = math.round(x * 100.0)
+    let frac = pad_start(str(cents % 100), 2, "0")
+    return "{cents / 100}.{frac}"
+}
+
+let shapes = [Circle(1.5), Rect(2.0, 3.5), Triangle(3.0, 4.0), Circle(0.5), Rect(10.0, 0.25)]
+let mut total = 0.0
+for s in shapes {
+    let a = area(s)
+    total += a
+    println("{kind(s)}: {fmt2(a)}")
+}
+println("total: {fmt2(total)}")

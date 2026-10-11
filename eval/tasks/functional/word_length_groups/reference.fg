@@ -1,0 +1,10 @@
+let cleaned = map(input().words(), fn(w) { return regex.replace(w.lower(), "[^a-z]", "") })
+let words = unique(filter(cleaned, fn(w) { return w != "" }))
+let groups = group_by(words, fn(w) { return len(w) })
+let lengths = sort(map(keys(groups), fn(k) { return int(k) }))
+for n in lengths {
+    let listed = join(sort(groups[str(n)]), " ")
+    println("{n}: {listed}")
+}
+let longest = lengths[len(lengths) - 1]
+println("longest: " + join(sort(groups[str(longest)]), " "))

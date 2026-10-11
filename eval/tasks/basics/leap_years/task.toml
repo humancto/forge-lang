@@ -1,0 +1,26 @@
+id = "leap_years"
+category = "basics"
+title = "Leap year check"
+prompt = """
+Read years from standard input, one per line. For each year print `<year> leap` if it is a
+leap year in the Gregorian calendar, otherwise `<year> common`.
+"""
+stdin = """
+1900
+2000
+2023
+2024
+2100
+2400
+1996
+"""
+needs = []
+expected_stdout = """
+1900 common
+2000 leap
+2023 common
+2024 leap
+2100 common
+2400 leap
+1996 leap
+"""

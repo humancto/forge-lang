@@ -1,10 +1,11 @@
 use super::bytecode::{Chunk, Constant, UpvalueSource};
 use super::verify::{MAX_CODE_LEN, MAX_PROTO_DEPTH};
+use crate::semantics::edition::Edition;
 use std::io::{self, Write};
 
 const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
-const VERSION_MINOR: u8 = 3;
+const VERSION_MINOR: u8 = 4;
 
 #[derive(Debug)]
 pub struct SerializeError {
@@ -75,7 +76,11 @@ fn write_chunk(w: &mut Vec<u8>, chunk: &Chunk) -> Result<(), SerializeError> {
     w.write_all(MAGIC)?;
     w.push(VERSION_MAJOR);
     w.push(VERSION_MINOR);
-    write_chunk_inner(w, chunk)
+    write_chunk_inner(w, chunk)?;
+    // v1.4+: the edition the program was compiled under, after the root
+    // chunk (prototypes share it).
+    w.push(chunk.edition.to_u8());
+    Ok(())
 }
 
 fn write_chunk_inner(w: &mut Vec<u8>, chunk: &Chunk) -> Result<(), SerializeError> {
@@ -306,7 +311,26 @@ fn read_chunk_root(r: &mut Reader<'_>) -> Result<Chunk, SerializeError> {
         )));
     }
 
-    read_chunk_inner(r, version[1], 1)
+    let mut chunk = read_chunk_inner(r, version[1], 1)?;
+    // Bytecode older than v1.4 predates editions: edition 2026.
+    if version[0] == VERSION_MAJOR && version[1] >= 4 {
+        let byte = r.u8()?;
+        let edition = Edition::from_u8(byte).ok_or_else(|| {
+            SerializeError::new(&format!(
+                "bytecode was compiled for an unknown edition (code {}); this Forge may be too old",
+                byte
+            ))
+        })?;
+        set_edition(&mut chunk, edition);
+    }
+    Ok(chunk)
+}
+
+fn set_edition(chunk: &mut Chunk, edition: Edition) {
+    chunk.edition = edition;
+    for proto in &mut chunk.prototypes {
+        set_edition(proto, edition);
+    }
 }
 
 fn read_chunk_inner(
@@ -412,6 +436,7 @@ fn read_chunk_inner(
         proto_id: crate::vm::bytecode::next_proto_id(),
         global_hints: Vec::new(),
         global_ids: Default::default(),
+        edition: Edition::DEFAULT,
     })
 }
 
@@ -664,6 +689,7 @@ mod tests {
         // Code count, right after the constants.
         let bytes = serialize_chunk(&chunk).unwrap();
         let code_at = bytes.len()
+            - 1 // edition (v1.4+)
             - (4 + 4 * chunk.code.len()) // cols
             - (4 + 4 * chunk.lines.len()) // lines
             - (4 * chunk.code.len()) // code
@@ -861,6 +887,57 @@ mod tests {
         let old = deserialize_chunk(&serialize_chunk_v1_1(&chunk)).unwrap();
         assert_eq!(old.arity, 3);
         assert_eq!(old.min_arity, 0);
+    }
+
+    #[test]
+    fn edition_roundtrips_and_defaults_for_old_bytecode() {
+        let mut chunk = make_simple_chunk();
+        let mut proto = Chunk::new("inner");
+        proto.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 1);
+        chunk.prototypes.push(proto);
+        for edition in Edition::ALL {
+            chunk.edition = *edition;
+            let bytes = serialize_chunk(&chunk).unwrap();
+            assert_eq!(bytes.last(), Some(&edition.to_u8()));
+            let restored = deserialize_chunk(&bytes).unwrap();
+            assert_eq!(restored.edition, *edition);
+            assert_eq!(restored.prototypes[0].edition, *edition);
+        }
+
+        // Bytecode from before editions (< v1.4) is edition 2026.
+        chunk.edition = Edition::E2027;
+        let old = deserialize_chunk(&serialize_chunk_v1_1(&chunk)).unwrap();
+        assert_eq!(old.edition, Edition::E2026);
+        assert_eq!(old.prototypes[0].edition, Edition::E2026);
+
+        // An edition this Forge does not know is refused, not misread.
+        let mut bytes = serialize_chunk(&chunk).unwrap();
+        *bytes.last_mut().unwrap() = 0xEE;
+        let err = deserialize_chunk(&bytes).unwrap_err();
+        assert!(err.message.contains("unknown edition"), "{}", err);
+        // ... and a missing edition byte is a truncated file.
+        bytes.pop();
+        assert!(deserialize_chunk(&bytes).is_err());
+    }
+
+    #[test]
+    fn compiler_records_the_edition() {
+        use crate::semantics::edition;
+        let program = crate::parser::Parser::new(
+            crate::lexer::Lexer::new("fn f(x) { return x }\nlet y = f(1)\n")
+                .tokenize()
+                .unwrap(),
+        )
+        .parse_program()
+        .unwrap();
+        for e in Edition::ALL {
+            let _scope = edition::scope(Some(*e));
+            let chunk = crate::vm::compiler::compile(&program).unwrap();
+            assert_eq!(chunk.edition, *e);
+            assert!(chunk.prototypes.iter().all(|p| p.edition == *e));
+            let restored = deserialize_chunk(&serialize_chunk(&chunk).unwrap()).unwrap();
+            assert_eq!(restored.edition, *e);
+        }
     }
 
     #[test]

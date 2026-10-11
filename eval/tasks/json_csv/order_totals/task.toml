@@ -1,0 +1,27 @@
+id = "order_totals"
+category = "json_csv"
+title = "Order totals from nested JSON"
+prompt = """
+Standard input is a JSON object `{"orders": [...]}`. Each order has an `id`, a `customer` and
+`items`, a list of `{"sku", "price_cents", "qty"}`. An order may also have a `coupon` with a
+`percent` discount applied to its subtotal (round the discount down to whole cents). Print
+`<id> <customer>: <total>` per order with the total in dollars with two decimals, then
+`grand total: <sum>` and `best customer: <customer with the largest summed totals>`.
+"""
+stdin = """
+{"orders": [
+  {"id": "A1", "customer": "ada", "items": [{"sku": "pen", "price_cents": 150, "qty": 4}, {"sku": "pad", "price_cents": 899, "qty": 1}]},
+  {"id": "A2", "customer": "bob", "items": [{"sku": "ink", "price_cents": 2599, "qty": 2}], "coupon": {"percent": 15}},
+  {"id": "A3", "customer": "ada", "items": [{"sku": "pen", "price_cents": 150, "qty": 10}, {"sku": "bag", "price_cents": 4999, "qty": 1}], "coupon": {"percent": 10}},
+  {"id": "A4", "customer": "cy", "items": []}
+]}
+"""
+needs = []
+expected_stdout = """
+A1 ada: 14.99
+A2 bob: 44.19
+A3 ada: 58.50
+A4 cy: 0.00
+grand total: 117.68
+best customer: ada
+"""

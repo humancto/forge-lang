@@ -1,0 +1,29 @@
+id = "duration_format"
+category = "basics"
+title = "Seconds to H:MM:SS"
+prompt = """
+Read non-negative whole numbers of seconds from standard input, one per line, and print each
+as a duration `H:MM:SS` (hours not padded, minutes and seconds padded to two digits).
+For example 3725 prints `1:02:05` and 59 prints `0:00:59`.
+"""
+stdin = """
+0
+59
+60
+3599
+3600
+3725
+86399
+90061
+"""
+needs = []
+expected_stdout = """
+0:00:00
+0:00:59
+0:01:00
+0:59:59
+1:00:00
+1:02:05
+23:59:59
+25:01:01
+"""
