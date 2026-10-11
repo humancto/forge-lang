@@ -135,8 +135,10 @@ pub struct CompileOptions {
 
 impl Compiler {
     fn new(name: &str) -> Self {
+        let mut chunk = Chunk::new(name);
+        chunk.edition = crate::semantics::edition::current();
         Self {
-            chunk: Chunk::new(name),
+            chunk,
             locals: Vec::new(),
             scope_depth: 0,
             next_register: 0,

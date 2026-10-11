@@ -1817,6 +1817,9 @@ fn run_bytecode_file(file_path: &PathBuf, profile: bool) {
         }
     };
 
+    // A compiled program keeps the edition it was compiled under (the VM
+    // and any module it imports read it at preparation).
+    let _edition = semantics::edition::scope(Some(chunk.edition));
     let mut vm = if profile {
         vm::machine::VM::with_profiling()
     } else {

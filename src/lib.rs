@@ -93,6 +93,8 @@ pub extern "C" fn forge_execute_bytecode(bytecode_ptr: *const u8, bytecode_len: 
             }
         };
 
+        // Run under the edition the program was compiled with.
+        let _edition = semantics::edition::scope(Some(chunk.edition));
         let mut machine = vm::machine::VM::new();
         match machine.execute(&chunk) {
             Ok(_) => 0,
