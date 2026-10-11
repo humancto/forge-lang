@@ -1,0 +1,18 @@
+// Removed builtins with an exact replacement are renamed.
+let x = 4
+assert(x > 1, "x is big enough")
+assert(x == 4)
+assert_eq(x * 2, 8)
+assert(!(x == 5), "x must not be 5")
+fn work() { return 7 }
+let w = work()
+if w != 7 {
+    assert(false, "ghost changed the result")
+}
+if false {
+    assert(false, "something ain't right")
+}
+
+// A user definition named like a removed builtin is left alone.
+fn sus(v) { return v }
+println(sus(w))

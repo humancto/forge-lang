@@ -5,6 +5,7 @@ mod color;
 mod dap;
 mod doc;
 mod errors;
+mod fix;
 mod formatter;
 mod interpreter;
 /// Forge — Internet-Native Programming Language
@@ -570,6 +571,23 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Migrate code to a newer edition: `forge fix --edition 2027 [paths]`
+    /// rewrites every removed 2026 form (set/change/define/otherwise/say/
+    /// ...) in place, keeping comments and layout, and reports what it
+    /// cannot rewrite (docs/editions/2027.md)
+    Fix {
+        /// Files or directories (defaults to the current directory)
+        paths: Vec<PathBuf>,
+        /// Do not write; exit 1 when a file needs changes
+        #[arg(long)]
+        check: bool,
+        /// Print a unified diff of the changes instead of writing them
+        #[arg(long)]
+        diff: bool,
+        /// Also set `edition = "2027"` in forge.toml of each directory given
+        #[arg(long = "set-edition")]
+        set_edition: bool,
+    },
     /// Run tests in the tests/ directory
     Test {
         /// Test directory (defaults to "tests")
@@ -981,6 +999,29 @@ async fn async_main() {
             println!("Forge v{}", VERSION);
             println!("Internet-native programming language");
             println!("Bytecode VM with mark-sweep GC");
+        }
+        Some(Command::Fix {
+            paths,
+            check,
+            diff,
+            set_edition,
+        }) => {
+            // The only migration is 2026 -> 2027.
+            if cli.edition.as_deref().is_some_and(|e| e != "2027") {
+                eprintln!(
+                    "{}",
+                    errors::format_simple_error(
+                        "forge fix migrates edition 2026 code to edition 2027: use --edition 2027"
+                    )
+                );
+                process::exit(1);
+            }
+            let options = fix::FixOptions {
+                check,
+                diff,
+                set_edition,
+            };
+            process::exit(fix::run(&paths, &options));
         }
         Some(Command::Fmt { files, check }) => {
             formatter::format_files(&files, check);

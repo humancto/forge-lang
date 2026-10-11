@@ -1,0 +1,30 @@
+// Edition 2026 natural syntax: variables, functions, output.
+let name = "Ada"          // immutable
+let mut count = 0
+count = count + 1
+
+fn greet(who) {
+    return "Hello, {who}!"
+}
+
+println(greet(name))
+println(upper("loud"))
+println(lower("QUIET"))
+println(upper(str(name)))
+println(count)
+println((1, 2))
+println(count + 1)
+
+/* block comment
+   spanning lines */
+async fn fetch_later() {
+    return await later()
+}
+
+async fn later() {
+    return 1
+}
+
+let o = json.parse("""{"check": 2}""")
+println(o.check)
+let s = set([1, 2])

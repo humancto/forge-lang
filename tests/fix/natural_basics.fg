@@ -1,0 +1,30 @@
+// Edition 2026 natural syntax: variables, functions, output.
+set name to "Ada"          // immutable
+set mut count to 0
+change count to count + 1
+
+define greet(who) {
+    return "Hello, {who}!"
+}
+
+say greet(name)
+yell "loud"
+whisper "QUIET"
+yell name
+say(count)
+say (1, 2)
+say count + 1
+
+/* block comment
+   spanning lines */
+forge fetch_later() {
+    return hold later()
+}
+
+forge fn later() {
+    return 1
+}
+
+let o = json.parse("""{"check": 2}""")
+say o.check
+let s = set([1, 2])

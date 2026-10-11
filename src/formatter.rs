@@ -56,7 +56,7 @@ pub fn format_files(files: &[PathBuf], check: bool) {
     }
 }
 
-fn find_forge_files(dir: &str) -> Vec<PathBuf> {
+pub(crate) fn find_forge_files(dir: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_fg_files(Path::new(dir), &mut files);
     files.sort();
