@@ -29,6 +29,7 @@ import random
 import re
 import shutil
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -491,6 +492,15 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _handle
 
 
+class _QuickBindServer(http.server.ThreadingHTTPServer):
+    """`ThreadingHTTPServer` without the reverse DNS lookup
+    (`socket.getfqdn`) in `server_bind`, which can stall on CI machines."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+
 class Fixture:
     _lock = threading.Lock()
     _server = None
@@ -499,7 +509,7 @@ class Fixture:
     def base_url(cls, task):
         with cls._lock:
             if cls._server is None:
-                srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FixtureHandler)
+                srv = _QuickBindServer(("127.0.0.1", 0), _FixtureHandler)
                 srv.daemon_threads = True
                 threading.Thread(target=srv.serve_forever, daemon=True).start()
                 cls._server = srv
