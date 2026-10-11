@@ -18,6 +18,7 @@
 pub mod alloc;
 pub mod edition;
 pub mod errors;
+pub mod hoist;
 pub mod types;
 
 use edition::Edition;
