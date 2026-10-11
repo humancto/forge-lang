@@ -1881,16 +1881,14 @@ impl Interpreter {
 
                 self.check_match_exhaustive(&val, arms)?;
 
-                for arm in arms {
-                    if self.match_pattern(&arm.pattern, &val) {
-                        self.env.push_scope();
-                        self.bind_pattern(&arm.pattern, &val);
+                match self.select_match_arm(&val, arms)? {
+                    Some(arm) => {
                         let result = self.exec_body(&arm.body);
                         self.env.pop_scope();
-                        return result;
+                        result
                     }
+                    None => Err(RuntimeError::new(crate::semantics::NON_EXHAUSTIVE_MATCH)),
                 }
-                Err(RuntimeError::new(crate::semantics::NON_EXHAUSTIVE_MATCH))
             }
 
             Stmt::For {
@@ -2564,8 +2562,45 @@ impl Interpreter {
         }
     }
 
+    /// The arm of a `match` that takes `val`: its pattern matches and its
+    /// guard, evaluated with the pattern's bindings in scope, is truthy. On
+    /// `Some`, the scope holding the bindings is still pushed: the caller
+    /// runs the body and pops it. A failing guard falls through to the
+    /// next arm.
+    fn select_match_arm<'a>(
+        &mut self,
+        val: &Value,
+        arms: &'a [MatchArm],
+    ) -> Result<Option<&'a MatchArm>, RuntimeError> {
+        for arm in arms {
+            if !self.match_pattern(&arm.pattern, val) {
+                continue;
+            }
+            self.env.push_scope();
+            self.bind_pattern(&arm.pattern, val);
+            if let Some(guard) = &arm.guard {
+                match self.eval_expr(guard) {
+                    Ok(v) if v.is_truthy() => {}
+                    Ok(_) => {
+                        self.env.pop_scope();
+                        continue;
+                    }
+                    Err(e) => {
+                        self.env.pop_scope();
+                        return Err(e);
+                    }
+                }
+            }
+            return Ok(Some(arm));
+        }
+        Ok(None)
+    }
+
     /// A `match` on an ADT value must cover every variant unless it has a
-    /// wildcard or catch-all binding arm.
+    /// wildcard or catch-all binding arm. Or-patterns cover each of their
+    /// alternatives. Guarded arms count as covering here (the run-time
+    /// check only rejects variants no arm mentions); the type checker
+    /// treats them as non-covering (T0011).
     fn check_match_exhaustive(&self, val: &Value, arms: &[MatchArm]) -> Result<(), RuntimeError> {
         // Check exhaustiveness for ADT values
         if let Value::Object(obj) = val {
@@ -2573,8 +2608,8 @@ impl Interpreter {
                 let type_key = format!("__type_{}__", type_name);
                 if let Some(Value::Object(type_meta)) = self.env.get(&type_key) {
                     if let Some(Value::Array(variant_list)) = type_meta.get("variants") {
-                        let has_wildcard =
-                            arms.iter().any(|a| matches!(a.pattern, Pattern::Wildcard));
+                        let alternatives = || arms.iter().flat_map(|a| a.pattern.alternatives());
+                        let has_wildcard = alternatives().any(|p| matches!(p, Pattern::Wildcard));
                         let variant_names: Vec<&str> = variant_list
                             .iter()
                             .filter_map(|v| {
@@ -2585,8 +2620,8 @@ impl Interpreter {
                                 }
                             })
                             .collect();
-                        let has_true_catchall = arms.iter().any(|a| {
-                            if let Pattern::Binding(bname) = &a.pattern {
+                        let has_true_catchall = alternatives().any(|p| {
+                            if let Pattern::Binding(bname) = p {
                                 !variant_names.contains(&bname.as_str())
                             } else {
                                 false
@@ -2594,7 +2629,7 @@ impl Interpreter {
                         });
                         if !has_wildcard && !has_true_catchall {
                             for vname in &variant_names {
-                                let covered = arms.iter().any(|a| match &a.pattern {
+                                let covered = alternatives().any(|p| match p {
                                     Pattern::Constructor { name, .. } => name == vname,
                                     Pattern::Binding(bname) => bname == vname,
                                     _ => false,
@@ -2689,18 +2724,16 @@ impl Interpreter {
                 }
                 let val = self.eval_expr(subject).map_err(patch_err)?;
                 self.check_match_exhaustive(&val, arms).map_err(patch_err)?;
-                for arm in arms {
-                    if self.match_pattern(&arm.pattern, &val) {
-                        self.env.push_scope();
-                        self.bind_pattern(&arm.pattern, &val);
+                match self.select_match_arm(&val, arms).map_err(patch_err)? {
+                    Some(arm) => {
                         let result = self.eval_block_value(&arm.body);
                         self.env.pop_scope();
-                        return result;
+                        result
                     }
+                    None => Err(patch_err(RuntimeError::new(
+                        crate::semantics::NON_EXHAUSTIVE_MATCH,
+                    ))),
                 }
-                Err(patch_err(RuntimeError::new(
-                    crate::semantics::NON_EXHAUSTIVE_MATCH,
-                )))
             }
             stmt => Ok(match self.exec_stmt(stmt).map_err(patch_err)? {
                 Signal::Return(v) => BlockExit::Return(v),
@@ -5185,11 +5218,18 @@ impl Interpreter {
                 }
                 false
             }
+            Pattern::Or(alts) => alts.iter().any(|p| self.match_pattern(p, value)),
         }
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, value: &Value) {
         match pattern {
+            Pattern::Or(alts) => {
+                // The first matching alternative supplies the bindings.
+                if let Some(alt) = alts.iter().find(|p| self.match_pattern(p, value)) {
+                    self.bind_pattern(alt, value);
+                }
+            }
             Pattern::Binding(name) => {
                 self.env.define(name.clone(), value.clone());
             }

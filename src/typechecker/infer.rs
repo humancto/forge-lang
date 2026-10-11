@@ -1712,6 +1712,9 @@ impl<'a> Checker<'a> {
                     self.set_binding_type(name, t);
                 }
             }
+            if let Some(guard) = &arm.guard {
+                self.infer(guard, None);
+            }
             let (t, f) = self.check_body(&arm.body);
             if let (Some(name), Some(orig)) = (&subject_name, &original) {
                 self.set_binding_type(name, orig.clone());
@@ -1734,15 +1737,33 @@ impl<'a> Checker<'a> {
         (result, flow)
     }
 
-    /// Bind the names a pattern introduces, typed from the subject.
+    /// Bind the names a pattern introduces, typed from the subject. A name
+    /// bound by several alternatives of an or-pattern gets the join of its
+    /// types.
     fn bind_pattern(&mut self, pattern: &Pattern, subject: &Ty) {
+        let mut bindings: Vec<(String, Ty)> = Vec::new();
+        self.pattern_bindings(pattern, subject, &mut bindings);
+        for (name, ty) in bindings {
+            self.bind(&name, ty, None, BindKind::Other);
+        }
+    }
+
+    fn pattern_bindings(&mut self, pattern: &Pattern, subject: &Ty, out: &mut Vec<(String, Ty)>) {
         match pattern {
             Pattern::Wildcard | Pattern::Literal(_) => {}
             Pattern::Binding(name) => {
                 if self.is_unit_variant_pattern(name) {
                     return;
                 }
-                self.bind(name, subject.clone(), None, BindKind::Other);
+                match out.iter_mut().find(|(n, _)| n == name) {
+                    Some((_, ty)) => *ty = self.cx.join(ty, subject),
+                    None => out.push((name.clone(), subject.clone())),
+                }
+            }
+            Pattern::Or(alts) => {
+                for alt in alts {
+                    self.pattern_bindings(alt, subject, out);
+                }
             }
             Pattern::Constructor { name, fields } => {
                 let field_types: Vec<Ty> = match (name.as_str(), subject) {
@@ -1759,7 +1780,7 @@ impl<'a> Checker<'a> {
                 };
                 for (i, f) in fields.iter().enumerate() {
                     let ty = field_types.get(i).cloned().unwrap_or(Ty::Any);
-                    self.bind_pattern(f, &ty);
+                    self.pattern_bindings(f, &ty, out);
                 }
             }
         }
@@ -1770,9 +1791,16 @@ impl<'a> Checker<'a> {
     }
 
     /// Report a non-exhaustive match; returns whether the match is
-    /// exhaustive.
+    /// exhaustive. A guarded arm covers nothing (its guard may fail); an
+    /// or-pattern covers what each of its alternatives covers.
     fn check_exhaustiveness(&mut self, subject: &Ty, arms: &[MatchArm]) -> bool {
-        let catch_all = arms.iter().any(|a| match &a.pattern {
+        // Top-level patterns of the unguarded arms, or-patterns flattened.
+        let covering: Vec<&Pattern> = arms
+            .iter()
+            .filter(|a| a.guard.is_none())
+            .flat_map(|a| a.pattern.alternatives())
+            .collect();
+        let catch_all = covering.iter().any(|p| match p {
             Pattern::Wildcard => true,
             Pattern::Binding(n) => !self.is_unit_variant_pattern(n),
             _ => false,
@@ -1781,7 +1809,7 @@ impl<'a> Checker<'a> {
             return true;
         }
         let has_ctor = |name: &str| {
-            arms.iter().any(|a| match &a.pattern {
+            covering.iter().any(|p| match p {
                 Pattern::Constructor { name: c, .. } => c == name,
                 Pattern::Binding(b) => b == name,
                 _ => false,
@@ -1789,7 +1817,7 @@ impl<'a> Checker<'a> {
         };
         let (label, missing): (String, Vec<String>) = match subject {
             Ty::Option(_) => {
-                let has_none = arms.iter().any(|a| match &a.pattern {
+                let has_none = covering.iter().any(|p| match p {
                     Pattern::Literal(Expr::Ident(n)) => n == "null" || n == "None",
                     Pattern::Binding(n) => n == "None" || n == "null",
                     _ => false,
@@ -1813,8 +1841,9 @@ impl<'a> Checker<'a> {
             }
             Ty::Bool => {
                 let has = |v: bool| {
-                    arms.iter()
-                        .any(|a| matches!(&a.pattern, Pattern::Literal(Expr::Bool(b)) if *b == v))
+                    covering
+                        .iter()
+                        .any(|p| matches!(p, Pattern::Literal(Expr::Bool(b)) if *b == v))
                 };
                 let mut missing = Vec::new();
                 if !has(true) {

@@ -1188,6 +1188,83 @@ fn adt_constructors_matches_and_exhaustiveness() {
 }
 
 #[test]
+fn match_expression_type_is_the_join_of_its_arms() {
+    let a = analysis(
+        "let n = 3\nlet s = match n {\n  0 => \"none\",\n  1 | 2 => \"few\",\n  x if x < 10 => \"some {x}\",\n  _ => \"many\",\n}\nlet b = match n { 0 => { let t = 1\n t + 1 }, _ => 5 }",
+    );
+    let ty_of = |name: &str| {
+        a.index
+            .occurrences
+            .iter()
+            .enumerate()
+            .find(|(_, o)| o.name == name && o.is_def())
+            .and_then(|(id, _)| a.facts.def_types.get(&id))
+            .map(|t| t.to_string())
+    };
+    assert_eq!(ty_of("s").as_deref(), Some("String"));
+    assert_eq!(ty_of("b").as_deref(), Some("Int"));
+    assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+    // The joined type is checked against a declared one.
+    assert_eq!(
+        codes("let n = 1\nlet s: Int = match n { 0 => \"zero\", _ => \"other\" }"),
+        vec![Code::TypeMismatch]
+    );
+    // Bindings are visible in the guard and typed from the subject.
+    assert_eq!(
+        codes("let n = 1\nlet s = match n { x if x - \"a\" => 1, _ => 2 }"),
+        vec![Code::InvalidOperator]
+    );
+}
+
+#[test]
+fn match_exhaustiveness_with_guards_and_or_patterns() {
+    let src = "type Shape = Circle(Float) | Rect(Float, Float) | Square(Float, Float)\nlet s = Circle(1.0)\n";
+    // An or-pattern covers each alternative.
+    assert!(codes(&format!(
+        "{}let a = match s {{\n  Circle(r) => r,\n  Rect(w, h) | Square(w, h) => w * h,\n}}",
+        src
+    ))
+    .is_empty());
+    // A guarded arm covers nothing.
+    assert_eq!(
+        codes(&format!(
+            "{}let a = match s {{\n  Circle(r) if r > 1.0 => r,\n  Rect(w, h) | Square(w, h) => w * h,\n}}",
+            src
+        )),
+        vec![Code::NonExhaustiveMatch]
+    );
+    assert!(codes(&format!(
+        "{}let a = match s {{\n  Circle(r) if r > 1.0 => r,\n  Circle(r) => 0.0,\n  Rect(w, h) | Square(w, h) => w * h,\n}}",
+        src
+    ))
+    .is_empty());
+    // A guarded catch-all is not a catch-all.
+    assert_eq!(
+        codes("let b = true\nmatch b {\n  true => say 1\n  x if x => say 2\n}"),
+        vec![Code::NonExhaustiveMatch]
+    );
+    assert!(codes("let b = true\nmatch b {\n  true | false => say 1\n}").is_empty());
+}
+
+#[test]
+fn or_pattern_alternatives_must_bind_the_same_names() {
+    let err = match analyze(
+        "let v = Some(1)\nmatch v {\n  Some(x) | None => say 1\n}",
+        &CheckOptions::default(),
+    ) {
+        Err(FrontendError::Parse { message, .. }) => message,
+        _ => panic!("expected a parse error"),
+    };
+    assert!(
+        err.contains("every alternative of an or-pattern must bind the same names"),
+        "{}",
+        err
+    );
+    // The same names in any order, and unit variants, are fine.
+    assert!(codes("type P = A(Int, Int) | B(Int, Int)\nlet p = A(1, 2)\nmatch p {\n  A(x, y) | B(y, x) => say x + y\n}").is_empty());
+}
+
+#[test]
 fn immutable_assignment_is_reported() {
     assert_eq!(codes("let x = 1\nx = 2"), vec![Code::ImmutableAssign]);
     assert_eq!(
