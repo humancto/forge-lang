@@ -1,0 +1,70 @@
+// Edition 2026 (the default) pin: `push(xs, v)` on a mutable variable
+// (function parameters and captured variables included) returns the new
+// array AND stores it back into `xs`, in every position. Edition 2027 makes
+// `push` pure (tests/edition2027/functional_push_test.fg); 2026 code keeps
+// working. `forge fix --edition 2027` rewrites a statement `push(xs, v)` to
+// `xs = push(xs, v)` and reports the other positions.
+
+fn grow(xs) {
+    let longer = push(xs, 0)
+    return [len(xs), len(longer)]
+}
+
+@test
+fn statement_push_appends_to_a_mutable_variable() {
+    let mut xs = [1]
+    push(xs, 2)
+    push(xs, 3)
+    assert_eq(xs, [1, 2, 3])
+}
+
+@test
+fn let_push_also_updates_the_variable() {
+    let mut cols = [1, 2]
+    let a = push(cols, 3)
+    assert_eq(a, [1, 2, 3])
+    assert_eq(cols, [1, 2, 3])
+}
+
+@test
+fn push_updates_a_parameter() {
+    assert_eq(grow([5, 6]), [3, 3])
+}
+
+@test
+fn push_updates_a_captured_variable() {
+    let mut acc = []
+    let add = fn(x) { push(acc, x) }
+    add(1)
+    add(2)
+    assert_eq(acc, [1, 2])
+}
+
+@test
+fn push_on_an_immutable_variable_returns_a_new_array() {
+    let xs = [1]
+    push(xs, 2)
+    let ys = push(xs, 3)
+    assert_eq(xs, [1])
+    assert_eq(ys, [1, 3])
+}
+
+@test
+fn assigning_the_result_appends_once() {
+    let mut xs = []
+    for i in range(0, 100) {
+        xs = push(xs, i)
+    }
+    assert_eq(len(xs), 100)
+    let b = xs
+    xs = push(xs, 100)
+    assert_eq(len(b), 100)
+    assert_eq(len(xs), 101)
+}
+
+@test
+fn pop_removes_the_last_element() {
+    let mut stack = [1, 2, 3]
+    assert_eq(pop(stack), 3)
+    assert_eq(stack, [1, 2])
+}

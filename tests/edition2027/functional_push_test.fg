@@ -1,0 +1,200 @@
+// Edition 2027: `push(xs, v)` is a pure function. It returns a new array
+// and never changes `xs` or any other variable, in every position. The
+// method form `xs.push(v)` is the one form that appends to a variable in
+// place; `pop(xs)` / `xs.pop()` keep removing the last element.
+// Run with:
+//   forge --edition 2027 test tests/edition2027 --engine both
+// Edition 2026 behaviour is pinned in tests/push_mutation_2026_test.fg.
+// A bare statement `push(xs, v)` is a type error in 2027 (T0019), so it
+// cannot appear here; see tests/edition2027_pure_push.rs.
+
+fn is_safe(cols, c) {
+    let r = len(cols)
+    for rr in range(0, r) {
+        let cc = cols[rr]
+        if cc == c || math.abs(c - cc) == r - rr {
+            return false
+        }
+    }
+    return true
+}
+
+// Backtracking that relies on `push` leaving the parameter alone.
+fn count_queens(n, cols) {
+    if len(cols) == n {
+        return 1
+    }
+    let mut total = 0
+    for c in range(0, n) {
+        if is_safe(cols, c) {
+            let next = push(cols, c)
+            total += count_queens(n, next)
+        }
+    }
+    return total
+}
+
+@test
+fn backtracking_with_push_keeps_the_parameter() {
+    assert_eq(count_queens(4, []), 2)
+    assert_eq(count_queens(6, []), 4)
+    assert_eq(count_queens(8, []), 92)
+}
+
+fn first_solution(n, cols) {
+    if len(cols) == n {
+        return cols
+    }
+    for c in range(0, n) {
+        if is_safe(cols, c) {
+            let found = first_solution(n, push(cols, c))
+            if found != null {
+                return found
+            }
+        }
+    }
+    return null
+}
+
+@test
+fn push_as_an_argument_keeps_the_parameter() {
+    assert_eq(first_solution(6, []), [1, 3, 5, 0, 2, 4])
+}
+
+@test
+fn let_push_leaves_a_mutable_variable_unchanged() {
+    let mut cols = [1, 2]
+    let a = push(cols, 3)
+    assert_eq(a, [1, 2, 3])
+    assert_eq(cols, [1, 2])
+    let b = push(cols, 4)
+    assert_eq(b, [1, 2, 4])
+    assert_eq(a, [1, 2, 3])
+    assert_eq(cols, [1, 2])
+}
+
+fn grow(xs) {
+    let longer = push(xs, 0)
+    return [len(xs), len(longer)]
+}
+
+@test
+fn push_on_a_parameter_leaves_it_unchanged() {
+    assert_eq(grow([5, 6]), [2, 3])
+}
+
+@test
+fn push_in_a_closure_leaves_the_captured_variable_unchanged() {
+    let mut acc = [1]
+    let add = fn(x) { return push(acc, x) }
+    assert_eq(add(2), [1, 2])
+    assert_eq(add(3), [1, 3])
+    assert_eq(acc, [1])
+    // A lambda whose body is just the call returns the new array.
+    let rows = map([7, 8], fn(x) { push(acc, x) })
+    assert_eq(rows, [[1, 7], [1, 8]])
+    assert_eq(acc, [1])
+}
+
+@test
+fn push_inside_an_expression_leaves_the_variable_unchanged() {
+    let mut xs = [1, 2, 3]
+    assert_eq(len(push(xs, 4)), 4)
+    assert_eq(push(xs, 4)[3], 4)
+    let both = [push(xs, "a"), push(xs, "b")]
+    assert_eq(both, [[1, 2, 3, "a"], [1, 2, 3, "b"]])
+    assert_eq(xs, [1, 2, 3])
+}
+
+@test
+fn assigning_the_result_appends() {
+    let mut xs = []
+    for i in range(0, 1000) {
+        xs = push(xs, i)
+    }
+    assert_eq(len(xs), 1000)
+    assert_eq(xs[0], 0)
+    assert_eq(xs[999], 999)
+}
+
+@test
+fn assigning_the_result_does_not_change_aliases() {
+    let mut a = []
+    a = push(a, 1)
+    let b = a
+    a = push(a, 2)
+    let c = a
+    a = push(a, 3)
+    assert_eq(b, [1])
+    assert_eq(c, [1, 2])
+    assert_eq(a, [1, 2, 3])
+}
+
+@test
+fn assigning_a_complex_value_appends() {
+    let mut rows = []
+    for i in range(0, 3) {
+        rows = push(rows, { n: i, sq: i * i })
+    }
+    assert_eq(rows[2].sq, 4)
+    let mut names = []
+    names = push(names, upper("ada"))
+    assert_eq(names, ["ADA"])
+}
+
+@test
+fn assigning_to_another_variable_keeps_the_source() {
+    let mut src = [1]
+    let mut dst = []
+    dst = push(src, 2)
+    assert_eq(src, [1])
+    assert_eq(dst, [1, 2])
+}
+
+@test
+fn assigning_to_a_captured_variable_appends() {
+    let mut log = []
+    let note = fn(x) { log = push(log, x) }
+    note("a")
+    note("b")
+    assert_eq(log, ["a", "b"])
+}
+
+@test
+fn method_push_still_appends_in_place() {
+    let mut xs = [1]
+    xs.push(2)
+    let r = xs.push(3)
+    assert_eq(xs, [1, 2, 3])
+    assert_eq(r, [1, 2, 3])
+}
+
+@test
+fn pop_still_removes_the_last_element() {
+    let mut stack = [1, 2, 3]
+    assert_eq(pop(stack), 3)
+    assert_eq(stack, [1, 2])
+    assert_eq(stack.pop(), 2)
+    assert_eq(stack, [1])
+    let fixed = [4, 5]
+    assert_eq(pop(fixed), 5)
+    assert_eq(fixed, [4, 5])
+}
+
+@test
+fn push_on_a_field_or_index_returns_a_new_array() {
+    let mut o = { items: [1] }
+    let more = push(o.items, 2)
+    assert_eq(o.items, [1])
+    o.items = push(o.items, 3)
+    assert_eq(o.items, [1, 3])
+    assert_eq(more, [1, 2])
+    let mut grid = [[0]]
+    grid[0] = push(grid[0], 1)
+    assert_eq(grid, [[0, 1]])
+}
+
+@test
+fn push_requires_an_array() {
+    assert_throws(fn() { push("abc", 1) })
+}

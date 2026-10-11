@@ -186,10 +186,26 @@ impl Interpreter {
     ///
     /// `push`, `add` and `remove` evaluate to the updated collection; it is
     /// copied out only when `want_result` is true.
+    ///
+    /// From edition 2027 the free function `push(v, x)` is pure (it never
+    /// updates `v`; docs/editions/2027.md), so it is not one of these forms
+    /// there; the method form `v.push(x)` still is.
     pub(super) fn try_mutate_in_place(
         &mut self,
         expr: &Expr,
         want_result: bool,
+    ) -> Option<Result<Value, RuntimeError>> {
+        let free_push = self.edition < crate::semantics::edition::Edition::E2027;
+        self.mutate_in_place(expr, want_result, free_push)
+    }
+
+    /// [`try_mutate_in_place`](Self::try_mutate_in_place), with the free
+    /// `push(v, x)` form included when `free_push` is true.
+    fn mutate_in_place(
+        &mut self,
+        expr: &Expr,
+        want_result: bool,
+        free_push: bool,
     ) -> Option<Result<Value, RuntimeError>> {
         let Expr::Call { function, args } = expr else {
             return None;
@@ -200,7 +216,8 @@ impl Interpreter {
                 _ => return None,
             },
             Expr::Ident(f)
-                if (f == "push" && args.len() == 2) || (f == "pop" && args.len() == 1) =>
+                if (f == "push" && args.len() == 2 && free_push)
+                    || (f == "pop" && args.len() == 1) =>
             {
                 match &args[0] {
                     Expr::Ident(v) => (v.as_str(), f.as_str(), &args[1..]),
@@ -482,8 +499,9 @@ impl Interpreter {
                     && matches!(&args[0], Expr::Ident(v) if v == x) =>
             {
                 // `x = push(x, e)`: the in-place push leaves `x` holding
-                // exactly the value the assignment would store.
-                self.try_mutate_in_place(value, false)
+                // exactly the value the assignment would store (any
+                // edition: it is the explicit form of a pure `push`).
+                self.mutate_in_place(value, false, true)
                     .map(|result| result.map(|_| ()))
             }
             Expr::BinOp { left, op, right }

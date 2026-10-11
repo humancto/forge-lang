@@ -199,6 +199,54 @@ fn push_result_used_as_value_keeps_value_semantics() {
     );
 }
 
+/// Whether any chunk of `source` (compiled under `edition`) contains
+/// `PushLocal`.
+fn uses_push_local(source: &str, edition: crate::semantics::edition::Edition) -> bool {
+    fn walk(chunk: &crate::vm::bytecode::Chunk) -> bool {
+        chunk.code.iter().any(|&i| {
+            crate::vm::bytecode::decode_op(i) == crate::vm::bytecode::OpCode::PushLocal as u8
+        }) || chunk.prototypes.iter().any(walk)
+    }
+    let _edition = crate::semantics::edition::scope(Some(edition));
+    let chunk = compiler::compile(&parse_program(source)).expect("compile error");
+    walk(&chunk)
+}
+
+#[test]
+fn push_assignment_compiles_to_push_local_in_every_edition() {
+    use crate::semantics::edition::Edition;
+    let assign = "fn f() {\n let mut xs = []\n xs = push(xs, 1)\n return xs\n}";
+    let statement = "fn f() {\n let mut xs = []\n push(xs, 1)\n return xs\n}";
+    for edition in Edition::ALL {
+        assert!(uses_push_local(assign, *edition), "{edition}");
+    }
+    // Edition 2027: the free function is pure, so the statement form is an
+    // ordinary (discarded) call.
+    assert!(uses_push_local(statement, Edition::E2026));
+    assert!(!uses_push_local(statement, Edition::E2027));
+}
+
+#[test]
+fn push_assignment_in_place_is_invisible_to_aliases() {
+    for edition in crate::semantics::edition::Edition::ALL {
+        let _edition = crate::semantics::edition::scope(Some(*edition));
+        assert_fn_output(
+            r#"
+            let mut a = []
+            a = push(a, 1)
+            let b = a
+            a = push(a, 2)
+            let holder = [a]
+            a = push(a, 3)
+            println(b)
+            println(holder[0])
+            println(a)
+            "#,
+            &["[1]", "[1, 2]", "[1, 2, 3]"],
+        );
+    }
+}
+
 #[test]
 fn pop_in_place_is_invisible_to_aliases() {
     assert_fn_output(
