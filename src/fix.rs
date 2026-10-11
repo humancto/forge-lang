@@ -11,6 +11,11 @@
 //! mechanically (`safe { }` used as a value, `sus(x)`, which printed to
 //! stderr, ...) is reported with its position and left untouched.
 //!
+//! `push(xs, v)` changes meaning (edition 2027 makes it pure): a statement
+//! `push(xs, v)` on a mutable variable or parameter becomes
+//! `xs = push(xs, v)`; any other use whose 2026 meaning also updated `xs`
+//! is reported.
+//!
 //! The input must be edition-2026 code (it is lexed with the 2026 keyword
 //! set whatever edition the process runs under), so running the fixer on
 //! its own output changes nothing.
@@ -19,7 +24,7 @@ use crate::lexer::token::{Spanned, Token};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::semantics::edition::{self, Edition};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A form the fixer left untouched.
@@ -44,6 +49,16 @@ struct Edit {
     start: usize,
     end: usize,
     text: String,
+}
+
+/// What a name passed to `push` refers to: in edition 2026 `push(x, v)`
+/// also stored the new array into `x` when `x` is a mutable binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgBinding {
+    /// `let mut x` (`param: false`) or a function parameter.
+    Mutable { param: bool },
+    /// Anything else: `let x`, a loop variable, a global, ...
+    Other,
 }
 
 /// Builtins removed in 2027 that have no mechanical equivalent, and why.
@@ -96,6 +111,31 @@ pub fn fix_source(source: &str) -> Result<Fixed, String> {
         })
         .map(|(_, occ)| (occ.span.start.line, occ.span.start.col))
         .collect();
+    let mut push_globals = HashSet::new();
+    let mut arg_bindings = HashMap::new();
+    for (id, occ) in index.occurrences.iter().enumerate() {
+        if !matches!(occ.role, crate::parser::index::Role::Ref) {
+            continue;
+        }
+        let at = (occ.span.start.line, occ.span.start.col);
+        match &resolution.resolved[id] {
+            crate::typechecker::resolve::Resolved::Global if occ.name == "push" => {
+                push_globals.insert(at);
+            }
+            crate::typechecker::resolve::Resolved::Local(def) => {
+                use crate::parser::index::{DefKind, Role};
+                let binding = match &index.occurrences[*def].role {
+                    Role::Def(DefKind::Variable { mutable: true }) => {
+                        ArgBinding::Mutable { param: false }
+                    }
+                    Role::Def(DefKind::Parameter) => ArgBinding::Mutable { param: true },
+                    _ => ArgBinding::Other,
+                };
+                arg_bindings.insert(at, binding);
+            }
+            _ => {}
+        }
+    }
 
     let chars: Vec<char> = source.chars().collect();
     let mut fixer = Fixer {
@@ -105,6 +145,8 @@ pub fn fix_source(source: &str) -> Result<Fixed, String> {
         unfixable: Vec::new(),
         rewrites: 0,
         removed_globals,
+        push_globals,
+        arg_bindings,
     };
     fixer.run();
     let Fixer {
@@ -172,6 +214,10 @@ struct Fixer<'a> {
     /// Positions of references to removed builtins that resolve to the
     /// builtin (not a user definition of the same name).
     removed_globals: HashSet<(usize, usize)>,
+    /// Positions of references to the builtin `push`.
+    push_globals: HashSet<(usize, usize)>,
+    /// What each reference to a local name refers to (see [`ArgBinding`]).
+    arg_bindings: HashMap<(usize, usize), ArgBinding>,
 }
 
 fn is_open(t: &Token) -> bool {
@@ -468,6 +514,9 @@ impl Fixer<'_> {
                 Token::Check => self.fix_check(i),
                 Token::Say | Token::Yell | Token::Whisper => self.fix_say(i, &t),
                 Token::Ident(ref name) if self.removed_global(i) => self.fix_builtin(i, name),
+                Token::Ident(ref name) if name == "push" && self.is_push_builtin(i) => {
+                    self.fix_push(i)
+                }
                 Token::StringLit(ref s) if s.contains('{') => self.check_interpolation(i, s),
                 _ => {}
             }
@@ -480,6 +529,151 @@ impl Fixer<'_> {
     fn removed_global(&self, i: usize) -> bool {
         let t = &self.toks[i];
         self.removed_globals.contains(&(t.line, t.col))
+    }
+
+    fn is_push_builtin(&self, i: usize) -> bool {
+        let t = &self.toks[i];
+        self.push_globals.contains(&(t.line, t.col))
+    }
+
+    fn arg_binding(&self, i: usize) -> ArgBinding {
+        let t = &self.toks[i];
+        self.arg_bindings
+            .get(&(t.line, t.col))
+            .copied()
+            .unwrap_or(ArgBinding::Other)
+    }
+
+    /// Index of the `(`/`[`/`{` that the closing token at `close` matches.
+    fn matching_back(&self, close: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for j in (0..=close).rev() {
+            let t = self.tok(j);
+            if is_close(t) {
+                depth += 1;
+            } else if is_open(t) {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether the token after `last` ends a statement.
+    fn ends_statement(&self, last: usize) -> bool {
+        matches!(
+            self.tok(last + 1),
+            Token::Newline | Token::Semicolon | Token::RBrace | Token::Eof
+        )
+    }
+
+    /// Whether the statement ending at token `last` is the last statement
+    /// of a function or lambda body (so its value is the result).
+    fn ends_function_body(&self, last: usize) -> bool {
+        let mut j = last + 1;
+        while matches!(self.tok(j), Token::Newline | Token::Semicolon) {
+            j += 1;
+        }
+        if !matches!(self.tok(j), Token::RBrace) {
+            return false;
+        }
+        let Some(open) = self.matching_back(j) else {
+            return false;
+        };
+        // Walk back over a return type annotation to the parameter list.
+        let mut k = open;
+        while k > 0 {
+            k -= 1;
+            match self.tok(k) {
+                Token::RParen => {
+                    let Some(lp) = self.matching_back(k) else {
+                        return false;
+                    };
+                    let before = if lp == 0 {
+                        &Token::Newline
+                    } else {
+                        self.tok(lp - 1)
+                    };
+                    return match before {
+                        Token::Fn | Token::Gt => true,
+                        Token::Ident(_) => {
+                            lp >= 2 && matches!(self.tok(lp - 2), Token::Fn | Token::Define)
+                        }
+                        _ => false,
+                    };
+                }
+                Token::Newline | Token::Semicolon | Token::LBrace | Token::RBrace | Token::Eof => {
+                    return false
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// `push(xs, v)`: in edition 2026 a mutable `xs` was also updated; in
+    /// 2027 `push` only returns the new array.
+    fn fix_push(&mut self, i: usize) {
+        if !matches!(self.tok(i + 1), Token::LParen) {
+            return;
+        }
+        let Some(close) = self.matching(i + 1) else {
+            return;
+        };
+        if !self.has_top_level_comma(i + 1, close) {
+            return;
+        }
+        let arg = match (self.tok(i + 2), self.tok(i + 3)) {
+            (Token::Ident(x), Token::Comma) => Some((x.clone(), self.arg_binding(i + 2))),
+            _ => None,
+        };
+        if self.at_statement_start(i) && self.ends_statement(close) {
+            match arg {
+                Some((x, ArgBinding::Mutable { .. })) if !self.ends_function_body(close) => {
+                    let s = self.start(i);
+                    self.replace(s, s, format!("{x} = "));
+                }
+                Some((x, ArgBinding::Mutable { .. })) => self.report(
+                    i,
+                    format!(
+                        "cannot rewrite this `push({x}, ...)`: it is the function's result and also updated `{x}` in edition 2026; in 2027 write `{x} = push({x}, value)` (or `{x}.push(value)`) and return what you need"
+                    ),
+                ),
+                Some((x, ArgBinding::Other)) => self.report(
+                    i,
+                    format!(
+                        "`push({x}, ...)` as a statement does nothing (`{x}` is not a `let mut` variable or a parameter, and in edition 2027 push never changes its argument, T0019): remove it, or use the result"
+                    ),
+                ),
+                None => self.report(
+                    i,
+                    "`push(...)` as a statement does nothing in edition 2027 (push returns a new array, T0019): assign the result",
+                ),
+            }
+            return;
+        }
+        let Some((x, ArgBinding::Mutable { param })) = arg else {
+            return;
+        };
+        // `x = push(x, v)`: the assignment stores what 2026 stored anyway.
+        let assigns_same = i >= 2
+            && matches!(self.tok(i - 1), Token::Eq)
+            && ident_is(self.tok(i - 2), &x)
+            && self.at_statement_start(i - 2)
+            && self.ends_statement(close);
+        // `return push(param, v)`: the updated parameter is gone anyway.
+        let returns_param = param && i >= 1 && matches!(self.tok(i - 1), Token::Return);
+        if assigns_same || returns_param {
+            return;
+        }
+        self.report(
+            i,
+            format!(
+                "in edition 2026 this `push({x}, ...)` also updated `{x}`; in 2027 it only returns the new array: if the update is needed, add `{x} = push({x}, value)` (or `{x}.push(value)`) as its own statement"
+            ),
+        );
     }
 
     fn fix_set(&mut self, i: usize) {
@@ -1117,6 +1311,60 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(fix(input), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn statement_push_on_a_mutable_binding_assigns_the_result() {
+        let cases = [
+            (
+                "let mut xs = [1]\npush(xs, 2)\n",
+                "let mut xs = [1]\nxs = push(xs, 2)\n",
+            ),
+            (
+                "fn f(items) {\n    push(items, 1)\n    return items\n}\n",
+                "fn f(items) {\n    items = push(items, 1)\n    return items\n}\n",
+            ),
+            (
+                "let mut out = []\nfor x in [1] { if x > 0 { push(out, x * 2) } else { push(out, 0) } }\n",
+                "let mut out = []\nfor x in [1] { if x > 0 { out = push(out, x * 2) } else { out = push(out, 0) } }\n",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(fix(input), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn push_forms_that_keep_their_meaning_are_left_alone() {
+        for src in [
+            "let mut xs = []\nxs = push(xs, 1)\n",
+            "let xs = [1]\nlet ys = push(xs, 2)\n",
+            "let ys = push([1], 2)\n",
+            "fn f(xs) { return push(xs, 1) }\n",
+            "let mut o = { a: [] }\no.a = push(o.a, 1)\n",
+            "fn push(a, b) { return a }\nlet mut xs = []\npush(xs, 1)\n",
+            "let mut xs = []\nxs.push(1)\n",
+        ] {
+            assert_eq!(fix(src), src);
+        }
+    }
+
+    #[test]
+    fn push_forms_that_change_meaning_are_reported() {
+        for src in [
+            // 2026 also updated `cols`.
+            "let mut cols = []\nlet a = push(cols, 1)\n",
+            "fn f(cols) { let a = push(cols, 1)\n return cols }\n",
+            // The function's result, and an update.
+            "let mut acc = []\nlet add = fn(x) { push(acc, x) }\n",
+            // A no-op in both editions, and a T0019 error in 2027.
+            "let xs = [1]\npush(xs, 2)\n",
+            "let mut o = { a: [] }\npush(o.a, 1)\n",
+        ] {
+            let fixed = fix_source(src).expect("fixes");
+            assert_eq!(fixed.unfixable.len(), 1, "{src}: {:?}", fixed.unfixable);
+            assert_eq!(fixed.output, src);
         }
     }
 
