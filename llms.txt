@@ -41,7 +41,7 @@ println(typeof(pi))           // Float
 println(user.name)
 println(nums[0])
 println(len(nums))
-println(str(42) + "!")
+println(str(42) + "!")        // + joins two Strings; convert other values with str() or "{x}"
 println(int("7") + 1)
 println(10 / 4)               // 2 (Int / Int is integer division)
 ```
@@ -436,6 +436,7 @@ fn cities() { return ["Oslo"] }
 - Method chains cannot start a line with `.`; keep `a.filter(...).map(...)` on one line.
 - `regex.*` takes `(text, pattern)`, not `(pattern, text)`. Escape backslashes in patterns: `"\\d+"`.
 - `reduce(array, initial, fn)` — the initial value comes second.
+- Put non-String values into text with interpolation (`"total: {n}"`) or `str(n)`, never `"total: " + n`: edition 2027 rejects `+` between a String and a non-String (E0034; edition 2026 converts silently).
 - Mutating a field or index requires a `let mut` binding.
 - `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.

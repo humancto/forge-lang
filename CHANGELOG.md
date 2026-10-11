@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Edition 2027: strict `+`** — `+` with exactly one String operand (`"a" + 1`, `1 + "a"`, `"x" + true`, `"x" + null`, `"x" + [1]`) is a runtime error on both engines under `--edition 2027` / `edition = "2027"`: new error code `E0034` (`cannot add String and Int`, hint: use `str(x)` or `"{x}"` interpolation; `forge explain E0034`). The type checker reports a statically known case as an error (`T0005`) even without `--strict`. Edition 2026 (the default) keeps the implicit conversion. The edition is recorded when a program is prepared (VM, interpreter, type checker) and carried into imports, spawned tasks, HTTP/WebSocket forks and sandbox runs; `.fgc` bytecode (format 1.4) records the edition it was compiled under, and older files run as edition 2026. See `docs/editions/2027.md`.
+
+### Changed
+
+- **Bytecode format 1.4** — `.fgc` files end with one byte naming the edition the program was compiled under. Forge reads 1.0–1.4; older Forge releases refuse 1.4 files with "newer than supported".
+
 ## [0.10.0] - 2026-10-09
 
 ### Added
