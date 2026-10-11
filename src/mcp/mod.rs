@@ -2191,7 +2191,7 @@ mod tests {
 
     fn edition_2027_declared_type_errors_on(engine: Engine) {
         use crate::semantics::edition::{self, Edition};
-        let code = r#"say \"before\"\nfn twice(n: Int) -> Int { return n * 2 }\nsay twice(\"x\")"#;
+        let code = r#"println(\"before\")\nfn twice(n: Int) -> Int { return n * 2 }\nprintln(twice(\"x\"))"#;
         let input = format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"check_forge\",\"arguments\":{{\"code\":\"{code}\"}}}}}}\n\
              {{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{{\"code\":\"{code}\"}}}}}}\n"

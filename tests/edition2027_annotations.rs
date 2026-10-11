@@ -47,9 +47,9 @@ fn with_engine<'a>(engine: &[&'a str], rest: &[&'a str]) -> Vec<&'a str> {
     engine.iter().chain(rest).copied().collect()
 }
 
-const DECLARED_ERROR: &str = "say \"before\"\n\
+const DECLARED_ERROR: &str = "println(\"before\")\n\
 fn twice(n: Int) -> Int { return n * 2 }\n\
-say twice(\"oops\")\n";
+println(twice(\"oops\"))\n";
 
 #[test]
 fn declared_type_error_stops_a_2027_run_before_it_starts() {
@@ -126,8 +126,8 @@ fn edition_2026_warns_and_runs() {
 fn annotated_boundaries_are_checked_at_run_time_in_2027() {
     // `json.parse` returns `Any`: only the run-time check can see it.
     let source = "fn double(n: Int) -> Int { return n * 2 }\n\
-                  say double(4)\n\
-                  say double(json.parse(\"\\\"seven\\\"\"))\n";
+                  println(double(4))\n\
+                  println(double(json.parse(\"\\\"seven\\\"\")))\n";
     for (edition, fails) in [("2027", true), ("2026", false)] {
         let dir = project("runtime", edition, &[("main.fg", source)]);
         for engine in ENGINES {
@@ -157,7 +157,7 @@ fn annotated_boundaries_are_checked_at_run_time_in_2027() {
 fn strict_in_2027_also_rejects_inferred_type_diagnostics() {
     // An unknown name on a path that never runs: a warning by default in
     // every edition, an error under --strict.
-    let source = "if false { say nope }\nsay \"ran\"\n";
+    let source = "if false { println(nope) }\nprintln(\"ran\")\n";
     let dir = project("strict", "2027", &[("main.fg", source)]);
     let out = forge(&dir, &["run", "main.fg"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "ran\n", "{:?}", out);

@@ -1901,7 +1901,8 @@ mod tests {
 
     #[test]
     fn edition_2027_rejects_declared_type_errors_before_running() {
-        let src = "say \"before\"\nfn twice(n: Int) -> Int { return n * 2 }\nsay twice(\"x\")";
+        let src =
+            "println(\"before\")\nfn twice(n: Int) -> Int { return n * 2 }\nprintln(twice(\"x\"))";
         for engine in ENGINES {
             eprintln!("engine: {engine}");
             match Sandbox::new()
@@ -1938,7 +1939,7 @@ mod tests {
     #[test]
     fn edition_2027_checks_annotated_boundaries_at_run_time() {
         let src =
-            "fn same(n: Int) -> Int { return n }\nsay same(2)\nsay same(json.parse(\"\\\"x\\\"\"))";
+            "fn same(n: Int) -> Int { return n }\nprintln(same(2))\nprintln(same(json.parse(\"\\\"x\\\"\")))";
         for engine in ENGINES {
             eprintln!("engine: {engine}");
             match Sandbox::new()
@@ -1976,7 +1977,7 @@ mod tests {
         let module = dir.join("secret.fg");
         std::fs::write(&module, "fn hidden(n: Int) -> Int { return n }").expect("write");
         let src = format!(
-            "import \"{}\"\nsay hidden(\"x\")",
+            "import \"{}\"\nprintln(hidden(\"x\"))",
             module.display().to_string().replace('\\', "/")
         );
         for engine in ENGINES {

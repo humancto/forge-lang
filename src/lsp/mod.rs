@@ -2444,6 +2444,7 @@ mod tests {
             &crate::typechecker::CheckOptions {
                 strict: true,
                 file: None,
+                ..Default::default()
             },
         )
         .expect("parses");

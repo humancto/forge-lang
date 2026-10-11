@@ -2613,6 +2613,30 @@ impl VM {
                 let r = self.gc.alloc(ObjKind::Map(vm_pairs));
                 Value::obj(r)
             }
+            crate::interpreter::Value::ResultOk(inner) => {
+                let v = self.convert_interp_value(inner);
+                Value::obj(self.gc.alloc(ObjKind::ResultOk(v)))
+            }
+            crate::interpreter::Value::ResultErr(inner) => {
+                let v = self.convert_interp_value(inner);
+                Value::obj(self.gc.alloc(ObjKind::ResultErr(v)))
+            }
+            // Options are ADT objects on the VM (see `Some`/the `None`
+            // prelude global).
+            crate::interpreter::Value::Some(inner) => {
+                let v = self.convert_interp_value(inner);
+                let mut obj = IndexMap::new();
+                obj.insert("__type__".to_string(), self.alloc_string("Option"));
+                obj.insert("__variant__".to_string(), self.alloc_string("Some"));
+                obj.insert("_0".to_string(), v);
+                Value::obj(self.gc.alloc(ObjKind::Object(obj)))
+            }
+            crate::interpreter::Value::None => {
+                let mut obj = IndexMap::new();
+                obj.insert("__type__".to_string(), self.alloc_string("Option"));
+                obj.insert("__variant__".to_string(), self.alloc_string("None"));
+                Value::obj(self.gc.alloc(ObjKind::Object(obj)))
+            }
             // Callable builtins returned by shared code (native plugin
             // namespaces from `plugins::import`).
             crate::interpreter::Value::BuiltIn(name) => self.alloc_builtin(name),

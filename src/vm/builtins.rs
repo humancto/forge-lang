@@ -175,6 +175,8 @@ impl VM {
                 .and_then(|t| t.as_obj())
                 .and_then(|r| self.gc.get(r))
                 .is_some_and(|o| matches!(&o.kind, ObjKind::String(s) if s == name)),
+            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.fits_fast(*v, ok, depth + 1),
+            (T::Result(_, err), Some(ObjKind::ResultErr(e))) => self.fits_fast(*e, err, depth + 1),
             (T::Union(members), _) => members.iter().any(|m| self.fits_fast(value, m, depth + 1)),
             _ => false,
         }
@@ -205,7 +207,15 @@ impl VM {
             // takes the shared implementation.
             "__types.check" => match self.types_check_fast(&args) {
                 Some(value) => Ok(value),
-                None => self.call_shared_module(name, &args),
+                None => {
+                    // The shared check raises on a violation; on success
+                    // it returns its argument, which must stay the
+                    // original VM value: a round trip through interpreter
+                    // values does not preserve every kind (`Ok(1)` came
+                    // back as null).
+                    self.call_shared_module(name, &args)?;
+                    Ok(args.first().copied().unwrap_or(Value::null()))
+                }
             },
             "__types.bind" => match self.types_bind_fast(&args) {
                 Some(bound) => Ok(self.alloc_string(&bound)),

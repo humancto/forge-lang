@@ -77,3 +77,42 @@ fn unannotated_code_is_unchecked() {
     assert_eq(f(1), 1)
     assert_eq(f("s"), "s")
 }
+
+struct OptUser { name: String }
+
+fn find_opt_user(xs: [OptUser], n: String) -> ?OptUser {
+    for u in xs {
+        if u.name == n {
+            return Some(u)
+        }
+    }
+    return None
+}
+
+@test
+fn option_of_struct_returns_pass_the_boundary_check() {
+    let xs = [OptUser { name: "a" }]
+    assert(is_some(find_opt_user(xs, "a")))
+    assert(is_none(find_opt_user(xs, "b")))
+}
+
+fn checked_transfer(balances, amount: Int) -> Result<Object, String> {
+    if amount <= 0 {
+        return Err("amount must be positive")
+    }
+    let mut updated = balances
+    updated["a"] = amount
+    return Ok(updated)
+}
+
+@test
+fn result_returns_keep_their_value_through_the_boundary_check() {
+    let ok = checked_transfer({ a: 1 }, 5)
+    assert(is_ok(ok))
+    assert_eq(unwrap(ok).a, 5)
+    let failed = match checked_transfer({ a: 1 }, 0) {
+        Ok(_) => "ok",
+        Err(message) => message,
+    }
+    assert_eq(failed, "amount must be positive")
+}

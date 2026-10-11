@@ -135,6 +135,12 @@ fn corpus_edition_2027_errors_are_strict_errors() {
             if !d.is_error() {
                 continue;
             }
+            // Strict `+` (String + non-String, T0005) is an edition 2027
+            // rule rather than a declared-type contradiction: legal 2026
+            // code, so strict mode in 2026 does not report it.
+            if d.code.as_str() == "T0005" && d.message.contains("String") {
+                continue;
+            }
             let key = format!("{}:{} {}", relative(&path), d.line(), d.code);
             assert!(
                 allowed.contains(&key),

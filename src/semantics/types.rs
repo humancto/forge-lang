@@ -242,6 +242,15 @@ pub fn fits(value: &Value, ty: &RuntimeType) -> bool {
         T::Option(inner) => match value {
             Value::Null | Value::None => true,
             Value::Some(v) => fits(v, inner),
+            // The VM's Option values reach here as tagged objects
+            // (`{__type__: "Option", __variant__: "Some", _0: v}`).
+            Value::Object(map) if type_tag(map) == Some("Option") => {
+                match (map.get("__variant__"), map.get("_0")) {
+                    (Some(Value::String(v)), Some(payload)) if v == "Some" => fits(payload, inner),
+                    (Some(Value::String(v)), _) => v == "None",
+                    _ => false,
+                }
+            }
             other => fits(other, inner),
         },
         T::Result(ok, err) => match value {
