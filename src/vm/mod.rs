@@ -40,7 +40,10 @@ pub fn run_chunk(chunk: &bytecode::Chunk, profile: bool) -> Result<(), VMError> 
 /// Compile and execute in REPL mode (returns the last value).
 #[allow(dead_code)]
 pub fn run_repl(vm: &mut VM, program: &Program) -> Result<value::Value, VMError> {
-    let chunk = compiler::compile_repl(program).map_err(|e| VMError::new(&e.message))?;
+    let predefined =
+        |name: &str| crate::semantics::hoist::is_predefined(name) || vm.globals.get(name).is_some();
+    let chunk =
+        compiler::compile_repl_with(program, &predefined).map_err(|e| VMError::new(&e.message))?;
     vm.execute(&chunk)
 }
 

@@ -138,6 +138,29 @@ fn repl_steps_share_globals_and_chunks_are_reusable_across_vms() {
 }
 
 #[test]
+fn repl_steps_hoist_functions_within_the_step() {
+    let steps = [
+        ("let b = later()\nfn later() {\n    return 5\n}\nb", "5"),
+        ("fn answer() {\n    return 41\n}", "null"),
+        // `answer` exists from the previous step, so this step's new
+        // definition is not hoisted: the call above it gets the old one.
+        (
+            "let a = answer()\nfn answer() {\n    return 1\n}\n[a, answer()]",
+            "[41, 1]",
+        ),
+    ];
+    let mut interp = Interpreter::new();
+    let mut vm = VM::new();
+    for (source, expected) in steps {
+        let program = parse(source);
+        let got = interp.run_repl(&program).expect("interpreter").to_string();
+        assert_eq!(got, expected, "interpreter: {}", source);
+        let got = super::run_repl(&mut vm, &program).expect("vm");
+        assert_eq!(got.display(&vm.gc), expected, "vm: {}", source);
+    }
+}
+
+#[test]
 fn spawn_gets_copies_of_globals() {
     assert_value(
         "let base = 10\nfn add(x) {\n    return x + base\n}\nlet h = spawn { add(5) }\nawait h",

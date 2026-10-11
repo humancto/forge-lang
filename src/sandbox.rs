@@ -1000,6 +1000,18 @@ mod tests {
     }
 
     #[test]
+    fn hoisted_functions_run_in_the_sandbox() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            let out = Sandbox::new()
+                .engine(engine)
+                .run_source("println(mean([2, 4]))\nfn mean(xs) { return sum(xs) / len(xs) }")
+                .expect("runs");
+            assert_eq!(out.stdout, "3\n");
+        }
+    }
+
+    #[test]
     fn edition_2027_rejects_mixed_string_concat() {
         for engine in ENGINES {
             eprintln!("engine: {engine}");
