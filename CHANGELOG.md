@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A capitalised constant can end an `if`/`while` condition: `if c == QUOTE {` followed by a statement parsed `QUOTE { ... }` as a struct literal ("expected identifier, got If"). `Name {` is a struct literal only when `field:` or `}` follows the brace. Found by the eval baseline.
 - `"{}"` is text (an empty JSON object), not an "empty interpolation expression" error.
 - String interpolations may contain string literals: `"{join(xs, ", ")}"` was a syntax error, and `"{join(xs, " ")}"` printed its own source text. Digit-only braces (`"\\d{4}"`, `"[a-z]{2,}"`) are regex quantifiers, not interpolations; a `{` followed by a quote or not closed on its line stays literal text, as before. The top failure cause in the eval's second blind round (10 of 21 failures).
+- JIT: calls between compiled functions use absolute addresses; a 32-bit relative call could not reach code compiled into a mapping more than 2 GiB away and crashed inside `cranelift-jit` (seen intermittently).
 - `forge run app.fg | head` exits quietly when the reader closes the pipe instead of panicking with a backtrace.
 
 ## [0.10.0] - 2026-10-09
