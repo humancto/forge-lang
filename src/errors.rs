@@ -313,10 +313,11 @@ impl ProgramDiagnostic {
         }
     }
 
-    /// A lexer (`E0001`) or parser (`E0002`) error.
+    /// A lexer (`E0001`) or parser (`E0002`, or `E0034` for a form removed
+    /// in edition 2027) error.
     pub fn syntax(lexer: bool, message: &str, file: &str, line: usize, col: usize) -> Self {
         use crate::semantics::errors;
-        let class = errors::lookup(if lexer { "E0001" } else { "E0002" })
+        let class = errors::lookup(errors::syntax_code(lexer, message))
             .expect("BUG: syntax codes are in the table");
         Self {
             code: class.code.to_string(),

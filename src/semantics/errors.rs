@@ -235,7 +235,7 @@ Fix: pass every required argument, or give the parameter a default:
     ErrorCode {
         code: "E0006",
         title: "assignment to an immutable variable",
-        hint: "declare the variable with `let mut` (or `set mut`) to allow reassignment",
+        hint: "declare the variable with `let mut` to allow reassignment",
         explanation: "\
 A variable declared without `mut` was reassigned. Forge bindings are
 immutable by default so that values do not change behind your back.
@@ -785,7 +785,43 @@ Fix: give each task its own stream (call `.stream()` per task), or collect
 it into an array first (`let xs = s.collect()`) and share the array.",
         matches: |h| h.starts_with("stream already in use") || h.starts_with("stream "),
     },
+    ErrorCode {
+        code: "E0034",
+        title: "removed in edition 2027",
+        hint: "use the replacement named in the message; `forge fix --edition 2027` rewrites 2026 code",
+        explanation: "\
+A syntax error: the program runs under edition 2027 (`edition = \"2027\"` in
+forge.toml, or `forge --edition 2027`), which has one way to write each
+thing. The natural-syntax forms of edition 2026 (`set x to`, `change x to`,
+`define`, `otherwise`/`nah`, `forge` functions, `hold`, `emit`, `grab ...
+from`, `repeat n times`, `unpack ... from`, `safe { }`, `must`, `check`,
+`say`/`yell`/`whisper`) are removed; their words are ordinary names again.
+The message names the exact replacement. (The removed builtins `sus`,
+`bruh`, `slay`, ... are unknown names, E0003.)
+
+Example:
+
+    set total to 0          // removed in edition 2027: `set total to ...`
+
+Fix: write the replacement (`let total = 0`), or run
+`forge fix --edition 2027 file.fg`, which rewrites every removed form.
+docs/editions/2027.md lists each form and its replacement.",
+        matches: |h| h.starts_with(crate::semantics::edition::REMOVED_PREFIX),
+    },
 ];
+
+/// The code of a syntax error: `E0001` for the lexer, `E0002` for the
+/// parser, or a more specific syntax class the parser's message names
+/// (`E0034`, a form removed in edition 2027).
+pub fn syntax_code(lexer: bool, message: &str) -> &'static str {
+    if lexer {
+        return "E0001";
+    }
+    if headline(message).starts_with(crate::semantics::edition::REMOVED_PREFIX) {
+        return "E0034";
+    }
+    "E0002"
+}
 
 /// The code for a runtime error message.
 pub fn classify(message: &str) -> &'static ErrorCode {

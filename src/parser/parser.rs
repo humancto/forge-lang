@@ -6,6 +6,9 @@ use super::index::{DefKind, IndexBuilder, OccId, Pos, Role, ScopeKind, Span, Syn
 use crate::lexer::token::{Spanned, Token};
 use crate::lexer::Lexer;
 
+#[path = "removed.rs"]
+mod removed;
+
 pub struct Parser {
     tokens: Vec<Spanned>,
     pos: usize,
@@ -268,6 +271,11 @@ impl Parser {
             Token::Agent => self.parse_agent_def(),
             Token::Download => self.parse_download(),
             Token::Crawl => self.parse_crawl(),
+            // Edition 2027: a removed natural-syntax form (`set x to 1`, ...).
+            Token::Ident(_) => match self.removed_statement_form() {
+                Some(err) => Err(err),
+                None => self.parse_expr_or_assign(),
+            },
             _ => self.parse_expr_or_assign(),
         }
     }
@@ -439,6 +447,9 @@ impl Parser {
 
         let mut methods = Vec::new();
         while !self.check(&Token::RBrace) {
+            if let Some(err) = self.removed_statement_form() {
+                return Err(err);
+            }
             if self.check(&Token::Fn) || self.check(&Token::Define) {
                 self.advance();
             }
@@ -536,6 +547,9 @@ impl Parser {
         methods: &mut Vec<SpannedStmt>,
     ) -> Result<(), ParseError> {
         while !self.check(&Token::RBrace) {
+            if let Some(err) = self.removed_statement_form() {
+                return Err(err);
+            }
             let (line, col) = self.current_pos();
             // `parse_fn_def` takes this, so functions nested in a method
             // body are ordinary functions again.
@@ -893,6 +907,9 @@ impl Parser {
         self.skip_newlines();
         let mut arms = Vec::new();
         while !self.check(&Token::RBrace) {
+            if let Some(err) = self.removed_else_arm() {
+                return Err(err);
+            }
             if self.check(&Token::Else) || self.check(&Token::Otherwise) || self.check(&Token::Nah)
             {
                 self.advance();
@@ -1970,6 +1987,9 @@ impl Parser {
     }
 
     fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
+        if let Some(err) = self.removed_expression_form() {
+            return Err(err);
+        }
         match self.current_token() {
             Token::Await | Token::Hold => {
                 self.advance();

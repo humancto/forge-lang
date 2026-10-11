@@ -2,6 +2,7 @@
 /// Hand-rolled for full control over string interpolation and error reporting.
 /// Will migrate to `logos` in Phase 3 for performance.
 use super::token::{Spanned, Token};
+use crate::semantics::edition::Edition;
 
 /// A comment found while lexing. The parser never sees comments; tools that
 /// must preserve them (the formatter) ask for them with
@@ -27,16 +28,28 @@ pub struct Lexer {
     col: usize,
     /// Collected comments, when the caller asked for them.
     comments: Option<Vec<Comment>>,
+    /// Edition whose keyword set applies (words removed in edition 2027
+    /// lex as plain identifiers there; see [`Token::keyword_in`]).
+    edition: Edition,
 }
 
 impl Lexer {
+    /// A lexer for the edition in effect on this thread
+    /// (`semantics::edition::current`).
     pub fn new(source: &str) -> Self {
+        Self::with_edition(source, crate::semantics::edition::current())
+    }
+
+    /// A lexer for an explicit edition (`forge fix` reads 2026 source
+    /// whatever edition the process runs under).
+    pub fn with_edition(source: &str, edition: Edition) -> Self {
         Self {
             source: source.chars().collect(),
             pos: 0,
             line: 1,
             col: 1,
             comments: None,
+            edition,
         }
     }
 
@@ -427,7 +440,7 @@ impl Lexer {
         let word: String = self.source[start..self.pos].iter().collect();
 
         // Check for keywords
-        Token::keyword_from_str(&word).unwrap_or(Token::Ident(word))
+        Token::keyword_in(&word, self.edition).unwrap_or(Token::Ident(word))
     }
 
     // --- Navigation helpers ---

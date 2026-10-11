@@ -1531,9 +1531,16 @@ pub fn check_source(source: &str) -> Vec<Diagnostic> {
         Err(e) => {
             let (code, line, col, message) = match e {
                 FrontendError::Lex { line, col, message } => ("E0001", line, col, message),
-                FrontendError::Parse { line, col, message } => ("E0002", line, col, message),
+                FrontendError::Parse { line, col, message } => (
+                    crate::semantics::errors::syntax_code(false, &message),
+                    line,
+                    col,
+                    message,
+                ),
             };
-            let hint = crate::semantics::errors::lookup(code).map(|c| c.hint.to_string());
+            let hint = crate::semantics::errors::message_hint(&message)
+                .map(str::to_string)
+                .or_else(|| crate::semantics::errors::lookup(code).map(|c| c.hint.to_string()));
             vec![Diagnostic {
                 line,
                 column: col,
