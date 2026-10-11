@@ -1,0 +1,134 @@
+// Global numeric builtins: abs, min, max, round, to_fixed
+// (shared rules in stdlib/math.rs, same results on both engines).
+
+fn message_of(f) {
+    try {
+        f()
+    } catch e {
+        return e.message
+    }
+    return "no error"
+}
+
+@test
+fn abs_keeps_the_type() {
+    assert_eq(abs(-5), 5)
+    assert_eq(abs(5), 5)
+    assert_eq(abs(-2.5), 2.5)
+    assert_eq(typeof(abs(-3)), "Int")
+    assert_eq(typeof(abs(-3.0)), "Float")
+    assert_eq(abs(0), 0)
+    // i64::MIN has no Int magnitude: promotes to Float, like math.abs.
+    assert_eq(typeof(abs(-9223372036854775807 - 1)), "Float")
+    assert_eq(abs(-7), math.abs(-7))
+    assert_eq((-4).abs(), 4)
+}
+
+@test
+fn abs_rejects_non_numbers() {
+    assert(starts_with(message_of(fn() { abs("x") }), "abs() requires a number"))
+}
+
+@test
+fn min_max_of_values() {
+    assert_eq(min(3, 1), 1)
+    assert_eq(max(3, 1), 3)
+    assert_eq(min(4, 2, 8, 6), 2)
+    assert_eq(max(4, 2, 8, 6), 8)
+    assert_eq(min(-1, -1), -1)
+    assert_eq(typeof(min(1, 2)), "Int")
+    // Any Float makes the result a Float.
+    assert_eq(min(1, 2.5), 1.0)
+    assert_eq(typeof(min(1, 2.5)), "Float")
+    assert_eq(max(1, 2.5), 2.5)
+}
+
+@test
+fn min_max_of_an_array() {
+    assert_eq(min([5, 3, 9]), 3)
+    assert_eq(max([5, 3, 9]), 9)
+    assert_eq(max([1.5]), 1.5)
+    assert_eq(max(freeze([2, 7])), 7)
+    assert_eq(min([5, 3, 9]), min_of([5, 3, 9]))
+}
+
+@test
+fn min_max_errors() {
+    assert(starts_with(message_of(fn() { min([]) }), "min() requires a non-empty array"))
+    assert(starts_with(message_of(fn() { max(5) }), "max() requires two or more numbers, or one array of numbers"))
+    assert(starts_with(message_of(fn() { min(1, "a") }), "min() requires numbers"))
+    assert(starts_with(message_of(fn() { max(["a", "b"]) }), "max() requires numbers"))
+}
+
+@test
+fn round_without_digits_gives_an_int() {
+    assert_eq(round(2.4), 2)
+    assert_eq(round(2.5), 3)
+    assert_eq(round(-2.5), -3)
+    assert_eq(round(7), 7)
+    assert_eq(typeof(round(2.6)), "Int")
+    assert_eq(round(2.6), math.round(2.6))
+}
+
+@test
+fn round_with_digits_keeps_a_float() {
+    assert_eq(round(3.14159, 2), 3.14)
+    assert_eq(round(2.675, 2), 2.67)
+    assert_eq(round(0.125, 2), 0.13)
+    assert_eq(round(-0.125, 2), -0.13)
+    assert_eq(round(2.5, 0), 3.0)
+    assert_eq(typeof(round(2.5, 0)), "Float")
+    assert_eq(round(1234.5678, 1), 1234.6)
+    assert_eq(round(5, 2), 5)
+    assert_eq(typeof(round(5, 2)), "Int")
+    assert_eq(round(1.0 / 3.0, 100), 1.0 / 3.0)
+    assert_eq((3.14159).round(3), 3.142)
+}
+
+@test
+fn round_digits_errors() {
+    assert(starts_with(message_of(fn() { round(1.5, -1) }), "round() requires the number of digits to be an Int from 0 to 100"))
+    assert(starts_with(message_of(fn() { round(1.5, 101) }), "round() requires the number of digits"))
+    assert(starts_with(message_of(fn() { round(1.5, 1.0) }), "round() requires the number of digits"))
+    assert(starts_with(message_of(fn() { round("1.5") }), "round() requires a number"))
+}
+
+@test
+fn to_fixed_pads_and_rounds() {
+    assert_eq(to_fixed(2.5, 2), "2.50")
+    assert_eq(to_fixed(3, 2), "3.00")
+    assert_eq(to_fixed(3.14159, 2), "3.14")
+    assert_eq(to_fixed(2.675, 2), "2.67")
+    assert_eq(to_fixed(1.005, 2), "1.00")
+    assert_eq(to_fixed(0.125, 2), "0.13")
+    assert_eq(to_fixed(9.995, 2), "9.99")
+    assert_eq(to_fixed(9.9951, 2), "10.00")
+    assert_eq(to_fixed(-1.5, 0), "-2")
+    assert_eq(to_fixed(2.5), "3")
+    assert_eq(to_fixed(-2.345, 1), "-2.3")
+    assert_eq(to_fixed(-12, 1), "-12.0")
+    assert_eq(to_fixed(0.0, 3), "0.000")
+    // A result that rounds to zero has no minus sign.
+    assert_eq(to_fixed(-0.004, 2), "0.00")
+    assert_eq(to_fixed(1000000000000000000000.0, 1), "1000000000000000000000.0")
+    assert_eq(len(to_fixed(0.1, 100)), 102)
+    assert_eq((2.5).to_fixed(2), "2.50")
+    let price = 19.999
+    assert_eq("total: {price.to_fixed(2)}", "total: 20.00")
+}
+
+@test
+fn to_fixed_non_finite() {
+    assert_eq(to_fixed(math.inf, 2), str(math.inf))
+    assert_eq(to_fixed(-math.inf, 2), str(-math.inf))
+    let nan = math.inf - math.inf
+    assert_eq(to_fixed(nan, 2), str(nan))
+    assert_eq(str(round(nan, 2)), str(nan))
+}
+
+@test
+fn to_fixed_errors() {
+    assert(starts_with(message_of(fn() { to_fixed("2.5", 2) }), "to_fixed() requires a number"))
+    assert(starts_with(message_of(fn() { to_fixed(2.5, 1000) }), "to_fixed() requires the number of digits to be an Int from 0 to 100"))
+    assert(starts_with(message_of(fn() { to_fixed(2.5, -1) }), "to_fixed() requires the number of digits"))
+}

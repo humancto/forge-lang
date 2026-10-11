@@ -3038,7 +3038,38 @@ impl VM {
                     .map_err(|m| VMError::new(&m))?;
                 Value::obj(self.gc.alloc_string(l + &r))
             }
+            Outcome::ArrayConcat => {
+                let items = self.concat_array_items(left, right)?;
+                Value::obj(self.gc.alloc(ObjKind::Array(items)))
+            }
         })
+    }
+
+    /// The items of `left + right` for two arrays (frozen ones included),
+    /// checked against the collection size cap before copying.
+    pub(super) fn concat_array_items(
+        &self,
+        left: &Value,
+        right: &Value,
+    ) -> Result<Vec<Value>, VMError> {
+        let a = self.concat_operand_items(left);
+        let b = self.concat_operand_items(right);
+        self.caps
+            .check_collection(a.len() + b.len())
+            .map_err(|m| VMError::new(&m))?;
+        let mut out = Vec::with_capacity(a.len() + b.len());
+        out.extend_from_slice(a);
+        out.extend_from_slice(b);
+        Ok(out)
+    }
+
+    /// The items of an array or frozen array; empty for anything else.
+    pub(super) fn concat_operand_items(&self, value: &Value) -> &[Value] {
+        match value.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::Array(items)) => items,
+            Some(ObjKind::Frozen(inner)) => self.concat_operand_items(inner),
+            _ => &[],
+        }
     }
 
     pub(super) fn arith_op(

@@ -1,0 +1,49 @@
+// json.parse keeps the document's key order; json.compact has no spaces.
+
+@test
+fn parse_preserves_key_order() {
+    let obj = json.parse("""{"zeta": 1, "alpha": 2, "mid": {"b": 1, "a": 2}}""")
+    assert_eq(keys(obj), ["zeta", "alpha", "mid"])
+    assert_eq(keys(obj.mid), ["b", "a"])
+    assert_eq(json.stringify(obj), """{"zeta": 1, "alpha": 2, "mid": {"b": 1, "a": 2}}""")
+}
+
+@test
+fn parse_repeated_key_keeps_first_position_last_value() {
+    let obj = json.parse("""{"a": 1, "b": 2, "a": 3}""")
+    assert_eq(keys(obj), ["a", "b"])
+    assert_eq(obj.a, 3)
+}
+
+@test
+fn parse_values() {
+    let v = json.parse("""[1, -2, 2.5, true, null, "s", 18446744073709551615]""")
+    assert_eq(v[0], 1)
+    assert_eq(v[1], -2)
+    assert_eq(v[2], 2.5)
+    assert_eq(v[3], true)
+    assert_eq(v[4], null)
+    assert_eq(v[5], "s")
+    assert_eq(typeof(v[6]), "Float")
+}
+
+@test
+fn compact_has_no_whitespace() {
+    let data = { team: "data", size: 3, leads: ["Di", "Ed"], meta: { ok: true, none: null } }
+    assert_eq(json.compact(data), """{"team":"data","size":3,"leads":["Di","Ed"],"meta":{"ok":true,"none":null}}""")
+    assert_eq(json.compact([]), "[]")
+    assert_eq(json.compact({}), "{}")
+    assert_eq(json.compact("a, b: c"), "\"a, b: c\"")
+    assert_eq(json.compact([1, [2, 3]]), "[1,[2,3]]")
+}
+
+@test
+fn stringify_is_unchanged() {
+    assert_eq(json.stringify({ a: [1, 2], b: "x" }), """{"a": [1, 2], "b": "x"}""")
+}
+
+@test
+fn round_trip_keeps_order() {
+    let text = """{"z":1,"y":[{"q":1,"p":2}],"x":null}"""
+    assert_eq(json.compact(json.parse(text)), text)
+}

@@ -1,0 +1,4 @@
+// expect: [[zeta, alpha], {"zeta":1,"alpha":[1,2.5,"x"]}]
+// json.parse keeps document key order; json.compact has no whitespace.
+let obj = json.parse("""{"zeta": 1, "alpha": [1, 2.5, "x"]}""")
+[keys(obj), json.compact(obj)]

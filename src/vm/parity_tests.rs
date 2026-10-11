@@ -1090,8 +1090,18 @@ fn vm_bet_no_cap() {
 // ----- Language-semantics parity (shared rules in `crate::semantics`) -----
 
 #[test]
-fn parity_array_plus_array_is_type_error() {
-    assert_cross_backend_error_contains("[1, 2] + [3]", "cannot apply Add to Array and Array");
+fn parity_array_plus_array_concatenates() {
+    assert_cross_backend_value("[1, 2] + [3]", "[1, 2, 3]");
+    assert_cross_backend_value(
+        "let mut xs = [1]\nlet ys = xs\nxs = xs + [2]\nxs += [3]\n[ys, xs]",
+        "[[1], [1, 2, 3]]",
+    );
+}
+
+#[test]
+fn parity_array_minus_array_is_type_error() {
+    assert_cross_backend_error_contains("[1, 2] - [3]", "cannot apply Sub to Array and Array");
+    assert_cross_backend_error_contains("[1, 2] + 3", "cannot apply Add to Array and Int");
 }
 
 #[test]

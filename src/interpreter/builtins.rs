@@ -9,6 +9,26 @@
 /// accessible to the rest of the module where it is called.
 use super::*;
 
+/// A numeric argument of the global math builtins (`abs`, `min`, ...);
+/// `None` for anything that is not an Int or a Float.
+fn num_arg(v: Option<&Value>) -> Option<crate::stdlib::math::Num> {
+    use crate::stdlib::math::Num;
+    match v {
+        Some(Value::Int(n)) => Some(Num::Int(*n)),
+        Some(Value::Float(f)) => Some(Num::Float(*f)),
+        _ => None,
+    }
+}
+
+/// The optional Int `digits` argument of `round` / `to_fixed`: absent,
+/// or present (and an Int or not).
+fn digits_arg(v: Option<&Value>) -> Option<Option<i64>> {
+    v.map(|d| match d {
+        Value::Int(n) => Some(*n),
+        _ => None,
+    })
+}
+
 /// Construct a Map from an Array/Tuple of 2-element pairs, from an Array of
 /// 2-element arrays, or by cloning another Map. Used by `map(arg)` and by
 /// the `map()` constructor overload.
@@ -1161,6 +1181,36 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new("count() requires (string, substring)")),
             },
+            // ===== Numbers (shared rules: `stdlib::math::global_*`) =====
+            "abs" => crate::stdlib::math::global_abs(num_arg(args.first()))
+                .map(|n| n.into_interp())
+                .map_err(|e| RuntimeError::new(&e)),
+            "min" | "max" => {
+                use crate::stdlib::math::MinMaxArgs;
+                let first = match args.first() {
+                    Some(Value::Frozen(inner)) => Some(inner.as_ref()),
+                    other => other,
+                };
+                let spread = match (args.len(), first) {
+                    (1, Some(Value::Array(items))) => {
+                        MinMaxArgs::Array(items.iter().map(|v| num_arg(Some(v))).collect())
+                    }
+                    _ => MinMaxArgs::Values(args.iter().map(|v| num_arg(Some(v))).collect()),
+                };
+                crate::stdlib::math::global_min_max(name, spread, name == "min")
+                    .map(|n| n.into_interp())
+                    .map_err(|e| RuntimeError::new(&e))
+            }
+            "round" => {
+                crate::stdlib::math::global_round(num_arg(args.first()), digits_arg(args.get(1)))
+                    .map(|n| n.into_interp())
+                    .map_err(|e| RuntimeError::new(&e))
+            }
+            "to_fixed" => {
+                crate::stdlib::math::global_to_fixed(num_arg(args.first()), digits_arg(args.get(1)))
+                    .map(Value::String)
+                    .map_err(|e| RuntimeError::new(&e))
+            }
             // ===== Numeric Aggregates =====
             "sum" => match args.first() {
                 Some(Value::Array(arr)) => {
@@ -1728,9 +1778,8 @@ impl Interpreter {
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let json: serde_json::Value = serde_json::from_str(stdout.trim())
-                    .map_err(|e| RuntimeError::new(&format!("sh_json parse error: {}", e)))?;
-                Ok(crate::stdlib::json_module::json_to_forge(json))
+                crate::stdlib::json_module::parse_str(stdout.trim())
+                    .map_err(|e| RuntimeError::new(&format!("sh_json parse error: {}", e)))
             }
             "sh_ok" => {
                 let _subprocess =

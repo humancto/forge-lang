@@ -201,14 +201,11 @@ fn ws_receive(id: &str, timeout_ms: u64) -> Result<Value, String> {
             Ok(Some(Ok(msg))) => match msg {
                 Message::Text(text) => {
                     let text_str = text.to_string();
-                    match serde_json::from_str::<serde_json::Value>(&text_str) {
+                    match crate::stdlib::json_module::parse_str(&text_str) {
                         Ok(json) => {
                             let mut result = IndexMap::new();
                             result.insert("type".to_string(), Value::String("text".to_string()));
-                            result.insert(
-                                "data".to_string(),
-                                crate::runtime::server::json_to_forge(json),
-                            );
+                            result.insert("data".to_string(), json);
                             result.insert("raw".to_string(), Value::String(text_str));
                             Ok(Value::Object(result))
                         }

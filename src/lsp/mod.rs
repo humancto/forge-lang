@@ -781,7 +781,7 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         ("mysql", vec!["connect", "query", "execute", "close"]),
         ("jwt", vec!["sign", "verify", "decode", "valid"]),
         ("env", vec!["get", "set", "keys", "has"]),
-        ("json", vec!["parse", "stringify", "pretty"]),
+        ("json", vec!["parse", "stringify", "compact", "pretty"]),
         (
             "regex",
             vec!["test", "find", "find_all", "replace", "split"],
@@ -1506,6 +1506,23 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     (
         "max_of",
         "fn max_of(array) -> Value — Find maximum value in array",
+    ),
+    ("abs", "fn abs(x) -> Number — Absolute value (Int stays Int)"),
+    (
+        "min",
+        "fn min(a, b, ...) -> Number — Smallest of the numbers, or of one array",
+    ),
+    (
+        "max",
+        "fn max(a, b, ...) -> Number — Largest of the numbers, or of one array",
+    ),
+    (
+        "round",
+        "fn round(x, digits?) -> Number — Int without digits; Float rounded to digits decimals",
+    ),
+    (
+        "to_fixed",
+        "fn to_fixed(x, digits) -> String — x with exactly digits decimals: to_fixed(2.5, 2) is \"2.50\"",
     ),
     ("unique", "fn unique(array) -> Array — Remove duplicates"),
     (

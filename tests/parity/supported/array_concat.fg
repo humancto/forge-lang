@@ -1,0 +1,17 @@
+// expect: [[1, 2], [1, 2, 3, 4], [0, 1, 2, 3, 4], [1, 2, 3]]
+// `+` on two arrays builds a new array; in-place appends to a local are
+// invisible through aliases.
+let mut xs = [1, 2]
+let alias = xs
+xs = xs + [3]
+xs += [4]
+let mut built = []
+for i in range(5) {
+    built = built + [i]
+}
+fn grow(a) {
+    let mut b = a
+    b = b + [3]
+    return b
+}
+[alias, xs, built, grow([1, 2])]

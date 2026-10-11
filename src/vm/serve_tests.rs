@@ -142,7 +142,9 @@ fn handler_arguments_bind_like_the_interpreter() {
     let mut req = HandlerRequest::default();
     req.path_params.insert("id".to_string(), "7".to_string());
     req.query_params.insert("page".to_string(), "2".to_string());
-    req.body = Some(json!({"name": "forge", "tags": [1, 2.5, null, true]}));
+    req.body = Some(crate::runtime::server::json_to_forge(
+        json!({"name": "forge", "tags": [1, 2.5, null, true]}),
+    ));
     let (status, body) = request(&t, "show", req);
     assert_eq!(status, StatusCode::OK);
     assert_eq!(

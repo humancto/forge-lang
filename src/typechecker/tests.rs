@@ -999,10 +999,13 @@ fn hoisted_functions_are_not_used_before_definition() {
 #[test]
 fn invalid_operators_follow_the_shared_rules() {
     assert_eq!(codes("say \"a\" - 1"), vec![Code::InvalidOperator]);
-    assert_eq!(codes("say [1] + [2]"), vec![Code::InvalidOperator]);
+    assert_eq!(codes("say [1] - [2]"), vec![Code::InvalidOperator]);
+    assert_eq!(codes("say [1] + 2"), vec![Code::InvalidOperator]);
     assert_eq!(codes("say 1 + true"), vec![Code::InvalidOperator]);
     // String + anything concatenates; numbers mix; strings compare.
     assert!(codes("say \"a\" + 1\nsay 1 + 2.5\nsay \"a\" < \"b\"\nsay 7 / 2").is_empty());
+    // Two arrays concatenate.
+    assert!(codes("say [1] + [2]\nlet mut xs = [1]\nxs += [\"a\"]").is_empty());
 }
 
 #[test]
