@@ -3,7 +3,7 @@
 #
 #   packaging/homebrew/fill.sh <version> <SHA256SUMS.txt> [template] > forge.rb
 #
-# <version> may carry a leading "v" (0.10.0 or v0.10.0). <SHA256SUMS.txt> is
+# <version> may carry a leading "v" (0.11.0 or v0.11.0). <SHA256SUMS.txt> is
 # the file the release workflow attaches to the GitHub release
 # (`sha256sum` format: "<hex>  forge-v<version>-<target>.tar.gz").
 # Fails if any target the formula needs is missing from the sums file or if

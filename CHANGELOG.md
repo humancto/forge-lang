@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-11
+
 ### Added
 
 - **Top-level functions are hoisted** (all editions, both engines, `src/semantics/hoist.rs`) — a top-level `fn` (also `async fn` and decorated functions) can be called above its definition: `let avg = mean(nums)` before `fn mean(xs) { ... }` no longer fails with E0003. Each definition runs as early as it can without changing what any name means: a function that reads a top-level variable runs right after that variable is defined (calling it above that point is the usual `undefined variable` error naming the function), so a hoisted function never sees an uninitialized variable and captures exactly what it did before. Names defined more than once, assigned, or shadowing a builtin are not hoisted, so redefinition behaves as before; `impl` blocks stay in place. Applies to imported modules, REPL steps (names from earlier steps are not hoisted), `forge test` files, servers, MCP tool files and the sandbox. The type checker no longer reports T0018 for such calls.
