@@ -461,9 +461,11 @@ in `try { ... } catch e { ... }`.",
         title: "value does not match its type annotation",
         hint: "pass a value of the annotated type, or loosen the annotation",
         explanation: "\
-Under `forge run --strict`, annotated parameters and return types are also
-checked while the program runs. A value that does not fit its annotation
-stops the program at the call or return.
+From edition 2027 (and under `forge run --strict` in 2026), annotated
+parameters and return types are also checked while the program runs. A
+value that does not fit its annotation stops the program at the call or
+return; a generic parameter declared exactly `T` must get the same type
+from every argument of one call.
 
 Example:
 

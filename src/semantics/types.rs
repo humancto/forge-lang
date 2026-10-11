@@ -257,6 +257,91 @@ pub fn fits(value: &Value, ty: &RuntimeType) -> bool {
     }
 }
 
+/// What one argument says about a generic type parameter at run time, in
+/// canonical notation: its outer type (`Int`, `Named:Point`, `[Any]`, ...).
+/// `None` when it says nothing (`Option` values, streams, tasks,
+/// channels). Element types are not looked at, so binding is O(1) per
+/// argument.
+pub fn param_shape(value: &Value) -> Option<String> {
+    Some(match value {
+        Value::Frozen(inner) => return param_shape(inner),
+        Value::Int(_) => "Int".into(),
+        Value::Float(_) => "Float".into(),
+        Value::String(_) => "String".into(),
+        Value::Bool(_) => "Bool".into(),
+        Value::Null => "Null".into(),
+        Value::Object(map) => match type_tag(map) {
+            Some(name) => format!("Named:{}", name),
+            None => "Object".into(),
+        },
+        Value::Function(_) | Value::Lambda { .. } | Value::BuiltIn(_) => "Fn".into(),
+        Value::Array(_) => "[Any]".into(),
+        Value::Set(_) => "Set<Any>".into(),
+        Value::Map(_) => "Map<Any,Any>".into(),
+        Value::ResultOk(_) | Value::ResultErr(_) => "Result<Any,Any>".into(),
+        Value::Tuple(items) => format!("({})", vec!["Any"; items.len()].join(",")),
+        Value::Some(_)
+        | Value::None
+        | Value::Stream(_)
+        | Value::TaskHandle(_)
+        | Value::Channel(_) => return None,
+    })
+}
+
+/// Bind a generic type parameter from the arguments at the positions
+/// declared exactly `T` (`fn pair<T>(a: T, b: T)`), consistently within one
+/// call: every argument must have the shape of the first one that has a
+/// shape, except that Int and Float make `Float` (an Int fits Float). On
+/// success, the canonical type `T` stands for in this call (`Any` when no
+/// argument says); on failure, `(index, first_index, bound)`: argument
+/// `index` does not fit the type bound by argument `first_index`.
+pub fn bind_param(values: &[Value]) -> Result<String, (usize, usize, String)> {
+    bind_shapes(values.iter().map(param_shape))
+}
+
+/// [`bind_param`] over the arguments' shapes ([`param_shape`]); engines
+/// that compute shapes on their own values (the VM) share the rule.
+pub fn bind_shapes(
+    shapes: impl IntoIterator<Item = Option<String>>,
+) -> Result<String, (usize, usize, String)> {
+    let mut bound: Option<(usize, String)> = None;
+    for (i, shape) in shapes.into_iter().enumerate() {
+        let Some(shape) = shape else {
+            continue;
+        };
+        match &mut bound {
+            None => bound = Some((i, shape)),
+            Some((_, b)) if *b == shape => {}
+            Some((_, b)) if b == "Float" && shape == "Int" => {}
+            Some((_, b)) if b == "Int" && shape == "Float" => *b = "Float".into(),
+            Some((first, b)) => return Err((i, *first, b.clone())),
+        }
+    }
+    Ok(bound.map_or_else(|| "Any".to_string(), |(_, b)| b))
+}
+
+/// The run-time error for an argument that does not fit the type its
+/// generic parameter was bound to earlier in the same call.
+pub fn param_violation(
+    function: &str,
+    param: &str,
+    type_param: &str,
+    first: &str,
+    bound: &str,
+    value: &Value,
+) -> String {
+    let bound = parse(bound).map_or_else(|_| bound.to_string(), |t| t.to_string());
+    format!(
+        "type error: argument '{}' of '{}' must be {} like argument '{}' (type parameter {}), got {}",
+        param,
+        function,
+        bound,
+        first,
+        type_param,
+        describe(value)
+    )
+}
+
 /// The type name shown for a value in a violation message.
 pub fn describe(value: &Value) -> String {
     match value {
@@ -358,6 +443,44 @@ mod tests {
         for (value, ty, expected) in cases {
             assert_eq!(fits(&value, &t(ty)), expected, "{:?} : {}", value, ty);
         }
+    }
+
+    #[test]
+    fn generic_parameters_bind_consistently() {
+        let s = |x: &str| Value::String(x.into());
+        assert_eq!(bind_param(&[s("a"), s("b")]), Ok("String".to_string()));
+        assert_eq!(
+            bind_param(&[Value::Int(1), Value::Float(2.5)]),
+            Ok("Float".to_string())
+        );
+        assert_eq!(
+            bind_param(&[Value::Float(2.5), Value::Int(1)]),
+            Ok("Float".to_string())
+        );
+        assert_eq!(
+            bind_param(&[Value::None, Value::None]),
+            Ok("Any".to_string())
+        );
+        assert_eq!(
+            bind_param(&[Value::Int(1), s("x")]),
+            Err((1, 0, "Int".to_string()))
+        );
+        assert_eq!(
+            bind_param(&[Value::Array(vec![]), Value::Array(vec![Value::Int(1)])]),
+            Ok("[Any]".to_string())
+        );
+        // Every shape is valid canonical notation.
+        for v in [
+            Value::Tuple(vec![Value::Int(1), Value::Null]),
+            Value::Map(vec![]),
+        ] {
+            let shape = param_shape(&v).expect("has a shape");
+            assert!(fits(&v, &t(&shape)), "{}", shape);
+        }
+        assert_eq!(
+            param_violation("pair", "b", "T", "a", "Int", &s("x")),
+            "type error: argument 'b' of 'pair' must be Int like argument 'a' (type parameter T), got String"
+        );
     }
 
     #[test]

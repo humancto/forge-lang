@@ -1,0 +1,79 @@
+// Edition 2027: annotations are enforced (docs/editions/2027.md).
+// Statically certain contradictions of declared types stop the program
+// before it runs (pinned by the CLI and type-checker tests); values the
+// checker cannot see (JSON, unannotated helpers) are checked at annotated
+// function boundaries while the program runs.
+//   forge --edition 2027 test tests/edition2027 --engine both
+
+struct Point { x: Int, y: Int }
+
+fn first_int(xs: [Int]) -> Int { return xs[0] }
+fn claims_int(v) -> Int { return v }
+fn tail_claims_string(v) -> String { v }
+fn norm(p: Point) -> Int { return p.x + p.y }
+fn maybe_len(s: ?String) -> Int {
+    if s == null { return 0 }
+    return len(s)
+}
+fn scale(x: Float) -> Float { return x * 2.0 }
+fn pair<T>(a: T, b: T) -> [T] { return [a, b] }
+fn first<T>(xs: [T]) -> T { return xs[0] }
+
+// Unannotated: the checker knows nothing about what this returns.
+fn opaque(v) { return v }
+
+@test
+fn correct_calls_pass() {
+    assert_eq(first_int([4, 5]), 4)
+    assert_eq(norm(Point { x: 1, y: 2 }), 3)
+    assert_eq(maybe_len(null), 0)
+    assert_eq(maybe_len("abc"), 3)
+    // An Int fits Float.
+    assert_eq(scale(2), 4.0)
+    assert_eq(first([7, 8]), 7)
+    assert_eq(pair(1, 2.5), [1, 2.5])
+}
+
+@test
+fn arguments_are_checked_at_run_time() {
+    let data = json.parse("[\"a\", \"b\"]")
+    assert_throws(fn() { first_int(data) })
+    assert_throws(fn() { norm(opaque({ x: 1, y: 2 })) })
+    assert_throws(fn() { maybe_len(opaque(5)) })
+}
+
+@test
+fn returns_are_checked_at_run_time() {
+    assert_eq(claims_int(3), 3)
+    assert_throws(fn() { claims_int("three") })
+    assert_eq(tail_claims_string("s"), "s")
+    assert_throws(fn() { tail_claims_string(1) })
+}
+
+@test
+fn violation_names_the_boundary() {
+    let mut message = ""
+    let mut code = ""
+    try {
+        first_int(opaque(["a"]))
+    } catch e {
+        message = e.message
+        code = e.code
+    }
+    assert(contains(message, "argument 'xs' of 'first_int' must be [Int]"))
+    assert_eq(code, "E0017")
+}
+
+@test
+fn generic_parameters_are_consistent_within_a_call() {
+    assert_eq(pair("a", "b"), ["a", "b"])
+    assert_throws(fn() { pair(1, opaque("x")) })
+}
+
+@test
+fn unannotated_code_is_unchecked() {
+    assert_eq(opaque("anything"), "anything")
+    let f = fn(x) { return x }
+    assert_eq(f(1), 1)
+    assert_eq(f("s"), "s")
+}

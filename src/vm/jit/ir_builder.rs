@@ -663,6 +663,8 @@ fn build_body<M: Module>(
                         return Err(format!("BUG: unverified call at ip {}", ip));
                     };
                     match info {
+                        // A type parameter's binding: compile-time only.
+                        CallInfo::TypeBinding { .. } => {}
                         CallInfo::SelfCall | CallInfo::Callee { .. } => {
                             let (target, csig, ret) = match info {
                                 CallInfo::Callee { id, sig, ret, .. } => {
@@ -820,6 +822,7 @@ fn lower_pure<M: Module>(
             Ok(b.inst_results(inst)[0])
         };
     Ok(match op {
+        PureOp::Identity => regs.get(b, base, args[0]),
         PureOp::ToFloat => f64_arg(b, 0),
         PureOp::ToInt => match args[0] {
             // `n as i64`: saturating, NaN -> 0.

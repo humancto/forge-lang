@@ -15,8 +15,13 @@
 //!   before their definition runs, unreachable code, missing returns and
 //!   non-exhaustive matches.
 //!
-//! Every diagnostic has a stable code (`T0001`...; see [`Code`]). By
-//! default all of them are warnings; `--strict` makes them errors.
+//! Every diagnostic has a stable code (`T0001`...; see [`Code`]). In
+//! edition 2026 all of them are warnings by default; `--strict` makes them
+//! errors. From edition 2027, a contradiction of a *declared* type
+//! (`Code::contradicts_declaration`: T0001-T0003, T0012, T0015, T0016) is
+//! an error by default, and annotated function boundaries are checked at
+//! run time too (`enforce`); diagnostics resting on inferred types stay
+//! warnings unless `--strict` ([`SeverityPolicy`]).
 //!
 //! Entry point: [`analyze`] (source text → full [`Analysis`]), used by the
 //! CLI, the LSP and `forge mcp`.
@@ -34,11 +39,12 @@ mod corpus_tests;
 #[cfg(test)]
 mod tests;
 
-pub use diagnostics::{Code, Diagnostic, Fix, Severity};
+pub use diagnostics::{Basis, Code, Diagnostic, Fix, SeverityPolicy};
 pub use infer::TypeFacts;
 
 use crate::parser::ast::{Program, Stmt};
 use crate::parser::index::{DefKind, Role, Span, SyntaxIndex};
+use crate::semantics::edition::Edition;
 use resolve::{ImportedNames, Resolution, Resolved};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -49,6 +55,23 @@ pub struct CheckOptions {
     pub strict: bool,
     /// The file being checked; imports are resolved relative to it.
     pub file: Option<PathBuf>,
+    /// The edition whose rules grade the diagnostics; `None`: the edition
+    /// in effect on this thread (`semantics::edition::current`).
+    pub edition: Option<Edition>,
+    /// Do not read imported files: their declarations are unknown (`Any`).
+    /// For hosts that must not touch the file system outside a run's
+    /// permission policy (`Sandbox`).
+    pub skip_imports: bool,
+}
+
+impl CheckOptions {
+    pub fn policy(&self) -> SeverityPolicy {
+        SeverityPolicy::new(
+            self.strict,
+            self.edition
+                .unwrap_or_else(crate::semantics::edition::current),
+        )
+    }
 }
 
 /// A failure before type checking could start.
@@ -106,6 +129,58 @@ pub fn analyze(source: &str, options: &CheckOptions) -> Result<Analysis, Fronten
     Ok(analyze_parsed(program, index, options))
 }
 
+/// Why [`prepare`] refused a program.
+#[derive(Debug, Clone)]
+pub enum PrepareError {
+    Frontend(FrontendError),
+    /// The checker found errors (all diagnostics, warnings included, in
+    /// checking order).
+    Type(Vec<Diagnostic>),
+}
+
+/// The front end of every surface that *runs* code (`forge run`/`test`/
+/// `-e`, the REPL, `Sandbox`): check `source`, refuse it when a diagnostic
+/// is an error under `options.policy()` (`--strict`, or a contradiction of
+/// a declared type from edition 2027), and instrument annotated function
+/// boundaries for run-time checks when the policy enforces them
+/// ([`enforce`]). Returns the program to run and the (warning)
+/// diagnostics to show.
+pub fn prepare(
+    source: &str,
+    options: &CheckOptions,
+) -> Result<(Program, Vec<Diagnostic>), PrepareError> {
+    let policy = options.policy();
+    let options = CheckOptions {
+        edition: Some(policy.edition),
+        ..options.clone()
+    };
+    let analysis = analyze(source, &options).map_err(PrepareError::Frontend)?;
+    let diagnostics = analysis.diagnostics;
+    if diagnostics.iter().any(|d| d.is_error()) {
+        return Err(PrepareError::Type(diagnostics));
+    }
+    let mut program = analysis.program;
+    if policy.enforces_at_run_time() {
+        enforce::instrument(&mut program);
+    }
+    Ok((program, diagnostics))
+}
+
+/// The closing line of a run refused by type errors (`forge run`), naming
+/// the rule that made them errors.
+pub fn refusal_summary(errors: usize, policy: SeverityPolicy) -> String {
+    format!(
+        "type checking failed with {} error{} ({})",
+        errors,
+        if errors == 1 { "" } else { "s" },
+        if policy.strict {
+            "--strict".to_string()
+        } else {
+            format!("edition {}: declared types are enforced", policy.edition)
+        }
+    )
+}
+
 /// Check a program parsed with a syntax index.
 pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptions) -> Analysis {
     let base_dir = options
@@ -113,7 +188,7 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
         .as_deref()
         .and_then(Path::parent)
         .map(Path::to_path_buf);
-    let imports = collect_imports(&program, base_dir.as_deref());
+    let imports = collect_imports(&program, base_dir.as_deref(), options.skip_imports);
     let loaded: Vec<Option<Program>> = imports
         .iter()
         .map(|i| i.resolved.as_deref().and_then(load_module))
@@ -131,7 +206,8 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
 
     let resolution = resolve::resolve(&index, &wildcard_imports);
 
-    let mut checker = infer::Checker::new(options.strict, Some(&index), Some(&resolution));
+    let policy = options.policy();
+    let mut checker = infer::Checker::new(policy, Some(&index), Some(&resolution));
     for (info, program) in imports.iter().zip(&loaded) {
         if let Some(program) = program {
             checker.import_declarations(program, info.names.as_deref());
@@ -144,7 +220,7 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
         &index,
         &resolution,
         &wildcard_imports,
-        options.strict,
+        policy,
     ));
     diagnostics.retain(|d| !suppressed.iter().any(|r| within(d.span, *r)));
     sort_diagnostics(&mut diagnostics);
@@ -173,7 +249,7 @@ fn is_builtin_module(path: &str) -> bool {
     crate::semantics::BUILTIN_MODULES.contains(&path)
 }
 
-fn collect_imports(program: &Program, base_dir: Option<&Path>) -> Vec<ImportInfo> {
+fn collect_imports(program: &Program, base_dir: Option<&Path>, skip: bool) -> Vec<ImportInfo> {
     program
         .statements
         .iter()
@@ -181,7 +257,7 @@ fn collect_imports(program: &Program, base_dir: Option<&Path>) -> Vec<ImportInfo
             Stmt::Import { path, names } => Some(ImportInfo {
                 path: path.clone(),
                 names: names.clone(),
-                resolved: if is_builtin_module(path) {
+                resolved: if skip || is_builtin_module(path) {
                     None
                 } else {
                     crate::package::resolve_import_from(path, base_dir)
@@ -230,17 +306,13 @@ fn name_diagnostics(
     index: &SyntaxIndex,
     resolution: &Resolution,
     imports: &[ImportedNames],
-    strict: bool,
+    policy: SeverityPolicy,
 ) -> Vec<Diagnostic> {
     // A wildcard import we could not read might define anything.
     if imports.iter().any(|i| i.names.is_none()) {
         return Vec::new();
     }
-    let severity = if strict {
-        Severity::Error
-    } else {
-        Severity::Warning
-    };
+    let severity = |code: Code| policy.severity(code, Basis::Declared);
     let mut out = Vec::new();
     let mut seen_unknown: HashSet<(String, usize)> = HashSet::new();
     for (id, occ) in index.occurrences.iter().enumerate() {
@@ -252,7 +324,7 @@ fn name_diagnostics(
                 let suggestion = suggest::closest(&occ.name, candidates.iter().map(String::as_str));
                 out.push(Diagnostic {
                     code: Code::UnknownType,
-                    severity,
+                    severity: severity(Code::UnknownType),
                     message: format!("unknown type '{}'", occ.name),
                     span: occ.span,
                     help: suggestion.map(|s| format!("did you mean '{}'?", s)),
@@ -275,7 +347,7 @@ fn name_diagnostics(
                 let suggestion = suggest::closest(&occ.name, candidates.iter().map(String::as_str));
                 out.push(Diagnostic {
                     code: Code::UnknownName,
-                    severity,
+                    severity: severity(Code::UnknownName),
                     message: format!("unknown name '{}'", occ.name),
                     span: occ.span,
                     // A builtin removed by the edition (`say` in 2027)
@@ -310,7 +382,7 @@ fn name_diagnostics(
                 };
                 out.push(Diagnostic {
                     code: Code::UseBeforeDefinition,
-                    severity,
+                    severity: severity(Code::UseBeforeDefinition),
                     message: format!(
                         "{} '{}' is used before it is defined (line {})",
                         what, occ.name, def_occ.span.start.line
