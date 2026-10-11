@@ -61,9 +61,13 @@ pub enum Stmt {
         decorators: Vec<Decorator>,
         is_async: bool,
     },
+    /// `let [mut] {a, b: c} = v`, `let [mut] [x, ...rest] = v`,
+    /// `let [mut] (a, b) = v`, and the 2026 `unpack ... from v`.
     Destructure {
         pattern: DestructurePattern,
         value: Expr,
+        /// `let mut` patterns bind mutable variables (`unpack`: immutable).
+        mutable: bool,
     },
     StructDef {
         name: String,
@@ -375,7 +379,8 @@ pub enum PipeStep {
 
 #[derive(Debug, Clone)]
 pub enum DestructurePattern {
-    Object(Vec<String>),
+    /// `(field, binding)` pairs: `{a, b: c}` is `[("a", "a"), ("b", "c")]`.
+    Object(Vec<(String, String)>),
     Array {
         items: Vec<String>,
         rest: Option<String>,

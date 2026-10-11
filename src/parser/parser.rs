@@ -282,20 +282,12 @@ impl Parser {
             false
         };
 
-        // Tuple destructuring: let (a, b, c) = expr
-        if self.check(&Token::LParen) {
-            self.advance();
-            let mut names = Vec::new();
+        // Destructuring: let (a, b) = tuple, let {a, b: c} = obj,
+        // let [x, ...rest] = arr
+        if self.check(&Token::LParen) || self.check(&Token::LBrace) || self.check(&Token::LBracket)
+        {
             let mut defs = Vec::new();
-            while !self.check(&Token::RParen) {
-                let name = self.expect_ident()?;
-                defs.push(self.note_def(&name, DefKind::Variable { mutable }));
-                names.push(name);
-                if self.check(&Token::Comma) {
-                    self.advance();
-                }
-            }
-            self.expect(Token::RParen)?;
+            let pattern = self.parse_destructure_pattern(mutable, &mut defs)?;
             self.expect(Token::Eq)?;
             let value = self.parse_expr()?;
             let end = self.prev_end();
@@ -303,8 +295,9 @@ impl Parser {
                 self.set_visible(def, end);
             }
             return Ok(Stmt::Destructure {
-                pattern: DestructurePattern::Tuple(names),
+                pattern,
                 value,
+                mutable,
             });
         }
 
@@ -788,61 +781,97 @@ impl Parser {
         Ok(Stmt::YieldStmt(expr))
     }
 
-    /// Parses: unpack { a, b } from expr  /  unpack [ a, ...rest ] from expr
-    /// An identifier bound by destructuring (`unpack`).
-    fn expect_bound_ident(&mut self, defs: &mut Vec<Option<OccId>>) -> Result<String, ParseError> {
+    /// An identifier bound by destructuring.
+    fn expect_bound_ident(
+        &mut self,
+        mutable: bool,
+        defs: &mut Vec<Option<OccId>>,
+    ) -> Result<String, ParseError> {
         let name = self.expect_ident()?;
-        defs.push(self.note_def(&name, DefKind::Variable { mutable: false }));
+        defs.push(self.note_def(&name, DefKind::Variable { mutable }));
         Ok(name)
     }
 
-    fn parse_unpack(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(Token::Unpack)?;
-        let mut defs = Vec::new();
-
-        let pattern = if self.check(&Token::LBrace) {
+    /// A destructuring pattern at the cursor: `{a, b: c}`, `[x, ...rest]`
+    /// or `(a, b)` (shared by `let` and `unpack`). The bound names are
+    /// recorded in `defs`; the caller makes them visible after the value.
+    fn parse_destructure_pattern(
+        &mut self,
+        mutable: bool,
+        defs: &mut Vec<Option<OccId>>,
+    ) -> Result<DestructurePattern, ParseError> {
+        if self.check(&Token::LBrace) {
             self.advance();
-            let mut names = Vec::new();
+            self.skip_newlines();
+            let mut fields = Vec::new();
             while !self.check(&Token::RBrace) {
-                names.push(self.expect_bound_ident(&mut defs)?);
+                // `field` binds `field`; `field: name` binds `name`.
+                let field = self.expect_ident()?;
+                let binding = if self.check(&Token::Colon) {
+                    self.note_prev(&field, Role::Field);
+                    self.advance();
+                    self.expect_bound_ident(mutable, defs)?
+                } else {
+                    defs.push(self.note_def(&field, DefKind::Variable { mutable }));
+                    field.clone()
+                };
+                fields.push((field, binding));
+                self.skip_newlines();
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
+                self.skip_newlines();
             }
             self.expect(Token::RBrace)?;
-            DestructurePattern::Object(names)
+            Ok(DestructurePattern::Object(fields))
         } else if self.check(&Token::LBracket) {
             self.advance();
+            self.skip_newlines();
             let mut items = Vec::new();
             let mut rest = None;
             while !self.check(&Token::RBracket) {
+                if rest.is_some() {
+                    return Err(self.error("`...rest` must be the last element of the pattern"));
+                }
                 if self.check(&Token::DotDotDot) {
                     self.advance();
-                    rest = Some(self.expect_bound_ident(&mut defs)?);
+                    rest = Some(self.expect_bound_ident(mutable, defs)?);
                 } else {
-                    items.push(self.expect_bound_ident(&mut defs)?);
+                    items.push(self.expect_bound_ident(mutable, defs)?);
                 }
+                self.skip_newlines();
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
+                self.skip_newlines();
             }
             self.expect(Token::RBracket)?;
-            DestructurePattern::Array { items, rest }
+            Ok(DestructurePattern::Array { items, rest })
         } else if self.check(&Token::LParen) {
             self.advance();
             let mut names = Vec::new();
             while !self.check(&Token::RParen) {
-                names.push(self.expect_bound_ident(&mut defs)?);
+                names.push(self.expect_bound_ident(mutable, defs)?);
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
             }
             self.expect(Token::RParen)?;
-            DestructurePattern::Tuple(names)
+            Ok(DestructurePattern::Tuple(names))
         } else {
-            return Err(self.error("expected {, [, or ( after 'unpack'"));
-        };
+            Err(self.error("expected {, [, or ( to start a destructuring pattern"))
+        }
+    }
 
+    /// Parses (edition 2026): unpack { a, b } from expr  /  unpack [ a, ...rest ] from expr
+    fn parse_unpack(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(Token::Unpack)?;
+        let mut defs = Vec::new();
+        if !(self.check(&Token::LBrace) || self.check(&Token::LBracket) || self.check(&Token::LParen))
+        {
+            return Err(self.error("expected {, [, or ( after 'unpack'"));
+        }
+        let pattern = self.parse_destructure_pattern(false, &mut defs)?;
         self.expect(Token::From)?;
         let value = self.parse_expr()?;
         let end = self.prev_end();
@@ -850,7 +879,11 @@ impl Parser {
             self.set_visible(def, end);
         }
 
-        Ok(Stmt::Destructure { pattern, value })
+        Ok(Stmt::Destructure {
+            pattern,
+            value,
+            mutable: false,
+        })
     }
 
     fn parse_when(&mut self) -> Result<Stmt, ParseError> {

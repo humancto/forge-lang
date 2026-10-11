@@ -2283,14 +2283,19 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
-            Stmt::Destructure { pattern, value } => {
+            Stmt::Destructure {
+                pattern,
+                value,
+                mutable,
+            } => {
                 let val = self.eval_expr(value)?;
+                let mutable = *mutable;
                 match pattern {
-                    DestructurePattern::Object(names) => {
+                    DestructurePattern::Object(fields) => {
                         if let Value::Object(map) = &val {
-                            for name in names {
-                                let v = map.get(name).cloned().unwrap_or(Value::Null);
-                                self.env.define(name.clone(), v);
+                            for (field, name) in fields {
+                                let v = map.get(field).cloned().unwrap_or(Value::Null);
+                                self.env.define_with_mutability(name.clone(), v, mutable);
                             }
                         } else {
                             return Err(RuntimeError::new("cannot destructure non-object"));
@@ -2300,7 +2305,7 @@ impl Interpreter {
                         if let Value::Array(arr) = &val {
                             for (i, name) in items.iter().enumerate() {
                                 let v = arr.get(i).cloned().unwrap_or(Value::Null);
-                                self.env.define(name.clone(), v);
+                                self.env.define_with_mutability(name.clone(), v, mutable);
                             }
                             if let Some(rest_name) = rest {
                                 let rest_items = if items.len() < arr.len() {
@@ -2308,7 +2313,11 @@ impl Interpreter {
                                 } else {
                                     Vec::new()
                                 };
-                                self.env.define(rest_name.clone(), Value::Array(rest_items));
+                                self.env.define_with_mutability(
+                                    rest_name.clone(),
+                                    Value::Array(rest_items),
+                                    mutable,
+                                );
                             }
                         } else {
                             return Err(RuntimeError::new("cannot destructure non-array"));
@@ -2318,7 +2327,7 @@ impl Interpreter {
                         if let Value::Tuple(items) = &val {
                             for (i, name) in names.iter().enumerate() {
                                 let v = items.get(i).cloned().unwrap_or(Value::Null);
-                                self.env.define(name.clone(), v);
+                                self.env.define_with_mutability(name.clone(), v, mutable);
                             }
                         } else {
                             return Err(RuntimeError::new("cannot destructure non-tuple"));

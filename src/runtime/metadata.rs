@@ -321,7 +321,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut std::collections::BTre
                 collect_vm_incompatible_stmt(&method.stmt, issues);
             }
         }
-        Stmt::Destructure { pattern: _, value } => {
+        Stmt::Destructure { value, .. } => {
             collect_vm_incompatible_expr(value, issues);
         }
         Stmt::TryCatch {
