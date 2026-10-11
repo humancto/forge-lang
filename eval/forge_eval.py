@@ -541,8 +541,12 @@ def free_port():
 
 
 class RunConfig:
-    def __init__(self, lang, forge="forge", engine="vm", edition=None, python="python3"):
+    def __init__(self, lang, forge="forge", engine="vm", edition=None, python="python3",
+                 grant_stdin_file=False):
         self.lang = lang
+        # Counterfactual scoring: also let the program read /dev/stdin as a
+        # file, to see which failures hide behind that one cause.
+        self.grant_stdin_file = grant_stdin_file
         self.forge = forge
         self.engine = engine
         self.edition = edition
@@ -569,8 +573,11 @@ def forge_command(cfg, task, workdir, source, extra_args, port=None):
         cmd += ["--edition", cfg.edition]
     cmd += ["--sandbox", "--error-format", "json", "--max-time", str(task.timeout)]
     needs = set(task.needs)
-    if "read" in needs:
-        cmd.append("--allow-read=" + workdir)
+    reads = [workdir] if "read" in needs else []
+    if cfg.grant_stdin_file:
+        reads.append("/dev/stdin")
+    if reads:
+        cmd.append("--allow-read=" + ",".join(reads))
     if "write" in needs:
         cmd.append("--allow-write=" + workdir)
     if "net" in needs:
@@ -1353,7 +1360,8 @@ def cmd_score(args):
     all_tasks = {t.id: t for t in load_tasks(task_selector(args))}
     tasks = [all_tasks[i] for i in meta.get("tasks", []) if i in all_tasks]
     forge = find_forge(args.forge) if lang == "forge" else None
-    cfg = RunConfig(lang, forge, args.engine, args.edition, args.python)
+    cfg = RunConfig(lang, forge, args.engine, args.edition, args.python,
+                    grant_stdin_file=args.grant_stdin_file)
 
     def one(task):
         tdir = os.path.join(run, task.id)
@@ -1752,6 +1760,8 @@ def main(argv=None):
     p.add_argument("--engine", choices=["vm", "interp"], default="vm")
     p.add_argument("--edition", help="e.g. 2027 (default: the forge default edition)")
     p.add_argument("--report-name", default="report")
+    p.add_argument("--grant-stdin-file", action="store_true",
+                   help="counterfactual: also allow reading /dev/stdin as a file")
     p.set_defaults(func=cmd_score)
 
     p = sub.add_parser("compare", help="compare scored runs")
