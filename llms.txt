@@ -61,10 +61,17 @@ println(len(nums))
 println(str(42) + "!")        // + joins two Strings; convert other values with str() or "{x}"
 println(int("7") + 1)
 println(10 / 4)               // 2 (Int / Int is integer division)
+println([1, 2] + [3])         // [1, 2, 3] (+ also joins two arrays)
+println(abs(-3))              // 3
+println(min(4, 2), max([4, 9]))   // min/max take numbers or one array
+println(round(3.14159, 2))    // 3.14 (round(x) alone gives an Int: 3)
+println(to_fixed(2.5, 2))     // 2.50 (a String with exactly 2 decimals)
 let {name: who, age} = user     // destructuring (also `let [first, ...rest] = nums`, `let (a, b) = pair`)
 let [first, ...rest] = nums
 println("{who} {age} {first} {rest}")
 ```
+
+Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max` and `round` keep Ints as Ints.
 
 Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
 
@@ -356,7 +363,7 @@ println(m.get("k"))
 println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
 ```
 
-Other builtins: `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
 
 ## Standard library (always in scope)
 
@@ -364,7 +371,7 @@ Other builtins: `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a
 | ------ | -------------------------------------------- |
 | `math` | `sqrt(x)`, `pow(b, e)`, `abs`, `max(a, b)`, `min`, `floor`, `ceil`, `round`, `random_int(lo, hi)`, `pi`, `e` |
 | `fs` | `read(path)`, `write(path, text)`, `append`, `exists`, `list(dir)`, `remove`, `mkdir`, `copy(src, dst)`, `rename` |
-| `json` | `parse(text)`, `stringify(value)` |
+| `json` | `parse(text)` (keeps the document's key order), `stringify(value)` → `{"a": 1, "b": [1, 2]}`, `compact(value)` → `{"a":1,"b":[1,2]}` (no whitespace), `pretty(value, indent?)` |
 | `regex` | `test(text, pattern)`, `find(text, pattern)`, `find_all(text, pattern)`, `replace(text, pattern, repl)`, `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
 | `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body) |
@@ -386,6 +393,7 @@ println(math.sqrt(16.0))
 println(regex.find_all("a1b22c333", "\\d+"))
 println(regex.replace("a1b2", "\\d", "#"))
 println(json.stringify({ a: [1, 2] }))
+println(json.compact({ b: 1, a: [1, 2] }))   // {"b":1,"a":[1,2]}
 println(json.parse("[1, 2]")[1])
 println(env.get("FORGE_LLMS_UNSET", "fallback"))
 println(path.join("a", "b.txt"))
@@ -487,6 +495,7 @@ fn cities() { return ["Oslo"] }
 - `regex.*` takes `(text, pattern)`, not `(pattern, text)`. Escape backslashes in patterns: `"\\d+"`.
 - `reduce(array, initial, fn)` — the initial value comes second.
 - Put non-String values into text with interpolation (`"total: {n}"`) or `str(n)`, never `"total: " + n`: edition 2027 rejects `+` between a String and a non-String (E0034; edition 2026 converts silently).
+- No format specs such as `{x:.2f}` or `%.2f`: write `"{to_fixed(x, 2)}"`.
 - Mutating a field or index requires a `let mut` binding.
 - `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.
