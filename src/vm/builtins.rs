@@ -2013,7 +2013,9 @@ impl VM {
                     let default = args.get(2).cloned().unwrap_or(Value::null());
                     if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::Object(map) = &obj.kind {
-                            if key.contains('.') {
+                            // An exact key wins over the dot-path reading
+                            // (`get(counts, ".txt", 0)`).
+                            if key.contains('.') && !map.contains_key(key.as_str()) {
                                 let parts: Vec<&str> = key.split('.').collect();
                                 let mut current_map = map.clone();
                                 for (i, part) in parts.iter().enumerate() {
