@@ -351,6 +351,8 @@ fn fixed_corpus_parses_under_2027_and_behaves_the_same() {
     let mut reported: BTreeMap<String, usize> = BTreeMap::new();
     for line in stderr.lines() {
         if let Some(path) = line.split(':').next() {
+            // Windows prints `.\tests\x.fg`; the corpus keys use `/`.
+            let path = path.replace('\\', "/");
             let path = path.trim_start_matches("./");
             *reported.entry(path.to_string()).or_default() += 1;
         }

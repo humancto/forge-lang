@@ -521,6 +521,9 @@ def wait_port_free(port, timeout=10.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # Bind the way servers do (SO_REUSEADDR), so a socket of the
+            # previous run lingering in TIME_WAIT does not count as busy.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("127.0.0.1", port))
                 return True
@@ -819,7 +822,9 @@ def classify(lang, result, passed):
         return ("pass", None, None, [])
     stderr = result.get("stderr", "")
     if result.get("timed_out") or (lang == "forge" and result.get("returncode") == 124):
-        return ("timeout", None, "exceeded the time limit", [])
+        tail = (result.get("stderr") or "").strip().splitlines()[-1:]
+        detail = "exceeded the time limit" + (" ({})".format(tail[0][:200]) if tail else "")
+        return ("timeout", None, detail, [])
     if lang == "forge":
         diags = parse_forge_diagnostics(stderr)
         errors = [d for d in diags if d.get("severity") == "error"]
