@@ -1778,9 +1778,8 @@ impl Interpreter {
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let json: serde_json::Value = serde_json::from_str(stdout.trim())
-                    .map_err(|e| RuntimeError::new(&format!("sh_json parse error: {}", e)))?;
-                Ok(crate::stdlib::json_module::json_to_forge(json))
+                crate::stdlib::json_module::parse_str(stdout.trim())
+                    .map_err(|e| RuntimeError::new(&format!("sh_json parse error: {}", e)))
             }
             "sh_ok" => {
                 let _subprocess =

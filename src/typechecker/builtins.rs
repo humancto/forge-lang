@@ -149,6 +149,7 @@ const MODULE_SIGNATURES: &[&str] = &[
     "fs.temp_dir() -> String",
     "json.stringify(Any) -> String",
     "json.pretty(Any) -> String",
+    "json.compact(Any) -> String",
     "crypto.sha256(Any) -> String",
     "crypto.md5(Any) -> String",
     "crypto.base64_encode(Any) -> String",

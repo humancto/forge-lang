@@ -2074,9 +2074,8 @@ impl VM {
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let json: serde_json::Value = serde_json::from_str(stdout.trim())
+                let interp_val = crate::stdlib::json_module::parse_str(stdout.trim())
                     .map_err(|e| VMError::new(&format!("sh_json parse error: {}", e)))?;
-                let interp_val = crate::stdlib::json_module::json_to_forge(json);
                 self.from_interp_checked(&interp_val)
             }
             "sh_ok" => {

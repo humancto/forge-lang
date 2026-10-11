@@ -781,7 +781,7 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         ("mysql", vec!["connect", "query", "execute", "close"]),
         ("jwt", vec!["sign", "verify", "decode", "valid"]),
         ("env", vec!["get", "set", "keys", "has"]),
-        ("json", vec!["parse", "stringify", "pretty"]),
+        ("json", vec!["parse", "stringify", "compact", "pretty"]),
         (
             "regex",
             vec!["test", "find", "find_all", "replace", "split"],

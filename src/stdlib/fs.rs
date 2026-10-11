@@ -289,12 +289,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 let path = confine_read(path)?;
                 let content = std::fs::read_to_string(&path)
                     .map_err(|e| format!("fs.read_json error: {}", e))?;
-                match serde_json::from_str::<serde_json::Value>(&content) {
-                    Ok(_) => {
-                        crate::stdlib::json_module::call("json.parse", vec![Value::String(content)])
-                    }
-                    Err(e) => Err(format!("fs.read_json parse error: {}", e)),
-                }
+                crate::stdlib::json_module::parse_str(&content)
+                    .map_err(|e| format!("fs.read_json parse error: {}", e))
             }
             _ => Err("fs.read_json() requires a file path string".to_string()),
         },
