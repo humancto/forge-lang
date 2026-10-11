@@ -2145,17 +2145,39 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             )
         }
 
-        Stmt::Destructure { pattern, value } => {
+        Stmt::Destructure {
+            pattern,
+            value,
+            mutable,
+        } => {
             // `__forge_destructure` applies the interpreter's rules (missing
             // fields / items become null, wrong container type is an error)
             // and returns the bound values in order.
             let value_reg = c.alloc_reg()?;
             compile_expr(c, value, value_reg)?;
-            let (kind, names, rest): (&str, &[String], Option<&String>) = match pattern {
-                DestructurePattern::Object(names) => ("object", names, None),
-                DestructurePattern::Array { items, rest } => ("array", items, rest.as_ref()),
-                DestructurePattern::Tuple(names) => ("tuple", names, None),
-            };
+            // `keys`: what `__forge_destructure` reads (object fields);
+            // `names`: the locals bound, in the same order.
+            let (kind, keys, names, rest): (&str, Vec<&String>, Vec<&String>, Option<&String>) =
+                match pattern {
+                    DestructurePattern::Object(fields) => (
+                        "object",
+                        fields.iter().map(|(field, _)| field).collect(),
+                        fields.iter().map(|(_, name)| name).collect(),
+                        None,
+                    ),
+                    DestructurePattern::Array { items, rest } => (
+                        "array",
+                        items.iter().collect(),
+                        items.iter().collect(),
+                        rest.as_ref(),
+                    ),
+                    DestructurePattern::Tuple(names) => (
+                        "tuple",
+                        names.iter().collect(),
+                        names.iter().collect(),
+                        None,
+                    ),
+                };
             let parts_reg = c.alloc_reg()?;
             let saved = c.next_register;
             let kind_reg = c.alloc_reg()?;
@@ -2164,7 +2186,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             let names_reg = c.alloc_reg()?;
             compile_expr(
                 c,
-                &Expr::Array(names.iter().map(|n| Expr::StringLit(n.clone())).collect()),
+                &Expr::Array(keys.iter().map(|n| Expr::StringLit((*n).clone())).collect()),
                 names_reg,
             )?;
             let rest_flag_reg = c.alloc_reg()?;
@@ -2182,10 +2204,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             )?;
             c.free_to(saved);
 
-            let targets: Vec<&String> = names.iter().chain(rest).collect();
+            let targets: Vec<&String> = names.into_iter().chain(rest).collect();
             let target_regs: Vec<u8> = targets
                 .iter()
-                .map(|name| c.add_local(name, false))
+                .map(|name| c.add_local(name, *mutable))
                 .collect::<Result<_, _>>()?;
             let idx_reg = c.alloc_reg()?;
             for (index, target_reg) in target_regs.into_iter().enumerate() {

@@ -377,7 +377,13 @@ pub const YIELD_UNSUPPORTED: &str =
 
 /// Reading a name that is bound nowhere. `similar` is an optional
 /// did-you-mean suggestion.
+///
+/// A builtin removed by an edition (`say` in 2027) is only ever undefined
+/// in an edition that removed it, so its hint names the replacement.
 pub fn undefined_variable(name: &str, similar: Option<&str>) -> String {
+    if let Some(hint) = crate::builtins_registry::removal_hint(name) {
+        return format!("undefined variable: '{}'\n  hint: {}", name, hint);
+    }
     match similar {
         Some(similar) => format!(
             "undefined variable: '{}'\n  hint: did you mean '{}'?",

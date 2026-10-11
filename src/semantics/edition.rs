@@ -130,6 +130,19 @@ impl Drop for ScopeGuard {
     }
 }
 
+/// Headline prefix of every "removed in edition 2027" error (syntax error
+/// code `E0035`, `semantics::errors`).
+pub const REMOVED_PREFIX: &str = "removed in edition 2027:";
+
+/// The syntax error for a natural-syntax form removed in edition 2027:
+/// names the form and the exact replacement.
+pub fn removed_syntax(form: &str, replacement: &str) -> String {
+    format!(
+        "{} `{}`\n  hint: write `{}` instead (`forge fix --edition 2027` rewrites 2026 code)",
+        REMOVED_PREFIX, form, replacement
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -171,8 +171,39 @@ pub enum Token {
     Eof,
 }
 
+/// Natural-syntax keywords removed in edition 2027 (RFC 0008 section 5).
+/// From 2027 on they are ordinary identifiers; the parser recognises the old
+/// forms only to report them (`parser::removed`).
+pub const REMOVED_IN_2027: &[&str] = &[
+    "set",
+    "change",
+    "define",
+    "otherwise",
+    "nah",
+    "forge",
+    "hold",
+    "emit",
+    "grab",
+    "repeat",
+    "unpack",
+    "safe",
+    "must",
+    "check",
+    "say",
+    "yell",
+    "whisper",
+];
+
 impl Token {
-    /// Check if this token is a keyword
+    /// The keyword `s` spells in `edition`, if any.
+    pub fn keyword_in(s: &str, edition: crate::semantics::edition::Edition) -> Option<Token> {
+        if edition >= crate::semantics::edition::Edition::E2027 && REMOVED_IN_2027.contains(&s) {
+            return None;
+        }
+        Self::keyword_from_str(s)
+    }
+
+    /// The keyword `s` spells in edition 2026 (every keyword).
     pub fn keyword_from_str(s: &str) -> Option<Token> {
         match s {
             "let" => Some(Token::Let),

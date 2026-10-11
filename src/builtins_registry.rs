@@ -29,6 +29,7 @@
 //! Compiler intrinsics (`__forge_*`) are not user-visible and are not listed.
 
 use crate::interpreter::Value;
+use crate::semantics::edition::Edition;
 
 /// Number of arguments a builtin accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,9 +223,84 @@ pub static GLOBALS: &[Builtin] = &[
     b("await_timeout", 2, 2),
 ];
 
-/// Look up a global builtin by name.
+/// Look up a global builtin by name (in any edition; see [`available`]).
 pub fn global(name: &str) -> Option<&'static Builtin> {
     GLOBALS.iter().find(|b| b.name == name)
+}
+
+/// A global builtin that an edition removed (RFC 0008: one way to write
+/// each thing). Under `edition` and later it is not defined at all — both
+/// engines leave it out of the globals and the type checker reports it as
+/// an unknown name (T0006) — and the undefined-name error carries
+/// `replacement`.
+#[derive(Debug)]
+pub struct Removal {
+    pub name: &'static str,
+    pub removed_in: Edition,
+    /// What to write instead (an expression or idiom, in backticks).
+    pub replacement: &'static str,
+}
+
+const fn removed(name: &'static str, replacement: &'static str) -> Removal {
+    Removal {
+        name,
+        removed_in: Edition::E2027,
+        replacement,
+    }
+}
+
+/// Builtins removed by an edition. Each still exists in older editions
+/// (they are in [`GLOBALS`]).
+pub static REMOVED: &[Removal] = &[
+    removed("say", "`println(x)`"),
+    removed("yell", "`println(upper(str(x)))`"),
+    removed("whisper", "`println(lower(str(x)))`"),
+    removed(
+        "sus",
+        "`println(x)` (sus printed `x` and its type to stderr and returned `x`)",
+    ),
+    removed("bruh", "`assert(false, message)`"),
+    removed("bet", "`assert(condition, message)`"),
+    removed("no_cap", "`assert_eq(a, b)`"),
+    removed("ick", "`assert(!condition, message)`"),
+    removed(
+        "cook",
+        "`f()` timed with `time.now()` (cook called `f` and printed how long it took)",
+    ),
+    removed(
+        "yolo",
+        "`try { f() } catch e { }` (yolo returned None on error)",
+    ),
+    removed("ghost", "`f()` (ghost only called `f`)"),
+    removed(
+        "slay",
+        "a loop timing `f()` with `time.now()` (slay benchmarked `f`)",
+    ),
+];
+
+/// The removal entry for `name`, if some edition removed it.
+pub fn removal(name: &str) -> Option<&'static Removal> {
+    REMOVED.iter().find(|r| r.name == name)
+}
+
+/// Whether the global builtin `name` exists in `edition`.
+pub fn available(name: &str, edition: Edition) -> bool {
+    removal(name).is_none_or(|r| edition < r.removed_in)
+}
+
+/// The global builtins of `edition` (what both engines register).
+pub fn globals_in(edition: Edition) -> impl Iterator<Item = &'static Builtin> {
+    GLOBALS.iter().filter(move |b| available(b.name, edition))
+}
+
+/// The hint for an undefined `name` that an edition removed.
+pub fn removal_hint(name: &str) -> Option<String> {
+    removal(name).map(|r| {
+        format!(
+            "`{}` was removed in edition {}; use {} instead",
+            r.name, r.removed_in, r.replacement
+        )
+    })
 }
 
 /// Shared arity rule for global builtins. Names that are not global
@@ -501,6 +577,24 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "builtins not dispatched: {:?}", missing);
+    }
+
+    #[test]
+    fn removed_builtins_exist_before_their_edition_only() {
+        for r in REMOVED {
+            assert!(global(r.name).is_some(), "{} is not a builtin", r.name);
+            assert!(available(r.name, Edition::E2026), "{}", r.name);
+            assert!(!available(r.name, Edition::E2027), "{}", r.name);
+            assert!(!r.replacement.is_empty());
+        }
+        assert!(available("println", Edition::E2027));
+        assert!(globals_in(Edition::E2027).all(|b| b.name != "say"));
+        assert_eq!(globals_in(Edition::E2026).count(), GLOBALS.len());
+        let hint = removal_hint("say").expect("say was removed");
+        assert_eq!(
+            hint,
+            "`say` was removed in edition 2027; use `println(x)` instead"
+        );
     }
 
     #[test]

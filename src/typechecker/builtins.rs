@@ -384,8 +384,12 @@ pub static BUILTINS: LazyLock<Builtins> = LazyLock::new(|| {
 
 /// Is `name` bound when a program starts (builtin function, module or
 /// prelude value)?
+///
+/// A builtin removed by the edition in effect (`say` in 2027) is not.
 pub fn is_global(name: &str) -> bool {
-    crate::builtins_registry::global(name).is_some()
+    let edition = crate::semantics::edition::current();
+    crate::builtins_registry::global(name)
+        .is_some_and(|_| crate::builtins_registry::available(name, edition))
         || BUILTINS.modules.contains_key(name)
         || PRELUDE_VALUES.contains(&name)
         || EXTRA_GLOBALS.contains(&name)
@@ -394,8 +398,8 @@ pub fn is_global(name: &str) -> bool {
 
 /// Every global name, for "did you mean" suggestions.
 pub fn global_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = crate::builtins_registry::GLOBALS
-        .iter()
+    let edition = crate::semantics::edition::current();
+    let mut names: Vec<&'static str> = crate::builtins_registry::globals_in(edition)
         .map(|b| b.name)
         .collect();
     names.extend(crate::builtins_registry::modules().iter().map(|m| m.name));

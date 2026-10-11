@@ -1063,14 +1063,23 @@ impl<'a> Checker<'a> {
                 );
                 (Ty::Null, Flow::Normal)
             }
-            Stmt::Destructure { pattern, value } => {
+            Stmt::Destructure {
+                pattern,
+                value,
+                mutable,
+            } => {
                 let vt = self.infer(value, None);
                 let vt = self.cx.resolve(&vt);
+                let kind = if *mutable {
+                    BindKind::Mutable
+                } else {
+                    BindKind::Immutable
+                };
                 match pattern {
-                    DestructurePattern::Object(names) => {
-                        for n in names {
-                            let ty = self.field_type(&vt, n).unwrap_or(Ty::Any);
-                            self.bind(n, ty, None, BindKind::Immutable);
+                    DestructurePattern::Object(fields) => {
+                        for (field, n) in fields {
+                            let ty = self.field_type(&vt, field).unwrap_or(Ty::Any);
+                            self.bind(n, ty, None, kind);
                         }
                     }
                     DestructurePattern::Array { items, rest } => {
@@ -1079,10 +1088,10 @@ impl<'a> Checker<'a> {
                             _ => Ty::Any,
                         };
                         for n in items {
-                            self.bind(n, elem.clone(), None, BindKind::Immutable);
+                            self.bind(n, elem.clone(), None, kind);
                         }
                         if let Some(r) = rest {
-                            self.bind(r, Ty::array(elem), None, BindKind::Immutable);
+                            self.bind(r, Ty::array(elem), None, kind);
                         }
                     }
                     DestructurePattern::Tuple(names) => {
@@ -1091,7 +1100,7 @@ impl<'a> Checker<'a> {
                                 Ty::Tuple(items) => items.get(i).cloned().unwrap_or(Ty::Null),
                                 _ => Ty::Any,
                             };
-                            self.bind(n, ty, None, BindKind::Immutable);
+                            self.bind(n, ty, None, kind);
                         }
                     }
                 }

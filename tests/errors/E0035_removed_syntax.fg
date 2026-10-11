@@ -1,0 +1,3 @@
+// forge-args: --edition 2027
+let total = 1
+set total to 2

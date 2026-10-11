@@ -560,7 +560,9 @@ impl VM {
     fn register_builtins(&mut self) {
         // User-visible globals come from the shared registry, so the VM and
         // the interpreter expose exactly the same builtins.
-        let globals = crate::builtins_registry::GLOBALS.iter().map(|b| b.name);
+        // A builtin removed by the run's edition is not defined at all.
+        let edition = crate::semantics::edition::current();
+        let globals = crate::builtins_registry::globals_in(edition).map(|b| b.name);
         for name in globals.chain(COMPILER_INTRINSICS.iter().copied()) {
             let name_ref = self.gc.alloc(ObjKind::NativeFunction(NativeFn {
                 name: name.to_string(),
