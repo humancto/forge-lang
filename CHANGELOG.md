@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Edition 2027: annotations are enforced** (`docs/editions/2027.md`, RFC 0008 §4) — a contradiction of a declared type (T0001 type mismatch, T0002 argument, T0003 return, T0012 interface, T0015 unknown type, T0016 missing field) is an error that stops `forge run`, `forge test`, `forge -e`, the REPL, `Sandbox` and `forge mcp` (`run_forge`, sessions, tool files) before anything runs; diagnostics resting on inferred types stay warnings. Annotated function arguments and results are checked at run time by default (the `--strict` instrumentation); unannotated code is left untouched. Generic type parameters are checked for consistency per call, statically and, for parameters declared exactly `T`, at run time (`type error: argument 'b' of 'pair' must be Int like argument 'a' (type parameter T), got String`). `--strict` in 2027 still makes every diagnostic an error. New `SandboxError::Type { diagnostics }` (kind `type`); `run_forge` reports them as `error.diagnostics` with `severity: "error"`. Edition 2026 behaves exactly as before.
+- **Cheaper annotation checks** — the JIT compiles annotated numeric functions again (a check whose value provably fits is the identity), and both engines decide common checks without converting values. On a debug build, `fn fib(n: Int) -> Int` runs at the unannotated speed on the VM; per-call scalar checks cost ~1.3x on call-bound loops; `[Int]` arguments are checked element by element (O(n) per call).
+
+### Changed
+
+- The type checker solves a generic parameter given both Int and Float arguments in one call to Float, independent of argument order (`pair(1, 2.5)` no longer warns).
+
 ## [0.10.0] - 2026-10-09
 
 ### Added
