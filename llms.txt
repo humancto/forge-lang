@@ -53,6 +53,7 @@ let nums = [1, 2, 3]          // Array
 let user = { name: "Ada", age: 36 }   // Object (string keys, insertion-ordered)
 let pair = (1, "one")         // Tuple
 println("Hello, {name}! count={count}")   // "{expr}" interpolates inside double-quoted strings
+println("{join(["a", "b"], ", ")}")       // any expression, including string literals: a, b
 println(typeof(pi))           // Float
 println(user.name)
 println(nums[0])
@@ -65,7 +66,7 @@ let [first, ...rest] = nums
 println("{who} {age} {first} {rest}")
 ```
 
-Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines.
+Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
 
 ## Type annotations and checking
 

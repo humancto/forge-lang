@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Programs can read piped input with `fs.read("/dev/stdin")` and `fs.lines("/dev/stdin")` on both engines and under `--sandbox` (same policy as `input()`); `llms.txt` documents reading input. Found by the eval baseline, where it caused 62 of 103 failures.
 - `unpack` and `let (a, b) = ...` bindings are immutable on the interpreter too (they already were on the VM), and `let mut (a, b) = ...` is mutable on both engines.
 - A capitalised constant can end an `if`/`while` condition: `if c == QUOTE {` followed by a statement parsed `QUOTE { ... }` as a struct literal ("expected identifier, got If"). `Name {` is a struct literal only when `field:` or `}` follows the brace. Found by the eval baseline.
+- String interpolations may contain string literals: `"{join(xs, ", ")}"` was a syntax error, and `"{join(xs, " ")}"` printed its own source text. Digit-only braces (`"\\d{4}"`, `"[a-z]{2,}"`) are regex quantifiers, not interpolations; a `{` followed by a quote or not closed on its line stays literal text, as before. The top failure cause in the eval's second blind round (10 of 21 failures).
+- `forge run app.fg | head` exits quietly when the reader closes the pipe instead of panicking with a backtrace.
 
 ## [0.10.0] - 2026-10-09
 

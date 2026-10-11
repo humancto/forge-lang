@@ -1,0 +1,20 @@
+// Interpolations may contain string literals, and digit-only braces are
+// regex quantifiers, not interpolations.
+
+@test
+fn string_literals_inside_interpolation() {
+    let xs = ["a", "b"]
+    assert_eq("{join(xs, ", ")}", "a, b")
+    assert_eq("{join(xs, " ")}|{len(xs)}", "a b|2")
+    assert_eq("{join(xs, \"-\")}", "a-b")
+    let m = { k: "v" }
+    assert_eq("got {m["k"]}", "got v")
+    assert_eq("q \" {len("x\"y")}", "q \" 3")
+}
+
+@test
+fn digit_braces_are_regex_quantifiers() {
+    assert(regex.test("2024", "\\d{4}"))
+    assert_eq(len(regex.find_all("aa b ccc", "[a-z]{2,}")), 2)
+    assert_eq("{1,3}", "{1,3}")
+}

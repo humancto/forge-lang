@@ -2454,7 +2454,17 @@ impl Parser {
         let mut current = String::new();
 
         while let Some((_, ch)) = chars.next() {
-            if ch == '{' {
+            if ch == '{' && Self::is_quantifier_braces(chars.clone().map(|(_, c)| c)) {
+                // `{4}`, `{2,}`, `{1,3}`: a regex quantifier, not an
+                // expression (interpolating a bare number is pointless).
+                current.push('{');
+                for (_, inner) in chars.by_ref() {
+                    current.push(inner);
+                    if inner == '}' {
+                        break;
+                    }
+                }
+            } else if ch == '{' {
                 if !current.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut current)));
                 }
@@ -2506,6 +2516,25 @@ impl Parser {
         }
 
         Ok(Expr::StringInterp(parts))
+    }
+
+    /// After a `{` in a string: whether `digits[,digits]}` follows.
+    fn is_quantifier_braces(rest: impl Iterator<Item = char>) -> bool {
+        let mut digits_before = 0;
+        let mut comma = false;
+        for c in rest {
+            match c {
+                '0'..='9' => {
+                    if !comma {
+                        digits_before += 1;
+                    }
+                }
+                ',' if !comma => comma = true,
+                '}' => return digits_before > 0,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// Parse one `{expr}` of an interpolated string. `token` is the string
