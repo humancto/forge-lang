@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Bytecode format 1.4** — `.fgc` files end with one byte naming the edition the program was compiled under. Forge reads 1.0–1.4; older Forge releases refuse 1.4 files with "newer than supported".
 - The type checker solves a generic parameter given both Int and Float arguments in one call to Float, independent of argument order (`pair(1, 2.5)` no longer warns).
+- `http.post`/`put`/`patch` with a String `body` send it as is (Content-Type `application/json` when it parses as JSON, `text/plain` otherwise) instead of encoding it as a JSON string: `body: json.stringify(x)` was encoded twice. Other values are still sent as JSON.
 
 ### Fixed
 

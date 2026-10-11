@@ -3,7 +3,8 @@ category = "concurrency"
 title = "Concurrent map preserving order"
 prompt = """
 Read words from standard input (whitespace-separated). Process every word in its own concurrent
-task: the task computes `<word>=<number of distinct letters>` after lowercasing. Collect the
+task: the task computes `<word>=<n>`, where `<word>` is the word exactly as given and `<n>` is
+the number of distinct letters, counting upper and lower case as the same letter. Collect the
 results in the original input order (regardless of which task finishes first) and print them
 joined by `, `. Then print `tasks: <n>`.
 """

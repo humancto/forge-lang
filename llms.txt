@@ -366,7 +366,7 @@ Other builtins: `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a
 | `json` | `parse(text)`, `stringify(value)` |
 | `regex` | `test(text, pattern)`, `find(text, pattern)`, `find_all(text, pattern)`, `replace(text, pattern, repl)`, `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
-| `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }`; response: `{ status, ok, body, json, headers }` |
+| `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body) |
 | `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `close()` |
 | `pg`, `mysql` | `connect(url)`, `query(conn, sql, params?)`, `execute(conn, sql, params?)`, `close(conn)`; mysql adds `begin/commit/rollback` |
 | `jwt` | `sign(claims, secret, opts?)`, `verify(token, secret)`, `decode(token)`, `valid(token, secret)` |

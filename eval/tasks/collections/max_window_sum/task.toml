@@ -4,8 +4,8 @@ title = "Best sliding window"
 prompt = """
 The first line of standard input is a window size k, the second line a list of integers
 separated by spaces. Find the contiguous window of k numbers with the largest sum (the first
-one if several tie). Print `sum: <s>`, `start: <index>` (0-based) and `window: <numbers>`
-separated by spaces.
+one if several tie). Print three lines: `sum: <s>`, then `start: <index>` (0-based), then
+`window: <numbers>` with the window's numbers separated by spaces.
 """
 stdin = """
 3
