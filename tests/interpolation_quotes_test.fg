@@ -18,3 +18,12 @@ fn digit_braces_are_regex_quantifiers() {
     assert_eq(len(regex.find_all("aa b ccc", "[a-z]{2,}")), 2)
     assert_eq("{1,3}", "{1,3}")
 }
+
+@test
+fn a_brace_before_a_quote_is_literal() {
+    let wrapped = "{" + "x" + "}"
+    assert_eq(len(wrapped), 3)
+    assert(starts_with(wrapped, "{"))
+    let pair = "{\"k\":" + "1" + "}"
+    assert_eq(json.parse(pair).k, 1)
+}

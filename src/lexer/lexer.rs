@@ -354,14 +354,18 @@ impl Lexer {
                 '{' => {
                     // A `{` that cannot start an interpolation is literal
                     // text, as before: one followed by a quote (`"{"`,
-                    // `"{" + body + "}"`) or one that does not close on
+                    // `"{" + body + "}"`, `"{\"key\": "`) or one that does not close on
                     // this line (`"{not json"`).
                     let (start, col, line, len) = (self.pos, self.col, self.line, result.len());
                     let mut ahead = self.pos + 1;
                     while ahead < self.source.len() && self.source[ahead] == ' ' {
                         ahead += 1;
                     }
-                    let quote_next = self.source.get(ahead) == Some(&'"');
+                    let quote_next = match self.source.get(ahead) {
+                        Some('"') => true,
+                        Some('\\') => self.source.get(ahead + 1) == Some(&'"'),
+                        _ => false,
+                    };
                     if quote_next || self.lex_interpolation(&mut result).is_err() {
                         (self.pos, self.col, self.line) = (start, col, line);
                         result.truncate(len);
