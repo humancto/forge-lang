@@ -1,0 +1,7 @@
+// Edition 2027 tests. Run with:
+//   forge --edition 2027 test tests/edition2027 --engine both
+
+@test
+fn runs_under_edition_2027() {
+    assert_eq(1 + 1, 2)
+}
