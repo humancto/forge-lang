@@ -1,0 +1,35 @@
+// A capitalised constant can end an `if`/`while` condition: `Name {`
+// starts a struct literal only when `field:` or `}` follows the brace.
+
+struct Pt { x: Int }
+
+@test
+fn capitalised_constants_end_conditions() {
+    let QT = "\""
+    let MAX = 3
+    let c = "\""
+    let mut hits = 0
+    if c == QT {
+        hits += 1
+    }
+    let mut i = 0
+    while i < MAX {
+        i += 1
+    }
+    assert_eq(hits, 1)
+    assert_eq(i, 3)
+}
+
+@test
+fn struct_literals_still_parse_everywhere() {
+    let p = Pt { x: 1 }
+    let q = Pt {
+        x: 2
+    }
+    let mut same = false
+    if p == Pt { x: 1 } {
+        same = true
+    }
+    assert(same)
+    assert_eq(q.x, 2)
+}

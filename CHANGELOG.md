@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get(obj, key, default)` returns the value of an exact key that contains dots (`get(counts, ".txt", 0)`) instead of reading it as a path and returning the default; dot-paths still walk nested objects when no such key exists.
 - Programs can read piped input with `fs.read("/dev/stdin")` and `fs.lines("/dev/stdin")` on both engines and under `--sandbox` (same policy as `input()`); `llms.txt` documents reading input. Found by the eval baseline, where it caused 62 of 103 failures.
 - `unpack` and `let (a, b) = ...` bindings are immutable on the interpreter too (they already were on the VM), and `let mut (a, b) = ...` is mutable on both engines.
+- A capitalised constant can end an `if`/`while` condition: `if c == QUOTE {` followed by a statement parsed `QUOTE { ... }` as a struct literal ("expected identifier, got If"). `Name {` is a struct literal only when `field:` or `}` follows the brace. Found by the eval baseline.
 
 ## [0.10.0] - 2026-10-09
 

@@ -2308,6 +2308,7 @@ impl Parser {
                 // Check for struct init: Name { field: value }
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
                     && self.check(&Token::LBrace)
+                    && self.brace_opens_struct_fields()
                 {
                     self.note_prev(&name, Role::TypeRef);
                     self.advance();
@@ -2860,6 +2861,22 @@ impl Parser {
             .get(self.pos)
             .map(|s| s.token.clone())
             .unwrap_or(Token::Eof)
+    }
+
+    /// At `{` after a capitalised name: whether it opens struct-literal
+    /// fields (`}` or `field:` next, newlines skipped) rather than a block.
+    /// `if c == QUOTE {` followed by a statement is a block, so a
+    /// capitalised constant can end an `if`/`while` condition.
+    fn brace_opens_struct_fields(&self) -> bool {
+        let mut offset = 1;
+        while self.peek_token(offset) == Token::Newline {
+            offset += 1;
+        }
+        match self.peek_token(offset) {
+            Token::RBrace => true,
+            Token::Eof => false,
+            _ => self.peek_token(offset + 1) == Token::Colon,
+        }
     }
 
     fn peek_token(&self, offset: usize) -> Token {
