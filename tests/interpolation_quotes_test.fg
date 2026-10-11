@@ -27,3 +27,10 @@ fn a_brace_before_a_quote_is_literal() {
     let pair = "{\"k\":" + "1" + "}"
     assert_eq(json.parse(pair).k, 1)
 }
+
+@test
+fn empty_braces_are_text() {
+    assert_eq(len("{}"), 2)
+    assert_eq(json.parse("{}"), {})
+    assert_eq(len("a {} b"), 6)
+}

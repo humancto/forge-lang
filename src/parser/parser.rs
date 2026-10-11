@@ -2454,7 +2454,12 @@ impl Parser {
         let mut current = String::new();
 
         while let Some((_, ch)) = chars.next() {
-            if ch == '{' && Self::is_quantifier_braces(chars.clone().map(|(_, c)| c)) {
+            if ch == '{' && chars.peek().map(|(_, c)| *c) == Some('}') {
+                // `"{}"` (an empty JSON object, a format placeholder) is
+                // text: there is no expression to interpolate.
+                chars.next();
+                current.push_str("{}");
+            } else if ch == '{' && Self::is_quantifier_braces(chars.clone().map(|(_, c)| c)) {
                 // `{4}`, `{2,}`, `{1,3}`: a regex quantifier, not an
                 // expression (interpolating a bare number is pointless).
                 current.push('{');
