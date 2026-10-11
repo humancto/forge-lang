@@ -43,10 +43,10 @@
 //! | `Eq`/`NotEq` | any two values | Bool | — |
 //! | `Not`/`And`/`Or` | any value (truthiness) | Bool | — |
 //! | `Jump`/`Loop`/`JumpIf*` | cond any value | — | `Loop`: task cancelled |
-//! | `GetGlobal` | self, a verified function, `float`/`int`/`range`/`math`, the method-call intrinsic | reference | — (guards) |
+//! | `GetGlobal` | self, a verified function, `float`/`int`/`range`/`math`/`__types`, the method-call intrinsic | reference | — (guards) |
 //! | `GetUpvalue` | a captured closure (called only) | reference | — (guard) |
 //! | `GetField` | `math` Float constant | Float | — (guard) |
-//! | `Call` | self / callee with `arity` args (callee specialized for their kinds), pure builtin | its result | stack depth, cancelled, builtin-specific |
+//! | `Call` | self / callee with `arity` args (callee specialized for their kinds), pure builtin, `__types.check` of a value whose kind fits the type (identity) | its result | stack depth, cancelled, builtin-specific |
 //! | `ForRangePrep`/`ForRangeNext` | `range` with Int args | Int counters | — |
 //! | `Return` | a value, same kind on every path | — | — |
 
@@ -187,10 +187,32 @@ impl MathFn {
     }
 }
 
+/// The hidden module of annotation checks (`typechecker::enforce`).
+pub const TYPES_MODULE: &str = "__types";
+
+/// Does every value of kind `kind` fit the annotation `ty`
+/// (`semantics::types::fits`)? Then `__types.check(v, ty, _)` is the
+/// identity on it.
+fn kind_fits(kind: JitType, ty: &crate::semantics::types::RuntimeType) -> bool {
+    use crate::semantics::types::RuntimeType as T;
+    match ty {
+        T::Any => true,
+        T::Int => kind == JitType::Int,
+        T::Float => kind.is_numeric(),
+        T::Bool => kind == JitType::Bool,
+        T::Option(inner) => kind_fits(kind, inner),
+        T::Union(members) => members.iter().any(|m| kind_fits(kind, m)),
+        _ => false,
+    }
+}
+
 /// A call the JIT performs without leaving native code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PureOp {
     Math(MathFn),
+    /// `__types.check(v, ty, context)` where the verifier proved `v`'s
+    /// kind fits `ty`: the result is `v`.
+    Identity,
     /// `float(x)`
     ToFloat,
     /// `int(x)`
@@ -363,6 +385,8 @@ pub enum Ref {
     Builtin(Builtin),
     /// The `math` module object.
     Math,
+    /// The `__types` module object (annotation checks).
+    Types,
     /// `callees[i]` of the function being verified.
     Callee(u16),
 }
@@ -382,6 +406,10 @@ pub enum RegState {
     /// Holds the string constant with this index; only usable as a method
     /// name.
     Str(u16),
+    /// What a generic type parameter stands for in this call
+    /// (`__types.bind` of arguments of these kinds); only usable as the
+    /// type operand of `__types.check`.
+    TypeOf(JitType),
     /// The mode register of a counting `for` loop, known to select the
     /// counting path (`ForRangePrep` succeeded: the `range` guard holds and
     /// the arguments are verified Ints).
@@ -408,8 +436,10 @@ impl fmt::Display for RegState {
             RegState::SelfFn => write!(f, "self function"),
             RegState::Ref(Ref::Builtin(b)) => write!(f, "builtin {}", b.name()),
             RegState::Ref(Ref::Math) => write!(f, "module math"),
+            RegState::Ref(Ref::Types) => write!(f, "module {}", TYPES_MODULE),
             RegState::Ref(Ref::Callee(_)) => write!(f, "function"),
             RegState::Str(_) => write!(f, "string"),
+            RegState::TypeOf(t) => write!(f, "type parameter bound to {}", t),
             RegState::RangeFast => write!(f, "range-loop mode"),
             RegState::Conflict => write!(f, "conflicting kinds"),
         }
@@ -559,6 +589,10 @@ pub enum CallInfo {
         /// rebased onto this path).
         via: ClosurePath,
     },
+    /// `__types.bind` of arguments whose kinds agree on `bound`: a
+    /// compile-time fact (the destination becomes [`RegState::TypeOf`]),
+    /// no native code.
+    TypeBinding { bound: JitType },
     /// A pure builtin computed inline (or through a pure bridge).
     Pure {
         op: PureOp,
@@ -907,6 +941,9 @@ fn verify_with_ret(
                 } else if name == MATH_MODULE {
                     // Guarded per member at the use site.
                     RegState::Ref(Ref::Math)
+                } else if name == TYPES_MODULE {
+                    // Guarded at the use site, like `math`.
+                    RegState::Ref(Ref::Types)
                 } else {
                     let GlobalView::Closure {
                         chunk: callee,
@@ -1072,6 +1109,91 @@ fn verify_with_ret(
                             ret,
                         }
                     }
+                    RegState::Ref(Ref::Builtin(Builtin::CallMethod))
+                        if b >= 2 && read(&s, a + 1)? == RegState::Ref(Ref::Types) =>
+                    {
+                        // Annotation checks (`typechecker::enforce`):
+                        // `__types.check(value, type, context)` is the
+                        // identity when the value's kind fits the type
+                        // (a literal, or a type parameter's binding), and
+                        // `__types.bind("T", f, names, args..)` of agreeing
+                        // kinds is a compile-time binding. Anything else
+                        // stays in the VM, which decides (and raises).
+                        let unsupported = |what: String| {
+                            Reject::at(
+                                ip,
+                                RejectKind::UnsupportedBuiltin(format!(
+                                    "{}.{}",
+                                    TYPES_MODULE, what
+                                )),
+                            )
+                        };
+                        let RegState::Str(m) = read(&s, a + 2)? else {
+                            return Err(Reject::at(ip, RejectKind::NonSelfCall));
+                        };
+                        let member: &'static str = match const_str(m as usize)?.as_str() {
+                            "check" if b == 5 => "check",
+                            "bind" if b >= 6 => "bind",
+                            other => return Err(unsupported(other.to_string())),
+                        };
+                        let qualified = format!("{}.{}", TYPES_MODULE, member);
+                        if env.member(TYPES_MODULE, member) != MemberView::Native(qualified) {
+                            return Err(unsupported(member.to_string()));
+                        }
+                        push_guard(
+                            &mut guards,
+                            Guard::Member {
+                                object: TYPES_MODULE,
+                                field: member,
+                                expect: MemberExpect::Native,
+                            },
+                        );
+                        if member == "check" {
+                            let kind = value(&s, a + 3)?;
+                            let fits = match (read(&s, a + 4)?, read(&s, a + 5)?) {
+                                (RegState::Str(t), RegState::Str(_)) => {
+                                    crate::semantics::types::parse_cached(const_str(t as usize)?)
+                                        .is_ok_and(|parsed| kind_fits(kind, &parsed))
+                                }
+                                (RegState::TypeOf(bound), RegState::Str(_)) => {
+                                    kind == bound
+                                        || (bound == JitType::Float && kind == JitType::Int)
+                                }
+                                _ => false,
+                            };
+                            if !fits {
+                                return Err(unsupported(format!("check({})", kind)));
+                            }
+                            CallInfo::Pure {
+                                op: PureOp::Identity,
+                                first_arg: 3,
+                                args: vec![kind],
+                                ret: kind,
+                            }
+                        } else {
+                            for i in 3..6 {
+                                if !matches!(read(&s, a + i)?, RegState::Str(_)) {
+                                    return Err(unsupported("bind".to_string()));
+                                }
+                            }
+                            // `semantics::types::bind_shapes` on kinds.
+                            let mut bound: Option<JitType> = None;
+                            for kind in kinds(&s, a + 6, b - 5)? {
+                                bound = Some(match (bound, kind) {
+                                    (None, k) => k,
+                                    (Some(x), k) if x == k => x,
+                                    (Some(x), k) if x.is_numeric() && k.is_numeric() => {
+                                        JitType::Float
+                                    }
+                                    _ => return Err(unsupported("bind".to_string())),
+                                });
+                            }
+                            let Some(bound) = bound else {
+                                return Err(unsupported("bind".to_string()));
+                            };
+                            CallInfo::TypeBinding { bound }
+                        }
+                    }
                     RegState::Ref(Ref::Builtin(Builtin::CallMethod)) => {
                         // `__forge_call_method(receiver, "name", args..)`.
                         if b < 2 || read(&s, a + 1)? != RegState::Ref(Ref::Math) {
@@ -1115,12 +1237,15 @@ fn verify_with_ret(
                     }
                     _ => return Err(Reject::at(ip, RejectKind::NonSelfCall)),
                 };
-                let ret = match &info {
-                    CallInfo::SelfCall => assumed_ret,
-                    CallInfo::Callee { ret, .. } | CallInfo::Pure { ret, .. } => *ret,
+                let result = match &info {
+                    CallInfo::SelfCall => RegState::Val(assumed_ret),
+                    CallInfo::Callee { ret, .. } | CallInfo::Pure { ret, .. } => {
+                        RegState::Val(*ret)
+                    }
+                    CallInfo::TypeBinding { bound } => RegState::TypeOf(*bound),
                 };
                 ops[ip] = Some(OpInfo::Call(info));
-                s[dst] = RegState::Val(ret);
+                s[dst] = result;
             }
             OpCode::ForRangePrep => {
                 if read(&s, a)? != RegState::Ref(Ref::Builtin(Builtin::Range))

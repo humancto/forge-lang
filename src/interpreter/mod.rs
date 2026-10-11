@@ -2934,6 +2934,79 @@ impl Interpreter {
 
     // ========== Expression Evaluation ==========
 
+    /// The annotation checks `typechecker::enforce` inserts (`--strict`,
+    /// edition 2027) run on every call of an annotated function:
+    /// `__types.check(value, type, "<context>")` and `__types.bind("T",
+    /// "<fn>", "<names>", args..)` are decided here without cloning the
+    /// hidden module or going through builtin dispatch. Same rule and
+    /// messages as the module members (`stdlib::types_module`); any other
+    /// shape takes the normal call path.
+    fn try_types_check(
+        &mut self,
+        function: &Expr,
+        args: &[Expr],
+    ) -> Option<Result<Value, RuntimeError>> {
+        let Expr::FieldAccess { object, field } = function else {
+            return None;
+        };
+        if !matches!(object.as_ref(), Expr::Ident(m) if m == crate::typechecker::enforce::MODULE) {
+            return None;
+        }
+        match (field.as_str(), args) {
+            ("check", [value, ty, Expr::StringLit(context)]) => {
+                let value = match self.eval_expr(value) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let ty = match ty {
+                    Expr::StringLit(ty) => crate::semantics::types::parse_cached(ty),
+                    // A generic parameter's binding (a local).
+                    other => match self.eval_expr(other) {
+                        Ok(Value::String(ty)) => crate::semantics::types::parse_cached(&ty),
+                        Ok(_) => return None,
+                        Err(e) => return Some(Err(e)),
+                    },
+                };
+                let expected = match ty {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(RuntimeError::new(&e))),
+                };
+                Some(if crate::semantics::types::fits(&value, &expected) {
+                    Ok(value)
+                } else {
+                    Err(RuntimeError::new(&crate::semantics::types::violation(
+                        context, &expected, &value,
+                    )))
+                })
+            }
+            ("bind", [Expr::StringLit(_), Expr::StringLit(_), Expr::StringLit(_), values @ ..]) => {
+                let mut evaluated = Vec::with_capacity(values.len());
+                for v in values {
+                    match self.eval_expr(v) {
+                        Ok(v) => evaluated.push(v),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                if let Ok(bound) = crate::semantics::types::bind_param(&evaluated) {
+                    return Some(Ok(Value::String(bound)));
+                }
+                // The module member words the error.
+                let mut all = Vec::with_capacity(args.len());
+                for a in &args[..3] {
+                    if let Expr::StringLit(s) = a {
+                        all.push(Value::String(s.clone()));
+                    }
+                }
+                all.extend(evaluated);
+                Some(
+                    crate::stdlib::types_module::call("__types.bind", all)
+                        .map_err(|e| RuntimeError::new(&e)),
+                )
+            }
+            _ => None,
+        }
+    }
+
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
         match expr {
             Expr::Int(n) => Ok(Value::Int(*n)),
@@ -3079,6 +3152,9 @@ impl Interpreter {
             }
 
             Expr::Call { function, args } => {
+                if let Some(result) = self.try_types_check(function, args) {
+                    return result;
+                }
                 // Method call: obj.method(args) -> method(obj, args)
                 // In-place forms on variables: mutating collection methods
                 // (`a.push(x)`, `push(a, x)`, `s.add(x)`, ...) and cheap

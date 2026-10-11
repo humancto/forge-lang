@@ -148,3 +148,43 @@ fn corpus_edition_2027_errors_are_strict_errors() {
         eprintln!("{}", found.join("\n"));
     }
 }
+
+/// Edition 2027 instruments only annotated functions, so unannotated
+/// programs run exactly the program they ran in 2026: the benchmark
+/// workloads (tools/bench.sh) are unchanged by `prepare`.
+#[test]
+fn unannotated_benchmarks_are_not_instrumented_in_2027() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut checked = 0;
+    for dir in ["benchmarks/vm", "benchmarks/interp"] {
+        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.extension().is_none_or(|e| e != "fg") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read benchmark");
+            let prepare_in = |edition| {
+                prepare(
+                    &source,
+                    &CheckOptions {
+                        file: Some(path.clone()),
+                        edition: Some(edition),
+                        ..CheckOptions::default()
+                    },
+                )
+                .map(|(program, _)| format!("{:?}", program))
+                .unwrap_or_else(|e| panic!("{}: {:?}", path.display(), e))
+            };
+            assert_eq!(
+                prepare_in(Edition::E2026),
+                prepare_in(Edition::E2027),
+                "{} is instrumented",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 10, "benchmarks not found");
+}
