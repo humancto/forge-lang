@@ -23,6 +23,21 @@ forge run --max-fuel 1000000 --max-memory 64MB f.fg  # deterministic step budget
 
 Engine flags go BEFORE the subcommand: `forge --interp run x.fg`, not `forge run x.fg --interp`. Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `+=`.
 
+## Reading input
+
+Programs read piped standard input with `fs.lines("/dev/stdin")` (an array of lines, without the newlines) or `fs.read("/dev/stdin")` (all of it as one string). `input()` also returns all of stdin, with trailing whitespace trimmed. Command-line arguments after the file name are not passed to the program: take input from stdin.
+
+```forge
+let lines = fs.lines("/dev/stdin")
+let mut total = 0
+for line in lines {
+    if trim(line) != "" {
+        total += int(trim(line))
+    }
+}
+println("lines={len(lines)} total={total}")
+```
+
 ## Values, variables, strings
 
 ```forge

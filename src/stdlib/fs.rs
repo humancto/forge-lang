@@ -81,6 +81,26 @@ pub fn confine_write(path: &str) -> Result<PathBuf, String> {
     )?)
 }
 
+/// The text of `path` for `fs.read`/`fs.lines` (`what` names the caller in
+/// errors). `/dev/stdin` reads the host's standard input under the same
+/// rule as `input()` (empty when the policy keeps stdin from the script):
+/// it is how programs in most languages read piped input, and a path
+/// check cannot grant it (it resolves to a pipe, not a file).
+pub fn read_text(path: &str, what: &str) -> Result<String, String> {
+    if path == "/dev/stdin" {
+        use std::io::Read;
+        let mut buffer = String::new();
+        if crate::permissions::host_stdin_allowed() {
+            std::io::stdin()
+                .read_to_string(&mut buffer)
+                .map_err(|e| format!("{} error: {}", what, e))?;
+        }
+        return Ok(buffer);
+    }
+    let path = confine_read(path)?;
+    std::fs::read_to_string(&path).map_err(|e| format!("{} error: {}", what, e))
+}
+
 pub fn create_module() -> Value {
     let mut m = IndexMap::new();
     m.insert("read".to_string(), Value::BuiltIn("fs.read".to_string()));
@@ -147,12 +167,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     let _file = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Files)?;
     match name {
         "fs.read" => match args.first() {
-            Some(Value::String(path)) => {
-                let path = confine_read(path)?;
-                std::fs::read_to_string(&path)
-                    .map(Value::String)
-                    .map_err(|e| format!("fs.read error: {}", e))
-            }
+            Some(Value::String(path)) => read_text(path, "fs.read").map(Value::String),
             _ => Err("fs.read() requires a file path string".to_string()),
         },
         "fs.write" => match (args.first(), args.get(1)) {
@@ -299,9 +314,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "fs.lines" => match args.first() {
             Some(Value::String(path)) => {
-                let path = confine_read(path)?;
-                let content =
-                    std::fs::read_to_string(&path).map_err(|e| format!("fs.lines error: {}", e))?;
+                let content = read_text(path, "fs.lines")?;
                 Ok(Value::Array(
                     content
                         .lines()
@@ -390,10 +403,7 @@ pub fn call_vm(
         "fs.read" => {
             let path = get_str(args.first().ok_or("fs.read() requires a path")?)
                 .ok_or("fs.read() requires a string path")?;
-            let path = confine_read(&path)?;
-            std::fs::read_to_string(&path)
-                .map(FsResult::StringVal)
-                .map_err(|e| format!("fs.read error: {}", e))
+            read_text(&path, "fs.read").map(FsResult::StringVal)
         }
         "fs.write" => {
             let path = get_str(args.first().ok_or("fs.write() requires a path")?)
@@ -459,9 +469,7 @@ pub fn call_vm(
         }
         "fs.lines" => {
             let path = get_str(args.first().ok_or("path required")?).ok_or("string required")?;
-            let path = confine_read(&path)?;
-            let content =
-                std::fs::read_to_string(&path).map_err(|e| format!("fs.lines error: {}", e))?;
+            let content = read_text(&path, "fs.lines")?;
             Ok(FsResult::ArrayVal(
                 content.lines().map(|l| l.to_string()).collect(),
             ))
