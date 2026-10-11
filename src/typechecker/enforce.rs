@@ -162,6 +162,9 @@ impl Instrumenter<'_> {
             Stmt::Match { subject, arms } => {
                 self.expr(subject);
                 for arm in arms {
+                    if let Some(g) = &mut arm.guard {
+                        self.expr(g);
+                    }
                     self.stmts(&mut arm.body);
                 }
             }
@@ -383,6 +386,9 @@ fn wrap_returns_stmt(stmt: &mut Stmt, ty: &str, context: &str) {
         Stmt::Match { subject, arms } => {
             wrap_returns_expr(subject, ty, context);
             for arm in arms {
+                if let Some(g) = &mut arm.guard {
+                    wrap_returns_expr(g, ty, context);
+                }
                 wrap_returns(&mut arm.body, ty, context);
             }
         }

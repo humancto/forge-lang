@@ -1,0 +1,73 @@
+// expect: [big circle, circle 1.5, box 2x3, box 1x1, dot, minus one, none, few, few, some 5, many, warm, warm, cold, small, large 14, value 3, empty, error bad, listed 4, not listed 5, zero, k=1, k=2, E0026]
+// match expressions, guards and or-patterns (RFC 0008 section 3).
+type Shape = Circle(Float) | Rect(Float, Float) | Square(Float, Float) | Dot
+type Color = Red | Green | Blue
+
+fn describe(s) {
+    return match s {
+        Circle(r) if r > 10.0 => "big circle",
+        Circle(r) => "circle {r}",
+        Rect(w, h) | Square(w, h) => "box {w}x{h}",
+        Dot => "dot",
+    }
+}
+
+let mut out = []
+for s in [Circle(20.0), Circle(1.5), Rect(2.0, 3.0), Square(1.0, 1.0), Dot] {
+    out = push(out, describe(s))
+}
+
+for n in [-1, 0, 1, 2, 5, 12] {
+    let size = match n {
+        -1 => "minus one",
+        0 => "none",
+        1 | 2 => "few",
+        x if x < 10 => "some {x}",
+        _ => "many",
+    }
+    out = push(out, size)
+}
+
+for c in [Red, Green, Blue] {
+    out = push(out, match c { Red | Green => "warm", Blue => "cold" })
+}
+
+for r in [Ok(Some(1)), Ok(Some(7)), Ok(Some(3)), Ok(None), Err("bad")] {
+    out = push(out, match r {
+        Ok(Some(1 | 2)) => "small",
+        Ok(Some(n)) if n > 5 => {
+            let d = n * 2
+            "large {d}"
+        },
+        Ok(Some(n)) => "value {n}",
+        Ok(None) => "empty",
+        Err(e) => "error {e}",
+    })
+}
+
+let xs = [3, 4]
+for v in [4, 5] {
+    let found = match v {
+        y if any(xs, fn(x) { x == y }) => "listed {y}",
+        y => "not listed {y}",
+    }
+    out = push(out, found)
+}
+
+for i in range(3) {
+    let f = match i {
+        0 => fn() { "zero" },
+        k => fn() { "k={k}" },
+    }
+    out = push(out, f())
+}
+
+try {
+    let bad = match 3 {
+        x if x > 9 => "big",
+    }
+    out = push(out, bad)
+} catch e {
+    out = push(out, e.code)
+}
+out

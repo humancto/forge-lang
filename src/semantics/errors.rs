@@ -635,11 +635,14 @@ Fix: this is intentional — address the condition the message describes.",
         title: "non-exhaustive match",
         hint: "add a `_ => ...` arm to handle every other value",
         explanation: "\
-A `match` statement ran with a value that none of its arms matched.
+A `match` (statement or expression) ran with a value that none of its
+arms matched. An arm whose guard (`pattern if condition`) is false does not
+match.
 
 Example:
 
     match status { \"ok\" => say \"fine\" }      // status is \"error\"
+    let size = match n { x if x > 9 => \"big\" }   // n is 3
 
 Fix: add the missing arms, or a wildcard arm: `_ => say \"unexpected\"`.
 The type checker reports missing ADT variants statically (T0011).",

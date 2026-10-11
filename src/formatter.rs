@@ -575,7 +575,7 @@ fn is_unary_position(prev: Option<&Item>) -> Option<bool> {
     let t = prev.token?;
     if ends_operand(t) {
         Some(false)
-    } else if is_keyword(t) || matches!(t, Token::Bar | Token::Ampersand) {
+    } else if is_keyword(t) || matches!(t, Token::Ampersand) {
         None
     } else {
         Some(true)
@@ -614,12 +614,7 @@ fn spacing(a: &Item, a_unary: Option<bool>, b: &Item, gap: &str) -> String {
     let ambiguous = |t: &Token| {
         matches!(
             t,
-            Token::Lt
-                | Token::Gt
-                | Token::PipeRight
-                | Token::Question
-                | Token::Bar
-                | Token::Ampersand
+            Token::Lt | Token::Gt | Token::PipeRight | Token::Question | Token::Ampersand
         )
     };
     if ambiguous(ta) || ambiguous(tb) {
@@ -930,6 +925,14 @@ otherwise { z() }
             fmt("let c = term.table (rows)\n"),
             "let c = term.table (rows)\n"
         );
+    }
+
+    #[test]
+    fn formats_match_expressions_guards_and_or_patterns() {
+        let src = "let size = match n{\n0=>\"none\",\n1|2 =>\"few\",\nx if x < 10=>\"some\",\n-1|- 2=>\"neg\",\nRect(w,h)|Square(w,h)=>{\nw*h\n},\n_=>\"many\",\n}\ntype Color = Red|Green\n";
+        let want = "let size = match n {\n    0 => \"none\",\n    1 | 2 => \"few\",\n    x if x < 10 => \"some\",\n    -1 | -2 => \"neg\",\n    Rect(w, h) | Square(w, h) => {\n        w * h\n    },\n    _ => \"many\",\n}\ntype Color = Red | Green\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want, "idempotent");
     }
 
     #[test]

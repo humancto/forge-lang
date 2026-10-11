@@ -1,0 +1,15 @@
+// match expressions, guards and or-patterns are in every edition (RFC 0008
+// section 3); the full suite is tests/match_expressions_test.fg.
+
+@test
+fn match_expression_guard_and_or_pattern() {
+    let label = fn(n) {
+        match n {
+            0 => "none",
+            1 | 2 => "few",
+            x if x < 10 => "some {x}",
+            _ => "many",
+        }
+    }
+    assert_eq(map([0, 2, 5, 50], label), ["none", "few", "some 5", "many"])
+}
