@@ -314,6 +314,26 @@ impl ProgramDiagnostic {
     }
 
     /// A lexer (`E0001`) or parser (`E0002`) error.
+    /// A type-checker diagnostic (`T0006` ...) in `file` (as displayed).
+    pub fn type_check(file: &str, d: &crate::typechecker::Diagnostic) -> Self {
+        let len = if d.span.end.line == d.span.start.line {
+            d.span.end.col.saturating_sub(d.span.start.col).max(1)
+        } else {
+            1
+        };
+        Self {
+            code: d.code.as_str().to_string(),
+            is_error: d.is_error(),
+            message: d.message.clone(),
+            file: file.to_string(),
+            line: d.line(),
+            col: d.col().max(1),
+            len,
+            hint: d.help.clone(),
+            phase: Phase::Type,
+        }
+    }
+
     pub fn syntax(lexer: bool, message: &str, file: &str, line: usize, col: usize) -> Self {
         use crate::semantics::errors;
         let class = errors::lookup(if lexer { "E0001" } else { "E0002" })

@@ -4,9 +4,16 @@
 use super::*;
 
 fn check_source(source: &str, strict: bool) -> Vec<Diagnostic> {
-    analyze(source, &CheckOptions { strict, file: None })
-        .expect("test source parses")
-        .diagnostics
+    analyze(
+        source,
+        &CheckOptions {
+            strict,
+            edition: Some(Edition::E2026),
+            ..CheckOptions::default()
+        },
+    )
+    .expect("test source parses")
+    .diagnostics
 }
 
 fn warnings_for(source: &str) -> Vec<Diagnostic> {
@@ -1240,4 +1247,204 @@ fn native_imports_bind_their_names() {
         codes("import { mul } from native \"libs/libmath\"\nsay mull(1)"),
         vec![Code::UnknownName]
     );
+}
+
+// ---------------------------------------------------------------------
+// Edition 2027: declared types are enforced (docs/editions/2027.md)
+// ---------------------------------------------------------------------
+
+fn check_in(source: &str, strict: bool, edition: Edition) -> Vec<Diagnostic> {
+    analyze(
+        source,
+        &CheckOptions {
+            strict,
+            edition: Some(edition),
+            ..CheckOptions::default()
+        },
+    )
+    .expect("test source parses")
+    .diagnostics
+}
+
+/// Every code's `forge explain` example: a warning in 2026, and in 2027 an
+/// error exactly when the code contradicts a declaration.
+#[test]
+fn edition_2027_promotes_exactly_the_declared_type_codes() {
+    use crate::typechecker::diagnostics::tests::example_of;
+    for code in Code::ALL {
+        let example = example_of(code.explanation());
+        let in_2026 = check_in(&example, false, Edition::E2026);
+        let in_2027 = check_in(&example, false, Edition::E2027);
+        assert!(
+            in_2026.iter().all(|d| !d.is_error()),
+            "{}: 2026 must only warn: {:?}",
+            code,
+            in_2026
+        );
+        let d = in_2027
+            .iter()
+            .find(|d| d.code == *code)
+            .unwrap_or_else(|| panic!("{} example does not report {}", code, code));
+        assert_eq!(
+            d.is_error(),
+            code.contradicts_declaration(),
+            "{} in 2027: {:?}",
+            code,
+            d
+        );
+    }
+}
+
+#[test]
+fn edition_2027_promoted_codes() {
+    let promoted: Vec<&str> = Code::ALL
+        .iter()
+        .filter(|c| c.contradicts_declaration())
+        .map(|c| c.as_str())
+        .collect();
+    // docs/editions/2027.md lists these; change both together.
+    assert_eq!(
+        promoted,
+        vec!["T0001", "T0002", "T0003", "T0012", "T0015", "T0016"]
+    );
+}
+
+#[test]
+fn edition_2027_argument_return_and_let_mismatches_are_errors() {
+    for (src, code) in [
+        ("let x: Int = \"hello\"", Code::TypeMismatch),
+        (
+            "fn f(xs: [Int]) -> Int { return xs[0] }\nsay f([\"a\"])",
+            Code::ArgumentType,
+        ),
+        ("fn f() -> Int { return \"no\" }", Code::ReturnType),
+        ("fn f() -> Int { \"no\" }", Code::ReturnType),
+        (
+            "struct P { x: Int, y: Int }\nlet p = P { x: 1 }",
+            Code::MissingField,
+        ),
+        ("let k: Strng = \"x\"", Code::UnknownType),
+    ] {
+        let old = check_in(src, false, Edition::E2026);
+        let new = check_in(src, false, Edition::E2027);
+        assert_eq!(old.len(), 1, "{}: {:?}", src, old);
+        assert_eq!(new.len(), 1, "{}: {:?}", src, new);
+        assert_eq!((old[0].code, new[0].code), (code, code), "{}", src);
+        assert!(!old[0].is_error(), "2026 warns: {}", src);
+        assert!(new[0].is_error(), "2027 rejects: {}", src);
+    }
+}
+
+#[test]
+fn edition_2027_keeps_inferred_and_engine_rule_diagnostics_as_warnings() {
+    for src in [
+        // Engine rules.
+        "fn add(a, b) { return a + b }\nsay add(1)",
+        "let total = \"3\" - 1",
+        "say coutn",
+        // Inferred Option type.
+        "let o = Some(1)\nsay unwrap_or(o, \"x\")",
+        // Flow analysis.
+        "fn sign(n: Int) -> Int {\n  if n > 0 { return 1 }\n}",
+        // Inferred return type of a method against an interface.
+        "power Named { fn name() -> String }\nthing Robot { id: Int }\ngive Robot the power Named { fn name(it) { return it.id } }",
+    ] {
+        let new = check_in(src, false, Edition::E2027);
+        assert!(!new.is_empty(), "{} reports something", src);
+        assert!(new.iter().all(|d| !d.is_error()), "{}: {:?}", src, new);
+    }
+}
+
+#[test]
+fn strict_in_2027_still_makes_every_diagnostic_an_error() {
+    let e = check_in("say \"a\" - 1\nsay nope", true, Edition::E2027);
+    assert_eq!(e.len(), 2);
+    assert!(e.iter().all(|d| d.is_error()));
+}
+
+#[test]
+fn unannotated_code_is_clean_in_2027() {
+    let src = "let xs = [1, 2, 3]\nfn total(v) { let mut s = 0\nfor x in v { s = s + x }\nreturn s }\nsay total(xs)\nlet mut y = 1\ny = \"now a string\"";
+    assert!(check_in(src, false, Edition::E2027).is_empty());
+}
+
+#[test]
+fn generic_parameters_are_consistent_per_call() {
+    let first = "fn first<T>(xs: [T]) -> T { return xs[0] }\n";
+    // `first([1, 2])` is an Int.
+    let e = check_in(
+        &format!("{}let n: String = first([1, 2])", first),
+        false,
+        Edition::E2027,
+    );
+    assert_eq!(e.len(), 1, "{:?}", e);
+    assert!(e[0].is_error() && e[0].message.contains("assigned Int"));
+    assert!(check_in(
+        &format!("{}let n: Int = first([1, 2])", first),
+        false,
+        Edition::E2027
+    )
+    .is_empty());
+
+    let pair = "fn pair<T>(a: T, b: T) -> [T] { return [a, b] }\n";
+    let e = check_in(&format!("{}pair(1, \"x\")", pair), false, Edition::E2027);
+    assert_eq!(e.len(), 1, "{:?}", e);
+    assert_eq!(e[0].code, Code::ArgumentType);
+    assert!(e[0].is_error());
+    // Int and Float make T Float, in either order.
+    for call in ["pair(1, 2.5)", "pair(2.5, 1)"] {
+        let src = format!("{}let p: [Float] = {}", pair, call);
+        assert!(
+            check_in(&src, false, Edition::E2027).is_empty(),
+            "{}: {:?}",
+            call,
+            check_in(&src, false, Edition::E2027)
+        );
+    }
+}
+
+#[test]
+fn generic_structs_are_checked_in_2027() {
+    let src = "struct Box<T> { value: T }\nlet b: Box<Int> = Box { value: \"s\" }";
+    let e = check_in(src, false, Edition::E2027);
+    assert_eq!(e.len(), 1, "{:?}", e);
+    assert!(e[0].is_error());
+    let src = "struct Box<T> { value: T }\nfn unbox<T>(b: Box<T>) -> T { return b.value }\nlet u: String = unbox(Box { value: 3 })";
+    let e = check_in(src, false, Edition::E2027);
+    assert_eq!(e.len(), 1, "{:?}", e);
+    assert!(e[0].is_error() && e[0].message.contains("assigned Int"));
+}
+
+#[test]
+fn prepare_instruments_annotated_code_from_2027() {
+    let src = "fn f(x: Int) -> Int { return x }\nfn g(y) { return y }";
+    let calls = |edition| {
+        let (program, _) = prepare(
+            src,
+            &CheckOptions {
+                edition: Some(edition),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("prepares");
+        format!("{:?}", program).matches("__types").count()
+    };
+    assert_eq!(calls(Edition::E2026), 0);
+    // Argument and return of `f`; nothing in unannotated `g`.
+    assert_eq!(calls(Edition::E2027), 2);
+}
+
+#[test]
+fn prepare_refuses_declared_type_errors_from_2027() {
+    let src = "fn f(x: Int) { return x }\nf(\"a\")";
+    let options = |edition| CheckOptions {
+        edition: Some(edition),
+        ..CheckOptions::default()
+    };
+    let (_, warnings) = prepare(src, &options(Edition::E2026)).expect("2026 runs");
+    assert_eq!(warnings.len(), 1);
+    match prepare(src, &options(Edition::E2027)) {
+        Err(PrepareError::Type(d)) => assert!(d[0].is_error() && d[0].code == Code::ArgumentType),
+        other => panic!("expected a type error, got {:?}", other.map(|(_, d)| d)),
+    }
 }

@@ -64,10 +64,16 @@ fn allowlist() -> BTreeSet<String> {
 }
 
 fn check(path: &Path, strict: bool) -> Vec<Diagnostic> {
+    check_in(path, strict, Edition::E2026)
+}
+
+fn check_in(path: &Path, strict: bool, edition: Edition) -> Vec<Diagnostic> {
     let source = std::fs::read_to_string(path).expect("read corpus file");
     let options = CheckOptions {
         strict,
         file: Some(path.to_path_buf()),
+        edition: Some(edition),
+        skip_imports: false,
     };
     match analyze(&source, &options) {
         Ok(a) => a.diagnostics,
@@ -114,4 +120,31 @@ fn corpus_strict_errors_are_exactly_the_allowlist() {
         "stale allowlist entries (no longer reported): {:?}",
         stale
     );
+}
+
+/// Edition 2027 (without `--strict`) only promotes contradictions of
+/// declared types, so its errors are a subset of the strict-mode errors
+/// above. Files with such errors do not run under 2027 until migrated;
+/// they are listed in docs/editions/2027.md.
+#[test]
+fn corpus_edition_2027_errors_are_strict_errors() {
+    let allowed = allowlist();
+    let mut found = Vec::new();
+    for path in corpus_files() {
+        for d in check_in(&path, false, Edition::E2027) {
+            if !d.is_error() {
+                continue;
+            }
+            let key = format!("{}:{} {}", relative(&path), d.line(), d.code);
+            assert!(
+                allowed.contains(&key),
+                "edition 2027 error that strict mode does not report: {}",
+                key
+            );
+            found.push(format!("{}  {}", key, d.message));
+        }
+    }
+    if std::env::var_os("FORGE_LIST_2027_ERRORS").is_some() {
+        eprintln!("{}", found.join("\n"));
+    }
 }

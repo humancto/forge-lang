@@ -551,8 +551,8 @@ fn lsp_range(source: &str, span: crate::parser::index::Span) -> serde_json::Valu
 fn get_diagnostics_for(source: &str, path: Option<std::path::PathBuf>) -> Vec<serde_json::Value> {
     use crate::typechecker::{analyze, CheckOptions, FrontendError};
     let options = CheckOptions {
-        strict: false,
         file: path,
+        ..CheckOptions::default()
     };
     match analyze(source, &options) {
         Ok(analysis) => analysis

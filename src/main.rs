@@ -67,7 +67,8 @@ enum FrontendError {
         col: usize,
         message: String,
     },
-    Type(Vec<typechecker::Diagnostic>),
+    /// Type errors, with the policy that made them errors.
+    Type(Vec<typechecker::Diagnostic>, typechecker::SeverityPolicy),
 }
 
 #[derive(Parser)]
@@ -1016,6 +1017,7 @@ async fn async_main() {
                     engine,
                     vm_compat: &vm_compat,
                     timeout: (timeout > 0).then(|| std::time::Duration::from_secs(timeout)),
+                    strict,
                 },
             );
         }
@@ -1185,9 +1187,10 @@ async fn async_main() {
 }
 
 /// Lex, parse and type-check `source` (from `filename`, which locates
-/// imports). With `strict`, type diagnostics are errors and stop the run,
-/// and annotations are additionally enforced at run time (see
-/// `typechecker::enforce`).
+/// imports) under the current edition. Type errors stop the run: every
+/// diagnostic under `--strict`, contradictions of declared types from
+/// edition 2027. Annotations are then also enforced at run time (see
+/// `typechecker::enforce` and `typechecker::prepare`).
 fn prepare_program(
     source: &str,
     filename: &str,
@@ -1197,44 +1200,28 @@ fn prepare_program(
     let options = typechecker::CheckOptions {
         strict,
         file: path.exists().then(|| path.to_path_buf()),
+        edition: None,
+        skip_imports: false,
     };
-    let analysis = typechecker::analyze(source, &options).map_err(|e| match e {
-        typechecker::FrontendError::Lex { line, col, message } => {
-            FrontendError::Lex { line, col, message }
-        }
-        typechecker::FrontendError::Parse { line, col, message } => {
-            FrontendError::Parse { line, col, message }
-        }
-    })?;
-    let diagnostics = analysis.diagnostics;
-    if diagnostics.iter().any(|d| d.is_error()) {
-        return Err(FrontendError::Type(diagnostics));
-    }
-    let mut program = analysis.program;
-    if strict {
-        typechecker::enforce::instrument(&mut program);
-    }
-    Ok((program, diagnostics))
+    let policy = options.policy();
+    typechecker::prepare(source, &options).map_err(|e| match e {
+        typechecker::PrepareError::Frontend(typechecker::FrontendError::Lex {
+            line,
+            col,
+            message,
+        }) => FrontendError::Lex { line, col, message },
+        typechecker::PrepareError::Frontend(typechecker::FrontendError::Parse {
+            line,
+            col,
+            message,
+        }) => FrontendError::Parse { line, col, message },
+        typechecker::PrepareError::Type(diagnostics) => FrontendError::Type(diagnostics, policy),
+    })
 }
 
 /// A type-checker diagnostic as a program diagnostic (`T0006` ...).
 fn type_diagnostic(filename: &str, d: &typechecker::Diagnostic) -> errors::ProgramDiagnostic {
-    let len = if d.span.end.line == d.span.start.line {
-        d.span.end.col.saturating_sub(d.span.start.col).max(1)
-    } else {
-        1
-    };
-    errors::ProgramDiagnostic {
-        code: d.code.as_str().to_string(),
-        is_error: d.is_error(),
-        message: d.message.clone(),
-        file: errors::display_path(filename),
-        line: d.line(),
-        col: d.col().max(1),
-        len,
-        hint: d.help.clone(),
-        phase: errors::Phase::Type,
-    }
+    errors::ProgramDiagnostic::type_check(&errors::display_path(filename), d)
 }
 
 /// Syntax errors (E0001 lexer, E0002 parser) or the type diagnostics of a
@@ -1248,7 +1235,7 @@ fn frontend_diagnostics(filename: &str, err: &FrontendError) -> Vec<errors::Prog
         FrontendError::Parse { line, col, message } => vec![errors::ProgramDiagnostic::syntax(
             false, message, &file, *line, *col,
         )],
-        FrontendError::Type(diagnostics) => diagnostics
+        FrontendError::Type(diagnostics, _) => diagnostics
             .iter()
             .map(|d| type_diagnostic(filename, d))
             .collect(),
@@ -1259,16 +1246,12 @@ fn print_frontend_error(source: &str, filename: &str, err: FrontendError) -> ! {
     for d in frontend_diagnostics(filename, &err) {
         eprintln!("{}", d.render(source));
     }
-    if let FrontendError::Type(diagnostics) = &err {
+    if let FrontendError::Type(diagnostics, policy) = &err {
         if errors::error_format() == errors::ErrorFormat::Human {
             let errors = diagnostics.iter().filter(|d| d.is_error()).count();
             eprintln!(
                 "{}",
-                errors::format_simple_error(&format!(
-                    "type checking failed with {} error{} (--strict)",
-                    errors,
-                    if errors == 1 { "" } else { "s" }
-                ))
+                errors::format_simple_error(&typechecker::refusal_summary(errors, *policy))
             );
         }
     }
@@ -1916,7 +1899,7 @@ mod tests {
         "#;
 
         match prepare_program(source, "<test>", true) {
-            Err(FrontendError::Type(warnings)) => {
+            Err(FrontendError::Type(warnings, _)) => {
                 assert!(warnings.iter().any(|w| w.is_error()));
                 assert!(warnings.iter().any(|w| w.message.contains("expected Int")));
             }

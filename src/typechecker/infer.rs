@@ -27,7 +27,7 @@
 //! caller provides one; without it diagnostics point at statement starts.
 
 use super::builtins;
-use super::diagnostics::{Code, Diagnostic, Fix, Severity};
+use super::diagnostics::{Basis, Code, Diagnostic, Fix, SeverityPolicy};
 use super::resolve::{Resolution, Resolved};
 use super::suggest;
 use super::types::{FnTy, InferCtx, Ty};
@@ -182,7 +182,10 @@ const EXTRA_VALUE_METHODS: &[&str] = &[
 ];
 
 pub struct Checker<'a> {
-    strict: bool,
+    policy: SeverityPolicy,
+    /// > 0 while reporting a diagnostic that rests on an inferred type
+    /// (see `report_inferred`).
+    inferred_basis: usize,
     index: Option<&'a SyntaxIndex>,
     resolution: Option<&'a Resolution>,
     by_stmt: HashMap<Pos, Vec<OccId>>,
@@ -224,7 +227,7 @@ pub struct Checker<'a> {
 
 impl<'a> Checker<'a> {
     pub fn new(
-        strict: bool,
+        policy: SeverityPolicy,
         index: Option<&'a SyntaxIndex>,
         resolution: Option<&'a Resolution>,
     ) -> Self {
@@ -235,7 +238,8 @@ impl<'a> Checker<'a> {
             }
         }
         Self {
-            strict,
+            policy,
+            inferred_basis: 0,
             index,
             resolution,
             by_stmt,
@@ -345,11 +349,14 @@ impl<'a> Checker<'a> {
         }
         self.diagnostics.push(Diagnostic {
             code,
-            severity: if self.strict {
-                Severity::Error
-            } else {
-                Severity::Warning
-            },
+            severity: self.policy.severity(
+                code,
+                if self.inferred_basis > 0 {
+                    Basis::Inferred
+                } else {
+                    Basis::Declared
+                },
+            ),
             message,
             span,
             help,
@@ -359,6 +366,15 @@ impl<'a> Checker<'a> {
 
     fn simple(&mut self, code: Code, span: Span, message: impl Into<String>) {
         self.report(code, span, message, None, Vec::new());
+    }
+
+    /// Report a diagnostic whose code usually contradicts a declaration
+    /// but that here rests on an inferred type: it stays a warning in
+    /// every edition unless `--strict` (`SeverityPolicy::severity`).
+    fn simple_inferred(&mut self, code: Code, span: Span, message: impl Into<String>) {
+        self.inferred_basis += 1;
+        self.simple(code, span, message);
+        self.inferred_basis -= 1;
     }
 
     fn stmt_span(&self) -> Span {
@@ -634,7 +650,7 @@ impl<'a> Checker<'a> {
         params: &[Param],
         return_type: &Option<TypeAnn>,
     ) -> Callable {
-        let mut me = Checker::new(self.strict, None, None);
+        let mut me = Checker::new(self.policy, None, None);
         me.structs = self.structs.clone();
         me.adts = self.adts.clone();
         me.aliases = self.aliases.clone();
@@ -1974,7 +1990,8 @@ impl<'a> Checker<'a> {
                 self.cx.rollback(snap);
                 if !fits {
                     ok = false;
-                    self.simple(
+                    // The method's return type may be inferred.
+                    self.simple_inferred(
                         Code::InterfaceNotSatisfied,
                         span,
                         format!(
@@ -2701,7 +2718,8 @@ impl<'a> Checker<'a> {
                             self.cx.rollback(snap);
                             if !fits && !inner.is_unknown() {
                                 let span = args.get(1).map_or(span, |a| self.expr_span(a));
-                                self.simple(
+                                // The Option's inner type is usually inferred.
+                                self.simple_inferred(
                                     Code::TypeMismatch,
                                     span,
                                     format!(
@@ -2876,6 +2894,9 @@ impl<'a> Checker<'a> {
         kind: CallKind,
     ) -> Ty {
         let subst = self.instantiate(sig);
+        if kind != CallKind::Builtin {
+            self.widen_numeric_type_params(sig, &subst, args);
+        }
         let params: Vec<Ty> = sig.params.iter().map(|p| p.subst_params(&subst)).collect();
 
         if !has_spread
@@ -2953,6 +2974,53 @@ impl<'a> Checker<'a> {
         let ret = self.cx.resolve(&ret);
         // Unsolved type variables in the result mean "unknown".
         self.cx.finalize(&ret)
+    }
+
+    /// A type parameter given both `Int` and `Float` arguments in one call
+    /// (`fn max<T>(a: T, b: T)` called as `max(1, 2.5)`) is `Float`, as an
+    /// Int fits Float everywhere else; without this the first argument
+    /// would fix `T` to `Int` and the call would be checked depending on
+    /// argument order. Only simple arguments (literals, names, operators,
+    /// field and index reads) at positions typed exactly `T` are looked at.
+    fn widen_numeric_type_params(
+        &mut self,
+        sig: &FnTy,
+        subst: &BTreeMap<String, Ty>,
+        args: &[Expr],
+    ) {
+        fn simple(e: &Expr) -> bool {
+            match e {
+                Expr::Int(_) | Expr::Float(_) | Expr::Ident(_) => true,
+                Expr::UnaryOp { operand, .. } => simple(operand),
+                Expr::BinOp { left, right, .. } => simple(left) && simple(right),
+                Expr::FieldAccess { object, .. } => simple(object),
+                Expr::Index { object, index } => simple(object) && simple(index),
+                _ => false,
+            }
+        }
+        for tp in &sig.type_params {
+            let Some(var) = subst.get(tp) else { continue };
+            let (mut ints, mut floats) = (false, false);
+            for (param, arg) in sig.params.iter().zip(args) {
+                if !matches!(param, Ty::Param(p) if p == tp) || !simple(arg) {
+                    continue;
+                }
+                let mute = std::mem::replace(&mut self.mute, true);
+                let t = self.infer(arg, None);
+                self.mute = mute;
+                match self.cx.resolve(&t) {
+                    Ty::Int => ints = true,
+                    Ty::Float => floats = true,
+                    _ => {}
+                }
+            }
+            if ints && floats {
+                let snap = self.cx.snapshot();
+                if !self.cx.assign(var, &Ty::Float) {
+                    self.cx.rollback(snap);
+                }
+            }
+        }
     }
 
     fn infer_method_call(

@@ -51,6 +51,11 @@ pub struct TestOptions<'a> {
     /// it cannot be interrupted safely, so the whole run aborts with a
     /// failure naming the hung test. `None` disables the watchdog.
     pub timeout: Option<std::time::Duration>,
+    /// `--strict`. From edition 2027 test files are type-checked before
+    /// they run (declared-type errors fail the file; `--strict` makes every
+    /// diagnostic an error) and annotated boundaries are checked at run
+    /// time; edition 2026 runs them unchecked, as it always has.
+    pub strict: bool,
 }
 
 /// Aborts the process when the currently armed test overruns its deadline.
@@ -288,7 +293,7 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
             }
         };
 
-        let program = match parse_source(&source) {
+        let program = match prepare_source(&source, &path, opts.strict) {
             Ok(p) => p,
             Err(message) => {
                 crate::color::ceprintln!("  \x1B[31mERROR\x1B[0m  {} — {}", path_str, message);
@@ -392,6 +397,41 @@ pub fn run_tests(test_dir: &str, opts: &TestOptions) {
 
     if any_failed {
         std::process::exit(1);
+    }
+}
+
+/// Parse a test file; from edition 2027 (or under `--strict` there) also
+/// type-check and instrument it like `forge run` does
+/// (`typechecker::prepare`). Type errors are printed here; the returned
+/// message is the one-line reason for the file's failure.
+fn prepare_source(source: &str, path: &Path, strict: bool) -> Result<Program, String> {
+    use crate::semantics::edition::{self, Edition};
+    use crate::typechecker::{self, CheckOptions, PrepareError};
+    let edition = edition::current();
+    if edition < Edition::E2027 {
+        return parse_source(source);
+    }
+    let options = CheckOptions {
+        strict,
+        file: Some(path.to_path_buf()),
+        edition: Some(edition),
+        skip_imports: false,
+    };
+    match typechecker::prepare(source, &options) {
+        Ok((program, _warnings)) => Ok(program),
+        Err(PrepareError::Frontend(_)) => parse_source(source),
+        Err(PrepareError::Type(diagnostics)) => {
+            let file = errors::display_path(&path.display().to_string());
+            let mut count = 0;
+            for d in diagnostics.iter().filter(|d| d.is_error()) {
+                count += 1;
+                crate::color::ceprintln!(
+                    "{}",
+                    errors::ProgramDiagnostic::type_check(&file, d).render(source)
+                );
+            }
+            Err(typechecker::refusal_summary(count, options.policy()))
+        }
     }
 }
 
