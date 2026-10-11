@@ -1,0 +1,20 @@
+id = "word_frequency"
+category = "strings"
+title = "Top words in a text"
+prompt = """
+Read all of standard input as text. Split it into words: a word is a maximal run of ASCII
+letters (anything else separates words), compared case-insensitively. Print the 5 most
+frequent words as `<word> <count>`, lowercase, most frequent first; break ties alphabetically.
+"""
+stdin = """
+The quick brown fox jumps over the lazy dog. The dog sleeps; the fox doesn't!
+A fox, a dog, and THE end. Quick-quick, said the bird.
+"""
+needs = []
+expected_stdout = """
+the 6
+dog 3
+fox 3
+quick 3
+a 2
+"""

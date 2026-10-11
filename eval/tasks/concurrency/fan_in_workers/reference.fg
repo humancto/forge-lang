@@ -1,0 +1,24 @@
+let ch = channel()
+for k in [1, 2, 3] {
+    spawn {
+        for j in range(1, k * 2 + 1) {
+            send(ch, "w{k}:{j}")
+        }
+        send(ch, "w{k}:done")
+    }
+}
+let mut messages = []
+let mut done = 0
+while done < 3 {
+    let m = receive(ch)
+    if ends_with(m, ":done") {
+        done += 1
+    } else {
+        messages = push(messages, m)
+    }
+}
+for m in sort(messages) {
+    println(m)
+}
+println("messages: {len(messages)}")
+println("workers finished: {done}")

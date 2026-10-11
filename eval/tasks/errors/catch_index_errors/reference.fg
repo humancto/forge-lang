@@ -1,0 +1,17 @@
+let colors = ["red", "green", "blue", "cyan", "magenta"]
+let mut errors = 0
+for line in split(input(), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    let i = int(line.trim())
+    try {
+        assert(i >= 0, "negative index")
+        let value = colors[i]
+        println("{i}: {value}")
+    } catch e {
+        println("{i}: out of range")
+        errors += 1
+    }
+}
+println("errors: {errors}")

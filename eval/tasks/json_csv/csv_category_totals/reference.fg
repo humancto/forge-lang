@@ -1,0 +1,26 @@
+fn to_cents(amount: String) -> Int {
+    let parts = split(amount, ".")
+    return int(parts[0]) * 100 + int(parts[1])
+}
+
+fn fmt_cents(c: Int) -> String {
+    return "{c / 100}." + pad_start(str(c % 100), 2, "0")
+}
+
+// Split by hand: csv.parse would turn "12.50" into the Float 12.5.
+let lines = split(input(), "\n")
+let mut totals = {}
+let mut counts = {}
+for line in slice(lines, 1, len(lines)) {
+    if line.trim() == "" {
+        continue
+    }
+    let cells = split(line, ",")
+    let c = cells[1]
+    totals[c] = get(totals, c, 0) + to_cents(cells[2])
+    counts[c] = get(counts, c, 0) + 1
+}
+println("category,total,count")
+for c in sort(keys(totals)) {
+    println("{c},{fmt_cents(totals[c])},{counts[c]}")
+}

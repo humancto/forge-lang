@@ -1,0 +1,16 @@
+for line in split(input(), "\n") {
+    if line == "" {
+        continue
+    }
+    let colon = index_of(line, ":")
+    let k = int(substring(line, 0, colon))
+    let xs = substring(line, colon + 1).words()
+    let n = len(xs)
+    if n == 0 {
+        println("")
+        continue
+    }
+    let shift = ((k % n) + n) % n
+    let rotated = flatten([slice(xs, n - shift, n), slice(xs, 0, n - shift)])
+    println(join(rotated, " "))
+}

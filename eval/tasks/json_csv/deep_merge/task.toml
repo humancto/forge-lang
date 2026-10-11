@@ -1,0 +1,31 @@
+id = "deep_merge"
+category = "json_csv"
+title = "Deep-merge configuration"
+prompt = """
+Standard input contains two JSON objects separated by a line with only `---`: a base
+configuration and an override. Deep-merge the override into the base: when both values are
+objects merge them recursively, otherwise the override value replaces the base value (arrays
+are replaced, not concatenated); a `null` override removes the key. Then print every leaf of
+the result as `<dotted.path> = <value as compact JSON>`, visiting keys in sorted order at every
+level (an empty object is a leaf printed as `{}`).
+"""
+stdin = """
+{"server": {"host": "0.0.0.0", "port": 8080, "tls": {"enabled": false}},
+ "db": {"url": "sqlite://dev.db", "pool": 5},
+ "features": ["a", "b"], "debug": true}
+---
+{"server": {"port": 443, "tls": {"enabled": true, "cert": "/etc/cert.pem"}},
+ "db": {"pool": null},
+ "features": ["c"], "debug": false, "cache": {}}
+"""
+needs = []
+expected_stdout = """
+cache = {}
+db.url = "sqlite://dev.db"
+debug = false
+features = ["c"]
+server.host = "0.0.0.0"
+server.port = 443
+server.tls.cert = "/etc/cert.pem"
+server.tls.enabled = true
+"""

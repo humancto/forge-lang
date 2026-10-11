@@ -1,0 +1,20 @@
+fn make_adder(n: Int) {
+    return fn(x) { return x + n }
+}
+
+fn make_multiplier(n: Int) {
+    return fn(x) { return x * n }
+}
+
+fn apply_all(fns, x: Int) {
+    return map(fns, fn(f) { return f(x) })
+}
+
+let add1 = make_adder(1)
+let times2 = make_multiplier(2)
+let fns = [make_adder(1), make_adder(10), make_multiplier(3), make_multiplier(-1), fn(x) { return times2(add1(x)) }]
+for x in [0, 5, -3] {
+    let results = map(apply_all(fns, x), fn(r) { return str(r) })
+    println("{x} -> " + join(results, " "))
+}
+println("sum of results for 7: {sum(apply_all(fns, 7))}")

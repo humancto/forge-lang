@@ -1,0 +1,19 @@
+fn vowels(word: String) -> Int {
+    return len(filter(word.lower().chars(), fn(c) { return contains("aeiou", c) }))
+}
+
+let words = input().words()
+let mut total = 0
+let mut best = ""
+let mut best_n = -1
+for w in words {
+    let n = vowels(w)
+    println("{w}: {n}")
+    total += n
+    if n > best_n {
+        best_n = n
+        best = w
+    }
+}
+println("total: {total}")
+println("max: {best}")

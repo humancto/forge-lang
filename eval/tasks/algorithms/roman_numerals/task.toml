@@ -1,0 +1,32 @@
+id = "roman_numerals"
+category = "algorithms"
+title = "Roman numerals both ways"
+prompt = """
+Each line of standard input is either an integer from 1 to 3999 or a Roman numeral (standard
+subtractive form). Convert integers to Roman numerals and Roman numerals to integers, printing
+`<input> -> <output>`. If a Roman numeral is not in canonical form (i.e. converting its value
+back does not give the same string) print `<input> -> invalid`.
+"""
+stdin = """
+1994
+MCMXCIV
+4
+IIII
+3999
+XLII
+2024
+IC
+MMXXIV
+"""
+needs = []
+expected_stdout = """
+1994 -> MCMXCIV
+MCMXCIV -> 1994
+4 -> IV
+IIII -> invalid
+3999 -> MMMCMXCIX
+XLII -> 42
+2024 -> MMXXIV
+IC -> invalid
+MMXXIV -> 2024
+"""

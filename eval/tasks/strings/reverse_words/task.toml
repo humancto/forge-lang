@@ -1,0 +1,22 @@
+id = "reverse_words"
+category = "strings"
+title = "Reverse words in each line"
+prompt = """
+Read lines from standard input. For each line print its words (separated by any whitespace)
+in reverse order, joined by single spaces, followed by ` (<n> words)`.
+Skip lines that contain no words.
+"""
+stdin = """
+hello world
+  the   quick brown   fox  
+
+single
+a b c d e f
+"""
+needs = []
+expected_stdout = """
+world hello (2 words)
+fox brown quick the (4 words)
+single (1 words)
+f e d c b a (6 words)
+"""

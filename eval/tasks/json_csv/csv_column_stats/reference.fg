@@ -1,0 +1,13 @@
+let rows = filter(csv.parse(input()), fn(r) { return str(r.temp) != "" })
+let temps = map(rows, fn(r) { return int(r.temp) })
+let n = len(temps)
+let total = sum(temps)
+// Mean in tenths, rounded half away from zero, using integers only.
+let tenths_abs = (math.abs(total) * 20 + n) / (2 * n)
+let sign = if total < 0 { "-" } else { "" }
+let mean = "{sign}{tenths_abs / 10}.{tenths_abs % 10}"
+let lo = min_of(temps)
+let hi = max_of(temps)
+println("count={n} min={lo} max={hi} mean={mean}")
+println("coldest: {rows[index_of(temps, lo)].station}")
+println("warmest: {rows[index_of(temps, hi)].station}")

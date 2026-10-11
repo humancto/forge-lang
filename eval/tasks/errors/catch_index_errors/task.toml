@@ -1,0 +1,28 @@
+id = "catch_index_errors"
+category = "errors"
+title = "Catching out-of-range access"
+prompt = """
+The list is ["red", "green", "blue", "cyan", "magenta"]. Standard input has one index per line.
+For each index, try to read that element by direct indexing and print `<i>: <value>`. Negative
+indices are not allowed and also count as out of range. If the access fails, catch the error
+(do not pre-check the bounds yourself for non-negative indices) and print
+`<i>: out of range`. At the end print `errors: <n>`.
+"""
+stdin = """
+0
+4
+5
+2
+-1
+100
+"""
+needs = []
+expected_stdout = """
+0: red
+4: magenta
+5: out of range
+2: blue
+-1: out of range
+100: out of range
+errors: 3
+"""

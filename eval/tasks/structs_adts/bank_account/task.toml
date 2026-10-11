@@ -1,0 +1,22 @@
+id = "bank_account"
+category = "structs_adts"
+title = "Bank account ledger"
+prompt = """
+Model a bank account with an owner and a balance in whole cents. Process these operations in
+order on an account owned by `Ada` that starts at 10000 cents:
+deposit 2500, withdraw 4000, withdraw 9000, deposit 125, withdraw 8625, withdraw 1.
+A withdrawal larger than the balance is rejected and leaves the balance unchanged.
+For each operation print `<op> <amount>: ok, balance <b>` or
+`<op> <amount>: rejected (insufficient funds), balance <b>`. At the end print
+`Ada: <b> cents after <n> successful operations`.
+"""
+needs = []
+expected_stdout = """
+deposit 2500: ok, balance 12500
+withdraw 4000: ok, balance 8500
+withdraw 9000: rejected (insufficient funds), balance 8500
+deposit 125: ok, balance 8625
+withdraw 8625: ok, balance 0
+withdraw 1: rejected (insufficient funds), balance 0
+Ada: 0 cents after 4 successful operations
+"""

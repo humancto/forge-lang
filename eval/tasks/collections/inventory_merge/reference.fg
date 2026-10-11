@@ -1,0 +1,21 @@
+let a = [["bolts", 120], ["nuts", 300], ["washers", 75], ["screws", 40]]
+let b = [["nuts", 200], ["screws", 60], ["rivets", 15], ["bolts", 5], ["anchors", 0]]
+let mut totals = {}
+for pair in flatten([a, b]) {
+    let item = pair[0]
+    totals[item] = get(totals, item, 0) + pair[1]
+}
+let positive = filter(keys(totals), fn(k) { return totals[k] > 0 })
+let ordered = sort(positive, fn(x, y) {
+    if totals[x] != totals[y] {
+        return totals[y] - totals[x]
+    }
+    if x < y {
+        return -1
+    }
+    return 1
+})
+for item in ordered {
+    println("{item}: {totals[item]}")
+}
+println("total: {sum(values(totals))}")

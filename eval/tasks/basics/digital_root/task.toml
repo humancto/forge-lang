@@ -1,0 +1,25 @@
+id = "digital_root"
+category = "basics"
+title = "Digit sum and digital root"
+prompt = """
+Read non-negative integers from standard input, one per line. For each one print
+`<n>: sum=<s> root=<r>` where s is the sum of its decimal digits and r is its digital root
+(repeat the digit sum until a single digit remains).
+"""
+stdin = """
+0
+7
+38
+12345
+99999999
+1000000007
+"""
+needs = []
+expected_stdout = """
+0: sum=0 root=0
+7: sum=7 root=7
+38: sum=11 root=2
+12345: sum=15 root=6
+99999999: sum=72 root=9
+1000000007: sum=8 root=8
+"""

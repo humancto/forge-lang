@@ -1,0 +1,21 @@
+id = "compact_json"
+category = "json_csv"
+title = "Reshape JSON"
+prompt = """
+Standard input is a JSON object mapping team names to arrays of member objects with `name` and
+`role`. Produce a JSON array with one object per team, in alphabetical order of team name:
+`{"team": <name>, "size": <number of members>, "leads": [<names of members whose role is
+"lead", in input order>]}`. Print it as compact JSON on one line with no spaces at all
+(e.g. `[{"team":"a","size":1,"leads":[]}]`), with the keys in the order team, size, leads.
+"""
+stdin = """
+{
+  "platform": [{"name": "Ada", "role": "lead"}, {"name": "Bob", "role": "dev"}],
+  "data": [{"name": "Cy", "role": "dev"}, {"name": "Di", "role": "lead"}, {"name": "Ed", "role": "lead"}],
+  "design": [{"name": "Flo", "role": "designer"}]
+}
+"""
+needs = []
+expected_stdout = """
+[{"team":"data","size":3,"leads":["Di","Ed"]},{"team":"design","size":1,"leads":[]},{"team":"platform","size":2,"leads":["Ada"]}]
+"""

@@ -1,0 +1,18 @@
+id = "compose_pipeline"
+category = "functional"
+title = "Function composition"
+prompt = """
+Write a `compose` function that takes a list of one-argument functions and returns a new
+function applying them left to right. Build these pipelines over integers:
+p1 = add 3, then double, then square; p2 = square, then subtract 1, then halve (integer
+division); p3 = the empty pipeline (identity).
+For x from 1 to 5 print `x=<x> p1=<..> p2=<..> p3=<..>`.
+"""
+needs = []
+expected_stdout = """
+x=1 p1=64 p2=0 p3=1
+x=2 p1=100 p2=1 p3=2
+x=3 p1=144 p2=4 p3=3
+x=4 p1=196 p2=7 p3=4
+x=5 p1=256 p2=12 p3=5
+"""

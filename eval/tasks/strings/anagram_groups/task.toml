@@ -1,0 +1,21 @@
+id = "anagram_groups"
+category = "strings"
+title = "Group anagrams"
+prompt = """
+Read words from standard input (separated by whitespace). Group words that are anagrams of
+each other (same letters, case-sensitive, duplicates kept). Print each group on one line as its
+words sorted alphabetically and separated by spaces; print groups in alphabetical order of
+their first word. Then print `groups: <n>`.
+"""
+stdin = """
+listen silent enlist google tinsel banana inlets gogole cat act tac dog
+"""
+needs = []
+expected_stdout = """
+act cat tac
+banana
+dog
+enlist inlets listen silent tinsel
+gogole google
+groups: 5
+"""

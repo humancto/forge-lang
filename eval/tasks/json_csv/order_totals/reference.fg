@@ -1,0 +1,29 @@
+fn money(cents: Int) -> String {
+    return "{cents / 100}." + pad_start(str(cents % 100), 2, "0")
+}
+
+let data = json.parse(input())
+let mut grand = 0
+let mut per_customer = {}
+for o in data.orders {
+    let mut subtotal = 0
+    for item in o.items {
+        subtotal += item.price_cents * item.qty
+    }
+    if has_key(o, "coupon") {
+        subtotal -= subtotal * o.coupon.percent / 100
+    }
+    grand += subtotal
+    per_customer[o.customer] = get(per_customer, o.customer, 0) + subtotal
+    println("{o.id} {o.customer}: {money(subtotal)}")
+}
+println("grand total: {money(grand)}")
+let mut best = ""
+let mut best_total = -1
+for name in keys(per_customer) {
+    if per_customer[name] > best_total {
+        best_total = per_customer[name]
+        best = name
+    }
+}
+println("best customer: {best}")

@@ -1,0 +1,33 @@
+id = "config_validation"
+category = "errors"
+title = "Validate a configuration"
+prompt = """
+Standard input is a configuration file of `key = value` lines (blank lines and lines starting
+with `#` are ignored). Validate it and collect every problem instead of stopping at the first:
+- a line without `=` is `line <n>: expected key = value`
+- required keys are `host`, `port` and `mode`; each missing one is `missing key: <key>`
+  (reported in that order, after the line problems)
+- `port` must be an integer between 1 and 65535: `invalid port: <value>`
+- `mode` must be `dev` or `prod`: `invalid mode: <value>`
+- `workers`, if present, must be a positive integer: `invalid workers: <value>`
+Value checks are reported after the missing keys, in the order port, mode, workers.
+Print `config ok` if there are no problems, otherwise `<k> problems:` followed by each problem
+on its own line prefixed with `- `.
+"""
+stdin = """
+# service config
+host = example.com
+port = 80800
+mode=staging
+workers = 0
+this line is broken
+timeout = 30
+"""
+needs = []
+expected_stdout = """
+4 problems:
+- line 6: expected key = value
+- invalid port: 80800
+- invalid mode: staging
+- invalid workers: 0
+"""

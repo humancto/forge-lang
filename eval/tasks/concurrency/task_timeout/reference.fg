@@ -1,0 +1,17 @@
+let fast = spawn {
+    wait(0.05)
+    return "fast result"
+}
+let slow = spawn {
+    wait(2)
+    return "slow result"
+}
+for entry in [["fast", fast, 1000], ["slow", slow, 300]] {
+    let result = await_timeout(entry[1], entry[2])
+    if result == null {
+        println("{entry[0]}: timed out")
+    } else {
+        println("{entry[0]}: {result}")
+    }
+}
+println("slow finally: {await slow}")

@@ -1,0 +1,17 @@
+id = "temperature_table"
+category = "basics"
+title = "Celsius to Fahrenheit table"
+prompt = """
+Print a conversion table from Celsius to Fahrenheit for 0, 20, 40, 60, 80 and 100 degrees Celsius.
+Use F = C * 9 / 5 + 32 (all values here convert to whole numbers).
+Print one line per temperature in the form `0C = 32F`.
+"""
+needs = []
+expected_stdout = """
+0C = 32F
+20C = 68F
+40C = 104F
+60C = 140F
+80C = 176F
+100C = 212F
+"""

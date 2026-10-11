@@ -1,0 +1,17 @@
+id = "parallel_sums"
+category = "concurrency"
+title = "Parallel range sums"
+prompt = """
+Split the numbers 1..1000000 (inclusive) into 4 equal chunks and compute the sum of the squares
+of each chunk in a separate concurrent task (thread, task or coroutine). Wait for all of them
+and print `chunk <i>: <sum>` for i = 1..4 in chunk order, then `total: <sum of all>`.
+"""
+timeout = 30
+needs = []
+expected_stdout = """
+chunk 1: 5208364583375000
+chunk 2: 36458427083375000
+chunk 3: 98958489583375000
+chunk 4: 192708552083375000
+total: 333333833333500000
+"""

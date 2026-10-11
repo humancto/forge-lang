@@ -1,0 +1,24 @@
+id = "organize_files"
+category = "files"
+title = "Organise files into folders"
+prompt = """
+The current directory contains an `inbox` folder with files. Move every file from `inbox` into
+a folder named after its extension without the dot (e.g. `inbox/a.txt` goes to `txt/a.txt`;
+files without an extension go to `misc`), creating folders as needed. Print
+`<old path> -> <new path>` for each move in alphabetical order of file name, then
+`inbox empty: <true|false>` and, for each created folder in alphabetical order,
+`<folder>: <file names sorted, separated by spaces>`.
+"""
+needs = ["read", "write"]
+expected_stdout = """
+inbox/README -> misc/README
+inbox/notes.txt -> txt/notes.txt
+inbox/photo.jpg -> jpg/photo.jpg
+inbox/report.pdf -> pdf/report.pdf
+inbox/todo.txt -> txt/todo.txt
+inbox empty: true
+jpg: photo.jpg
+misc: README
+pdf: report.pdf
+txt: notes.txt todo.txt
+"""

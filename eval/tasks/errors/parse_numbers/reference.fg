@@ -1,0 +1,26 @@
+fn parse_int(text: String) -> Result<Int, String> {
+    let t = text.trim()
+    if !regex.test(t, "^-?[0-9]+$") {
+        return Err("invalid number '{t}'")
+    }
+    return Ok(int(t))
+}
+
+let mut total = 0
+let mut valid = 0
+let lines = split(input(), "\n")
+for i in range(0, len(lines)) {
+    let line = lines[i]
+    if line.trim() == "" {
+        continue
+    }
+    let parsed = parse_int(line)
+    if is_ok(parsed) {
+        total += unwrap(parsed)
+        valid += 1
+    } else {
+        println("line {i + 1}: {unwrap_err(parsed)}")
+    }
+}
+println("sum: {total}")
+println("valid: {valid}")

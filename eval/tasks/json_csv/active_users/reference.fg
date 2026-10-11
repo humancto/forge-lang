@@ -1,0 +1,15 @@
+let users = json.parse(input())
+let active = filter(users, fn(u) { return u.active })
+let ordered = sort(active, fn(a, b) {
+    if a.age != b.age {
+        return a.age - b.age
+    }
+    if a.name < b.name {
+        return -1
+    }
+    return 1
+})
+for u in ordered {
+    println("{u.name} ({u.age})")
+}
+println("active: {len(active)} of {len(users)}")

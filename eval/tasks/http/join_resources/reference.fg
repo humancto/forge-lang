@@ -1,0 +1,35 @@
+let base = input().trim()
+let users = json.parse(http.get(base + "/users.json").body)
+let orders = json.parse(http.get(base + "/orders.json").body)
+let mut by_id = {}
+for u in users {
+    by_id[str(u.id)] = u
+}
+let mut totals = {}
+let mut unknown = []
+for o in orders {
+    let key = str(o.user_id)
+    if !has_key(by_id, key) {
+        if !contains(unknown, o.user_id) {
+            unknown = push(unknown, o.user_id)
+        }
+        continue
+    }
+    let mut agg = get(totals, key, { count: 0, cents: 0 })
+    agg.count += 1
+    agg.cents += o.total_cents
+    totals[key] = agg
+}
+let ranked = sort(keys(totals), fn(a, b) { return totals[b].cents - totals[a].cents })
+for key in ranked {
+    let t = totals[key]
+    let cents = pad_start(str(t.cents % 100), 2, "0")
+    println("{by_id[key].name}: {t.count} orders, {t.cents / 100}.{cents}")
+}
+let without = sort(map(filter(users, fn(u) { return !has_key(totals, str(u.id)) }), fn(u) { return u.name }))
+println("no orders: " + join(without, ", "))
+if len(unknown) == 0 {
+    println("unknown user ids: none")
+} else {
+    println("unknown user ids: " + join(map(sort(unknown), fn(i) { return str(i) }), ","))
+}

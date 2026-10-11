@@ -1,0 +1,32 @@
+fn levenshtein(a: String, b: String) -> Int {
+    let xs = a.chars()
+    let ys = b.chars()
+    let mut prev = range(0, len(ys) + 1)
+    for i in range(1, len(xs) + 1) {
+        let mut cur = [i]
+        for j in range(1, len(ys) + 1) {
+            let cost = if xs[i - 1] == ys[j - 1] { 0 } else { 1 }
+            let best = math.min(math.min(prev[j] + 1, cur[j - 1] + 1), prev[j - 1] + cost)
+            cur = push(cur, best)
+        }
+        prev = cur
+    }
+    return prev[len(ys)]
+}
+
+fn show(s: String) -> String {
+    if s == "" {
+        return "\"\""
+    }
+    return s
+}
+
+for line in split(input(), "\n") {
+    let comma = index_of(line, ",")
+    if comma < 0 {
+        continue
+    }
+    let a = substring(line, 0, comma)
+    let b = substring(line, comma + 1)
+    println("{show(a)} -> {show(b)}: {levenshtein(a, b)}")
+}

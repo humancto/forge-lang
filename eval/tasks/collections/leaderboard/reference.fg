@@ -1,0 +1,24 @@
+let mut rows = []
+for line in split(input(), "\n") {
+    let p = line.words()
+    if len(p) == 2 {
+        rows = push(rows, { name: p[0], score: int(p[1]) })
+    }
+}
+let ranked = sort(rows, fn(a, b) {
+    if a.score != b.score {
+        return b.score - a.score
+    }
+    if a.name < b.name {
+        return -1
+    }
+    return 1
+})
+let mut rank = 0
+for i in range(0, len(ranked)) {
+    let r = ranked[i]
+    if i == 0 || r.score != ranked[i - 1].score {
+        rank = i + 1
+    }
+    println("{rank}. {r.name} {r.score}")
+}

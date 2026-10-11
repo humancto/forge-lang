@@ -1,0 +1,20 @@
+id = "inventory_merge"
+category = "collections"
+title = "Merge two inventories"
+prompt = """
+Two warehouses report stock as lists of (item, quantity):
+warehouse A: bolts 120, nuts 300, washers 75, screws 40
+warehouse B: nuts 200, screws 60, rivets 15, bolts 5, anchors 0
+Merge them by summing quantities per item. Print `<item>: <qty>` for every item with a positive
+total, sorted by quantity descending and then by item name ascending. Finally print
+`total: <sum of all quantities>`.
+"""
+needs = []
+expected_stdout = """
+nuts: 500
+bolts: 125
+screws: 100
+washers: 75
+rivets: 15
+total: 815
+"""

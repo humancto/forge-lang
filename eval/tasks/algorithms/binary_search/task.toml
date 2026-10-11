@@ -1,0 +1,33 @@
+id = "binary_search"
+category = "algorithms"
+title = "Binary search with insertion points"
+prompt = """
+The first line of standard input is a sorted list of distinct integers separated by spaces; the
+following lines each hold one query integer. Implement binary search yourself (no library
+search). For each query print `<q>: found at <index>` (0-based) or
+`<q>: not found, insert at <index>` where index is where it would be inserted to keep the list
+sorted. Finally print `comparisons: <c>` with the total number of loop iterations your
+search made over all queries, using the standard half-open loop `lo = 0, hi = n; while lo < hi:
+mid = (lo + hi) / 2 (integer division) ...` that stops as soon as the value is found.
+"""
+stdin = """
+2 3 5 8 13 21 34 55 89
+13
+1
+100
+2
+89
+40
+6
+"""
+needs = []
+expected_stdout = """
+13: found at 4
+1: not found, insert at 0
+100: not found, insert at 9
+2: found at 0
+89: found at 8
+40: not found, insert at 7
+6: not found, insert at 3
+comparisons: 21
+"""

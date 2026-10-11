@@ -1,0 +1,25 @@
+id = "vowel_count"
+category = "strings"
+title = "Vowels per word"
+prompt = """
+Read one line of text from standard input. For every whitespace-separated word print
+`<word>: <n>` where n is the number of vowels (a, e, i, o, u, either case) in it. Finally print
+`total: <t>` and the word with the most vowels as `max: <word>` (the first one on a tie).
+"""
+stdin = """
+Programming in Forge is AUDACIOUS and queueing is fun
+"""
+needs = []
+expected_stdout = """
+Programming: 3
+in: 1
+Forge: 2
+is: 1
+AUDACIOUS: 6
+and: 1
+queueing: 5
+is: 1
+fun: 1
+total: 21
+max: AUDACIOUS
+"""

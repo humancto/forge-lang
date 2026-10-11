@@ -1,0 +1,24 @@
+let lower = "abcdefghijklmnopqrstuvwxyz"
+let upper = lower.upper()
+
+fn shift_char(c: String, k: Int) -> String {
+    let i = index_of(lower, c)
+    if i >= 0 {
+        return lower.char_at(((i + k) % 26 + 26) % 26)
+    }
+    let j = index_of(upper, c)
+    if j >= 0 {
+        return upper.char_at(((j + k) % 26 + 26) % 26)
+    }
+    return c
+}
+
+fn encode(text: String, k: Int) -> String {
+    return join(map(text.chars(), fn(c) { return shift_char(c, k) }), "")
+}
+
+let parts = split(input(), "\n")
+let shift = int(parts[0].trim())
+let encoded = encode(parts[1], shift)
+println(encoded)
+println(encode(encoded, -shift))

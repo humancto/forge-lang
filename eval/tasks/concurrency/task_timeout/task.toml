@@ -1,0 +1,16 @@
+id = "task_timeout"
+category = "concurrency"
+title = "Waiting with a timeout"
+prompt = """
+Start two concurrent tasks: `fast` sleeps 50 milliseconds and returns `fast result`; `slow`
+sleeps 2 seconds and returns `slow result`. Wait for `fast` with a timeout of 1 second and for
+`slow` with a timeout of 300 milliseconds. For each print `<name>: <result>` or
+`<name>: timed out`. Then wait for `slow` without a timeout and print `slow finally: <result>`.
+"""
+timeout = 15
+needs = []
+expected_stdout = """
+fast: fast result
+slow: timed out
+slow finally: slow result
+"""

@@ -1,0 +1,17 @@
+id = "knapsack"
+category = "algorithms"
+title = "0/1 knapsack"
+prompt = """
+A backpack holds at most 15 kg. Items (name, weight kg, value): map 1 15, compass 1 10,
+water 5 30, sandwich 3 25, tent 9 60, camera 4 35, book 2 12, jacket 6 40.
+Choose items (each at most once) to maximise the total value. Print `best value: <v>`,
+`weight: <w>` and `items: <names in the order listed above, separated by spaces>`. If several
+selections reach the best value, choose the one with the smallest total weight, and if still
+tied, the one whose sorted list of item indices is lexicographically smallest.
+"""
+needs = []
+expected_stdout = """
+best value: 125
+weight: 15
+items: map compass sandwich camera jacket
+"""

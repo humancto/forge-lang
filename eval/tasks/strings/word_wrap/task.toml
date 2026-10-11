@@ -1,0 +1,26 @@
+id = "word_wrap"
+category = "strings"
+title = "Greedy word wrap"
+prompt = """
+Read a width W from the first line of standard input and a paragraph from the remaining lines.
+Wrap the paragraph's words greedily into lines of at most W characters (words separated by a
+single space; a word longer than W goes on its own line). Print each line between `|` characters,
+padded with spaces to exactly W characters, for example `|the quick |`.
+"""
+stdin = """
+16
+Forge is an internet-native programming language with built-in HTTP,
+databases, crypto and a surprisingly-long-hyphenated-word in the middle.
+"""
+needs = []
+expected_stdout = """
+|Forge is an     |
+|internet-native |
+|programming     |
+|language with   |
+|built-in HTTP,  |
+|databases,      |
+|crypto and a    |
+|surprisingly-long-hyphenated-word|
+|in the middle.  |
+"""

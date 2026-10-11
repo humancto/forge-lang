@@ -1,0 +1,24 @@
+// Triple-quoted strings are raw: no escapes and no {interpolation}.
+let pattern = """^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[(DEBUG|INFO|WARN|ERROR)\] (.*)$"""
+let levels = ["DEBUG", "INFO", "WARN", "ERROR"]
+let mut counts = { DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0 }
+let mut invalid = 0
+let mut errors = []
+for line in split(input(), "\n") {
+    if !regex.test(line, pattern) {
+        invalid += 1
+        continue
+    }
+    let level = regex.replace(line, pattern, "$1")
+    counts[level] = counts[level] + 1
+    if level == "ERROR" {
+        errors = push(errors, regex.replace(line, pattern, "$2"))
+    }
+}
+for level in levels {
+    println("{level}: {counts[level]}")
+}
+println("invalid: {invalid}")
+for e in errors {
+    println("! {e}")
+}

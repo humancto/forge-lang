@@ -1,0 +1,17 @@
+let p = 1000000007
+
+fn fact_mod(n: Int) -> Int {
+    let mut r = 1
+    for i in range(2, n + 1) {
+        r = r * i % p
+    }
+    return r
+}
+
+let ns = [5, 10, 15, 20, 25]
+let tasks = map(ns, fn(n) { return spawn { fact_mod(n) } })
+let values = await_all(tasks)
+for i in range(0, len(ns)) {
+    println("{ns[i]}! mod p = {values[i]}")
+}
+println("max: {max_of(values)}")

@@ -1,0 +1,25 @@
+let required = { alpha: 1, beta: 3, gamma: 6, delta: 2 }
+
+fn fetch_job(job: String, attempt: Int) -> Result<String, String> {
+    if attempt < required[job] {
+        return Err("{job}: attempt {attempt} failed")
+    }
+    return Ok("{job} done")
+}
+
+for job in ["alpha", "beta", "gamma", "delta"] {
+    println("== {job} ==")
+    let mut done = false
+    for attempt in range(1, 5) {
+        let result = fetch_job(job, attempt)
+        if is_ok(result) {
+            println("{job}: {unwrap(result)} after {attempt} attempt(s)")
+            done = true
+            break
+        }
+        println("  retry: {unwrap_err(result)}")
+    }
+    if !done {
+        println("{job}: gave up after 4 attempts")
+    }
+}

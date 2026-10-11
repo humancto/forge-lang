@@ -1,0 +1,20 @@
+id = "rectangles"
+category = "structs_adts"
+title = "Rectangles sorted by area"
+prompt = """
+Define a Rectangle type with a name, a width and a height (integers), with methods for its area
+and its perimeter. Create the rectangles door 2x7, window 4x3, table 3x3, poster 6x1 and
+rug 5x4. Print them sorted by area ascending (by name on equal areas) as
+`<name> <w>x<h> area=<a> perimeter=<p>`, then print `largest: <name>`. Also print
+`squares: <names>` listing the names of the squares in the original order, separated by `, `.
+"""
+needs = []
+expected_stdout = """
+poster 6x1 area=6 perimeter=14
+table 3x3 area=9 perimeter=12
+window 4x3 area=12 perimeter=14
+door 2x7 area=14 perimeter=18
+rug 5x4 area=20 perimeter=18
+largest: rug
+squares: table
+"""

@@ -1,0 +1,23 @@
+id = "word_length_groups"
+category = "functional"
+title = "Group words by length"
+prompt = """
+Read all words from standard input (whitespace-separated, lowercase them, strip any characters
+that are not letters, and drop words that become empty). Group the distinct words by length
+and print one line per length in ascending order: `<length>: <words sorted alphabetically,
+separated by spaces>`. Then print `longest: <the longest word(s) joined by spaces>`.
+"""
+stdin = """
+The rain, in Spain, stays mainly in the plain!
+Rain? Plain. MAINLY... 42 a
+"""
+needs = []
+expected_stdout = """
+1: a
+2: in
+3: the
+4: rain
+5: plain spain stays
+6: mainly
+longest: mainly
+"""

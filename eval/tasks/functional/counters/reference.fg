@@ -1,0 +1,18 @@
+fn make_counter(start: Int, step: Int) {
+    let mut current = start
+    return fn() {
+        let value = current
+        current += step
+        return value
+    }
+}
+
+let c1 = make_counter(0, 1)
+let c2 = make_counter(100, -10)
+let c3 = make_counter(5, 5)
+let counters = { c1: c1, c2: c2, c3: c3 }
+for name in ["c1", "c1", "c2", "c3", "c1", "c2", "c2", "c3"] {
+    let counter = counters[name]
+    println("{name}: {counter()}")
+}
+println("c1 next: {c1()}")

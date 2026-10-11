@@ -1,0 +1,32 @@
+id = "update_json_config"
+category = "files"
+title = "Update a JSON file"
+prompt = """
+The current directory contains `config.json`. Read it, set `version` to the next patch version
+(e.g. `1.4.9` becomes `1.4.10`), add `"beta"` to the end of the `features` array if it is not
+already there, set `updated_by` to `"eval"`, and remove the key `deprecated` if present. Write
+it back to `config.json` as JSON with 2-space indentation (one key per line, like Python's
+`json.dumps(value, indent=2, sort_keys=True)`), with the keys of every object sorted
+alphabetically. Print `version: <old> -> <new>` and `features: <count>`.
+"""
+needs = ["read", "write"]
+output_files = ["config.json"]
+expected_stdout = """
+version: 1.4.9 -> 1.4.10
+features: 3
+--- config.json ---
+{
+  "features": [
+    "auth",
+    "search",
+    "beta"
+  ],
+  "limits": {
+    "burst": 20,
+    "rps": 100
+  },
+  "name": "forge-app",
+  "updated_by": "eval",
+  "version": "1.4.10"
+}
+"""

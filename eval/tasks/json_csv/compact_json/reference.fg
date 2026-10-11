@@ -1,0 +1,22 @@
+let teams = json.parse(input())
+let mut out = []
+for team in sort(keys(teams)) {
+    let members = teams[team]
+    let leads = map(filter(members, fn(m) { return m.role == "lead" }), fn(m) { return m.name })
+    out = push(out, { team: team, size: len(members), leads: leads })
+}
+
+// json.stringify puts a space after `,` and `:`; build the compact form.
+fn compact(v) -> String {
+    let t = typeof(v)
+    if t == "Array" {
+        return "[" + join(map(v, fn(x) { return compact(x) }), ",") + "]"
+    }
+    if t == "Object" {
+        let fields = map(keys(v), fn(k) { return json.stringify(k) + ":" + compact(v[k]) })
+        return "{" + join(fields, ",") + "}"
+    }
+    return json.stringify(v)
+}
+
+println(compact(out))

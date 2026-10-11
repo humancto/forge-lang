@@ -1,0 +1,22 @@
+for line in split(input(), "\n") {
+    if !contains(line, "|") {
+        continue
+    }
+    let parts = split(line, "|")
+    let target = int(parts[0].trim())
+    let xs = map(parts[1].words(), fn(w) { return int(w) })
+    let mut seen = {}
+    let mut answer = "none"
+    for j in range(0, len(xs)) {
+        let need = str(target - xs[j])
+        if has_key(seen, need) {
+            answer = "{seen[need]} {j}"
+            break
+        }
+        let key = str(xs[j])
+        if !has_key(seen, key) {
+            seen[key] = j
+        }
+    }
+    println(answer)
+}

@@ -1,0 +1,37 @@
+fn encode(s: String) -> String {
+    let cs = s.chars()
+    let mut out = ""
+    let mut i = 0
+    while i < len(cs) {
+        let mut j = i
+        while j < len(cs) && cs[j] == cs[i] {
+            j += 1
+        }
+        out += cs[i] + str(j - i)
+        i = j
+    }
+    return out
+}
+
+fn decode(s: String) -> String {
+    let mut out = ""
+    for part in regex.find_all(s, "\\D\\d+") {
+        let c = substring(part, 0, 1)
+        let n = int(substring(part, 1))
+        out += repeat_str(c, n)
+    }
+    return out
+}
+
+for line in split(input(), "\n") {
+    if line == "" {
+        continue
+    }
+    let op = substring(line, 0, 1)
+    let rest = if len(line) > 2 { substring(line, 2) } else { "" }
+    if op == "E" {
+        println(encode(rest))
+    } else {
+        println(decode(rest))
+    }
+}

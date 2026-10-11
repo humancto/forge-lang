@@ -1,0 +1,43 @@
+struct User {
+    id: Int,
+    name: String,
+    manager: Int
+}
+
+let users = [
+    User { id: 1, name: "Grace", manager: 0 },
+    User { id: 2, name: "Alan", manager: 1 },
+    User { id: 3, name: "Ada", manager: 1 },
+    User { id: 4, name: "Linus", manager: 2 },
+    User { id: 5, name: "Barbara", manager: 4 },
+    User { id: 6, name: "Ken", manager: 0 },
+]
+
+fn find_user(id: Int) -> Option<User> {
+    for u in users {
+        if u.id == id {
+            return Some(u)
+        }
+    }
+    return None
+}
+
+for line in split(input(), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    let id = int(line.trim())
+    match find_user(id) {
+        Some(u) => {
+            if u.manager == 0 {
+                println("{id}: {u.name}, top level")
+            } else {
+                match find_user(u.manager) {
+                    Some(m) => println("{id}: {u.name}, reports to {m.name}"),
+                    None => println("{id}: {u.name}, top level"),
+                }
+            }
+        }
+        None => println("{id}: not found"),
+    }
+}

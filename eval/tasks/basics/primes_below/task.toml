@@ -1,0 +1,15 @@
+id = "primes_below"
+category = "basics"
+title = "Primes below a limit"
+prompt = """
+Read a single integer N from standard input and print all prime numbers smaller than N on one
+line, separated by single spaces. Then print `count: <k>` on a second line.
+"""
+stdin = """
+60
+"""
+needs = []
+expected_stdout = """
+2 3 5 7 11 13 17 19 23 29 31 37 41 43 47 53 59
+count: 17
+"""

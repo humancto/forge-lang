@@ -1,0 +1,12 @@
+fn quote_field(v: String) -> String {
+    if contains(v, ",") || contains(v, "\"") || contains(v, "\n") {
+        return "\"" + replace(v, "\"", "\"\"") + "\""
+    }
+    return v
+}
+
+println("name,city,quote")
+for r in json.parse(input()) {
+    let cells = map(["name", "city", "quote"], fn(k) { return quote_field(get(r, k, "")) })
+    println(join(cells, ","))
+}

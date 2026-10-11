@@ -1,0 +1,53 @@
+let mut graph = {}
+let mut start = ""
+for line in split(input(), "\n") {
+    let p = line.words()
+    if len(p) == 3 {
+        let w = int(p[2])
+        graph[p[0]] = push(get(graph, p[0], []), { dest: p[1], cost: w })
+        graph[p[1]] = push(get(graph, p[1], []), { dest: p[0], cost: w })
+    } else if len(p) == 2 && p[0] == "from" {
+        start = p[1]
+    }
+}
+
+let mut dist = {}
+let mut prev = {}
+let mut done = {}
+dist[start] = 0
+prev[start] = ""
+loop {
+    // pick the closest unfinished city (small graphs: a linear scan is fine)
+    let mut u = ""
+    for city in keys(dist) {
+        if !has_key(done, city) && (u == "" || dist[city] < dist[u]) {
+            u = city
+        }
+    }
+    if u == "" {
+        break
+    }
+    done[u] = true
+    for edge in get(graph, u, []) {
+        let candidate = dist[u] + edge.cost
+        if !has_key(dist, edge.dest) || candidate < dist[edge.dest] {
+            dist[edge.dest] = candidate
+            prev[edge.dest] = u
+        }
+    }
+}
+
+for city in sort(keys(graph)) {
+    if !has_key(dist, city) {
+        println("{city}: unreachable")
+        continue
+    }
+    let mut path = []
+    let mut cur = city
+    while cur != "" {
+        path = push(path, cur)
+        cur = prev[cur]
+    }
+    let route = join(reverse(path), ">")
+    println("{city}: {dist[city]} via {route}")
+}

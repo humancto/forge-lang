@@ -1,0 +1,17 @@
+for i in range(1, 36) {
+    let mut word = ""
+    if i % 3 == 0 {
+        word += "Fizz"
+    }
+    if i % 5 == 0 {
+        word += "Buzz"
+    }
+    if i % 7 == 0 {
+        word += "Bazz"
+    }
+    if word == "" {
+        println(i)
+    } else {
+        println(word)
+    }
+}

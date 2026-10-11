@@ -1,0 +1,20 @@
+let lines = split(input(), "\n")
+let names = lines[0].words()
+let scores = map(lines[1].words(), fn(w) { return int(w) })
+let n = math.min(len(names), len(scores))
+let pairs = zip(slice(names, 0, n), slice(scores, 0, n))
+let mut best = pairs[0]
+let mut total = 0
+for e in enumerate(pairs) {
+    let name = e.value[0]
+    let score = e.value[1]
+    println("{e.index + 1}. {name}: {score}")
+    total += score
+    if score > best[1] {
+        best = e.value
+    }
+}
+println("best: {best[0]}")
+// score > total / n, compared without division
+let above = filter(pairs, fn(p) { return p[1] * n > total })
+println("above average: " + join(map(above, fn(p) { return p[0] }), " "))

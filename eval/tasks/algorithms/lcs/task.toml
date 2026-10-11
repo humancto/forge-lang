@@ -1,0 +1,26 @@
+id = "lcs"
+category = "algorithms"
+title = "Longest common subsequence"
+prompt = """
+Each line of standard input holds two words separated by a space. For each pair print
+`<a> <b>: <length> <subsequence>` with the length of their longest common subsequence and one
+such subsequence, reconstructed from the standard dynamic-programming table
+(dp[i][j] = LCS length of the first i chars of a and the first j chars of b) by walking back
+from dp[len a][len b]: if the characters match take it and move diagonally, otherwise move up
+(i-1) when dp[i-1][j] >= dp[i][j-1], else left. Print `-` for an empty subsequence.
+"""
+stdin = """
+ABCBDAB BDCABA
+kitten sitting
+abc xyz
+forge gorge
+AGGTAB GXTXAYB
+"""
+needs = []
+expected_stdout = """
+ABCBDAB BDCABA: 4 BCBA
+kitten sitting: 4 ittn
+abc xyz: 0 -
+forge gorge: 4 orge
+AGGTAB GXTXAYB: 4 GTAB
+"""

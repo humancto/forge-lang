@@ -1,0 +1,7 @@
+for r in range(1, 7) {
+    let mut line = ""
+    for c in range(1, 7) {
+        line += pad_start(str(r * c), 4, " ")
+    }
+    println(line)
+}

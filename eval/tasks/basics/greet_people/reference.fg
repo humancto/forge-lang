@@ -1,0 +1,13 @@
+for line in split(input(), "\n") {
+    let parts = line.words()
+    if len(parts) != 2 {
+        continue
+    }
+    let name = parts[0]
+    let age = int(parts[1])
+    let mut message = "Hello, {name}! Next year you will be {age + 1}."
+    if age < 18 {
+        message += " (minor)"
+    }
+    println(message)
+}

@@ -1,0 +1,22 @@
+let text = input()
+let first_newline = index_of(text, "\n")
+let width = int(substring(text, 0, first_newline))
+let words = substring(text, first_newline + 1).words()
+let mut lines = []
+let mut current = ""
+for word in words {
+    if current == "" {
+        current = word
+    } else if len(current) + 1 + len(word) <= width {
+        current = current + " " + word
+    } else {
+        lines = push(lines, current)
+        current = word
+    }
+}
+if current != "" {
+    lines = push(lines, current)
+}
+for line in lines {
+    println("|" + pad_end(line, width, " ") + "|")
+}

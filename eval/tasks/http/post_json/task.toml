@@ -1,0 +1,23 @@
+id = "post_json"
+category = "http"
+title = "POST JSON and read the reply"
+prompt = """
+The first line of standard input is a base URL. `POST <base>/echo` with a JSON body replies
+with a JSON object `{"method": ..., "path": ..., "query": {...}, "body": <your parsed JSON body>,
+"content_type": <the Content-Type header you sent>}`. Send
+`{"user": "ada", "items": [3, 1, 2], "express": true}` with Content-Type `application/json` to
+`<base>/echo?ref=eval` and print, from the reply: `method: <method>`, `ref: <query ref>`,
+`items sum: <sum of body.items>`, `express: <true|false>` and
+`json content type: <yes|no>` (whether the echoed content type starts with `application/json`).
+"""
+stdin = """
+{base_url}
+"""
+needs = ["net"]
+expected_stdout = """
+method: POST
+ref: eval
+items sum: 6
+express: true
+json content type: yes
+"""

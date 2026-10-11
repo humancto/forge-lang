@@ -1,0 +1,35 @@
+fn int_pow(a: Int, b: Int) -> Int {
+    let mut result = 1
+    for i in range(0, b) {
+        result = result * a
+    }
+    return result
+}
+
+let ops = {
+    add: fn(a, b) { return a + b },
+    sub: fn(a, b) { return a - b },
+    mul: fn(a, b) { return a * b },
+    div: fn(a, b) { return a / b },
+    mod: fn(a, b) { return a % b },
+    pow: fn(a, b) { return int_pow(a, b) },
+    max: fn(a, b) { return math.max(a, b) },
+}
+
+for line in split(input(), "\n") {
+    let p = line.words()
+    if len(p) != 3 {
+        continue
+    }
+    let op = p[0]
+    let a = int(p[1])
+    let b = int(p[2])
+    if !has_key(ops, op) {
+        println("unknown op: {op}")
+    } else if (op == "div" || op == "mod") && b == 0 {
+        println("{op}({a}, {b}) = undefined")
+    } else {
+        let f = ops[op]
+        println("{op}({a}, {b}) = {f(a, b)}")
+    }
+}

@@ -1,0 +1,25 @@
+id = "base_conversion"
+category = "algorithms"
+title = "Number bases"
+prompt = """
+Each line of standard input is a non-negative decimal integer. Print
+`<n>: bin=<binary> oct=<octal> hex=<lowercase hex> b36=<base 36 with digits 0-9a-z>`
+without prefixes, implementing the conversion yourself with repeated division. Then, for the
+last number only, print `roundtrip: <ok|fail>` after converting its base-36 form back to decimal.
+"""
+stdin = """
+0
+10
+255
+4096
+123456789
+"""
+needs = []
+expected_stdout = """
+0: bin=0 oct=0 hex=0 b36=0
+10: bin=1010 oct=12 hex=a b36=a
+255: bin=11111111 oct=377 hex=ff b36=73
+4096: bin=1000000000000 oct=10000 hex=1000 b36=35s
+123456789: bin=111010110111100110100010101 oct=726746425 hex=75bcd15 b36=21i3v9
+roundtrip: ok
+"""

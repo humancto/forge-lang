@@ -1,0 +1,25 @@
+id = "json_to_csv"
+category = "json_csv"
+title = "JSON records to CSV with quoting"
+prompt = """
+Standard input is a JSON array of objects with fields `name`, `city` and `quote`. Print CSV
+with the header `name,city,quote` and one row per object. Quote a field with double quotes only
+if it contains a comma, a double quote or a newline; inside a quoted field, double every `"`.
+Missing fields are empty.
+"""
+stdin = """
+[
+  {"name": "Ada", "city": "London", "quote": "That brain of mine is something more than merely mortal"},
+  {"name": "Grace", "city": "Arlington, VA", "quote": "It's easier to ask forgiveness than it is to get permission"},
+  {"name": "Alan", "quote": "We can only see a short distance ahead, but we can see plenty there that needs to be done"},
+  {"name": "Edsger \\"EWD\\" Dijkstra", "city": "Nuenen", "quote": "Simplicity is prerequisite for reliability"}
+]
+"""
+needs = []
+expected_stdout = """
+name,city,quote
+Ada,London,That brain of mine is something more than merely mortal
+Grace,"Arlington, VA",It's easier to ask forgiveness than it is to get permission
+Alan,,"We can only see a short distance ahead, but we can see plenty there that needs to be done"
+"Edsger ""EWD"" Dijkstra",Nuenen,Simplicity is prerequisite for reliability
+"""

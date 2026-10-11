@@ -1,0 +1,27 @@
+id = "fan_in_workers"
+category = "concurrency"
+title = "Fan-in from several workers"
+prompt = """
+Start 3 worker tasks with ids 1, 2 and 3. Worker k sends the messages `w<k>:<j>` for j = 1..k*2
+into one shared channel (queue), then a final message `w<k>:done`. The main program reads
+messages until it has seen all three `done` messages. Since arrival order is not deterministic,
+print all non-done messages sorted alphabetically, one per line, then `messages: <n>` and
+`workers finished: 3`.
+"""
+needs = []
+expected_stdout = """
+w1:1
+w1:2
+w2:1
+w2:2
+w2:3
+w2:4
+w3:1
+w3:2
+w3:3
+w3:4
+w3:5
+w3:6
+messages: 12
+workers finished: 3
+"""

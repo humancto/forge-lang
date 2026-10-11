@@ -1,0 +1,67 @@
+struct Stack {
+    items: [Int]
+}
+
+impl Stack {
+    fn push_value(it, v: Int) -> Stack {
+        return Stack { items: push(it.items, v) }
+    }
+
+    fn size(it) -> Int {
+        return len(it.items)
+    }
+
+    fn top(it) -> Int {
+        return it.items[len(it.items) - 1]
+    }
+
+    fn drop_top(it) -> Stack {
+        return Stack { items: slice(it.items, 0, len(it.items) - 1) }
+    }
+}
+
+fn calc(tokens: [String]) -> Result<Int, String> {
+    let mut stack = Stack { items: [] }
+    for t in tokens {
+        if t == "+" || t == "-" || t == "*" || t == "/" {
+            if stack.size() < 2 {
+                return Err("stack underflow")
+            }
+            let b = stack.top()
+            stack = stack.drop_top()
+            let a = stack.top()
+            stack = stack.drop_top()
+            if t == "+" {
+                stack = stack.push_value(a + b)
+            } else if t == "-" {
+                stack = stack.push_value(a - b)
+            } else if t == "*" {
+                stack = stack.push_value(a * b)
+            } else {
+                if b == 0 {
+                    return Err("division by zero")
+                }
+                stack = stack.push_value(a / b)
+            }
+        } else {
+            stack = stack.push_value(int(t))
+        }
+    }
+    if stack.size() != 1 {
+        return Err("leftover operands")
+    }
+    return Ok(stack.top())
+}
+
+for line in split(input(), "\n") {
+    let expr = line.trim()
+    if expr == "" {
+        continue
+    }
+    let result = calc(expr.words())
+    if is_ok(result) {
+        println("{expr} = {unwrap(result)}")
+    } else {
+        println("{expr} = error: {unwrap_err(result)}")
+    }
+}

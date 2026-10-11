@@ -1,0 +1,58 @@
+let rows = filter(split(input(), "\n"), fn(l) { return l != "" })
+let mut grid = map(rows, fn(r) { return r.chars() })
+let height = len(grid)
+let width = len(grid[0])
+let mut start = [0, 0]
+let mut goal = [0, 0]
+for r in range(0, height) {
+    for c in range(0, width) {
+        if grid[r][c] == "S" {
+            start = [r, c]
+        }
+        if grid[r][c] == "E" {
+            goal = [r, c]
+        }
+    }
+}
+
+fn key(r: Int, c: Int) -> String {
+    return "{r},{c}"
+}
+
+let moves = [[-1, 0], [1, 0], [0, -1], [0, 1]]
+let mut prev = {}
+prev[key(start[0], start[1])] = null
+let mut queue = [start]
+let mut head = 0
+let mut found = false
+while head < len(queue) {
+    let cur = queue[head]
+    head += 1
+    if cur[0] == goal[0] && cur[1] == goal[1] {
+        found = true
+        break
+    }
+    for m in moves {
+        let r = cur[0] + m[0]
+        let c = cur[1] + m[1]
+        if r >= 0 && r < height && c >= 0 && c < width && grid[r][c] != "#" && !has_key(prev, key(r, c)) {
+            prev[key(r, c)] = cur
+            queue = push(queue, [r, c])
+        }
+    }
+}
+if !found {
+    println("no path")
+} else {
+    let mut steps = 1
+    let mut cur = prev[key(goal[0], goal[1])]
+    while !(cur[0] == start[0] && cur[1] == start[1]) {
+        grid[cur[0]][cur[1]] = "*"
+        cur = prev[key(cur[0], cur[1])]
+        steps += 1
+    }
+    println("shortest path: {steps} steps")
+    for row in grid {
+        println(join(row, ""))
+    }
+}

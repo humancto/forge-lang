@@ -1,0 +1,30 @@
+id = "log_levels"
+category = "strings"
+title = "Count log levels"
+prompt = """
+Read log lines from standard input. A valid line looks like `2024-03-01 12:00:01 [LEVEL] message`
+where LEVEL is one of DEBUG, INFO, WARN, ERROR. Count the valid lines per level and print
+`<LEVEL>: <count>` for the four levels in the order DEBUG, INFO, WARN, ERROR. Then print
+`invalid: <n>` for the lines that do not match, and finally print the messages of the ERROR
+lines, one per line, prefixed by `! `.
+"""
+stdin = """
+2024-03-01 12:00:01 [INFO] server started
+2024-03-01 12:00:02 [DEBUG] config loaded from /etc/app.toml
+2024-03-01 12:00:05 [WARN] slow query (1.2s)
+garbage line
+2024-03-01 12:01:00 [ERROR] database connection lost
+2024-03-01 12:01:01 [INFO] retrying
+2024-03-01 12:01:02 [FATAL] not a level
+2024-03-01 12:01:03 [ERROR] retry failed: timeout
+"""
+needs = []
+expected_stdout = """
+DEBUG: 1
+INFO: 2
+WARN: 1
+ERROR: 2
+invalid: 2
+! database connection lost
+! retry failed: timeout
+"""

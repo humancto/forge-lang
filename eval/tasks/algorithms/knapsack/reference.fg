@@ -1,0 +1,51 @@
+let items = [
+    { name: "map", weight: 1, value: 15 },
+    { name: "compass", weight: 1, value: 10 },
+    { name: "water", weight: 5, value: 30 },
+    { name: "sandwich", weight: 3, value: 25 },
+    { name: "tent", weight: 9, value: 60 },
+    { name: "camera", weight: 4, value: 35 },
+    { name: "book", weight: 2, value: 12 },
+    { name: "jacket", weight: 6, value: 40 },
+]
+let n = len(items)
+
+fn lex_less(a: [Int], b: [Int]) -> Bool {
+    let m = math.min(len(a), len(b))
+    for i in range(0, m) {
+        if a[i] != b[i] {
+            return a[i] < b[i]
+        }
+    }
+    return len(a) < len(b)
+}
+
+// Enumerate all 2^n subsets (n = 8).
+let mut best_value = -1
+let mut best_weight = 0
+let mut best_idx = []
+for mask in range(0, 256) {
+    let mut idx = []
+    let mut w = 0
+    let mut v = 0
+    let mut bits = mask
+    for i in range(0, n) {
+        if bits % 2 == 1 {
+            idx = push(idx, i)
+            w += items[i].weight
+            v += items[i].value
+        }
+        bits = bits / 2
+    }
+    if w > 15 {
+        continue
+    }
+    if v > best_value || (v == best_value && (w < best_weight || (w == best_weight && lex_less(idx, best_idx)))) {
+        best_value = v
+        best_weight = w
+        best_idx = idx
+    }
+}
+println("best value: {best_value}")
+println("weight: {best_weight}")
+println("items: " + join(map(best_idx, fn(i) { return items[i].name }), " "))

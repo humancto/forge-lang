@@ -1,0 +1,26 @@
+id = "template_fill"
+category = "strings"
+title = "Fill a template"
+prompt = """
+Standard input contains `key=value` lines, then a line with only `---`, then a template.
+Replace every `{{key}}` in the template with its value (keys are made of letters, digits and
+underscores). Placeholders whose key is not defined stay unchanged. Print the filled
+template, then a line `missing: <keys>` listing the undefined keys used in the template in
+order of first appearance separated by `,` (or `missing: none`).
+"""
+stdin = """
+name=Ada
+lang=Forge
+count=3
+---
+Dear {{name}},
+You have {{count}} new messages about {{lang}}.
+{{name}}, see {{url}} or ask {{owner}} (re: {{url}}).
+"""
+needs = []
+expected_stdout = """
+Dear Ada,
+You have 3 new messages about Forge.
+Ada, see {{url}} or ask {{owner}} (re: {{url}}).
+missing: url,owner
+"""

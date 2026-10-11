@@ -1,0 +1,12 @@
+fn compose(fns) {
+    return fn(x) {
+        return reduce(fns, x, fn(acc, f) { return f(acc) })
+    }
+}
+
+let p1 = compose([fn(x) { return x + 3 }, fn(x) { return x * 2 }, fn(x) { return x * x }])
+let p2 = compose([fn(x) { return x * x }, fn(x) { return x - 1 }, fn(x) { return x / 2 }])
+let p3 = compose([])
+for x in range(1, 6) {
+    println("x={x} p1={p1(x)} p2={p2(x)} p3={p3(x)}")
+}

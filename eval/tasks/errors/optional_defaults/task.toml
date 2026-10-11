@@ -1,0 +1,27 @@
+id = "optional_defaults"
+category = "errors"
+title = "Defaults for missing values"
+prompt = """
+Each line of standard input is a list of `key=value` pairs separated by `;` describing a user,
+e.g. `name=Ada;age=36;city=London`. Any pair may be missing and a value may be empty. Print
+`<name> | <age> | <city>` per line, using `anonymous` for a missing or empty name, `?` for a
+missing, empty or non-numeric age, and `unknown` for a missing or empty city. Then print
+`average known age: <avg>` using integer division (truncating) over the users with a numeric
+age, or `average known age: n/a` if there are none.
+"""
+stdin = """
+name=Ada;age=36;city=London
+age=41
+name=Bob;city=
+name=;age=x;city=Oslo
+city=Paris;name=Cy;age=29
+"""
+needs = []
+expected_stdout = """
+Ada | 36 | London
+anonymous | 41 | unknown
+Bob | ? | unknown
+anonymous | ? | Oslo
+Cy | 29 | Paris
+average known age: 35
+"""

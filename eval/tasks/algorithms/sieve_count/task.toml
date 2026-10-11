@@ -1,0 +1,19 @@
+id = "sieve_count"
+category = "algorithms"
+title = "Sieve of Eratosthenes"
+prompt = """
+Read N from standard input and use the sieve of Eratosthenes to find the primes below N. Print
+`primes below <N>: <count>`, `largest: <p>`, `sum: <s>` and `twin pairs: <t>` where a twin
+pair is two primes that differ by 2 (both below N).
+"""
+stdin = """
+10000
+"""
+timeout = 20
+needs = []
+expected_stdout = """
+primes below 10000: 1229
+largest: 9973
+sum: 5736396
+twin pairs: 205
+"""

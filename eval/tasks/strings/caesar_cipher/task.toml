@@ -1,0 +1,18 @@
+id = "caesar_cipher"
+category = "strings"
+title = "Caesar cipher"
+prompt = """
+Standard input has two lines: an integer shift (may be negative or larger than 26) and a line
+of text. Print the text with every ASCII letter shifted by that many positions in the alphabet,
+wrapping around and keeping its case; all other characters are unchanged. On a second line
+print the result decoded again (shifted back), which must equal the original text.
+"""
+stdin = """
+29
+Hello, World! Zebra-123 xyz
+"""
+needs = []
+expected_stdout = """
+Khoor, Zruog! Cheud-123 abc
+Hello, World! Zebra-123 xyz
+"""

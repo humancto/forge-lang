@@ -1,0 +1,23 @@
+id = "matrix_transpose"
+category = "collections"
+title = "Transpose and sums"
+prompt = """
+Standard input holds a matrix of integers: one row per line, values separated by spaces (all
+rows have the same length). Print the transposed matrix in the same format, then a line
+`row sums: ...` with the sums of the original rows and a line `col sums: ...` with the sums of
+the original columns (values separated by single spaces).
+"""
+stdin = """
+1 2 3 4
+5 6 7 8
+9 10 11 12
+"""
+needs = []
+expected_stdout = """
+1 5 9
+2 6 10
+3 7 11
+4 8 12
+row sums: 10 26 42
+col sums: 15 18 21 24
+"""

@@ -1,0 +1,31 @@
+id = "status_codes"
+category = "http"
+title = "Handle HTTP status codes"
+prompt = """
+The first line of standard input is a base URL; each following line is a path. `GET <base><path>`
+for each path, in order. Paths of the form `/status/<code>` reply with that status code. Print
+`<path>: <status> <class>` where class is `ok` for 2xx, `client error` for 4xx and
+`server error` for 5xx. Do not stop on error statuses. Finally print
+`ok: <n>, failed: <m>`.
+"""
+stdin = """
+{base_url}
+/status/200
+/status/404
+/users.json
+/status/500
+/status/201
+/missing.json
+/status/503
+"""
+needs = ["net"]
+expected_stdout = """
+/status/200: 200 ok
+/status/404: 404 client error
+/users.json: 200 ok
+/status/500: 500 server error
+/status/201: 201 ok
+/missing.json: 404 client error
+/status/503: 503 server error
+ok: 3, failed: 4
+"""

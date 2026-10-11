@@ -1,0 +1,9 @@
+[
+  {"id": 101, "user_id": 3, "total_cents": 1999},
+  {"id": 102, "user_id": 1, "total_cents": 500},
+  {"id": 103, "user_id": 3, "total_cents": 12001},
+  {"id": 104, "user_id": 9, "total_cents": 700},
+  {"id": 105, "user_id": 4, "total_cents": 250},
+  {"id": 106, "user_id": 1, "total_cents": 4000},
+  {"id": 107, "user_id": 7, "total_cents": 1}
+]

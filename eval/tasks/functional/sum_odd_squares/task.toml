@@ -1,0 +1,22 @@
+id = "sum_odd_squares"
+category = "functional"
+title = "Map, filter, reduce"
+prompt = """
+Read integers from standard input (whitespace-separated). Using map/filter/reduce style (no
+explicit loops), print:
+`odd squares sum: <sum of squares of the odd numbers>`,
+`evens doubled: <each even number doubled, in input order, separated by spaces>`,
+`product of positives: <product of the numbers > 0>` (1 if there are none), and
+`all below 100: <true|false>` and `any negative: <true|false>`.
+"""
+stdin = """
+3 -4 7 10 -1 0 12 5 8
+"""
+needs = []
+expected_stdout = """
+odd squares sum: 84
+evens doubled: -8 20 0 24 16
+product of positives: 100800
+all below 100: true
+any negative: true
+"""

@@ -1,0 +1,48 @@
+let mut problems: [String] = []
+let mut config = {}
+let lines = split(input(), "\n")
+for i in range(0, len(lines)) {
+    let s = lines[i].trim()
+    if s == "" || starts_with(s, "#") {
+        continue
+    }
+    let eq = index_of(s, "=")
+    if eq < 0 {
+        problems = push(problems, "line {i + 1}: expected key = value")
+        continue
+    }
+    config[substring(s, 0, eq).trim()] = substring(s, eq + 1).trim()
+}
+for key in ["host", "port", "mode"] {
+    if !has_key(config, key) {
+        problems = push(problems, "missing key: {key}")
+    }
+}
+
+fn is_uint(text: String) -> Bool {
+    return regex.test(text, "^[0-9]+$")
+}
+
+if has_key(config, "port") {
+    let port = config.port
+    if !is_uint(port) || int(port) < 1 || int(port) > 65535 {
+        problems = push(problems, "invalid port: {port}")
+    }
+}
+if has_key(config, "mode") && config.mode != "dev" && config.mode != "prod" {
+    problems = push(problems, "invalid mode: {config.mode}")
+}
+if has_key(config, "workers") {
+    let w = config.workers
+    if !is_uint(w) || int(w) <= 0 {
+        problems = push(problems, "invalid workers: {w}")
+    }
+}
+if len(problems) == 0 {
+    println("config ok")
+} else {
+    println("{len(problems)} problems:")
+    for p in problems {
+        println("- {p}")
+    }
+}

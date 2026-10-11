@@ -1,0 +1,38 @@
+type Light = Red | Green | Yellow
+
+fn duration(s: Light) -> Int {
+    match s {
+        Red => { return 30 }
+        Green => { return 25 }
+        Yellow => { return 5 }
+    }
+}
+
+fn next_light(s: Light) -> Light {
+    match s {
+        Red => { return Green }
+        Green => { return Yellow }
+        Yellow => { return Red }
+    }
+}
+
+fn name(s: Light) -> String {
+    match s {
+        Red => { return "Red" }
+        Green => { return "Green" }
+        Yellow => { return "Yellow" }
+    }
+}
+
+let mut t = 0
+let mut state = Red
+let mut at_100 = Red
+while t <= 100 {
+    if t < 100 {
+        println("t={t} {name(state)}")
+    }
+    at_100 = state
+    t += duration(state)
+    state = next_light(state)
+}
+println("at 100: {name(at_100)}")

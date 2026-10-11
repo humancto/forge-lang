@@ -1,0 +1,48 @@
+fn is_safe(cols: [Int], c: Int) -> Bool {
+    let r = len(cols)
+    for rr in range(0, r) {
+        let cc = cols[rr]
+        if cc == c || math.abs(c - cc) == r - rr {
+            return false
+        }
+    }
+    return true
+}
+
+fn solve(n: Int, cols: [Int], out: [[Int]], max_count: Int) -> [[Int]] {
+    if len(cols) == n {
+        return flatten([out, [cols]])
+    }
+    let mut found = out
+    for c in range(0, n) {
+        if max_count > 0 && len(found) >= max_count {
+            return found
+        }
+        if is_safe(cols, c) {
+            // push() appends to `cols` in place; pass a fresh array instead.
+            found = solve(n, flatten([cols, [c]]), found, max_count)
+        }
+    }
+    return found
+}
+
+fn count(n: Int, cols: [Int]) -> Int {
+    if len(cols) == n {
+        return 1
+    }
+    let mut total = 0
+    for c in range(0, n) {
+        if is_safe(cols, c) {
+            total += count(n, flatten([cols, [c]]))
+        }
+    }
+    return total
+}
+
+for n in range(1, 9) {
+    println("n={n}: {count(n, [])}")
+}
+let first = solve(6, [], [], 1)[0]
+for c in first {
+    println(repeat_str(".", c) + "Q" + repeat_str(".", 6 - c - 1))
+}

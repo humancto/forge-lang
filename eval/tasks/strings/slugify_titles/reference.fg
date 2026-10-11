@@ -1,0 +1,11 @@
+fn slug(title: String) -> String {
+    let dashed = regex.replace(title.lower(), "[^a-z0-9]+", "-")
+    return regex.replace(dashed, "^-+|-+$", "")
+}
+
+for line in split(input(), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    println(slug(line))
+}

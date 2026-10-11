@@ -1,0 +1,16 @@
+id = "dedupe_ordered"
+category = "collections"
+title = "Remove duplicates keeping order"
+prompt = """
+Read whitespace-separated tokens from standard input. Print the distinct tokens in order of
+first appearance, joined by single spaces. On a second line print how many duplicates were
+removed as `removed: <n>`.
+"""
+stdin = """
+apple banana apple cherry banana date apple elder fig date
+"""
+needs = []
+expected_stdout = """
+apple banana cherry date elder fig
+removed: 4
+"""

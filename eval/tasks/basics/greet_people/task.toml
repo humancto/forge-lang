@@ -1,0 +1,21 @@
+id = "greet_people"
+category = "basics"
+title = "Greeting from name and age"
+prompt = """
+Standard input has one person per line as `<name> <age>`. For each person print
+`Hello, <name>! Next year you will be <age+1>.` If the age is under 18 add ` (minor)` at the
+end of the line, before nothing else.
+"""
+stdin = """
+Ada 36
+Tim 17
+Zoe 5
+Grace 85
+"""
+needs = []
+expected_stdout = """
+Hello, Ada! Next year you will be 37.
+Hello, Tim! Next year you will be 18. (minor)
+Hello, Zoe! Next year you will be 6. (minor)
+Hello, Grace! Next year you will be 86.
+"""

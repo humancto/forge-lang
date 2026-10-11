@@ -1,0 +1,19 @@
+id = "traffic_light"
+category = "structs_adts"
+title = "State machine"
+prompt = """
+Model a traffic light as an enumeration with states Red, Green and Yellow. Each state has a
+duration (Red 30, Green 25, Yellow 5 seconds) and a next state (Red -> Green -> Yellow -> Red).
+Starting at Red at time 0, simulate 100 seconds: print `t=<time> <State>` every time the light
+changes state (including the initial state at t=0), for all changes with time < 100. Then
+print the state at t=100 as `at 100: <State>`.
+"""
+needs = []
+expected_stdout = """
+t=0 Red
+t=30 Green
+t=55 Yellow
+t=60 Red
+t=90 Green
+at 100: Green
+"""

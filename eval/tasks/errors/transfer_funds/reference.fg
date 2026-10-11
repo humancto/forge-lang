@@ -1,0 +1,40 @@
+fn transfer(balances, source: String, target: String, amount: Int) -> Result<Object, String> {
+    if amount <= 0 {
+        return Err("amount must be positive")
+    }
+    for name in [source, target] {
+        if !has_key(balances, name) {
+            return Err("unknown account: {name}")
+        }
+    }
+    if source == target {
+        return Err("cannot transfer to self")
+    }
+    if balances[source] < amount {
+        return Err("insufficient funds in {source}: has {balances[source]}, needs {amount}")
+    }
+    let mut updated = balances
+    updated[source] = updated[source] - amount
+    updated[target] = updated[target] + amount
+    return Ok(updated)
+}
+
+let transfers = [
+    ["alice", "bob", 200], ["bob", "carol", 400], ["carol", "alice", 50],
+    ["dave", "alice", 10], ["bob", "bob", 5], ["alice", "carol", -20],
+    ["bob", "carol", 320], ["alice", "carol", 300],
+]
+let mut balances = { alice: 500, bob: 120, carol: 0 }
+for t in transfers {
+    let result = transfer(balances, t[0], t[1], t[2])
+    match result {
+        Ok(updated) => {
+            balances = updated
+            println("ok: {t[0]} -> {t[1]} {t[2]}")
+        }
+        Err(message) => println("failed: {t[0]} -> {t[1]} {t[2]}: {message}"),
+    }
+}
+for name in sort(keys(balances)) {
+    println("{name}: {balances[name]}")
+}

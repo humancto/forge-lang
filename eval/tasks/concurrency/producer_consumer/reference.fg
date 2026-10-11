@@ -1,0 +1,22 @@
+let ch = channel()
+spawn {
+    for i in range(1, 21) {
+        send(ch, i)
+    }
+    close(ch)
+}
+let mut count = 0
+let mut total = 0
+loop {
+    let v = receive(ch)
+    if v == null {
+        break
+    }
+    count += 1
+    if v % 3 == 0 {
+        println("got {v}")
+        total += v * v
+    }
+}
+println("received: {count}")
+println("sum of squares: {total}")

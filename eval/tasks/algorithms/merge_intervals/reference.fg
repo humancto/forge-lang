@@ -1,0 +1,31 @@
+let mut intervals = []
+for line in split(input(), "\n") {
+    let text = line.trim()
+    if text == "" {
+        continue
+    }
+    // The separator is the first "-" after the first character.
+    let sep = index_of(substring(text, 1), "-") + 1
+    intervals = push(intervals, [int(substring(text, 0, sep)), int(substring(text, sep + 1))])
+}
+let ordered = sort(intervals, fn(x, y) {
+    if x[0] != y[0] {
+        return x[0] - y[0]
+    }
+    return x[1] - y[1]
+})
+let mut merged = []
+for iv in ordered {
+    let n = len(merged)
+    if n > 0 && iv[0] <= merged[n - 1][1] + 1 {
+        merged[n - 1][1] = math.max(merged[n - 1][1], iv[1])
+    } else {
+        merged = push(merged, iv)
+    }
+}
+let mut covered = 0
+for iv in merged {
+    println("[{iv[0]}, {iv[1]}]")
+    covered += iv[1] - iv[0] + 1
+}
+println("covered: {covered}")

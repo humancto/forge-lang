@@ -1,0 +1,33 @@
+let mut deps = {}
+for line in split(input(), "\n") {
+    let colon = index_of(line, ":")
+    if colon < 0 {
+        continue
+    }
+    let task = substring(line, 0, colon).trim()
+    let needed = substring(line, colon + 1).words()
+    deps[task] = flatten([get(deps, task, []), needed])
+    for d in needed {
+        if !has_key(deps, d) {
+            deps[d] = []
+        }
+    }
+}
+let mut done = {}
+let mut sequence = []
+loop {
+    let ready = sort(filter(keys(deps), fn(t) {
+        return !has_key(done, t) && all(deps[t], fn(d) { return has_key(done, d) })
+    }))
+    if len(ready) == 0 {
+        break
+    }
+    done[ready[0]] = true
+    sequence = push(sequence, ready[0])
+}
+if len(sequence) < len(keys(deps)) {
+    let stuck = sort(filter(keys(deps), fn(t) { return !has_key(done, t) }))
+    println("cycle detected among: " + join(stuck, ", "))
+} else {
+    println(join(sequence, " -> "))
+}

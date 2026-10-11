@@ -1,0 +1,28 @@
+id = "balanced_brackets"
+category = "algorithms"
+title = "Balanced brackets"
+prompt = """
+For each line of standard input, check whether the brackets `()`, `[]` and `{}` are balanced
+(other characters are ignored). Print `ok` or `error at <position>: <reason>` followed by
+` | <line>`. Positions are 1-based character positions. Reasons: `unexpected <c>` for a closing
+bracket that does not match the most recent open bracket (or when none is open), and
+`unclosed <c>` (with the position of the innermost unclosed opening bracket) at the end of the
+line.
+"""
+stdin = """
+(a[b]{c})
+fn(x) { return [x, y) }
+((())
+}{
+let m = { a: [1, 2], b: (3) }
+[(])
+"""
+needs = []
+expected_stdout = """
+ok | (a[b]{c})
+error at 21: unexpected ) | fn(x) { return [x, y) }
+error at 1: unclosed ( | ((())
+error at 1: unexpected } | }{
+ok | let m = { a: [1, 2], b: (3) }
+error at 3: unexpected ] | [(])
+"""

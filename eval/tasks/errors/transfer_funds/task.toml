@@ -1,0 +1,29 @@
+id = "transfer_funds"
+category = "errors"
+title = "Validated transfers"
+prompt = """
+Accounts and balances: alice 500, bob 120, carol 0. Process the transfers below in order with a
+function that validates and returns an error message instead of applying invalid transfers:
+alice->bob 200, bob->carol 400, carol->alice 50, dave->alice 10, bob->bob 5, alice->carol -20,
+bob->carol 320, alice->carol 300.
+Rules, checked in this order: amount must be positive (`amount must be positive`); both
+accounts must exist (`unknown account: <name>`, source first); source and destination must
+differ (`cannot transfer to self`); the source needs enough money
+(`insufficient funds in <name>: has <b>, needs <amount>`).
+Print `ok: <from> -> <to> <amount>` or `failed: <from> -> <to> <amount>: <error>` for each,
+then the final balances as `<name>: <balance>` in alphabetical order.
+"""
+needs = []
+expected_stdout = """
+ok: alice -> bob 200
+failed: bob -> carol 400: insufficient funds in bob: has 320, needs 400
+failed: carol -> alice 50: insufficient funds in carol: has 0, needs 50
+failed: dave -> alice 10: unknown account: dave
+failed: bob -> bob 5: cannot transfer to self
+failed: alice -> carol -20: amount must be positive
+ok: bob -> carol 320
+ok: alice -> carol 300
+alice: 0
+bob: 0
+carol: 620
+"""

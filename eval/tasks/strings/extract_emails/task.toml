@@ -1,0 +1,21 @@
+id = "extract_emails"
+category = "strings"
+title = "Extract e-mail addresses"
+prompt = """
+Read all of standard input. Find every e-mail address in it, where an address is one or more
+of letters, digits, `.`, `_`, `%`, `+` or `-`, then `@`, then a domain made of letters, digits,
+`.` and `-` that ends with `.` followed by at least two letters. Print the distinct addresses,
+lowercased, in alphabetical order, one per line, then `total: <n>`.
+"""
+stdin = """
+Contact ada@example.com or Grace.Hopper@Navy.mil for details.
+Old address: ADA@example.com (do not use). Bob <bob+news@mail.example.org>,
+invalid: someone@localhost, @nobody.com, carol@site.c
+"""
+needs = []
+expected_stdout = """
+ada@example.com
+bob+news@mail.example.org
+grace.hopper@navy.mil
+total: 3
+"""

@@ -1,0 +1,35 @@
+let mut totals = {}
+let mut products = {}
+let rows = split(fs.read("sales.csv"), "\n")
+for line in slice(rows, 1, len(rows)) {
+    if line.trim() == "" {
+        continue
+    }
+    let cells = split(line, ",")
+    let region = cells[0]
+    let product = cells[1]
+    let units = int(cells[2])
+    totals[region] = get(totals, region, 0) + units
+    let mut per = get(products, region, {})
+    per[product] = get(per, product, 0) + units
+    products[region] = per
+}
+let mut out = []
+let mut grand = 0
+for region in sort(keys(totals)) {
+    let per = products[region]
+    let best = sort(keys(per), fn(a, b) {
+        if per[a] != per[b] {
+            return per[b] - per[a]
+        }
+        if a < b {
+            return -1
+        }
+        return 1
+    })[0]
+    out = push(out, "{region}: {totals[region]} units, top product {best}")
+    grand += totals[region]
+}
+out = push(out, "grand total: {grand}")
+fs.write("report.txt", join(out, "\n") + "\n")
+println("wrote report.txt ({len(keys(totals))} regions)")

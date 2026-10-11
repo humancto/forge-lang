@@ -1,0 +1,21 @@
+id = "vector_interface"
+category = "structs_adts"
+title = "Vectors and an interface"
+prompt = """
+Define a 2D vector type with integer x and y, supporting addition, scaling by an integer, the
+dot product and the squared length. Define an interface (or trait/protocol) `Describable` with a
+method `describe()` returning a string, and implement it for the vector as `Vec(<x>, <y>)`.
+With a = (3, -4) and b = (1, 2) print, one per line:
+`a = Vec(3, -4)`, `b = ...`, `a + b = ...`, `3 * b = ...`, `a . b = <dot>`, `|a|^2 = <len2>`,
+and `a + 2b = ...`.
+"""
+needs = []
+expected_stdout = """
+a = Vec(3, -4)
+b = Vec(1, 2)
+a + b = Vec(4, -2)
+3 * b = Vec(3, 6)
+a . b = -5
+|a|^2 = 25
+a + 2b = Vec(5, 0)
+"""

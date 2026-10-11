@@ -1,0 +1,9 @@
+region,product,units
+north,widget,12
+south,gadget,7
+north,gadget,30
+east,widget,5
+south,widget,7
+north,widget,18
+east,gizmo,9
+south,gizmo,2

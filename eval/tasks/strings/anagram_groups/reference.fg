@@ -1,0 +1,10 @@
+let mut groups = {}
+for w in input().words() {
+    let key = join(sort(w.chars()), "")
+    groups[key] = push(get(groups, key, []), w)
+}
+let rows = sort(map(values(groups), fn(g) { return join(sort(g), " ") }))
+for row in rows {
+    println(row)
+}
+println("groups: {len(rows)}")

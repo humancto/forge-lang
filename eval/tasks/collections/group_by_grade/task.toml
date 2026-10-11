@@ -1,0 +1,24 @@
+id = "group_by_grade"
+category = "collections"
+title = "Group students by grade"
+prompt = """
+Standard input has lines `<name> <grade>` (grade is a single letter). Print one line per grade
+in alphabetical order: `<grade>: <names>` with the names in alphabetical order separated by
+`, `, followed by ` (<count>)`.
+"""
+stdin = """
+Zoe B
+Ada A
+Tom C
+Eve A
+Bob B
+Mia A
+Lee C
+Ann B
+"""
+needs = []
+expected_stdout = """
+A: Ada, Eve, Mia (3)
+B: Ann, Bob, Zoe (3)
+C: Lee, Tom (2)
+"""

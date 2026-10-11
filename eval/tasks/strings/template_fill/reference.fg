@@ -1,0 +1,25 @@
+let parts = split(input(), "---\n")
+let mut values = {}
+for line in split(parts[0], "\n") {
+    let i = index_of(line, "=")
+    if i > 0 {
+        values[substring(line, 0, i)] = substring(line, i + 1)
+    }
+}
+let mut out = parts[1]
+let mut missing = []
+// Triple-quoted strings are raw: no escapes and no {interpolation}.
+for placeholder in regex.find_all(out, """\{\{\w+\}\}""") {
+    let key = substring(placeholder, 2, len(placeholder) - 2)
+    if has_key(values, key) {
+        out = replace(out, placeholder, values[key])
+    } else if !contains(missing, key) {
+        missing = push(missing, key)
+    }
+}
+println(out)
+if len(missing) == 0 {
+    println("missing: none")
+} else {
+    println("missing: " + join(missing, ","))
+}

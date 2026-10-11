@@ -1,0 +1,20 @@
+id = "csv_report_file"
+category = "files"
+title = "Write a report file"
+prompt = """
+The current directory contains `sales.csv` with header `region,product,units` (units are whole
+numbers). Write a file `report.txt` containing one line per region in alphabetical order:
+`<region>: <total units> units, top product <product with most units in that region>` (the
+alphabetically first product on a tie), followed by a final line `grand total: <units>`. The
+file must end with a newline. Print `wrote report.txt (<n> regions)` to standard output.
+"""
+needs = ["read", "write"]
+output_files = ["report.txt"]
+expected_stdout = """
+wrote report.txt (3 regions)
+--- report.txt ---
+east: 14 units, top product gizmo
+north: 60 units, top product gadget
+south: 16 units, top product gadget
+grand total: 90
+"""

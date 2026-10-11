@@ -1,0 +1,22 @@
+id = "counters"
+category = "functional"
+title = "Independent counters via closures"
+prompt = """
+Write `make_counter(start, step)` returning a function that, each time it is called, returns
+the current value and then advances it by step (the first call returns start). Create
+c1 = make_counter(0, 1), c2 = make_counter(100, -10) and c3 = make_counter(5, 5). Call them in
+this order and print each result on its own line as `<name>: <value>`:
+c1, c1, c2, c3, c1, c2, c2, c3. Then print `c1 next: <value>` for one more call of c1.
+"""
+needs = []
+expected_stdout = """
+c1: 0
+c1: 1
+c2: 100
+c3: 5
+c1: 2
+c2: 90
+c2: 80
+c3: 10
+c1 next: 3
+"""
