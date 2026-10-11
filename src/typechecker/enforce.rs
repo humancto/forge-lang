@@ -12,7 +12,8 @@
 //!
 //! Generic functions bind each type parameter once per call from the
 //! arguments declared exactly as that parameter (`fn pair<T>(a: T, b: T)`:
-//! `__types.bind([a, b], ...)`, which also checks they agree), and a
+//! `__types.bind("T", "pair", "a,b", a, b)`, which also checks they
+//! agree), and a
 //! return declared exactly `T` is checked against that binding. A type
 //! parameter that only appears inside another type (`[T]`, `Box<T>`) is
 //! checked statically only (it is `Any` at run time), as are interfaces.
@@ -355,15 +356,16 @@ impl Instrumenter<'_> {
             if at.is_empty() {
                 continue;
             }
-            let bind = module_call(
-                "bind",
-                vec![
-                    Expr::Array(at.iter().map(|p| Expr::Ident(p.name.clone())).collect()),
-                    Expr::Array(at.iter().map(|p| Expr::StringLit(p.name.clone())).collect()),
-                    Expr::StringLit(tp.clone()),
-                    Expr::StringLit(label.to_string()),
-                ],
-            );
+            // `__types.bind("T", "<function>", "a,b", a, b)`: constants and
+            // the arguments themselves, so nothing is allocated per call.
+            let names: Vec<&str> = at.iter().map(|p| p.name.as_str()).collect();
+            let mut args = vec![
+                Expr::StringLit(tp.clone()),
+                Expr::StringLit(label.to_string()),
+                Expr::StringLit(names.join(",")),
+            ];
+            args.extend(at.iter().map(|p| Expr::Ident(p.name.clone())));
+            let bind = module_call("bind", args);
             checks.push(SpannedStmt::new(
                 Stmt::Let {
                     name: binding_local(tp),

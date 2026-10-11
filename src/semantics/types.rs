@@ -296,9 +296,17 @@ pub fn param_shape(value: &Value) -> Option<String> {
 /// argument says); on failure, `(index, first_index, bound)`: argument
 /// `index` does not fit the type bound by argument `first_index`.
 pub fn bind_param(values: &[Value]) -> Result<String, (usize, usize, String)> {
+    bind_shapes(values.iter().map(param_shape))
+}
+
+/// [`bind_param`] over the arguments' shapes ([`param_shape`]); engines
+/// that compute shapes on their own values (the VM) share the rule.
+pub fn bind_shapes(
+    shapes: impl IntoIterator<Item = Option<String>>,
+) -> Result<String, (usize, usize, String)> {
     let mut bound: Option<(usize, String)> = None;
-    for (i, value) in values.iter().enumerate() {
-        let Some(shape) = param_shape(value) else {
+    for (i, shape) in shapes.into_iter().enumerate() {
+        let Some(shape) = shape else {
             continue;
         };
         match &mut bound {

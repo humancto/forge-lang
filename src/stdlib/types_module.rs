@@ -43,27 +43,26 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 ))
             }
         }
-        // `__types.bind(values, names, type_param, function)`: the type a
-        // generic parameter stands for in this call (canonical notation),
-        // from the arguments declared exactly as that parameter.
+        // `__types.bind(type_param, function, names, values...)`: the type
+        // a generic parameter stands for in this call (canonical notation),
+        // from the arguments declared exactly as that parameter (`names` is
+        // their comma-separated parameter names).
         "__types.bind" => {
             let mut args = args.into_iter();
             let (
-                Some(Value::Array(values)),
-                Some(Value::Array(names)),
                 Some(Value::String(type_param)),
                 Some(Value::String(function)),
-            ) = (args.next(), args.next(), args.next(), args.next())
+                Some(Value::String(names)),
+            ) = (args.next(), args.next(), args.next())
             else {
                 return Err(
-                    "__types.bind(values, names, type_param, function) expects two arrays and two strings"
+                    "__types.bind(type_param, function, names, values...) expects three strings"
                         .into(),
                 );
             };
-            let name = |i: usize| match names.get(i) {
-                Some(Value::String(n)) => n.clone(),
-                _ => format!("#{}", i + 1),
-            };
+            let values: Vec<Value> = args.collect();
+            let names: Vec<&str> = names.split(',').collect();
+            let name = |i: usize| names.get(i).copied().unwrap_or("?").to_string();
             match crate::semantics::types::bind_param(&values) {
                 Ok(bound) => Ok(Value::String(bound)),
                 Err((i, first, bound)) => Err(crate::semantics::types::param_violation(
