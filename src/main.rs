@@ -1199,6 +1199,11 @@ async fn async_main() {
             unreachable!("BUG: forge mcp is dispatched before the CLI policy is installed")
         }
         Some(Command::Learn { lesson }) => {
+            // The lessons are edition 2026 code (they teach the natural
+            // syntax too), whatever edition the current project uses.
+            if cli.edition.is_none() {
+                semantics::edition::set_default(semantics::edition::Edition::E2026);
+            }
             learn::run_learn(lesson);
         }
         Some(Command::Chat) => {
