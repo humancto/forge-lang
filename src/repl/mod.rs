@@ -597,17 +597,15 @@ fn print_help() {
     exit        Quit the REPL
 
   Quick Examples:
-    say "Hello!"              Output
-    yell "LOUD!"              Uppercase output
-    set x to 42               Variable
-    set mut y to 0             Mutable variable
-    define add(a, b) {{ a + b }}  Function
-    [1, 2, 3].sort()          Method chaining
-    say term.emoji("fire")     Emoji
-    say term.sparkline([1,4,2,8])  Sparkline chart
-    say math.pi                Math
-    say typeof(42)             Type checking
-    say crypto.sha256("hi")    Crypto
+    println("Hello!")                  Output
+    let x = 42                         Variable
+    let mut y = 0                      Mutable variable
+    fn add(a, b) {{ a + b }}             Function
+    [1, 2, 3].sort()                   Method chaining
+    println(term.sparkline([1,4,2,8])) Sparkline chart
+    println(math.pi)                   Math
+    println(typeof(42))                Type checking
+    println(crypto.sha256("hi"))       Crypto
 
   Modules: math, fs, io, crypto, db, pg, mysql, env, json, regex, log, http, csv, term, jwt, exec, npc
 "#

@@ -481,8 +481,8 @@ impl Server {
             text.push_str(
                 "Run Forge scripts in a sandbox. Instead of chaining many tool calls, write one \
                  short Forge program that does the work (HTTP, JSON, CSV, math, strings, \
-                 collections are built in) and pass it to run_forge; print results with `say` \
-                 or `println`. If you do not know Forge, call forge_reference first; use \
+                 collections are built in) and pass it to run_forge; print results with \
+                 `println`. If you do not know Forge, call forge_reference first; use \
                  check_forge to find syntax and type errors without running. ",
             );
             if self.config.sessions_enabled() {

@@ -20,7 +20,7 @@ that a model cannot guess from `llms.txt`).
 | 6 | bug (fixed) | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
 | 7 | bug (fixed) | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
 | 8 | bug (fixed) | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
-| 9 | bug | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
+| 9 | bug (fixed) | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
 | 10 | perf | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys) | data (latest_record_wins, word_freq_large, ...) |
 | 11 | perf | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function) | data |
 | 12 | perf | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each) | data |
@@ -247,6 +247,8 @@ Suggested fix: use the innermost frame's position for the diagnostic on the VM, 
 interpreter, and keep the trace as extra context.
 
 ### 9. The E0013 hint suggests a builtin that edition 2027 removed
+
+**Fixed:** hints are edition-neutral instead of edition-specific: the E0013 hint is `check the spelling; print the value with println(x) (or its type with typeof(x)) to see what it contains`, valid in both editions. Also fixed: every `forge explain` example (runtime and type-checker codes) uses `println(...)` instead of `say`, E0028's example uses `let {name} = 42` instead of `unpack`, explanations of 2026-only features say so (E0021 GenZ asserts, E0022 `check`, E0023 `must`), the REPL `help` examples, the LSP completions (removed keywords and builtins are not offered in edition 2027) and the MCP server instructions (`say`). Test: `semantics::errors::tests::hints_and_examples_do_not_suggest_removed_names`.
 
 Every `no method ...` / `no field ...` error carries the hint
 `check the spelling; print the value with sus(x) to see what it contains`, also under
