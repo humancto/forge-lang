@@ -1,0 +1,45 @@
+id = "fetch_error_report"
+category = "http_client"
+title = "Classify HTTP fetch failures without crashing"
+prompt = """
+The first line of standard input is a base URL. Each following non-blank line is
+`<label> <target>`: if the target starts with `http://` it is a full URL, otherwise it is
+a path to append to the base URL. `GET` each target, in order, and print one line per
+target, never stopping early:
+
+- `<label>: connection failed` when no HTTP response is received at all (for example
+  the connection is refused);
+- `<label>: HTTP <status>` when the status is 400 or above;
+- `<label>: invalid JSON` when the body is not valid JSON;
+- otherwise `<label>: ok <the body as compact JSON (no spaces)>`; note that the JSON
+  document `null` is valid.
+
+Finally print `ok=<n> errors=<n>`.
+"""
+stdin = """
+{base_url}
+data /data.json
+missing /nope.json
+boom /status/500
+teapot /status/418
+broken /broken.json
+nothing /null.json
+list /list.json
+down {closed_url}/data.json
+text /notes.txt
+created /status/201
+"""
+needs = ["net"]
+expected_stdout = """
+data: ok {"value":42,"unit":"ms"}
+missing: HTTP 404
+boom: HTTP 500
+teapot: HTTP 418
+broken: invalid JSON
+nothing: ok null
+list: ok [1,2,{"x":"y"}]
+down: connection failed
+text: invalid JSON
+created: ok {"status":201}
+ok=4 errors=6
+"""

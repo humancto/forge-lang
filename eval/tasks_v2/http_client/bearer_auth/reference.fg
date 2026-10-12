@@ -1,0 +1,28 @@
+// Bearer-token requests with custom headers.
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" })
+let base = lines[0].trim()
+let token = lines[1].trim()
+let auth = { Authorization: "Bearer {token}" }
+
+let anon = http.get("{base}/auth/profile.json")
+println("no token: {anon.status} {anon.json.error}")
+let wrong = http.get("{base}/auth/profile.json", { headers: { Authorization: "Bearer not-the-token" } })
+println("wrong token: {wrong.status} {wrong.json.error}")
+
+let profile = http.get("{base}/auth/profile.json", { headers: auth }).json
+println("profile: {profile.name} <{profile.email}> ({profile.plan})")
+
+let orders = http.get("{base}/auth/orders.json", { headers: auth }).json.orders
+let cents = sum(map(orders, fn(o) { return o.total_cents }))
+println("orders: {len(orders)} total {cents / 100}.{pad_start(str(cents % 100), 2, "0")}")
+
+let headers = merge(auth, {
+    Accept: "application/json",
+    "X-Request-Id": "req-{profile.id}",
+    "X-Client": "eval/1.0",
+})
+let seen = http.get("{base}/headers", { headers: headers }).json
+for name in sort(keys(seen)) {
+    println("{name}: {seen[name]}")
+}

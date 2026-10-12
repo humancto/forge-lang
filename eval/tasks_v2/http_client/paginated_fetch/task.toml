@@ -1,0 +1,34 @@
+id = "paginated_fetch"
+category = "http_client"
+title = "Follow next links through a paginated JSON API"
+prompt = """
+The first line of standard input is a base URL (for example `http://127.0.0.1:8000/api`).
+`GET <base>/start.json` returns the first page of a paginated list:
+`{"page": <n>, "items": [...], "next": <file name of the next page, or null>}`. The next
+page is at `<base>/<next>`. Pages may be empty. Each item is
+`{"id", "owner", "amount", "currency"}` where amount is a number with at most 2 decimals.
+
+Fetch every page in order and print:
+1. `pages: <number of pages fetched>`
+2. `items: <number of items>`
+3. for every currency in ascending order: `<currency> <total amount with exactly 2 decimals> (<n> items)`
+4. for every owner, sorted by number of items (descending) then name (ascending):
+   `<owner>: <n>`
+"""
+stdin = """
+{base_url}
+"""
+needs = ["net"]
+expected_stdout = """
+pages: 4
+items: 12
+EUR 326.08 (6 items)
+JPY 34.73 (1 items)
+USD 143.74 (5 items)
+cy: 3
+fay: 3
+bo: 2
+gus: 2
+dee: 1
+eve: 1
+"""
