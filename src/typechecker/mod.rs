@@ -280,6 +280,7 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
             base_dir.as_deref(),
             policy,
         ));
+        diagnostics.extend(import_rename_diagnostics(&imports, &loaded, &index, policy));
     }
     sort_diagnostics(&mut diagnostics);
 
@@ -407,6 +408,57 @@ fn import_diagnostics(
             }
         })
         .collect()
+}
+
+/// T0021 for each `import { name as alias }` whose `name` is a struct,
+/// `type`, variant or interface of the module: the same rule (and text)
+/// as the engines' E0019 (`semantics::check_import_alias`), reported at
+/// the alias.
+fn import_rename_diagnostics(
+    imports: &[ImportInfo],
+    loaded: &[Option<Program>],
+    index: &SyntaxIndex,
+    policy: SeverityPolicy,
+) -> Vec<Diagnostic> {
+    use crate::parser::index::{DefKind, Role};
+    let mut out = Vec::new();
+    for (info, program) in imports.iter().zip(loaded) {
+        let (Some(program), Some(names)) = (program, &info.names) else {
+            continue;
+        };
+        for name in names {
+            let Some(alias) = &name.alias else { continue };
+            let Err(message) =
+                crate::semantics::check_import_alias(&info.path, program, &name.name, alias)
+            else {
+                continue;
+            };
+            let at_alias = index.occurrences.iter().find(|o| {
+                o.name == *alias
+                    && matches!(&o.role, Role::Def(DefKind::Import { path, name: n })
+                        if *path == info.path && *n == name.name)
+            });
+            let span = match at_alias {
+                Some(o) => o.span,
+                None => {
+                    let start = crate::parser::index::Pos::new(info.line, info.col.max(1));
+                    let end =
+                        crate::parser::index::Pos::new(info.line, info.col.max(1) + "import".len());
+                    Span::new(start, end)
+                }
+            };
+            let headline = crate::semantics::errors::headline(&message).to_string();
+            out.push(Diagnostic {
+                code: Code::ImportRename,
+                severity: policy.severity(Code::ImportRename, Basis::Declared),
+                message: headline,
+                span,
+                help: crate::semantics::errors::message_hint(&message).map(str::to_string),
+                fixes: Vec::new(),
+            });
+        }
+    }
+    out
 }
 
 /// Parse an imported module (no checking: it is checked on its own).

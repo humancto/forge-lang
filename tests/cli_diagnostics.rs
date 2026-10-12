@@ -158,3 +158,27 @@ fn runtime_errors_inside_functions_point_at_the_callee() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// V2 finding 25: `eprintln` / `eprint` write to the process's stderr and
+/// nothing else, on both engines and in both editions.
+#[test]
+fn eprintln_writes_to_stderr_on_both_engines() {
+    let dir = scratch("eprintln");
+    std::fs::write(
+        dir.join("e.fg"),
+        "println(\"result\")\neprintln(\"warning:\", 3)\neprint(\"x\")\neprint(\"y\\n\")\n",
+    )
+    .unwrap();
+    for edition in ["2026", "2027"] {
+        for engine in [&["--interp"][..], &[][..]] {
+            let mut args = vec!["--edition", edition];
+            args.extend_from_slice(engine);
+            args.extend(["run", "e.fg"]);
+            let out = forge_in(&dir, &args, &[]);
+            assert!(out.status.success(), "{:?}", out);
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "result\n");
+            assert_eq!(String::from_utf8_lossy(&out.stderr), "warning: 3\nxy\n");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -149,9 +149,12 @@ pub struct HandlerRequest {
     /// repeated headers are joined with `", "`.
     pub headers: IndexMap<String, String>,
     /// The body, decoded by its content type
-    /// ([`crate::runtime::http_response::parse_body`]); `None` when the
+    /// ([`crate::runtime::http_response::read_body`]); `None` when the
     /// request has no body.
     pub body: Option<Value>,
+    /// The body's exact text (`""` when there is none). A body that is not
+    /// UTF-8 is refused before the handler runs, so this is always exact.
+    pub raw_body: String,
 }
 
 fn string_object<'a>(pairs: impl IntoIterator<Item = (&'a String, &'a String)>) -> Value {
@@ -175,6 +178,7 @@ impl HandlerRequest {
         req.insert("query".to_string(), string_object(&self.query_params));
         req.insert("headers".to_string(), string_object(&self.headers));
         req.insert("body".to_string(), self.body.clone().unwrap_or(Value::Null));
+        req.insert("raw_body".to_string(), Value::String(self.raw_body.clone()));
         Value::Object(req)
     }
 }
@@ -184,10 +188,12 @@ impl HandlerRequest {
 ///
 /// - a path parameter with the same name (`/users/:id` -> `id`) wins;
 /// - `body` / `data` receive the request body (`{}` when there is none);
+/// - `raw_body` receives the body's exact text (`""` when there is none);
 /// - `query` / `qs` receive every query parameter as an object;
 /// - `headers` receives the request headers (lower-case names) as an object;
 /// - `req` / `request` receive the whole request: `method`, `path`,
-///   `params`, `query`, `headers` and `body` (`null` when there is none);
+///   `params`, `query`, `headers`, `body` (`null` when there is none) and
+///   `raw_body`;
 /// - any other name receives the query parameter of that name;
 /// - otherwise the argument is `null`.
 ///
@@ -207,6 +213,8 @@ pub fn handler_args<'a>(
                     .as_ref()
                     .cloned()
                     .unwrap_or(Value::Object(IndexMap::new()))
+            } else if name == "raw_body" {
+                Value::String(request.raw_body.clone())
             } else if name == "query" || name == "qs" {
                 string_object(&request.query_params)
             } else if name == "headers" {
@@ -572,7 +580,7 @@ async fn read_request(
     path_params: HashMap<String, String>,
     request: axum::extract::Request,
 ) -> Result<HandlerRequest, crate::runtime::http_response::BodyError> {
-    use crate::runtime::http_response::{parse_body, BodyError, MAX_BODY_BYTES};
+    use crate::runtime::http_response::{read_body, BodyError, MAX_BODY_BYTES};
     let (parts, body) = request.into_parts();
     let query_params: IndexMap<String, String> = parts
         .uri
@@ -613,14 +621,15 @@ async fn read_request(
         .headers
         .get(http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
-    let body = parse_body(content_type, &bytes)?;
+    let body = read_body(content_type, &bytes)?;
     Ok(HandlerRequest {
         method: parts.method.as_str().to_string(),
         path: parts.uri.path().to_string(),
         path_params,
         query_params,
         headers,
-        body,
+        body: body.decoded,
+        raw_body: body.raw,
     })
 }
 

@@ -31,15 +31,26 @@ Errors can be caught with `try`/`catch`:
 try {
     let x = 1 / 0
 } catch e {
-    say e.message    // "division by zero"
-    say e.type       // "ArithmeticError"
+    println(e.message)    // "division by zero"
+    println(e.type)       // "ArithmeticError"
+    println(e.code)       // "E0008"
+    println(e.hint)       // "check that the divisor is not zero before dividing"
 }
 ```
 
-The catch variable receives an object with `message` and `type` fields. Error types are inferred from the error message content:
+The catch variable receives an object with four fields, in this order:
+
+- `message` — the error message without its hint line (usually one line; an assertion's `left:`/`right:` lines are kept).
+- `type` — a legacy classification (table below). Prefer `code`.
+- `code` — the stable error code (`E0008`), as `forge explain` lists it.
+- `hint` — the suggestion the error carries (`"available fields: a, b"`, `"did you mean 'count'?"`), or `null` when it has none.
+
+The `type` is derived from the message's first line:
 
 | Error Type        | Triggered By                                |
 | ----------------- | ------------------------------------------- |
+| `TimeoutError`    | An HTTP request timed out (`E0036`)         |
+| `ConnectionError` | An HTTP connection failed (`E0037`)         |
 | `TypeError`       | Message contains "type" or "Type"           |
 | `ArithmeticError` | Message contains "division by zero"         |
 | `AssertionError`  | Message contains "assertion"                |

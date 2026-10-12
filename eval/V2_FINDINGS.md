@@ -31,12 +31,13 @@ that a model cannot guess from `llms.txt`).
 | 17 | gap (fixed) | `import { a as b }` does not exist and is misparsed ("does not export 'as'"); importing a module twice runs it twice | clashing_modules |
 | 18 | gap (fixed) | Request bodies must be JSON with `Content-Type: application/json`; otherwise axum answers 400/415 in text/plain | servers |
 | 19 | gap (fixed) | `llms.txt` describes import resolution incorrectly | multifile |
-| 20 | gap | `regex` has no capture groups | logfmt_parse, ini_config_check |
-| 21 | gap | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
+| 20 | gap (fixed) | `regex` has no capture groups | logfmt_parse, ini_config_check |
+| 21 | gap (fixed) | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
 | 22 | gap | `Map<String, T>` (suggested for objects by the MCP section) does not accept an object literal; there is no typed dictionary for objects | typed |
-| 23 | gap | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
-| 24 | gap | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
-| 25 | gap | No way to write to stderr except `log.*` (structured tracing) | error_handling |
+| 23 | gap (fixed) | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
+| 24 | gap (fixed) | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
+| 25 | gap (fixed) | No way to write to stderr except `log.*` (structured tracing) | error_handling |
+| 26 | bug (fixed) | `forge check`: a module-level variable named like a builtin (`let mut count = 0`) is typed as the builtin inside the module's functions (false T0005 in the importer) | multifile |
 
 ---
 
@@ -264,6 +265,26 @@ Every `no method ...` / `no field ...` error carries the hint
 Suggested fix: make the hint edition-aware (`println(x)` / `typeof(x)`), or drop the
 `sus` mention.
 
+### 26. Imported modules: module-level names typed as builtins
+
+**Fixed:** names in an imported module's function bodies resolve in that module (`ForeignModule` in `src/typechecker/infer.rs`, using `semantics::hoist::module_binders`): its own top-level bindings shadow builtins, and the importing file's functions are not visible there. Test: `typechecker::tests::imported_module_names_shadow_builtins_in_its_bodies`.
+
+```forge
+// counter.fg
+let mut count = 0
+fn bump() {
+    count = count + 1
+    return count
+}
+```
+```forge
+import { bump } from "counter.fg"
+let n = bump() + 1   // T0005: operator '+' cannot be applied to fn(Any, Any) -> Int and Int
+```
+
+The checker inferred `bump`'s return type with the importer's name resolution, where
+`count` is the builtin `count(xs, x)`.
+
 ## Performance
 
 Measured with the prebuilt v0.11.0 `forge` binary on the development container; times are for
@@ -443,7 +464,8 @@ namespace object); cache a module per resolved path within a run.
 **Fixed:** `import { a as b } from "m.fg"` (functions and variables; renaming a struct or
 type is E0019), on both engines, the checker, the LSP and `forge fmt`. A module runs once
 per program and its importers share its state. Not done: `import "m.fg" as m` (namespace
-objects).
+objects). `forge check` also reports renaming a struct, type, variant or interface (T0021, at
+the alias; an error from edition 2027), not only the run (E0019).
 
 ### 18. Request bodies must be JSON with the JSON content type
 
@@ -460,7 +482,9 @@ JSON `{"error": ...}`.
 **Fixed:** bodies are decoded by content type: JSON is parsed, a form becomes an object of
 Strings, anything else (or no content type) is a String; a POST without a body binds `{}`.
 Invalid JSON is `400 {"error": "invalid JSON body: ..."}`, a non-UTF-8 body `415`, both as
-JSON.
+JSON. The undecoded text is the `raw_body` handler parameter and `req.raw_body` (`""` without a
+body), for webhook signatures; a non-UTF-8 body is refused for every content type, so it is
+always exact (`tests/server_engine_parity.rs`, `/webhook`).
 
 ### 19. `llms.txt` describes import paths wrongly
 
@@ -484,6 +508,8 @@ only works when the pattern matches; `replace` accepts `$1` because it is Rust's
 
 Suggested fix: `regex.match(text, pattern)` returning `null` or
 `{ text, start, end, groups: [...], named: {...} }`, and `regex.match_all`.
+
+**Fixed:** `regex.captures(text, pattern)` returns the first match's groups as an array (`[whole, g1, g2, ...]`, `null` for a group that did not take part) or `null`, and `regex.captures_all(text, pattern)` one such array per match; named groups are numbered with the others (kept to arrays: one shape, indexable like `find_all`'s results). `regex.replace` references (`$1`, `$0`, `${name}`, `$$`, and `${1}a` when a letter follows) are documented in `llms.txt` and the spec. Tests: `tests/regex_captures_test.fg` (both engines), `stdlib::regex_module::tests`.
 
 ### 21. Behaviour models need but `llms.txt` does not state
 
@@ -513,6 +539,13 @@ Each of these cost a wrong guess while writing references:
 Suggested fix: add these to `llms.txt` (a "Concurrency details", "Maps and sets" and
 "time" paragraph would cover most).
 
+**Fixed:** `llms.txt` states each of them, verified on both engines: `select`'s result and
+`receive` on a drained closed channel, `exit(code)`, abandoned detached tasks, negative indexes
+(strings cannot be indexed at all), the `Map` methods (`set`/`remove` return a new map, `m[k]`
+is an error), the `time.*` signatures and result objects, no `? :` (`if` is an expression), no
+array/tuple patterns, the `typeof` names (structs and algebraic values are `Object`; named
+functions `Function`, anonymous ones `Lambda`), and that 4xx/5xx HTTP answers are responses.
+
 ### 22. No typed dictionary for objects
 
 `let c: Map<String, Int> = { a: 1 }` is `T0001 type mismatch: 'c' declared as
@@ -536,6 +569,15 @@ milliseconds.
 Suggested fix: distinct messages (and `e.type`) for timeout, connection refused, DNS and
 TLS errors; document `timeout` in seconds.
 
+**Fixed:** a timeout is E0036 (`http.get error: timed out after 1 second waiting for
+127.0.0.1:8080`, `e.type == "TimeoutError"`), a connection that cannot be made E0037
+(`connection refused by ...`, `cannot resolve host '...'`, `TLS handshake failed with ...`,
+`could not connect to ...`, `e.type == "ConnectionError"`), on both engines and for `fetch`,
+`http.download` and `http.crawl` too (`semantics::net`, `runtime::client::describe_request_error`).
+`timeout` is documented in seconds (`llms.txt`, spec), accepts Floats, and rejects
+non-numbers. Tests: `tests/http_client_errors.rs` (slow local server, closed port, both
+engines), fixtures `tests/errors/E0036_network_timeout.fg` and `E0037_connection_refused.fg`.
+
 ### 24. `e.message` sometimes contains the hint
 
 ```forge
@@ -550,6 +592,11 @@ try {
 Programs that print `e.message` print two lines. Suggested fix: keep hints out of
 `message` (expose them as `e.hint`).
 
+**Fixed:** the caught object is `{ message, type, code, hint }` on both engines
+(`semantics::errors::caught_error_fields`): `message` without the hint line, `hint` the
+error's own hint or `null`. Tests: `tests/caught_error_hint_test.fg` (both engines),
+`semantics::errors::tests::caught_errors_keep_the_hint_out_of_the_message`.
+
 ### 25. No stderr output
 
 There is no `eprintln`/`io.stderr`; `log.*` writes structured tracing events (with
@@ -557,3 +604,5 @@ timestamps and targets) to stderr. CLI-style programs (grep_exit_status, ini_con
 can only report errors on stdout plus an exit status.
 
 Suggested fix: `eprintln(...)` / `eprint(...)` builtins routed through `runtime::stdio::err`.
+
+**Fixed:** `eprintln(...)` / `eprint(...)` (registry, both engines, both editions, type checker, LSP) write like `println`/`print` to stderr through `runtime::stdio::err_line`/`err`, so a capture (the playground) records them as stderr and spawned tasks inherit it. Tests: `tests/cli_diagnostics.rs::eprintln_writes_to_stderr_on_both_engines`, `vm::parity_tests::eprintln_goes_to_the_captured_stderr_on_both_engines`, `tests/stderr_output_test.fg`.

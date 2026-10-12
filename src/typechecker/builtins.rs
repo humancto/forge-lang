@@ -21,6 +21,8 @@ const SIGNATURES: &[&str] = &[
     // Output
     "print(...Any) -> Null",
     "println(...Any) -> Null",
+    "eprint(...Any) -> Null",
+    "eprintln(...Any) -> Null",
     "say(...Any) -> Null",
     "yell(...Any) -> Null",
     "whisper(...Any) -> Null",
@@ -170,6 +172,7 @@ const MODULE_SIGNATURES: &[&str] = &[
     "regex.replace(String, String, String) -> String",
     "regex.split(String, String) -> [String]",
     "regex.find_all(String, String) -> [String]",
+    "regex.captures_all(String, String) -> [[Any]]",
 ];
 
 /// Prelude values that are neither builtins nor modules.

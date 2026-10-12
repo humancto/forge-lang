@@ -1,0 +1,5 @@
+// forge-env: FORGE_HTTP_ALLOW_PRIVATE=1
+// tests/error_codes.rs listens on FORGE_TEST_SILENT_ADDR and never answers.
+// `timeout` is in seconds.
+let addr = env.get("FORGE_TEST_SILENT_ADDR", "127.0.0.1:9")
+http.get("http://{addr}/", { timeout: 0.3 })

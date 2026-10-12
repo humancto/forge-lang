@@ -842,6 +842,48 @@ Fix: write the replacement (`let total = 0`), or run
 docs/editions/2027.md lists each form and its replacement.",
         matches: |h| h.starts_with(crate::semantics::edition::REMOVED_PREFIX),
     },
+    ErrorCode {
+        code: "E0036",
+        title: "network request timed out",
+        hint: "the server did not answer in time; raise the `timeout` option (seconds) or retry",
+        explanation: "\
+An HTTP request (`http.get`, `http.post`, ..., `fetch`, `http.download`,
+`http.crawl`) did not complete within its time limit: the `timeout` option,
+in seconds (default 30; 300 for `http.download`). The server accepted the
+connection, or was still being reached, but did not send the whole response
+in time. A connection that could not be made at all is E0037.
+
+Example:
+
+    http.get(\"https://slow.example.com/report\", { timeout: 2 })
+    // http.get error: timed out after 2 seconds waiting for slow.example.com:443
+
+Fix: raise the limit (`{ timeout: 60 }`, fractions such as `0.5` work too),
+or catch the error and retry: `try { ... } catch e { if e.code == \"E0036\" { ... } }`.",
+        matches: crate::semantics::net::is_timeout_headline,
+    },
+    ErrorCode {
+        code: "E0037",
+        title: "network connection failed",
+        hint: "check the URL's host and port, that the server is running, and the network",
+        explanation: "\
+An HTTP request could not connect to the server: the connection was refused
+(nothing listens on that port), the host name could not be resolved, the TLS
+handshake failed (for example an invalid certificate), or the network is
+unreachable. The message says which. No request was sent, so retrying is
+safe. A server that is reached but answers too slowly is E0036; a server
+that answers with an error status (404, 500, ...) is not an error at all:
+the response has `ok == false` and its `status`.
+
+Example:
+
+    http.get(\"http://localhost:9999/health\")
+    // http.get error: connection refused by localhost:9999
+
+Fix: check the URL, start the server, or catch the error:
+`try { ... } catch e { if e.code == \"E0037\" { ... } }`.",
+        matches: crate::semantics::net::is_connect_headline,
+    },
 ];
 
 /// The code of a syntax error: `E0001` for the lexer, `E0002` for the
@@ -902,6 +944,42 @@ pub fn message_hint(message: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+/// A message without its hint line(s): what `catch e` exposes as
+/// `e.message` (the hint is `e.hint`, see [`caught_error_fields`]). Other
+/// lines (an assertion's `left:`/`right:`) are kept.
+pub fn without_hint(message: &str) -> String {
+    if !message.contains(HINT_PREFIX) {
+        return message.to_string();
+    }
+    message
+        .split('\n')
+        .filter(|l| !l.starts_with(HINT_PREFIX))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The fields of the object a `catch e { }` block receives, in order:
+/// `message` (without the hint line), `type` (legacy), `code`, and `hint`
+/// (the message's own hint, `None` → `null`). Both engines build the
+/// object from this, so it is the same everywhere.
+pub fn caught_error_fields(message: &str) -> CaughtError {
+    CaughtError {
+        message: without_hint(message),
+        error_type: legacy_error_type(message),
+        code: classify(message).code,
+        hint: message_hint(message).map(str::to_string),
+    }
+}
+
+/// See [`caught_error_fields`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaughtError {
+    pub message: String,
+    pub error_type: &'static str,
+    pub code: &'static str,
+    pub hint: Option<String>,
+}
+
 /// The hint to show for a message: its own, else its code's default.
 pub fn hint_for(message: &str) -> &str {
     message_hint(message).unwrap_or(classify(message).hint)
@@ -913,7 +991,11 @@ pub fn hint_for(message: &str) -> &str {
 /// did-you-mean) cannot change it.
 pub fn legacy_error_type(message: &str) -> &'static str {
     let message = headline(message);
-    if message.contains("type") || message.contains("Type") {
+    if crate::semantics::net::is_timeout_headline(message) {
+        "TimeoutError"
+    } else if crate::semantics::net::is_connect_headline(message) {
+        "ConnectionError"
+    } else if message.contains("type") || message.contains("Type") {
         "TypeError"
     } else if message.contains("division by zero") || message.contains("modulo by zero") {
         "ArithmeticError"
@@ -1185,10 +1267,55 @@ mod tests {
                 "E0009",
             ),
             ("something odd happened".to_string(), "E0000"),
+            (
+                format!(
+                    "http.get error: {}",
+                    s::net::timed_out(std::time::Duration::from_secs(2), "h:80")
+                ),
+                "E0036",
+            ),
+            (
+                format!(
+                    "fetch error: {}",
+                    s::net::connect_failed(s::net::Failure::Refused, "h:80", "")
+                ),
+                "E0037",
+            ),
+            (
+                format!(
+                    "http.post error: {}",
+                    s::net::connect_failed(s::net::Failure::UnknownHost, "h", "no such host")
+                ),
+                "E0037",
+            ),
+            (
+                format!(
+                    "download error: {}",
+                    s::net::connect_failed(s::net::Failure::Tls, "h:443", "bad certificate")
+                ),
+                "E0037",
+            ),
+            (
+                "http.get error: request failed: bad redirect".to_string(),
+                "E0016",
+            ),
         ];
         for (message, code) in cases {
             assert_eq!(classify(&message).code, code, "{:?}", message);
         }
+    }
+
+    #[test]
+    fn caught_errors_keep_the_hint_out_of_the_message() {
+        use crate::semantics as s;
+        let caught = caught_error_fields(&s::no_field("b", ["a"]));
+        assert_eq!(caught.message, "no field 'b' on object");
+        assert_eq!(caught.hint.as_deref(), Some("available fields: a"));
+        assert_eq!(caught.code, "E0013");
+        assert_eq!(caught.error_type, "RuntimeError");
+        let plain = caught_error_fields("assert_eq failed\n  left: 1\n  right: 2");
+        assert_eq!(plain.message, "assert_eq failed\n  left: 1\n  right: 2");
+        assert_eq!(plain.hint, None);
     }
 
     #[test]
@@ -1219,6 +1346,16 @@ mod tests {
             "RuntimeError"
         );
         assert_eq!(legacy_error_type(&s::immutable_reassign("x")), "TypeError");
+        let timeout = format!(
+            "http.get error: {}",
+            s::net::timed_out(std::time::Duration::from_secs(1), "h:80")
+        );
+        assert_eq!(legacy_error_type(&timeout), "TimeoutError");
+        let refused = format!(
+            "http.get error: {}",
+            s::net::connect_failed(s::net::Failure::Refused, "h:80", "")
+        );
+        assert_eq!(legacy_error_type(&refused), "ConnectionError");
     }
 
     fn s_div() -> &'static str {

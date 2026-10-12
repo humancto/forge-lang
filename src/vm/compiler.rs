@@ -808,7 +808,7 @@ fn is_output_expr(expr: &Expr) -> bool {
                 Expr::Ident(name)
                     if matches!(
                         name.as_str(),
-                        "print" | "println" | "say" | "yell" | "whisper"
+                        "print" | "println" | "eprint" | "eprintln" | "say" | "yell" | "whisper"
                     )
             )
     )

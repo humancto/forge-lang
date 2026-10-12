@@ -12,13 +12,15 @@ fn plus(a, b) {
 fn add_error(a, b) {
     let mut message = ""
     let mut code = ""
+    let mut hint = ""
     try {
         plus(a, b)
     } catch e {
         message = e.message
         code = e.code
+        hint = e.hint
     }
-    return [code, message]
+    return [code, message, hint]
 }
 
 @test
@@ -26,7 +28,7 @@ fn string_plus_int_is_an_error() {
     let r = add_error("a", 1)
     assert_eq(r[0], "E0034")
     assert(starts_with(r[1], "cannot add String and Int"))
-    assert(contains(r[1], "str(x)"))
+    assert(contains(r[2], "str(x)"))
 }
 
 @test

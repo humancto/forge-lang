@@ -1,0 +1,3 @@
+// forge-env: FORGE_HTTP_ALLOW_PRIVATE=1
+// Nothing listens on port 1 of the loopback interface.
+http.get("http://127.0.0.1:1/health")

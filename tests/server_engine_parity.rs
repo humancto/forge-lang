@@ -477,6 +477,11 @@ fn plain_object() {
 fn raises() {
     return must Err("boom")
 }
+
+@post("/webhook")
+fn webhook(raw_body, req, body) {
+    return { raw: raw_body, same: req.raw_body == raw_body, sig: crypto.sha256(raw_body), parsed: body }
+}
 "#;
 
 /// `(method, path, content type, body, extra headers)`.
@@ -585,6 +590,28 @@ const REQUESTS2: &[Request2] = &[
     ("GET", "/hand-built-bad", None, None, &[]),
     ("GET", "/plain-object", None, None, &[]),
     ("GET", "/raises", None, None, &[]),
+    (
+        "POST",
+        "/webhook",
+        Some("application/json"),
+        Some(b"{ \"b\": [2],\n  \"a\":1 }\n"),
+        &[],
+    ),
+    ("POST", "/webhook", None, None, &[]),
+    (
+        "POST",
+        "/webhook",
+        Some("application/x-www-form-urlencoded"),
+        Some(b"a=x+y&c=%ff"),
+        &[],
+    ),
+    (
+        "POST",
+        "/webhook",
+        Some("application/x-www-form-urlencoded"),
+        Some(b"a=\xff"),
+        &[],
+    ),
 ];
 
 /// Response headers the corpus compares (the rest — date, request id —
@@ -761,4 +788,26 @@ fn handler_responses_and_request_bodies_are_identical_on_both_engines() {
     assert_eq!(reply(28).status, 200);
     assert_eq!(json(28), j!({"status": 404, "body": "not a response"}));
     assert_eq!(reply(29).status, 500);
+    // `raw_body` / `req.raw_body`: the exact text, next to the decoded body.
+    let raw = "{ \"b\": [2],\n  \"a\":1 }\n";
+    assert_eq!(
+        json(30),
+        j!({"raw": raw, "same": true, "sig": sha256_hex(raw), "parsed": {"b": [2], "a": 1}})
+    );
+    assert_eq!(
+        json(31),
+        j!({"raw": "", "same": true, "sig": sha256_hex(""), "parsed": {}})
+    );
+    assert_eq!(json(32)["raw"], "a=x+y&c=%ff");
+    assert_eq!(json(32)["parsed"]["a"], "x y");
+    // A body that is not UTF-8 is refused whatever its content type.
+    assert_eq!(reply(33).status, 415);
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
