@@ -340,7 +340,7 @@ fix the key's spelling.",
     ErrorCode {
         code: "E0011",
         title: "value cannot be indexed",
-        hint: "index arrays and strings with integers, objects and maps with keys",
+        hint: "index arrays with integers and objects with keys; for a string use `substring(s, i, i + 1)`, for a Map `m.get(k)`",
         explanation: "\
 `container[index]` (or `container[index] = value`) was used with a
 container/index combination that does not support it: indexing a number,
