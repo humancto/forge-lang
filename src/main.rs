@@ -1472,16 +1472,13 @@ fn ensure_vm_compatible(program: &Program, mode: &str, serving: Serving) -> Resu
 }
 
 /// Print a VM runtime error with the same source snippet the interpreter
-/// shows (anchored at the failing statement of the main program), followed
+/// shows (anchored at the line where the error happened, inside the
+/// innermost function that has a position, like the interpreter), followed
 /// by the VM stack trace.
 fn report_vm_error(source: &str, filename: &str, error: &vm::machine::VMError) {
     let file = errors::display_path(filename);
-    let main_frame = error
-        .stack_trace
-        .iter()
-        .rev()
-        .find(|frame| frame.function == "<main>" && frame.line > 0);
-    let (line, col) = match main_frame {
+    let innermost = error.stack_trace.iter().find(|frame| frame.line > 0);
+    let (line, col) = match innermost {
         Some(frame) if source.lines().count() >= frame.line => (frame.line, frame.col.max(1)),
         _ => (0, 0),
     };
@@ -1508,6 +1505,13 @@ fn report_interpreter_error(source: &str, filename: &str, e: &interpreter::Runti
         "{}",
         errors::ProgramDiagnostic::runtime(&e.message, &file, line, col).render(source)
     );
+    // The call stack, printed like the VM's (innermost first).
+    if errors::error_format() == errors::ErrorFormat::Human && !e.trace().is_empty() {
+        for frame in e.trace() {
+            eprintln!("  at {} (line {})", frame.function, frame.line);
+        }
+        eprintln!("  at <main> (line {})", e.top_level_line());
+    }
 }
 
 /// Run a package-manager operation on a plain OS thread.

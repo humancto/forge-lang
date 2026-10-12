@@ -19,7 +19,7 @@ that a model cannot guess from `llms.txt`).
 | 5 | bug (fixed) | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
 | 6 | bug (fixed) | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
 | 7 | bug (fixed) | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
-| 8 | bug | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
+| 8 | bug (fixed) | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
 | 9 | bug | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
 | 10 | perf | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys) | data (latest_record_wins, word_freq_large, ...) |
 | 11 | perf | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function) | data |
@@ -227,6 +227,8 @@ Suggested fix: report an unresolved import as an error (T-code) in `forge check`
 LSP, and never fall back to a builtin for an imported name.
 
 ### 8. VM error positions inside functions point at the caller
+
+**Fixed:** `forge run` reports a VM runtime error at the innermost frame that has a position (the line inside the callee, as the interpreter and the `Sandbox` already did), in human and JSON output. The interpreter now records the call stack an error unwinds through (`RuntimeError::trace`, only on the error path) and prints it like the VM (`at pick (line 2)` ... `at <main> (line 10)`). One difference remains: the VM names `impl` methods `<lambda>` in the trace, the interpreter `P::bad`. Test: `tests/cli_diagnostics.rs::runtime_errors_inside_functions_point_at_the_callee` (both engines, JSON and human).
 
 ```forge
 fn pick(xs, i) {
