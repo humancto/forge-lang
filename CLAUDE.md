@@ -92,7 +92,7 @@ Source of truth: `src/stdlib/`. Globals on both engines (registered from `src/bu
 | `jwt`    | sign, verify, decode, valid (HS256/384/512, RS256, ES256)                                                                                                        |
 | `env`    | get, set, has, keys                                                                                                                                              |
 | `json`   | parse, stringify, pretty                                                                                                                                         |
-| `regex`  | test(text, pattern), find, find_all, replace, split                                                                                                              |
+| `regex`  | test(text, pattern), find, find_all, captures, captures_all, replace (`$1`/`${name}`), split                                                                     |
 | `log`    | info, warn, error, debug                                                                                                                                         |
 | `http`   | get, post, put, delete, patch, head, download, crawl                                                                                                             |
 | `csv`    | parse, stringify, read, write                                                                                                                                    |

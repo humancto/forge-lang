@@ -1701,8 +1701,10 @@ All functions take the **text first, then the pattern**. This order reads natura
 | `regex.test(text, pattern)`      | Test if pattern matches anywhere in text | `regex.test("hello", "ell")` → `true`               | Bool           |
 | `regex.find(text, pattern)`      | Find first match                         | `regex.find("abc123", "\\d+")` → `"123"`            | String or Null |
 | `regex.find_all(text, pattern)`  | Find all matches                         | `regex.find_all("a1b2c3", "\\d")` → `["1","2","3"]` | Array[String]  |
-| `regex.replace(text, pat, repl)` | Replace all matches                      | `regex.replace("aabaa", "a+", "x")` → `"xbx"`       | String         |
+| `regex.replace(text, pat, repl)` | Replace all matches; `repl` may use `$0`, `$1`, `${name}`, `$$` | `regex.replace("aabaa", "a+", "x")` → `"xbx"`       | String         |
 | `regex.split(text, pattern)`     | Split text by pattern                    | `regex.split("a:b::c", ":+")` → `["a","b","c"]`     | Array[String]  |
+| `regex.captures(text, pattern)` | Groups of the first match (`[whole, g1, ...]`, unmatched group `null`) | `regex.captures("k=7", "(\\w)=(\\d)")` → `["k=7","k","7"]` | Array or Null |
+| `regex.captures_all(text, pattern)` | Groups of every match | `regex.captures_all("a=1 b=2", "(\\w)=(\\d)")` → `[["a=1","a","1"], ["b=2","b","2"]]` | Array[Array] |
 
 > **Backslash Escaping.** In Forge strings, backslashes need to be doubled for regex special sequences: write `"\\d+"` to match one or more digits. The first backslash escapes the second, so the regex engine receives `\d+`.
 

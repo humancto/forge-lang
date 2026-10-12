@@ -31,7 +31,7 @@ that a model cannot guess from `llms.txt`).
 | 17 | gap (fixed) | `import { a as b }` does not exist and is misparsed ("does not export 'as'"); importing a module twice runs it twice | clashing_modules |
 | 18 | gap (fixed) | Request bodies must be JSON with `Content-Type: application/json`; otherwise axum answers 400/415 in text/plain | servers |
 | 19 | gap (fixed) | `llms.txt` describes import resolution incorrectly | multifile |
-| 20 | gap | `regex` has no capture groups | logfmt_parse, ini_config_check |
+| 20 | gap (fixed) | `regex` has no capture groups | logfmt_parse, ini_config_check |
 | 21 | gap | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
 | 22 | gap | `Map<String, T>` (suggested for objects by the MCP section) does not accept an object literal; there is no typed dictionary for objects | typed |
 | 23 | gap | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
@@ -483,6 +483,8 @@ only works when the pattern matches; `replace` accepts `$1` because it is Rust's
 
 Suggested fix: `regex.match(text, pattern)` returning `null` or
 `{ text, start, end, groups: [...], named: {...} }`, and `regex.match_all`.
+
+**Fixed:** `regex.captures(text, pattern)` returns the first match's groups as an array (`[whole, g1, g2, ...]`, `null` for a group that did not take part) or `null`, and `regex.captures_all(text, pattern)` one such array per match; named groups are numbered with the others (kept to arrays: one shape, indexable like `find_all`'s results). `regex.replace` references (`$1`, `$0`, `${name}`, `$$`, and `${1}a` when a letter follows) are documented in `llms.txt` and the spec. Tests: `tests/regex_captures_test.fg` (both engines), `stdlib::regex_module::tests`.
 
 ### 21. Behaviour models need but `llms.txt` does not state
 

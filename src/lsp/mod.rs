@@ -794,7 +794,15 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         ("json", vec!["parse", "stringify", "compact", "pretty"]),
         (
             "regex",
-            vec!["test", "find", "find_all", "replace", "split"],
+            vec![
+                "test",
+                "find",
+                "find_all",
+                "replace",
+                "split",
+                "captures",
+                "captures_all",
+            ],
         ),
         ("log", vec!["info", "warn", "error", "debug"]),
         (

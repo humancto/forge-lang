@@ -1,0 +1,55 @@
+// regex.captures / regex.captures_all and group references in
+// regex.replace (V2 finding 20). One implementation
+// (src/stdlib/regex_module.rs) for both engines.
+
+@test
+fn captures_returns_the_groups_of_the_first_match() {
+    let caps = regex.captures("ts=12 user=ada id=7", "user=(\\w+) id=(\\d+)")
+    assert_eq(caps, ["user=ada id=7", "ada", "7"])
+    assert_eq(caps[1], "ada")
+    assert_eq(int(caps[2]) + 1, 8)
+}
+
+@test
+fn captures_is_null_without_a_match() {
+    assert_eq(regex.captures("no user here", "user=(\\w+)"), null)
+}
+
+@test
+fn unmatched_optional_groups_are_null() {
+    let caps = regex.captures("port", "(\\w+)(:(\\d+))?")
+    assert_eq(caps, ["port", "port", null, null])
+}
+
+@test
+fn named_groups_are_numbered_left_to_right() {
+    let caps = regex.captures("2024-01-15", """(?<y>\d{4})-(?P<m>\d{2})-(\d{2})""")
+    assert_eq(caps, ["2024-01-15", "2024", "01", "15"])
+}
+
+@test
+fn captures_all_returns_every_match() {
+    let pairs = regex.captures_all("a=1, b=22, c", "(\\w)=(\\d+)")
+    assert_eq(pairs, [["a=1", "a", "1"], ["b=22", "b", "22"]])
+    let mut out = {}
+    for p in pairs {
+        out[p[1]] = int(p[2])
+    }
+    assert_eq(out, { a: 1, b: 22 })
+    assert_eq(regex.captures_all("abc", "(\\d)"), [])
+}
+
+@test
+fn replace_expands_group_references() {
+    assert_eq(regex.replace("2024-01-15", "(\\d{4})-(\\d{2})-(\\d{2})", "$2/$3/$1"), "01/15/2024")
+    assert_eq(regex.replace("2024-01-15", """(?<y>\d{4})-\d{2}-\d{2}""", """${y}!"""), "2024!")
+    assert_eq(regex.replace("ab", "(a)", """${1}x"""), "axb")
+    assert_eq(regex.replace("ab", "a", "$$"), "$b")
+    assert_eq(regex.replace("a1", "\\d", "<$0>"), "a<1>")
+}
+
+@test
+fn invalid_patterns_raise() {
+    assert_throws(fn() { regex.captures("x", "(") })
+    assert_throws(fn() { regex.captures_all("x", "[") })
+}

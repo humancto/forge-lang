@@ -379,7 +379,7 @@ Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digi
 | `math` | `sqrt(x)`, `pow(b, e)`, `abs`, `max(a, b)`, `min`, `floor`, `ceil`, `round`, `random_int(lo, hi)`, `pi`, `e` |
 | `fs` | `read(path)`, `write(path, text)`, `append`, `exists`, `list(dir)`, `remove`, `mkdir`, `copy(src, dst)`, `rename` |
 | `json` | `parse(text)` (keeps the document's key order), `stringify(value)` → `{"a": 1, "b": [1, 2]}`, `compact(value)` → `{"a":1,"b":[1,2]}` (no whitespace), `pretty(value, indent?)` |
-| `regex` | `test(text, pattern)`, `find(text, pattern)`, `find_all(text, pattern)`, `replace(text, pattern, repl)`, `split(text, pattern)` — text FIRST |
+| `regex` | `test(text, pattern)`, `find(text, pattern)` (first match or `null`), `find_all(text, pattern)`, `captures(text, pattern)` (first match's groups `[whole, g1, g2, ...]`, an unmatched group `null`; `null` when nothing matches), `captures_all(text, pattern)` (one such array per match), `replace(text, pattern, repl)` (`repl` may use `$1`, `$0`, `$$`, and `${name}` for `(?<name>...)` in a `"""..."""` string), `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
 | `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body) |
 | `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `last_insert_rowid()`, `begin()`/`commit()`/`rollback()`, `close()` |
@@ -399,6 +399,9 @@ Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digi
 println(math.sqrt(16.0))
 println(regex.find_all("a1b22c333", "\\d+"))
 println(regex.replace("a1b2", "\\d", "#"))
+let kv = regex.captures("user=ada id=7", "user=(\\w+) id=(\\d+)")   // ["user=ada id=7", "ada", "7"]
+println("{kv[1]} {int(kv[2]) + 1}")
+println(regex.replace("2024-01-15", "(\\d+)-(\\d+)-(\\d+)", "$3.$2.$1"))   // 15.01.2024
 println(json.stringify({ a: [1, 2] }))
 println(json.compact({ b: 1, a: [1, 2] }))   // {"b":1,"a":[1,2]}
 println(json.parse("[1, 2]")[1])
