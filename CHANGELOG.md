@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- VM: a function that assigns to a top-level variable declared both with and without `mut` (`let x = 1 ... let mut x = 2`) runs on the interpreter, which applies the declaration in force when the assignment runs; the VM used to merge both declarations' mutability.
+
 - `eval/forge_eval.py`: tasks whose time limit proves concurrency (`timed`, every `parallel` task) run one at a time after the others in `validate` and `score`, so CPU contention on a small machine cannot push them past their limit.
 
 - **`.push()` / `.pop()` on a nested place updates it** (both engines, all editions) — `groups[k].push(x)`, `o.items.push(x)`, `grid[0].pop()`, `o.seen.add(x)` (the method form on any field/index chain rooted at a variable) used to change a copy and silently do nothing; they now update the place exactly as `xs.push(x)` updates a variable. Order: index expressions, then arguments, then the place. A change under an immutable root raises the error `o.a = v` raises (`cannot reassign immutable variable`), reported statically as T0017 when the receiver is a known array/set; a frozen receiver raises `cannot push a frozen value` (now classified E0029); a value with its own `push` method gets an ordinary method call. The free functions `push(o.a, v)` / `pop(o.a)` keep their meaning. (eval finding 1)

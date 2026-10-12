@@ -94,6 +94,10 @@ pub struct Compiler {
     /// not inside a block), with whether any of those declarations is
     /// `mut`. Shared by every nested compiler; see [`Compiler::forward_global`].
     toplevel_binders: Arc<HashMap<String, bool>>,
+    /// Names the top level declares both with and without `mut`. Which
+    /// declaration a function's assignment meets depends on when it runs,
+    /// so such assignments are left to the interpreter (`Unsupported`).
+    toplevel_mixed: Arc<HashSet<String>>,
     /// Top-level bindings compiled as globals so far, in compile order,
     /// with the mutability of the latest declaration.
     toplevel_globals: HashMap<String, bool>,
@@ -173,6 +177,7 @@ impl Compiler {
             branch_overflow: false,
             is_top_level: false,
             toplevel_binders: Arc::new(HashMap::new()),
+            toplevel_mixed: Arc::new(HashSet::new()),
             toplevel_globals: HashMap::new(),
             toplevel_refs: HashSet::new(),
         }
@@ -203,6 +208,7 @@ impl Compiler {
         fc.global_prefix = self.global_prefix.clone();
         fc.module_globals = self.module_globals.clone();
         fc.toplevel_binders = Arc::clone(&self.toplevel_binders);
+        fc.toplevel_mixed = Arc::clone(&self.toplevel_mixed);
         fc.toplevel_globals = self.toplevel_globals.clone();
         fc
     }
@@ -317,6 +323,19 @@ impl Compiler {
     /// top-level `let` that has not been compiled yet: a forward reference.
     fn is_forward_toplevel(&self, name: &str) -> bool {
         !self.toplevel_globals.contains_key(name) && self.toplevel_binders.contains_key(name)
+    }
+
+    /// An assignment to `name` from inside a function, where `name` is a
+    /// top-level variable declared both with and without `mut`: whether it
+    /// is allowed depends on which declaration has run, which the VM does
+    /// not track, so the program runs on the interpreter.
+    fn check_mixed_mutability_write(&self, name: &str) -> Result<(), CompileError> {
+        if !self.is_top_level && self.toplevel_mixed.contains(name) {
+            return Err(CompileError::unsupported(
+                "assigning, inside a function, to a top-level variable declared both with and without `mut`",
+            ));
+        }
+        Ok(())
     }
 
     /// Record a global access to `name` (see `toplevel_refs`).
@@ -686,8 +705,15 @@ fn hoisted<'a>(
 /// [`Compiler::toplevel_global_mutability`]).
 fn begin_top_level(c: &mut Compiler, program: &Program) {
     let mut binders: HashMap<String, bool> = HashMap::new();
+    let mut seen: HashMap<String, (bool, bool)> = HashMap::new();
     let mut bind = |name: &str, mutable: bool| {
         *binders.entry(name.to_string()).or_insert(false) |= mutable;
+        let kinds = seen.entry(name.to_string()).or_insert((false, false));
+        if mutable {
+            kinds.0 = true;
+        } else {
+            kinds.1 = true;
+        }
     };
     for spanned in &program.statements {
         match &spanned.stmt {
@@ -704,6 +730,12 @@ fn begin_top_level(c: &mut Compiler, program: &Program) {
     }
     c.is_top_level = true;
     c.toplevel_binders = Arc::new(binders);
+    c.toplevel_mixed = Arc::new(
+        seen.into_iter()
+            .filter(|(_, (m, i))| *m && *i)
+            .map(|(name, _)| name)
+            .collect(),
+    );
     c.begin_scope();
 }
 
@@ -1012,6 +1044,8 @@ fn compile_store_variable(c: &mut Compiler, name: &str, src: u8) -> Result<(), C
             );
         }
         c.emit(encode_abc(OpCode::SetLocal, reg, src, 0), 0);
+    } else if let Err(e) = c.check_mixed_mutability_write(name) {
+        return Err(e);
     } else if c.binding_mutability(name) == Some(false) {
         // A top-level `let` declared further down does not exist yet when
         // this runs early: that is "undefined variable" first.
@@ -1478,6 +1512,9 @@ fn try_compile_place_method(
         0,
     );
     let unchanged = c.emit_jump(OpCode::JumpIfFalse, changed_reg, 0);
+    if c.resolve_local(root).is_none() {
+        c.check_mixed_mutability_write(root)?;
+    }
     if c.binding_mutability(root) == Some(false) {
         compile_hidden_stmt(
             c,
