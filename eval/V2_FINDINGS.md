@@ -18,7 +18,7 @@ that a model cannot guess from `llms.txt`).
 | 4 | bug (fixed) | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
 | 5 | bug (fixed) | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
 | 6 | bug (fixed) | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
-| 7 | bug | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
+| 7 | bug (fixed) | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
 | 8 | bug | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
 | 9 | bug | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
 | 10 | perf | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys) | data (latest_record_wins, word_freq_large, ...) |
@@ -206,6 +206,8 @@ Reference workaround: a hand-written parser (csv_quoted_fields) and `split` for 
 (sales_report_api, department_join).
 
 ### 7. `forge check` ignores imports it cannot resolve
+
+**Fixed:** an import the checker cannot find or parse is the new T0020 (`cannot import 'does_not_exist.fg': file not found (looked for /dir/does_not_exist.fg)`, with where it looks as the help), an error from edition 2027 and under `--strict` (exit 1 from `forge check`), a warning in 2026. Its names are unknown (`Any`) instead of builtins of the same name: no false T0004 for `title()`, also after an unreadable wildcard import. Not reported when imports are skipped (`Sandbox`, MCP). Tests: `typechecker::tests::unresolved_imports_are_reported_without_cascading`, the `forge explain T0020` example test.
 
 ```forge
 import { nothing_here } from "does_not_exist.fg"

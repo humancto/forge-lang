@@ -231,6 +231,9 @@ pub struct Checker<'a> {
     /// dropped too.
     pub suppressed_regions: Vec<Span>,
     facts: TypeFacts,
+    /// A wildcard import could not be read: any global name may be
+    /// something it defines, so none is checked as the builtin.
+    pub(crate) unknown_wildcard: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -258,6 +261,7 @@ impl<'a> Checker<'a> {
             interfaces: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
+            unknown_wildcard: false,
             cx: InferCtx::default(),
             scopes: vec![HashMap::new()],
             frames: Vec::new(),
@@ -546,6 +550,8 @@ impl<'a> Checker<'a> {
             (Some(_), Some(res)) => {
                 let occs = self.occs_in_stmt(name, NameClass::Value);
                 match occs.first() {
+                    // An unreadable `import "m.fg"` may define it.
+                    Some(_) if self.unknown_wildcard => false,
                     Some(id) => matches!(res.resolved[*id], Resolved::Global),
                     // Synthesized names (`say` → println) have no
                     // occurrence; they are always the builtin.
@@ -2287,8 +2293,12 @@ impl<'a> Checker<'a> {
         if let Some(t) = self.variant_value_type(name) {
             return t;
         }
-        if let Some(sig) = builtins::function(name) {
-            return Ty::Fn(sig.clone());
+        // Only the builtin itself: an imported name of the same spelling
+        // (from a module that could not be read) is unknown, not the builtin.
+        if self.is_global_here(name) {
+            if let Some(sig) = builtins::function(name) {
+                return Ty::Fn(sig.clone());
+            }
         }
         Ty::Any
     }

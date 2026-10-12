@@ -96,6 +96,9 @@ struct ImportInfo {
     /// `Some` for `import { a, b } from "path"`.
     names: Option<Vec<String>>,
     resolved: Option<PathBuf>,
+    /// Position of the `import` statement.
+    line: usize,
+    col: usize,
 }
 
 /// Everything known about one source file after checking.
@@ -254,6 +257,7 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
 
     let policy = options.policy();
     let mut checker = infer::Checker::new(policy, Some(&index), Some(&resolution));
+    checker.unknown_wildcard = wildcard_imports.iter().any(|i| i.names.is_none());
     for (info, program) in imports.iter().zip(&loaded) {
         if let Some(program) = program {
             checker.import_declarations(program, info.names.as_deref());
@@ -269,6 +273,14 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
         policy,
     ));
     diagnostics.retain(|d| !suppressed.iter().any(|r| within(d.span, *r)));
+    if !options.skip_imports {
+        diagnostics.extend(import_diagnostics(
+            &imports,
+            &loaded,
+            base_dir.as_deref(),
+            policy,
+        ));
+    }
     sort_diagnostics(&mut diagnostics);
 
     Analysis {
@@ -332,6 +344,8 @@ fn collect_imports(program: &Program, base_dir: Option<&Path>, skip: bool) -> Ve
             Stmt::Import { path, names } => Some(ImportInfo {
                 path: path.clone(),
                 names: names.clone(),
+                line: s.line,
+                col: s.col,
                 resolved: if skip || is_builtin_module(path) {
                     None
                 } else {
@@ -339,6 +353,58 @@ fn collect_imports(program: &Program, base_dir: Option<&Path>, skip: bool) -> Ve
                 },
             }),
             _ => None,
+        })
+        .collect()
+}
+
+/// T0020 for each file import that cannot be found, read or parsed. Its
+/// names stay unknown (`Any`, never a builtin of the same name), so the
+/// import is the only diagnostic about it.
+fn import_diagnostics(
+    imports: &[ImportInfo],
+    loaded: &[Option<Program>],
+    base_dir: Option<&Path>,
+    policy: SeverityPolicy,
+) -> Vec<Diagnostic> {
+    imports
+        .iter()
+        .zip(loaded)
+        .filter(|(i, program)| !is_builtin_module(&i.path) && program.is_none())
+        .map(|(i, _)| {
+            let start = crate::parser::index::Pos::new(i.line, i.col.max(1));
+            let end = crate::parser::index::Pos::new(i.line, i.col.max(1) + "import".len());
+            let (message, help) = match &i.resolved {
+                None => {
+                    let tried = base_dir.map_or_else(
+                        || PathBuf::from(&i.path),
+                        |dir| dir.join(&i.path),
+                    );
+                    (
+                        format!(
+                            "cannot import '{}': file not found (looked for {})",
+                            i.path,
+                            tried.display()
+                        ),
+                        "paths are resolved relative to the importing file, then the working directory, then forge_modules/ (the .fg suffix is optional)".to_string(),
+                    )
+                }
+                Some(found) => (
+                    format!(
+                        "cannot import '{}': {} cannot be read or does not parse",
+                        i.path,
+                        found.display()
+                    ),
+                    format!("run `forge check {}` to see the problem", found.display()),
+                ),
+            };
+            Diagnostic {
+                code: Code::UnresolvedImport,
+                severity: policy.severity(Code::UnresolvedImport, Basis::Declared),
+                message,
+                span: Span::new(start, end),
+                help: Some(help),
+                fixes: Vec::new(),
+            }
         })
         .collect()
 }
