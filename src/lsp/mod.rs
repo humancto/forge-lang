@@ -790,7 +790,8 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         (
             "http",
             vec![
-                "get", "post", "put", "delete", "patch", "head", "download", "crawl",
+                "get", "post", "put", "delete", "patch", "head", "download", "crawl", "pretty",
+                "response",
             ],
         ),
         ("csv", vec!["parse", "stringify", "read", "write"]),
