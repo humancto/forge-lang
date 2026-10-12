@@ -1,0 +1,33 @@
+id = "csv_quoted_fields"
+category = "data"
+title = "CSV with quoted fields, embedded newlines and leading zeros"
+prompt = """
+Standard input is a CSV file (RFC 4180) with the header `id,name,city,amount,notes`. Lines
+end with `\\r\\n`. Fields may be quoted with double quotes; a quoted field may contain commas,
+line breaks, and doubled quotes (`""` stands for one `"`). Values are never trimmed: keep
+spaces inside fields exactly as they are. Ids are strings and keep their leading zeros.
+`amount` is a decimal number with at most two decimals that may contain `,` as a thousands
+separator (`"1,234.5"`); an empty amount counts as 0.
+
+Print every record, sorted by id (plain string order), as
+`<id>|<name>|<city>|<amount>|<notes>` where amount has exactly two decimals and every line
+break inside notes is printed as the two characters `\\n` (a backslash and an `n`; a
+`\\r\\n` inside a quoted field counts as one line break).
+
+Then print `--`, then one line per city `<city>: <total>` (total with two decimals), sorted
+by total (descending), then by city name (ascending).
+"""
+stdin = "id,name,city,amount,notes\r\n00042,\"Doe, Jane\",Oslo,\"1,234.50\",\"said \"\"hi\"\"\"\r\n7,Bob,Lima,12,\r\n00007,\"  Ann  \",Oslo,0.5,\"two\r\nlines\"\r\n0100,Zoe,\"Lima\",,\"a,b\"\r\n042,\"O'Brien\",Kyiv,\"2,000\",\"multi\r\nline\r\nnote, with comma\"\r\n9,\"\"\"Quoted\"\" Name\",Kyiv,99.99,plain\r\n"
+needs = []
+expected_stdout = """
+00007|  Ann  |Oslo|0.50|two\\nlines
+00042|Doe, Jane|Oslo|1234.50|said "hi"
+0100|Zoe|Lima|0.00|a,b
+042|O'Brien|Kyiv|2000.00|multi\\nline\\nnote, with comma
+7|Bob|Lima|12.00|
+9|"Quoted" Name|Kyiv|99.99|plain
+--
+Kyiv: 2099.99
+Oslo: 1235.00
+Lima: 12.00
+"""

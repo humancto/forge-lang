@@ -1,0 +1,34 @@
+id = "latest_record_wins"
+category = "data"
+title = "Deduplicate 50,000 updates, latest record wins"
+prompt = """
+Standard input has 50,000 lines `<timestamp> <user> <plan>` (timestamp is an integer, user
+an id such as `u01234`, plan one word), in no particular order. They are plan changes; for
+each user the current plan is the one from the update with the largest timestamp, and when
+several updates of a user share that timestamp, the one that appears last in the input wins.
+
+Print:
+1. `users: <number of distinct users>`
+2. for every plan, in ascending order: `<plan>: <number of users whose current plan it is>`
+3. `most updates:` followed by the 5 users with the most updates, most first (ties by user
+   id ascending), each on its own line as `<user> <count> <current plan>`.
+
+The input is large: the program must finish in a few seconds, so avoid work that grows
+quadratically with the number of lines or users.
+"""
+stdin_file = "input.txt"
+needs = []
+timeout = 20
+expected_stdout = """
+users: 18389
+enterprise: 4564
+free: 4639
+pro: 4560
+team: 4626
+most updates:
+u03778 11 free
+u04572 10 free
+u14253 10 enterprise
+u15228 10 team
+u18767 10 pro
+"""

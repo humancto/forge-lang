@@ -1,0 +1,17 @@
+// Word frequencies over a large text. `frequencies` counts in one pass;
+// growing an object one key at a time would copy it on every insert.
+
+let text = fs.read("/dev/stdin").lower()
+let words = regex.find_all(text, "[a-z]+")
+let counts = frequencies(words)
+let distinct = keys(counts)
+let once = len(filter(distinct, fn(w) { return counts[w] == 1 }))
+
+println("words: {len(words)}")
+println("distinct: {len(distinct)}")
+println("once: {once}")
+
+let ranked = sort(sort(distinct), fn(a, b) { return counts[b] - counts[a] })
+for w in slice(ranked, 0, 10) {
+    println("{w} {counts[w]}")
+}

@@ -1,0 +1,48 @@
+id = "business_days"
+category = "data"
+title = "Business-day arithmetic with holidays"
+prompt = """
+The first line of standard input is `holidays: <date>, <date>, ...` (dates as `YYYY-MM-DD`).
+Every following non-blank line is a query:
+
+- `between <d1> <d2>`: the number of business days in the half-open range [d1, d2), that
+  is d1 counts and d2 does not. If d2 is before d1, the answer is minus the count for
+  `between <d2> <d1>`.
+- `add <d> <n>` (n >= 0): walk forward from d one calendar day at a time, counting the
+  business days you step on; the answer is the date on which the count reaches n
+  (`add <d> 0` is d itself, `add <friday> 1` is the next Monday when it is not a holiday).
+
+A business day is a Monday to Friday that is not a holiday. Print each query followed by
+`: ` and its answer, for example `between 2026-03-02 2026-03-09: 5` and
+`add 2026-03-06 1: 2026-03-09`.
+"""
+stdin = """
+holidays: 2026-12-25, 2027-01-01, 2028-02-29, 2026-04-03
+between 2026-03-02 2026-03-09
+add 2026-03-06 1
+between 2026-12-24 2027-01-04
+add 2026-12-24 3
+between 2027-01-04 2026-12-24
+between 2028-02-25 2028-03-03
+add 2028-02-28 1
+add 2026-04-02 1
+add 2026-03-07 0
+between 2026-03-07 2026-03-08
+add 2026-01-01 260
+between 2026-01-01 2027-01-01
+"""
+needs = []
+expected_stdout = """
+between 2026-03-02 2026-03-09: 5
+add 2026-03-06 1: 2026-03-09
+between 2026-12-24 2027-01-04: 5
+add 2026-12-24 3: 2026-12-30
+between 2027-01-04 2026-12-24: -5
+between 2028-02-25 2028-03-03: 4
+add 2028-02-28 1: 2028-03-01
+add 2026-04-02 1: 2026-04-06
+add 2026-03-07 0: 2026-03-07
+between 2026-03-07 2026-03-08: 0
+add 2026-01-01 260: 2027-01-05
+between 2026-01-01 2027-01-01: 259
+"""

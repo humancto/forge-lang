@@ -1,0 +1,47 @@
+id = "log_latency_percentiles"
+category = "data"
+title = "Latency percentiles per endpoint from an access log"
+prompt = """
+Standard input is an HTTP access log, one request per line:
+`<timestamp> <method> <path> <status> <latency>ms`, fields separated by single spaces, for
+example `2026-03-01T10:00:01Z GET /api/users/42 200 135ms`.
+
+- Blank lines are ignored.
+- A non-blank line is malformed if it does not have exactly 5 fields, if the status is not
+  exactly 3 digits, or if the latency is not one or more digits followed by `ms`. Count
+  malformed lines and otherwise ignore them.
+
+Group the requests by endpoint: the method, a space, and the path in which every path
+segment that consists only of digits is replaced by `:id` (`/api/users/0042` becomes
+`/api/users/:id`; `/api/users/7x` stays as it is). For each endpoint compute:
+
+- `count`: the number of requests;
+- `p50` and `p95`: latency percentiles by the nearest-rank method (sort the endpoint's
+  latencies ascending; the p-th percentile is the value at 1-based position
+  ceil(p / 100 * count));
+- `max`: the largest latency;
+- `errors`: the percentage of its requests with status 500 or above, with exactly one
+  decimal, halves rounded up (1 of 3 is `33.3`, 1 of 8 is `12.5`, 1 of 16 is `6.3`).
+
+Print one line per endpoint, sorted by count (descending), then by endpoint (ascending,
+plain character order):
+
+`<endpoint> count=<n> p50=<p50>ms p95=<p95>ms max=<max>ms errors=<pct>%`
+
+Finally print `malformed: <n>`.
+"""
+stdin_file = "input.txt"
+needs = []
+expected_stdout = """
+GET /api/orders/:id/items count=28 p50=366ms p95=718ms max=753ms errors=14.3%
+GET /health count=28 p50=5ms p95=9ms max=9ms errors=21.4%
+GET /api/users/:id count=20 p50=308ms p95=876ms max=894ms errors=10.0%
+GET /api/orders count=15 p50=410ms p95=798ms max=798ms errors=20.0%
+GET /api/users count=15 p50=375ms p95=848ms max=848ms errors=13.3%
+POST /api/orders count=12 p50=370ms p95=863ms max=863ms errors=16.7%
+DELETE /api/users/:id count=11 p50=434ms p95=860ms max=860ms errors=18.2%
+POST /api/users count=11 p50=314ms p95=781ms max=781ms errors=27.3%
+GET /api/users/7x count=1 p50=15ms p95=15ms max=15ms errors=0.0%
+PATCH /api/users/:id count=1 p50=12ms p95=12ms max=12ms errors=0.0%
+malformed: 6
+"""

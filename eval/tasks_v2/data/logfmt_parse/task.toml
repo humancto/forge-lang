@@ -1,0 +1,50 @@
+id = "logfmt_parse"
+category = "data"
+title = "Parse logfmt lines with quoted values"
+prompt = """
+Each non-blank line of standard input is a logfmt record: space-separated `key=value`
+pairs. A key is a letter or `_` followed by letters, digits, `_` or `.`. A value is either
+bare (one or more characters other than space and `"`) or double-quoted; inside quotes,
+`\\"` stands for `"` and `\\\\` for `\\`, and any other character (spaces included) stands
+for itself. Pairs are separated by one or more spaces. A line that does not fully match
+this grammar (for example an unterminated quote, a pair without `=`, or an empty value) is
+invalid and is skipped.
+
+Every valid record has the keys `time` and `level`; some also have `msg`, `route` and `dur`.
+`dur` is a duration such as `12ms` (whole milliseconds) or `1.5s` / `0.25s` (seconds with
+up to 3 decimals).
+
+Print, in input order, one line `<LEVEL> <time> <msg>` for every valid record whose level is
+`warn` or `error` (level in upper case; msg unescaped, or `-` if missing). Then print
+`levels: ` followed by `<level>=<count>` for every level seen, sorted by level and separated
+by single spaces. Then, for every route that appears with a `dur`, sorted by route:
+`route <route>: n=<count> avg=<average duration in ms, exactly one decimal, halves rounded up>ms`.
+Finally print `invalid: <number of invalid lines>`.
+"""
+stdin = '''
+time=2026-03-01T10:00:00Z level=info msg="server started" port=8080
+time=2026-03-01T10:00:01Z level=debug route=/api/users dur=12ms
+time=2026-03-01T10:00:02Z level=warn msg="slow query: \"users\" took 1.5s" route=/api/users dur=1.5s
+time=2026-03-01T10:00:03Z level=error msg="disk at 95% on /var" path="C:\\temp"
+time=2026-03-01T10:00:04Z level=info route=/api/orders dur=0.25s user.id=7
+time=2026-03-01T10:00:05Z level=error msg="unterminated
+time=2026-03-01T10:00:06Z   level=info    route=/api/orders   dur=101ms
+time=2026-03-01T10:00:07Z level=warn route=/health dur=3ms
+time=2026-03-01T10:00:08Z level=info msg=
+time=2026-03-01T10:00:09Z level=info novalue route=/x
+time=2026-03-01T10:00:10Z level=error msg="tab	and \\n stay" route=/api/users dur=2ms
+time=2026-03-01T10:00:11Z level=info 9key=1
+time=2026-03-01T10:00:12Z level=info _k.v2=ok route=/api/orders dur=0.001s
+'''
+needs = []
+expected_stdout = """
+WARN 2026-03-01T10:00:02Z slow query: "users" took 1.5s
+ERROR 2026-03-01T10:00:03Z disk at 95% on /var
+WARN 2026-03-01T10:00:07Z -
+ERROR 2026-03-01T10:00:10Z tab	and \\n stay
+levels: debug=1 error=2 info=4 warn=2
+route /api/orders: n=3 avg=117.3ms
+route /api/users: n=3 avg=504.7ms
+route /health: n=1 avg=3.0ms
+invalid: 4
+"""

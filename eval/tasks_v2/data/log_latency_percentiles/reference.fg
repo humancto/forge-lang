@@ -1,0 +1,65 @@
+// Latency percentiles per endpoint (nearest rank).
+
+fn normalize_path(path: String) -> String {
+    let segs = map(split(path, "/"), fn(seg) {
+        if regex.test(seg, "^[0-9]+$") {
+            return ":id"
+        }
+        return seg
+    })
+    return join(segs, "/")
+}
+
+fn nearest_rank(sorted: [Int], p: Int) -> Int {
+    let n = len(sorted)
+    let pos = (p * n + 99) / 100
+    return sorted[pos - 1]
+}
+
+let mut reqs = []
+let mut malformed = 0
+for line in split(fs.read("/dev/stdin"), "\n") {
+    if line.trim() == "" {
+        continue
+    }
+    let parts = split(line, " ")
+    if len(parts) != 5 || !regex.test(parts[3], "^[0-9]{3}$") || !regex.test(parts[4], "^[0-9]+ms$") {
+        malformed += 1
+        continue
+    }
+    reqs.push({
+        endpoint: parts[1] + " " + normalize_path(parts[2]),
+        status: int(parts[3]),
+        latency: int(replace(parts[4], "ms", "")),
+    })
+}
+
+// group_by keeps first-appearance order; each value is that endpoint's requests.
+let groups = group_by(reqs, fn(r) { return r.endpoint })
+
+let endpoints = sort(keys(groups), fn(a, b) {
+    let ca = len(groups[a])
+    let cb = len(groups[b])
+    if ca != cb {
+        return cb - ca
+    }
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    return 0
+})
+
+for endpoint in endpoints {
+    let reqs = groups[endpoint]
+    let lat = sort(map(reqs, fn(r) { return r.latency }))
+    let n = len(lat)
+    let errors = len(filter(reqs, fn(r) { return r.status >= 500 }))
+    let tenths = (errors * 2000 + n) / (2 * n)
+    let p50 = nearest_rank(lat, 50)
+    let p95 = nearest_rank(lat, 95)
+    println("{endpoint} count={n} p50={p50}ms p95={p95}ms max={lat[n - 1]}ms errors={tenths / 10}.{tenths % 10}%")
+}
+println("malformed: {malformed}")

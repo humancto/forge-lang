@@ -1,0 +1,74 @@
+// Left join of departments with employees, then rank by budget use.
+
+fn table(block: String) {
+    let lines = filter(split(block, "\n"), fn(l) { return l.trim() != "" })
+    let head = split(lines[0].trim(), ",")
+    return map(slice(lines, 1, len(lines)), fn(l) {
+        let cells = split(l.trim(), ",")
+        let mut row = {}
+        for e in enumerate(head) {
+            row[e.value] = cells[e.index]
+        }
+        return row
+    })
+}
+
+// x / y rounded half up to `digits` decimals (non-negative integers only)
+fn ratio(x: Int, y: Int, digits: Int) -> String {
+    let scale = int(math.pow(10, digits))
+    let scaled = (x * scale * 2 + y) / (2 * y)
+    return "{scaled / scale}.{pad_start(str(scaled % scale), digits, "0")}"
+}
+
+let blocks = split(fs.read("/dev/stdin"), "\n---\n")
+let emps = table(blocks[0])
+let depts = table(blocks[1])
+
+let lines = map(depts, fn(d) {
+    let staff = filter(emps, fn(e) { return e.dept == d.id })
+    let n = len(staff)
+    let payroll = sum(map(staff, fn(e) { return int(e.salary) }))
+    let budget = int(d.budget)
+    let mut avg = "0.00"
+    let mut senior = "-"
+    if n > 0 {
+        avg = ratio(payroll, n, 2)
+        let by_hire = sort(staff, fn(a, b) {
+            if a.hired != b.hired {
+                if a.hired < b.hired {
+                    return -1
+                }
+                return 1
+            }
+            return int(a.id) - int(b.id)
+        })
+        senior = by_hire[0].name
+    }
+    let used_tenths = (payroll * 2000 + budget) / (2 * budget)
+    return {
+        name: d.name,
+        used: used_tenths,
+        text: "{d.name}: staff={n} payroll={payroll} avg={avg} used={ratio(payroll * 100, budget, 1)}% senior={senior}",
+    }
+})
+
+let ranked = sort(lines, fn(a, b) {
+    if a.used != b.used {
+        return b.used - a.used
+    }
+    if a.name < b.name {
+        return -1
+    }
+    return 1
+})
+for l in ranked {
+    println(l.text)
+}
+
+let dept_ids = map(depts, fn(d) { return d.id })
+let unassigned = map(filter(emps, fn(e) { return !contains(dept_ids, e.dept) }), fn(e) { return e.name })
+if len(unassigned) == 0 {
+    println("unassigned: -")
+} else {
+    println("unassigned: " + join(unassigned, ", "))
+}

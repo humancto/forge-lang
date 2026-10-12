@@ -1,0 +1,54 @@
+id = "json_order_summary"
+category = "data"
+title = "Reshape nested JSON orders into per-customer summaries"
+prompt = """
+Standard input is one JSON document `{"orders": [...]}`. Each order has `id`, `status`
+(`"paid"`, `"pending"` or `"refunded"`), `customer` (an object with `id` and `name`),
+`items` (an array of `{"sku", "qty", "unit_cents"}`) and an optional `coupon`
+(`{"percent": <integer>}`).
+
+The total of an order is the sum of `qty * unit_cents` over its items; with a coupon it is
+reduced by `percent` percent and rounded down to a whole cent (`total * (100 - percent) / 100`
+with integer division). Only paid orders count as spending.
+
+Print one line per customer (every customer that appears in any order), as compact JSON
+(no spaces, keys in exactly this order, non-ASCII characters written as they are, not
+escaped):
+
+`{"customer":<id>,"name":<name>,"paid_orders":<n>,"spent_cents":<sum of paid totals>,"skus":[<distinct skus of paid orders, sorted>],"largest_order":<id of the paid order with the highest total, the earliest one on ties; null if none>}`
+
+The name is the one from the customer's first order. Sort customers by `spent_cents`
+(descending), then by customer id (ascending). Finally print one more compact JSON line:
+`{"customers":<n>,"paid_orders":<n>,"revenue_cents":<sum>,"refunded_orders":<n>}`.
+"""
+stdin = """
+{"orders": [
+  {"id": "o-1", "status": "paid", "customer": {"id": "c2", "name": "Zoë \\"Z\\" Li"},
+   "items": [{"sku": "pen", "qty": 3, "unit_cents": 150}, {"sku": "ink", "qty": 1, "unit_cents": 899}]},
+  {"id": "o-2", "status": "pending", "customer": {"id": "c1", "name": "Ada"},
+   "items": [{"sku": "pad", "qty": 2, "unit_cents": 400}]},
+  {"id": "o-3", "status": "paid", "customer": {"id": "c3", "name": "Bo"},
+   "items": [{"sku": "pen", "qty": 10, "unit_cents": 150}], "coupon": {"percent": 15}},
+  {"id": "o-4", "status": "refunded", "customer": {"id": "c2", "name": "Zoe Li"},
+   "items": [{"sku": "desk", "qty": 1, "unit_cents": 15000}]},
+  {"id": "o-5", "status": "paid", "customer": {"id": "c2", "name": "Zoe Li"},
+   "items": [{"sku": "clip", "qty": 7, "unit_cents": 33}, {"sku": "ink", "qty": 2, "unit_cents": 899}], "coupon": {"percent": 5}},
+  {"id": "o-6", "status": "paid", "customer": {"id": "c4", "name": "Cy"},
+   "items": [{"sku": "pad", "qty": 3, "unit_cents": 400}, {"sku": "pen", "qty": 1, "unit_cents": 150}]},
+  {"id": "o-7", "status": "paid", "customer": {"id": "c3", "name": "Bo"},
+   "items": [{"sku": "clip", "qty": 4, "unit_cents": 33}]},
+  {"id": "o-8", "status": "paid", "customer": {"id": "c4", "name": "Cy"},
+   "items": [{"sku": "ink", "qty": 1, "unit_cents": 899}, {"sku": "pen", "qty": 3, "unit_cents": 150}, {"sku": "clip", "qty": 1, "unit_cents": 2}]},
+  {"id": "o-9", "status": "pending", "customer": {"id": "c5", "name": "Dee"},
+   "items": []}
+]}
+"""
+needs = []
+expected_stdout = """
+{"customer":"c2","name":"Zoë \\"Z\\" Li","paid_orders":2,"spent_cents":3276,"skus":["clip","ink","pen"],"largest_order":"o-5"}
+{"customer":"c4","name":"Cy","paid_orders":2,"spent_cents":2701,"skus":["clip","ink","pad","pen"],"largest_order":"o-8"}
+{"customer":"c3","name":"Bo","paid_orders":2,"spent_cents":1407,"skus":["clip","pen"],"largest_order":"o-3"}
+{"customer":"c1","name":"Ada","paid_orders":0,"spent_cents":0,"skus":[],"largest_order":null}
+{"customer":"c5","name":"Dee","paid_orders":0,"spent_cents":0,"skus":[],"largest_order":null}
+{"customers":5,"paid_orders":6,"revenue_cents":7384,"refunded_orders":1}
+"""

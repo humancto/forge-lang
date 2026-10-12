@@ -1,0 +1,68 @@
+id = "room_bookings_merge"
+category = "data"
+title = "Merge 20,000+ room bookings and find free gaps"
+prompt = """
+Each line of standard input is a booking `<room> <HH:MM>-<HH:MM>` (start before end, both
+within 08:00-20:00). There are more than 20,000 lines in no particular order, for a few
+dozen rooms.
+
+For each room, merge its bookings into busy blocks: bookings that overlap or touch
+(one ends exactly when the next starts) belong to the same block. Then print, for every
+room in ascending order:
+
+`<room> blocks=<number of busy blocks> busy=<total busy time> free=<longest free gap>`
+
+where the total busy time is written `<hours>h<MM>m` (minutes two digits, e.g. `3h05m`,
+`12h00m`), and the longest free gap is the longest stretch inside 08:00-20:00 not covered by
+any block, written `<HH:MM>-<HH:MM>` (the earliest one if several are equally long), or
+`none` if the room is busy the whole day.
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+needs = []
+timeout = 20
+expected_stdout = """
+room-01 blocks=1 busy=12h00m free=none
+room-02 blocks=1 busy=12h00m free=none
+room-03 blocks=1 busy=12h00m free=none
+room-04 blocks=1 busy=11h58m free=08:00-08:02
+room-05 blocks=1 busy=11h59m free=08:00-08:01
+room-06 blocks=1 busy=11h59m free=08:00-08:01
+room-07 blocks=9 busy=7h18m free=14:31-16:45
+room-08 blocks=12 busy=6h52m free=12:33-13:50
+room-09 blocks=1 busy=12h00m free=none
+room-10 blocks=1 busy=11h53m free=08:00-08:07
+room-11 blocks=1 busy=12h00m free=none
+room-12 blocks=1 busy=12h00m free=none
+room-13 blocks=8 busy=7h33m free=12:24-14:54
+room-14 blocks=4 busy=3h10m free=08:00-11:06
+room-15 blocks=1 busy=11h57m free=08:00-08:03
+room-16 blocks=2 busy=11h37m free=08:00-08:18
+room-17 blocks=9 busy=7h49m free=08:37-10:54
+room-18 blocks=4 busy=3h15m free=15:23-20:00
+room-19 blocks=1 busy=12h00m free=none
+room-20 blocks=1 busy=12h00m free=none
+room-21 blocks=1 busy=12h00m free=none
+room-22 blocks=5 busy=2h51m free=11:22-15:06
+room-23 blocks=1 busy=12h00m free=none
+room-24 blocks=1 busy=11h59m free=08:00-08:01
+room-25 blocks=1 busy=11h56m free=08:00-08:04
+room-26 blocks=1 busy=12h00m free=none
+room-27 blocks=1 busy=12h00m free=none
+room-28 blocks=1 busy=11h59m free=08:00-08:01
+room-29 blocks=1 busy=12h00m free=none
+room-30 blocks=1 busy=8h55m free=08:00-11:05
+room-31 blocks=1 busy=12h00m free=none
+room-32 blocks=4 busy=1h33m free=09:59-16:58
+room-33 blocks=1 busy=11h58m free=08:00-08:02
+room-34 blocks=3 busy=2h31m free=13:23-18:24
+room-35 blocks=4 busy=1h57m free=16:27-20:00
+room-36 blocks=4 busy=3h38m free=08:00-10:38
+room-37 blocks=8 busy=6h54m free=10:20-11:45
+room-38 blocks=8 busy=8h26m free=10:58-11:44
+room-39 blocks=1 busy=12h00m free=none
+room-40 blocks=4 busy=3h05m free=13:04-17:33
+room-41 blocks=1 busy=12h00m free=none
+room-42 blocks=4 busy=3h30m free=10:30-13:00
+"""

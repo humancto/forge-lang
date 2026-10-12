@@ -1,0 +1,51 @@
+id = "department_join"
+category = "data"
+title = "Join employees with departments and rank by budget use"
+prompt = """
+Standard input holds two CSV tables separated by a line containing only `---`. Both have a
+header line and no quoted fields.
+
+1. Employees: `id,name,dept,salary,hired` (salary a whole number, hired as `YYYY-MM-DD`).
+2. Departments: `id,name,budget` (budget a whole number greater than 0).
+
+An employee belongs to the department whose `id` equals their `dept`. Employees whose
+`dept` matches no department are unassigned.
+
+For every department (also those without employees) print one line:
+
+`<name>: staff=<n> payroll=<sum of salaries> avg=<average salary> used=<payroll as a percentage of budget>% senior=<name of the employee hired first>`
+
+`avg` has exactly two decimals, `used` exactly one decimal, both with halves rounded up;
+for a department without employees `avg` is `0.00` and `senior` is `-`. Ties for the
+earliest hire date go to the smallest employee id (compared as numbers). Sort the lines by
+`used` (descending), then by department name (ascending).
+
+Finally print `unassigned: ` followed by the names of the unassigned employees in input
+order, separated by `, ` (or `-` if there are none).
+"""
+stdin = """
+id,name,dept,salary,hired
+7,Ada,eng,120000,2019-04-01
+12,Bo,ops,65000,2021-09-15
+3,Cy,eng,99500,2019-04-01
+21,Dee,sales,70000,2020-01-06
+5,Eve,eng,135000,2022-11-30
+9,Fay,mkt,58000,2018-02-01
+14,Gus,sales,72250,2018-07-23
+2,Hal,ops,61000,2023-03-01
+30,Ivy,legal,90000,2017-05-05
+---
+id,name,budget
+eng,Engineering,400000
+ops,Operations,150000
+sales,Sales,142250
+hr,People,80000
+"""
+needs = []
+expected_stdout = """
+Sales: staff=2 payroll=142250 avg=71125.00 used=100.0% senior=Gus
+Engineering: staff=3 payroll=354500 avg=118166.67 used=88.6% senior=Cy
+Operations: staff=2 payroll=126000 avg=63000.00 used=84.0% senior=Bo
+People: staff=0 payroll=0 avg=0.00 used=0.0% senior=-
+unassigned: Fay, Ivy
+"""
