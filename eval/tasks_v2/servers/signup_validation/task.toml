@@ -90,12 +90,12 @@ body = '[1, 2]'
 [[request]]
 method = "POST"
 path = "/signup"
-body = '{"username": "a_very_long_username", "email": "x@@y.com", "age": 121, "password": "abcdefgh"}'
+body = '{"username": "a_very_long_username", "email": "x@@y.com", "age": 121, "password": "lettersonly"}'
 
 [[request]]
 method = "POST"
 path = "/signup"
-body = '{"username": "bo_2", "email": "bo@mail.co", "age": 120, "password": "Pa55word"}'
+body = '{"username": "bo_2", "email": "bo@mail.co", "age": 120, "password": "bicycle9"}'
 
 [[request]]
 method = "GET"
