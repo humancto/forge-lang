@@ -234,6 +234,24 @@ pub struct Checker<'a> {
     /// A wildcard import could not be read: any global name may be
     /// something it defines, so none is checked as the builtin.
     pub(crate) unknown_wildcard: bool,
+    /// Set while the bodies of an imported module's functions are inferred
+    /// (`import_declarations`): their names resolve in that module, not in
+    /// the file being checked.
+    foreign: Option<ForeignModule>,
+}
+
+/// Name resolution for an imported module's function bodies. The syntax
+/// index and resolution belong to the importing file, so they say nothing
+/// about these bodies: a module-level name (`let mut count = 0`) must not
+/// resolve to a builtin of the same spelling, nor to the importer's names.
+struct ForeignModule {
+    /// Names the module's top level may bind (over-approximated).
+    binders: HashSet<String>,
+    /// The module has a wildcard import: any name may be defined there.
+    unknown: bool,
+    /// Module functions imported under their own name: they are in
+    /// `functions` with the module's signature.
+    kept: HashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -262,6 +280,7 @@ impl<'a> Checker<'a> {
             methods: HashMap::new(),
             functions: HashMap::new(),
             unknown_wildcard: false,
+            foreign: None,
             cx: InferCtx::default(),
             scopes: vec![HashMap::new()],
             frames: Vec::new(),
@@ -336,12 +355,30 @@ impl<'a> Checker<'a> {
             .collect();
         self.collect_declarations(&stmts);
         // Imported function bodies are not checked here, but their return
-        // types are still inferred so calls get useful result types.
+        // types are still inferred so calls get useful result types. Names
+        // in those bodies resolve in the module (`ForeignModule`).
+        let (binders, unknown) = crate::semantics::hoist::module_binders(&program.statements);
+        let kept = program
+            .statements
+            .iter()
+            .filter_map(|s| match &s.stmt {
+                Stmt::FnDef { name, .. } if wanted(name) && alias(name).is_none() => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let saved_foreign = self.foreign.replace(ForeignModule {
+            binders,
+            unknown,
+            kept,
+        });
         let before = std::mem::take(&mut self.diagnostics);
         let mute = std::mem::replace(&mut self.mute, true);
         self.infer_return_types(&stmts);
         self.mute = mute;
         self.diagnostics = before;
+        self.foreign = saved_foreign;
     }
 
     fn walk_program(&mut self, program: &Program) {
@@ -556,9 +593,22 @@ impl<'a> Checker<'a> {
 
     /// Is `name` (as used in the current statement) the builtin/module of
     /// that name, i.e. not shadowed by a user definition?
+    /// The user function `name` denotes here. In an imported module's
+    /// body only the module's own imported functions are known (the
+    /// importer's functions are not visible there).
+    fn function_here(&self, name: &str) -> Option<&Callable> {
+        match &self.foreign {
+            Some(f) if !f.kept.contains(name) => None,
+            _ => self.functions.get(name),
+        }
+    }
+
     fn is_global_here(&self, name: &str) -> bool {
         if self.lookup(name).is_some() || self.functions.contains_key(name) {
             return false;
+        }
+        if let Some(f) = &self.foreign {
+            return !f.unknown && !f.binders.contains(name) && builtins::is_global(name);
         }
         match (self.index, self.resolution) {
             (Some(_), Some(res)) => {
@@ -2301,7 +2351,7 @@ impl<'a> Checker<'a> {
             "None" => return Ty::option(Ty::Any),
             _ => {}
         }
-        if let Some(c) = self.functions.get(name) {
+        if let Some(c) = self.function_here(name) {
             return Ty::Fn(c.sig.clone());
         }
         if let Some(t) = self.variant_value_type(name) {
@@ -2801,7 +2851,7 @@ impl<'a> Checker<'a> {
             let ty = self.cx.resolve(&b.ty);
             return self.call_value(&ty, name, args, has_spread, span, true);
         }
-        if let Some(c) = self.functions.get(name).cloned() {
+        if let Some(c) = self.function_here(name).cloned() {
             return self.call_signature(name, &c.sig, args, has_spread, span, CallKind::User);
         }
         if let Some(t) = self.variant_value_type(name) {

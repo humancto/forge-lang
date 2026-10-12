@@ -603,6 +603,18 @@ fn binders(stmt: &Stmt) -> Binders {
     b
 }
 
+/// The names a module's top level may bind (over-approximated like
+/// [`plan`]'s analysis), and whether it may bind names not known here (a
+/// wildcard `import "file"`). The type checker uses it to keep an imported
+/// module's own names from resolving to the importer's or to builtins.
+pub fn module_binders(statements: &[SpannedStmt]) -> (HashSet<String>, bool) {
+    let mut b = Binders::default();
+    for s in statements {
+        collect_binders(&s.stmt, false, &mut b);
+    }
+    (b.names, b.everything)
+}
+
 fn collect_binders(stmt: &Stmt, in_function: bool, b: &mut Binders) {
     let add = |name: &str, b: &mut Binders| {
         b.names.insert(name.to_string());

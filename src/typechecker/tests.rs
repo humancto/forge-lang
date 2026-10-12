@@ -1658,6 +1658,50 @@ fn unresolved_imports_are_reported_without_cascading() {
     assert!(ds.is_empty(), "{ds:?}");
 }
 
+// An imported module's own names (a module-level `let mut count`, a helper
+// called `title`) shadow the builtins of that spelling inside its function
+// bodies, as at run time; the inferred return types must not be builtins.
+#[test]
+fn imported_module_names_shadow_builtins_in_its_bodies() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_module_names_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("counter.fg"),
+        "let mut count = 0\n\
+         fn bump() {\n    count = count + 1\n    return count\n}\n\
+         fn get_count() { return count }\n\
+         fn title() { return \"T\" }\n\
+         fn heading() { return title() + \"!\" }\n\
+         fn twice(n) { return bump() + n }\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    for source in [
+        "import { bump, get_count, heading } from \"counter.fg\"\nlet n = bump() + 1\nprintln(get_count() * 2 + n)\nprintln(heading() + \"?\")\n",
+        "import { bump as inc, twice } from \"counter.fg\"\nprintln(inc() + twice(1) + 1)\n",
+        "import \"counter.fg\"\nprintln(get_count() * 2 + bump())\n",
+    ] {
+        for edition in [Edition::E2026, Edition::E2027] {
+            let ds = analyze(
+                source,
+                &CheckOptions {
+                    file: Some(main.clone()),
+                    edition: Some(edition),
+                    ..CheckOptions::default()
+                },
+            )
+            .expect("parses")
+            .diagnostics;
+            assert!(ds.is_empty(), "{edition:?} {source}: {ds:?}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn imports_are_not_resolved_when_skipped() {
     let ds = analyze(

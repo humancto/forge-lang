@@ -37,6 +37,7 @@ that a model cannot guess from `llms.txt`).
 | 23 | gap | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
 | 24 | gap | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
 | 25 | gap | No way to write to stderr except `log.*` (structured tracing) | error_handling |
+| 26 | bug (fixed) | `forge check`: a module-level variable named like a builtin (`let mut count = 0`) is typed as the builtin inside the module's functions (false T0005 in the importer) | multifile |
 
 ---
 
@@ -256,6 +257,26 @@ Every `no method ...` / `no field ...` error carries the hint
 
 Suggested fix: make the hint edition-aware (`println(x)` / `typeof(x)`), or drop the
 `sus` mention.
+
+### 26. Imported modules: module-level names typed as builtins
+
+**Fixed:** names in an imported module's function bodies resolve in that module (`ForeignModule` in `src/typechecker/infer.rs`, using `semantics::hoist::module_binders`): its own top-level bindings shadow builtins, and the importing file's functions are not visible there. Test: `typechecker::tests::imported_module_names_shadow_builtins_in_its_bodies`.
+
+```forge
+// counter.fg
+let mut count = 0
+fn bump() {
+    count = count + 1
+    return count
+}
+```
+```forge
+import { bump } from "counter.fg"
+let n = bump() + 1   // T0005: operator '+' cannot be applied to fn(Any, Any) -> Int and Int
+```
+
+The checker inferred `bump`'s return type with the importer's name resolution, where
+`count` is the builtin `count(xs, x)`.
 
 ## Performance
 
