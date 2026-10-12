@@ -939,6 +939,42 @@ pub fn message_hint(message: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+/// A message without its hint line(s): what `catch e` exposes as
+/// `e.message` (the hint is `e.hint`, see [`caught_error_fields`]). Other
+/// lines (an assertion's `left:`/`right:`) are kept.
+pub fn without_hint(message: &str) -> String {
+    if !message.contains(HINT_PREFIX) {
+        return message.to_string();
+    }
+    message
+        .split('\n')
+        .filter(|l| !l.starts_with(HINT_PREFIX))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The fields of the object a `catch e { }` block receives, in order:
+/// `message` (without the hint line), `type` (legacy), `code`, and `hint`
+/// (the message's own hint, `None` → `null`). Both engines build the
+/// object from this, so it is the same everywhere.
+pub fn caught_error_fields(message: &str) -> CaughtError {
+    CaughtError {
+        message: without_hint(message),
+        error_type: legacy_error_type(message),
+        code: classify(message).code,
+        hint: message_hint(message).map(str::to_string),
+    }
+}
+
+/// See [`caught_error_fields`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaughtError {
+    pub message: String,
+    pub error_type: &'static str,
+    pub code: &'static str,
+    pub hint: Option<String>,
+}
+
 /// The hint to show for a message: its own, else its code's default.
 pub fn hint_for(message: &str) -> &str {
     message_hint(message).unwrap_or(classify(message).hint)
@@ -1260,6 +1296,19 @@ mod tests {
         for (message, code) in cases {
             assert_eq!(classify(&message).code, code, "{:?}", message);
         }
+    }
+
+    #[test]
+    fn caught_errors_keep_the_hint_out_of_the_message() {
+        use crate::semantics as s;
+        let caught = caught_error_fields(&s::no_field("b", ["a"]));
+        assert_eq!(caught.message, "no field 'b' on object");
+        assert_eq!(caught.hint.as_deref(), Some("available fields: a"));
+        assert_eq!(caught.code, "E0013");
+        assert_eq!(caught.error_type, "RuntimeError");
+        let plain = caught_error_fields("assert_eq failed\n  left: 1\n  right: 2");
+        assert_eq!(plain.message, "assert_eq failed\n  left: 1\n  right: 2");
+        assert_eq!(plain.hint, None);
     }
 
     #[test]

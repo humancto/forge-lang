@@ -2512,21 +2512,20 @@ impl VM {
         ))
     }
 
-    /// The object a `catch e { }` block receives: `message`, the legacy
-    /// `type` and the stable `code` (shared with the interpreter through
-    /// `semantics::errors`).
+    /// The object a `catch e { }` block receives: `message` (without its
+    /// hint line), the legacy `type`, the stable `code` and the `hint`
+    /// (shared with the interpreter through `semantics::errors`).
     fn runtime_error_value(&mut self, err: &VMError) -> Value {
-        use crate::semantics::errors;
+        let caught = crate::semantics::errors::caught_error_fields(&err.message);
         let mut err_obj = IndexMap::new();
-        err_obj.insert("message".to_string(), self.alloc_string(&err.message));
-        err_obj.insert(
-            "type".to_string(),
-            self.alloc_string(errors::legacy_error_type(&err.message)),
-        );
-        err_obj.insert(
-            "code".to_string(),
-            self.alloc_string(errors::classify(&err.message).code),
-        );
+        err_obj.insert("message".to_string(), self.alloc_string(&caught.message));
+        err_obj.insert("type".to_string(), self.alloc_string(caught.error_type));
+        err_obj.insert("code".to_string(), self.alloc_string(caught.code));
+        let hint = match &caught.hint {
+            Some(h) => self.alloc_string(h),
+            None => Value::null(),
+        };
+        err_obj.insert("hint".to_string(), hint);
         let err_ref = self.gc.alloc(ObjKind::Object(err_obj));
         Value::obj(err_ref)
     }

@@ -2337,18 +2337,19 @@ impl Interpreter {
                 Err(e) if e.is_control_escape() => Err(e),
                 Err(e) => {
                     self.env.push_scope();
+                    // The fields come from the shared table, so both
+                    // engines hand `catch` the same object.
+                    let caught = crate::semantics::errors::caught_error_fields(&e.message);
                     let mut err_obj = IndexMap::new();
-                    err_obj.insert("message".to_string(), Value::String(e.message.clone()));
-                    // `type` (legacy) and `code` come from the shared table,
-                    // so both engines hand `catch` the same object.
-                    use crate::semantics::errors;
+                    err_obj.insert("message".to_string(), Value::String(caught.message));
                     err_obj.insert(
                         "type".to_string(),
-                        Value::String(errors::legacy_error_type(&e.message).to_string()),
+                        Value::String(caught.error_type.to_string()),
                     );
+                    err_obj.insert("code".to_string(), Value::String(caught.code.to_string()));
                     err_obj.insert(
-                        "code".to_string(),
-                        Value::String(errors::classify(&e.message).code.to_string()),
+                        "hint".to_string(),
+                        caught.hint.map_or(Value::Null, Value::String),
                     );
                     self.env.define(catch_var.clone(), Value::Object(err_obj));
                     // FIX: was `result.unwrap_or(Signal::None);` — the semicolon

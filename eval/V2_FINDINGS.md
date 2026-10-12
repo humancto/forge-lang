@@ -35,7 +35,7 @@ that a model cannot guess from `llms.txt`).
 | 21 | gap | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
 | 22 | gap | `Map<String, T>` (suggested for objects by the MCP section) does not accept an object literal; there is no typed dictionary for objects | typed |
 | 23 | gap (fixed) | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
-| 24 | gap | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
+| 24 | gap (fixed) | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
 | 25 | gap (fixed) | No way to write to stderr except `log.*` (structured tracing) | error_handling |
 | 26 | bug (fixed) | `forge check`: a module-level variable named like a builtin (`let mut count = 0`) is typed as the builtin inside the module's functions (false T0005 in the importer) | multifile |
 
@@ -559,6 +559,11 @@ try {
 
 Programs that print `e.message` print two lines. Suggested fix: keep hints out of
 `message` (expose them as `e.hint`).
+
+**Fixed:** the caught object is `{ message, type, code, hint }` on both engines
+(`semantics::errors::caught_error_fields`): `message` without the hint line, `hint` the
+error's own hint or `null`. Tests: `tests/caught_error_hint_test.fg` (both engines),
+`semantics::errors::tests::caught_errors_keep_the_hint_out_of_the_message`.
 
 ### 25. No stderr output
 
