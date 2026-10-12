@@ -3176,11 +3176,35 @@ impl VM {
             Outcome::Float(f) => Value::float(f),
             Outcome::Bool(b) => Value::bool_val(b),
             Outcome::Concat => {
-                let (l, r) = (left.display(&self.gc), right.display(&self.gc));
-                self.caps
-                    .check_string(l.len() + r.len())
-                    .map_err(|m| VMError::new(&m))?;
-                Value::obj(self.gc.alloc_string(l + &r))
+                // Build the result once, without copying string operands
+                // first. It is not interned: a computed string is rarely
+                // seen again, and interning it costs a hash, a table entry
+                // and a second copy (`"r" + str(i)` in a loop of 100k
+                // distinct values spent most of its time there).
+                let mut text = match self.get_str_ref(left) {
+                    Some(s) => {
+                        let mut t = String::with_capacity(s.len() + 16);
+                        t.push_str(s);
+                        t
+                    }
+                    None => left.display(&self.gc),
+                };
+                match self.get_str_ref(right) {
+                    Some(s) => {
+                        self.caps
+                            .check_string(text.len() + s.len())
+                            .map_err(|m| VMError::new(&m))?;
+                        text.push_str(s);
+                    }
+                    None => {
+                        let r = right.display(&self.gc);
+                        self.caps
+                            .check_string(text.len() + r.len())
+                            .map_err(|m| VMError::new(&m))?;
+                        text.push_str(&r);
+                    }
+                }
+                Value::obj(self.gc.alloc(ObjKind::String(text)))
             }
             Outcome::ArrayConcat => {
                 let items = self.concat_array_items(left, right)?;
