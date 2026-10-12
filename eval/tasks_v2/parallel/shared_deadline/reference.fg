@@ -1,0 +1,26 @@
+// One deadline for all jobs: each await gets only the time that is left.
+// Jobs still running at exit are abandoned (the program does not wait).
+
+let jobs = map(filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" }), fn(l) {
+    return split(l.trim(), " ")
+})
+let handles = map(jobs, fn(j) {
+    return spawn {
+        wait(int(j[1]) / 1000.0)
+        return "{j[0].upper()}-{j[1]}"
+    }
+})
+let deadline = time.now().unix_ms + 1000
+
+let mut done = 0
+for e in enumerate(jobs) {
+    let left = max(0, deadline - time.now().unix_ms)
+    let r = await_timeout(handles[e.index], left)
+    if r == null {
+        println("{e.value[0]}: timed out")
+    } else {
+        done += 1
+        println("{e.value[0]}: {r}")
+    }
+}
+println("done={done} timed_out={len(jobs) - done}")

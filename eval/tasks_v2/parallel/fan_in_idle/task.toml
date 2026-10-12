@@ -1,0 +1,33 @@
+id = "fan_in_idle"
+category = "parallel"
+title = "Merge two producers and stop when the input goes idle"
+prompt = """
+Standard input has two lines, each a list of comma-separated integers: the items of
+producer A and of producer B.
+
+Start two concurrent producers that each send their items, one at a time, to the
+consumer (the main program), sleeping 20 ms before each item:
+- A sends all its items and then a final "done" signal;
+- B sends all its items and then hangs: it sleeps for 60 seconds without sending
+  anything more (it never finishes).
+
+The consumer takes items from both producers as they arrive. It stops as soon as A has
+signalled done and no item has arrived from either producer for 300 ms. It must not wait
+for B to finish; the whole program must end within 2 seconds.
+
+Then print (the arrival interleaving varies, so only per-producer order is printed):
+1. `a: <A's items in the order received, separated by ,>`
+2. `b: <B's items in the order received, separated by ,>`
+3. `received=<number of items> sum=<sum of all items>`
+"""
+stdin = """
+5,3,8,13,1,-2
+40,2,7,7,9
+"""
+needs = []
+timeout = 2
+expected_stdout = """
+a: 5,3,8,13,1,-2
+b: 40,2,7,7,9
+received=11 sum=93
+"""

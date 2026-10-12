@@ -1,0 +1,49 @@
+// Fan-in with select and an idle timeout. select([chans], ms) returns
+// [index, value] for the first channel with a message, or null when
+// nothing arrives in time.
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" })
+let a_items = map(split(lines[0].trim(), ","), fn(x) { return int(x) })
+let b_items = map(split(lines[1].trim(), ","), fn(x) { return int(x) })
+let a = channel()
+let b = channel()
+
+spawn {
+    for x in a_items {
+        wait(0.02)
+        send(a, { item: x })
+    }
+    send(a, { done: true })
+}
+spawn {
+    for x in b_items {
+        wait(0.02)
+        send(b, { item: x })
+    }
+    wait(60)
+}
+
+let mut got_a = []
+let mut got_b = []
+let mut a_done = false
+loop {
+    let msg = select([a, b], 300)
+    if msg == null {
+        if a_done {
+            break
+        }
+        continue
+    }
+    let body = msg[1]
+    if has_key(body, "done") {
+        a_done = true
+    } else if msg[0] == 0 {
+        got_a.push(body.item)
+    } else {
+        got_b.push(body.item)
+    }
+}
+println("a: " + join(map(got_a, fn(x) { return str(x) }), ","))
+println("b: " + join(map(got_b, fn(x) { return str(x) }), ","))
+let all_items = got_a + got_b
+println("received={len(all_items)} sum={sum(all_items)}")

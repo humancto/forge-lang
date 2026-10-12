@@ -1,0 +1,45 @@
+// parse -> digest -> output, one task per stage, bounded channels between
+// them. A closed channel makes receive return null, which ends a stage.
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" })
+let parsed = channel(2)
+let digested = channel(2)
+
+let parser = spawn {
+    for line in lines {
+        let text = line.trim()
+        let at = index_of(text, " ")
+        let body = substring(text, at + 1, len(text))
+        let rec = { id: substring(text, 0, at), text: body, words: len(split(body, " ")) }
+        wait(0.04)
+        send(parsed, rec)
+    }
+    close(parsed)
+    return null
+}
+
+let digester = spawn {
+    loop {
+        let rec = receive(parsed)
+        if rec == null {
+            break
+        }
+        let out = merge(rec, { sha: substring(crypto.sha256(rec.text), 0, 8) })
+        wait(0.04)
+        send(digested, out)
+    }
+    close(digested)
+    return null
+}
+
+let mut n = 0
+loop {
+    let rec = receive(digested)
+    if rec == null {
+        break
+    }
+    println("{rec.id} words={rec.words} sha={rec.sha} {rec.text.upper()}")
+    n += 1
+    wait(0.04)
+}
+println("processed {n}")

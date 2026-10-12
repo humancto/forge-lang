@@ -1,0 +1,35 @@
+// Map: one task per chunk returns its counts. Reduce: merge with
+// group_by/sum over the partial entries (adding keys to one object one at a
+// time is slow for thousands of keys).
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l != "" })
+let chunks = chunk(lines, 3000)
+
+let partials = await_all(map(chunks, fn(c) {
+    return spawn {
+        let words = flatten(map(c, fn(l) { return split(l, " ") }))
+        return { words: len(words), counts: frequencies(words) }
+    }
+}))
+
+for e in enumerate(partials) {
+    println("chunk {e.index + 1}: {e.value.words} words, {len(keys(e.value.counts))} distinct")
+}
+
+let pairs = flatten(map(partials, fn(p) { return entries(p.counts) }))
+let by_word = group_by(pairs, fn(pair) { return pair[0] })
+let words = keys(by_word)
+let totals = from_entries(map(words, fn(w) {
+    return [w, sum(map(by_word[w], fn(pair) { return pair[1] }))]
+}))
+println("total: {sum(map(partials, fn(p) { return p.words }))} words, {len(words)} distinct")
+println("top:")
+let ranked = sort(sort(words), fn(a, b) { return totals[b] - totals[a] })
+for w in slice(ranked, 0, 10) {
+    println("{w} {totals[w]}")
+}
+
+// a word only in chunk 4 has exactly one partial entry, and it is chunk 4's
+let last = partials[3].counts
+let only_last = filter(keys(last), fn(w) { return len(by_word[w]) == 1 })
+println("only in chunk 4: {len(only_last)}")

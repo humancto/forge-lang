@@ -1,0 +1,40 @@
+id = "chunked_word_count"
+category = "parallel"
+title = "Map-reduce word counts over chunks processed concurrently"
+prompt = """
+Standard input is a text of 12,000 lines (about 120,000 lower-case words separated by
+single spaces). Count word frequencies map-reduce style: split the lines into 4
+contiguous chunks of 3,000 lines, count the words of each chunk in its own concurrent
+task, then merge the four partial counts.
+
+Print:
+1. for each chunk in order: `chunk <k>: <words> words, <distinct> distinct` (k from 1);
+2. `total: <words> words, <distinct> distinct` for the whole text;
+3. `top:` and then the 10 most frequent words as `<word> <count>`, most frequent first,
+   ties by word ascending;
+4. `only in chunk 4: <number of distinct words that occur in chunk 4 and in no other chunk>`.
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+needs = []
+timeout = 20
+expected_stdout = """
+chunk 1: 30132 words, 5677 distinct
+chunk 2: 29931 words, 5664 distinct
+chunk 3: 29959 words, 5659 distinct
+chunk 4: 29801 words, 5713 distinct
+total: 119823 words, 7810 distinct
+top:
+uwei 7905
+lwuqgnmuky 4201
+ogt 2957
+rbep 2255
+ekdxon 1766
+owtjmsur 1588
+ewdkzal 1353
+zxeokw 1288
+ylltxqcit 1090
+cnrsjaaedi 1011
+only in chunk 4: 242
+"""

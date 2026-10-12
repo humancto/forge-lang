@@ -1,0 +1,63 @@
+id = "isolated_failures"
+category = "parallel"
+title = "Concurrent tasks where some fail, without losing the others"
+prompt = """
+Each non-blank line of standard input is an operation. Run every operation as its own
+concurrent task; each task first sleeps 200 ms (simulated work), so running them one after
+another would be too slow: the program must finish within 1.5 seconds. A failing task must
+not affect the others.
+
+Operations (numbers are integers):
+- `div <a> <b>`: a divided by b, rounded toward zero; fails with `division by zero` if b is 0.
+- `nth <i> <x1,x2,...>`: the element at 0-based index i of the comma-separated list
+  (printed as it is written); fails with `index out of range` if there is no such element
+  (negative indexes never exist).
+- `num <text>`: the text as an integer; fails with `not a number` unless it is an optional
+  `-` followed by digits.
+- `isqrt <n>`: the largest integer whose square is at most n; fails with `negative input`
+  if n < 0.
+- anything else fails with `unknown operation`.
+
+Print one line per operation in input order: `<line number>: ok <result>` or
+`<line number>: error <reason>` (line numbers count non-blank lines from 1). Then print
+`ok=<n> errors=<n>`, then one line per failure reason that occurred, sorted by reason:
+`<reason>: <count>`.
+"""
+stdin = """
+div 17 5
+div -17 5
+div 4 0
+nth 2 a,b,c,d
+nth 4 a,b,c,d
+nth -1 a,b
+num 0042
+num 4.2
+num -7
+isqrt 99
+isqrt -1
+isqrt 1000000
+pow 2 8
+"""
+needs = []
+timeout = 1.5
+expected_stdout = """
+1: ok 3
+2: ok -3
+3: error division by zero
+4: ok c
+5: error index out of range
+6: error index out of range
+7: ok 42
+8: error not a number
+9: ok -7
+10: ok 9
+11: error negative input
+12: ok 1000
+13: error unknown operation
+ok=7 errors=6
+division by zero: 1
+index out of range: 2
+negative input: 1
+not a number: 1
+unknown operation: 1
+"""

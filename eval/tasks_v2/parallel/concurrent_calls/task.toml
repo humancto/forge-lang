@@ -1,0 +1,42 @@
+id = "concurrent_calls"
+category = "parallel"
+title = "Run slow calls concurrently within a deadline"
+prompt = """
+Each non-blank line of standard input describes a slow service call:
+`<name> <latency_ms> <value>`. Simulate each call by sleeping latency_ms milliseconds and
+then producing its result: if value is an integer, the result is value * value; otherwise
+the call fails.
+
+The latencies add up to far more than the time limit, so the calls must run concurrently:
+the whole program must finish within 3 seconds (no call takes longer than 1.5 s).
+
+Print one line per call in input order: `<name>: <result>` or `<name>: failed`, then
+`ok=<number of successful calls> sum=<sum of their results>`.
+"""
+stdin = """
+alpha 900 3
+beta 1200 -4
+gamma 400 x7
+delta 1000 12
+epsilon 700 0
+zeta 1100 5
+eta 600 2.5
+theta 800 100
+iota 1300 -11
+kappa 500 6
+"""
+needs = []
+timeout = 4
+expected_stdout = """
+alpha: 9
+beta: 16
+gamma: failed
+delta: 144
+epsilon: 0
+zeta: 25
+eta: failed
+theta: 10000
+iota: 121
+kappa: 36
+ok=8 sum=10351
+"""
