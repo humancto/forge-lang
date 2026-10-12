@@ -104,7 +104,7 @@ Source of truth: `src/stdlib/`. Globals on both engines (registered from `src/bu
 
 ## Core Builtins (beyond modules)
 
-- Output: print, println, say, yell, whisper
+- Output: print, println, eprint, eprintln (stderr), say, yell, whisper
 - Types: str, int, float, type, typeof
 - Collections: len, push, pop, keys, values, contains, range, enumerate, sum, min_of, max_of, unique, zip, flatten, group_by, chunk, slice, partition
 - Functional: map, filter, reduce, sort (with custom comparator), reverse, find, flat_map, any, all, sample, shuffle

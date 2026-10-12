@@ -1128,6 +1128,15 @@ impl VM {
                 crate::runtime::stdio::out(&text.join(" "));
                 Ok(Value::null())
             }
+            "eprint" | "eprintln" => {
+                let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
+                if name == "eprintln" {
+                    crate::runtime::stdio::err_line(&text.join(" "));
+                } else {
+                    crate::runtime::stdio::err(&text.join(" "));
+                }
+                Ok(Value::null())
+            }
             "yell" => {
                 let text: Vec<String> = args.iter().map(|v| v.display(&self.gc)).collect();
                 let output = text.join(" ").to_uppercase();

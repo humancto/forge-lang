@@ -1860,7 +1860,7 @@ impl Interpreter {
                             Expr::Ident(name)
                                 if matches!(
                                     name.as_str(),
-                                    "print" | "println" | "say" | "yell" | "whisper"
+                                    "print" | "println" | "eprint" | "eprintln" | "say" | "yell" | "whisper"
                                 )
                         )
                 );

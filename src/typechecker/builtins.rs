@@ -21,6 +21,8 @@ const SIGNATURES: &[&str] = &[
     // Output
     "print(...Any) -> Null",
     "println(...Any) -> Null",
+    "eprint(...Any) -> Null",
+    "eprintln(...Any) -> Null",
     "say(...Any) -> Null",
     "yell(...Any) -> Null",
     "whisper(...Any) -> Null",

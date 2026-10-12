@@ -1483,3 +1483,28 @@ fn registry_globals_and_modules_exist_on_both_engines() {
         missing
     );
 }
+
+/// `eprint`/`eprintln` write to the thread's stdio capture as stderr on
+/// both engines (V2 finding 25), also from a spawned task.
+#[test]
+fn eprintln_goes_to_the_captured_stderr_on_both_engines() {
+    use crate::runtime::stdio::{capture, Stream};
+    let source = "println(\"out\")\neprintln(\"err:\", 1, [2])\neprint(\"a\", \"b\")\neprint(\"\\n\")\nlet t = spawn { eprintln(\"from task\") }\nawait t\n";
+    let program = parse_program(source);
+    for engine in ["interp", "vm"] {
+        let guard = capture(1 << 16);
+        if engine == "interp" {
+            Interpreter::new().run(&program).expect("interpreter error");
+        } else {
+            let chunk = compiler::compile(&program).expect("compile error");
+            VM::new().execute(&chunk).expect("vm error");
+        }
+        let captured = guard.finish();
+        assert_eq!(captured.text(Stream::Stdout), "out\n", "{engine}");
+        assert_eq!(
+            captured.text(Stream::Stderr),
+            "err: 1 [2]\na b\nfrom task\n",
+            "{engine}"
+        );
+    }
+}

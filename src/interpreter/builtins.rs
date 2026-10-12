@@ -124,6 +124,17 @@ impl Interpreter {
                 self.write_output(&output, true);
                 Ok(Value::Null)
             }
+            // stderr: never the interpreter's own output sink (the DAP
+            // console), always the thread's stdio capture or the process.
+            "eprint" | "eprintln" => {
+                let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
+                if name == "eprintln" {
+                    crate::runtime::stdio::err_line(&text.join(" "));
+                } else {
+                    crate::runtime::stdio::err(&text.join(" "));
+                }
+                Ok(Value::Null)
+            }
             "len" => super::places::len_of(args.first()),
             "type" | "typeof" => match args.first() {
                 Some(v) => Ok(Value::String(v.type_name().to_string())),

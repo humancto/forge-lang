@@ -637,6 +637,8 @@ fn get_completions() -> Vec<serde_json::Value> {
     let builtins = [
         "println",
         "print",
+        "eprintln",
+        "eprint",
         "say",
         "yell",
         "whisper",
@@ -1371,6 +1373,14 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     (
         "print",
         "fn print(...args) — Print values without a newline",
+    ),
+    (
+        "eprintln",
+        "fn eprintln(...args) — Print values to stderr followed by a newline",
+    ),
+    (
+        "eprint",
+        "fn eprint(...args) — Print values to stderr without a newline",
     ),
     ("say", "fn say(...args) — Print with natural language style"),
     ("yell", "fn yell(...args) — Print in UPPERCASE"),

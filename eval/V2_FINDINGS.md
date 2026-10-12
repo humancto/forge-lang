@@ -36,7 +36,7 @@ that a model cannot guess from `llms.txt`).
 | 22 | gap | `Map<String, T>` (suggested for objects by the MCP section) does not accept an object literal; there is no typed dictionary for objects | typed |
 | 23 | gap | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
 | 24 | gap | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
-| 25 | gap | No way to write to stderr except `log.*` (structured tracing) | error_handling |
+| 25 | gap (fixed) | No way to write to stderr except `log.*` (structured tracing) | error_handling |
 | 26 | bug (fixed) | `forge check`: a module-level variable named like a builtin (`let mut count = 0`) is typed as the builtin inside the module's functions (false T0005 in the importer) | multifile |
 
 ---
@@ -558,3 +558,5 @@ timestamps and targets) to stderr. CLI-style programs (grep_exit_status, ini_con
 can only report errors on stdout plus an exit status.
 
 Suggested fix: `eprintln(...)` / `eprint(...)` builtins routed through `runtime::stdio::err`.
+
+**Fixed:** `eprintln(...)` / `eprint(...)` (registry, both engines, both editions, type checker, LSP) write like `println`/`print` to stderr through `runtime::stdio::err_line`/`err`, so a capture (the playground) records them as stderr and spawned tasks inherit it. Tests: `tests/cli_diagnostics.rs::eprintln_writes_to_stderr_on_both_engines`, `vm::parity_tests::eprintln_goes_to_the_captured_stderr_on_both_engines`, `tests/stderr_output_test.fg`.

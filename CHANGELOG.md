@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`eprintln(...)` and `eprint(...)`** (both engines, both editions) — like `println`/`print`, but to stderr, so a command-line program can report warnings and errors while stdout carries only its result. They write through the program's output capture like other output (the browser playground shows them as stderr; inside `Sandbox`/`forge mcp` stderr is not captured, as for `log.*`).
 - **`regex.captures(text, pattern)` and `regex.captures_all(text, pattern)`** (both engines, `src/stdlib/regex_module.rs`) — the capture groups of the first match (`[whole, g1, g2, ...]`, `null` for a group that did not take part, `null` when nothing matches) and of every match. Named groups (`(?<name>...)`) are numbered with the others. The group references `regex.replace` always accepted (`$1`, `$0`, `${name}`, `$$`) are now documented.
 
 ### Changed

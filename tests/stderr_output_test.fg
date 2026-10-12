@@ -1,0 +1,12 @@
+// eprint / eprintln write to stderr (V2 finding 25). The CLI test
+// `tests/cli_diagnostics.rs` checks which stream the text lands on; here
+// both engines accept every argument shape and return null.
+
+@test
+fn eprintln_and_eprint_return_null() {
+    assert_eq(eprintln("warning:", 1, [2, 3], { a: 4 }), null)
+    assert_eq(eprintln(), null)
+    assert_eq(eprint("no newline "), null)
+    assert_eq(eprint(), null)
+    eprintln("")
+}
