@@ -23,9 +23,10 @@
 //!
 //! # Request bodies
 //!
-//! [`parse_body`] turns a request body into the handler's `body` value by
-//! its `Content-Type` (JSON, form, text); a malformed body is answered
-//! before the handler runs, with a JSON error.
+//! [`read_body`] turns a request body into the handler's `body` value by
+//! its `Content-Type` (JSON, form, text), keeping its exact text for
+//! `raw_body`; a malformed body is answered before the handler runs, with
+//! a JSON error.
 
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use indexmap::IndexMap;
@@ -278,7 +279,8 @@ pub struct RequestBody {
     pub raw: String,
 }
 
-/// The handler's `body` for a request body of `content_type`:
+/// The handler's view of a request body of `content_type`: `raw` is the
+/// exact text, and `decoded` the handler's `body`:
 ///
 /// - empty → `None` (the `body` parameter then gets `{}`, `req.body` null);
 /// - not UTF-8 → `415`, whatever the content type (so `raw_body` is always
@@ -286,11 +288,6 @@ pub struct RequestBody {
 /// - `application/json` or `*/*+json` → the parsed JSON (`400` if invalid);
 /// - `application/x-www-form-urlencoded` → an object of Strings;
 /// - anything else, or no content type → the body as a String.
-pub fn parse_body(content_type: Option<&str>, bytes: &[u8]) -> Result<Option<Value>, BodyError> {
-    read_body(content_type, bytes).map(|b| b.decoded)
-}
-
-/// [`parse_body`], plus the raw text of the body.
 pub fn read_body(content_type: Option<&str>, bytes: &[u8]) -> Result<RequestBody, BodyError> {
     if bytes.is_empty() {
         return Ok(RequestBody {
@@ -341,6 +338,10 @@ pub fn read_body(content_type: Option<&str>, bytes: &[u8]) -> Result<RequestBody
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn parse_body(content_type: Option<&str>, bytes: &[u8]) -> Result<Option<Value>, BodyError> {
+        read_body(content_type, bytes).map(|b| b.decoded)
+    }
 
     fn spec(v: JsonValue) -> Result<ResponseSpec, String> {
         ResponseSpec::from_json(&v).expect("a response value")

@@ -149,7 +149,7 @@ pub struct HandlerRequest {
     /// repeated headers are joined with `", "`.
     pub headers: IndexMap<String, String>,
     /// The body, decoded by its content type
-    /// ([`crate::runtime::http_response::parse_body`]); `None` when the
+    /// ([`crate::runtime::http_response::read_body`]); `None` when the
     /// request has no body.
     pub body: Option<Value>,
     /// The body's exact text (`""` when there is none). A body that is not
