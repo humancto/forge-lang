@@ -442,7 +442,8 @@ namespace object); cache a module per resolved path within a run.
 **Fixed:** `import { a as b } from "m.fg"` (functions and variables; renaming a struct or
 type is E0019), on both engines, the checker, the LSP and `forge fmt`. A module runs once
 per program and its importers share its state. Not done: `import "m.fg" as m` (namespace
-objects).
+objects). `forge check` also reports renaming a struct, type, variant or interface (T0021, at
+the alias; an error from edition 2027), not only the run (E0019).
 
 ### 18. Request bodies must be JSON with the JSON content type
 

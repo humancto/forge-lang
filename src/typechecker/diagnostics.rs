@@ -53,6 +53,9 @@ pub enum Code {
     DiscardedResult,
     /// An `import` names a file that cannot be found or read.
     UnresolvedImport,
+    /// `import { Name as Other }` renames a struct, `type`, variant or
+    /// interface (only functions and variables can be renamed).
+    ImportRename,
 }
 
 impl Code {
@@ -78,6 +81,7 @@ impl Code {
         Code::UseBeforeDefinition,
         Code::DiscardedResult,
         Code::UnresolvedImport,
+        Code::ImportRename,
     ];
 
     /// The stable identifier, e.g. `"T0006"`.
@@ -103,6 +107,7 @@ impl Code {
             Code::UseBeforeDefinition => "T0018",
             Code::DiscardedResult => "T0019",
             Code::UnresolvedImport => "T0020",
+            Code::ImportRename => "T0021",
         }
     }
 }
@@ -139,6 +144,7 @@ impl Code {
             Code::UseBeforeDefinition => "name used before its definition",
             Code::DiscardedResult => "result of a pure call discarded",
             Code::UnresolvedImport => "import not found",
+            Code::ImportRename => "type renamed by an import",
         }
     }
 
@@ -406,6 +412,21 @@ Fix: correct the path (the message shows where it looked), or create the
 module. An error from edition 2027 and under `--strict`, otherwise a
 warning; running the program fails at the import either way (E0019)."
             }
+            Code::ImportRename => {
+                "\
+`import { name as alias } from \"path\"` renames functions and variables
+only. A struct, `type`, variant or interface keeps its own name: its
+values, methods, patterns and `impl` blocks refer to it by that name.
+
+Example:
+
+    import { Point as P } from \"geometry.fg\"    // Point is a struct
+
+Fix: import it under its own name (`import { Point } from \"geometry.fg\"`),
+and rename the module's functions instead if two modules clash. An error
+from edition 2027 and under `--strict`, otherwise a warning; running the
+program fails at the import either way (E0019)."
+            }
         }
     }
 }
@@ -448,8 +469,10 @@ impl Code {
                 | Code::InterfaceNotSatisfied
                 | Code::UnknownType
                 | Code::MissingField
-                // The program declared a module that is not there.
+                // The program declared a module that is not there, or
+                // an import the module cannot satisfy.
                 | Code::UnresolvedImport
+                | Code::ImportRename
         )
     }
 }
@@ -590,6 +613,48 @@ pub(crate) mod tests {
             .join("\n")
     }
 
+    /// Modules an example imports (they exist next to it when it is
+    /// checked, as they would in the reader's project).
+    fn example_modules(code: Code) -> &'static [(&'static str, &'static str)] {
+        match code {
+            Code::ImportRename => &[("geometry.fg", "struct Point { x: Int, y: Int }\n")],
+            _ => &[],
+        }
+    }
+
+    /// The diagnostics of a code's `forge explain` example in `edition`,
+    /// checked as `main.fg` next to the modules it imports.
+    pub(crate) fn check_example(
+        code: Code,
+        edition: Edition,
+    ) -> Vec<crate::typechecker::Diagnostic> {
+        let example = example_of(code.explanation());
+        let modules = example_modules(code);
+        let file = if modules.is_empty() {
+            None
+        } else {
+            let dir = std::env::temp_dir().join(format!(
+                "forge_explain_{}_{}_{:?}",
+                code.as_str(),
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&dir).expect("example dir");
+            for (name, source) in modules {
+                std::fs::write(dir.join(name), source).expect("example module");
+            }
+            Some(dir.join("main.fg"))
+        };
+        let options = crate::typechecker::CheckOptions {
+            edition: Some(edition),
+            file,
+            ..crate::typechecker::CheckOptions::default()
+        };
+        crate::typechecker::analyze(&example, &options)
+            .unwrap_or_else(|_| panic!("{} example does not parse:\n{}", code, example))
+            .diagnostics
+    }
+
     /// Every explanation's example really produces its code, so
     /// `forge explain` never shows an example that does not apply.
     #[test]
@@ -599,20 +664,14 @@ pub(crate) mod tests {
             assert!(text.contains("Fix"), "{} explanation needs a fix", code);
             let example = example_of(text);
             assert!(!example.is_empty(), "{} explanation needs an example", code);
-            let options = crate::typechecker::CheckOptions {
-                edition: Some(code.since()),
-                ..crate::typechecker::CheckOptions::default()
-            };
-            let analysis = crate::typechecker::analyze(&example, &options)
-                .unwrap_or_else(|_| panic!("{} example does not parse:\n{}", code, example));
+            let diagnostics = check_example(*code, code.since());
             assert!(
-                analysis.diagnostics.iter().any(|d| d.code == *code),
+                diagnostics.iter().any(|d| d.code == *code),
                 "{} example does not produce {}:\n{}\ngot: {:?}",
                 code,
                 code,
                 example,
-                analysis
-                    .diagnostics
+                diagnostics
                     .iter()
                     .map(|d| format!("{} {}", d.code, d.message))
                     .collect::<Vec<_>>()

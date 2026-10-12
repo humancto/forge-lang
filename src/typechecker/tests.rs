@@ -1376,11 +1376,10 @@ fn check_in(source: &str, strict: bool, edition: Edition) -> Vec<Diagnostic> {
 /// contradicts a declaration or is an edition rule.
 #[test]
 fn edition_2027_promotes_exactly_the_declared_type_codes() {
-    use crate::typechecker::diagnostics::tests::example_of;
+    use crate::typechecker::diagnostics::tests::check_example;
     for code in Code::ALL {
-        let example = example_of(code.explanation());
-        let in_2026 = check_in(&example, false, Edition::E2026);
-        let in_2027 = check_in(&example, false, Edition::E2027);
+        let in_2026 = check_example(*code, Edition::E2026);
+        let in_2027 = check_example(*code, Edition::E2027);
         assert!(
             in_2026.iter().all(|d| !d.is_error()),
             "{}: 2026 must only warn: {:?}",
@@ -1411,7 +1410,7 @@ fn edition_2027_promoted_codes() {
     // docs/editions/2027.md lists these; change both together.
     assert_eq!(
         promoted,
-        vec!["T0001", "T0002", "T0003", "T0012", "T0015", "T0016", "T0020"]
+        vec!["T0001", "T0002", "T0003", "T0012", "T0015", "T0016", "T0020", "T0021"]
     );
 }
 
@@ -1699,6 +1698,87 @@ fn imported_module_names_shadow_builtins_in_its_bodies() {
             assert!(ds.is_empty(), "{edition:?} {source}: {ds:?}");
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// `import { P as Q }` of a struct, type, variant or interface is reported
+// statically (T0021, at the alias) with the engines' E0019 text; renaming a
+// function or variable is fine.
+#[test]
+fn renaming_a_type_in_an_import_is_reported() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_import_rename_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("shapes.fg"),
+        "struct P { x: Int }\ntype Shape = Circle(Float) | Square(Float)\ninterface Named { fn name() -> String }\nfn helper() { return 1 }\nlet limit = 3\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    let check = |source: &str, edition| {
+        analyze(
+            source,
+            &CheckOptions {
+                file: Some(main.clone()),
+                edition: Some(edition),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("parses")
+        .diagnostics
+    };
+    let source = "import { helper as h, limit as max_n, P as Point, Shape as S, Circle as C, Named as N } from \"shapes.fg\"\nprintln(h() + max_n)\n";
+    for edition in [Edition::E2026, Edition::E2027] {
+        let ds = check(source, edition);
+        let found: Vec<(&str, usize, usize, bool)> = ds
+            .iter()
+            .map(|d| {
+                (
+                    d.code.as_str(),
+                    d.span.start.line,
+                    d.span.start.col,
+                    d.is_error(),
+                )
+            })
+            .collect();
+        let error = edition == Edition::E2027;
+        assert_eq!(
+            found,
+            vec![
+                ("T0021", 1, 44, error),
+                ("T0021", 1, 60, error),
+                ("T0021", 1, 73, error),
+                ("T0021", 1, 85, error),
+            ],
+            "{edition:?}: {ds:?}"
+        );
+        assert_eq!(
+            ds[0].message,
+            "cannot import 'P' as 'Point' from 'shapes.fg': 'P' is a struct, and only functions and variables can be renamed"
+        );
+        assert_eq!(
+            ds[0].help.as_deref(),
+            Some("import it under its own name: import { P } from \"shapes.fg\"")
+        );
+        assert!(
+            ds[2].message.contains("'Circle' is a variant"),
+            "{}",
+            ds[2].message
+        );
+        assert!(
+            ds[3].message.contains("'Named' is an interface"),
+            "{}",
+            ds[3].message
+        );
+    }
+    assert!(check(
+        "import { helper as h, P } from \"shapes.fg\"\nprintln(h())\n",
+        Edition::E2027
+    )
+    .is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
