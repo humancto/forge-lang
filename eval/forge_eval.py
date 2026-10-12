@@ -1175,12 +1175,28 @@ def lint_reference(path):
 
 
 def check_reference(forge, task, edition):
-    """Diagnostics of `forge check` on a task's Forge reference."""
-    cmd = [forge, "--edition", edition, "check", "--format", "json", task.reference("forge")]
+    """Diagnostics of `forge check` on a task's Forge reference. It is checked
+    as `main.fg` next to a copy of the task's `files/`, the way it runs, so
+    the modules it imports are visible to the checker."""
+    workdir = tempfile.mkdtemp(prefix="forge-eval-check-")
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-    except subprocess.TimeoutExpired:
-        return [{"code": "timeout", "message": "forge check timed out"}]
+        if os.path.isdir(task.files_dir()):
+            for name in os.listdir(task.files_dir()):
+                src = os.path.join(task.files_dir(), name)
+                dst = os.path.join(workdir, name)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy(src, dst)
+        shutil.copy(task.reference("forge"), os.path.join(workdir, "main.fg"))
+        cmd = [forge, "--edition", edition, "check", "--format", "json", "main.fg"]
+        try:
+            p = subprocess.run(cmd, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               timeout=60)
+        except subprocess.TimeoutExpired:
+            return [{"code": "timeout", "message": "forge check timed out"}]
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
     out = p.stdout.decode("utf-8", "replace") + p.stderr.decode("utf-8", "replace")
     diags = parse_forge_diagnostics(out)
     if p.returncode != 0 and not diags:
