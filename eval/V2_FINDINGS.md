@@ -34,7 +34,7 @@ that a model cannot guess from `llms.txt`).
 | 20 | gap (fixed) | `regex` has no capture groups | logfmt_parse, ini_config_check |
 | 21 | gap | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
 | 22 | gap | `Map<String, T>` (suggested for objects by the MCP section) does not accept an object literal; there is no typed dictionary for objects | typed |
-| 23 | gap | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
+| 23 | gap (fixed) | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
 | 24 | gap | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
 | 25 | gap (fixed) | No way to write to stderr except `log.*` (structured tracing) | error_handling |
 | 26 | bug (fixed) | `forge check`: a module-level variable named like a builtin (`let mut count = 0`) is typed as the builtin inside the module's functions (false T0005 in the importer) | multifile |
@@ -536,6 +536,15 @@ milliseconds.
 
 Suggested fix: distinct messages (and `e.type`) for timeout, connection refused, DNS and
 TLS errors; document `timeout` in seconds.
+
+**Fixed:** a timeout is E0036 (`http.get error: timed out after 1 second waiting for
+127.0.0.1:8080`, `e.type == "TimeoutError"`), a connection that cannot be made E0037
+(`connection refused by ...`, `cannot resolve host '...'`, `TLS handshake failed with ...`,
+`could not connect to ...`, `e.type == "ConnectionError"`), on both engines and for `fetch`,
+`http.download` and `http.crawl` too (`semantics::net`, `runtime::client::describe_request_error`).
+`timeout` is documented in seconds (`llms.txt`, spec), accepts Floats, and rejects
+non-numbers. Tests: `tests/http_client_errors.rs` (slow local server, closed port, both
+engines), fixtures `tests/errors/E0036_network_timeout.fg` and `E0037_connection_refused.fg`.
 
 ### 24. `e.message` sometimes contains the hint
 

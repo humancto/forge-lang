@@ -11,8 +11,11 @@
 //! * `--error-format json` and `forge check --format json` emit one JSON
 //!   object per diagnostic with the documented fields.
 //!
-//! A fixture's first line may carry extra CLI flags:
-//! `// forge-args: --strict`.
+//! A fixture's leading comment lines may carry extra CLI flags
+//! (`// forge-args: --strict`) and environment variables
+//! (`// forge-env: FORGE_HTTP_ALLOW_PRIVATE=1`). Every fixture also gets
+//! `FORGE_TEST_SILENT_ADDR`: a loopback address that accepts connections
+//! and never answers (for the HTTP client timeout, E0036).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -37,14 +40,30 @@ fn root() -> PathBuf {
 }
 
 fn forge(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(FORGE)
-        .args(args)
+    forge_with_env(cwd, args, &[])
+}
+
+fn forge_with_env(cwd: &Path, args: &[&str], envs: &[(String, String)]) -> Output {
+    let mut cmd = Command::new(FORGE);
+    cmd.args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .env("NO_COLOR", "1")
-        .env_remove("FORGE_MAX_DEPTH")
-        .output()
-        .expect("run forge")
+        .env_remove("FORGE_MAX_DEPTH");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("run forge")
+}
+
+/// The values of a fixture's leading `// <key>: ...` comment lines.
+fn header_values<'a>(source: &'a str, key: &str) -> Vec<&'a str> {
+    source
+        .lines()
+        .take_while(|l| l.starts_with("//"))
+        .filter_map(|l| l.split(key).nth(1))
+        .flat_map(|v| v.split_whitespace())
+        .collect()
 }
 
 /// `(code, title)` for every code `forge explain` lists, in order.
@@ -138,15 +157,23 @@ fn every_runtime_code_has_a_fixture() {
 #[test]
 fn fixtures_fail_with_their_code_on_both_engines() {
     let dir = root().join("tests/errors");
+    // Accepts connections (the kernel completes the handshake for the
+    // backlog) but never reads or answers: a request to it times out.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind silent listener");
+    let silent_addr = silent.local_addr().expect("silent listener address");
     let mut failures = Vec::new();
     for (code, path) in fixtures() {
-        let first = std::fs::read_to_string(&path).unwrap();
-        let extra: Vec<&str> = first
-            .lines()
-            .next()
-            .and_then(|l| l.split("forge-args:").nth(1))
-            .map(|a| a.split_whitespace().collect())
-            .unwrap_or_default();
+        let source = std::fs::read_to_string(&path).unwrap();
+        let extra = header_values(&source, "forge-args:");
+        let mut envs: Vec<(String, String)> = header_values(&source, "forge-env:")
+            .into_iter()
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        envs.push((
+            "FORGE_TEST_SILENT_ADDR".to_string(),
+            silent_addr.to_string(),
+        ));
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         let mut seen = Vec::new();
         for engine in [None, Some("--interp")] {
@@ -154,7 +181,7 @@ fn fixtures_fail_with_their_code_on_both_engines() {
             args.extend(["--error-format", "json"]);
             args.extend(extra.iter().copied());
             args.extend(["run", file.as_str()]);
-            let out = forge(&dir, &args);
+            let out = forge_with_env(&dir, &args, &envs);
             let errors = json_errors(&out.stderr);
             let label = engine.unwrap_or("vm");
             if out.status.success() {

@@ -82,7 +82,7 @@ say resp.status
 | `body`    | `any`    | Request body (auto-serialized as JSON)              |
 | `headers` | `object` | Custom request headers                              |
 | `auth`    | `string` | Bearer token (sets `Authorization: Bearer <token>`) |
-| `timeout` | `int`    | Timeout in seconds (default: 30)                    |
+| `timeout` | `int` or `float` | Time limit for the whole request, in **seconds** (default: 30; `0.5` is half a second) |
 
 ```forge
 let resp = http.get("https://api.example.com/me", {
@@ -90,6 +90,29 @@ let resp = http.get("https://api.example.com/me", {
     headers: { "Accept": "application/json" },
     timeout: 10
 })
+```
+
+### Errors
+
+A response with an error status (404, 500, ...) is not an error: it is returned with `ok == false`. A request that gets no response raises a catchable error whose code says why:
+
+| Code    | `e.type`          | Message (after `http.get error: `)                                                                 |
+| ------- | ----------------- | -------------------------------------------------------------------------------------------------- |
+| `E0036` | `TimeoutError`    | `timed out after 10 seconds waiting for host:port`                                                 |
+| `E0037` | `ConnectionError` | `connection refused by host:port`, `cannot resolve host 'name': ...`, `TLS handshake failed with host:port: ...`, `could not connect to host:port: ...` |
+
+Other failures (an invalid URL, a private address, a rejected redirect, a body over `max_bytes`) are `E0016`. `fetch`, `http.download` (default timeout 300 seconds) and `http.crawl` report the same codes. E0036 and E0037 messages name the host and port, not the full URL (a query string can carry credentials).
+
+```forge
+try {
+    http.get("https://api.example.com/slow", { timeout: 2 })
+} catch e {
+    if e.code == "E0036" {
+        println("too slow, try again later")
+    } else if e.code == "E0037" {
+        println("server unreachable: {e.message}")
+    }
+}
 ```
 
 ### http.download(url, destination?) -> object

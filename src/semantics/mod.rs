@@ -19,6 +19,7 @@ pub mod alloc;
 pub mod edition;
 pub mod errors;
 pub mod hoist;
+pub mod net;
 pub mod ordered_set;
 pub mod types;
 
