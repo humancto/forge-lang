@@ -187,6 +187,14 @@ pub struct VM {
     /// dropped.
     #[cfg(feature = "jit")]
     pub(crate) jit_bridge_error: Option<VMError>,
+    /// Closures recently called back by native builtins (`vm::callback`).
+    pub(super) callbacks: super::callback::CallbackMemo,
+    /// Counts every entry into bytecode execution (`run_until`) and into a
+    /// native builtin (`call_native`): only those can change globals,
+    /// captured variables or the VM state JIT entry guards depend on. Equal
+    /// epochs mean no Forge code or builtin ran in between, so guards that
+    /// held still hold (`vm::callback`).
+    pub(super) exec_epoch: u64,
     pub profiler: Profiler,
     /// Instructions left before the next safe-point poll of `timeout`
     /// deadlines (see [`SAFEPOINT_INTERVAL`]). Reading the clock and walking
@@ -438,6 +446,8 @@ impl VM {
             jit: super::jit::tier::JitState::default(),
             #[cfg(feature = "jit")]
             jit_bridge_error: None,
+            callbacks: Default::default(),
+            exec_epoch: 0,
             profiler,
             safepoint_countdown: 0,
             fuel_window: 0,
@@ -1014,7 +1024,8 @@ impl VM {
         Ok(frame_idx)
     }
 
-    fn run_until(&mut self, boundary_frame_idx: usize) -> Result<Value, VMError> {
+    pub(super) fn run_until(&mut self, boundary_frame_idx: usize) -> Result<Value, VMError> {
+        self.exec_epoch = self.exec_epoch.wrapping_add(1);
         let mut cached_closure: Option<(GcRef, Arc<Chunk>)> = None;
 
         loop {
@@ -2158,68 +2169,111 @@ impl VM {
         depth_below: usize,
         force_hot: bool,
     ) -> Result<Option<Value>, VMError> {
-        use super::jit::tier::{invoke, Invoke};
+        let Some(sel) = self.jit_select(closure, chunk, args, depth_below, force_hot) else {
+            return Ok(None);
+        };
+        self.jit_run_selected(&sel, args, depth_below)
+    }
 
+    /// The specialization to run for this call, if any: [`JitState::select`]
+    /// (function, argument kinds, globals guards) plus the VM-state entry
+    /// guards only the VM can check.
+    ///
+    /// [`JitState::select`]: super::jit::tier::JitState::select
+    #[cfg(feature = "jit")]
+    pub(super) fn jit_select(
+        &mut self,
+        closure: GcRef,
+        chunk: &Arc<Chunk>,
+        args: &[Value],
+        depth_below: usize,
+        force_hot: bool,
+    ) -> Option<super::jit::tier::Selected> {
         let globals = JitGlobals {
             globals: &self.globals,
             gc: &self.gc,
         };
-        let Some(sel) = self
+        let sel = self
             .jit
-            .select(closure, chunk, args, &self.gc, force_hot, &globals)
-        else {
-            return Ok(None);
-        };
+            .select(closure, chunk, args, &self.gc, force_hot, &globals)?;
+        if !self.jit_vm_guards_ok(depth_below) {
+            self.jit.record_guard_failure(&sel);
+            return None;
+        }
+        Some(sel)
+    }
 
-        // VM-state guards (`select` checked the globals the code relies
-        // on): the VM itself would refuse the call (stack overflow), or a
-        // `timeout` is active (the VM checks deadlines between
-        // instructions; native code does not).
-        let depth_limit = crate::runtime::recursion::max_depth();
+    /// VM-state entry guards (`select` checked the globals the code relies
+    /// on): the VM itself would refuse the call (stack overflow), or a
+    /// `timeout` is active (the VM checks deadlines between instructions;
+    /// native code does not). Only running bytecode can change them while
+    /// `depth_below` stays the same (see `vm::callback`).
+    #[cfg(feature = "jit")]
+    pub(super) fn jit_vm_guards_ok(&self, depth_below: usize) -> bool {
         // Native code has no fuel counter: with a fuel budget every call
         // stays in the VM, so exhaustion is exact and deterministic.
         // Likewise the JIT polls only the run's own cancel flag, so code
         // inside a squad / timeout scope stays in the VM.
-        let guards_ok = depth_below < depth_limit
+        depth_below < crate::runtime::recursion::max_depth()
             && !self.meter.fuel_limited()
             && self.scope_cancels.is_empty()
-            && self.frames.iter().all(|f| f.timeouts.is_empty());
-        if !guards_ok {
-            self.jit.record_guard_failure(&sel);
-            return Ok(None);
-        }
+            && self.frames.iter().all(|f| f.timeouts.is_empty())
+    }
 
-        let mut raw: Vec<i64> = Vec::with_capacity(args.len());
-        for v in args {
-            // `select` already checked every argument's kind.
+    /// Run the selected specialization natively. `args` must match the
+    /// signature it was selected for (`TypeSig::matches`): the native code
+    /// trusts each argument's encoding. `None` means it deopted (or an
+    /// argument has no native encoding), and the caller runs the call in
+    /// the VM.
+    #[cfg(feature = "jit")]
+    pub(super) fn jit_run_selected(
+        &mut self,
+        sel: &super::jit::tier::Selected,
+        args: &[Value],
+        depth_below: usize,
+    ) -> Result<Option<Value>, VMError> {
+        use super::jit::tier::{invoke, Invoke};
+
+        // Arguments are encoded on the stack for the usual arities.
+        const INLINE_ARGS: usize = 8;
+        let mut inline = [0i64; INLINE_ARGS];
+        let mut spilled = Vec::new();
+        let raw: &mut [i64] = if args.len() <= INLINE_ARGS {
+            &mut inline[..args.len()]
+        } else {
+            spilled.resize(args.len(), 0);
+            &mut spilled
+        };
+        for (slot, v) in raw.iter_mut().zip(args) {
             let encoded = super::jit::types::JitType::of_value(v, &self.gc)
                 .and_then(|kind| kind.encode(v, &self.gc));
             let Some(encoded) = encoded else {
                 return Ok(None);
             };
-            raw.push(encoded);
+            *slot = encoded;
         }
-        let max_depth = (depth_limit - 1 - depth_below) as i64;
+        let depth_limit = crate::runtime::recursion::max_depth();
+        let max_depth = depth_limit.saturating_sub(1 + depth_below) as i64;
         // SAFETY: `sel.entry` was produced by the JIT compiler owned by
         // `self.jit`, which outlives this call; `raw` has exactly the
         // specialization's arity (checked by `select`); `self.cancelled` is
         // alive for the duration of the call.
-        let outcome = unsafe { invoke(sel.entry, &raw, max_depth, Arc::as_ptr(&self.cancelled)) };
+        let outcome = unsafe { invoke(sel.entry, raw, max_depth, Arc::as_ptr(&self.cancelled)) };
         // An error raised by a runtime bridge is the call's outcome. It is
         // checked before the return/deopt result: a deopt would re-run the
         // call in the VM and repeat the side effects that preceded the
         // error, and a normal return would swallow it.
         if let Some(err) = self.jit_bridge_error.take() {
-            self.jit.record_run(&sel);
+            self.jit.record_run(sel);
             return Err(err);
         }
         match outcome {
             Invoke::Returned(r) => {
-                self.jit.record_run(&sel);
+                self.jit.record_run(sel);
                 Ok(Some(sel.ret.decode(r, &mut self.gc)))
             }
             Invoke::Deopt => {
-                self.jit.record_deopt(&sel);
+                self.jit.record_deopt(sel);
                 Ok(None)
             }
         }
@@ -2238,6 +2292,37 @@ impl VM {
     #[cfg(all(test, feature = "jit"))]
     pub(crate) fn take_jit_bridge_error(&mut self) -> Option<VMError> {
         self.jit_bridge_error.take()
+    }
+
+    /// Push the frame for a call of `closure` (whose code is `chunk`) with
+    /// `args`, the way every call of a Forge function starts: the shared
+    /// depth limit, the register window, missing parameters set to `null`
+    /// and extra arguments dropped (callbacks are lenient; direct calls
+    /// check arity before getting here). The caller sets the frame's
+    /// `entry_args` if the function can be restarted natively by loop
+    /// tier-up (`try_jit_loop_restart`), then runs it with `run_until`.
+    pub(super) fn enter_closure(
+        &mut self,
+        closure: GcRef,
+        arity: usize,
+        frame_size: usize,
+        args: &[Value],
+    ) -> Result<(), VMError> {
+        let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
+        // Shared depth limit + native stack guard (runtime/recursion.rs):
+        // runaway recursion is a catchable error, never a process abort.
+        crate::runtime::recursion::check_call_depth(self.frames.len())
+            .map_err(|m| VMError::new(&m))?;
+        self.ensure_registers(new_base + frame_size);
+        let passed = args.len().min(arity);
+        self.registers[new_base..new_base + passed].copy_from_slice(&args[..passed]);
+        for slot in &mut self.registers[new_base + passed..new_base + arity] {
+            *slot = Value::null();
+        }
+        let mut frame = CallFrame::new(closure, new_base, frame_size);
+        frame.argc = args.len();
+        self.frames.push(frame);
+        Ok(())
     }
 
     /// Call any callable value (closure, function, native, `__call__`
@@ -2267,53 +2352,33 @@ impl VM {
                 match &obj.kind {
                     ObjKind::Closure(closure) => {
                         let chunk = closure.function.chunk.clone();
-                        let func_name = closure.function.name.clone();
+                        // Only `--profile` records named calls; the name is
+                        // cloned only then (anonymous lambdas all share the
+                        // name "<lambda>" and are not profiled).
+                        let profiled_name = (self.profiler.is_enabled()
+                            && !closure.function.name.is_empty()
+                            && closure.function.name != "<lambda>")
+                            .then(|| closure.function.name.clone());
 
                         // JIT dispatch: a verified, type-specialized native
                         // version runs when its entry guards pass; otherwise
                         // (or on deopt) the call runs in the VM below.
                         #[cfg(feature = "jit")]
                         if let Some(result) = self.try_jit_call(r, &chunk, &args)? {
-                            if self.profiler.is_enabled()
-                                && !func_name.is_empty()
-                                && func_name != "<lambda>"
-                            {
-                                self.profiler.enter_function(&func_name);
+                            if let Some(name) = &profiled_name {
+                                self.profiler.enter_function(name);
                                 self.profiler.exit_function();
                             }
                             return Ok(result);
                         }
 
-                        // Count calls for profiling. Anonymous lambdas all
-                        // share the name "<lambda>" and are not profiled.
-                        if !func_name.is_empty() && func_name != "<lambda>" {
-                            self.profiler.enter_function(&func_name);
+                        if let Some(name) = &profiled_name {
+                            self.profiler.enter_function(name);
                         }
-
-                        let arity = chunk.arity as usize;
                         let frame_size = (chunk.max_registers as usize).max(1);
-                        let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
-                        // Shared depth limit + native stack guard
-                        // (runtime/recursion.rs): runaway recursion is a
-                        // catchable error, never a process abort.
-                        crate::runtime::recursion::check_call_depth(self.frames.len())
-                            .map_err(|m| VMError::new(&m))?;
-                        self.ensure_registers(new_base + frame_size);
-
-                        for (i, arg) in args.iter().enumerate() {
-                            if i < arity {
-                                self.registers[new_base + i] = *arg;
-                            }
-                        }
-                        for i in args.len()..arity {
-                            self.registers[new_base + i] = Value::null();
-                        }
-
-                        let mut frame = CallFrame::new(r, new_base, frame_size);
-                        frame.argc = args.len();
-                        frame.entry_args = args;
-                        self.frames.push(frame);
+                        self.enter_closure(r, chunk.arity as usize, frame_size, &args)?;
                         let boundary = self.frames.len() - 1;
+                        self.frames[boundary].entry_args = args;
                         self.run_until(boundary)
                     }
                     ObjKind::NativeFunction(nf) => {

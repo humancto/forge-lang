@@ -26,6 +26,9 @@ impl VM {
     /// still holds in Rust locals. `dispatch_native` is private so every
     /// native call goes through this wrapper.
     pub(super) fn call_native(&mut self, name: &str, args: Vec<Value>) -> Result<Value, VMError> {
+        // A builtin may change state JIT entry guards depend on (see
+        // `exec_epoch`).
+        self.exec_epoch = self.exec_epoch.wrapping_add(1);
         crate::builtins_registry::check_arity(name, args.len()).map_err(|e| VMError::new(&e))?;
         crate::builtins_registry::warn_if_deprecated(name);
         // Values are `Copy`; keep the leading arguments (pinned below until
@@ -1233,10 +1236,7 @@ impl VM {
                 self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
-                    if self
-                        .call_value(func.clone(), vec![item])?
-                        .is_truthy(&self.gc)
-                    {
+                    if self.call_callback(func, &[item])?.is_truthy(&self.gc) {
                         return Ok(Value::bool_val(true));
                     }
                 }
@@ -1263,10 +1263,7 @@ impl VM {
                 self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
-                    if !self
-                        .call_value(func.clone(), vec![item])?
-                        .is_truthy(&self.gc)
-                    {
+                    if !self.call_callback(func, &[item])?.is_truthy(&self.gc) {
                         return Ok(Value::bool_val(false));
                     }
                 }
@@ -1476,7 +1473,7 @@ impl VM {
                 let func = args[1].clone();
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    out.push(self.call_value(func.clone(), vec![item])?);
+                    out.push(self.call_callback(func, &[item])?);
                 }
                 let r = self.gc.alloc(ObjKind::Array(out));
                 Ok(Value::obj(r))
@@ -1503,7 +1500,7 @@ impl VM {
                 let func = args[1].clone();
                 let mut out = Vec::new();
                 for item in items {
-                    let keep = self.call_value(func.clone(), vec![item.clone()])?;
+                    let keep = self.call_callback(func, &[item])?;
                     if keep.is_truthy(&self.gc) {
                         out.push(item);
                     }
@@ -1533,7 +1530,7 @@ impl VM {
                 let mut acc = args[1].clone();
                 let func = args[2].clone();
                 for item in items {
-                    acc = self.call_value(func.clone(), vec![acc, item])?;
+                    acc = self.call_callback(func, &[acc, item])?;
                 }
                 Ok(acc)
             }
@@ -1559,7 +1556,7 @@ impl VM {
                                 if err.is_some() {
                                     return std::cmp::Ordering::Equal;
                                 }
-                                match self.call_value(func.clone(), vec![a.clone(), b.clone()]) {
+                                match self.call_callback(func, &[*a, *b]) {
                                     Ok(ref v) => match v.as_int(&self.gc) {
                                         Some(n) => {
                                             if n < 0 {
@@ -2354,7 +2351,7 @@ impl VM {
                 self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
-                    let result = self.call_value(func.clone(), vec![item.clone()])?;
+                    let result = self.call_callback(func, &[item])?;
                     if result.is_truthy(&self.gc) {
                         return Ok(item);
                     }
@@ -2384,7 +2381,7 @@ impl VM {
                 let func = args[1].clone();
                 let mut out = Vec::new();
                 for item in items {
-                    let result = self.call_value(func.clone(), vec![item])?;
+                    let result = self.call_callback(func, &[item])?;
                     match result.classify(&self.gc) {
                         ValueKind::Obj(r) => {
                             if let Some(obj) = self.gc.get(r) {
@@ -2588,7 +2585,7 @@ impl VM {
                 let mut matches = Vec::new();
                 let mut rest = Vec::new();
                 for item in items {
-                    let result = self.call_value(func.clone(), vec![item.clone()])?;
+                    let result = self.call_callback(func, &[item])?;
                     if result.is_truthy(&self.gc) {
                         matches.push(item);
                     } else {
@@ -2613,7 +2610,7 @@ impl VM {
                 let func = args[1].clone();
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
                 for item in items {
-                    let key = self.call_value(func.clone(), vec![item.clone()])?;
+                    let key = self.call_callback(func, &[item])?;
                     let key_str = key.display(&self.gc);
                     groups.entry(key_str).or_default().push(item);
                 }
@@ -2636,7 +2633,7 @@ impl VM {
                 // Pre-compute keys to avoid calling inside sort closure
                 let mut pairs: Vec<(Value, Value)> = Vec::new();
                 for item in items {
-                    let key = self.call_value(key_fn.clone(), vec![item.clone()])?;
+                    let key = self.call_callback(key_fn, &[item])?;
                     pairs.push((key, item));
                 }
                 pairs.sort_by(|(ka, _), (kb, _)| {
@@ -2671,7 +2668,7 @@ impl VM {
                 self.gc.pin_values(&items);
                 let func = args[1].clone();
                 for item in items {
-                    self.call_value(func.clone(), vec![item])?;
+                    self.call_callback(func, &[item])?;
                 }
                 Ok(Value::null())
             }
@@ -4666,7 +4663,7 @@ impl VM {
                 Step::PullFilter { upstream, pred } => loop {
                     match self.stream_next_vm(upstream)? {
                         None => return Ok(None),
-                        Some(v) => match self.call_value(pred, vec![v]) {
+                        Some(v) => match self.call_callback(pred, &[v]) {
                             Ok(res) => {
                                 if res.is_truthy(&self.gc) {
                                     return Ok(Some(v));
@@ -4681,7 +4678,7 @@ impl VM {
                 },
                 Step::PullMap { upstream, fn_val } => match self.stream_next_vm(upstream)? {
                     None => return Ok(None),
-                    Some(v) => match self.call_value(fn_val, vec![v]) {
+                    Some(v) => match self.call_callback(fn_val, &[v]) {
                         Ok(res) => return Ok(Some(res)),
                         Err(e) => {
                             self.poison_stream_vm(r, &e.message);
@@ -4857,7 +4854,7 @@ impl VM {
                 }
                 let func = args[0];
                 while let Some(v) = self.stream_next_vm(cell)? {
-                    if let Err(e) = self.call_value(func, vec![v]) {
+                    if let Err(e) = self.call_callback(func, &[v]) {
                         self.poison_stream_vm(cell, &e.message);
                         return Err(e);
                     }
@@ -4880,7 +4877,7 @@ impl VM {
                 let mut acc = args[0];
                 let func = args[1];
                 while let Some(v) = self.stream_next_vm(cell)? {
-                    match self.call_value(func, vec![acc, v]) {
+                    match self.call_callback(func, &[acc, v]) {
                         Ok(res) => acc = res,
                         Err(e) => {
                             self.poison_stream_vm(cell, &e.message);
@@ -4934,7 +4931,7 @@ impl VM {
                 }
                 let pred = args[0];
                 while let Some(v) = self.stream_next_vm(cell)? {
-                    match self.call_value(pred, vec![v]) {
+                    match self.call_callback(pred, &[v]) {
                         Ok(res) => {
                             if res.is_truthy(&self.gc) {
                                 return Ok(self.alloc_option_some(v));
@@ -4954,7 +4951,7 @@ impl VM {
                 }
                 let pred = args[0];
                 while let Some(v) = self.stream_next_vm(cell)? {
-                    match self.call_value(pred, vec![v]) {
+                    match self.call_callback(pred, &[v]) {
                         Ok(res) => {
                             if res.is_truthy(&self.gc) {
                                 return Ok(Value::bool_val(true));
@@ -4974,7 +4971,7 @@ impl VM {
                 }
                 let pred = args[0];
                 while let Some(v) = self.stream_next_vm(cell)? {
-                    match self.call_value(pred, vec![v]) {
+                    match self.call_callback(pred, &[v]) {
                         Ok(res) => {
                             if !res.is_truthy(&self.gc) {
                                 return Ok(Value::bool_val(false));

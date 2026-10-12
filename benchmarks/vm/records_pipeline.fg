@@ -1,0 +1,9 @@
+// VM benchmark: build 300k records (objects) with map, then filter + map +
+// reduce over them, in the method form real programs use.
+let rows = range(0, 300000).map(fn(i) {
+    return {id: i, price: (i * 7919) % 1000, qty: (i * 31) % 7}
+})
+let big = rows.filter(fn(r) { return r.qty > 2 })
+let totals = big.map(fn(r) { return r.price * r.qty })
+println(len(totals))
+println(totals.reduce(0, fn(acc, t) { return acc + t }))

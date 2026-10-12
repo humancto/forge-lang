@@ -28,7 +28,7 @@ tools/bench_compare.py --base /path/to/old/forge --head target/release/forge
 
 | Suite | Programs | Engine |
 |---|---|---|
-| `vm` | `benchmarks/vm/*.fg`: `loop` (20M-iteration `while`), `fib` (recursive fib(30)), `string_build` (200k `s = s + "x"`), `array_push` (100k `push`), `map_filter` (map/filter/reduce over 1M items), `mandelbrot` (200×200 grid, 50 iterations, pure Float loops), `spectral_norm` (n = 100, Float helper called from array loops), `nbody` (5 bodies, 20k steps over Float arrays), `repeat_loop` / `range_loop` (5M-iteration top-level `repeat` / `for i in range(..)`), `toplevel_loop` / `toplevel_loop_fn` (the same 5M-iteration `while` at the top level and inside a function), `toplevel_string` (`string_build` at the top level), `toplevel_captured` (2M calls of a top-level `fn` that updates a captured top-level variable), `global_calls` (2M iterations reading two builtins as globals) | default (VM with JIT tier-up) |
+| `vm` | `benchmarks/vm/*.fg`: `loop` (20M-iteration `while`), `fib` (recursive fib(30)), `string_build` (200k `s = s + "x"`), `array_push` (100k `push`), `map_filter` (map/filter/reduce over 1M items), `mandelbrot` (200×200 grid, 50 iterations, pure Float loops), `spectral_norm` (n = 100, Float helper called from array loops), `nbody` (5 bodies, 20k steps over Float arrays), `repeat_loop` / `range_loop` (5M-iteration top-level `repeat` / `for i in range(..)`), `toplevel_loop` / `toplevel_loop_fn` (the same 5M-iteration `while` at the top level and inside a function), `toplevel_string` (`string_build` at the top level), `toplevel_captured` (2M calls of a top-level `fn` that updates a captured top-level variable), `global_calls` (2M iterations reading two builtins as globals), and the higher-order collection shapes: `reduce_lambda` (`reduce` over 1M items with an arithmetic lambda), `sort_comparator` (`sort` of 200k pseudo-random ints with a comparator lambda), `stream_chain` (a lazy `.stream()` filter/map/reduce over 1M items), `records_pipeline` (300k objects built with `map`, then `.filter`/`.map`/`.reduce` reading their fields) | default (VM with JIT tier-up) |
 | `interp` | `benchmarks/interp/*.fg`: array reads, deep recursion, fib, push via method and reassignment, set building, string building | `--interp` |
 | `startup` | `benchmarks/startup/hello.fg` run 20 times per sample (`STARTUP_BATCH`) | default |
 | `peers` | `benchmarks/peers/*.{py,js,lua}`: line-for-line ports of the `vm` suite | `python3`, `node`, `lua`/`luajit` |
@@ -169,9 +169,11 @@ Reading the table:
 - `string_build` and `array_push` benefit from the VM's in-place update of
   uniquely owned locals (`GcObject::unique`). CPython 3.11 does not avoid
   the quadratic copy in this loop shape.
-- `map_filter` is the VM's weakest case here. Closure callbacks invoked
-  from native `map`/`filter`/`reduce` do not tier up, and it is about 2.3×
-  Node and 1.25× CPython.
+- `map_filter` was the VM's weakest case in this table (about 2.3× Node
+  and 1.25× CPython). The callbacks did tier up, but every call from a
+  native builtin re-did the whole call setup and JIT selection. Since
+  callbacks go through `VM::call_callback` it runs below CPython and
+  Node; see [Higher-order collection code](#higher-order-collection-code).
 - Start-up: `startup/hello` measured 0.202 s per batch of 20, about
   **10 ms per `forge run`** of a one-line program (including process
   creation on a loaded host). See [performance/startup.md](performance/startup.md)
@@ -188,3 +190,78 @@ Interpreter suite (`--interp`, median of 5):
 | `interp/push_reassign` | 0.128 | |
 | `interp/set_build` | 3.707 | 20k `add` + 20k `has`. That is slow for its size and suggests linear-time set operations in the interpreter, worth a look |
 | `interp/string_build` | 0.188 | |
+
+## Higher-order collection code
+
+`map`/`filter`/`reduce`/`sort`/`find`/`any`/`all`/`flat_map`, their method
+forms (`xs.map(f)`) and `.stream()` stages call a Forge function once per
+element. That is what most real Forge programs are made of, so it has its
+own benchmarks (`map_filter`, `reduce_lambda`, `sort_comparator`,
+`stream_chain`, `records_pipeline`) with Python and Node ports.
+
+### Where the time went
+
+Profiled with callgrind on a symbolized release build (`map_filter`, and
+`records_pipeline` for the non-JIT path):
+
+- The lambdas *did* tier up: `forge --jit` showed `<lambda>(Int) -> Int`
+  compiled. The cost was the call path around them, ~100–140 ns per
+  element: `call_value` allocated an argument `Vec` per call, cloned the
+  function's name, and the JIT tier then hashed the function id (SipHash),
+  built a `TypeSig` `Vec`, searched the specializations, re-checked every
+  entry guard and encoded the arguments into another `Vec`. On top of that,
+  a disabled profiler still allocated and hashed a `String` per named call.
+- For callbacks that cannot be compiled (field reads, objects), the call
+  setup was a smaller share; the rest is object work: `{...}` literals
+  (an intern-table lookup per key constant, a `String` per key, an
+  `IndexMap` insert with SipHash) and `r.field` reads (a SipHash lookup).
+- `forge run` spent ~10% of a 100k-record program freeing the heap object
+  by object at exit.
+
+### What changed
+
+- `VM::call_callback` (`src/vm/callback.rs`): a per-VM memo of recently
+  called-back closures; the frame is entered from the argument slice
+  (`entry_args` only kept for functions with a loop); the JIT selection is
+  cached together with the conditions under which its entry guards held
+  (`exec_epoch`, bumped on every entry into bytecode or into a builtin;
+  `Globals::version`; frame depth; the `JitState` instance), so a hot
+  callback re-enters native code directly.
+- The general call path allocates less (no name clone, `TypeSig::matches`,
+  stack-encoded JIT arguments, an `FnId` hasher), the disabled profiler is
+  free, and `forge run` no longer frees the heap before exiting.
+- `rows.push({...})` with an object or tuple literal appends in place
+  (`PushLocal`); it used to copy the array on every push.
+
+Compiling `map(xs, fn(x) { ... })` into an inline loop was considered and
+not done: it must re-check at run time that `map` is still the builtin
+(user code can shadow it), keep callback leniency (`fn(x, i)` gets
+`null`), error messages, stack traces and evaluation order identical, and
+it would only remove the remaining ~20–30 ns of call setup per element
+now that hot callbacks run natively.
+
+### Numbers
+
+Measured 2026-10-12, release build (fat LTO), Linux x86_64, 4 vCPU,
+**heavily loaded** (load average 10–14 from parallel builds). Best of 9
+interleaved runs (base, head, Python, Node in turn), whole process, in
+milliseconds. Contention only adds time, so the best sample is the most
+stable figure on this host; ratios matter more than absolute values.
+
+| Workload (`benchmarks/vm/`) | before | after | speed-up | Python 3.11 | Node 22 |
+|---|---:|---:|---:|---:|---:|
+| `map_filter`: map/filter/reduce, 1M items | 313 | 85 | 3.7× | 239 | 133 |
+| `reduce_lambda`: reduce, 1M items | 138 | 42 | 3.3× | 146 | 107 |
+| `sort_comparator`: sort 200k ints, comparator | 519 | 167 | 3.1× | 388 | 148 |
+| `stream_chain`: lazy stream filter/map/reduce, 1M | 209 | 76 | 2.8× | 131 | 121 |
+| `records_pipeline`: 300k objects, filter/map/reduce | 577 | 512 | 1.1× | 207 | 305 |
+
+The JIT-able shapes now run at or below Node. `records_pipeline` is still
+about 2.5× CPython: its time is object creation and field lookup, not
+callbacks (see above); a faster object representation is the next step
+there.
+
+On the regression gate (`tools/bench_compare.py`, 5 interleaved rounds,
+same host) nothing else in `vm`, `interp` or `startup` changed beyond
+noise; re-running the two benchmarks the noisy first pass flagged with 8–10
+rounds gave `toplevel_string` +2.2% best and `global_calls` −1.2% best.

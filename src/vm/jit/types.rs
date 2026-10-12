@@ -109,7 +109,47 @@ impl TypeSig {
     pub fn arity(&self) -> usize {
         self.0.len()
     }
+
+    /// `TypeSig::of_args(args, gc) == Some(self)`, without allocating: the
+    /// per-call lookup of an existing specialization.
+    #[inline]
+    pub fn matches(&self, args: &[Value], gc: &Gc) -> bool {
+        self.0.len() == args.len()
+            && self
+                .0
+                .iter()
+                .zip(args)
+                .all(|(t, v)| JitType::of_value(v, gc) == Some(*t))
+    }
 }
+
+/// Hasher for maps keyed by [`FnId`], which the tier looks up on every call
+/// of a function it tracks. A `FnId` is a process-unique counter, so one
+/// multiplication spreads it well; the default SipHash costs more than the
+/// rest of a cached lookup.
+#[derive(Default, Clone, Copy)]
+pub struct FnIdHasher(u64);
+
+impl std::hash::Hasher for FnIdHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0 ^ n).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(u64::from(*b));
+        }
+    }
+}
+
+/// A map keyed by [`FnId`] with [`FnIdHasher`].
+pub type FnIdMap<V> = std::collections::HashMap<FnId, V, std::hash::BuildHasherDefault<FnIdHasher>>;
 
 impl fmt::Display for TypeSig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

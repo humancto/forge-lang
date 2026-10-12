@@ -39,21 +39,20 @@ impl Profiler {
         self.enabled
     }
 
-    /// Record a function call. Always increments the call counter (for JIT
-    /// hotness detection). Only tracks timing when the profiler is fully
-    /// enabled (`--profile`).
-    ///
-    /// Note: `exit_function` still early-returns when disabled because there
-    /// is no timing data to record (we don't push to `call_stack`).
+    /// Record a function call (`--profile` only). A disabled profiler
+    /// records nothing: this runs on every named call, and the JIT keeps its
+    /// own hotness counters (`jit::tier`), so counting here would only cost
+    /// a `String` allocation and a hash per call.
     pub fn enter_function(&mut self, name: &str) {
+        if !self.enabled {
+            return;
+        }
         let entry = self
             .stats
             .entry(name.to_string())
             .or_insert_with(FunctionStats::new);
         entry.call_count = entry.call_count.saturating_add(1);
-        if self.enabled {
-            self.call_stack.push((name.to_string(), Instant::now()));
-        }
+        self.call_stack.push((name.to_string(), Instant::now()));
     }
 
     pub fn exit_function(&mut self) {
@@ -145,16 +144,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn profiler_disabled_still_counts_calls() {
+    fn profiler_disabled_records_nothing() {
         let mut p = Profiler::new(false);
         p.enter_function("foo");
         p.exit_function();
-        // Call counting always works (for JIT hotness detection).
-        // Only timing is disabled.
-        assert_eq!(p.call_count("foo"), 1);
-        assert!(!p.is_hot("foo"));
-        let stats = p.stats.get("foo").unwrap();
-        assert_eq!(stats.total_time, std::time::Duration::ZERO);
+        // Without `--profile` nothing is recorded (no per-call cost).
+        assert_eq!(p.call_count("foo"), 0);
+        assert!(p.report().is_empty());
     }
 
     #[test]
@@ -244,14 +240,11 @@ mod tests {
     }
 
     #[test]
-    fn profiler_disabled_detects_hot() {
+    fn profiler_disabled_never_hot() {
         let mut p = Profiler::new(false);
         for _ in 0..100 {
             p.enter_function("hot_fn");
         }
-        assert!(p.is_hot("hot_fn"));
-        // No timing recorded when disabled
-        let stats = p.stats.get("hot_fn").unwrap();
-        assert_eq!(stats.total_time, Duration::ZERO);
+        assert!(!p.is_hot("hot_fn"));
     }
 }

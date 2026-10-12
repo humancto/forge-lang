@@ -6,7 +6,6 @@
 //! calls [`invoke`], and reports the outcome back with
 //! [`JitState::record_deopt`] or [`JitState::record_guard_failure`].
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -16,7 +15,7 @@ use crate::vm::bytecode::{Chunk, Constant};
 use crate::vm::gc::Gc;
 use crate::vm::jit::ir_builder::CalleeBodies;
 use crate::vm::jit::jit_module::JitCompiler;
-use crate::vm::jit::types::{FnId, JitType, TypeSig};
+use crate::vm::jit::types::{FnId, FnIdMap, JitType, TypeSig};
 use crate::vm::jit::verifier::{
     self, push_guard, CallInfo, ClosurePath, Env, GlobalView, Guard, MemberView, OpInfo, Reject,
 };
@@ -183,7 +182,11 @@ pub struct JitState {
     pub verbose: bool,
     compiler: Option<JitCompiler>,
     compiler_failed: bool,
-    fns: HashMap<FnId, FnJitState>,
+    fns: FnIdMap<FnJitState>,
+    /// Process-unique id of this state (and so of the compiler that owns
+    /// every entry point it hands out): a cached [`Selected`] is only used
+    /// with the instance it came from.
+    instance: u64,
 }
 
 impl Default for JitState {
@@ -224,8 +227,18 @@ impl JitState {
             verbose: false,
             compiler: None,
             compiler_failed: false,
-            fns: HashMap::new(),
+            fns: FnIdMap::default(),
+            instance: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
         }
+    }
+
+    /// See the `instance` field.
+    #[inline]
+    pub fn instance(&self) -> u64 {
+        self.instance
     }
 
     /// True when nothing has been compiled or recorded (required before a
@@ -335,14 +348,16 @@ impl JitState {
             Self::guard_failed(state);
             return None;
         }
-        let Some(sig) = TypeSig::of_args(args, gc) else {
-            Self::guard_failed(state);
-            return None;
-        };
 
-        let (state, idx) = match state.specs.iter().position(|(s, _)| *s == sig) {
+        // Known signatures are matched in place (this runs on every call);
+        // a `TypeSig` is only built to compile a new one.
+        let (state, idx) = match state.specs.iter().position(|(s, _)| s.matches(args, gc)) {
             Some(i) => (state, i),
             None => {
+                let Some(sig) = TypeSig::of_args(args, gc) else {
+                    Self::guard_failed(state);
+                    return None;
+                };
                 let compiled = self.ensure_spec(closure, chunk, &sig, globals, &mut Vec::new());
                 let state = self.fns.get_mut(&id)?;
                 match compiled {

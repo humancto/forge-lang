@@ -1219,14 +1219,16 @@ fn try_compile_mutating_call(
 }
 
 /// An operand whose evaluation has no side effects and runs no user code
-/// (literals, variable reads, arithmetic on those, array literals of
-/// those). Evaluating it before rather than after reading a local
-/// therefore cannot change the result, which lets `AddLocal` / `PushLocal`
-/// read the local last.
+/// (literals, variable reads, arithmetic on those, array, tuple and object
+/// literals of those). Evaluating it before rather than after reading a
+/// local therefore cannot change the result, which lets `AddLocal` /
+/// `PushLocal` read the local last. (Object literals matter: without them
+/// `rows.push({id: i})` in a loop copied the whole array on every push.)
 fn is_simple_operand(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
-        Expr::Array(items) => items.iter().all(is_simple_operand),
+        Expr::Array(items) | Expr::Tuple(items) => items.iter().all(is_simple_operand),
+        Expr::Object(fields) => fields.iter().all(|(_, value)| is_simple_operand(value)),
         Expr::BinOp { left, right, .. } => is_simple_operand(left) && is_simple_operand(right),
         Expr::UnaryOp { operand, .. } => is_simple_operand(operand),
         _ => false,

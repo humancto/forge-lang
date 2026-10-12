@@ -1,0 +1,4 @@
+// VM benchmark: reduce over 1M integers with a lambda that does a little
+// arithmetic per element.
+let xs = range(0, 1000000)
+println(reduce(xs, 0, fn(acc, x) { return (acc + x * x) % 1000003 }))
