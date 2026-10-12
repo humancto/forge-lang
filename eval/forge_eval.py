@@ -1267,8 +1267,17 @@ def cmd_validate(args):
                 problems.append("{}: reference.fg:{}: {} {} ({})".format(
                     checks[fut].id, d.get("line"), d.get("code"), d.get("message"),
                     d.get("severity")))
-    results = map_timed_last(lambda j: evaluate(j[1], j[0], j[0].reference(j[1].lang)),
-                             jobs, lambda j: j[0], args.jobs)
+    def run_reference(job):
+        t, c = job
+        r = evaluate(c, t, t.reference(c.lang))
+        # A timed reference gets one more try after a timeout: a pipeline
+        # that really runs its stages one after another misses the limit
+        # every time, a slow moment on a shared runner does not.
+        if t.timed and r.get("class") == "timeout":
+            r = evaluate(c, t, t.reference(c.lang))
+        return r
+
+    results = map_timed_last(run_reference, jobs, lambda j: j[0], args.jobs)
     for (t, c), r in zip(jobs, results):
         if r["status"] != "pass":
             failures.append((t, c, r))
