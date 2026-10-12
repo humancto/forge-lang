@@ -2042,6 +2042,7 @@ impl<'a> Checker<'a> {
                 };
             }
         }
+        let a = self.upcast_to_interfaces(&e, &a, span);
         let snap = self.cx.snapshot();
         if self.cx.assign(&e, &a) {
             return true;
@@ -2050,6 +2051,47 @@ impl<'a> Checker<'a> {
         let m = msg(&self.cx.finalize(&e), &self.cx.finalize(&a));
         self.simple(code, span, m);
         false
+    }
+
+    /// `actual` with every struct that sits where `expected` has an
+    /// interface replaced by that interface, so `Ok(Circle {..})` fits
+    /// `Result<Shape, E>` and `[Circle {..}]` fits `[Shape]` (collections
+    /// are values, so element types may be upcast). A struct that does not
+    /// satisfy the interface is reported (T0012) where it is found.
+    fn upcast_to_interfaces(&mut self, expected: &Ty, actual: &Ty, span: Span) -> Ty {
+        let e = self.cx.resolve(expected);
+        let a = self.cx.resolve(actual);
+        match (&e, &a) {
+            (Ty::Named(iface, _), Ty::Named(st, _))
+                if st != iface && self.interfaces.contains_key(iface) =>
+            {
+                let (st, iface) = (st.clone(), iface.clone());
+                self.check_interface_satisfaction(&st, &iface, span);
+                e.clone()
+            }
+            (Ty::Array(x), Ty::Array(y)) => {
+                Ty::Array(Box::new(self.upcast_to_interfaces(x, y, span)))
+            }
+            (Ty::Set(x), Ty::Set(y)) => Ty::Set(Box::new(self.upcast_to_interfaces(x, y, span))),
+            (Ty::Option(x), Ty::Option(y)) => {
+                Ty::Option(Box::new(self.upcast_to_interfaces(x, y, span)))
+            }
+            (Ty::Result(x1, x2), Ty::Result(y1, y2)) => Ty::Result(
+                Box::new(self.upcast_to_interfaces(x1, y1, span)),
+                Box::new(self.upcast_to_interfaces(x2, y2, span)),
+            ),
+            (Ty::Map(k1, v1), Ty::Map(k2, v2)) => Ty::Map(
+                Box::new(self.upcast_to_interfaces(k1, k2, span)),
+                Box::new(self.upcast_to_interfaces(v1, v2, span)),
+            ),
+            (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => Ty::Tuple(
+                xs.iter()
+                    .zip(ys)
+                    .map(|(x, y)| self.upcast_to_interfaces(x, y, span))
+                    .collect(),
+            ),
+            _ => a,
+        }
     }
 
     /// Does `type_name` provide everything `iface` requires? Reports T0012

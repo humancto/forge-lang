@@ -1693,3 +1693,18 @@ fn imports_are_not_resolved_when_skipped() {
         "{ds:?}"
     );
 }
+
+#[test]
+fn structs_fit_interfaces_inside_generic_types() {
+    let src = "interface Shape { fn area() -> Float }\nstruct Circle { r: Float }\nimpl Shape for Circle { fn area(it) -> Float { return it.r } }\nfn wrapped() -> Result<Shape, String> { return Ok(Circle { r: 2.0 }) }\nfn arr() -> [Shape] { return [Circle { r: 3.0 }] }\nfn opt() -> ?Shape { return Some(Circle { r: 1.0 }) }";
+    let w = warnings_for(src);
+    assert!(w.is_empty(), "{:?}", w);
+    // A struct that does not satisfy the interface is still reported.
+    let bad = "interface Shape { fn area() -> Float }\nstruct Point { x: Int }\nfn arr() -> [Shape] { return [Point { x: 1 }] }";
+    let w = warnings_for(bad);
+    assert!(
+        w.iter().any(|w| w.message.contains("does not satisfy")),
+        "{:?}",
+        w
+    );
+}
