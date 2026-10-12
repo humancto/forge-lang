@@ -1,0 +1,5 @@
+// helpers.fg: character classes used by textkit.
+
+fn is_word_char(c: String) -> Bool {
+    return regex.test(c, "^[a-z0-9]$")
+}

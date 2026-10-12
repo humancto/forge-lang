@@ -1,0 +1,54 @@
+import { slug, wrap, word_count } from "textkit"
+
+// Sections as {title, paras: [[lines]]}; built immutably, since appending to
+// a nested array in place is not possible.
+let mut sections = []
+let mut in_para = false
+for line in fs.lines("/dev/stdin") {
+    if starts_with(line, "# ") {
+        sections.push({ title: substring(line, 2, len(line)).trim(), paras: [] })
+        in_para = false
+    } else if line.trim() == "" {
+        in_para = false
+    } else {
+        let last = len(sections) - 1
+        let mut paras = sections[last].paras
+        if in_para {
+            let p = len(paras) - 1
+            paras[p] = paras[p] + [line.trim()]
+        } else {
+            paras = paras + [[line.trim()]]
+            in_para = true
+        }
+        sections[last] = { title: sections[last].title, paras: paras }
+    }
+}
+
+let mut used = []
+println("Contents")
+for e in enumerate(sections) {
+    let base = slug(e.value.title)
+    let mut anchor = base
+    let mut k = 1
+    while contains(used, anchor) {
+        k += 1
+        anchor = "{base}-{k}"
+    }
+    used.push(anchor)
+    println("{e.index + 1}. {e.value.title} (#{anchor})")
+}
+
+for s in sections {
+    let paras = map(s.paras, fn(p) { return join(p, " ") })
+    let words = sum(map(paras, fn(p) { return word_count(p) }))
+    println("")
+    println("== {s.title} ({words} words) ==")
+    for e in enumerate(paras) {
+        if e.index > 0 {
+            println("")
+        }
+        for l in wrap(e.value, 40) {
+            println(l)
+        }
+    }
+}

@@ -1,0 +1,33 @@
+// config_schema.fg: default settings and validation rules.
+
+let DEFAULTS = {
+    server: { host: "127.0.0.1", port: 8080, tls: false },
+    db: { url: "sqlite://app.db", pool: 5 },
+    log_level: "info",
+    features: [],
+}
+
+let LEVELS = ["debug", "info", "warn", "error"]
+
+// The list of problems with a complete configuration (empty when valid).
+fn validate(cfg) {
+    let mut errors = []
+    let port = cfg.server.port
+    if typeof(port) != "Int" || port < 1 || port > 65535 {
+        errors.push("server.port must be an integer from 1 to 65535")
+    }
+    if typeof(cfg.server.tls) != "Bool" {
+        errors.push("server.tls must be true or false")
+    }
+    let pool = cfg.db.pool
+    if typeof(pool) != "Int" || pool < 1 || pool > 100 {
+        errors.push("db.pool must be an integer from 1 to 100")
+    }
+    if !contains(LEVELS, cfg.log_level) {
+        errors.push("log_level must be one of " + join(LEVELS, ", "))
+    }
+    if typeof(cfg.features) != "Array" || !all(cfg.features, fn(f) { return typeof(f) == "String" }) {
+        errors.push("features must be a list of strings")
+    }
+    return errors
+}

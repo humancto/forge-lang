@@ -1,0 +1,23 @@
+// csv_report.fg: render rows as CSV.
+
+fn label() -> String {
+    return "CSV"
+}
+
+fn quote(cell) -> String {
+    let s = str(cell)
+    if contains(s, ",") || contains(s, "\"") {
+        return "\"" + replace(s, "\"", "\"\"") + "\""
+    }
+    return s
+}
+
+// rows: array of objects with the same keys; the header comes from the first row.
+fn render(rows) -> String {
+    let head = keys(rows[0])
+    let mut lines = [join(head, ",")]
+    for r in rows {
+        lines.push(join(map(head, fn(k) { return quote(r[k]) }), ","))
+    }
+    return join(lines, "\n")
+}

@@ -1,0 +1,141 @@
+id = "config_layers"
+category = "multifile"
+title = "Merge user settings over imported defaults and validate them"
+prompt = '''
+Write `main.fg`. The working directory contains the Forge module `config_schema.fg`,
+which you must import (not copy). Its source:
+
+```forge
+// config_schema.fg: default settings and validation rules.
+
+let DEFAULTS = {
+    server: { host: "127.0.0.1", port: 8080, tls: false },
+    db: { url: "sqlite://app.db", pool: 5 },
+    log_level: "info",
+    features: [],
+}
+
+let LEVELS = ["debug", "info", "warn", "error"]
+
+// The list of problems with a complete configuration (empty when valid).
+fn validate(cfg) {
+    let mut errors = []
+    let port = cfg.server.port
+    if typeof(port) != "Int" || port < 1 || port > 65535 {
+        errors.push("server.port must be an integer from 1 to 65535")
+    }
+    if typeof(cfg.server.tls) != "Bool" {
+        errors.push("server.tls must be true or false")
+    }
+    let pool = cfg.db.pool
+    if typeof(pool) != "Int" || pool < 1 || pool > 100 {
+        errors.push("db.pool must be an integer from 1 to 100")
+    }
+    if !contains(LEVELS, cfg.log_level) {
+        errors.push("log_level must be one of " + join(LEVELS, ", "))
+    }
+    if typeof(cfg.features) != "Array" || !all(cfg.features, fn(f) { return typeof(f) == "String" }) {
+        errors.push("features must be a list of strings")
+    }
+    return errors
+}
+```
+
+Standard input is a JSON object with user settings. Build the effective configuration by
+merging it over `DEFAULTS`: where both the default and the user value are objects, merge
+them key by key (recursively); otherwise the user value replaces the default. Keys keep
+the order they have in `DEFAULTS`.
+
+- If the input is not valid JSON or not a JSON object, print `error: invalid JSON` and
+  exit with status 2.
+- A user key that does not exist at that place in `DEFAULTS` is dropped with the line
+  `warning: unknown key <dotted path>` (for example `warning: unknown key server.colour`),
+  printed in the order the keys appear in the input (depth first).
+- If a user value replaces a default that is an object but is not itself an object, print
+  `error: <dotted path> must be an object` and exit with status 2 (warnings for keys
+  before it are printed first; stop at the first such value).
+- Otherwise run `validate` on the merged configuration. If it returns problems, print
+  each as `error: <problem>` and exit with status 1.
+- Otherwise print `ok` and then the merged configuration as compact JSON (no spaces) on
+  one line, and exit with status 0.
+'''
+needs = ["read"]
+
+[[case]]
+name = "partial"
+stdin = '''
+{"server": {"port": 9000}, "features": ["beta"], "log_level": "debug"}
+'''
+exit_code = 0
+expected_stdout = """
+ok
+{"server":{"host":"127.0.0.1","port":9000,"tls":false},"db":{"url":"sqlite://app.db","pool":5},"log_level":"debug","features":["beta"]}
+"""
+
+[[case]]
+name = "empty"
+stdin = '''
+{}
+'''
+exit_code = 0
+expected_stdout = """
+ok
+{"server":{"host":"127.0.0.1","port":8080,"tls":false},"db":{"url":"sqlite://app.db","pool":5},"log_level":"info","features":[]}
+"""
+
+[[case]]
+name = "invalid_values"
+stdin = '''
+{"server": {"port": 70000, "colour": "red", "tls": "yes"}, "db": {"pool": 0, "url": "pg://x", "pool_size": 3}, "log_level": "loud", "extra": 1}
+'''
+exit_code = 1
+expected_stdout = """
+warning: unknown key server.colour
+warning: unknown key db.pool_size
+warning: unknown key extra
+error: server.port must be an integer from 1 to 65535
+error: server.tls must be true or false
+error: db.pool must be an integer from 1 to 100
+error: log_level must be one of debug, info, warn, error
+"""
+
+[[case]]
+name = "not_an_object"
+stdin = '''
+{"theme": "dark", "db": "sqlite://x", "server": 5}
+'''
+exit_code = 2
+expected_stdout = """
+warning: unknown key theme
+error: db must be an object
+"""
+
+[[case]]
+name = "bad_json"
+stdin = '''
+{"server": 
+'''
+exit_code = 2
+expected_stdout = """
+error: invalid JSON
+"""
+
+[[case]]
+name = "array_input"
+stdin = '''
+[1, 2]
+'''
+exit_code = 2
+expected_stdout = """
+error: invalid JSON
+"""
+
+[[case]]
+name = "features_bad"
+stdin = '''
+{"features": "beta", "server": {"host": "0.0.0.0", "tls": true}}
+'''
+exit_code = 1
+expected_stdout = """
+error: features must be a list of strings
+"""

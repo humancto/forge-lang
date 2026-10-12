@@ -1,0 +1,25 @@
+// Imports cannot be renamed, so import one module, keep its functions in
+// differently named variables, then import the other (its names shadow).
+import { label, render } from "csv_report.fg"
+let csv_label = label
+let csv_render = render
+import { label, render } from "md_report.fg"
+
+let emps = json.parse(fs.read("/dev/stdin"))
+let groups = group_by(emps, fn(e) { return e.team })
+let rows = sort(map(keys(groups), fn(t) {
+    return { team: t, people: len(groups[t]), payroll: sum(map(groups[t], fn(e) { return e.salary })) }
+}), fn(a, b) {
+    if a.payroll != b.payroll {
+        return b.payroll - a.payroll
+    }
+    if a.team < b.team {
+        return -1
+    }
+    return 1
+})
+
+println("## {csv_label()}")
+println(csv_render(rows))
+println("## {label()}")
+println(render(rows))

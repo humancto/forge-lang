@@ -1,0 +1,16 @@
+// md_report.fg: render rows as a Markdown table.
+
+fn label() -> String {
+    return "Markdown"
+}
+
+// rows: array of objects with the same keys; the header comes from the first row.
+fn render(rows) -> String {
+    let head = keys(rows[0])
+    let mut lines = ["| " + join(head, " | ") + " |"]
+    lines.push("|" + join(map(head, fn(k) { return "---" }), "|") + "|")
+    for r in rows {
+        lines.push("| " + join(map(head, fn(k) { return replace(str(r[k]), "|", "\\|") }), " | ") + " |")
+    }
+    return join(lines, "\n")
+}

@@ -1,0 +1,52 @@
+import { DEFAULTS, validate } from "config_schema.fg"
+
+// Ok(merged) or Err(path of a value that must be an object).
+fn merge(defaults, user, prefix: String) {
+    let mut out = defaults
+    for key in keys(user) {
+        let path = prefix + key
+        if !has_key(defaults, key) {
+            println("warning: unknown key {path}")
+            continue
+        }
+        let value = user[key]
+        if typeof(defaults[key]) == "Object" {
+            if typeof(value) != "Object" {
+                return Err(path)
+            }
+            out[key] = merge(defaults[key], value, path + ".")?
+        } else {
+            out[key] = value
+        }
+    }
+    return Ok(out)
+}
+
+let mut user = null
+try {
+    user = json.parse(fs.read("/dev/stdin"))
+} catch e {
+    user = null
+}
+if typeof(user) != "Object" {
+    println("error: invalid JSON")
+    exit(2)
+}
+
+match merge(DEFAULTS, user, "") {
+    Err(path) => {
+        println("error: {path} must be an object")
+        exit(2)
+    },
+    Ok(cfg) => {
+        let errors = validate(cfg)
+        if len(errors) > 0 {
+            for e in errors {
+                println("error: {e}")
+            }
+            exit(1)
+        }
+        println("ok")
+        println(json.compact(cfg))
+    },
+}

@@ -1,0 +1,99 @@
+id = "money_module"
+category = "multifile"
+title = "Use an imported money module with structs, methods and Results"
+prompt = '''
+Write `main.fg`. The working directory contains the Forge module `money.fg`; import it
+(do not copy its code) and use it. Its full source is:
+
+```forge
+// money.fg: exact money amounts in integer cents.
+
+struct Money {
+    cents: Int,
+    currency: String
+}
+
+impl Money {
+    fn plus(it, other) {
+        assert(it.currency == other.currency, "currency mismatch: {it.currency} vs {other.currency}")
+        return Money { cents: it.cents + other.cents, currency: it.currency }
+    }
+
+    fn times(it, n: Int) {
+        return Money { cents: it.cents * n, currency: it.currency }
+    }
+
+    fn show(it) -> String {
+        let mut sign = ""
+        if it.cents < 0 {
+            sign = "-"
+        }
+        let c = abs(it.cents)
+        return "{sign}{c / 100}.{pad_start(str(c % 100), 2, "0")} {it.currency}"
+    }
+}
+
+fn zero(currency: String) {
+    return Money { cents: 0, currency: currency }
+}
+
+// "12.5" or "12.50" or "-3" -> Ok(Money), anything else -> Err(message)
+fn parse_money(amount: String, currency: String) {
+    if !regex.test(amount, "^-?[0-9]+(\\.[0-9]{1,2})?$") {
+        return Err("bad amount: {amount}")
+    }
+    if !regex.test(currency, "^[A-Z]{3}$") {
+        return Err("bad currency: {currency}")
+    }
+    let negative = starts_with(amount, "-")
+    let digits = replace(amount, "-", "")
+    let parts = split(digits, ".")
+    let mut cents = int(parts[0]) * 100
+    if len(parts) == 2 {
+        cents += int(pad_end(parts[1], 2, "0"))
+    }
+    if negative {
+        cents = -cents
+    }
+    return Ok(Money { cents: cents, currency: currency })
+}
+```
+
+Each non-blank line of standard input is `<qty> x <item> @ <amount> <currency>`, for
+example `3 x pen @ 1.50 EUR` (qty is a whole number, possibly negative for refunds). Lines
+are numbered from 1 counting every line, blank ones included.
+
+For each line, in order:
+- if it does not have exactly that shape (6 space-separated fields, `x` and `@` in their
+  places, qty an integer), print `line <n>: bad format`;
+- else if `parse_money(amount, currency)` returns `Err(message)`, print
+  `line <n>: <message>`;
+- else add qty times the amount to that currency's total.
+
+Then print one line per currency that had at least one valid line, in ascending order:
+`<currency>: <the total's show()> over <number of valid lines> line(s)`.
+'''
+stdin = """
+3 x pen @ 1.50 EUR
+1 x desk @ 189 USD
+2 x lamp @ 25.9 EUR
+
+-1 x pen @ 1.50 EUR
+4 x mug @ 7.255 EUR
+2 x tea @ 4.00 eur
+two x cup @ 3.00 USD
+5 x clip @ 0.05 JPY
+1 x chair @ 74.50
+10 x clip @ 0.05 JPY
+1 x refund @ -20.10 USD
+"""
+needs = ["read"]
+expected_stdout = """
+line 6: bad amount: 7.255
+line 7: bad currency: eur
+line 8: bad format
+line 10: bad format
+EUR: 54.80 EUR over 3 line(s)
+JPY: 0.75 JPY over 2 line(s)
+USD: 168.90 USD over 2 line(s)
+"""

@@ -1,0 +1,75 @@
+// lib/parser.fg: parse an arithmetic expression into a tree.
+//
+// parse(src) returns Ok(node) or Err(message). Nodes are objects:
+//   { kind: "num", value: Int }
+//   { kind: "var", name: String }
+//   { kind: "neg", expr: node }
+//   { kind: "bin", op: "+" | "-" | "*" | "/" | "%", left: node, right: node }
+// Precedence: unary minus binds tightest, then * / %, then + -; binary
+// operators are left-associative; parentheses group.
+import { tokenize } from "tokenizer.fg"
+
+fn parse(src: String) {
+    let tokens = tokenize(src)?
+    let state = parse_sum(tokens, 0)?
+    if state.pos < len(tokens) {
+        return Err("unexpected '{tokens[state.pos].text}'")
+    }
+    return Ok(state.node)
+}
+
+fn peek(tokens, pos: Int) {
+    if pos < len(tokens) {
+        return tokens[pos].text
+    }
+    return ""
+}
+
+fn parse_sum(tokens, pos: Int) {
+    let mut state = parse_product(tokens, pos)?
+    while peek(tokens, state.pos) == "+" || peek(tokens, state.pos) == "-" {
+        let op = peek(tokens, state.pos)
+        let right = parse_product(tokens, state.pos + 1)?
+        state = { node: { kind: "bin", op: op, left: state.node, right: right.node }, pos: right.pos }
+    }
+    return Ok(state)
+}
+
+fn parse_product(tokens, pos: Int) {
+    let mut state = parse_unary(tokens, pos)?
+    while contains(["*", "/", "%"], peek(tokens, state.pos)) {
+        let op = peek(tokens, state.pos)
+        let right = parse_unary(tokens, state.pos + 1)?
+        state = { node: { kind: "bin", op: op, left: state.node, right: right.node }, pos: right.pos }
+    }
+    return Ok(state)
+}
+
+fn parse_unary(tokens, pos: Int) {
+    if peek(tokens, pos) == "-" {
+        let inner = parse_unary(tokens, pos + 1)?
+        return Ok({ node: { kind: "neg", expr: inner.node }, pos: inner.pos })
+    }
+    return parse_atom(tokens, pos)
+}
+
+fn parse_atom(tokens, pos: Int) {
+    if pos >= len(tokens) {
+        return Err("unexpected end")
+    }
+    let t = tokens[pos]
+    if t.kind == "num" {
+        return Ok({ node: { kind: "num", value: int(t.text) }, pos: pos + 1 })
+    }
+    if t.kind == "name" {
+        return Ok({ node: { kind: "var", name: t.text }, pos: pos + 1 })
+    }
+    if t.text == "(" {
+        let inner = parse_sum(tokens, pos + 1)?
+        if peek(tokens, inner.pos) != ")" {
+            return Err("missing )")
+        }
+        return Ok({ node: inner.node, pos: inner.pos + 1 })
+    }
+    return Err("unexpected '{t.text}'")
+}

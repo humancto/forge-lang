@@ -1,0 +1,89 @@
+id = "clashing_modules"
+category = "multifile"
+title = "Use two modules that export the same names"
+prompt = '''
+Write `main.fg`. The working directory contains two Forge modules that both define
+functions named `label` and `render`; import them (do not copy their code) and use both.
+
+`csv_report.fg`:
+
+```forge
+// csv_report.fg: render rows as CSV.
+
+fn label() -> String {
+    return "CSV"
+}
+
+fn quote(cell) -> String {
+    let s = str(cell)
+    if contains(s, ",") || contains(s, "\"") {
+        return "\"" + replace(s, "\"", "\"\"") + "\""
+    }
+    return s
+}
+
+// rows: array of objects with the same keys; the header comes from the first row.
+fn render(rows) -> String {
+    let head = keys(rows[0])
+    let mut lines = [join(head, ",")]
+    for r in rows {
+        lines.push(join(map(head, fn(k) { return quote(r[k]) }), ","))
+    }
+    return join(lines, "\n")
+}
+```
+
+`md_report.fg`:
+
+```forge
+// md_report.fg: render rows as a Markdown table.
+
+fn label() -> String {
+    return "Markdown"
+}
+
+// rows: array of objects with the same keys; the header comes from the first row.
+fn render(rows) -> String {
+    let head = keys(rows[0])
+    let mut lines = ["| " + join(head, " | ") + " |"]
+    lines.push("|" + join(map(head, fn(k) { return "---" }), "|") + "|")
+    for r in rows {
+        lines.push("| " + join(map(head, fn(k) { return replace(str(r[k]), "|", "\\|") }), " | ") + " |")
+    }
+    return join(lines, "\n")
+}
+```
+
+Standard input is a JSON array of employees `{"name", "team", "salary"}`. Build one row per
+team, `{"team": <team>, "people": <number of employees>, "payroll": <sum of salaries>}`
+(keys in that order), sorted by payroll (descending), then team (ascending).
+
+Print `## ` followed by the CSV module's `label()`, then its `render(rows)`; then
+`## ` followed by the Markdown module's `label()`, then its `render(rows)`.
+'''
+stdin = '''
+[
+  {"name": "Ada", "team": "core", "salary": 120},
+  {"name": "Bo", "team": "web, mobile", "salary": 95},
+  {"name": "Cy", "team": "core", "salary": 99},
+  {"name": "Dee", "team": "data|ml", "salary": 140},
+  {"name": "Eve", "team": "web, mobile", "salary": 124},
+  {"name": "Fay", "team": "ops \"blue\"", "salary": 219}
+]
+'''
+needs = ["read"]
+expected_stdout = """
+## CSV
+team,people,payroll
+core,2,219
+"ops ""blue""\",1,219
+"web, mobile",2,219
+data|ml,1,140
+## Markdown
+| team | people | payroll |
+|---|---|---|
+| core | 2 | 219 |
+| ops "blue" | 1 | 219 |
+| web, mobile | 2 | 219 |
+| data\\|ml | 1 | 140 |
+"""

@@ -1,0 +1,51 @@
+// money.fg: exact money amounts in integer cents.
+
+struct Money {
+    cents: Int,
+    currency: String
+}
+
+impl Money {
+    fn plus(it, other) {
+        assert(it.currency == other.currency, "currency mismatch: {it.currency} vs {other.currency}")
+        return Money { cents: it.cents + other.cents, currency: it.currency }
+    }
+
+    fn times(it, n: Int) {
+        return Money { cents: it.cents * n, currency: it.currency }
+    }
+
+    fn show(it) -> String {
+        let mut sign = ""
+        if it.cents < 0 {
+            sign = "-"
+        }
+        let c = abs(it.cents)
+        return "{sign}{c / 100}.{pad_start(str(c % 100), 2, "0")} {it.currency}"
+    }
+}
+
+fn zero(currency: String) {
+    return Money { cents: 0, currency: currency }
+}
+
+// "12.5" or "12.50" or "-3" -> Ok(Money), anything else -> Err(message)
+fn parse_money(amount: String, currency: String) {
+    if !regex.test(amount, "^-?[0-9]+(\\.[0-9]{1,2})?$") {
+        return Err("bad amount: {amount}")
+    }
+    if !regex.test(currency, "^[A-Z]{3}$") {
+        return Err("bad currency: {currency}")
+    }
+    let negative = starts_with(amount, "-")
+    let digits = replace(amount, "-", "")
+    let parts = split(digits, ".")
+    let mut cents = int(parts[0]) * 100
+    if len(parts) == 2 {
+        cents += int(pad_end(parts[1], 2, "0"))
+    }
+    if negative {
+        cents = -cents
+    }
+    return Ok(Money { cents: cents, currency: currency })
+}

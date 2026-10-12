@@ -1,0 +1,53 @@
+import { on, off, publish, listener_count } from "events.fg"
+
+fn make_counter() {
+    let mut calls = 0
+    return fn(payload) {
+        calls += 1
+        return "call #{calls}"
+    }
+}
+
+fn make_handler(kind: String, arg: String) {
+    if kind == "upper" {
+        return fn(p) { return p.upper() }
+    }
+    if kind == "len" {
+        return fn(p) { return str(len(p)) }
+    }
+    if kind == "prefix" {
+        return fn(p) { return arg + p }
+    }
+    return make_counter()
+}
+
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    let parts = split(line, " ")
+    let cmd = parts[0]
+    if cmd == "sub" {
+        let kind = parts[2]
+        let arg = join(slice(parts, 3, len(parts)), " ")
+        println("subscribed {on(parts[1], make_handler(kind, arg))}")
+    } else if cmd == "pub" {
+        let event = parts[1]
+        let payload = join(slice(parts, 2, len(parts)), " ")
+        let results = publish(event, payload)
+        if len(results) == 0 {
+            println("{event}: no listeners")
+        } else {
+            println("{event}: " + join(results, " | "))
+        }
+    } else if cmd == "off" {
+        let token = int(parts[1])
+        if off(token) {
+            println("removed {token}")
+        } else {
+            println("unknown {token}")
+        }
+    } else if cmd == "count" {
+        println("{parts[1]} has {listener_count(parts[1])} listener(s)")
+    }
+}

@@ -1,0 +1,47 @@
+// textkit: small text utilities (package entry point).
+import { is_word_char } from "helpers.fg"
+
+// Lower-case, runs of non-alphanumeric characters become one "-", no
+// leading or trailing "-".
+fn slug(s: String) -> String {
+    let mut out = ""
+    let mut dash = false
+    for c in split(s.lower(), "") {
+        if is_word_char(c) {
+            if dash && out != "" {
+                out += "-"
+            }
+            out += c
+            dash = false
+        } else {
+            dash = true
+        }
+    }
+    return out
+}
+
+// Greedy word wrap: lines of at most `width` characters; a single word
+// longer than width gets a line of its own.
+fn wrap(text: String, width: Int) -> [String] {
+    let words = filter(split(text, " "), fn(w) { return w != "" })
+    let mut lines = []
+    let mut current = ""
+    for w in words {
+        if current == "" {
+            current = w
+        } else if len(current) + 1 + len(w) <= width {
+            current = current + " " + w
+        } else {
+            lines.push(current)
+            current = w
+        }
+    }
+    if current != "" {
+        lines.push(current)
+    }
+    return lines
+}
+
+fn word_count(text: String) -> Int {
+    return len(filter(split(text, " "), fn(w) { return w != "" }))
+}
