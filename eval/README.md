@@ -222,6 +222,8 @@ tolerance).
    stdin = """..."""            # optional; or stdin_file = "input.txt" (in the task dir)
    needs = []                   # any of "read", "write", "net", "env", "run", "db"
    timeout = 10                 # seconds (default 10)
+   timed = true                 # optional (default: true in `parallel`): the time limit proves
+                                # overlap, so the run goes alone, after the others
    expected_stdout = """..."""
    # optional: exit_code = 1    (the status the program must exit with; default 0)
    # optional: editions = ["2027"]  (scored and validated only in these editions)

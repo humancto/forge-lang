@@ -347,6 +347,10 @@ class Task:
         self.expected = data.get("expected_stdout", "")
         self.needs = list(data.get("needs", []))
         self.timeout = float(data.get("timeout", DEFAULT_TIMEOUT))
+        # The time limit proves that work overlaps (sleeps in concurrent
+        # tasks), so the run must not compete for the CPU with other runs:
+        # see `map_timed_last`.
+        self.timed = bool(data.get("timed", self.category == "parallel"))
         self.mode = data.get("mode", "run")
         self.output_files = list(data.get("output_files", []))
         self.requests = list(data.get("request", []))
@@ -1263,12 +1267,11 @@ def cmd_validate(args):
                 problems.append("{}: reference.fg:{}: {} {} ({})".format(
                     checks[fut].id, d.get("line"), d.get("code"), d.get("message"),
                     d.get("severity")))
-        futs = {pool.submit(evaluate, c, t, t.reference(c.lang)): (t, c) for t, c in jobs}
-        for fut in concurrent.futures.as_completed(futs):
-            t, c = futs[fut]
-            r = fut.result()
-            if r["status"] != "pass":
-                failures.append((t, c, r))
+    results = map_timed_last(lambda j: evaluate(j[1], j[0], j[0].reference(j[1].lang)),
+                             jobs, lambda j: j[0], args.jobs)
+    for (t, c), r in zip(jobs, results):
+        if r["status"] != "pass":
+            failures.append((t, c, r))
     for t, c, r in sorted(failures, key=lambda x: (x[0].id, x[1].label())):
         problems.append("{} [{}]: {} {} {}".format(
             t.id, c.label(), r["class"], r.get("code") or "", (r.get("message") or "").strip()))
@@ -1614,6 +1617,21 @@ def cmd_generate(args):
 # ---------------------------------------------------------------------------
 
 
+def map_timed_last(fn, items, task_of, jobs):
+    """`[fn(x) for x in items]`, in order: items whose task is `timed` run
+    one at a time after the others, so a timing-sensitive run is never
+    slowed down by other runs on a small machine."""
+    results = [None] * len(items)
+    untimed = [i for i, x in enumerate(items) if not task_of(x).timed]
+    timed = [i for i, x in enumerate(items) if task_of(x).timed]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        for i, r in zip(untimed, pool.map(lambda i: fn(items[i]), untimed)):
+            results[i] = r
+    for i in timed:
+        results[i] = fn(items[i])
+    return results
+
+
 def pct(n, d):
     return round(100.0 * n / d, 1) if d else 0.0
 
@@ -1646,8 +1664,7 @@ def cmd_score(args):
             r["repair"] = {k: rr.get(k) for k in ("status", "class", "code", "message")}
         return r
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        results = list(pool.map(one, tasks))
+    results = map_timed_last(one, tasks, lambda t: t, args.jobs)
 
     report = build_report(meta, cfg, results)
     if skipped:
@@ -2027,6 +2044,14 @@ def selftest_v2_features(forge, args, expect):
         both = make_selftest_task(root, "data", {"id": "st_both", "expected_stdout": ""}, {})
         labels = [c.label() for c in validation_configs(forge, both, True)]
         check(labels == ["forge-vm", "forge-interp-2027"], "quick configs unchanged")
+
+        # Timing-sensitive tasks run alone, after the others, in order.
+        timed = make_selftest_task(root, "parallel", {"id": "st_timed", "expected_stdout": ""}, {})
+        check(timed.timed and not both.timed, "parallel tasks are timed")
+        seen = []
+        out = map_timed_last(lambda t: seen.append(t.id) or t.id, [timed, both, timed], lambda t: t, 4)
+        check(out == ["st_timed", "st_both", "st_timed"], "map_timed_last keeps order")
+        check(seen[0] == "st_both" and seen[1:] == ["st_timed", "st_timed"], "timed runs last")
 
         # [[case]] runs with exit codes and stdin_file.
         cases_toml = (
