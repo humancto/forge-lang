@@ -38,6 +38,7 @@ that a model cannot guess from `llms.txt`).
 | 24 | gap (fixed) | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
 | 25 | gap (fixed) | No way to write to stderr except `log.*` (structured tracing) | error_handling |
 | 26 | bug (fixed) | `forge check`: a module-level variable named like a builtin (`let mut count = 0`) is typed as the builtin inside the module's functions (false T0005 in the importer) | multifile |
+| 27 | perf (open) | macOS CI: a three-stage channel pipeline with 40 ms sleeps (`staged_pipeline`) took over 2.5 s on both engines, about 1.1 s on Linux; the Python reference passed on the same runner | parallel |
 
 ---
 
@@ -606,3 +607,16 @@ can only report errors on stdout plus an exit status.
 Suggested fix: `eprintln(...)` / `eprint(...)` builtins routed through `runtime::stdio::err`.
 
 **Fixed:** `eprintln(...)` / `eprint(...)` (registry, both engines, both editions, type checker, LSP) write like `println`/`print` to stderr through `runtime::stdio::err_line`/`err`, so a capture (the playground) records them as stderr and spawned tasks inherit it. Tests: `tests/cli_diagnostics.rs::eprintln_writes_to_stderr_on_both_engines`, `vm::parity_tests::eprintln_goes_to_the_captured_stderr_on_both_engines`, `tests/stderr_output_test.fg`.
+
+### 27. Channel pipeline slower on macOS
+
+`staged_pipeline` (25 records, three stages connected by `channel(2)`, `wait(0.04)` per
+record and stage) runs in about 1.1 s on Linux on both engines but exceeded its 2.5 s
+limit on every macOS CI run (debug build, `--sandbox`), retried and run alone; the Python
+reference with the same structure passed there. The cause is not known yet: candidates are
+per-call overhead in `wait`/`receive` on macOS (sleep overshoot, `recv_timeout` wake-ups)
+or sandbox polling. The task now sleeps 100 ms per stage with a 7 s limit (one stage after
+another takes at least 7.5 s), so it still proves the stages overlap.
+
+Suggested next step: time `wait(0.04)` loops and channel ping-pong on a macOS runner on both
+engines, with and without `--sandbox`.

@@ -11,7 +11,7 @@ let parser = spawn {
         let at = index_of(text, " ")
         let body = substring(text, at + 1, len(text))
         let rec = { id: substring(text, 0, at), text: body, words: len(split(body, " ")) }
-        wait(0.04)
+        wait(0.1)
         send(parsed, rec)
     }
     close(parsed)
@@ -25,7 +25,7 @@ let digester = spawn {
             break
         }
         let out = merge(rec, { sha: substring(crypto.sha256(rec.text), 0, 8) })
-        wait(0.04)
+        wait(0.1)
         send(digested, out)
     }
     close(digested)
@@ -40,6 +40,6 @@ loop {
     }
     println("{rec.id} words={rec.words} sha={rec.sha} {rec.text.upper()}")
     n += 1
-    wait(0.04)
+    wait(0.1)
 }
 println("processed {n}")

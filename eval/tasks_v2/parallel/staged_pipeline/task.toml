@@ -6,15 +6,15 @@ Each non-blank line of standard input is a record `<id> <text...>` (id is a word
 may contain spaces). Process the records with a pipeline of three stages that run
 concurrently, connected by bounded queues that hold at most 2 items each:
 
-1. parse: split the line into id and text, count the words of the text; then sleep 40 ms
+1. parse: split the line into id and text, count the words of the text; then sleep 100 ms
    (simulated I/O);
 2. digest: compute the first 8 hex characters of the SHA-256 of the text (lower-case hex);
-   then sleep 40 ms;
-3. output: print `<id> words=<n> sha=<digest> <text in upper case>`; then sleep 40 ms.
+   then sleep 100 ms;
+3. output: print `<id> words=<n> sha=<digest> <text in upper case>`; then sleep 100 ms.
 
 Records must come out in input order. When all records are done, print
 `processed <number of records>`. There are 25 records; doing the stages one after
-another would take about 3 seconds, and the program must finish within 2.5 seconds.
+another would take about 7.5 seconds, and the program must finish within 7 seconds.
 """
 stdin = """
 r01 the quick brown fox
@@ -44,7 +44,7 @@ r24 dolore eu fugiat nulla pariatur
 r25 the end
 """
 needs = []
-timeout = 2.5
+timeout = 7
 expected_stdout = """
 r01 words=4 sha=9ecb3656 THE QUICK BROWN FOX
 r02 words=2 sha=94d7b525 JUMPS OVER

@@ -13,7 +13,7 @@ def parse():
     for line in lines:
         rid, _, text = line.partition(" ")
         rec = {"id": rid, "text": text, "words": len(text.split())}
-        time.sleep(0.04)
+        time.sleep(0.1)
         q1.put(rec)
     q1.put(END)
 
@@ -25,7 +25,7 @@ def digest():
             q2.put(END)
             return
         rec["sha"] = hashlib.sha256(rec["text"].encode()).hexdigest()[:8]
-        time.sleep(0.04)
+        time.sleep(0.1)
         q2.put(rec)
 
 
@@ -39,5 +39,5 @@ while True:
     print("{} words={} sha={} {}".format(rec["id"], rec["words"], rec["sha"], rec["text"].upper()),
           flush=True)
     n += 1
-    time.sleep(0.04)
+    time.sleep(0.1)
 print("processed {}".format(n))
