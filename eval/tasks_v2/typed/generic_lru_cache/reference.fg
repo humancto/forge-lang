@@ -1,0 +1,106 @@
+// A generic LRU cache. Structs are values: every update returns a new cache.
+
+struct LruCache<T> {
+    capacity: Int,
+    order: [String],
+    values: Map<String, T>
+}
+
+impl LruCache {
+    fn lookup(it, key: String) {
+        if it.values.has(key) {
+            return Some(it.values.get(key))
+        }
+        return None
+    }
+
+    // The cache with `key` moved to the most recently used position.
+    fn touch(it, key: String) {
+        let rest = filter(it.order, fn(k) { return k != key })
+        return LruCache { capacity: it.capacity, order: rest + [key], values: it.values }
+    }
+
+    // The least recently used key that must go before inserting `key`, or "".
+    fn victim(it, key: String) -> String {
+        if it.values.has(key) || len(it.order) < it.capacity {
+            return ""
+        }
+        return it.order[0]
+    }
+
+    fn insert(it, key: String, value) {
+        let gone = it.victim(key)
+        let mut order = filter(it.order, fn(k) { return k != key && k != gone })
+        let mut values = it.values
+        if gone != "" {
+            values = values.remove(gone)
+        }
+        return LruCache { capacity: it.capacity, order: order + [key], values: values.set(key, value) }
+    }
+
+    fn dump(it) -> String {
+        return join(map(it.order, fn(k) { return "{k}={it.values.get(k)}" }), " ")
+    }
+}
+
+fn new_cache(capacity: Int) {
+    return LruCache { capacity: capacity, order: [], values: map() }
+}
+
+let mut nums: LruCache<Int> = new_cache(3)
+let mut names: LruCache<String> = new_cache(2)
+
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    let p = split(line, " ")
+    if p[0] == "sum" && len(p) == 1 {
+        let total = sum(map(nums.order, fn(k) { return nums.values.get(k) }))
+        println("sum = {total}")
+        continue
+    }
+    if len(p) < 2 || (p[1] != "nums" && p[1] != "names") {
+        println("error: bad command")
+        continue
+    }
+    let cache_name = p[1]
+    let mut cache = names
+    if cache_name == "nums" {
+        cache = nums
+    }
+    if p[0] == "put" && len(p) >= 4 {
+        let key = p[2]
+        let text = join(slice(p, 3, len(p)), " ")
+        if cache_name == "nums" && !regex.test(text, "^-?[0-9]+$") {
+            println("error: nums needs an integer")
+            continue
+        }
+        let gone = cache.victim(key)
+        if gone != "" {
+            println("evicted {cache_name}/{gone}")
+        }
+        if cache_name == "nums" {
+            nums = nums.insert(key, int(text))
+        } else {
+            names = names.insert(key, text)
+        }
+    } else if p[0] == "get" && len(p) == 3 {
+        let key = p[2]
+        match cache.lookup(key) {
+            Some(v) => {
+                println("{cache_name}/{key} = {v}")
+                if cache_name == "nums" {
+                    nums = nums.touch(key)
+                } else {
+                    names = names.touch(key)
+                }
+            },
+            None => println("{cache_name}/{key} miss"),
+        }
+    } else if p[0] == "dump" && len(p) == 2 {
+        println("{cache_name}: {cache.dump()}".trim())
+    } else {
+        println("error: bad command")
+    }
+}

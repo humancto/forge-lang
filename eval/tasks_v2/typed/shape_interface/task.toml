@@ -1,0 +1,58 @@
+id = "shape_interface"
+category = "typed"
+title = "Shapes behind an interface, with declared types"
+editions = ["2027"]
+prompt = """
+Write a typed program: declare an interface `Shape` with methods `area() -> Float`,
+`perimeter() -> Float` and `label() -> String`, three struct types `Circle`, `Rect` and
+`Triangle` (with Float fields) that implement it, and give every function declared
+parameter and return types.
+
+Each non-blank line of standard input is a shape: `circle <r>`, `rect <w> <h>` or
+`triangle <a> <b> <c>`; the numbers are decimal numbers such as `2`, `0.5` or `3.25`.
+A line is rejected with `line <n>: invalid` (n counts all lines from 1) if the kind is
+unknown, the number of values is wrong, a value is not a number or not greater than 0, or
+the triangle sides violate the triangle inequality (each side must be strictly less than
+the sum of the other two).
+
+Labels: `circle r=<r>`, `rect <w>x<h>`, `triangle <a>-<b>-<c>`, with the numbers exactly as
+written. Use pi = 3.141592653589793; the triangle's area comes from Heron's formula.
+
+After the rejection lines, print the valid shapes sorted by area (descending; ties keep
+input order) as `<label>: area=<area> perimeter=<perimeter>`, then `total area=<sum>`, all
+with exactly 2 decimals (rounded half away from zero), then `largest perimeter: <label>`
+(the first one on ties).
+"""
+stdin = """
+circle 2
+rect 3 4
+triangle 3 4 5
+hexagon 1
+rect 2.5 -1
+triangle 1 2 3
+circle 0.5
+rect 10 0.25
+triangle 2 2 2
+rect 3
+circle abc
+triangle 7 8.5 9.25
+rect 2 3
+"""
+needs = []
+expected_stdout = """
+line 4: invalid
+line 5: invalid
+line 6: invalid
+line 10: invalid
+line 11: invalid
+triangle 7-8.5-9.25: area=28.38 perimeter=24.75
+circle r=2: area=12.57 perimeter=12.57
+rect 3x4: area=12.00 perimeter=14.00
+triangle 3-4-5: area=6.00 perimeter=12.00
+rect 2x3: area=6.00 perimeter=10.00
+rect 10x0.25: area=2.50 perimeter=20.50
+triangle 2-2-2: area=1.73 perimeter=6.00
+circle r=0.5: area=0.79 perimeter=3.14
+total area=69.96
+largest perimeter: triangle 7-8.5-9.25
+"""

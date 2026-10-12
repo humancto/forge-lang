@@ -1,0 +1,60 @@
+id = "expr_simplifier"
+category = "typed"
+title = "Parse, simplify and print a recursive expression type"
+editions = ["2027"]
+prompt = """
+Write a typed program. Declare a recursive algebraic data type
+`Expr = Num(Int) | Var(String) | Add(Expr, Expr) | Mul(Expr, Expr) | Neg(Expr)`, a parser
+returning `Result<Expr, String>`, and functions with declared parameter and return types
+to simplify, print and evaluate expressions.
+
+Each non-blank line of standard input is `<bindings> | <expression>`. Bindings are
+comma-separated `name=integer` pairs (possibly none). The expression is in prefix
+S-expression form: an integer (`7`, `-3`), a name (lower-case letters), `(+ a b)`,
+`(* a b)` or `(- a)` (negation, exactly one operand). Tokens are separated by spaces and/or
+parentheses. Anything else (wrong operand count, unknown operator, stray tokens) is a
+parse error.
+
+Simplify bottom-up (simplify the children first, then apply the first matching rule):
+- `Add(Num a, Num b)` → `Num(a+b)`; `Add(e, Num 0)` or `Add(Num 0, e)` → `e`
+- `Mul(Num a, Num b)` → `Num(a*b)`; `Mul(e, Num 1)` or `Mul(Num 1, e)` → `e`;
+  `Mul(e, Num 0)` or `Mul(Num 0, e)` → `Num 0`
+- `Neg(Num a)` → `Num(-a)`; `Neg(Neg e)` → `e`
+
+Print the simplified expression in infix form: `a + b`, `a * b` (an Add operand of a Mul
+is put in parentheses), `-a` (parentheses around an Add or Mul operand, e.g. `-(x + 1)`),
+numbers and names as they are. Then ` => ` and the value of the simplified expression with
+the bindings, or `unbound <name>` for the first unbound name in left-to-right order.
+For a line that does not parse, print `parse error`.
+"""
+stdin = """
+x=3 | (+ x (* 2 3))
+ | (* (+ 1 2) (+ 3 4))
+x=5,y=2 | (* (+ x 0) (+ y 1))
+a=1 | (- (- (+ a 1)))
+x=10 | (* x (+ 0 0))
+y=4 | (+ (* 1 y) (- 7))
+x=2 | (* (+ x 1) (- (* x x)))
+ | (+ z (* q 1))
+x=1 | (+ x)
+x=1 | (^ x 2)
+x=1 | (+ x 1) 2
+k=-4 | (- (* k (+ k 0)))
+m=6,n=-1 | (+ (* m n) (* (+ m 1) (- n)))
+"""
+needs = []
+expected_stdout = """
+x + 6 => 9
+21 => 21
+x * (y + 1) => 15
+a + 1 => 2
+0 => 0
+y + -7 => -3
+(x + 1) * -(x * x) => -12
+z + q => unbound z
+parse error
+parse error
+parse error
+-(k * k) => -16
+m * n + (m + 1) * -n => 1
+"""

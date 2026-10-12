@@ -1,0 +1,75 @@
+id = "typed_order_decode"
+category = "typed"
+title = "Decode untyped JSON into typed structs with precise errors"
+editions = ["2027"]
+prompt = """
+Write a typed program. Declare the struct types
+`Line { sku: String, qty: Int, unit_price: Float }` and
+`Order { id: String, lines: [Line], coupon: Option<String> }`, and decode functions that
+return `Result<Line, String>` and `Result<Order, String>`; give every function declared
+parameter and return types.
+
+Standard input is a JSON array. Decode each element into an Order, checking fields in this
+order and reporting only the first problem as `<path>: <problem>`:
+
+- the element must be an object (path `$`, problem `expected object`);
+- `id`: a string;
+- `lines`: an array, not empty (`must not be empty`);
+- each line `lines[<i>]`: an object, then `sku` (string), `qty` (integer, then
+  `must be positive` if it is not greater than 0), `unit_price` (a JSON number; an
+  integer such as `5` is accepted and means 5.0);
+- `coupon`: optional; when present (and not null) a string.
+
+Problems are `missing` for an absent field, `expected string` / `expected integer` /
+`expected number` / `expected array` / `expected object` for a wrong type (null counts as
+a wrong type except for `coupon`). Paths look like `id`, `lines`, `lines[1].qty`.
+
+The total of an order is the sum of qty * unit_price; the coupon `HALF` then halves it,
+`TENOFF` subtracts 10 (but not below 0), and any other coupon changes nothing. For each
+element print `#<index>: <id> <number of lines> line(s) total=<total with exactly 2
+decimals>` (add ` coupon=<coupon>` when there is one) or `#<index>: invalid <path>:
+<problem>` (index from 0). Finally print `valid=<n> invalid=<n> revenue=<sum of totals,
+2 decimals>`.
+"""
+stdin = """
+[
+  {"id": "A1", "lines": [{"sku": "pen", "qty": 3, "unit_price": 5}], "coupon": "HALF"},
+  {"id": "A2", "lines": [{"sku": "ink", "qty": 2, "unit_price": 7.25}, {"sku": "pad", "qty": 1, "unit_price": 3}]},
+  {"id": "A3", "lines": []},
+  {"id": 4, "lines": [{"sku": "x", "qty": 1, "unit_price": 1}]},
+  {"id": "A5", "lines": [{"sku": "pen", "qty": 1, "unit_price": 2}, {"sku": "cap", "qty": 1.5, "unit_price": 2}]},
+  {"id": "A6", "lines": [{"sku": "pen", "qty": 0, "unit_price": 2}]},
+  {"id": "A7", "lines": [{"sku": "pen", "qty": 2}]},
+  "A8",
+  {"lines": [{"sku": "pen", "qty": 1, "unit_price": 1}]},
+  {"id": "A10", "lines": [{"sku": "pen", "qty": 1, "unit_price": "9.99"}]},
+  {"id": "A11", "lines": [{"sku": "mug", "qty": 1, "unit_price": 8.5}], "coupon": "TENOFF"},
+  {"id": "A12", "lines": [{"sku": "mug", "qty": 3, "unit_price": 7}], "coupon": null},
+  {"id": "A13", "lines": [{"sku": "mug", "qty": 1, "unit_price": 3}], "coupon": 5},
+  {"id": "A14", "lines": [{"sku": "box", "qty": 7, "unit_price": 1}], "coupon": "HALF"},
+  {"id": "A15", "lines": {"sku": "box"}},
+  {"id": "A16", "lines": [["box", 1, 2]]},
+  {"id": "A17", "lines": [{"sku": null, "qty": 1, "unit_price": 1}]}
+]
+"""
+needs = []
+expected_stdout = """
+#0: A1 1 line(s) total=7.50 coupon=HALF
+#1: A2 2 line(s) total=17.50
+#2: invalid lines: must not be empty
+#3: invalid id: expected string
+#4: invalid lines[1].qty: expected integer
+#5: invalid lines[0].qty: must be positive
+#6: invalid lines[0].unit_price: missing
+#7: invalid $: expected object
+#8: invalid id: missing
+#9: invalid lines[0].unit_price: expected number
+#10: A11 1 line(s) total=0.00 coupon=TENOFF
+#11: A12 1 line(s) total=21.00
+#12: invalid coupon: expected string
+#13: A14 1 line(s) total=3.50 coupon=HALF
+#14: invalid lines: expected array
+#15: invalid lines[0]: expected object
+#16: invalid lines[0].sku: expected string
+valid=5 invalid=12 revenue=49.50
+"""

@@ -1,0 +1,115 @@
+type State = Created(Int) | Paid(Int) | Shipped(Int, String) | Delivered(Int) | Cancelled(String, Int)
+
+impl State {
+    fn name(it) -> String {
+        return match it {
+            Created(_) => "created",
+            Paid(_) => "paid",
+            Shipped(_, _) => "shipped",
+            Delivered(_) => "delivered",
+            Cancelled(_, _) => "cancelled",
+        }
+    }
+
+    fn label(it) -> String {
+        return match it {
+            Created(t) => "created({t})",
+            Paid(t) => "paid({t})",
+            Shipped(_, tracking) => "shipped({tracking})",
+            Delivered(_) => "delivered",
+            Cancelled(reason, refund) => "cancelled({reason}, refund {refund})",
+        }
+    }
+
+    // Total counted as revenue (paid, shipped or delivered), else 0.
+    fn revenue(it) -> Int {
+        return match it {
+            Paid(t) => t,
+            Shipped(t, _) => t,
+            Delivered(t) => t,
+            _ => 0,
+        }
+    }
+
+    fn step(it, verb: String, args: [String]) -> Result<State, String> {
+        let refused = "cannot {verb} a {it.name()} order"
+        return match it {
+            Created(t) => {
+                if verb == "pay" {
+                    if args[0] != str(t) {
+                        Err("amount mismatch: expected {t}")
+                    } else {
+                        Ok(Paid(t))
+                    }
+                } else if verb == "cancel" {
+                    Ok(Cancelled(join(args, " "), 0))
+                } else {
+                    Err(refused)
+                }
+            },
+            Paid(t) => {
+                if verb == "ship" {
+                    Ok(Shipped(t, args[0]))
+                } else if verb == "cancel" {
+                    Ok(Cancelled(join(args, " "), t))
+                } else {
+                    Err(refused)
+                }
+            },
+            Shipped(t, _) => {
+                if verb == "deliver" {
+                    Ok(Delivered(t))
+                } else {
+                    Err(refused)
+                }
+            },
+            _ => Err(refused),
+        }
+    }
+}
+
+let mut orders = {}
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    let p = split(line.trim(), " ")
+    let verb = p[0]
+    let id = p[1]
+    let args = slice(p, 2, len(p))
+    if verb == "create" {
+        if has_key(orders, id) {
+            println("{id}: error: order exists")
+        } else if !regex.test(args[0], "^[0-9]+$") || int(args[0]) == 0 {
+            println("{id}: error: bad amount")
+        } else {
+            orders[id] = Created(int(args[0]))
+            println("{id}: new -> created")
+        }
+        continue
+    }
+    if !contains(["pay", "ship", "deliver", "cancel"], verb) {
+        println("{id}: error: unknown command")
+        continue
+    }
+    if !has_key(orders, id) {
+        println("{id}: error: unknown order")
+        continue
+    }
+    let current = orders[id]
+    match current.step(verb, args) {
+        Ok(next) => {
+            println("{id}: {current.name()} -> {next.name()}")
+            orders[id] = next
+        },
+        Err(msg) => println("{id}: error: {msg}"),
+    }
+}
+println("summary:")
+let mut revenue = 0
+for id in sort(keys(orders)) {
+    let s = orders[id]
+    println("  {id} {s.label()}")
+    revenue += s.revenue()
+}
+println("revenue: {revenue}")

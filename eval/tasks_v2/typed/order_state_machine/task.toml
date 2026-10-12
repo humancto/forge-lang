@@ -1,0 +1,89 @@
+id = "order_state_machine"
+category = "typed"
+title = "An order lifecycle as a typed state machine"
+editions = ["2027"]
+prompt = """
+Write a typed program. Model an order's state as an algebraic data type with the variants
+`Created(total)`, `Paid(total)`, `Shipped(total, tracking)`, `Delivered(total)` and
+`Cancelled(reason, refund)`, implement the transition as a method or function that takes
+the current state and a command and returns a `Result` (the new state or an error
+message), and give every function declared parameter and return types.
+
+Each non-blank line of standard input is a command for an order id:
+- `create <id> <total>` (total a positive integer) → `Created`; error `order exists` if the
+  id is already known, `bad amount` if the total is not a positive integer;
+- `pay <id> <amount>` from Created → `Paid`; error `amount mismatch: expected <total>` if
+  the amount differs from the total;
+- `ship <id> <tracking>` from Paid → `Shipped`;
+- `deliver <id>` from Shipped → `Delivered`;
+- `cancel <id> <reason words...>` from Created or Paid → `Cancelled` with refund = the
+  total if it was Paid, else 0.
+
+Any other transition is the error `cannot <verb> a <state> order`, with verb the command
+word and state the lower-case name of the current state (`created`, `paid`, `shipped`,
+`delivered`, `cancelled`). A command for an unknown id (other than create) is the error
+`unknown order`; an unknown command word is the error `unknown command`. Commands with a
+missing argument do not occur.
+
+For each command print `<id>: <old state> -> <new state>` (use `new` as the old state for
+create) or `<id>: error: <message>`. Then print `summary:` and, for every order sorted by
+id, `  <id> <label>` where label is `created(<total>)`, `paid(<total>)`,
+`shipped(<tracking>)`, `delivered`, or `cancelled(<reason>, refund <refund>)`. Finally
+print `revenue: <sum of totals of paid, shipped and delivered orders>`.
+"""
+stdin = """
+create o1 250
+create o2 99
+create o1 10
+pay o1 200
+pay o1 250
+ship o1 TRK-77
+deliver o1
+cancel o1 changed my mind
+create o3 40
+cancel o3 duplicate order
+pay o3 40
+pay o2 99
+cancel o2 customer request
+ship o4 X
+create o5 -5
+create o6 120
+pay o6 120
+ship o6 TRK-1
+deliver o6
+deliver o6
+refund o6
+create o7 70
+"""
+needs = []
+expected_stdout = """
+o1: new -> created
+o2: new -> created
+o1: error: order exists
+o1: error: amount mismatch: expected 250
+o1: created -> paid
+o1: paid -> shipped
+o1: shipped -> delivered
+o1: error: cannot cancel a delivered order
+o3: new -> created
+o3: created -> cancelled
+o3: error: cannot pay a cancelled order
+o2: created -> paid
+o2: paid -> cancelled
+o4: error: unknown order
+o5: error: bad amount
+o6: new -> created
+o6: created -> paid
+o6: paid -> shipped
+o6: shipped -> delivered
+o6: error: cannot deliver a delivered order
+o6: error: unknown command
+o7: new -> created
+summary:
+  o1 delivered
+  o2 cancelled(customer request, refund 99)
+  o3 cancelled(duplicate order, refund 0)
+  o6 delivered
+  o7 created(70)
+revenue: 370
+"""
