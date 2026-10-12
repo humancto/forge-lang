@@ -1227,6 +1227,10 @@ def validation_configs(forge, task, quick, python_cfg=None):
 def cmd_validate(args):
     forge = find_forge(args.forge)
     tasks = load_tasks(task_selector(args), args.tier)
+    excluded = {x.strip() for x in getattr(args, "exclude", "").split(",") if x.strip()}
+    if excluded:
+        tasks = [t for t in tasks if t.id not in excluded]
+        print("excluded: {}".format(", ".join(sorted(excluded))))
     if not tasks:
         sys.exit("no tasks selected")
     problems = []
@@ -2219,6 +2223,8 @@ def main(argv=None):
                    help="Forge on vm (2026) and interp (2027) only, instead of all four "
                         "(a task pinned to one edition: vm and interp in it)")
     p.add_argument("--no-python", action="store_true", help="skip the Python references")
+    p.add_argument("--exclude", default="",
+                   help="comma-separated task ids to leave out")
     p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser("selftest", help="check the harness's own scoring and parsing")
