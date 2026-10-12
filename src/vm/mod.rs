@@ -1,5 +1,6 @@
 mod builtins; // VM builtin dispatch — extracted from machine.rs
 pub mod bytecode;
+mod callback; // calling Forge functions back from native builtins (map, filter, ...)
 pub mod compiler;
 #[cfg(feature = "host")]
 pub(crate) mod embed; // compile / call helpers for the sandbox and `forge mcp`
@@ -49,6 +50,8 @@ pub fn run_repl(vm: &mut VM, program: &Program) -> Result<value::Value, VMError>
 
 #[cfg(test)]
 mod async_tests;
+#[cfg(test)]
+mod callback_tests;
 #[cfg(test)]
 mod enum_methods_tests;
 #[cfg(test)]

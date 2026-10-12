@@ -238,6 +238,9 @@ pub struct Globals {
     names: Arc<GlobalNames>,
     slots: Vec<Option<Value>>,
     index: Arc<HashMap<Arc<str>, GlobalId>>,
+    /// Bumped by every write; lets a cache tell that no global changed
+    /// (`VM::call_callback`'s JIT entry-guard cache).
+    version: u64,
 }
 
 impl Default for Globals {
@@ -258,6 +261,7 @@ impl Globals {
             names,
             slots: Vec::new(),
             index: Arc::default(),
+            version: 0,
         }
     }
 
@@ -280,6 +284,7 @@ impl Globals {
     /// Define or reassign global `id`. The hot path of `SetGlobal`.
     #[inline]
     pub fn set_id(&mut self, id: GlobalId, value: Value) {
+        self.version = self.version.wrapping_add(1);
         if let Some(Some(slot)) = self.slots.get_mut(id.index()) {
             *slot = value;
             return;
@@ -289,6 +294,7 @@ impl Globals {
     }
 
     fn define(&mut self, id: GlobalId, name: Arc<str>, value: Value) {
+        self.version = self.version.wrapping_add(1);
         let i = id.index();
         if self.slots.len() <= i {
             self.slots.resize(i + 1, None);
@@ -311,11 +317,18 @@ impl Globals {
     pub fn insert(&mut self, name: impl AsRef<str>, value: Value) -> Option<Value> {
         let name = name.as_ref();
         if let Some(id) = self.index.get(name).copied() {
+            self.version = self.version.wrapping_add(1);
             return self.slots[id.index()].replace(value);
         }
         let (id, name) = self.names.intern_shared(name);
         self.define(id, name, value);
         None
+    }
+
+    /// Changes whenever a global is defined or assigned.
+    #[inline]
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Names of the defined globals (arbitrary order).
@@ -354,6 +367,7 @@ impl Globals {
             names: Arc::clone(&self.names),
             slots,
             index: Arc::clone(&self.index),
+            version: self.version.wrapping_add(1),
         })
     }
 
