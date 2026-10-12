@@ -58,3 +58,13 @@ Fresh solvers, the 0.11.0 `llms.txt`, scored on the release branch:
 
 Round 3's only failure before `floor`/`ceil` became globals was a call to
 `floor(x)`.
+
+## 2026-10-12: tier v2 added
+
+Tier v1 no longer finds anything to fix, so `eval/tasks_v2/` adds 50 harder tasks
+(servers, HTTP clients, multi-file programs, concurrency, error handling, edition-2027
+typed programs, large data inputs). No solver has been scored on it yet; every reference
+passes on both engines and the editions it applies to. Writing the references found the
+issues in [`V2_FINDINGS.md`](V2_FINDINGS.md). Score a run on both editions:
+`score <run> --tier v2` and `score <run> --tier v2 --edition 2027` (the `typed` tasks
+count only in 2027).

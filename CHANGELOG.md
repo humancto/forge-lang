@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Eval tier v2** (`eval/tasks_v2/`, `eval/README.md`) — 50 harder tasks for the evaluation harness, since tier v1 is saturated (blind solvers score 100%): 10 HTTP servers (`@server` JSON APIs with validation, persistence across requests in a JSON file or SQLite, data loaded at start-up), 6 HTTP clients (pagination, retries on 5xx, bearer tokens and headers, POST/PUT/DELETE, refused connections, URL encoding), 6 multi-file programs importing provided modules and a `forge_modules` package, 6 concurrency tasks (bounded pipelines, shared deadlines, `select` with an idle timeout, failure isolation, map-reduce), 6 error-handling tasks with exit statuses, 6 edition-2027-only typed tasks (interfaces, algebraic types, generic structs, typed JSON decoding), and 10 data tasks (quoted CSV, nested JSON, ISO timestamps, logfmt, and 20,000-100,000-line inputs where quadratic code times out). Harness: `--tier v1|v2|all`, `editions = [...]` pinning, `[[case]]` runs with `exit_code`, `stdin_file`, a `db` capability, server requests with `headers`/`status_only`, and fixture routes `flaky/`, `auth/`, `headers` plus `{closed_url}`; `selftest` covers them. `eval/V2_FINDINGS.md` lists the Forge bugs, performance cliffs and `llms.txt` gaps found while writing the references (among them: `.push()` on a nested place is silently dropped, the interpreter loses methods of selectively imported structs, `try_receive` differs between engines, a `Float` annotation keeps Ints, object-key insertion is quadratic on the VM, and handlers cannot set status codes).
+
+### Fixed
+
+- `eval/forge_eval.py validate` type-checks each reference next to a copy of its task's `files/`, so imported modules are visible to `forge check`.
+
 ## [0.11.0] - 2026-10-11
 
 ### Added
