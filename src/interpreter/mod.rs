@@ -1515,6 +1515,37 @@ impl Interpreter {
         interp
     }
 
+    /// Merge an imported module's method tables, static methods, struct
+    /// defaults and embedded fields into this interpreter. Includes the
+    /// tables the module itself imported, so `impl` blocks reach every
+    /// importer however the type was brought in.
+    fn absorb_type_tables(&mut self, from: &Interpreter) {
+        for (type_name, methods) in &from.method_tables {
+            let entry = self
+                .method_tables
+                .entry(type_name.clone())
+                .or_insert_with(IndexMap::new);
+            for (k, v) in methods {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+        for (type_name, statics) in &from.static_methods {
+            let entry = self
+                .static_methods
+                .entry(type_name.clone())
+                .or_insert_with(IndexMap::new);
+            for (k, v) in statics {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+        for (name, defaults) in &from.struct_defaults {
+            self.struct_defaults.insert(name.clone(), defaults.clone());
+        }
+        for (name, embeds) in &from.embedded_fields {
+            self.embedded_fields.insert(name.clone(), embeds.clone());
+        }
+    }
+
     pub(crate) fn exec_background_block(
         &mut self,
         stmts: &[SpannedStmt],
@@ -2198,54 +2229,18 @@ impl Interpreter {
                     // Import all top-level definitions
                     for spanned in &program.statements {
                         match &spanned.stmt {
-                            Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
+                            Stmt::FnDef { name, .. }
+                            | Stmt::Let { name, .. }
+                            | Stmt::StructDef { name, .. } => {
                                 if let Some(val) = import_interp.env.get(name) {
                                     self.env.define(name.clone(), val);
                                 }
                             }
-                            Stmt::StructDef { name, .. } => {
-                                if let Some(val) = import_interp.env.get(name) {
-                                    self.env.define(name.clone(), val);
-                                }
-                                // Copy struct defaults and embedded fields
-                                if let Some(defaults) = import_interp.struct_defaults.get(name) {
-                                    self.struct_defaults.insert(name.clone(), defaults.clone());
-                                }
-                                if let Some(embeds) = import_interp.embedded_fields.get(name) {
-                                    self.embedded_fields.insert(name.clone(), embeds.clone());
-                                }
-                            }
-                            Stmt::TypeDef { name, variants } => {
+                            Stmt::TypeDef { variants, .. } => {
                                 // Import each variant individually
                                 for variant in variants {
                                     if let Some(val) = import_interp.env.get(&variant.name) {
                                         self.env.define(variant.name.clone(), val);
-                                    }
-                                }
-                                // Import type metadata
-                                let meta_key = format!("__type_{}__", name);
-                                if let Some(val) = import_interp.env.get(&meta_key) {
-                                    self.env.define(meta_key, val);
-                                }
-                            }
-                            Stmt::ImplBlock { type_name, .. } => {
-                                // Copy method tables and static methods
-                                if let Some(methods) = import_interp.method_tables.get(type_name) {
-                                    let entry = self
-                                        .method_tables
-                                        .entry(type_name.clone())
-                                        .or_insert_with(IndexMap::new);
-                                    for (k, v) in methods {
-                                        entry.insert(k.clone(), v.clone());
-                                    }
-                                }
-                                if let Some(statics) = import_interp.static_methods.get(type_name) {
-                                    let entry = self
-                                        .static_methods
-                                        .entry(type_name.clone())
-                                        .or_insert_with(IndexMap::new);
-                                    for (k, v) in statics {
-                                        entry.insert(k.clone(), v.clone());
                                     }
                                 }
                             }
@@ -2253,6 +2248,19 @@ impl Interpreter {
                         }
                     }
                 }
+                // Type metadata travels with every import, selective or
+                // not: a value built from an imported struct or variant
+                // dispatches through these tables (the VM registers them
+                // process-wide when the module runs).
+                for spanned in &program.statements {
+                    if let Stmt::TypeDef { name, .. } = &spanned.stmt {
+                        let meta_key = format!("__type_{}__", name);
+                        if let Some(val) = import_interp.env.get(&meta_key) {
+                            self.env.define(meta_key, val);
+                        }
+                    }
+                }
+                self.absorb_type_tables(&import_interp);
                 Ok(Signal::None)
             }
 

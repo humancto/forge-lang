@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Interpreter: a struct or `type` brought in with a selective import (`import { P } from "shapes.fg"`) keeps its `impl` methods, static methods and field defaults, as on the VM (was `E0013 no method 'double' on P`).
+
 ## [0.11.0] - 2026-10-11
 
 ### Added
