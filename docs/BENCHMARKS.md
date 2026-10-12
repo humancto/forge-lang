@@ -28,8 +28,8 @@ tools/bench_compare.py --base /path/to/old/forge --head target/release/forge
 
 | Suite | Programs | Engine |
 |---|---|---|
-| `vm` | `benchmarks/vm/*.fg`: `loop` (20M-iteration `while`), `fib` (recursive fib(30)), `string_build` (200k `s = s + "x"`), `array_push` (100k `push`), `map_filter` (map/filter/reduce over 1M items), `mandelbrot` (200×200 grid, 50 iterations, pure Float loops), `spectral_norm` (n = 100, Float helper called from array loops), `nbody` (5 bodies, 20k steps over Float arrays), `repeat_loop` / `range_loop` (5M-iteration top-level `repeat` / `for i in range(..)`), `toplevel_loop` / `toplevel_loop_fn` (the same 5M-iteration `while` at the top level and inside a function), `toplevel_string` (`string_build` at the top level), `toplevel_captured` (2M calls of a top-level `fn` that updates a captured top-level variable), `global_calls` (2M iterations reading two builtins as globals), and the higher-order collection shapes: `reduce_lambda` (`reduce` over 1M items with an arithmetic lambda), `sort_comparator` (`sort` of 200k pseudo-random ints with a comparator lambda), `stream_chain` (a lazy `.stream()` filter/map/reduce over 1M items), `records_pipeline` (300k objects built with `map`, then `.filter`/`.map`/`.reduce` reading their fields) | default (VM with JIT tier-up) |
-| `interp` | `benchmarks/interp/*.fg`: array reads, deep recursion, fib, push via method and reassignment, set building, string building | `--interp` |
+| `vm` | `benchmarks/vm/*.fg`: `loop` (20M-iteration `while`), `fib` (recursive fib(30)), `string_build` (200k `s = s + "x"`), `array_push` (100k `push`), `map_filter` (map/filter/reduce over 1M items), `mandelbrot` (200×200 grid, 50 iterations, pure Float loops), `spectral_norm` (n = 100, Float helper called from array loops), `nbody` (5 bodies, 20k steps over Float arrays), `repeat_loop` / `range_loop` (5M-iteration top-level `repeat` / `for i in range(..)`), `toplevel_loop` / `toplevel_loop_fn` (the same 5M-iteration `while` at the top level and inside a function), `toplevel_string` (`string_build` at the top level), `toplevel_captured` (2M calls of a top-level `fn` that updates a captured top-level variable), `global_calls` (2M iterations reading two builtins as globals), and the higher-order collection shapes: `reduce_lambda` (`reduce` over 1M items with an arithmetic lambda), `sort_comparator` (`sort` of 200k pseudo-random ints with a comparator lambda), `stream_chain` (a lazy `.stream()` filter/map/reduce over 1M items), `records_pipeline` (300k objects built with `map`, then `.filter`/`.map`/`.reduce` reading their fields), and container building: `word_count` (100k words, 5,000 distinct, `counts[w] = get(counts, w, 0) + 1` at the top level), `object_build` (an object with 50k computed keys, `ob[k] = v`), `push_records` (100k `recs.push({ id: i, name: ... })`) | default (VM with JIT tier-up) |
+| `interp` | `benchmarks/interp/*.fg`: array reads, deep recursion, fib, push via method and reassignment, set building, string building, and the `vm` suite's `word_count`, `object_build`, `push_records` | `--interp` |
 | `startup` | `benchmarks/startup/hello.fg` run 20 times per sample (`STARTUP_BATCH`) | default |
 | `peers` | `benchmarks/peers/*.{py,js,lua}`: line-for-line ports of the `vm` suite | `python3`, `node`, `lua`/`luajit` |
 
@@ -265,3 +265,50 @@ On the regression gate (`tools/bench_compare.py`, 5 interleaved rounds,
 same host) nothing else in `vm`, `interp` or `startup` changed beyond
 noise; re-running the two benchmarks the noisy first pass flagged with 8–10
 rounds gave `toplevel_string` +2.2% best and `global_calls` −1.2% best.
+
+## Building objects, records and groups
+
+The natural way to build a dictionary, a list of records or groups —
+`counts[w] = get(counts, w, 0) + 1`, `ob[k] = v`, `recs.push({ ... })`,
+`groups[k].push(x)` — was quadratic (eval tier v2, findings 10–14):
+collections are values, and on the VM `SetIndex`/`SetField` returned an
+updated copy of the whole container, a push of an object literal took the
+copying method-call path, a nested `groups[k].push(x)` updated nothing, and
+any read of the local (`get(counts, ...)`, `counts[w]`) shared it so the next
+update copied again. On the interpreter `get`/`has_key` copied the object
+for every call. Benchmarks: `word_count`, `object_build`, `push_records` in
+`benchmarks/vm/` and `benchmarks/interp/` with Python/Node/Lua ports.
+
+### What changed
+
+- VM opcodes that read and update a local's container without copying its
+  reference (`GetIndexLocal`, `GetFieldLocal`, `SetIndexLocal`,
+  `SetFieldLocal`, `PushIndexLocal`, `PushFieldLocal`, and `PeekLocal` +
+  `CallPure` for `len`/`get`/`has_key`/`contains`): an owned container
+  (`GcObject::unique`) is updated in place, and an array owned by an owned
+  container (`GcObject::slot_owned`) is appended in place. The rules that
+  keep this unobservable are in `src/vm/local_ops.rs`.
+- `xs.push(e)` takes the in-place `PushLocal` path for any `e`.
+- String concatenation (`"r" + str(i)`) builds its result once and no
+  longer interns it: a hash, a table entry and a second copy per computed
+  string (100k distinct strings: 230 → 120 ms).
+- Interpreter: `get`/`has_key` borrow the object; `g[k].push(x)` updates
+  the place in place.
+
+### Numbers
+
+Measured 2026-10-12, release build, the same loaded 4-vCPU host as above
+(load average 4–10). `tools/bench.sh`, 5–7 runs, median, whole process in
+seconds; "before" is v0.11.0.
+
+| Workload | VM before | VM after | interp before | interp after | Python 3.11 | Node 22 |
+|---|---:|---:|---:|---:|---:|---:|
+| `word_count`: 100k words, 5,000 distinct | 57.5 | 0.125 | 28.1 | 0.31 | 0.053 | 0.16 |
+| `object_build`: 50k computed keys | 81.2 | 0.045 | 0.11 | 0.074 | 0.032 | 0.083 |
+| `push_records`: 100k object literals | killed (memory) | 0.161 | 0.33 | 0.27 | 0.057 | 0.11 |
+
+On the VM these are now 1.4–2.8× CPython. What remains in `push_records`
+is object creation (a `String` per key and an `IndexMap` per record) and
+`str(i)`, shared with `records_pipeline`. On the regression gate
+(`tools/bench_compare.py`, interleaved rounds against v0.11.0) no other
+`vm`/`interp`/`startup` benchmark changed beyond this host's noise.

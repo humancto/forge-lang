@@ -333,6 +333,9 @@ let mut xs = [1, 2]
 xs = push(xs, 3)              // push returns a new array: reassign it
 xs.push(4)                    // or append in place (method form)
 let top = pop(xs)             // pop(xs) / xs.pop() remove and return the last element
+let mut groups = { a: [] }
+groups["a"].push(1)           // the method form also updates a field/index place
+groups.a.push(2)              // (the root must be `let mut`); groups is { a: [1, 2] }
 println(map(nums, fn(x) { return x * 2 }))
 println(filter(nums, fn(x) { return x > 2 }))
 println(reduce(nums, 0, fn(acc, x) { return acc + x }))   // (array, initial, fn)

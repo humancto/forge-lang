@@ -12,7 +12,7 @@ that a model cannot guess from `llms.txt`).
 
 | # | Severity | Finding | Tasks it affects |
 |---|---|---|---|
-| 1 | bug | `xs.push(v)` / `xs.pop()` on a nested place (`o.a.push(x)`, `g[k].push(x)`, `m[0].push(x)`) silently does nothing | data, any grouping code |
+| 1 | bug | `xs.push(v)` / `xs.pop()` on a nested place (`o.a.push(x)`, `g[k].push(x)`, `m[0].push(x)`) silently does nothing. **Fixed** (commits `e9ec31c` interpreter, `4ae27a6` VM) | data, any grouping code |
 | 2 | bug | Interpreter: `import { Struct } from "m.fg"` loses the struct's `impl` methods | money_module, any selective import of a type |
 | 3 | bug | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
 | 4 | bug | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
@@ -21,11 +21,11 @@ that a model cannot guess from `llms.txt`).
 | 7 | bug | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
 | 8 | bug | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
 | 9 | bug | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
-| 10 | perf | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys) | data (latest_record_wins, word_freq_large, ...) |
-| 11 | perf | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function) | data |
-| 12 | perf | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each) | data |
+| 10 | perf | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys). **Fixed** (`4ae27a6`) | data (latest_record_wins, word_freq_large, ...) |
+| 11 | perf | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function). **Fixed** (`ebe7a6b`, any value: `4ae27a6`) | data |
+| 12 | perf | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each). **Fixed** (`e9ec31c`) | data |
 | 13 | perf | `set`/`map` are linear lists: `st.has`, `st.add`, `m.get`, `m.set` are O(n) per call on both engines | data |
-| 14 | perf | Net effect: the textbook word count over 100,000 words takes 28 s (VM) / 30 s (interp); Python takes 0.03 s | word_freq_large |
+| 14 | perf | Net effect: the textbook word count over 100,000 words takes 28 s (VM) / 30 s (interp); Python takes 0.03 s. **Fixed**: 0.13 s (VM) / 0.31 s (interp) | word_freq_large |
 | 15 | gap | HTTP handlers cannot set a status code or response headers, and cannot read request headers | servers |
 | 16 | gap | A database opened at the top level of a server is not visible in handlers ("no database connection open") | todo_sqlite |
 | 17 | gap | `import { a as b }` does not exist and is misparsed ("does not export 'as'"); importing a module twice runs it twice | clashing_modules |
@@ -43,6 +43,13 @@ that a model cannot guess from `llms.txt`).
 ## Bugs
 
 ### 1. Method calls on a nested place are silently dropped
+
+**Fixed** (`e9ec31c`, `4ae27a6`): the method form of `push`/`pop`/`add`/`remove` on a
+field/index chain rooted at a variable updates the place on both engines and editions
+(index expressions, then arguments, then the place). An immutable root raises the
+`o.a = v` error (T0017 statically for a known array/set receiver); a frozen receiver
+raises E0029. Tests: `tests/nested_place_mutation_test.fg`, its 2027 copy,
+`src/vm/container_ops_tests.rs`.
 
 What I tried (log_latency_percentiles): group requests per endpoint with
 `groups[endpoint].push(req)`. Every group stayed at one element; no error, no warning.
@@ -266,6 +273,10 @@ the whole loop, "n" is the number of distinct keys or elements.
 
 ### 10. VM: assigning a key copies the object
 
+**Fixed** (`4ae27a6`): `SetIndexLocal`/`SetFieldLocal` update an object or array a local
+owns in place; reads (`GetIndexLocal`, `PeekLocal` + `CallPure` for `get`/`has_key`/
+`len`/`contains`) no longer share it. 50k keys: 81 s -> 0.05 s (`benchmarks/vm/object_build.fg`).
+
 `SetIndex` returns an updated copy (value semantics, `CLAUDE.md` "VM collections are
 values"), and for objects that copy is O(size) even when the object has a single owner.
 Building an object with 20,000 distinct keys did not finish: the process was killed after
@@ -277,6 +288,11 @@ Suggested fix: extend the `unique` single-owner in-place update to `SetIndex`/`S
 on objects (and maps/sets), or make object storage persistent (HAMT) so a copy is cheap.
 
 ### 11. VM: pushing object literals is quadratic
+
+**Fixed**: the push of a value that was not a "simple operand" took the copying
+`__forge_method_mut` path (`ebe7a6b` for literals; `4ae27a6` for any value, since
+`PushLocal` evaluates the value before reading the local exactly like the generic path).
+100k records: killed -> 0.16 s (`benchmarks/vm/push_records.fg`).
 
 ```forge
 let mut recs = []
@@ -296,6 +312,8 @@ Suggested fix: find why an object-literal argument makes `PushLocal` copy, add a
 
 ### 12. Interpreter: `get` and `has_key` copy the whole object
 
+**Fixed** (`e9ec31c`): both borrow a variable argument (`try_read_in_place`).
+
 `Environment::get` deep-clones a variable on read (`CLAUDE.md` "Reading a variable copies
 it"); builtins receive their arguments that way, so `get(counts, w, 0)` on an object with
 n keys costs O(n). The indexing form `counts[w]` borrows and is fast.
@@ -314,6 +332,10 @@ or a key projection); `CLAUDE.md` already notes "hashed Set/Map indexes" as bloc
 Arc-backed values.
 
 ### 14. What a model's natural solution costs
+
+**Fixed**: `benchmarks/vm/word_count.fg` (this loop at the top level) runs in 0.13 s on
+the VM and 0.31 s on the interpreter (was 57 s / 28 s; CPython 0.05 s). See
+`docs/BENCHMARKS.md`, "Building objects, records and groups".
 
 The idiomatic word count
 
