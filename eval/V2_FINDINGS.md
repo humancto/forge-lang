@@ -32,7 +32,7 @@ that a model cannot guess from `llms.txt`).
 | 18 | gap (fixed) | Request bodies must be JSON with `Content-Type: application/json`; otherwise axum answers 400/415 in text/plain | servers |
 | 19 | gap (fixed) | `llms.txt` describes import resolution incorrectly | multifile |
 | 20 | gap (fixed) | `regex` has no capture groups | logfmt_parse, ini_config_check |
-| 21 | gap | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
+| 21 | gap (fixed) | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
 | 22 | gap | `Map<String, T>` (suggested for objects by the MCP section) does not accept an object literal; there is no typed dictionary for objects | typed |
 | 23 | gap (fixed) | HTTP client: a timeout and a refused connection raise the same message; `timeout` units are undocumented | http_client |
 | 24 | gap (fixed) | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
@@ -516,6 +516,13 @@ Each of these cost a wrong guess while writing references:
 
 Suggested fix: add these to `llms.txt` (a "Concurrency details", "Maps and sets" and
 "time" paragraph would cover most).
+
+**Fixed:** `llms.txt` states each of them, verified on both engines: `select`'s result and
+`receive` on a drained closed channel, `exit(code)`, abandoned detached tasks, negative indexes
+(strings cannot be indexed at all), the `Map` methods (`set`/`remove` return a new map, `m[k]`
+is an error), the `time.*` signatures and result objects, no `? :` (`if` is an expression), no
+array/tuple patterns, the `typeof` names (structs and algebraic values are `Object`; named
+functions `Function`, anonymous ones `Lambda`), and that 4xx/5xx HTTP answers are responses.
 
 ### 22. No typed dictionary for objects
 

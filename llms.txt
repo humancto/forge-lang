@@ -57,6 +57,7 @@ println("{join(["a", "b"], ", ")}")       // any expression, including string li
 println(typeof(pi))           // Float
 println(user.name)
 println(nums[0])
+println(nums[-1])             // 3: negative indexes count from the end
 println(len(nums))
 println(str(42) + "!")        // + joins two Strings; convert other values with str() or "{x}"
 println(int("7") + 1)
@@ -73,7 +74,7 @@ println("{who} {age} {first} {rest}")
 
 Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
 
-Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
+Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. `typeof(x)` returns one of `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object` (also for struct and algebraic values), `Tuple`, `Set`, `Map`, `Result`, `Option`, `Function` (a named `fn`), `Lambda` (an anonymous `fn`), `BuiltIn`, `Channel`. Strings cannot be indexed (`s[0]` is an error): use `substring(s, start, end)`. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
 
 ## Type annotations and checking
 
@@ -124,6 +125,8 @@ loop {
     if m >= 4 { break }
 }
 println(score > 0 && score < 100)
+let grade = if score >= 50 { "pass" } else { "fail" }   // `if` is an expression; there is no `cond ? a : b`
+println(grade)
 ```
 
 ## Functions and closures
@@ -253,7 +256,7 @@ let label = match s {
 println(label)
 ```
 
-Patterns: literals (including negative numbers), `_`, bindings, constructors `Name(a, b)` (nested: `Ok(Some(x))`), and or-patterns `p1 | p2` whose alternatives bind the same names. A guard `pattern if cond` sees the pattern's bindings. If no arm matches, it is a runtime error (E0026); end with `_ => ...` when the cases are open.
+Patterns: literals (including negative numbers), `_`, bindings, constructors `Name(a, b)` (nested: `Ok(Some(x))`), and or-patterns `p1 | p2` whose alternatives bind the same names. There are no array or tuple patterns (`[a, b] =>` and `(a, b) =>` are syntax errors): destructure first (`let [a, b] = pair`) or nest matches. A guard `pattern if cond` sees the pattern's bindings. If no arm matches, it is a runtime error (E0026); end with `_ => ...` when the cases are open.
 
 ## Result, Option, errors
 
@@ -365,12 +368,14 @@ println(contains(s, "lo, W"))
 let st = set([1, 2, 2, 3])
 println(st.has(2))
 let mut m = map()
-m = m.set("k", 1)
+m = m.set("k", 1)             // set/remove return a new Map: reassign
 println(m.get("k"))
 println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
 ```
 
-Other builtins: `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+Maps: `m.set(k, v)` and `m.remove(k)` return a new Map (a bare `m.set(k, v)` statement changes nothing), `m.get(k)` (`null` if absent), `m.has(k)`, `m.keys()`, `m.values()`, `m.len()`, `m.to_array()` (an array of `(key, value)` tuples), `for k, v in m`; `m[k]` is an error. Keys may be any value; for String keys an object (`obj[k] = v`) is simpler.
+
+Other builtins: `exit(code)` (ends the program at once with that exit status; output already printed is kept), `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
 
 ## Standard library (always in scope)
 
@@ -389,7 +394,7 @@ Other builtins: `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stde
 | `env` | `get(name, default?)`, `set`, `has`, `keys` |
 | `log` | `info`, `warn`, `error`, `debug` (structured, via tracing) |
 | `term` | `red`, `green`, `bold`, `table(rows)`, `bar`, `sparkline`, `banner`, `box` |
-| `time` | `now()`, `format`, `parse`, `add`, `diff`, `unix`, `sleep` |
+| `time` | `now()` → `{ iso, unix, unix_ms, year, month, day, hour, minute, second, weekday, weekday_short, day_of_year, timezone }` (UTC); `unix()` (Int seconds); `parse(s)` (`2024-03-05`, `2024-03-05 10:20:30`, `2024-03-05T10:20:30Z` or with an offset, converted to UTC) → the same object; `format(t, "%Y-%m-%d")` (`t` an object or Unix seconds, strftime pattern, default `%Y-%m-%d %H:%M:%S`, always UTC); `add(t, secs)` / `add(t, { days: 1, hours: 2 })`, `sub` → object; `diff(a, b)` (a − b) → `{ seconds, minutes, hours, days, weeks, human }`; `sleep(seconds)` |
 | `os`, `path` | `os.platform()`, `os.cpus()`; `path.join(a, b)`, `path.extname(p)`, `path.basename(p)` |
 | `io` | `prompt`, `args_parse`, `args_get`, `args_has` |
 
@@ -443,7 +448,7 @@ let t = spawn {
 println(await_timeout(t, 10))  // null on timeout (milliseconds)
 ```
 
-Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `select(channels, timeout_ms?)`, `close(ch)`.
+Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `select(channels, timeout_ms?)` (`[index, value]` from the first channel with a value; `null` on timeout and also when the channels are closed), `close(ch)` (then `receive` returns `null` once the channel is drained). A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
 
 Tasks communicate through return values (`squad` results, `await`) and channels. Do not mutate captured variables from inside `spawn` and expect the parent to see it: the default VM gives each task its own copy (the `--interp` engine shares closure state).
 
@@ -538,7 +543,7 @@ fn cities() { return ["Oslo"] }
 - Words like `order`, `from`, `to`, `limit`, `where`, `select`, `table`, `take`, `times`, `safe` are fine as variable, function, parameter and field names. Reserved: `let mut fn return if else match for in while loop break continue struct type interface impl pub import spawn squad try catch async await yield true false null`.
 - `for i, x in array` does not work. Use `for e in enumerate(array) { e.index, e.value }`.
 - No `|x| ...` closures and no arrow functions. Write `fn(x) { return ... }`.
-- No `throw`, no `elif`, no `??` operator. Use `Err`/`?`, `else if`, and `get(obj, key, default)`.
+- No `throw`, no `elif`, no `??` and no `? :` operator. Use `Err`/`?`, `else if`, `get(obj, key, default)` and `if c { a } else { b }`.
 - Method chains cannot start a line with `.`; keep `a.filter(...).map(...)` on one line.
 - `regex.*` takes `(text, pattern)`, not `(pattern, text)`. Escape backslashes in patterns: `"\\d+"`.
 - `reduce(array, initial, fn)` — the initial value comes second.
