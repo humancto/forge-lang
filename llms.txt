@@ -382,7 +382,7 @@ Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digi
 | `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `close()` |
 | `pg`, `mysql` | `connect(url)`, `query(conn, sql, params?)`, `execute(conn, sql, params?)`, `close(conn)`; mysql adds `begin/commit/rollback` |
 | `jwt` | `sign(claims, secret, opts?)`, `verify(token, secret)`, `decode(token)`, `valid(token, secret)` |
-| `csv` | `parse(text)`, `stringify(rows)`, `read(path)`, `write(path, rows)` |
+| `csv` | `parse(text, opts?)` (RFC 4180: quoted fields keep commas, quotes and line breaks; rows are objects keyed by the header; unquoted fields that are exactly an integer, a decimal or `true`/`false` become numbers/booleans, anything else (`02134`, `+1`, `1e5`, quoted text) stays a String; `opts`: `{ header: false }` gives arrays, `{ types: false }` keeps every field a String), `stringify(rows)`, `read(path, opts?)`, `write(path, rows)` |
 | `env` | `get(name, default?)`, `set`, `has`, `keys` |
 | `log` | `info`, `warn`, `error`, `debug` (structured, via tracing) |
 | `term` | `red`, `green`, `bold`, `table(rows)`, `bar`, `sparkline`, `banner`, `box` |

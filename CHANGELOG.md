@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Interpreter: a struct or `type` brought in with a selective import (`import { P } from "shapes.fg"`) keeps its `impl` methods, static methods and field defaults, as on the VM (was `E0013 no method 'double' on P`).
 - VM: `try_receive(ch)` returns `Some(v)`, or `None` when nothing is waiting, like the interpreter and the documentation (it returned `Ok(v)` / `null`, so `match` on `Some(v)` only worked on `--interp`).
+- `csv.parse` / `csv.read` follow RFC 4180: quoted fields keep commas, doubled quotes, line breaks (LF or CRLF) and their surrounding whitespace, and an unterminated quote is an error instead of a silently broken record. Only unquoted fields that are exactly an integer, a plain decimal or `true`/`false` are converted, so `02134`, `+1`, `-0`, `1e5`, `NaN` and quoted numbers stay strings (zip codes and ids lost their leading zeros). New options `{ header: false }` (records as arrays) and `{ types: false }` (every field a string). `csv.stringify` also quotes values with line breaks or surrounding spaces and strings that would parse as numbers or booleans, so its output parses back to the same rows.
 
 ## [0.11.0] - 2026-10-11
 

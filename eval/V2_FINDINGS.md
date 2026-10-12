@@ -17,7 +17,7 @@ that a model cannot guess from `llms.txt`).
 | 3 | bug (fixed) | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
 | 4 | bug | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
 | 5 | bug | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
-| 6 | bug | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
+| 6 | bug (fixed) | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
 | 7 | bug | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
 | 8 | bug | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
 | 9 | bug | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
@@ -167,6 +167,8 @@ Reference workaround (typed_order_decode, shape_interface): `float(...)` when bu
 structs, with a comment.
 
 ### 6. `csv.parse` corrupts common CSV
+
+**Fixed:** `csv.parse`/`csv.read` are a character-level RFC 4180 parser (`src/stdlib/csv.rs`, shared by both engines): quoted fields keep commas, `""`, LF/CRLF and whitespace; an unterminated quote is an error; only unquoted fields that are exactly an integer, a plain decimal or `true`/`false` are converted (`02134`, `+1`, `1e5`, quoted numbers stay strings). Options `{ header: false }` and `{ types: false }`; `csv.stringify` output parses back to the same rows. Tests: `stdlib::csv::tests`, `tests/csv_rfc4180_test.fg` (both engines).
 
 ```forge
 // t.csv:
