@@ -1,0 +1,5 @@
+// VM benchmark: a lazy .stream() chain (filter, map, reduce) over 1M items.
+let xs = range(0, 1000000)
+let multiples = xs.stream().filter(fn(x) { return x % 3 == 0 })
+let doubled = multiples.map(fn(x) { return x * 2 })
+println(doubled.reduce(0, fn(acc, x) { return acc + x }))

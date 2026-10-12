@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Faster higher-order collection code on the VM** — callbacks from `map`, `filter`, `reduce`, `sort` (comparator), `find`, `any`, `all`, `flat_map`, `partition`, `group_by`, `sort_by`, `for_each`, their method forms (`xs.map(f)`) and `.stream()` stages go through a new fast path (`VM::call_callback`, `src/vm/callback.rs`): the callee is resolved once, frames are entered without allocating, and a JIT-compiled callback re-enters native code directly while nothing has run that could invalidate its entry guards. Best of 9 on a loaded 4-vCPU host: `map_filter` (1M items) 313 → 85 ms (CPython 239, Node 133), `reduce_lambda` 138 → 42 ms, `sort_comparator` (200k, comparator) 519 → 167 ms, `stream_chain` 209 → 76 ms, `records_pipeline` 577 → 512 ms. Results, errors, stack traces, `try`/`catch`, the recursion limit, fuel and timeouts are unchanged; a cancelled task (squad, `timeout`, sandbox deadline) now also stops between callback calls. Direct calls got cheaper too (no per-call name clone or signature allocation; a disabled profiler records nothing), and `forge run` no longer frees the heap object by object before exiting. New benchmarks `reduce_lambda`, `sort_comparator`, `stream_chain`, `records_pipeline` with Python/Node/Lua ports; see `docs/BENCHMARKS.md`.
+
+### Fixed
+
+- `rows.push({id: i, ...})` (an object or tuple literal) in a loop copied the whole array on every push on the VM: quadratic, and building 20k rows was killed for running out of memory. It now appends in place like other simple values (300k rows in ~0.24 s).
+
 ## [0.11.0] - 2026-10-11
 
 ### Added
