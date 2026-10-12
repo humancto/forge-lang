@@ -3016,7 +3016,8 @@ impl Interpreter {
     /// The annotation checks `typechecker::enforce` inserts (`--strict`,
     /// edition 2027) run on every call of an annotated function:
     /// `__types.check(value, type, "<context>")` and `__types.bind("T",
-    /// "<fn>", "<names>", args..)` are decided here without cloning the
+    /// "<fn>", "<names>", args..)` (and `__types.widen(value, type)`) are
+    /// decided here without cloning the
     /// hidden module or going through builtin dispatch. Same rule and
     /// messages as the module members (`stdlib::types_module`); any other
     /// shape takes the normal call path.
@@ -3051,12 +3052,27 @@ impl Interpreter {
                     Err(e) => return Some(Err(RuntimeError::new(&e))),
                 };
                 Some(if crate::semantics::types::fits(&value, &expected) {
-                    Ok(value)
+                    Ok(crate::semantics::types::widen(&value, &expected).unwrap_or(value))
                 } else {
                     Err(RuntimeError::new(&crate::semantics::types::violation(
                         context, &expected, &value,
                     )))
                 })
+            }
+            ("widen", [value, Expr::StringLit(ty)]) => {
+                let value = match self.eval_expr(value) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let expected = match crate::semantics::types::parse_cached(ty) {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(RuntimeError::new(&e))),
+                };
+                Some(Ok(if crate::semantics::types::fits(&value, &expected) {
+                    crate::semantics::types::widen(&value, &expected).unwrap_or(value)
+                } else {
+                    value
+                }))
             }
             ("bind", [Expr::StringLit(_), Expr::StringLit(_), Expr::StringLit(_), values @ ..]) => {
                 let mut evaluated = Vec::with_capacity(values.len());

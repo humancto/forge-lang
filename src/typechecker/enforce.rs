@@ -65,6 +65,17 @@ fn check_call(value: Expr, ty: &Expr, context: &str) -> Expr {
     )
 }
 
+/// `__types.widen(value, <type>)`: Int → Float widening without a check.
+fn widen_call(value: Expr, ty: String) -> Expr {
+    module_call("widen", vec![value, Expr::StringLit(ty)])
+}
+
+/// Can a value checked against canonical type `ty` change (Int → Float)?
+fn widens(ty: &str) -> bool {
+    crate::semantics::types::parse_cached(ty)
+        .is_ok_and(|t| crate::semantics::types::mentions_float(&t))
+}
+
 /// The local that holds what type parameter `tp` stands for in this call.
 fn binding_local(tp: &str) -> String {
     format!("__forge_type_{}", tp)
@@ -101,6 +112,13 @@ impl Instrumenter<'_> {
             Ty::Named(name, _) if self.env.is_interface(name) => return None,
             Ty::Named(name, _) => format!("Named:{}", name),
         })
+    }
+
+    /// The canonical type of struct `name`'s field `field` when a value
+    /// stored there can be widened (it declares Float).
+    fn field_canonical(&self, name: &str, field: &str) -> Option<String> {
+        let ty = self.env.struct_field_type(name, field)?;
+        self.canonical(&ty).filter(|c| widens(c))
     }
 
     fn stmts(&mut self, stmts: &mut [SpannedStmt]) {
@@ -157,6 +175,32 @@ impl Instrumenter<'_> {
                             line,
                             col,
                         );
+                    }
+                }
+            }
+            Stmt::Let {
+                value,
+                type_ann: Some(ann),
+                ..
+            } => {
+                self.expr(value);
+                // Annotated `let`s are checked statically; at run time a
+                // declared Float only widens an Int (`let x: Float = 7`).
+                let ty = self.env.lower_with(ann, &[]);
+                if let Some(canon) = self.canonical(&ty).filter(|c| widens(c)) {
+                    let v = std::mem::replace(value, Expr::Ident("null".to_string()));
+                    *value = widen_call(v, canon);
+                }
+            }
+            Stmt::StructDef { name, fields, .. } => {
+                // Defaults of fields declared Float (`x: Float = 0`).
+                for f in fields.iter_mut() {
+                    if let Some(default) = &mut f.default {
+                        self.expr(default);
+                        if let Some(canon) = self.field_canonical(name, &f.name) {
+                            let v = std::mem::replace(default, Expr::Ident("null".to_string()));
+                            *default = widen_call(v, canon);
+                        }
                     }
                 }
             }
@@ -246,7 +290,6 @@ impl Instrumenter<'_> {
                 }
             }
             Stmt::Return(None)
-            | Stmt::StructDef { .. }
             | Stmt::TypeDef { .. }
             | Stmt::InterfaceDef { .. }
             | Stmt::Break
@@ -272,9 +315,19 @@ impl Instrumenter<'_> {
                     }
                 }
             }
-            Expr::Object(fields) | Expr::StructInit { fields, .. } => {
+            Expr::Object(fields) => {
                 for (_, e) in fields {
                     self.expr(e);
+                }
+            }
+            Expr::StructInit { name, fields } => {
+                for (field, e) in fields.iter_mut() {
+                    self.expr(e);
+                    // Fields declared Float take Ints as Floats.
+                    if let Some(canon) = self.field_canonical(name, field) {
+                        let v = std::mem::replace(e, Expr::Ident("null".to_string()));
+                        *e = widen_call(v, canon);
+                    }
                 }
             }
             Expr::Array(items) | Expr::Tuple(items) => {
@@ -398,15 +451,23 @@ impl Instrumenter<'_> {
             let ty = self.env.lower_with(ann, type_params);
             if let Some(canon) = self.canonical(&ty) {
                 let context = format!("argument '{}' of '{}'", p.name, label);
-                checks.push(SpannedStmt::new(
-                    Stmt::Expression(check_call(
-                        Expr::Ident(p.name.clone()),
-                        &Expr::StringLit(canon),
-                        &context,
-                    )),
-                    line,
-                    col,
-                ));
+                let widens = widens(&canon);
+                let check = check_call(
+                    Expr::Ident(p.name.clone()),
+                    &Expr::StringLit(canon),
+                    &context,
+                );
+                // A declared Float makes an Int argument a Float: the
+                // parameter takes the checked (widened) value.
+                let stmt = if widens {
+                    Stmt::Assign {
+                        target: Expr::Ident(p.name.clone()),
+                        value: check,
+                    }
+                } else {
+                    Stmt::Expression(check)
+                };
+                checks.push(SpannedStmt::new(stmt, line, col));
             }
         }
         if !checks.is_empty() {

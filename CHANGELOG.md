@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A declared `Float` makes an Int a Float** (edition 2027 and `--strict`, both engines and JIT-compiled code; `semantics::types::widen`): `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1.5` (was `1`, integer division). The same holds for `-> Float` results, `let x: Float = 7`, struct fields declared `Float` and their defaults (`Price { amount: 5 }`), and nested positions (`[Float]`, `?Float`, tuples, map values, `Result`); an Int that a union member accepts as it is stays an Int. Edition 2026 without `--strict` runs no checks and does not convert: write `float(x)`. See docs/editions/2027.md.
+
 ### Fixed
 
 - Interpreter: a struct or `type` brought in with a selective import (`import { P } from "shapes.fg"`) keeps its `impl` methods, static methods and field defaults, as on the VM (was `E0013 no method 'double' on P`).
 - VM: `try_receive(ch)` returns `Some(v)`, or `None` when nothing is waiting, like the interpreter and the documentation (it returned `Ok(v)` / `null`, so `match` on `Some(v)` only worked on `--interp`).
 - `csv.parse` / `csv.read` follow RFC 4180: quoted fields keep commas, doubled quotes, line breaks (LF or CRLF) and their surrounding whitespace, and an unterminated quote is an error instead of a silently broken record. Only unquoted fields that are exactly an integer, a plain decimal or `true`/`false` are converted, so `02134`, `+1`, `-0`, `1e5`, `NaN` and quoted numbers stay strings (zip codes and ids lost their leading zeros). New options `{ header: false }` (records as arrays) and `{ types: false }` (every field a string). `csv.stringify` also quotes values with line breaks or surrounding spaces and strings that would parse as numbers or booleans, so its output parses back to the same rows.
+- VM, edition 2027 / `--strict`: a parameter declared as an array of functions (`fs: [fn(Int) -> Int]`) no longer fails its run-time check (`must be [function], got Array`). The VM decides every annotation check on its own values (`fits_vm`, the rule of `semantics::types::fits`), so functions inside arrays, tuples, sets, maps and options are recognised, and a function passed where another type is declared is reported as `got function` on both engines (the VM said `got Null`).
 
 ## [0.11.0] - 2026-10-11
 

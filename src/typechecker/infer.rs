@@ -626,6 +626,17 @@ impl<'a> Checker<'a> {
         ty
     }
 
+    /// The declared type of field `field` of struct `name` (generic
+    /// parameters stay `Ty::Param`).
+    pub(crate) fn struct_field_type(&self, name: &str, field: &str) -> Option<Ty> {
+        self.structs
+            .get(name)?
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .map(|f| f.ty.clone())
+    }
+
     pub(crate) fn is_interface(&self, name: &str) -> bool {
         self.interfaces.contains_key(name)
     }

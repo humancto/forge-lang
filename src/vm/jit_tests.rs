@@ -1824,6 +1824,37 @@ say either(false, true, false)
 }
 
 #[test]
+fn jit_widens_ints_checked_against_float() {
+    // A declared Float makes an Int a Float (`semantics::types::widen`):
+    // native code converts where the VM would, so `x / 2` is a Float
+    // division in every JIT mode.
+    let source = r#"
+fn half(x: Float) -> Float { return x / 2 }
+fn as_float(n: Int) -> Float { return n }
+fn third(x: Float) -> Float {
+    let y: Float = 3
+    return x / y
+}
+say half(3)
+say typeof(half(3))
+say as_float(7) / 2
+say third(1) * 3
+"#;
+    let (out, err) = instrumented_parity(source);
+    assert!(err.is_none(), "{:?}", err);
+    assert_eq!(out, vec!["1.5", "Float", "3.5", "1"]);
+    let (_, _, vm) = run_instrumented(source, JitMode::Eager);
+    for f in ["half", "as_float", "third"] {
+        assert!(
+            vm.jit.native_runs(f) > 0,
+            "expected `{}` to run natively; compiled: {:?}",
+            f,
+            vm.jit.compiled_function_names()
+        );
+    }
+}
+
+#[test]
 fn jit_leaves_failing_annotation_checks_to_the_vm() {
     // A String never fits Int, and Bool does not agree with Int: those
     // specializations are rejected and the VM raises the type error,

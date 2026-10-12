@@ -15,8 +15,8 @@ that a model cannot guess from `llms.txt`).
 | 1 | bug | `xs.push(v)` / `xs.pop()` on a nested place (`o.a.push(x)`, `g[k].push(x)`, `m[0].push(x)`) silently does nothing | data, any grouping code |
 | 2 | bug (fixed) | Interpreter: `import { Struct } from "m.fg"` loses the struct's `impl` methods | money_module, any selective import of a type |
 | 3 | bug (fixed) | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
-| 4 | bug | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
-| 5 | bug | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
+| 4 | bug (fixed) | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
+| 5 | bug (fixed) | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
 | 6 | bug (fixed) | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
 | 7 | bug | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
 | 8 | bug | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
@@ -120,6 +120,8 @@ both engines, add it to the engine-diff fixtures, and document it in `llms.txt` 
 
 ### 4. VM, edition 2027: `[fn(...) -> ...]` parameters fail their run-time check
 
+**Fixed:** the VM decided `__types.check` on its own values only for a few shapes and converted everything else to interpreter values, where a closure becomes null, so `[fn(Int) -> Int]` failed. It now decides every check on VM values (`fits_vm` in `src/vm/builtins.rs`, the rule of `semantics::types::fits`), and a violation by a function says `got function` on both engines. Tests: `tests/edition2027/annotations_test.fg` (`function_values_fit_function_annotations`, both engines).
+
 ```forge
 fn apply_all(fs: [fn(Int) -> Int], x: Int) -> [Int] {
     return map(fs, fn(f) { return f(x) })
@@ -137,6 +139,8 @@ Suggested fix: make the VM's `__types.check` accept VM closures as `function` el
 2027 parity fixture with arrays of functions.
 
 ### 5. A `Float` annotation does not make a value a Float
+
+**Fixed:** where a declared type is enforced (edition 2027 and `--strict`), an Int checked against a declared `Float` becomes a Float (`semantics::types::widen`, mirrored by the VM's `widen_vm` and the JIT's `kind_widens`): parameters (reassigned from their check), `-> Float` results, annotated `let`s and struct fields/defaults (`__types.widen`), nested `[Float]`/`?Float`/tuples/map values/`Result`. `half(3) == 1.5` and `typeof(half(3)) == "Float"` on both engines and in JIT code. Edition 2026 without `--strict` does not instrument and does not convert (documented in docs/editions/2027.md and llms.txt: write `float(x)`). `str(3.0)` is `"3"` on both engines (unchanged), so the difference shows in arithmetic and `typeof`. Tests: `tests/edition2027/annotations_test.fg` (`float_annotations_widen_ints`), `vm::jit_tests::jit_widens_ints_checked_against_float`.
 
 ```forge
 fn half(x: Float) -> Float {
