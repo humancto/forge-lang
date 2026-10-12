@@ -1,7 +1,8 @@
 use super::bytecode::*;
 use crate::parser::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 struct Local {
     name: String,
@@ -87,6 +88,19 @@ pub struct Compiler {
     /// branch is left as a placeholder and the function fails to compile in
     /// `check_branches` (instead of silently jumping to the wrong place).
     branch_overflow: bool,
+    /// Whether this compiler compiles a file's (or REPL step's) top level.
+    is_top_level: bool,
+    /// Names the top level binds with `let` or destructuring (directly,
+    /// not inside a block), with whether any of those declarations is
+    /// `mut`. Shared by every nested compiler; see [`Compiler::forward_global`].
+    toplevel_binders: Arc<HashMap<String, bool>>,
+    /// Top-level bindings compiled as globals so far, in compile order,
+    /// with the mutability of the latest declaration.
+    toplevel_globals: HashMap<String, bool>,
+    /// Names from `toplevel_binders` that this function (or one nested in
+    /// it) accessed as globals. A top-level `let` of such a name, compiled
+    /// afterwards, defines a global instead of a register local.
+    toplevel_refs: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +171,10 @@ impl Compiler {
             current_line: 0,
             current_col: 0,
             branch_overflow: false,
+            is_top_level: false,
+            toplevel_binders: Arc::new(HashMap::new()),
+            toplevel_globals: HashMap::new(),
+            toplevel_refs: HashSet::new(),
         }
     }
 
@@ -184,6 +202,8 @@ impl Compiler {
         fc.base_dir = self.base_dir.clone();
         fc.global_prefix = self.global_prefix.clone();
         fc.module_globals = self.module_globals.clone();
+        fc.toplevel_binders = Arc::clone(&self.toplevel_binders);
+        fc.toplevel_globals = self.toplevel_globals.clone();
         fc
     }
 
@@ -192,6 +212,8 @@ impl Compiler {
     /// and register the prototype. Returns the prototype index.
     fn finish_child(&mut self, mut fc: Compiler) -> Result<u16, CompileError> {
         fc.check_branches()?;
+        self.toplevel_refs
+            .extend(std::mem::take(&mut fc.toplevel_refs));
         for (uv_idx, name) in std::mem::take(&mut fc.pending_captures) {
             let source = self.capture_for_child(&name).ok_or_else(|| {
                 CompileError::new(&format!("internal: cannot resolve captured '{}'", name))
@@ -269,7 +291,63 @@ impl Compiler {
         if self.outer_names.contains(name) {
             return Some(true);
         }
-        None
+        self.toplevel_global_mutability(name)
+    }
+
+    /// For a name with no local or captured binding here: the mutability of
+    /// the top-level `let` it refers to, which is (or, when the reference
+    /// is compiled before the declaration, will be) a global. `None` for
+    /// any other global.
+    ///
+    /// Top-level `let`s are normally register locals of the top-level chunk
+    /// that functions capture as upvalues. A function compiled before the
+    /// `let` (`fn f() { return late }` above `let late = 1`) cannot capture
+    /// a register that does not exist yet, so it reads a global; the `let`
+    /// then defines that global instead of a local (see `toplevel_refs`).
+    /// Reading it before the `let` runs is "undefined variable", as in the
+    /// interpreter, whose top-level scope is one environment.
+    fn toplevel_global_mutability(&self, name: &str) -> Option<bool> {
+        if let Some(&mutable) = self.toplevel_globals.get(name) {
+            return Some(mutable);
+        }
+        self.toplevel_binders.get(name).copied()
+    }
+
+    /// Whether `name` (with no local or captured binding here) refers to a
+    /// top-level `let` that has not been compiled yet: a forward reference.
+    fn is_forward_toplevel(&self, name: &str) -> bool {
+        !self.toplevel_globals.contains_key(name) && self.toplevel_binders.contains_key(name)
+    }
+
+    /// Record a global access to `name` (see `toplevel_refs`).
+    fn note_global_access(&mut self, name: &str) {
+        if self.toplevel_binders.contains_key(name) && !self.toplevel_refs.contains(name) {
+            self.toplevel_refs.insert(name.to_string());
+        }
+    }
+
+    /// Whether a `let` of `name` compiled now is a top-level binding that
+    /// must be a global: something compiled earlier accessed it as one.
+    fn let_defines_global(&self, name: &str) -> bool {
+        self.is_top_level
+            && self.scope_depth == 1
+            && (self.toplevel_globals.contains_key(name) || self.toplevel_refs.contains(name))
+            && !self
+                .locals
+                .iter()
+                .any(|l| l.name == name && l.depth == self.scope_depth)
+    }
+
+    /// A `let` that redeclares a name bound in the same scope, after a
+    /// closure captured that binding: the index of the local to reuse.
+    /// The interpreter keeps one binding per name and scope, so the closure
+    /// sees the new value; a fresh register would leave it on the old one.
+    /// (Without a capture the two are indistinguishable, and a fresh
+    /// register keeps register types simple for the JIT.)
+    fn redeclared_captured_local(&self, name: &str) -> Option<usize> {
+        let index = self.locals.iter().rposition(|l| l.name == name)?;
+        let local = &self.locals[index];
+        (local.depth == self.scope_depth && local.captured).then_some(index)
     }
 
     /// The runtime global name for a user-visible top-level name.
@@ -602,8 +680,35 @@ fn hoisted<'a>(
         .map(|i| &program.statements[i])
 }
 
-fn compile_top_level(c: &mut Compiler, program: &Program) -> Result<(), CompileError> {
+/// Prepare `c` to compile the top level of `program` (a file, module or
+/// REPL step): record the names its `let`s and destructurings bind there,
+/// so functions compiled before such a declaration can still reach it (see
+/// [`Compiler::toplevel_global_mutability`]).
+fn begin_top_level(c: &mut Compiler, program: &Program) {
+    let mut binders: HashMap<String, bool> = HashMap::new();
+    let mut bind = |name: &str, mutable: bool| {
+        *binders.entry(name.to_string()).or_insert(false) |= mutable;
+    };
+    for spanned in &program.statements {
+        match &spanned.stmt {
+            Stmt::Let { name, mutable, .. } => bind(name, *mutable),
+            Stmt::Destructure {
+                pattern, mutable, ..
+            } => {
+                for name in crate::semantics::hoist::destructure_names(pattern) {
+                    bind(name, *mutable);
+                }
+            }
+            _ => {}
+        }
+    }
+    c.is_top_level = true;
+    c.toplevel_binders = Arc::new(binders);
     c.begin_scope();
+}
+
+fn compile_top_level(c: &mut Compiler, program: &Program) -> Result<(), CompileError> {
+    begin_top_level(c, program);
     for spanned in hoisted(program, &crate::semantics::hoist::is_predefined) {
         c.set_span(spanned);
         compile_stmt(c, &spanned.stmt)?;
@@ -667,7 +772,7 @@ pub fn compile_repl_with(
     predefined: &dyn Fn(&str) -> bool,
 ) -> Result<Chunk, CompileError> {
     let mut c = Compiler::new("<repl>");
-    c.begin_scope();
+    begin_top_level(&mut c, program);
 
     let result_reg = c.alloc_reg()?;
     let mut has_result = false;
@@ -908,6 +1013,9 @@ fn compile_store_variable(c: &mut Compiler, name: &str, src: u8) -> Result<(), C
         }
         c.emit(encode_abc(OpCode::SetLocal, reg, src, 0), 0);
     } else if c.binding_mutability(name) == Some(false) {
+        // A top-level `let` declared further down does not exist yet when
+        // this runs early: that is "undefined variable" first.
+        emit_forward_definedness_check(c, name)?;
         return compile_hidden_stmt(
             c,
             "__forge_raise_error",
@@ -916,9 +1024,39 @@ fn compile_store_variable(c: &mut Compiler, name: &str, src: u8) -> Result<(), C
     } else if let Some(uv_idx) = c.resolve_capture(name) {
         c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, src, 0), 0);
     } else {
-        let name_idx = c.const_str(&c.global_name(name));
-        c.emit(encode_abx(OpCode::SetGlobal, src, name_idx), 0);
+        emit_set_global_var(c, name, src)?;
     }
+    Ok(())
+}
+
+/// Assign the global variable `name` (no local or captured binding).
+fn emit_set_global_var(c: &mut Compiler, name: &str, src: u8) -> Result<(), CompileError> {
+    emit_forward_definedness_check(c, name)?;
+    let name_idx = c.const_str(&c.global_name(name));
+    c.emit(encode_abx(OpCode::SetGlobal, src, name_idx), 0);
+    Ok(())
+}
+
+/// Before assigning a top-level binding whose `let` is compiled later
+/// (`fn f() { late = 2 }` above `let mut late = 1`): read it, so calling
+/// `f` before the `let` ran fails with "undefined variable" like the
+/// interpreter, instead of `SetGlobal` silently defining it.
+fn emit_forward_definedness_check(c: &mut Compiler, name: &str) -> Result<(), CompileError> {
+    if c.resolve_local(name).is_some()
+        || c.resolve_upvalue(name).is_some()
+        || c.resolve_in_parent(name).is_some()
+        || c.resolve_parent_upvalue(name).is_some()
+        || c.outer_names.contains(name)
+        || !c.is_forward_toplevel(name)
+    {
+        return Ok(());
+    }
+    c.note_global_access(name);
+    let saved = c.next_register;
+    let probe = c.alloc_reg()?;
+    let idx = c.const_str(&c.global_name(name));
+    c.emit(encode_abx(OpCode::GetGlobal, probe, idx), 0);
+    c.free_to(saved);
     Ok(())
 }
 
@@ -1355,6 +1493,46 @@ fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, Com
     Ok(true)
 }
 
+/// Statement `s.add(e)` / `s.remove(e)` on a mutable local with a simple
+/// `e`: one `UpdateSetLocal`, in place when the local owns its set (so
+/// building a set in a loop is O(1) per element instead of copying it).
+/// Like `PushLocal`, only in statement position: the result (the receiver)
+/// is discarded. Any other receiver type takes the generic path at run time.
+fn try_compile_set_update_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, CompileError> {
+    let (receiver, method, value) = match expr {
+        Expr::MethodCall {
+            object,
+            method,
+            args,
+        } if args.len() == 1 => (object.as_ref(), method.as_str(), &args[0]),
+        Expr::Call { function, args } if args.len() == 1 => match function.as_ref() {
+            Expr::FieldAccess { object, field } => (object.as_ref(), field.as_str(), &args[0]),
+            _ => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    let op = match method {
+        "add" => SET_UPDATE_ADD,
+        "remove" => SET_UPDATE_REMOVE,
+        _ => return Ok(false),
+    };
+    let Expr::Ident(var) = receiver else {
+        return Ok(false);
+    };
+    if !is_simple_operand(value) {
+        return Ok(false);
+    }
+    let Some((reg, true)) = c.resolve_local(var) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let value_reg = c.alloc_reg()?;
+    compile_expr(c, value, value_reg)?;
+    c.emit(encode_abc(OpCode::UpdateSetLocal, reg, value_reg, op), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
 /// Store `src` into the variable `name` (local, captured or global).
 fn emit_store_var(c: &mut Compiler, name: &str, src: u8) -> Result<(), CompileError> {
     if let Some((reg, _)) = c.resolve_local(name) {
@@ -1362,8 +1540,7 @@ fn emit_store_var(c: &mut Compiler, name: &str, src: u8) -> Result<(), CompileEr
     } else if let Some(uv_idx) = c.resolve_capture(name) {
         c.emit(encode_abc(OpCode::SetUpvalue, uv_idx, src, 0), 0);
     } else {
-        let name_idx = c.const_str(&c.global_name(name));
-        c.emit(encode_abx(OpCode::SetGlobal, src, name_idx), 0);
+        emit_set_global_var(c, name, src)?;
     }
     Ok(())
 }
@@ -1843,6 +2020,30 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             value,
             ..
         } => {
+            if c.let_defines_global(name) {
+                let saved = c.next_register;
+                let tmp = c.alloc_reg()?;
+                compile_expr(c, value, tmp)?;
+                let name_idx = c.const_str(&c.global_name(name));
+                c.emit(encode_abx(OpCode::SetGlobal, tmp, name_idx), 0);
+                c.free_to(saved);
+                c.toplevel_globals.insert(name.clone(), *mutable);
+                return Ok(());
+            }
+            if let Some(index) = c.redeclared_captured_local(name) {
+                let reg = c.locals[index].register;
+                let saved = c.next_register;
+                let tmp = c.alloc_reg()?;
+                compile_expr(c, value, tmp)?;
+                c.emit(encode_abc(OpCode::SetLocal, reg, tmp, 0), 0);
+                c.free_to(saved);
+                c.locals[index].mutable = *mutable;
+                if c.module_mode && c.scope_depth == 1 {
+                    let name_idx = c.const_str(&c.global_name(name));
+                    c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                }
+                return Ok(());
+            }
             let reg = if matches!(value, Expr::Lambda { .. }) {
                 // A lambda may refer to itself recursively: bind first, then
                 // sync the binding's upvalue cell if the lambda captured it.
@@ -2125,7 +2326,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Match { subject, arms } => compile_match(c, subject, arms, None),
 
         Stmt::Expression(expr) => {
-            if try_compile_push_statement(c, expr)? {
+            if try_compile_push_statement(c, expr)? || try_compile_set_update_statement(c, expr)? {
                 return Ok(());
             }
             let saved = c.next_register;
@@ -2272,19 +2473,46 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             )?;
             c.free_to(saved);
 
+            // Each name becomes a new local, or (like `let`) a top-level
+            // global or a redeclared captured local that is assigned.
+            enum Target {
+                Fresh(u8),
+                Global(String),
+                Reused(u8),
+            }
             let targets: Vec<&String> = names.into_iter().chain(rest).collect();
-            let target_regs: Vec<u8> = targets
-                .iter()
-                .map(|name| c.add_local(name, *mutable))
-                .collect::<Result<_, _>>()?;
+            let mut slots = Vec::with_capacity(targets.len());
+            for name in &targets {
+                slots.push(if c.let_defines_global(name) {
+                    c.toplevel_globals.insert((*name).clone(), *mutable);
+                    Target::Global((*name).clone())
+                } else if let Some(index) = c.redeclared_captured_local(name) {
+                    c.locals[index].mutable = *mutable;
+                    Target::Reused(c.locals[index].register)
+                } else {
+                    Target::Fresh(c.add_local(name, *mutable)?)
+                });
+            }
             let idx_reg = c.alloc_reg()?;
-            for (index, target_reg) in target_regs.into_iter().enumerate() {
+            let item_reg = c.alloc_reg()?;
+            for (index, slot) in slots.into_iter().enumerate() {
                 let const_idx = c.const_int(index as i64);
                 c.emit(encode_abx(OpCode::LoadConst, idx_reg, const_idx), 0);
-                c.emit(
-                    encode_abc(OpCode::GetIndex, target_reg, parts_reg, idx_reg),
-                    0,
-                );
+                let dst = match &slot {
+                    Target::Fresh(reg) => *reg,
+                    Target::Global(_) | Target::Reused(_) => item_reg,
+                };
+                c.emit(encode_abc(OpCode::GetIndex, dst, parts_reg, idx_reg), 0);
+                match slot {
+                    Target::Fresh(_) => {}
+                    Target::Global(name) => {
+                        let name_idx = c.const_str(&c.global_name(&name));
+                        c.emit(encode_abx(OpCode::SetGlobal, item_reg, name_idx), 0);
+                    }
+                    Target::Reused(reg) => {
+                        c.emit(encode_abc(OpCode::SetLocal, reg, item_reg, 0), 0);
+                    }
+                }
             }
             c.free_to(idx_reg);
             Ok(())
@@ -2765,6 +2993,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             } else if let Some(uv_idx) = c.resolve_capture(name) {
                 c.emit(encode_abc(OpCode::GetUpvalue, dst, uv_idx, 0), 0);
             } else {
+                c.note_global_access(name);
                 let idx = c.const_str(&c.global_name(name));
                 let pc = c.chunk.code.len();
                 c.emit(encode_abx(OpCode::GetGlobal, dst, idx), 0);

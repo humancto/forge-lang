@@ -1,0 +1,47 @@
+// expect: [set(9007199254740993, 9007199254740992, 3), true, set(3), 29, [1, NaN, a, [1, 2], 0], [0, 4, 8, 12, 16, 1], 10, [set(1, 2), set(2, 3)], 10, true]
+// Sets are hash-indexed; every lookup must agree with the linear
+// definition, including equality that is not transitive (two large Ints
+// equal to one Float) and removal of every matching member.
+
+let big = 9007199254740992
+let s = set([big + 1, big, 3])
+let has_float = s.has(9007199254740992.0)
+let mut t = s
+t.remove(9007199254740992.0)
+
+let mut u = set([])
+for i in range(30) { u.add(big + i) }
+u.add(9007199254740992.0)
+u.remove(9007199254740994.0)
+
+let nan = math.sqrt(-1.0)
+let mut mixed = set([])
+for x in [1, 1.0, nan, nan, "a", [1, 2], [1.0, 2], 0, -0.0] { mixed.add(x) }
+
+let mut r = set([])
+for i in range(20) { r.add(i) }
+for i in range(20) {
+    if i % 4 != 0 { r.remove(i) }
+}
+r.add(1)
+r.add(0)
+let mut order = []
+for x in r { order.push(x) }
+
+let mut objects = set([])
+for i in range(10) { objects.add({k: i, name: "n{i}"}) }
+objects.add({name: "n4", k: 4.0})
+
+let mut a = set([1, 2])
+let alias = a
+a.add(3)
+a.remove(1)
+
+let mut many = set([])
+for i in range(500) { many.add(i * 2) }
+let mut found = 0
+for i in range(1000) {
+    if many.has(i) { found = found + 1 }
+}
+
+[s, has_float, t, len(u), mixed.to_array(), order, len(objects), [alias, a], found / 50, set([1, 2, 3]) == set([3.0, 2, 1])]

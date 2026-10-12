@@ -102,11 +102,21 @@ pub enum OpCode {
     /// `R(A) += 1` and the next instruction (the loop-exit jump) is skipped;
     /// otherwise execution continues with that exit jump.
     ForRangeNext,
+    /// A=local register, B=value, C=operation (`SET_UPDATE_ADD` /
+    /// `SET_UPDATE_REMOVE`): statement `local.add(R(B))` /
+    /// `local.remove(R(B))` on a mutable local (result discarded). Updates
+    /// the set in place when the local uniquely owns it; otherwise behaves
+    /// like `__forge_method_mut` (any receiver type).
+    UpdateSetLocal,
 }
+
+/// `UpdateSetLocal` operations (its C operand).
+pub const SET_UPDATE_ADD: u8 = 0;
+pub const SET_UPDATE_REMOVE: u8 = 1;
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::ForRangeNext as u8 + 1 == 69);
+const _: () = assert!(OpCode::UpdateSetLocal as u8 + 1 == 70);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -182,6 +192,7 @@ impl TryFrom<u8> for OpCode {
             66 => Ok(OpCode::PopLocal),
             67 => Ok(OpCode::ForRangePrep),
             68 => Ok(OpCode::ForRangeNext),
+            69 => Ok(OpCode::UpdateSetLocal),
             _ => Err(value),
         }
     }
@@ -417,7 +428,8 @@ mod tests {
         assert_eq!(OpCode::try_from(66u8), Ok(OpCode::PopLocal));
         assert_eq!(OpCode::try_from(67u8), Ok(OpCode::ForRangePrep));
         assert_eq!(OpCode::try_from(68u8), Ok(OpCode::ForRangeNext));
-        assert_eq!(OpCode::try_from(69u8), Err(69));
+        assert_eq!(OpCode::try_from(69u8), Ok(OpCode::UpdateSetLocal));
+        assert_eq!(OpCode::try_from(70u8), Err(70));
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }

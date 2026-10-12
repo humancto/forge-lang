@@ -158,6 +158,16 @@ fn echo(msg) {
     log.push(msg)
     return "echo {len(log)}: {msg}"
 }
+
+// A handler using top-level bindings declared below it.
+@get("/late")
+fn late_route() {
+    late_hits = late_hits + 1
+    return { late: late_value, hits: late_hits }
+}
+
+let late_value = "declared after its handler"
+let mut late_hits = 0
 "#;
 
 /// `(method, path, JSON body)`.
@@ -193,6 +203,8 @@ const REQUESTS: &[(&str, &str, Option<&str>)] = &[
     ("GET", "/undefined", None),
     ("GET", "/caught", None),
     ("GET", "/lambda", None),
+    ("GET", "/late", None),
+    ("GET", "/late", None),
     ("GET", "/no/such/route", None),
     ("POST", "/ping", Some("{}")),
     ("DELETE", "/hello/forge", None),
@@ -296,6 +308,18 @@ fn http_responses_are_identical_on_both_engines() {
         hits,
         [r#"{"hits":1,"log":[1]}"#, r#"{"hits":1,"log":[1]}"#],
         "a handler's global mutation leaked into the next request"
+    );
+    let late: Vec<_> = REQUESTS
+        .iter()
+        .zip(&vm)
+        .filter(|((_, p, _), _)| *p == "/late")
+        .map(|(_, reply)| reply.body.as_str())
+        .collect();
+    let expected = r#"{"hits":1,"late":"declared after its handler"}"#;
+    assert_eq!(
+        late,
+        [expected, expected],
+        "a binding declared after its handler is unreadable or leaked across requests"
     );
 }
 

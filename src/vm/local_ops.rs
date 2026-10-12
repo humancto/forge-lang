@@ -1,5 +1,5 @@
 //! Local-variable access and the in-place update opcodes
-//! (`AddLocal`, `PushLocal`, `PopLocal`).
+//! (`AddLocal`, `PushLocal`, `PopLocal`, `UpdateSetLocal`).
 //!
 //! # Single-owner updates
 //!
@@ -11,9 +11,9 @@
 //! The VM's GC is mark-sweep (no reference counts), so ownership is tracked
 //! structurally with `GcObject::unique`:
 //!
-//! * The bit is set only on a string/array that one of these opcodes has
-//!   just *allocated* and stored into exactly one local-variable register,
-//!   and only when that local has no open upvalue cell.
+//! * The bit is set only on a string/array/set that one of these opcodes
+//!   has just *allocated* and stored into exactly one local-variable
+//!   register, and only when that local has no open upvalue cell.
 //! * Every way a reference can leave a local register clears it:
 //!   `GetLocal` and `Move` (the only opcodes that copy a local's register
 //!   into another register) and closure capture (`Closure` with a local
@@ -248,6 +248,62 @@ impl VM {
         self.method_mut_local(frame_idx, base, slot, cur, "pop", Vec::new())
     }
 
+    /// `UpdateSetLocal`: statement `local.add(value)` (or `.remove`).
+    /// In place when the local uniquely owns a set: the hash index makes
+    /// that O(1) on average, where a copy is O(len).
+    pub(super) fn update_set_local(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        value: Value,
+        remove: bool,
+    ) -> Result<(), VMError> {
+        let cur = self.read_local(frame_idx, base, slot)?;
+        if let Some(r) = self.owned_by_local(frame_idx, slot, cur) {
+            // Look up with shared borrows: equality reads other heap
+            // objects (strings, nested collections).
+            let hash = value.set_hash(&self.gc);
+            let present = match self.gc.get(r).map(|o| &o.kind) {
+                Some(ObjKind::Set(items)) => {
+                    Some(items.contains(hash, |item| item.set_eq(&value, &self.gc)))
+                }
+                _ => None,
+            };
+            match (present, remove) {
+                (None, _) => {}
+                (Some(false), true) | (Some(true), false) => return Ok(()),
+                (Some(false), false) => {
+                    let mut grown = 0;
+                    if let Some(ObjKind::Set(items)) = self.gc.get_mut(r).map(|o| &mut o.kind) {
+                        let before = items.heap_bytes();
+                        items.push_unchecked(hash, value);
+                        grown = items.heap_bytes().saturating_sub(before);
+                    }
+                    self.gc.note_growth(grown);
+                    return Ok(());
+                }
+                (Some(true), true) => {
+                    // Removing compares items too, so take the set out of
+                    // the heap while it runs (nothing allocates or collects
+                    // meanwhile, and no item refers to the set itself).
+                    let Some(ObjKind::Set(items)) = self.gc.get_mut(r).map(|o| &mut o.kind) else {
+                        return Err(VMError::new("BUG: owned set changed kind"));
+                    };
+                    let mut items = std::mem::take(items);
+                    items.remove_matching(hash, |item| item.set_eq(&value, &self.gc));
+                    if let Some(ObjKind::Set(slot)) = self.gc.get_mut(r).map(|o| &mut o.kind) {
+                        *slot = items;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        let method = if remove { "remove" } else { "add" };
+        self.method_mut_local(frame_idx, base, slot, cur, method, vec![value])
+            .map(|_| ())
+    }
+
     /// Shared (copying) path: run `__forge_method_mut` exactly as the
     /// generic lowering does, store the new receiver into the local and
     /// return the method's result. A freshly allocated receiver array is
@@ -273,13 +329,17 @@ impl VM {
             },
             None => return Err(VMError::new("BUG: __forge_method_mut returned a non-pair")),
         };
-        // A different array than `cur` was just allocated by the copy; it is
-        // referenced only by the (now unreachable) pair and the local. The
-        // callers either discard `result` (`push`, whose result is the
-        // receiver) or return an element (`pop`), never the receiver.
+        // A different array or set than `cur` was just allocated by the
+        // copy; it is referenced only by the (now unreachable) pair and the
+        // local. The callers either discard `result` (`push`, `add` and
+        // `remove`, whose result is the receiver) or return an element
+        // (`pop`), never the receiver.
         if let Some(r) = new_receiver.as_obj() {
             let fresh_array = Some(r) != cur.as_obj()
-                && matches!(self.gc.get(r).map(|o| &o.kind), Some(ObjKind::Array(_)));
+                && matches!(
+                    self.gc.get(r).map(|o| &o.kind),
+                    Some(ObjKind::Array(_) | ObjKind::Set(_))
+                );
             if fresh_array && self.local_can_own(frame_idx, slot) {
                 self.gc.set_unique(r);
             }

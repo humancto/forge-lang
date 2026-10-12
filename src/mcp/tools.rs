@@ -429,7 +429,8 @@ fn value_to_json(v: &Value, depth: usize) -> Result<Json, String> {
             .map(Json::Number)
             .ok_or_else(|| format!("the result contains {}, which JSON cannot represent", f))?,
         Value::String(s) => Json::String(s.clone()),
-        Value::Array(items) | Value::Tuple(items) | Value::Set(items) => list(items)?,
+        Value::Array(items) | Value::Tuple(items) => list(items)?,
+        Value::Set(items) => list(&items.to_vec())?,
         Value::Object(map) => {
             let is_struct = matches!(map.get("__type__"), Some(Value::String(_)));
             let mut obj = Map::new();

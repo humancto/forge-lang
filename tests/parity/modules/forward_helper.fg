@@ -1,0 +1,10 @@
+// A module whose functions read and update top-level bindings declared
+// below them.
+fn module_late() { return late_setting + 1 }
+fn module_bump() {
+    hits = hits + 1
+    return hits
+}
+fn module_hits() { return hits }
+let late_setting = 41
+let mut hits = 0
