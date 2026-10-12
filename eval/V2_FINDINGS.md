@@ -14,7 +14,7 @@ that a model cannot guess from `llms.txt`).
 |---|---|---|---|
 | 1 | bug | `xs.push(v)` / `xs.pop()` on a nested place (`o.a.push(x)`, `g[k].push(x)`, `m[0].push(x)`) silently does nothing | data, any grouping code |
 | 2 | bug (fixed) | Interpreter: `import { Struct } from "m.fg"` loses the struct's `impl` methods | money_module, any selective import of a type |
-| 3 | bug | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
+| 3 | bug (fixed) | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
 | 4 | bug | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
 | 5 | bug | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
 | 6 | bug | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
@@ -101,6 +101,8 @@ does. Add a parity fixture.
 Reference workaround (money_module): `import "money.fg"`.
 
 ### 3. `try_receive` returns different types on the two engines
+
+**Fixed:** `try_receive` returns `Some(v)` / `None` on both engines (the VM returned `Ok(v)` / null), as `docs/part2_stdlib.md` already documented; `llms.txt` states it. Parity fixture `tests/parity/supported/try_receive_option.fg`.
 
 ```forge
 let c = channel(3)

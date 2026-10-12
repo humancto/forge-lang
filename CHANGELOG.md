@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Interpreter: a struct or `type` brought in with a selective import (`import { P } from "shapes.fg"`) keeps its `impl` methods, static methods and field defaults, as on the VM (was `E0013 no method 'double' on P`).
+- VM: `try_receive(ch)` returns `Some(v)`, or `None` when nothing is waiting, like the interpreter and the documentation (it returned `Ok(v)` / `null`, so `match` on `Some(v)` only worked on `--interp`).
 
 ## [0.11.0] - 2026-10-11
 

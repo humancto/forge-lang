@@ -355,9 +355,12 @@ fn vm_try_receive_available() {
         let result = try_receive(ch)
         println(is_some(result))
         println(unwrap(result))
+        println(result)
+        println(try_receive(ch))
     "#,
     );
-    assert_eq!(out, vec!["true", "42"]);
+    // `Some(v)` / `None`, like the interpreter (was `Ok(v)` / null).
+    assert_eq!(out, vec!["true", "42", "Some(42)", "None"]);
 }
 
 #[test]

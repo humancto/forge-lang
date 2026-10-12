@@ -3386,14 +3386,14 @@ impl VM {
                 let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
                 match &*guard {
                     Some(rx) => match rx.try_recv() {
+                        // `Some(v)` / `None`, like the interpreter.
                         Ok(shared) => {
                             let val = shared_to_value(&mut self.gc, &shared);
-                            let r = self.gc.alloc(ObjKind::ResultOk(val));
-                            Ok(Value::obj(r))
+                            Ok(self.alloc_option_some(val))
                         }
-                        Err(_) => Ok(Value::null()),
+                        Err(_) => Ok(self.alloc_option_none()),
                     },
-                    None => Ok(Value::null()),
+                    None => Ok(self.alloc_option_none()),
                 }
             }
             "select" => {
