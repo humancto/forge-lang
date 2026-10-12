@@ -42,6 +42,12 @@ import urllib.request
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(EVAL_DIR)
 TASKS_DIR = os.path.join(EVAL_DIR, "tasks")
+# Task tiers: v1 is the original set (eval/tasks), v2 the harder second tier
+# (eval/tasks_v2). `--tier` selects them; see eval/README.md.
+TIERS = {
+    "v1": TASKS_DIR,
+    "v2": os.path.join(EVAL_DIR, "tasks_v2"),
+}
 LLMS_TXT = os.path.join(REPO_ROOT, "llms.txt")
 
 LANGS = {
@@ -61,7 +67,20 @@ CATEGORIES = [
     "http",
     "files",
 ]
-CAPABILITIES = {"read", "write", "net", "env", "run"}
+TIER_CATEGORIES = {
+    "v1": CATEGORIES,
+    "v2": [
+        "servers",
+        "http_client",
+        "multifile",
+        "parallel",
+        "error_handling",
+        "typed",
+        "data",
+    ],
+}
+EDITIONS = ["2026", "2027"]
+CAPABILITIES = {"read", "write", "net", "env", "run", "db"}
 CONTEXTS = ["none", "llms", "llms+errors"]
 FAILURE_CLASSES = [
     "syntax_error",
@@ -315,14 +334,15 @@ def load_toml(path, force_mini=False):
 
 
 class Task:
-    def __init__(self, path, data):
+    def __init__(self, path, data, tier="v1"):
         self.dir = path
         self.data = data
+        self.tier = tier
         self.id = data.get("id", "")
         self.category = data.get("category", "")
         self.title = data.get("title", "")
         self.prompt = data.get("prompt", "").strip()
-        self.stdin = data.get("stdin")
+        self.stdin = self.read_stdin(data)
         self.args = list(data.get("args", []))
         self.expected = data.get("expected_stdout", "")
         self.needs = list(data.get("needs", []))
@@ -334,6 +354,39 @@ class Task:
         self.trim = bool(data.get("trim", True))
         self.sort_lines = bool(data.get("sort_lines", False))
         self.float_tolerance = data.get("float_tolerance")
+        self.exit_code = data.get("exit_code", 0)
+        # Editions the task is scored under (a typed task may be 2027-only).
+        self.editions = [str(e) for e in data.get("editions", EDITIONS)]
+        # Several runs of one program (`[[case]]`): each has its own stdin,
+        # expected output and exit code; the task passes when all do.
+        self.cases = []
+        for n, c in enumerate(data.get("case", []), 1):
+            self.cases.append({
+                "name": str(c.get("name", n)),
+                "stdin": self.read_stdin(c),
+                "args": list(c.get("args", [])),
+                "expected": c.get("expected_stdout", ""),
+                "exit_code": c.get("exit_code", 0),
+            })
+        if self.cases and "expected_stdout" not in data:
+            self.expected = "\n".join(
+                case_header(c["name"], c["exit_code"]) + "\n" + c["expected"].strip("\n")
+                for c in self.cases)
+
+    def read_stdin(self, table):
+        """`stdin`, or the content of `stdin_file` (relative to the task
+        directory; for inputs too large to inline)."""
+        if "stdin_file" in table:
+            path = os.path.join(self.dir, table["stdin_file"])
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    return f.read()
+            return None
+        return table.get("stdin")
+
+    def applies_to(self, edition):
+        """Whether the task is scored under `edition` (None: the default, 2026)."""
+        return (edition or "2026") in self.editions
 
     def reference(self, lang):
         return os.path.join(self.dir, "reference." + LANGS[lang]["ext"])
@@ -347,15 +400,41 @@ class Task:
     def problems(self):
         """Schema problems with this task (empty when valid)."""
         out = []
-        for key in ("id", "category", "title", "prompt", "expected_stdout"):
+        required = ["id", "category", "title", "prompt"]
+        if not self.cases:
+            required.append("expected_stdout")
+        for key in required:
             if key not in self.data:
                 out.append("missing required key `{}`".format(key))
         if self.id != os.path.basename(self.dir):
             out.append("id `{}` does not match directory name".format(self.id))
         if self.category != os.path.basename(os.path.dirname(self.dir)):
             out.append("category `{}` does not match parent directory".format(self.category))
-        if self.category not in CATEGORIES:
-            out.append("unknown category `{}`".format(self.category))
+        if self.category not in TIER_CATEGORIES.get(self.tier, []):
+            out.append("unknown category `{}` for tier {}".format(self.category, self.tier))
+        if not self.editions or set(self.editions) - set(EDITIONS):
+            out.append("editions must be a non-empty subset of {}".format(EDITIONS))
+        if not isinstance(self.exit_code, int):
+            out.append("exit_code must be an integer")
+        if self.cases:
+            if set(self.data) & {"expected_stdout", "stdin", "stdin_file", "args", "exit_code"}:
+                out.append("tasks with [[case]] put stdin/args/expected_stdout in the cases")
+            if self.mode == "server":
+                out.append("server tasks cannot have [[case]]")
+            names = [c["name"] for c in self.cases]
+            if len(set(names)) != len(names):
+                out.append("case names must be unique")
+            for c in self.data.get("case", []):
+                if "expected_stdout" not in c:
+                    out.append("every [[case]] needs expected_stdout")
+                bad_keys = set(c) - {"name", "stdin", "stdin_file", "args", "expected_stdout",
+                                     "exit_code"}
+                if bad_keys:
+                    out.append("unknown case keys: {}".format(sorted(bad_keys)))
+        for r in self.requests:
+            bad_keys = set(r) - {"method", "path", "body", "headers", "status_only"}
+            if bad_keys:
+                out.append("unknown request keys: {}".format(sorted(bad_keys)))
         bad = set(self.needs) - CAPABILITIES
         if bad:
             out.append("unknown needs: {}".format(sorted(bad)))
@@ -365,9 +444,14 @@ class Task:
             out.append("server tasks need [[request]] entries")
         if self.mode == "server" and "net" not in self.needs:
             out.append("server tasks need `net`")
-        uses_http = "{base_url}" in json.dumps([self.args, self.stdin])
-        if uses_http and "net" not in self.needs:
-            out.append("tasks using {base_url} need `net`")
+        for table in [self.data] + list(self.data.get("case", [])):
+            if "stdin_file" in table:
+                if "stdin" in table:
+                    out.append("stdin and stdin_file are exclusive")
+                if not os.path.isfile(os.path.join(self.dir, table["stdin_file"])):
+                    out.append("stdin_file {} not found".format(table["stdin_file"]))
+        if self.uses_fixture() and "net" not in self.needs:
+            out.append("tasks using {base_url} or {closed_url} need `net`")
         for lang in LANGS:
             if not os.path.isfile(self.reference(lang)):
                 out.append("missing reference.{}".format(LANGS[lang]["ext"]))
@@ -375,23 +459,51 @@ class Task:
             "id", "category", "title", "prompt", "stdin", "args", "expected_stdout",
             "needs", "timeout", "mode", "output_files", "request", "trim",
             "sort_lines", "float_tolerance", "notes", "tags", "port",
+            "exit_code", "editions", "case", "stdin_file",
         }
         if unknown:
             out.append("unknown keys: {}".format(sorted(unknown)))
         return out
 
+    def uses_fixture(self):
+        text = json.dumps([self.args, self.stdin, self.cases])
+        return "{base_url}" in text or "{closed_url}" in text
 
-def load_tasks(selector=None):
+    def run_cases(self):
+        """The runs that score this task: its [[case]] tables, or one run
+        built from the top-level stdin/args/expected_stdout/exit_code."""
+        if self.cases:
+            return self.cases
+        return [{"name": None, "stdin": self.stdin, "args": self.args,
+                 "expected": self.expected, "exit_code": self.exit_code}]
+
+
+def case_header(name, exit_code):
+    return "=== case {} (exit {})".format(name, exit_code)
+
+
+def tier_names(tier):
+    """The tiers a `--tier` value selects (`all` = every tier)."""
+    if not tier or tier == "all":
+        return list(TIERS)
+    return [tier]
+
+
+def load_tasks(selector=None, tier="all"):
     tasks = []
-    for category in sorted(os.listdir(TASKS_DIR)):
-        cdir = os.path.join(TASKS_DIR, category)
-        if not os.path.isdir(cdir):
+    for name in tier_names(tier):
+        root = TIERS[name]
+        if not os.path.isdir(root):
             continue
-        for tid in sorted(os.listdir(cdir)):
-            tdir = os.path.join(cdir, tid)
-            toml_path = os.path.join(tdir, "task.toml")
-            if os.path.isfile(toml_path):
-                tasks.append(Task(tdir, load_toml(toml_path)))
+        for category in sorted(os.listdir(root)):
+            cdir = os.path.join(root, category)
+            if not os.path.isdir(cdir):
+                continue
+            for tid in sorted(os.listdir(cdir)):
+                tdir = os.path.join(cdir, tid)
+                toml_path = os.path.join(tdir, "task.toml")
+                if os.path.isfile(toml_path):
+                    tasks.append(Task(tdir, load_toml(toml_path), name))
     if selector:
         tasks = [t for t in tasks if selector(t)]
     return tasks
@@ -420,18 +532,35 @@ def find_task_dir(task_id):
     """The directory of the task with this id (ids are directory names)."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
         return None
-    for category in os.listdir(TASKS_DIR):
-        tdir = os.path.join(TASKS_DIR, category, task_id)
-        if os.path.isfile(os.path.join(tdir, "task.toml")):
-            return tdir
+    for root in TIERS.values():
+        if not os.path.isdir(root):
+            continue
+        for category in os.listdir(root):
+            tdir = os.path.join(root, category, task_id)
+            if os.path.isfile(os.path.join(tdir, "task.toml")):
+                return tdir
     return None
 
 
+# The bearer token the fixture's auth/ routes accept.
+FIXTURE_TOKEN = "eval-token-7f3a"
+
+
 class _FixtureHandler(http.server.BaseHTTPRequestHandler):
-    """Routes, all under /t/<task_id>/:
-       <file>          a file from the task's www/ directory
-       echo            JSON {method, path, query, body, content_type}
-       status/<code>   that status with body {"status": code}"""
+    """Routes, all under /t/<task_id>~<run>/ (`<run>` is a token unique to
+    each program run, so per-run state such as the flaky/ counters never
+    leaks between runs; `~<run>` may be omitted):
+       <file>              a file from the task's www/ directory
+       echo                JSON {method, path, query, body, content_type}
+       status/<code>       that status with body {"status": code}
+       flaky/<n>/<key>     503 {"error": "unavailable", "attempt": k} for the
+                           first n requests of this run to <key>, then
+                           200 {"key": <key>, "attempt": k}
+       auth/<file>         the www/ file, only with the header
+                           `Authorization: Bearer <FIXTURE_TOKEN>`, else
+                           401 {"error": "unauthorized"}
+       headers             JSON object of the request's `x-*`, `accept` and
+                           `authorization` headers (names lower-cased)"""
 
     server_version = "ForgeEvalFixture/1"
 
@@ -451,12 +580,29 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
         parts = parsed.path.strip("/").split("/")
         if len(parts) < 3 or parts[0] != "t":
             return self._send(404, json.dumps({"error": "not found"}))
-        task = find_task_dir(parts[1])
+        run_key = parts[1]
+        task = find_task_dir(run_key.split("~")[0])
         if task is None:
             return self._send(404, json.dumps({"error": "unknown task"}))
         rest = parts[2:]
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
+        if len(rest) == 3 and rest[0] == "flaky" and rest[1].isdigit():
+            attempt = Fixture.count(run_key, rest[2])
+            if attempt <= int(rest[1]):
+                return self._send(503, json.dumps({"error": "unavailable", "attempt": attempt}))
+            return self._send(200, json.dumps({"key": rest[2], "attempt": attempt}))
+        if rest == ["headers"]:
+            seen = {}
+            for k, v in self.headers.items():
+                k = k.lower()
+                if k.startswith("x-") or k in ("accept", "authorization"):
+                    seen[k] = v
+            return self._send(200, json.dumps(seen, sort_keys=True))
+        if len(rest) >= 2 and rest[0] == "auth":
+            if self.headers.get("Authorization", "") != "Bearer " + FIXTURE_TOKEN:
+                return self._send(401, json.dumps({"error": "unauthorized"}))
+            rest = rest[1:]
         if rest == ["echo"]:
             text = raw.decode("utf-8", "replace")
             try:
@@ -504,9 +650,12 @@ class _QuickBindServer(http.server.ThreadingHTTPServer):
 class Fixture:
     _lock = threading.Lock()
     _server = None
+    _runs = 0
+    _counts = {}
 
     @classmethod
     def base_url(cls, task):
+        """The base URL for one run of `task` (a fresh run token per call)."""
         with cls._lock:
             if cls._server is None:
                 srv = _QuickBindServer(("127.0.0.1", 0), _FixtureHandler)
@@ -514,7 +663,22 @@ class Fixture:
                 threading.Thread(target=srv.serve_forever, daemon=True).start()
                 cls._server = srv
             port = cls._server.server_address[1]
-        return "http://127.0.0.1:{}/t/{}".format(port, task.id)
+            cls._runs += 1
+            run = cls._runs
+        return "http://127.0.0.1:{}/t/{}~r{}".format(port, task.id, run)
+
+    @classmethod
+    def count(cls, run_key, key):
+        """Count one request to `key` within a run and return the count."""
+        with cls._lock:
+            n = cls._counts.get((run_key, key), 0) + 1
+            cls._counts[(run_key, key)] = n
+            return n
+
+
+def closed_url():
+    """An http URL on a loopback port that nothing listens on."""
+    return "http://127.0.0.1:{}".format(free_port())
 
 
 _PORT_LOCKS = {}
@@ -599,13 +763,19 @@ def forge_command(cfg, task, workdir, source, extra_args, port=None):
         cmd.append("--allow-env")
     if "run" in needs:
         cmd.append("--allow-run")
+    if "db" in needs:
+        cmd.append("--allow-db")
     cmd += ["run", source] + extra_args
     return cmd
 
 
-def run_program(cfg, task, source_path):
+def run_program(cfg, task, source_path, case=None):
     """Run a solution; return a dict with stdout, stderr, returncode,
-    timed_out, duration, and the transcript compared with expected_stdout."""
+    timed_out, duration, and the transcript compared with expected_stdout.
+    `case` (one of `task.run_cases()`) supplies stdin and args."""
+    if case is None:
+        case = task.run_cases()[0]
+    case_stdin, case_args = case["stdin"], case["args"]
     workdir = tempfile.mkdtemp(prefix="forge-eval-")
     try:
         if os.path.isdir(task.files_dir()):
@@ -620,16 +790,19 @@ def run_program(cfg, task, source_path):
         source = os.path.join(workdir, "main." + ext)
         shutil.copy(source_path, source)
         subs = {"workdir": workdir}
-        if "{base_url}" in json.dumps([task.args, task.stdin]):
+        used = json.dumps([case_args, case_stdin])
+        if "{base_url}" in used:
             subs["base_url"] = Fixture.base_url(task)
+        if "{closed_url}" in used:
+            subs["closed_url"] = closed_url()
         port = None
         if task.mode == "server":
             # A fixed port in the prompt (Forge's @server takes a literal
             # port), else a free one passed in $PORT.
             port = int(task.port) if task.port else free_port()
             subs["port"] = str(port)
-        args = [substitute(a, subs) for a in task.args]
-        stdin = substitute(task.stdin, subs) if task.stdin is not None else None
+        args = [substitute(a, subs) for a in case_args]
+        stdin = substitute(case_stdin, subs) if case_stdin is not None else None
         env = dict(os.environ)
         env["FORGE_HTTP_ALLOW_PRIVATE"] = "1"
         env["NO_COLOR"] = "1"
@@ -693,13 +866,14 @@ def run_process(cmd, cwd, env, stdin, timeout):
         return {"stdout": "", "stderr": str(e), "returncode": 127, "timed_out": False}
 
 
-def http_request(method, url, body=None, timeout=5):
+def http_request(method, url, body=None, timeout=5, headers=None):
     data = None
-    headers = {}
+    sent = {}
     if body is not None:
         data = body.encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        sent["Content-Type"] = "application/json"
+    sent.update(headers or {})
+    req = urllib.request.Request(url, data=data, method=method, headers=sent)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
@@ -716,11 +890,16 @@ def canonical_body(text):
 
 def run_server(cmd, cwd, env, task, port):
     """Start a server program, wait for its port, send the task's requests
-    and build a transcript `STATUS <code>\\n<canonical body>` per request."""
+    and build a transcript `STATUS <code>\\n<canonical body>` per request
+    (just `STATUS <code>` for a request with `status_only = true`)."""
     wait_port_free(port)
+    # Output goes to files, not pipes: a chatty server (one log line per
+    # request) must never block on a full pipe while we wait for it.
+    out_file = tempfile.TemporaryFile()
+    err_file = tempfile.TemporaryFile()
     proc = subprocess.Popen(
         cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=out_file, stderr=err_file,
     )
     out_lines = []
     timed_out = False
@@ -739,8 +918,12 @@ def run_server(cmd, cwd, env, task, port):
             for req in task.requests:
                 try:
                     status, body = http_request(
-                        req.get("method", "GET"), base + req["path"], req.get("body"))
-                    out_lines.append("STATUS {}\n{}".format(status, canonical_body(body)))
+                        req.get("method", "GET"), base + req["path"], req.get("body"),
+                        headers=req.get("headers"))
+                    if req.get("status_only"):
+                        out_lines.append("STATUS {}".format(status))
+                    else:
+                        out_lines.append("STATUS {}\n{}".format(status, canonical_body(body)))
                 except Exception as e:  # connection reset, timeout...
                     out_lines.append("ERROR {}".format(type(e).__name__))
         elif proc.poll() is None:
@@ -749,10 +932,15 @@ def run_server(cmd, cwd, env, task, port):
         if proc.poll() is None:
             proc.terminate()
         try:
-            stdout, stderr = proc.communicate(timeout=5)
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-            stdout, stderr = proc.communicate()
+            proc.wait()
+        out_file.seek(0)
+        err_file.seek(0)
+        stdout, stderr = out_file.read(), err_file.read()
+        out_file.close()
+        err_file.close()
     rc = proc.returncode
     exited_early = not out_lines and not timed_out
     return {
@@ -787,8 +975,8 @@ def normalize(text, task):
     return lines
 
 
-def outputs_match(actual, task):
-    exp = normalize(task.expected, task)
+def outputs_match(actual, task, expected=None):
+    exp = normalize(task.expected if expected is None else expected, task)
     got = normalize(actual, task)
     if task.float_tolerance is None:
         return exp == got
@@ -826,15 +1014,20 @@ def parse_forge_diagnostics(stderr):
 PY_EXC = re.compile(r"^(\w+(?:\.\w+)*(?:Error|Exception|Exit|Interrupt|Warning)|\w+Error)(?::\s*(.*))?$")
 
 
-def classify(lang, result, passed):
-    """Return (class, code, message, warnings)."""
+def classify(lang, result, passed, expected_exit=0):
+    """Return (class, code, message, warnings). `expected_exit` is the exit
+    code the task asks for: exiting with it is not an error."""
     if passed:
         return ("pass", None, None, [])
     stderr = result.get("stderr", "")
-    if result.get("timed_out") or (lang == "forge" and result.get("returncode") == 124):
+    rc = result.get("returncode")
+    if result.get("timed_out") or (lang == "forge" and rc == 124 and expected_exit != 124):
         tail = (result.get("stderr") or "").strip().splitlines()[-1:]
         detail = "exceeded the time limit" + (" ({})".format(tail[0][:200]) if tail else "")
         return ("timeout", None, detail, [])
+    wrong_exit = None
+    if rc is not None and rc != expected_exit:
+        wrong_exit = "exit code {}, expected {}".format(rc, expected_exit)
     if lang == "forge":
         diags = parse_forge_diagnostics(stderr)
         errors = [d for d in diags if d.get("severity") == "error"]
@@ -844,15 +1037,17 @@ def classify(lang, result, passed):
             klass = {"syntax": "syntax_error", "type": "type_error"}.get(
                 d.get("phase"), "runtime_error")
             return (klass, d.get("code"), d.get("message", ""), warnings)
-        if result.get("returncode") not in (0, None):
+        if rc not in (0, None, expected_exit):
             lines = [l for l in stderr.strip().splitlines() if l.strip()]
-            msg = lines[-1] if lines else "exit code {}".format(result.get("returncode"))
+            msg = lines[-1] if lines else "exit code {}".format(rc)
             if "fuel exhausted" in msg or "memory limit" in msg:
                 return ("timeout", None, msg, warnings)
             return ("runtime_error", "exit", msg, warnings)
-        return ("wrong_output", None, None, warnings)
+        return ("wrong_output", None, wrong_exit, warnings)
     # python
-    if result.get("returncode") not in (0, None):
+    crashed = rc not in (0, None, expected_exit) or (
+        rc not in (0, None) and "Traceback (most recent call last)" in stderr)
+    if crashed:
         lines = [l for l in stderr.strip().splitlines() if l.strip()]
         for line in reversed(lines):
             m = PY_EXC.match(line.strip())
@@ -861,9 +1056,9 @@ def classify(lang, result, passed):
                 klass = "syntax_error" if name in (
                     "SyntaxError", "IndentationError", "TabError") else "runtime_error"
                 return (klass, name, (m.group(2) or "").strip(), [])
-        msg = lines[-1] if lines else "exit code {}".format(result.get("returncode"))
+        msg = lines[-1] if lines else "exit code {}".format(rc)
         return ("runtime_error", "exit", msg, [])
-    return ("wrong_output", None, None, [])
+    return ("wrong_output", None, wrong_exit, [])
 
 
 def message_prefix(message, n=60):
@@ -898,22 +1093,44 @@ def evaluate(cfg, task, source_path):
             source_path, encoding="utf-8", errors="replace").read().strip():
         return {"status": "fail", "class": "no_code", "code": None,
                 "message": "no solution", "warnings": [], "duration": 0}
-    result = run_program(cfg, task, source_path)
-    passed = (result.get("returncode") == 0 and not result.get("timed_out")
-              and outputs_match(result["transcript"], task))
-    klass, code, message, warnings = classify(cfg.lang, result, passed)
+    runs = []
+    for case in task.run_cases():
+        result = run_program(cfg, task, source_path, case)
+        expected_exit = case["exit_code"] if task.mode != "server" else 0
+        passed = (result.get("returncode") == expected_exit and not result.get("timed_out")
+                  and outputs_match(result["transcript"], task, case["expected"]))
+        runs.append((case, result, passed, expected_exit))
+    # The first failing run decides the class; a task with [[case]] tables
+    # reports every case's output under a `=== case <name> (exit <code>)`
+    # header, the same form its combined expected output has.
+    case, result, passed, expected_exit = next(
+        (r for r in runs if not r[2]), runs[0])
+    passed = all(r[2] for r in runs)
+    klass, code, message, warnings = classify(cfg.lang, result, passed, expected_exit)
+    if task.cases:
+        transcript = "\n".join(
+            case_header(c["name"], r.get("returncode")) + "\n" + r["transcript"].strip("\n")
+            for c, r, _, _ in runs)
+        stderr = "\n".join("[case {}] {}".format(c["name"], r["stderr"].strip())
+                           for c, r, _, _ in runs if r["stderr"].strip())
+        if not passed and message is None:
+            message = "case {}".format(case["name"])
+        elif not passed:
+            message = "case {}: {}".format(case["name"], message)
+    else:
+        transcript, stderr = result["transcript"], result["stderr"]
     out = {
         "status": "pass" if passed else "fail",
         "class": klass,
         "code": code,
         "message": message,
         "warnings": warnings,
-        "duration": result["duration"],
-        "stdout": result["transcript"][-4000:],
-        "stderr": result["stderr"][-4000:],
+        "duration": round(sum(r[1]["duration"] for r in runs), 3),
+        "stdout": transcript[-4000:],
+        "stderr": stderr[-4000:],
     }
     if klass == "wrong_output":
-        out["diff"] = diff_snippet(task.expected, result["transcript"], task)
+        out["diff"] = diff_snippet(task.expected, transcript, task)
     return out
 
 
@@ -971,9 +1188,25 @@ def check_reference(forge, task, edition):
     return diags
 
 
+def validation_configs(forge, task, quick, python_cfg=None):
+    """The runs that validate `task`'s references: Forge on both engines in
+    every edition the task applies to (`quick`: the VM in the first and the
+    interpreter in the last of them), plus Python."""
+    eds = [e for e in EDITIONS if e in task.editions]
+    if quick:
+        pairs = [("vm", eds[0]), ("interp", eds[-1])]
+    else:
+        pairs = [(engine, ed) for ed in eds for engine in ("vm", "interp")]
+    configs = [RunConfig("forge", forge, engine, None if ed == "2026" else ed)
+               for engine, ed in pairs]
+    if python_cfg is not None:
+        configs.append(python_cfg)
+    return configs
+
+
 def cmd_validate(args):
     forge = find_forge(args.forge)
-    tasks = load_tasks(task_selector(args))
+    tasks = load_tasks(task_selector(args), args.tier)
     if not tasks:
         sys.exit("no tasks selected")
     problems = []
@@ -995,25 +1228,19 @@ def cmd_validate(args):
         except ValueError as e:
             problems.append("{}: fallback TOML parser: {}".format(t.id, e))
 
-    if args.quick:
-        configs = [RunConfig("forge", forge, "vm"), RunConfig("forge", forge, "interp", "2027")]
-    else:
-        configs = [
-            RunConfig("forge", forge, "vm"),
-            RunConfig("forge", forge, "interp"),
-            RunConfig("forge", forge, "vm", "2027"),
-            RunConfig("forge", forge, "interp", "2027"),
-        ]
-    if not args.no_python:
-        configs.append(RunConfig("python", python=args.python))
-
-    jobs = [(t, c) for t in tasks for c in configs]
+    python_cfg = None if args.no_python else RunConfig("python", python=args.python)
+    jobs = [(t, c) for t in tasks for c in validation_configs(forge, t, args.quick, python_cfg)]
+    configs = []
+    for _, c in jobs:
+        if c.label() not in [x.label() for x in configs]:
+            configs.append(c)
     failures = []
     start = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         # References must also be clean for the type checker (warnings
         # included): edition 2027 turns declared-type mismatches into errors.
-        checks = {pool.submit(check_reference, forge, t, "2027"): t
+        # A task pinned to 2026 is checked in 2026.
+        checks = {pool.submit(check_reference, forge, t, max(t.editions)): t
                   for t in tasks if os.path.isfile(t.reference("forge"))}
         for fut in concurrent.futures.as_completed(checks):
             for d in fut.result():
@@ -1034,12 +1261,15 @@ def cmd_validate(args):
         if args.verbose and r.get("stderr"):
             problems.append("    stderr: " + r["stderr"].strip().replace("\n", "\n            "))
     elapsed = time.time() - start
-    per_cat = {}
-    for t in tasks:
-        per_cat[t.category] = per_cat.get(t.category, 0) + 1
     print("forge: {}".format(forge))
-    print("tasks: {} ({})".format(
-        len(tasks), ", ".join("{} {}".format(k, v) for k, v in sorted(per_cat.items()))))
+    for tier in TIERS:
+        per_cat = {}
+        for t in tasks:
+            if t.tier == tier:
+                per_cat[t.category] = per_cat.get(t.category, 0) + 1
+        if per_cat:
+            print("tasks {}: {} ({})".format(tier, sum(per_cat.values()), ", ".join(
+                "{} {}".format(k, v) for k, v in sorted(per_cat.items()))))
     print("runs: {} across {} in {:.1f}s".format(
         len(jobs), ", ".join(c.label() for c in configs), elapsed))
     if problems:
@@ -1081,7 +1311,13 @@ def system_prompt(lang, context):
     return text
 
 
-def user_prompt(task):
+def user_prompt(task, lang="forge"):
+    """The task prompt; a Forge task that is scored in one edition only says
+    which (the program runs as `forge --edition <E> run main.fg`)."""
+    if lang == "forge" and len(task.editions) == 1:
+        return task.prompt + (
+            "\n\nThe program runs with Forge edition {0} "
+            "(`forge --edition {0} run main.fg`).".format(task.editions[0]))
     return task.prompt
 
 
@@ -1259,7 +1495,7 @@ def repair_message(lang, result, evaluation):
 
 def cmd_generate(args):
     lang = args.lang
-    tasks = load_tasks(task_selector(args))
+    tasks = load_tasks(task_selector(args), args.tier)
     if args.limit:
         tasks = tasks[:args.limit]
     if not tasks:
@@ -1314,7 +1550,7 @@ def cmd_generate(args):
             return task.id, "ok"
         if args.skip_existing and os.path.isfile(sol):
             return task.id, "kept"
-        messages = [{"role": "user", "content": user_prompt(task)}]
+        messages = [{"role": "user", "content": user_prompt(task, lang)}]
         with open(os.path.join(tdir, "prompt.txt"), "w", encoding="utf-8") as f:
             f.write(messages[0]["content"])
         try:
@@ -1372,8 +1608,13 @@ def cmd_score(args):
         meta = json.load(f)
     lang = meta["lang"]
     ext = LANGS[lang]["ext"]
-    all_tasks = {t.id: t for t in load_tasks(task_selector(args))}
+    all_tasks = {t.id: t for t in load_tasks(task_selector(args), args.tier)}
     tasks = [all_tasks[i] for i in meta.get("tasks", []) if i in all_tasks]
+    skipped = []
+    if lang == "forge":
+        # A task pinned to other editions is not scored in this one.
+        skipped = [t.id for t in tasks if not t.applies_to(args.edition)]
+        tasks = [t for t in tasks if t.applies_to(args.edition)]
     forge = find_forge(args.forge) if lang == "forge" else None
     cfg = RunConfig(lang, forge, args.engine, args.edition, args.python,
                     grant_stdin_file=args.grant_stdin_file)
@@ -1393,6 +1634,10 @@ def cmd_score(args):
         results = list(pool.map(one, tasks))
 
     report = build_report(meta, cfg, results)
+    if skipped:
+        report["skipped"] = skipped
+        print("skipped (not scored in edition {}): {}".format(
+            args.edition or "2026", ", ".join(skipped)))
     name = args.report_name
     with open(os.path.join(run, name + ".json"), "w") as f:
         json.dump(report, f, indent=2)
@@ -1473,6 +1718,8 @@ def render_report_md(report):
         lines.append("- Engine: {}, edition {}".format(st["engine"], st["edition"]))
     lines.append("- Provider: {} ({})".format(meta.get("provider"), meta.get("model")))
     lines.append("- Context: {}".format(meta.get("context")))
+    if report.get("skipped"):
+        lines.append("- Not scored in this edition: {}".format(", ".join(report["skipped"])))
     lines.append("- pass@1: **{}%** ({}/{})".format(s["pass_at_1"], s["passed"], s["total"]))
     if "pass_at_2" in s:
         lines.append("- pass@2 (after one repair round): **{}%** ({}/{})".format(
@@ -1620,7 +1867,7 @@ def pack_instructions(lang, context, pack_name, answers_path):
 
 
 def cmd_blind_pack(args):
-    tasks = load_tasks(task_selector(args))
+    tasks = load_tasks(task_selector(args), args.tier)
     if args.limit:
         tasks = tasks[:args.limit]
     if args.shuffle is not None:
@@ -1633,7 +1880,7 @@ def cmd_blind_pack(args):
         lines = [pack_instructions(args.lang, args.context, "{} of {}".format(n, len(packs)),
                                    answers), "---", ""]
         for t in pack:
-            lines += ["## {}".format(t.id), "", t.prompt, ""]
+            lines += ["## {}".format(t.id), "", user_prompt(t, args.lang), ""]
         path = os.path.join(args.out, "{}.md".format(n))
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -1669,7 +1916,7 @@ def cmd_selftest(args):
         if not cond:
             failures.append(what)
 
-    tasks = {t.id: t for t in load_tasks(lambda t: t.category == "basics")}
+    tasks = {t.id: t for t in load_tasks(lambda t: t.category == "basics", "v1")}
     cfg = RunConfig("forge", forge, args.engine)
     work = tempfile.mkdtemp(prefix="forge-eval-selftest-")
     try:
@@ -1708,13 +1955,188 @@ def cmd_selftest(args):
     expect(message_prefix("undefined variable: 'foo' at 12") == "undefined variable: '_' at N",
            "message_prefix")
 
+    n_v2 = selftest_v2_features(forge, args, expect)
+
     if failures:
         print("selftest FAILED:")
         for f in failures:
             print("  " + f)
         return 1
-    print("selftest OK ({} scoring cases)".format(len(SELFTEST_CASES) + 1))
+    print("selftest OK ({} scoring cases, {} v2 harness checks)".format(
+        len(SELFTEST_CASES) + 1, n_v2))
     return 0
+
+
+def make_selftest_task(root, category, data, files):
+    """A throwaway task under `root` (not one of the real tiers)."""
+    tdir = os.path.join(root, category, data["id"])
+    os.makedirs(tdir, exist_ok=True)
+    for name, text in files.items():
+        with open(os.path.join(tdir, name), "w", encoding="utf-8") as f:
+            f.write(text)
+    data = dict(data, category=category, title="selftest", prompt="selftest")
+    return Task(tdir, data, "v2")
+
+
+def selftest_v2_features(forge, args, expect):
+    """Harness features added for the v2 tier: tiers, edition pinning,
+    [[case]] runs with exit codes, stdin_file, the server runner (status_only,
+    request headers, early exit) and the fixture's per-run routes. Returns
+    the number of checks."""
+    checks = [0]
+
+    def check(cond, what):
+        checks[0] += 1
+        expect(cond, "v2: " + what)
+
+    # Tiers: every v1 task is tier v1 with a v1 category; `all` is a superset.
+    v1 = load_tasks(None, "v1")
+    every = load_tasks(None, "all")
+    check(v1 and all(t.tier == "v1" and t.category in CATEGORIES for t in v1), "v1 tier loading")
+    check({t.id for t in v1} <= {t.id for t in every}, "tier all includes v1")
+    check(tier_names("all") == list(TIERS) and tier_names("v2") == ["v2"], "tier_names")
+
+    root = tempfile.mkdtemp(prefix="forge-eval-selftest-v2-")
+    try:
+        # Edition pinning.
+        pinned = make_selftest_task(root, "typed", {
+            "id": "st_pinned", "editions": ["2027"], "expected_stdout": "1\n"}, {})
+        check(not pinned.applies_to(None) and pinned.applies_to("2027"), "applies_to")
+        labels = [c.label() for c in validation_configs(forge, pinned, False)]
+        check(labels == ["forge-vm-2027", "forge-interp-2027"], "pinned configs {}".format(labels))
+        labels = [c.label() for c in validation_configs(forge, pinned, True)]
+        check(labels == ["forge-vm-2027", "forge-interp-2027"], "pinned quick configs")
+        check("--edition 2027" in user_prompt(pinned, "forge")
+              and user_prompt(pinned, "python") == "selftest", "pinned prompt note")
+        both = make_selftest_task(root, "data", {"id": "st_both", "expected_stdout": ""}, {})
+        labels = [c.label() for c in validation_configs(forge, both, True)]
+        check(labels == ["forge-vm", "forge-interp-2027"], "quick configs unchanged")
+
+        # [[case]] runs with exit codes and stdin_file.
+        cases_toml = (
+            'id = "st_cases"\ncategory = "error_handling"\ntitle = "t"\nprompt = "p"\n'
+            '[[case]]\nname = "good"\nstdin = "ok\\n"\nexpected_stdout = "fine\\n"\n'
+            '[[case]]\nname = "bad"\nstdin_file = "bad.txt"\nexpected_stdout = "broken\\n"\n'
+            'exit_code = 3\n')
+        cdir = os.path.join(root, "error_handling", "st_cases")
+        os.makedirs(cdir)
+        with open(os.path.join(cdir, "task.toml"), "w") as f:
+            f.write(cases_toml)
+        with open(os.path.join(cdir, "bad.txt"), "w") as f:
+            f.write("nope\n")
+        data = load_toml(os.path.join(cdir, "task.toml"))
+        check(load_toml(os.path.join(cdir, "task.toml"), force_mini=True) == data,
+              "MiniToml agrees on [[case]]")
+        ctask = Task(cdir, data, "v2")
+        check(ctask.cases[1]["stdin"] == "nope\n", "stdin_file read")
+        check(ctask.problems() == ["missing reference.fg", "missing reference.py"],
+              "case task schema {}".format(ctask.problems()))
+        good_fg = ('let s = input().trim()\nif s == "ok" {\n    println("fine")\n} else {\n'
+                   '    println("broken")\n    exit(3)\n}\n')
+        zero_fg = ('let s = input().trim()\nif s == "ok" {\n    println("fine")\n} else {\n'
+                   '    println("broken")\n}\n')
+        good_py = ('import sys\ns = sys.stdin.read().strip()\nprint("fine" if s == "ok" '
+                   'else "broken")\nsys.exit(0 if s == "ok" else 3)\n')
+        crash_py = ('import sys\ns = sys.stdin.read().strip()\nprint("fine" if s == "ok" '
+                    'else "broken")\nif s != "ok":\n    raise ValueError("boom")\n')
+        paths = {}
+        for name, text in (("good.fg", good_fg), ("zero.fg", zero_fg),
+                           ("good.py", good_py), ("crash.py", crash_py)):
+            paths[name] = os.path.join(root, name)
+            with open(paths[name], "w") as f:
+                f.write(text)
+        fcfg = RunConfig("forge", forge, args.engine)
+        pcfg = RunConfig("python", python=args.python)
+        r = evaluate(fcfg, ctask, paths["good.fg"])
+        check(r["status"] == "pass", "cases pass on forge: {} {}".format(r["class"], r.get("message")))
+        r = evaluate(fcfg, ctask, paths["zero.fg"])
+        check(r["class"] == "wrong_output" and "exit code 0, expected 3" in (r["message"] or ""),
+              "wrong exit code is wrong_output: {} {}".format(r["class"], r.get("message")))
+        r = evaluate(pcfg, ctask, paths["good.py"])
+        check(r["status"] == "pass", "cases pass on python: {}".format(r.get("message")))
+        r = evaluate(pcfg, ctask, paths["crash.py"])
+        check(r["class"] == "runtime_error" and r["code"] == "ValueError",
+              "python crash is runtime_error: {} {}".format(r["class"], r.get("code")))
+
+        # Server runner: a Forge and a Python server answer the same requests.
+        port = free_port()
+        srv_task = make_selftest_task(root, "servers", {
+            "id": "st_server", "mode": "server", "port": port, "needs": ["net"],
+            "timeout": 20,
+            "request": [
+                {"method": "GET", "path": "/hi/Ada"},
+                {"method": "POST", "path": "/sum", "body": '{"xs": [1, 2, 3]}',
+                 "headers": {"X-Ignored": "1"}},
+                {"method": "GET", "path": "/nope", "status_only": True},
+            ],
+            "expected_stdout": ('STATUS 200\n{"hi": "Ada"}\nSTATUS 200\n{"sum": 6}\n'
+                                'STATUS 404\n'),
+        }, {})
+        srv_fg = ('@server(port: {})\n\n@get("/hi/:name")\nfn hi(name: String) -> Json {{\n'
+                  '    return {{ hi: name }}\n}}\n\n@post("/sum")\nfn total(body: Json) -> Json {{\n'
+                  '    return {{ sum: sum(body.xs) }}\n}}\n').format(port)
+        srv_py = (
+            'import json, socketserver\nfrom http.server import BaseHTTPRequestHandler, '
+            'ThreadingHTTPServer\nclass H(BaseHTTPRequestHandler):\n'
+            '    def log_message(self, *a): pass\n'
+            '    def send(self, code, obj):\n'
+            '        data = b"" if obj is None else json.dumps(obj).encode()\n'
+            '        self.send_response(code)\n'
+            '        self.send_header("Content-Length", str(len(data)))\n'
+            '        self.end_headers()\n        self.wfile.write(data)\n'
+            '    def do_GET(self):\n'
+            '        if self.path.startswith("/hi/"):\n'
+            '            return self.send(200, {"hi": self.path[4:]})\n'
+            '        self.send(404, None)\n'
+            '    def do_POST(self):\n'
+            '        n = int(self.headers["Content-Length"])\n'
+            '        xs = json.loads(self.rfile.read(n))["xs"]\n'
+            '        self.send(200, {"sum": sum(xs)})\n'
+            'class S(ThreadingHTTPServer):\n'
+            '    def server_bind(self):\n'
+            '        socketserver.TCPServer.server_bind(self)\n'
+            '        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]\n'
+            'S(("127.0.0.1", {}), H).serve_forever()\n').replace("{}", str(port))
+        exits_fg = 'println("no server here")\n'
+        for name, text in (("srv.fg", srv_fg), ("srv.py", srv_py), ("exits.fg", exits_fg)):
+            paths[name] = os.path.join(root, name)
+            with open(paths[name], "w") as f:
+                f.write(text)
+        r = evaluate(fcfg, srv_task, paths["srv.fg"])
+        check(r["status"] == "pass", "forge server: {} {} {}".format(
+            r["class"], r.get("diff"), r.get("stderr", "")[-300:]))
+        r = evaluate(pcfg, srv_task, paths["srv.py"])
+        check(r["status"] == "pass", "python server: {} {}".format(r["class"], r.get("diff")))
+        srv_task.timeout = 3.0
+        r = evaluate(fcfg, srv_task, paths["exits.fg"])
+        check(r["status"] == "fail" and r["class"] in ("runtime_error", "wrong_output"),
+              "server that exits early fails: {}".format(r["class"]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # Fixture: per-run flaky counters, auth/ and headers.
+    fetch_users = next((t for t in v1 if t.id == "fetch_users"), None)
+    if fetch_users is not None:
+        base1 = Fixture.base_url(fetch_users)
+        base2 = Fixture.base_url(fetch_users)
+        check(base1 != base2, "fresh run token per base_url")
+        got = [http_request("GET", base1 + "/flaky/2/k")[0] for _ in range(3)]
+        check(got == [503, 503, 200], "flaky/2 per run: {}".format(got))
+        st, body = http_request("GET", base2 + "/flaky/2/k")
+        check(st == 503 and json.loads(body)["attempt"] == 1, "flaky counters are per run")
+        st, _ = http_request("GET", base1 + "/auth/users.json")
+        check(st == 401, "auth/ without a token is 401")
+        st, body = http_request("GET", base1 + "/auth/users.json",
+                                headers={"Authorization": "Bearer " + FIXTURE_TOKEN})
+        check(st == 200 and isinstance(json.loads(body), list), "auth/ with the token")
+        st, body = http_request("GET", base1 + "/headers", headers={"X-Trace": "abc"})
+        check(st == 200 and json.loads(body).get("x-trace") == "abc", "headers route")
+        try:
+            http_request("GET", closed_url() + "/", timeout=2)
+            check(False, "closed_url must refuse connections")
+        except (urllib.error.URLError, OSError):
+            check(True, "closed_url refuses")
+    return checks[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1727,9 +2149,13 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     jobs = max(2, min(16, (os.cpu_count() or 2) * 2))
 
-    def common(p, run_opts=True):
+    def common(p, run_opts=True, tier=None):
         p.add_argument("--tasks", help="comma-separated task ids")
         p.add_argument("--category", help="comma-separated categories")
+        if tier:
+            p.add_argument("--tier", choices=list(TIERS) + ["all"], default=tier,
+                           help="task tier: v1 (eval/tasks), v2 (eval/tasks_v2) or all "
+                                "(default: {})".format(tier))
         p.add_argument("--jobs", type=int, default=jobs, help="parallel workers")
         if run_opts:
             p.add_argument("--forge", help="forge binary (default: $FORGE_BIN, target/, PATH)")
@@ -1738,9 +2164,10 @@ def main(argv=None):
         p.add_argument("-v", "--verbose", action="store_true")
 
     p = sub.add_parser("validate", help="run every reference solution")
-    common(p)
+    common(p, tier="all")
     p.add_argument("--quick", action="store_true",
-                   help="Forge on vm (2026) and interp (2027) only, instead of all four")
+                   help="Forge on vm (2026) and interp (2027) only, instead of all four "
+                        "(a task pinned to one edition: vm and interp in it)")
     p.add_argument("--no-python", action="store_true", help="skip the Python references")
     p.set_defaults(func=cmd_validate)
 
@@ -1750,7 +2177,7 @@ def main(argv=None):
     p.set_defaults(func=cmd_selftest)
 
     p = sub.add_parser("generate", help="produce solutions with a provider")
-    common(p)
+    common(p, tier="v1")
     p.add_argument("--provider", choices=["anthropic", "command", "dir"], required=True)
     p.add_argument("--lang", choices=sorted(LANGS), required=True)
     p.add_argument("--context", choices=CONTEXTS, default="llms")
@@ -1770,7 +2197,7 @@ def main(argv=None):
     p.set_defaults(func=cmd_generate)
 
     p = sub.add_parser("score", help="run and score a run directory")
-    common(p)
+    common(p, tier="all")
     p.add_argument("run")
     p.add_argument("--engine", choices=["vm", "interp"], default="vm")
     p.add_argument("--edition", help="e.g. 2027 (default: the forge default edition)")
@@ -1786,7 +2213,7 @@ def main(argv=None):
     p.set_defaults(func=cmd_compare)
 
     p = sub.add_parser("blind-pack", help="write task packs for agents acting as models")
-    common(p, run_opts=False)
+    common(p, run_opts=False, tier="v1")
     p.add_argument("--lang", choices=sorted(LANGS), default="forge")
     p.add_argument("--context", choices=["none", "llms"], default="none")
     p.add_argument("--per-pack", type=int, default=10)

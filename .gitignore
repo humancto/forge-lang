@@ -58,3 +58,5 @@ docs/ARCHITECTURE_AUDIT.md
 
 # Eval task fixtures are data, whatever their extension.
 !eval/tasks/**/files/**
+!eval/tasks_v2/**/files/**
+!eval/tasks_v2/**/www/**
