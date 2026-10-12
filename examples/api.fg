@@ -1,6 +1,7 @@
 // api.fg — A complete REST API in Forge
 // Run: forge run api.fg
 // Test: curl http://localhost:8080/hello/World
+//       curl -i -X POST localhost:8080/items -H 'content-type: application/json' -d '{"name":"x"}'
 
 @server(port: 8080)
 
@@ -25,6 +26,16 @@ fn add(a: String, b: String) -> Json {
     let y = int(b)
     let sum = x + y
     return { a: x, b: y, sum: sum }
+}
+
+// http.response(status, body?, headers?) chooses the status code and headers.
+@post("/items")
+fn create_item(body, headers) {
+    if typeof(body) != "Object" || !has_key(body, "name") {
+        return http.response(400, { error: "send a JSON object with a name" })
+    }
+    let agent = get(headers, "user-agent")
+    return http.response(201, { id: 1, name: body.name, client: agent }, { Location: "/items/1" })
 }
 
 println("Forge API server starting...")

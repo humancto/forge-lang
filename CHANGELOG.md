@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **HTTP handlers control the response** (both engines) — `http.response(status, body?, headers?)` sets the status code (an Int from 200 to 599), response headers and body: `return http.response(201, { id: 1 }, { Location: "/items/1" })`, `http.response(404, { error: "not found" })`, `http.response(204)`. A `null` body sends no body, a String is sent as is (`text/plain; charset=utf-8` unless a `Content-Type` header is given), any other value as JSON. A header value may be a String, number, Bool or an array (one header per element, e.g. `Set-Cookie`); invalid names, values with line breaks or control characters (header injection) and the framing headers `Content-Length`/`Transfer-Encoding`/`Connection` are errors, as is a body with 204/304. The value is validated when built and again when the handler returns it (a hand-modified invalid one answers `500 {"error": "invalid http.response: ..."}`). Returning any other value still answers `200` JSON, and handler errors still answer `500 {"error": message}`.
+- **HTTP handlers read the request** — a `headers` parameter receives the request headers (lower-case names), and a `req`/`request` parameter the whole request: `{ method, path, params, query, headers, body }`. Existing bindings (path params, `body`/`data`, `query`/`qs`, single query params) are unchanged.
+- **`@patch` routes**, and `GET` routes answer `HEAD`.
+- **`import { name as alias } from "file.fg"`** (both engines, all editions) — binds an imported function or variable under another name (also for built-in modules: `import { sqrt as root } from "math"`). Structs, types, variants and interfaces keep their names (renaming one is E0019). The syntax index, type checker and LSP know the alias: go to definition and hover follow it to the module's definition, and renaming the definition renames the name in the import statement but not the alias. `forge fmt` formats it.
+
+### Changed
+
+- **A module runs once per program** (both engines) — importing a file that already ran (from another module, or `import "m.fg"` after `import { f } from "m.fg"`) binds its names without running it again, so its top-level side effects happen once and every importer shares its state. Circular imports are still reported (`circular import: a.fg -> b.fg -> a.fg`). The REPL keeps imported modules for the session; an HTTP request that imports a file still runs it in its own isolated fork.
+- **HTTP request bodies are decoded by content type** — JSON (`application/json`, `*+json`) is parsed, `application/x-www-form-urlencoded` becomes an object of Strings, and any other body (text, or no `Content-Type`) is a String; a request without a body binds `body` to `{}` (previously 415). Invalid JSON is answered `400 {"error": "invalid JSON body: ..."}`, a body that is not UTF-8 text `415`, a body over 2 MiB `413` — JSON errors instead of axum's plain-text rejections.
+- **A database opened at the top level is visible in HTTP handlers** (`db.open`, `pg.connect`; both engines) — previously every handler failed with "no database connection open". The connection is shared by all requests (statements run one at a time); a transaction belongs to the request that opened it (`db.begin()` or `BEGIN`: other requests wait for it, up to 30 s) and is rolled back when the request ends without committing; `db.last_insert_rowid()` is the request's own last insert. Spawned tasks and `schedule`/`watch` blocks see the connection too. `db.open`/`db.close` inside a handler only affect that request. `tests/server_database.rs` hammers a counter table from concurrent requests on both engines.
+
+### Fixed
+
+- `llms.txt` and the language spec describe import resolution as implemented (relative to the importing file, then the working directory, then `forge_modules`), the HTTP server's handler parameters, request bodies, responses and shared databases, and circular-import detection.
+
 ## [0.11.0] - 2026-10-11
 
 ### Added
