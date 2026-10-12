@@ -227,6 +227,38 @@ fn push_assignment_compiles_to_push_local_in_every_edition() {
 }
 
 #[test]
+fn pushing_object_and_tuple_literals_compiles_to_push_local() {
+    use crate::semantics::edition::Edition;
+    for value in ["{id: i, tags: [i, 1]}", "(i, \"x\")", "{nested: {a: i}}"] {
+        let source = format!(
+            "fn f(n) {{\n let mut xs = []\n for i in range(n) {{ xs.push({value}) }}\n return xs\n}}"
+        );
+        assert!(uses_push_local(&source, Edition::E2026), "{value}");
+    }
+    // A literal holding a call runs user code: it stays a method call.
+    let call = "fn g() { return 1 }\nfn f() {\n let mut xs = []\n xs.push({v: g()})\n return xs\n}";
+    assert!(!uses_push_local(call, Edition::E2026));
+}
+
+#[test]
+fn pushed_object_literals_are_invisible_to_aliases() {
+    assert_fn_output(
+        r#"
+        let mut rows = []
+        rows.push({id: 1})
+        let before = rows
+        rows.push({id: 2, tags: [1, 2]})
+        rows.push((3, "x"))
+        say len(before)
+        say len(rows)
+        say rows[1].tags
+        say rows[2]
+        "#,
+        &["1", "3", "[1, 2]", "(3, x)"],
+    );
+}
+
+#[test]
 fn push_assignment_in_place_is_invisible_to_aliases() {
     for edition in crate::semantics::edition::Edition::ALL {
         let _edition = crate::semantics::edition::scope(Some(*edition));
