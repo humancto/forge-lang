@@ -1,5 +1,4 @@
 use crate::interpreter::Value;
-use crate::runtime::server::json_to_forge;
 /// Forge HTTP Client — Powered by Reqwest
 /// Full HTTP/HTTPS client with JSON, headers, timeouts, and safety guards.
 use indexmap::IndexMap;
@@ -385,8 +384,8 @@ async fn fetch_validated(
     response.insert("headers".to_string(), Value::Object(resp_headers));
 
     // Auto-parse JSON body
-    match serde_json::from_str::<serde_json::Value>(&body_text) {
-        Ok(json) => response.insert("json".to_string(), json_to_forge(json)),
+    match crate::stdlib::json_module::parse_str(&body_text) {
+        Ok(json) => response.insert("json".to_string(), json),
         Err(_) => response.insert("json".to_string(), Value::Null),
     };
 

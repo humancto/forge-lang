@@ -1,0 +1,6 @@
+// A module that calls its own functions above their definitions.
+let doubled = double(21)
+let base = 10
+let shifted = plus_base(5)
+fn double(x) { return x * 2 }
+fn plus_base(x) { return x + base }

@@ -150,6 +150,21 @@ fn jit_nested_calls() {
 }
 
 #[test]
+fn jit_runs_hoisted_functions_called_above_their_definitions() {
+    // Hot, called before it is written; it calls another hoisted function.
+    let out = run_jit_native(
+        "let mut total = 0\nfor i in range(200) { total = total + sum_sq(i, 2) }\nprintln(total)\nfn sum_sq(a, b) { return sq(a) + sq(b) }\nfn sq(n) { return n * n }",
+        "sum_sq",
+    );
+    assert_eq!(out, vec!["2647500"]);
+    let out = run_jit_native(
+        "println(fib(20))\nfn fib(n) { if n <= 1 { return n } return fib(n - 1) + fib(n - 2) }",
+        "fib",
+    );
+    assert_eq!(out, vec!["6765"]);
+}
+
+#[test]
 fn jit_loop_accumulator() {
     let out = run_jit_function(
         "fn sum_to(n) { let mut s = 0\nlet mut i = 1\nwhile i <= n { s = s + i\ni = i + 1 }\nreturn s }\nprintln(sum_to(100))",

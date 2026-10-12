@@ -940,6 +940,15 @@ fn shared_binary_op(op: &BinOp) -> Option<crate::semantics::BinaryOp> {
 }
 
 /// Project an interpreter value onto the shared operand view.
+/// Length of an array (or frozen array); 0 for anything else.
+fn array_len(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => items.len(),
+        Value::Frozen(inner) => array_len(inner),
+        _ => 0,
+    }
+}
+
 fn semantic_operand(value: &Value) -> crate::semantics::Operand<'_> {
     use crate::semantics::Operand;
     match value {
@@ -1550,8 +1559,17 @@ impl Interpreter {
         }
     }
 
+    /// The order in which a top-level statement list runs: function
+    /// definitions are hoisted (`semantics::hoist`), except names this
+    /// interpreter already defines (builtins, earlier REPL/session steps).
+    fn hoist_plan(&self, statements: &[SpannedStmt]) -> crate::semantics::hoist::Plan {
+        crate::semantics::hoist::plan(statements, &|name| self.env.contains(name))
+    }
+
     pub fn run(&mut self, program: &Program) -> Result<Value, RuntimeError> {
-        for spanned in &program.statements {
+        let plan = self.hoist_plan(&program.statements);
+        for &index in &plan.order {
+            let spanned = &program.statements[index];
             self.current_line = spanned.line;
             if let Some(ref mut cov) = self.coverage {
                 if spanned.line > 0 {
@@ -1559,8 +1577,9 @@ impl Interpreter {
                 }
             }
             // Top-level statements are debugger stop points too (breakpoints,
-            // stepping, stop-on-entry); `exec_stmts` only covers blocks.
-            if spanned.line > 0 {
+            // stepping, stop-on-entry); `exec_stmts` only covers blocks. A
+            // hoisted definition is not: it runs before the code above it.
+            if spanned.line > 0 && !plan.was_moved(index) {
                 self.debug_check(spanned.line);
             }
             match self.exec_stmt(&spanned.stmt) {
@@ -1588,7 +1607,8 @@ impl Interpreter {
     /// Run in REPL mode — returns the value of the last expression for display
     pub fn run_repl(&mut self, program: &Program) -> Result<Value, RuntimeError> {
         let mut last = Value::Null;
-        for spanned in &program.statements {
+        let plan = self.hoist_plan(&program.statements);
+        for spanned in plan.order.iter().map(|&i| &program.statements[i]) {
             self.current_line = spanned.line;
             let patch = |mut e: RuntimeError| {
                 if e.line == 0 {
@@ -3297,6 +3317,12 @@ impl Interpreter {
                         "skip",
                         "frequencies",
                         "for_each",
+                        // Numbers
+                        "abs",
+                        "round",
+                        "floor",
+                        "ceil",
+                        "to_fixed",
                     ];
                     let func = match &obj {
                         Value::Object(map) if map.get(field).is_some() => {
@@ -4219,6 +4245,28 @@ impl Interpreter {
         Ok(Value::String(text))
     }
 
+    /// `left + right` for two arrays (frozen ones included): a new array,
+    /// within the collection size cap.
+    fn concat_arrays(&self, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
+        let items = |v: &'_ Value| -> Vec<Value> {
+            match v {
+                Value::Array(items) => items.clone(),
+                Value::Frozen(inner) => match inner.as_ref() {
+                    Value::Array(items) => items.clone(),
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            }
+        };
+        let (a, b) = (array_len(left), array_len(right));
+        self.caps
+            .check_collection(a + b)
+            .map_err(|m| RuntimeError::new(&m))?;
+        let mut out = items(left);
+        out.extend(items(right));
+        Ok(Value::Array(out))
+    }
+
     fn eval_binop(&self, left: &Value, op: &BinOp, right: &Value) -> Result<Value, RuntimeError> {
         // `==` / `!=` are total: values of different types are unequal,
         // never an error (same rule as the VM's `Value::equals`).
@@ -4239,6 +4287,7 @@ impl Interpreter {
                 Ok(crate::semantics::Outcome::Float(f)) => Ok(Value::Float(f)),
                 Ok(crate::semantics::Outcome::Bool(b)) => Ok(Value::Bool(b)),
                 Ok(crate::semantics::Outcome::Concat) => self.concat(left, right),
+                Ok(crate::semantics::Outcome::ArrayConcat) => self.concat_arrays(left, right),
                 Err(message) => Err(RuntimeError::new(&message)),
             };
         }

@@ -8,11 +8,20 @@ if !contains(cfg.features, "beta") {
 }
 cfg.updated_by = "eval"
 cfg = omit(cfg, ["deprecated"])
-// json.parse already orders keys; the keys added above go last, so re-sort.
-let mut ordered = {}
-for key in sort(keys(cfg)) {
-    ordered[key] = cfg[key]
+// json.parse keeps the file's key order: sort every object's keys.
+fn sorted_keys(v) {
+    if typeof(v) == "Object" {
+        let mut out = {}
+        for key in sort(keys(v)) {
+            out[key] = sorted_keys(v[key])
+        }
+        return out
+    }
+    if typeof(v) == "Array" {
+        return map(v, fn(x) { return sorted_keys(x) })
+    }
+    return v
 }
-fs.write("config.json", json.pretty(ordered) + "\n")
+fs.write("config.json", json.pretty(sorted_keys(cfg)) + "\n")
 println("version: {old} -> {new_version}")
 println("features: {len(cfg.features)}")

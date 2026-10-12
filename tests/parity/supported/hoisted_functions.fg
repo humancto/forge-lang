@@ -1,0 +1,28 @@
+// expect: [3, true, 12, undefined, 1, 2, 42, 15, 8]
+// Top-level functions may be called above their definitions (semantics::hoist).
+import { doubled, shifted, double } from "tests/parity/modules/hoisted_helper.fg"
+
+let a = mean([1, 2, 3, 6])
+let b = is_even(10)
+
+// `scaled` reads `scale`, so it is available once `scale` is defined.
+let mut early = "defined"
+try { scaled(1) } catch e { early = "undefined" }
+let scale = 3
+let c = scaled(4)
+
+// A name defined twice keeps both definitions in place.
+fn r() { return 1 }
+let r1 = r()
+fn r() { return 2 }
+let r2 = r()
+
+fn mean(xs) {
+    let total = sum(xs)
+    return total / len(xs)
+}
+fn is_even(n) { if n == 0 { return true } return is_odd(n - 1) }
+fn is_odd(n) { if n == 0 { return false } return is_even(n - 1) }
+fn scaled(x) { return x * scale }
+
+[a, b, c, early, r1, r2, doubled, shifted, double(4)]

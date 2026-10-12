@@ -37,16 +37,24 @@ previous run, not in advance.
 | `http.post` re-encoded a String body (1) | String bodies are sent as is |
 | `"{}"` was an empty-interpolation error (1) | `{}` is text |
 
-### Remaining failures (final branch, edition 2027)
+### Remaining failures after #154 (all fixed in 0.11.0)
 
-- `push(x, v)` updates a mutable variable `x` (parameters included) as
-  well as returning the new array, so `let a = push(cols, c)` in a
-  backtracking search changes `cols` (n_queens). The builtins spec says
-  the original is not modified; the statements spec calls it
-  side-effecting. **Needs a decision**: candidate edition 2027 change.
-- `abs(x)` is not a global (`math.abs`), mode_and_median.
-- No compact `json.stringify` (always `", "` and `": "`), compact_json.
-- Top-level functions are not hoisted (calling one above its
-  definition), csv_column_stats.
-- Two task prompts were ambiguous (both languages failed identically);
-  clarified.
+- `push(x, v)` also updated a mutable `x` (n_queens): edition 2027 makes
+  `push` pure; a discarded `push(xs, v)` is T0019.
+- `abs(x)` / `floor(x)` were not globals (mode_and_median, order_totals):
+  global `abs`, `min`, `max`, `round(x, digits?)`, `floor`, `ceil`,
+  `to_fixed`.
+- No compact JSON (compact_json): `json.compact`; `json.parse` keeps key
+  order.
+- Top-level functions were not hoisted (csv_column_stats): they are.
+
+## 2026-10-11: 0.11.0 (third blind round)
+
+Fresh solvers, the 0.11.0 `llms.txt`, scored on the release branch:
+
+| Run | Forge 2026 | Forge 2027 | Python |
+|---|---:|---:|---:|
+| Round 3 | **100%** (103/103) | **100%** (103/103) | 98.1% |
+
+Round 3's only failure before `floor`/`ceil` became globals was a call to
+`floor(x)`.

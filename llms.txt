@@ -61,10 +61,17 @@ println(len(nums))
 println(str(42) + "!")        // + joins two Strings; convert other values with str() or "{x}"
 println(int("7") + 1)
 println(10 / 4)               // 2 (Int / Int is integer division)
+println([1, 2] + [3])         // [1, 2, 3] (+ also joins two arrays)
+println(abs(-3))              // 3
+println(min(4, 2), max([4, 9]))   // min/max take numbers or one array
+println(round(3.14159, 2))    // 3.14 (round(x) alone gives an Int: 3)
+println(to_fixed(2.5, 2))     // 2.50 (a String with exactly 2 decimals)
 let {name: who, age} = user     // destructuring (also `let [first, ...rest] = nums`, `let (a, b) = pair`)
 let [first, ...rest] = nums
 println("{who} {age} {first} {rest}")
 ```
+
+Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
 
 Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
 
@@ -79,7 +86,7 @@ let names = ["ada", "bob"]
 let lens = map(names, fn(s) { len(s) })        // lens: [Int]
 ```
 
-Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition. Edition 2026 (default): warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
+Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition, T0019 discarded `push(xs, v)` result (edition 2027). Edition 2026 (default): warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
 
 Edition 2027 (`edition = "2027"` in forge.toml, or `forge --edition 2027`): annotations are enforced. A contradiction of a declared type (T0001, T0002, T0003, T0012, T0015, T0016) is an error and nothing runs; annotated function arguments and results are checked at run time on every call (E0017); unannotated code is not checked and costs nothing. Generic parameters must agree within a call: `fn pair<T>(a: T, b: T)` accepts `pair(1, 2)` and `pair(1, 2.5)` (T is Float) but not `pair(1, "x")`. So annotate function signatures with the types you mean (`fn total(xs: [Int]) -> Int`), and leave unknowns unannotated rather than guessing.
 
@@ -149,6 +156,8 @@ println(c())                  // 2
 ```
 
 Always write an explicit `return`.
+
+Top-level `fn` definitions are hoisted: `let avg = mean(nums)` may come before `fn mean(xs) { ... }` in the file (also in imported modules and test files). A function that reads a top-level variable becomes callable once that variable is defined. A name defined twice (or a builtin's name) is not hoisted.
 
 ## Structs, methods, interfaces
 
@@ -292,7 +301,7 @@ try {
 
 There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 
-Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0018`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0019`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
 ```forge
 try {
@@ -321,7 +330,9 @@ Native plugins (Rust/C shared libraries built with `crates/forge-plugin`): `impo
 ```forge
 let nums = [5, 3, 8, 1]
 let mut xs = [1, 2]
-xs = push(xs, 3)              // portable: reassign the result
+xs = push(xs, 3)              // push returns a new array: reassign it
+xs.push(4)                    // or append in place (method form)
+let top = pop(xs)             // pop(xs) / xs.pop() remove and return the last element
 println(map(nums, fn(x) { return x * 2 }))
 println(filter(nums, fn(x) { return x > 2 }))
 println(reduce(nums, 0, fn(acc, x) { return acc + x }))   // (array, initial, fn)
@@ -356,7 +367,7 @@ println(m.get("k"))
 println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
 ```
 
-Other builtins: `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
 
 ## Standard library (always in scope)
 
@@ -364,7 +375,7 @@ Other builtins: `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a
 | ------ | -------------------------------------------- |
 | `math` | `sqrt(x)`, `pow(b, e)`, `abs`, `max(a, b)`, `min`, `floor`, `ceil`, `round`, `random_int(lo, hi)`, `pi`, `e` |
 | `fs` | `read(path)`, `write(path, text)`, `append`, `exists`, `list(dir)`, `remove`, `mkdir`, `copy(src, dst)`, `rename` |
-| `json` | `parse(text)`, `stringify(value)` |
+| `json` | `parse(text)` (keeps the document's key order), `stringify(value)` → `{"a": 1, "b": [1, 2]}`, `compact(value)` → `{"a":1,"b":[1,2]}` (no whitespace), `pretty(value, indent?)` |
 | `regex` | `test(text, pattern)`, `find(text, pattern)`, `find_all(text, pattern)`, `replace(text, pattern, repl)`, `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
 | `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body) |
@@ -386,6 +397,7 @@ println(math.sqrt(16.0))
 println(regex.find_all("a1b22c333", "\\d+"))
 println(regex.replace("a1b2", "\\d", "#"))
 println(json.stringify({ a: [1, 2] }))
+println(json.compact({ b: 1, a: [1, 2] }))   // {"b":1,"a":[1,2]}
 println(json.parse("[1, 2]")[1])
 println(env.get("FORGE_LLMS_UNSET", "fallback"))
 println(path.join("a", "b.txt"))
@@ -486,7 +498,9 @@ fn cities() { return ["Oslo"] }
 - Method chains cannot start a line with `.`; keep `a.filter(...).map(...)` on one line.
 - `regex.*` takes `(text, pattern)`, not `(pattern, text)`. Escape backslashes in patterns: `"\\d+"`.
 - `reduce(array, initial, fn)` — the initial value comes second.
+- `push(xs, v)` returns a new array: write `xs = push(xs, v)` or `xs.push(v)`, never a bare `push(xs, v)` statement (edition 2027 rejects it, T0019). In 2027 `let ys = push(xs, v)` leaves `xs` unchanged (safe in backtracking); edition 2026 also updated a mutable `xs` there.
 - Put non-String values into text with interpolation (`"total: {n}"`) or `str(n)`, never `"total: " + n`: edition 2027 rejects `+` between a String and a non-String (E0034; edition 2026 converts silently).
+- No format specs such as `{x:.2f}` or `%.2f`: write `"{to_fixed(x, 2)}"`.
 - Mutating a field or index requires a `let mut` binding.
 - `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.

@@ -16,6 +16,10 @@ pub fn create_module() -> Value {
         Value::BuiltIn("json.pretty".to_string()),
     );
     m.insert(
+        "compact".to_string(),
+        Value::BuiltIn("json.compact".to_string()),
+    );
+    m.insert(
         "valid".to_string(),
         Value::BuiltIn("json.valid".to_string()),
     );
@@ -29,18 +33,22 @@ pub fn create_module() -> Value {
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "json.parse" => match args.first() {
-            Some(Value::String(s)) => match serde_json::from_str::<serde_json::Value>(s) {
-                Ok(v) => Ok(json_to_forge(v)),
-                Err(e) => Err(format!("JSON parse error: {}", e)),
-            },
+            Some(Value::String(s)) => parse_str(s).map_err(|e| format!("JSON parse error: {}", e)),
             _ => Err("json.parse() requires a string".to_string()),
         },
         "json.stringify" => match args.first() {
             Some(v) => {
                 validate_json_value(v)?;
-                Ok(Value::String(forge_to_json_compact(v)))
+                Ok(Value::String(forge_to_json_line(v, &SPACED)))
             }
             None => Err("json.stringify() requires a value".to_string()),
+        },
+        "json.compact" => match args.first() {
+            Some(v) => {
+                validate_json_value(v)?;
+                Ok(Value::String(forge_to_json_line(v, &COMPACT)))
+            }
+            None => Err("json.compact() requires a value".to_string()),
         },
         "json.pretty" => match args.first() {
             Some(v) => {
@@ -89,6 +97,88 @@ fn deep_merge(
         }
     }
     result
+}
+
+/// Parse JSON text into a Forge value. Object keys keep the order they
+/// have in the text (Forge objects are insertion-ordered); a repeated key
+/// keeps its first position and its last value. Use this rather than
+/// `serde_json::Value` + [`json_to_forge`]: `serde_json::Value` objects
+/// (without the `preserve_order` feature) sort their keys.
+pub fn parse_str(text: &str) -> Result<Value, serde_json::Error> {
+    serde_json::from_str::<Ordered>(text).map(|o| o.0)
+}
+
+/// A Forge value deserialized straight from JSON, object keys in document
+/// order (see [`parse_str`]). Also the HTTP server's request-body type.
+pub struct Ordered(pub Value);
+
+impl<'de> serde::Deserialize<'de> for Ordered {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(OrderedVisitor).map(Ordered)
+    }
+}
+
+struct OrderedVisitor;
+
+impl<'de> serde::de::Visitor<'de> for OrderedVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, b: bool) -> Result<Value, E> {
+        Ok(Value::Bool(b))
+    }
+
+    fn visit_i64<E>(self, n: i64) -> Result<Value, E> {
+        Ok(Value::Int(n))
+    }
+
+    // Same mapping as `json_to_forge`: beyond i64 becomes a Float.
+    fn visit_u64<E>(self, n: u64) -> Result<Value, E> {
+        Ok(i64::try_from(n).map_or(Value::Float(n as f64), Value::Int))
+    }
+
+    fn visit_f64<E>(self, f: f64) -> Result<Value, E> {
+        Ok(Value::Float(f))
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Value, E> {
+        Ok(Value::String(s.to_owned()))
+    }
+
+    fn visit_string<E>(self, s: String) -> Result<Value, E> {
+        Ok(Value::String(s))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
+        <Ordered as serde::Deserialize>::deserialize(d).map(|o| o.0)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(Ordered(v)) = seq.next_element()? {
+            items.push(v);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut out = IndexMap::new();
+        while let Some((k, Ordered(v))) = map.next_entry::<String, Ordered>()? {
+            out.insert(k, v);
+        }
+        Ok(Value::Object(out))
+    }
 }
 
 pub fn json_to_forge(v: serde_json::Value) -> Value {
@@ -184,41 +274,79 @@ fn validate_json_value(v: &Value) -> Result<(), String> {
     }
 }
 
-fn forge_to_json_compact(v: &Value) -> String {
+/// Separators of a one-line encoding: between items, and after a key.
+struct Separators {
+    item: &'static str,
+    key: &'static str,
+}
+
+/// `json.stringify`: `{"a": 1, "b": [1, 2]}`.
+const SPACED: Separators = Separators {
+    item: ", ",
+    key: ": ",
+};
+
+/// `json.compact`: `{"a":1,"b":[1,2]}` (no whitespace at all).
+const COMPACT: Separators = Separators {
+    item: ",",
+    key: ":",
+};
+
+/// One-line JSON for a validated value; keys keep their order.
+fn forge_to_json_line(v: &Value, sep: &Separators) -> String {
+    let mut out = String::new();
+    write_json_line(&mut out, v, sep);
+    out
+}
+
+fn write_json_line(out: &mut String, v: &Value, sep: &Separators) {
     match v {
-        Value::Int(n) => n.to_string(),
-        Value::Float(n) => format!("{}", n),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "null".to_string(),
-        Value::String(s) => escape_json_string(s),
+        Value::Int(n) => out.push_str(&n.to_string()),
+        Value::Float(n) => out.push_str(&format!("{}", n)),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Null => out.push_str("null"),
+        Value::String(s) => out.push_str(&escape_json_string(s)),
         Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
-            let entries: Vec<String> = items.iter().map(forge_to_json_compact).collect();
-            format!("[{}]", entries.join(", "))
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(sep.item);
+                }
+                write_json_line(out, item, sep);
+            }
+            out.push(']');
         }
         Value::Object(map) => {
-            let entries: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", escape_json_string(k), forge_to_json_compact(v)))
-                .collect();
-            format!("{{{}}}", entries.join(", "))
+            out.push('{');
+            for (i, (k, v)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(sep.item);
+                }
+                out.push_str(&escape_json_string(k));
+                out.push_str(sep.key);
+                write_json_line(out, v, sep);
+            }
+            out.push('}');
         }
         Value::Map(pairs) => {
-            // Validation guarantees all keys are strings at this point.
-            let entries: Vec<String> = pairs
-                .iter()
-                .map(|(k, v)| {
-                    let ks = if let Value::String(s) = k {
-                        escape_json_string(s)
-                    } else {
-                        escape_json_string("")
-                    };
-                    format!("{}: {}", ks, forge_to_json_compact(v))
-                })
-                .collect();
-            format!("{{{}}}", entries.join(", "))
+            out.push('{');
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(sep.item);
+                }
+                // Validation guarantees all keys are strings at this point.
+                let key = match k {
+                    Value::String(s) => s.as_str(),
+                    _ => "",
+                };
+                out.push_str(&escape_json_string(key));
+                out.push_str(sep.key);
+                write_json_line(out, v, sep);
+            }
+            out.push('}');
         }
-        Value::Frozen(inner) => forge_to_json_compact(inner),
-        _ => "null".to_string(),
+        Value::Frozen(inner) => write_json_line(out, inner, sep),
+        _ => out.push_str("null"),
     }
 }
 

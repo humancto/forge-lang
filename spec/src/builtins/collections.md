@@ -19,19 +19,37 @@ Returns a new array with `value` appended to the end.
 ```forge
 let a = [1, 2, 3]
 let b = push(a, 4)
-say b  // [1, 2, 3, 4]
+println(b)  // [1, 2, 3, 4]
+println(a)  // [1, 2, 3]
 ```
 
-> **Note:** `push` returns a new array. The original array is not modified.
+To append to a variable, assign the result (`xs = push(xs, v)`, every
+edition) or use the method form `xs.push(v)`, which appends to a `let mut`
+variable in place.
 
-## pop(array) -> array
+> **Edition 2027:** `push` never modifies its argument or any variable. A
+> statement `push(xs, v)` discards the result and is a type error
+> (T0019).
+>
+> **Edition 2026:** when the first argument is a mutable variable (`let
+> mut`, a function parameter, or a captured mutable variable), `push` also
+> stores the new array back into it, in every position:
+> `let b = push(xs, 4)` changes `xs` too, and a statement `push(xs, 4)`
+> appends. With any other first argument the original is not modified.
 
-Returns a new array with the last element removed.
+## pop(array) -> value
+
+Returns the last element of `array` (`null` when it is empty). When the
+argument is a mutable variable (`let mut` or a parameter), the element is
+also removed from it, in every edition; `xs.pop()` does the same.
 
 ```forge
-let a = [1, 2, 3]
-let b = pop(a)
-say b  // [1, 2]
+let mut stack = [1, 2, 3]
+let top = pop(stack)
+println(top)    // 3
+println(stack)  // [1, 2]
+let fixed = [4, 5]
+println(pop(fixed))  // 5 (fixed is unchanged)
 ```
 
 ## keys(object) -> array

@@ -141,6 +141,17 @@ fn corpus_edition_2027_errors_are_strict_errors() {
             if d.code.as_str() == "T0005" && d.message.contains("String") {
                 continue;
             }
+            // A discarded `push(xs, v)` (T0019) is legal 2026 code too: in
+            // 2026 the statement still appends to a mutable `xs`.
+            if d.code.as_str() == "T0019" {
+                found.push(format!(
+                    "{}:{} T0019  {}",
+                    relative(&path),
+                    d.line(),
+                    d.message
+                ));
+                continue;
+            }
             let key = format!("{}:{} {}", relative(&path), d.line(), d.code);
             assert!(
                 allowed.contains(&key),

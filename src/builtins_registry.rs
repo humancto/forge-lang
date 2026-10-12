@@ -97,6 +97,14 @@ pub static GLOBALS: &[Builtin] = &[
     b("str", 1, 1),
     b("int", 1, 1),
     b("float", 1, 1),
+    // Numbers (shared rules in `stdlib::math::global_*`)
+    b("abs", 1, 1),
+    variadic("min", 1),
+    variadic("max", 1),
+    b("round", 1, 2),
+    b("floor", 1, 1),
+    b("ceil", 1, 1),
+    b("to_fixed", 1, 2),
     // Collections
     b("push", 2, 2),
     b("pop", 1, 1),

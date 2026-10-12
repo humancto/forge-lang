@@ -139,8 +139,8 @@ const DEFAULT_MAX_INFLIGHT: usize = 512;
 pub struct HandlerRequest {
     pub path_params: HashMap<String, String>,
     pub query_params: HashMap<String, String>,
-    /// Parsed JSON body (`POST` / `PUT` only).
-    pub body: Option<JsonValue>,
+    /// Parsed JSON body (`POST` / `PUT` only), keys in document order.
+    pub body: Option<Value>,
 }
 
 /// Bind a handler's arguments by parameter name. Shared by both engines so
@@ -166,7 +166,7 @@ pub fn handler_args<'a>(
                 request
                     .body
                     .as_ref()
-                    .map(|b| json_to_forge(b.clone()))
+                    .cloned()
                     .unwrap_or(Value::Object(IndexMap::new()))
             } else if name == "query" || name == "qs" {
                 let obj: IndexMap<String, Value> = request
@@ -545,12 +545,12 @@ pub async fn serve(engine: Arc<dyn ServeEngine>, server: &ServerPlan) -> Result<
                                     Extension(rid): Extension<RequestId>,
                                     path: Option<Path<HashMap<String, String>>>,
                                     Query(query): Query<HashMap<String, String>>,
-                                    Json(body): Json<JsonValue>| async move {
+                                    Json(body): Json<crate::stdlib::json_module::Ordered>| async move {
                     let request_id = extract_request_id(&rid);
                     let request = HandlerRequest {
                         path_params: path.map(|Path(p)| p).unwrap_or_default(),
                         query_params: query,
-                        body: Some(body),
+                        body: Some(body.0),
                     };
                     run_handler(state, hn, request_id, request).await
                 };

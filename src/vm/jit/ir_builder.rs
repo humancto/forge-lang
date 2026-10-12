@@ -111,7 +111,7 @@ pub fn build_function<M: Module>(
         b.seal_block(block);
         let ctx_ptr = b.block_params(block)[0];
         let args_ptr = b.block_params(block)[1];
-        let body_ref = module.declare_func_in_func(body, b.func);
+        let body_ref = far_func_ref(module, body, b.func);
         let mut call_args = Vec::with_capacity(vf.sig.arity() + 2);
         call_args.push(ctx_ptr);
         call_args.push(b.ins().iconst(I64, 0));
@@ -218,8 +218,25 @@ impl Imports {
         *self
             .bodies
             .entry(id)
-            .or_insert_with(|| module.declare_func_in_func(id, b.func))
+            .or_insert_with(|| far_func_ref(module, id, b.func))
     }
+}
+
+/// A reference to another JIT-compiled function that is called with an
+/// absolute address. `declare_func_in_func` marks `Local` functions
+/// colocated, so calls use 32-bit PC-relative relocations; but every
+/// `compile` finalizes into its own mapping, and two mappings can land more
+/// than 2 GiB apart, which made `cranelift-jit` panic while patching the
+/// call (`TryFromIntError` in `compiled_blob.rs`). Only a function's call to
+/// itself stays near (same code blob).
+fn far_func_ref<M: Module>(
+    module: &mut M,
+    id: FuncId,
+    func: &mut cranelift_codegen::ir::Function,
+) -> FuncRef {
+    let r = module.declare_func_in_func(id, func);
+    func.dfg.ext_funcs[r].colocated = false;
+    r
 }
 
 /// Native variables of the VM registers.

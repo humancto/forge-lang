@@ -31,6 +31,14 @@ const SIGNATURES: &[&str] = &[
     "str(Any) -> String",
     "int(Any) -> Int",
     "float(Any) -> Float",
+    // Numbers
+    "abs<T>(T) -> T",
+    "min(Any, ...Any) -> Any",
+    "max(Any, ...Any) -> Any",
+    "round(Any, Int?) -> Any",
+    "to_fixed(Any, Int?) -> String",
+    "floor(Any) -> Any",
+    "ceil(Any) -> Any",
     // Collections
     "push<T>([T], T) -> [T]",
     "pop<T>([T]) -> T",
@@ -143,6 +151,7 @@ const MODULE_SIGNATURES: &[&str] = &[
     "fs.temp_dir() -> String",
     "json.stringify(Any) -> String",
     "json.pretty(Any) -> String",
+    "json.compact(Any) -> String",
     "crypto.sha256(Any) -> String",
     "crypto.md5(Any) -> String",
     "crypto.base64_encode(Any) -> String",

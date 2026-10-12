@@ -52,7 +52,7 @@ pub(crate) enum Num {
 }
 
 impl Num {
-    fn into_interp(self) -> Value {
+    pub(crate) fn into_interp(self) -> Value {
         match self {
             Num::Int(n) => Value::Int(n),
             Num::Float(f) => Value::Float(f),
@@ -100,6 +100,206 @@ pub(crate) fn random_int_between(min: i64, max: i64) -> i64 {
         .subsec_nanos() as i128;
     let range = (max as i128) - (min as i128) + 1;
     (min as i128 + nanos % range) as i64
+}
+
+// ===== Global numeric builtins (`abs`, `min`, `max`, `round`, `to_fixed`) =====
+//
+// Both engines convert their arguments to `Option<Num>` (`None` for a
+// value that is not a number) and call these, so results and error texts
+// cannot differ between the interpreter and the VM.
+
+/// Largest `digits` accepted by `round(x, digits)` and `to_fixed`.
+pub(crate) const MAX_FIXED_DIGITS: i64 = 100;
+
+/// `abs(x)`: same as `math.abs` (Int stays Int; `i64::MIN` promotes).
+pub(crate) fn global_abs(x: Option<Num>) -> Result<Num, String> {
+    match x {
+        Some(Num::Int(n)) => Ok(int_abs(n)),
+        Some(Num::Float(f)) => Ok(Num::Float(f.abs())),
+        None => Err("abs() requires a number".to_string()),
+    }
+}
+
+/// `floor(x)` / `ceil(x)`: same as `math.floor` / `math.ceil` (an Int
+/// result, or a Float when it does not fit in an Int).
+pub(crate) fn global_floor_ceil(x: Option<Num>, ceil: bool) -> Result<Num, String> {
+    match x {
+        Some(Num::Int(n)) => Ok(Num::Int(n)),
+        Some(Num::Float(f)) => Ok(rounded_float_to_num(if ceil {
+            f.ceil()
+        } else {
+            f.floor()
+        })),
+        None => Err(format!(
+            "{}() requires a number",
+            if ceil { "ceil" } else { "floor" }
+        )),
+    }
+}
+
+/// Arguments of `min` / `max`: one array, or the values themselves.
+pub(crate) enum MinMaxArgs {
+    /// `min(xs)`: the elements of the array.
+    Array(Vec<Option<Num>>),
+    /// `min(a, b, ...)`.
+    Values(Vec<Option<Num>>),
+}
+
+/// `min(a, b, ...)` / `min(xs)` (and `max`). All Ints give an Int; any
+/// Float makes the result a Float (as in `min_of`).
+pub(crate) fn global_min_max(name: &str, args: MinMaxArgs, min: bool) -> Result<Num, String> {
+    let items = match args {
+        MinMaxArgs::Array(items) if items.is_empty() => {
+            return Err(format!("{}() requires a non-empty array", name))
+        }
+        MinMaxArgs::Array(items) => items,
+        MinMaxArgs::Values(items) if items.len() < 2 => {
+            return Err(format!(
+                "{}() requires two or more numbers, or one array of numbers",
+                name
+            ))
+        }
+        MinMaxArgs::Values(items) => items,
+    };
+    let mut result: Option<Num> = None;
+    for item in items {
+        let Some(item) = item else {
+            return Err(format!("{}() requires numbers", name));
+        };
+        result = Some(match (result, item) {
+            (None, x) => x,
+            (Some(Num::Int(a)), Num::Int(b)) => Num::Int(if min { a.min(b) } else { a.max(b) }),
+            (Some(a), b) => {
+                let (a, b) = (num_to_f64(a), num_to_f64(b));
+                Num::Float(if min { a.min(b) } else { a.max(b) })
+            }
+        });
+    }
+    result.ok_or_else(|| format!("{}() requires numbers", name))
+}
+
+fn num_to_f64(n: Num) -> f64 {
+    match n {
+        Num::Int(i) => i as f64,
+        Num::Float(f) => f,
+    }
+}
+
+/// The `digits` argument of `round` / `to_fixed`: given or not, and
+/// whether it is an Int.
+fn fixed_digits(name: &str, digits: Option<Option<i64>>) -> Result<Option<usize>, String> {
+    match digits {
+        None => Ok(None),
+        Some(Some(d)) if (0..=MAX_FIXED_DIGITS).contains(&d) => Ok(Some(d as usize)),
+        Some(_) => Err(format!(
+            "{}() requires the number of digits to be an Int from 0 to {}",
+            name, MAX_FIXED_DIGITS
+        )),
+    }
+}
+
+/// `round(x)` rounds half away from zero to an Int (like `math.round`);
+/// `round(x, digits)` rounds to `digits` decimals and keeps the type (an
+/// Int is returned unchanged, a Float stays a Float).
+pub(crate) fn global_round(x: Option<Num>, digits: Option<Option<i64>>) -> Result<Num, String> {
+    let digits = fixed_digits("round", digits)?;
+    match (x, digits) {
+        (None, _) => Err("round() requires a number".to_string()),
+        (Some(Num::Int(n)), _) => Ok(Num::Int(n)),
+        (Some(Num::Float(f)), None) => Ok(rounded_float_to_num(f.round())),
+        (Some(Num::Float(f)), Some(_)) if !f.is_finite() => Ok(Num::Float(f)),
+        (Some(Num::Float(f)), Some(d)) => {
+            let text = fixed_decimal(f, d);
+            // `fixed_decimal` of a finite float is always a valid decimal.
+            Ok(Num::Float(text.parse().unwrap_or(f)))
+        }
+    }
+}
+
+/// `to_fixed(x, digits = 0)`: `x` as text with exactly `digits` decimals
+/// (`to_fixed(2.5, 2)` is `"2.50"`). Rounds half away from zero on the
+/// exact value of `x`; NaN and infinities print as `str(x)` does.
+pub(crate) fn global_to_fixed(
+    x: Option<Num>,
+    digits: Option<Option<i64>>,
+) -> Result<String, String> {
+    let digits = fixed_digits("to_fixed", digits)?.unwrap_or(0);
+    match x {
+        None => Err("to_fixed() requires a number".to_string()),
+        Some(Num::Int(n)) if digits == 0 => Ok(n.to_string()),
+        Some(Num::Int(n)) => Ok(format!("{}.{}", n, "0".repeat(digits))),
+        Some(Num::Float(f)) if !f.is_finite() => Ok(format!("{}", f)),
+        Some(Num::Float(f)) => Ok(fixed_decimal(f, digits)),
+    }
+}
+
+/// Finite `f` with exactly `digits` decimals, rounding half away from zero
+/// on the exact binary value (so `1.005` → `"1.00"`, since it is really
+/// 1.00499..., and `0.125` → `"0.13"`). A result that is all zeros has no
+/// minus sign.
+fn fixed_decimal(f: f64, digits: usize) -> String {
+    let magnitude = f.abs();
+    let body = if is_decimal_tie(magnitude, digits) {
+        // The exact value has `digits + 1` decimals and ends in 5, so this
+        // formatting is exact; round the digit string up by hand.
+        let exact = format!("{:.*}", digits + 1, magnitude);
+        round_up_decimal(&exact[..exact.len() - 1])
+    } else {
+        // Not halfway between two results: Rust's (correctly rounded)
+        // formatting agrees with any tie rule.
+        format!("{:.*}", digits, magnitude)
+    };
+    let body = body.trim_end_matches('.').to_string();
+    if f.is_sign_negative() && body.bytes().any(|b| (b'1'..=b'9').contains(&b)) {
+        format!("-{}", body)
+    } else {
+        body
+    }
+}
+
+/// Whether finite `x >= 0` lies exactly halfway between two multiples of
+/// `10^-digits`, i.e. `x * 10^digits * 2` is an odd integer. With
+/// `x = m * 2^e` (`m` odd) that product is `m * 5^digits * 2^(e + digits + 1)`,
+/// which is an odd integer exactly when `e == -(digits + 1)`.
+fn is_decimal_tie(x: f64, digits: usize) -> bool {
+    if x == 0.0 || !x.is_finite() {
+        return false;
+    }
+    let bits = x.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i64;
+    let frac = bits & ((1u64 << 52) - 1);
+    let (mut m, mut e) = if exp_bits == 0 {
+        (frac, -1074)
+    } else {
+        (frac | (1u64 << 52), exp_bits - 1075)
+    };
+    let tz = m.trailing_zeros();
+    m >>= tz;
+    e += tz as i64;
+    m != 0 && e == -(digits as i64 + 1)
+}
+
+/// Add one unit in the last place to a non-negative decimal string
+/// (`"0.12"` → `"0.13"`, `"9.99"` → `"10.00"`, `"0."` → `"1."`).
+fn round_up_decimal(text: &str) -> String {
+    let mut bytes = text.as_bytes().to_vec();
+    let mut i = bytes.len();
+    loop {
+        if i == 0 {
+            bytes.insert(0, b'1');
+            break;
+        }
+        i -= 1;
+        match bytes[i] {
+            b'.' => continue,
+            b'9' => bytes[i] = b'0',
+            d => {
+                bytes[i] = d + 1;
+                break;
+            }
+        }
+    }
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
@@ -416,6 +616,112 @@ mod tests {
         } else {
             panic!("expected Int");
         }
+    }
+
+    fn fixed(x: f64, digits: i64) -> String {
+        global_to_fixed(Some(Num::Float(x)), Some(Some(digits))).unwrap()
+    }
+
+    #[test]
+    fn to_fixed_rounds_half_away_from_zero_on_the_exact_value() {
+        assert_eq!(fixed(2.5, 2), "2.50");
+        assert_eq!(fixed(0.125, 2), "0.13"); // exact tie
+        assert_eq!(fixed(-0.125, 2), "-0.13");
+        assert_eq!(fixed(2.5, 0), "3");
+        assert_eq!(fixed(0.5, 0), "1");
+        assert_eq!(fixed(1.5, 0), "2");
+        assert_eq!(fixed(-2.5, 0), "-3");
+        assert_eq!(fixed(2.675, 2), "2.67"); // really 2.67499...
+        assert_eq!(fixed(1.005, 2), "1.00"); // really 1.00499...
+        assert_eq!(fixed(9.9951, 2), "10.00");
+        assert_eq!(fixed(99.5, 0), "100");
+        assert_eq!(fixed(0.0, 0), "0");
+        assert_eq!(fixed(-0.0, 2), "0.00");
+        assert_eq!(fixed(-0.004, 2), "0.00");
+        assert_eq!(fixed(5e-324, 3), "0.000");
+        assert_eq!(fixed(f64::MAX, 0).len(), 309);
+        assert_eq!(fixed(0.1, 100).len(), 102);
+        assert_eq!(fixed(f64::NAN, 2), "NaN");
+        assert_eq!(fixed(f64::INFINITY, 2), "inf");
+    }
+
+    #[test]
+    fn to_fixed_ints_and_errors() {
+        let int = |n, d| global_to_fixed(Some(Num::Int(n)), d);
+        assert_eq!(int(3, Some(Some(2))).unwrap(), "3.00");
+        assert_eq!(int(-3, None).unwrap(), "-3");
+        assert_eq!(
+            int(i64::MIN, Some(Some(1))).unwrap(),
+            "-9223372036854775808.0"
+        );
+        assert!(int(3, Some(Some(101))).is_err());
+        assert!(int(3, Some(Some(-1))).is_err());
+        assert!(int(3, Some(None)).is_err());
+        assert!(global_to_fixed(None, None).is_err());
+    }
+
+    #[test]
+    fn decimal_ties_are_detected_exactly() {
+        assert!(is_decimal_tie(0.5, 0));
+        assert!(is_decimal_tie(0.125, 2));
+        assert!(is_decimal_tie(2.5, 0));
+        assert!(!is_decimal_tie(2.5, 1));
+        assert!(!is_decimal_tie(2.675, 2));
+        assert!(!is_decimal_tie(0.1, 0));
+        assert!(!is_decimal_tie(0.0, 0));
+        // 2^49 + 0.125 is a tie at 2 decimals even though its ulp is 0.125.
+        let big = (1u64 << 49) as f64 + 0.125;
+        assert!(is_decimal_tie(big, 2));
+        assert_eq!(fixed(big, 2), "562949953421312.13");
+        assert_eq!(round_up_decimal("9.99"), "10.00");
+        assert_eq!(round_up_decimal("0."), "1.");
+    }
+
+    #[test]
+    fn round_with_and_without_digits() {
+        let f = |x: f64, d: Option<Option<i64>>| global_round(Some(Num::Float(x)), d).unwrap();
+        assert_eq!(f(2.5, None), Num::Int(3));
+        assert_eq!(f(-2.5, None), Num::Int(-3));
+        assert_eq!(f(3.14159, Some(Some(2))), Num::Float(3.14));
+        assert_eq!(f(2.5, Some(Some(0))), Num::Float(3.0));
+        assert_eq!(f(f64::INFINITY, Some(Some(2))), Num::Float(f64::INFINITY));
+        assert_eq!(
+            global_round(Some(Num::Int(7)), Some(Some(3))).unwrap(),
+            Num::Int(7)
+        );
+        assert!(global_round(Some(Num::Int(7)), Some(Some(-1))).is_err());
+        assert!(global_round(None, None).is_err());
+    }
+
+    #[test]
+    fn min_max_rules() {
+        use MinMaxArgs::*;
+        let ints = |v: &[i64]| v.iter().map(|&n| Some(Num::Int(n))).collect::<Vec<_>>();
+        assert_eq!(
+            global_min_max("min", Values(ints(&[3, 1, 2])), true).unwrap(),
+            Num::Int(1)
+        );
+        assert_eq!(
+            global_min_max("max", Array(ints(&[3, 1, 2])), false).unwrap(),
+            Num::Int(3)
+        );
+        assert_eq!(
+            global_min_max(
+                "min",
+                Values(vec![Some(Num::Int(1)), Some(Num::Float(2.5))]),
+                true
+            )
+            .unwrap(),
+            Num::Float(1.0)
+        );
+        assert!(global_min_max("min", Values(ints(&[1])), true).is_err());
+        assert!(global_min_max("min", Array(vec![]), true).is_err());
+        assert!(global_min_max("max", Values(vec![Some(Num::Int(1)), None]), false).is_err());
+        assert_eq!(
+            global_abs(Some(Num::Int(i64::MIN))).unwrap(),
+            int_abs(i64::MIN)
+        );
+        assert!(global_abs(None).is_err());
     }
 
     #[test]

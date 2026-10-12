@@ -590,9 +590,21 @@ fn module_top_level_names(program: &Program) -> HashSet<String> {
     names
 }
 
+/// Top-level statements in the order they run: function definitions are
+/// hoisted (`semantics::hoist`, shared with the interpreter).
+fn hoisted<'a>(
+    program: &'a Program,
+    predefined: &dyn Fn(&str) -> bool,
+) -> impl Iterator<Item = &'a SpannedStmt> {
+    crate::semantics::hoist::plan(&program.statements, predefined)
+        .order
+        .into_iter()
+        .map(|i| &program.statements[i])
+}
+
 fn compile_top_level(c: &mut Compiler, program: &Program) -> Result<(), CompileError> {
     c.begin_scope();
-    for spanned in &program.statements {
+    for spanned in hoisted(program, &crate::semantics::hoist::is_predefined) {
         c.set_span(spanned);
         compile_stmt(c, &spanned.stmt)?;
     }
@@ -640,14 +652,27 @@ pub fn module_global_prefix(resolved_path: &str) -> String {
     format!("__module[{}]::", resolved_path)
 }
 
+/// A REPL step with no earlier steps (tests; `vm::run_repl` passes the
+/// session's names to [`compile_repl_with`]).
+#[allow(dead_code)]
 pub fn compile_repl(program: &Program) -> Result<Chunk, CompileError> {
+    compile_repl_with(program, &crate::semantics::hoist::is_predefined)
+}
+
+/// [`compile_repl`] for a session whose earlier steps defined names:
+/// `predefined` says which names exist already (they are not hoisted, so a
+/// step that calls `f` above its new `fn f` still calls the old one).
+pub fn compile_repl_with(
+    program: &Program,
+    predefined: &dyn Fn(&str) -> bool,
+) -> Result<Chunk, CompileError> {
     let mut c = Compiler::new("<repl>");
     c.begin_scope();
 
     let result_reg = c.alloc_reg()?;
     let mut has_result = false;
 
-    for spanned in &program.statements {
+    for spanned in hoisted(program, predefined) {
         c.set_span(spanned);
         match &spanned.stmt {
             Stmt::Expression(expr) if !is_output_expr(expr) => {
@@ -1194,12 +1219,14 @@ fn try_compile_mutating_call(
 }
 
 /// An operand whose evaluation has no side effects and runs no user code
-/// (literals, variable reads, arithmetic on those). Evaluating it before
-/// rather than after reading a local therefore cannot change the result,
-/// which lets `AddLocal` / `PushLocal` read the local last.
+/// (literals, variable reads, arithmetic on those, array literals of
+/// those). Evaluating it before rather than after reading a local
+/// therefore cannot change the result, which lets `AddLocal` / `PushLocal`
+/// read the local last.
 fn is_simple_operand(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
+        Expr::Array(items) => items.iter().all(is_simple_operand),
         Expr::BinOp { left, right, .. } => is_simple_operand(left) && is_simple_operand(right),
         Expr::UnaryOp { operand, .. } => is_simple_operand(operand),
         _ => false,
@@ -1207,7 +1234,8 @@ fn is_simple_operand(expr: &Expr) -> bool {
 }
 
 /// `x = x + e` (and `x += e`) on a mutable local with a simple `e`:
-/// one `AddLocal`, which appends in place to a string the local owns.
+/// one `AddLocal`, which appends in place to a string or array the local
+/// owns (`s = s + "x"`, `xs = xs + [v]`).
 fn try_compile_add_local(
     c: &mut Compiler,
     target: &Expr,
@@ -1238,10 +1266,52 @@ fn try_compile_add_local(
     Ok(true)
 }
 
-/// Statement `xs.push(e)` / `push(xs, e)` on a mutable local with a simple
-/// `e`: one `PushLocal`, in place when the local owns its array. Only in
-/// statement position, because `push` returns the receiver itself and a
-/// used result would be a second reference to an owned array.
+/// Whether the free function `push(xs, v)` also stores the new array back
+/// into a mutable variable `xs` (edition 2026). From edition 2027 `push` is
+/// pure; only the method form `xs.push(v)` updates its receiver.
+fn free_push_updates_variable(c: &Compiler) -> bool {
+    c.chunk.edition < crate::semantics::edition::Edition::E2027
+}
+
+/// `x = push(x, e)` on a mutable local with a simple `e`: one `PushLocal`
+/// (any edition). The assignment stores exactly the array `PushLocal`
+/// leaves in the local, so the in-place append is unobservable; this keeps
+/// the explicit form (the only appending form of the free function in
+/// edition 2027) amortized O(1).
+fn try_compile_push_assign(
+    c: &mut Compiler,
+    target: &Expr,
+    value: &Expr,
+) -> Result<bool, CompileError> {
+    let (Expr::Ident(name), Expr::Call { function, args }) = (target, value) else {
+        return Ok(false);
+    };
+    let is_builtin_push = matches!(function.as_ref(), Expr::Ident(f) if f == "push"
+        && c.resolve_local(f).is_none()
+        && c.binding_mutability(f).is_none());
+    if !is_builtin_push
+        || args.len() != 2
+        || !matches!(&args[0], Expr::Ident(v) if v == name)
+        || !is_simple_operand(&args[1])
+    {
+        return Ok(false);
+    }
+    let Some((reg, true)) = c.resolve_local(name) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let value_reg = c.alloc_reg()?;
+    compile_expr(c, &args[1], value_reg)?;
+    c.emit(encode_abc(OpCode::PushLocal, reg, value_reg, 0), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// Statement `xs.push(e)` (and, in edition 2026, `push(xs, e)`) on a
+/// mutable local with a simple `e`: one `PushLocal`, in place when the
+/// local owns its array. Only in statement position, because `push` returns
+/// the receiver itself and a used result would be a second reference to an
+/// owned array.
 fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, CompileError> {
     let (receiver, value) = match expr {
         Expr::MethodCall {
@@ -1256,6 +1326,7 @@ fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, Com
             Expr::Ident(fn_name)
                 if fn_name == "push"
                     && args.len() == 2
+                    && free_push_updates_variable(c)
                     && c.resolve_local(fn_name).is_none()
                     && c.binding_mutability(fn_name).is_none() =>
             {
@@ -1798,7 +1869,9 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         }
 
         Stmt::Assign { target, value } => {
-            if try_compile_add_local(c, target, value)? {
+            if try_compile_add_local(c, target, value)?
+                || try_compile_push_assign(c, target, value)?
+            {
                 return Ok(());
             }
             // Like the interpreter: evaluate the value, then store it.
@@ -2763,14 +2836,15 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 lowered_args.extend(args.clone());
                 return compile_hidden_call(c, "__forge_call_method", lowered_args, dst);
             }
-            // `push(xs, v)` / `pop(xs)` on a mutable variable update it in
-            // place, exactly like the method forms.
+            // `pop(xs)` on a mutable variable updates it in place, exactly
+            // like the method form; so does `push(xs, v)` in edition 2026
+            // only (from 2027 `push` is a pure function: docs/editions/2027.md).
             if let (Expr::Ident(fn_name), Some(Expr::Ident(_))) = (function.as_ref(), args.first())
             {
                 let is_builtin =
                     c.resolve_local(fn_name).is_none() && c.binding_mutability(fn_name).is_none();
                 let arity_ok = match fn_name.as_str() {
-                    "push" => args.len() == 2,
+                    "push" => args.len() == 2 && free_push_updates_variable(c),
                     "pop" => args.len() == 1,
                     _ => false,
                 };

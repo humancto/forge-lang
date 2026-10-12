@@ -18,6 +18,7 @@
 pub mod alloc;
 pub mod edition;
 pub mod errors;
+pub mod hoist;
 pub mod types;
 
 use edition::Edition;
@@ -81,6 +82,9 @@ pub enum Outcome {
     /// String concatenation: the engine renders `display(left) + display(right)`
     /// with its own value formatter.
     Concat,
+    /// `Array + Array`: a new array with the left items, then the right
+    /// ones (the engine builds it, within the collection size cap).
+    ArrayConcat,
 }
 
 fn invalid(op: BinaryOp, l: &Operand<'_>, r: &Operand<'_>) -> String {
@@ -174,6 +178,7 @@ pub fn mixed_concat_error(left_type: &str, right_type: &str) -> String {
 /// * `String + anything` / `anything + String`: edition 2026 concatenates
 ///   the displayed values; edition 2027 is an error ([`is_mixed_concat`]).
 ///   No other operator accepts a string next to a non-string;
+/// * `Array + Array` concatenates the arrays (every edition);
 /// * everything else (bools, null, collections, ...) is a type error.
 pub fn binary(
     op: BinaryOp,
@@ -201,6 +206,7 @@ pub fn binary(
             _ => Err("invalid operator".to_string()),
         },
         (Null, _) | (_, Null) => Err("cannot perform arithmetic on null".to_string()),
+        (Other("Array"), Other("Array")) if op == BinaryOp::Add => Ok(Outcome::ArrayConcat),
         (Other(a), Other(b)) if a == b => Err(match a {
             "Option" => "invalid operator for Option".to_string(),
             "Tuple" => "tuples only support == and != operators".to_string(),
@@ -927,7 +933,25 @@ mod tests {
                 BinaryOp::Add,
                 Other("Array"),
                 Other("Array"),
-                Err("cannot apply Add to Array and Array".into()),
+                ok(Outcome::ArrayConcat),
+            ),
+            (
+                BinaryOp::Sub,
+                Other("Array"),
+                Other("Array"),
+                Err("cannot apply Sub to Array and Array".into()),
+            ),
+            (
+                BinaryOp::Add,
+                Other("Array"),
+                Other("Tuple"),
+                Err("cannot apply Add to Array and Tuple".into()),
+            ),
+            (
+                BinaryOp::Add,
+                Other("Array"),
+                Int(1),
+                Err("cannot apply Add to Array and Int".into()),
             ),
             (
                 BinaryOp::Lt,

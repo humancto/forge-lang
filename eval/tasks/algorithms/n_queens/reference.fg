@@ -19,7 +19,7 @@ fn solve(n: Int, cols: [Int], out: [[Int]], max_count: Int) -> [[Int]] {
             return found
         }
         if is_safe(cols, c) {
-            // push() appends to `cols` in place; pass a fresh array instead.
+            // Edition 2026: push() would also append to `cols`; pass a fresh array.
             found = solve(n, flatten([cols, [c]]), found, max_count)
         }
     }

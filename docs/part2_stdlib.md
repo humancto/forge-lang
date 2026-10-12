@@ -59,6 +59,8 @@ e = 2.718281828459045
 
 > **Type Preservation.** Functions like `abs`, `max`, `min`, `pow` preserve the input type when both arguments are integers. Pass a float to force a float result: `math.pow(2.0, 10)` returns `1024.0`.
 
+> **Global shortcuts.** `abs(x)`, `min(a, b, ...)` / `min(array)`, `max(...)` and `round(x)` are also global builtins with the same rules. `round(x, digits)` rounds to `digits` decimals and returns a Float (`round(3.14159, 2)` → `3.14`), and `to_fixed(x, digits)` formats a number with exactly `digits` decimals (`to_fixed(2.5, 2)` → `"2.50"`, rounding half away from zero) — use it to print money and averages, since a whole Float prints without decimals.
+
 ### Core Examples
 
 **Square roots and powers:**
@@ -1394,7 +1396,8 @@ Because Forge objects and JSON objects share the same structural model, serializ
 | Function                | Description                                   | Example                                  | Return Type |
 | ----------------------- | --------------------------------------------- | ---------------------------------------- | ----------- |
 | `json.parse(s)`         | Parse a JSON string into a Forge value        | `json.parse("{\"a\":1}")` → `{a: 1}`     | Value       |
-| `json.stringify(value)` | Convert a Forge value to compact JSON string  | `json.stringify({a: 1})` → `"{\"a\":1}"` | String      |
+| `json.stringify(value)` | Convert a Forge value to one-line JSON        | `json.stringify({a: 1})` → `{"a": 1}`    | String      |
+| `json.compact(value)`   | One-line JSON with no whitespace              | `json.compact({a: [1, 2]})` → `{"a":[1,2]}` | String   |
 | `json.pretty(value)`    | Convert a Forge value to indented JSON string | `json.pretty({a: 1})` → formatted string | String      |
 | `json.valid(s)`         | Check if a string is valid JSON               | `json.valid("{\"a\":1}")` → `true`       | Bool        |
 | `json.merge(a, b)`      | Deep-merge two objects (b overwrites a)       | `json.merge({x:1}, {y:2})` → `{x:1,y:2}` | Object      |
