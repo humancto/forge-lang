@@ -459,7 +459,9 @@ JSON `{"error": ...}`.
 **Fixed:** bodies are decoded by content type: JSON is parsed, a form becomes an object of
 Strings, anything else (or no content type) is a String; a POST without a body binds `{}`.
 Invalid JSON is `400 {"error": "invalid JSON body: ..."}`, a non-UTF-8 body `415`, both as
-JSON.
+JSON. The undecoded text is the `raw_body` handler parameter and `req.raw_body` (`""` without a
+body), for webhook signatures; a non-UTF-8 body is refused for every content type, so it is
+always exact (`tests/server_engine_parity.rs`, `/webhook`).
 
 ### 19. `llms.txt` describes import paths wrongly
 

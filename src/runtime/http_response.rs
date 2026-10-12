@@ -267,39 +267,43 @@ pub struct BodyError {
     pub message: String,
 }
 
+/// A request body as the handler sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestBody {
+    /// `body` / `req.body`, decoded by content type; `None` when the
+    /// request has no body.
+    pub decoded: Option<Value>,
+    /// `raw_body` / `req.raw_body`: the exact bytes as text (`""` when the
+    /// request has no body), e.g. for checking a webhook signature.
+    pub raw: String,
+}
+
 /// The handler's `body` for a request body of `content_type`:
 ///
 /// - empty → `None` (the `body` parameter then gets `{}`, `req.body` null);
+/// - not UTF-8 → `415`, whatever the content type (so `raw_body` is always
+///   the exact text);
 /// - `application/json` or `*/*+json` → the parsed JSON (`400` if invalid);
 /// - `application/x-www-form-urlencoded` → an object of Strings;
-/// - anything else, or no content type → the body as a String (`415` if it
-///   is not UTF-8).
+/// - anything else, or no content type → the body as a String.
 pub fn parse_body(content_type: Option<&str>, bytes: &[u8]) -> Result<Option<Value>, BodyError> {
+    read_body(content_type, bytes).map(|b| b.decoded)
+}
+
+/// [`parse_body`], plus the raw text of the body.
+pub fn read_body(content_type: Option<&str>, bytes: &[u8]) -> Result<RequestBody, BodyError> {
     if bytes.is_empty() {
-        return Ok(None);
+        return Ok(RequestBody {
+            decoded: None,
+            raw: String::new(),
+        });
     }
     let essence = content_type
         .and_then(|ct| ct.split(';').next())
         .map(|ct| ct.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    if essence == "application/json" || essence.ends_with("+json") {
-        return serde_json::from_slice::<crate::stdlib::json_module::Ordered>(bytes)
-            .map(|v| Some(v.0))
-            .map_err(|e| BodyError {
-                status: StatusCode::BAD_REQUEST,
-                message: format!("invalid JSON body: {}", e),
-            });
-    }
-    if essence == "application/x-www-form-urlencoded" {
-        let mut fields = IndexMap::new();
-        for (k, v) in url::form_urlencoded::parse(bytes) {
-            fields.insert(k.into_owned(), Value::String(v.into_owned()));
-        }
-        return Ok(Some(Value::Object(fields)));
-    }
-    match std::str::from_utf8(bytes) {
-        Ok(text) => Ok(Some(Value::String(text.to_string()))),
-        Err(_) => Err(BodyError {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Err(BodyError {
             status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
             message: format!(
                 "request body is not UTF-8 text (content type '{}'); send JSON, a form or text",
@@ -309,8 +313,28 @@ pub fn parse_body(content_type: Option<&str>, bytes: &[u8]) -> Result<Option<Val
                     essence.as_str()
                 }
             ),
-        }),
-    }
+        });
+    };
+    let decoded = if essence == "application/json" || essence.ends_with("+json") {
+        serde_json::from_str::<crate::stdlib::json_module::Ordered>(text)
+            .map(|v| v.0)
+            .map_err(|e| BodyError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("invalid JSON body: {}", e),
+            })?
+    } else if essence == "application/x-www-form-urlencoded" {
+        let mut fields = IndexMap::new();
+        for (k, v) in url::form_urlencoded::parse(bytes) {
+            fields.insert(k.into_owned(), Value::String(v.into_owned()));
+        }
+        Value::Object(fields)
+    } else {
+        Value::String(text.to_string())
+    };
+    Ok(RequestBody {
+        decoded: Some(decoded),
+        raw: text.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -469,5 +493,28 @@ mod tests {
         );
         let err = parse_body(Some("application/octet-stream"), &[0xff, 0xfe]).unwrap_err();
         assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // Whatever the content type, so `raw_body` is always exact text.
+        for ct in [
+            Some("application/x-www-form-urlencoded"),
+            Some("application/json"),
+            None,
+        ] {
+            let err = parse_body(ct, b"a=\xff").unwrap_err();
+            assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{ct:?}");
+        }
+    }
+
+    #[test]
+    fn raw_body_is_the_exact_text() {
+        let body = read_body(Some("application/json"), b"{ \"a\" :1 }\n").unwrap();
+        assert_eq!(body.raw, "{ \"a\" :1 }\n");
+        assert_eq!(
+            body.decoded,
+            Some(crate::stdlib::json_module::json_to_forge(json!({ "a": 1 })))
+        );
+        let form = read_body(Some("application/x-www-form-urlencoded"), b"a=x+y%21").unwrap();
+        assert_eq!(form.raw, "a=x+y%21");
+        let empty = read_body(Some("application/json"), b"").unwrap();
+        assert_eq!((empty.decoded, empty.raw.as_str()), (None, ""));
     }
 }

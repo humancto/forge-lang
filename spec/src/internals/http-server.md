@@ -109,7 +109,8 @@ Handler functions receive arguments based on their parameter names (`runtime::se
 | `body` or `data`            | Request body, decoded by content type (`{}` when absent)      |
 | `query` or `qs`             | Query string as an object                                     |
 | `headers`                   | Request headers, lower-case names                             |
-| `req` or `request`          | `{ method, path, params, query, headers, body }`              |
+| `raw_body`                  | The body's exact text (`""` when there is none)               |
+| `req` or `request`          | `{ method, path, params, query, headers, body, raw_body }`    |
 | Name matching a query param | Individual query parameter                                    |
 | Other                       | `null`                                                        |
 
@@ -123,7 +124,7 @@ fn search(body, query, req) {
 }
 ```
 
-Request bodies are decoded before the handler runs (`runtime::http_response::parse_body`): JSON content types are parsed (`400` if invalid), `application/x-www-form-urlencoded` becomes an object of Strings, and anything else is a String (`415` if it is not UTF-8). These errors, like every error the server answers itself, have a JSON `{"error": ...}` body.
+Request bodies are decoded before the handler runs (`runtime::http_response::read_body`): a body that is not UTF-8 is refused (`415`), JSON content types are parsed (`400` if invalid), `application/x-www-form-urlencoded` becomes an object of Strings, and anything else is a String. The undecoded text is kept as `raw_body`. These errors, like every error the server answers itself, have a JSON `{"error": ...}` body.
 
 ## Responses
 

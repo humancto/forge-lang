@@ -222,9 +222,10 @@ Handler functions receive arguments based on parameter names:
 
 - **Path parameters** (`:id`, `:name`) are passed by matching the parameter name.
 - **`body`** or **`data`** receives the request body (`{}` when the request has none).
+- **`raw_body`** receives the body's exact text, before decoding (`""` when the request has none) — for example to check a webhook's signature.
 - **`query`** or **`qs`** receives query string parameters as an object.
 - **`headers`** receives the request headers as an object with lower-case names (repeated headers joined with `, `).
-- **`req`** or **`request`** receives the whole request: `{ method, path, params, query, headers, body }` (`body` is `null` when there is none).
+- **`req`** or **`request`** receives the whole request: `{ method, path, params, query, headers, body, raw_body }` (`body` is `null` and `raw_body` is `""` when there is none).
 - Any other name receives the query parameter of that name, or `null`.
 
 Path, query and header values are Strings. Use `get(headers, "x-name")` for an optional header: indexing a missing key is an error.
@@ -239,7 +240,18 @@ The body is decoded by its `Content-Type`:
 | `application/x-www-form-urlencoded` | an object of Strings |
 | anything else, or none | the body as a String |
 
-Invalid JSON is answered `400` and a body that is not UTF-8 text `415`, with a JSON `{"error": ...}` body, before the handler runs. Bodies are limited to 2 MiB (`413`).
+Invalid JSON is answered `400` and a body that is not UTF-8 text `415` (whatever its content type, so `raw_body` is always the exact text), with a JSON `{"error": ...}` body, before the handler runs. Bodies are limited to 2 MiB (`413`).
+
+```forge
+@post("/webhook")
+fn webhook(raw_body, headers, body) {
+    let expected = crypto.sha256(env.get("WEBHOOK_SECRET", "") + raw_body)
+    if get(headers, "x-signature") != expected {
+        return http.response(401, { error: "bad signature" })
+    }
+    return { received: body.event }
+}
+```
 
 ### Responses
 
