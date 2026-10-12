@@ -17,11 +17,12 @@ runtime/server.rs builds axum Router
 axum + tokio serve requests
     |
     v
-Each request locks the Interpreter mutex,
-calls the handler function, serializes the return value as JSON
+Each request forks the program's state (VM template or interpreter),
+decodes the body, calls the handler on the blocking pool,
+and builds the response from its return value
 ```
 
-The server implementation lives in `src/runtime/server.rs` (~354 lines).
+The server implementation lives in `src/runtime/server.rs`, with response values and body decoding in `src/runtime/http_response.rs`.
 
 ## Server Configuration
 

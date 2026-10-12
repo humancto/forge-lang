@@ -2209,7 +2209,7 @@ mod tests {
             "@cache\nfn a() { return 1 }",
             "@get(\"/a\", auth: true)\nfn a() { return 1 }",
             "@get(path)\nfn a() { return 1 }",
-            "@patch(\"/a\")\nfn a() { return 1 }",
+            "@options(\"/a\")\nfn a() { return 1 }",
             "fn outer() {\n  @cache\n  fn inner() { return 1 }\n  return inner()\n}",
         ] {
             let (program, _) =
