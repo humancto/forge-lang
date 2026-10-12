@@ -668,42 +668,32 @@ impl VM {
                     .and_then(|r| self.gc.get(r))
                     .map(|o| &o.kind);
                 let is_frozen = matches!(kind, Some(ObjKind::Frozen(_)));
-                let updated: Option<(Vec<Value>, bool, Option<Value>)> =
-                    match (method.as_str(), kind, rest) {
-                        ("push", Some(ObjKind::Array(items)), [value]) => {
-                            let mut items = items.clone();
-                            items.push(*value);
-                            Some((items, false, None))
-                        }
-                        ("pop", Some(ObjKind::Array(items)), []) => {
-                            let mut items = items.clone();
-                            let popped = items.pop().unwrap_or(Value::null());
-                            Some((items, false, Some(popped)))
-                        }
-                        ("add", Some(ObjKind::Set(items)), [value]) => {
-                            let mut items = items.clone();
-                            if !items.iter().any(|v| v.set_eq(value, &self.gc)) {
-                                items.push(*value);
-                            }
-                            Some((items, true, None))
-                        }
-                        ("remove", Some(ObjKind::Set(items)), [value]) => {
-                            let items: Vec<Value> = items
-                                .iter()
-                                .filter(|v| !v.set_eq(value, &self.gc))
-                                .copied()
-                                .collect();
-                            Some((items, true, None))
-                        }
-                        _ => None,
-                    };
+                let updated: Option<(ObjKind, Option<Value>)> = match (method.as_str(), kind, rest)
+                {
+                    ("push", Some(ObjKind::Array(items)), [value]) => {
+                        let mut items = items.clone();
+                        items.push(*value);
+                        Some((ObjKind::Array(items), None))
+                    }
+                    ("pop", Some(ObjKind::Array(items)), []) => {
+                        let mut items = items.clone();
+                        let popped = items.pop().unwrap_or(Value::null());
+                        Some((ObjKind::Array(items), Some(popped)))
+                    }
+                    ("add", Some(ObjKind::Set(items)), [value]) => {
+                        let mut items = items.clone();
+                        items.add_in(*value, &self.gc);
+                        Some((ObjKind::Set(items), None))
+                    }
+                    ("remove", Some(ObjKind::Set(items)), [value]) => {
+                        let mut items = items.clone();
+                        items.remove_in(value, &self.gc);
+                        Some((ObjKind::Set(items), None))
+                    }
+                    _ => None,
+                };
                 let (new_receiver, result) = match updated {
-                    Some((items, is_set, explicit_result)) => {
-                        let kind = if is_set {
-                            ObjKind::Set(items)
-                        } else {
-                            ObjKind::Array(items)
-                        };
+                    Some((kind, explicit_result)) => {
                         let new_value = Value::obj(self.gc.alloc(kind));
                         (new_value, explicit_result.unwrap_or(new_value))
                     }
@@ -902,9 +892,8 @@ impl VM {
                         .and_then(|r| self.gc.get(r))
                         .and_then(|o| match &o.kind {
                             ObjKind::String(s) => Some(s.chars().count() as i64),
-                            ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a) => {
-                                Some(a.len() as i64)
-                            }
+                            ObjKind::Array(a) | ObjKind::Tuple(a) => Some(a.len() as i64),
+                            ObjKind::Set(a) => Some(a.len() as i64),
                             ObjKind::Object(o) => Some(o.len() as i64),
                             ObjKind::Map(pairs) => Some(pairs.len() as i64),
                             _ => None,
@@ -1009,7 +998,7 @@ impl VM {
             },
             "set" => {
                 if args.is_empty() {
-                    let r = self.gc.alloc(ObjKind::Set(Vec::new()));
+                    let r = self.gc.alloc(ObjKind::Set(VmSet::new()));
                     return Ok(Value::obj(r));
                 }
                 if args.len() != 1 {
@@ -1017,23 +1006,20 @@ impl VM {
                 }
                 if let Some(r) = args[0].as_obj() {
                     if let Some(obj) = self.gc.get(r) {
-                        match &obj.kind {
-                            ObjKind::Array(items) | ObjKind::Tuple(items) | ObjKind::Set(items) => {
-                                // Clone to drop GC borrow, then dedup via set_eq.
-                                let source = items.clone();
-                                let mut deduped = Vec::new();
-                                for item in source {
-                                    if !deduped
-                                        .iter()
-                                        .any(|existing: &Value| existing.set_eq(&item, &self.gc))
-                                    {
-                                        deduped.push(item);
-                                    }
-                                }
-                                let nr = self.gc.alloc(ObjKind::Set(deduped));
-                                return Ok(Value::obj(nr));
+                        // Dedup via set_eq (first occurrence wins), then
+                        // allocate once the GC borrow is released.
+                        let deduped = match &obj.kind {
+                            ObjKind::Array(items) | ObjKind::Tuple(items) => {
+                                Some(VmSet::collect_dedup(items.iter().copied(), &self.gc))
                             }
-                            _ => {}
+                            ObjKind::Set(items) => {
+                                Some(VmSet::collect_dedup(items.iter().copied(), &self.gc))
+                            }
+                            _ => None,
+                        };
+                        if let Some(set) = deduped {
+                            let nr = self.gc.alloc(ObjKind::Set(set));
+                            return Ok(Value::obj(nr));
                         }
                     }
                 }
@@ -1640,9 +1626,7 @@ impl VM {
                             ObjKind::Set(items) => {
                                 // Sets use value equality (same as .has()) so that
                                 // `contains(s, 1)` and `s.has(1)` agree.
-                                let items = items.clone();
-                                let found = items.iter().any(|v| v.set_eq(val, &self.gc));
-                                return Ok(Value::bool_val(found));
+                                return Ok(Value::bool_val(items.has_in(val, &self.gc)));
                             }
                             ObjKind::Map(pairs) => {
                                 // Maps: `contains(m, k)` matches `m.has(k)`.
@@ -4098,129 +4082,67 @@ impl VM {
 
         // Set-specific methods. Peel `Frozen(Set)` so frozen sets still
         // support read-only methods; mutating methods are rejected on
-        // frozen receivers. Clones the items Vec to drop the GC borrow
-        // before any further allocation.
-        let set_receiver: Option<(Vec<Value>, bool)> = {
-            receiver.as_obj().and_then(|r| {
-                let obj = self.gc.get(r)?;
-                match &obj.kind {
-                    ObjKind::Set(items) => Some((items.clone(), false)),
-                    ObjKind::Frozen(inner) => {
-                        let inner_r = inner.as_obj()?;
-                        let inner_obj = self.gc.get(inner_r)?;
-                        if let ObjKind::Set(items) = &inner_obj.kind {
-                            Some((items.clone(), true))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            })
-        };
-
-        if let Some((items, is_frozen)) = set_receiver {
-            // Peel "other" arg too so `a.union(frozen_b)` etc. work. Returns
-            // the inner Vec by clone to drop the GC borrow.
-            let peel_other = |vm: &Self, v: Value| -> Option<Vec<Value>> {
-                let r = v.as_obj()?;
-                let obj = vm.gc.get(r)?;
-                match &obj.kind {
-                    ObjKind::Set(inner) => Some(inner.clone()),
-                    ObjKind::Frozen(inner_val) => {
-                        let ir = inner_val.as_obj()?;
-                        let iobj = vm.gc.get(ir)?;
-                        if let ObjKind::Set(inner) = &iobj.kind {
-                            Some(inner.clone())
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
+        // frozen receivers. Lookups borrow the set; methods returning a new
+        // set build it before allocating (no GC borrow is held across an
+        // allocation).
+        if let Some((set_ref, is_frozen)) = self.peel_set(receiver) {
+            let gc = &self.gc;
+            let items = || set_items(gc, set_ref);
+            // Peel the "other" argument too so `a.union(frozen_b)` works.
+            let other = |name: &str| -> Result<&VmSet, VMError> {
+                let arg = extra_args.first().copied().unwrap_or(Value::null());
+                self.peel_set(arg)
+                    .and_then(|(r, _)| set_items(gc, r))
+                    .ok_or_else(|| VMError::new(&format!("{}() requires a set argument", name)))
+            };
+            let one_arg = |name: &str| -> Result<Value, VMError> {
+                match extra_args {
+                    [value] => Ok(*value),
+                    _ => Err(VMError::new(&format!("{}() requires one argument", name))),
                 }
             };
-            match method_name {
+            let result: Option<ObjKind> = match method_name {
                 "has" => {
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("has() requires one argument"));
-                    }
-                    let found = items.iter().any(|v| v.set_eq(&extra_args[0], &self.gc));
+                    let value = one_arg("has")?;
+                    let found = items().is_some_and(|set| set.has_in(&value, gc));
                     return Ok(Value::bool_val(found));
                 }
-                "add" => {
+                "add" | "remove" => {
                     if is_frozen {
                         return Err(VMError::new("cannot mutate a frozen set"));
                     }
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("add() requires one argument"));
+                    let value = one_arg(method_name)?;
+                    let mut new_items = items().cloned().unwrap_or_default();
+                    if method_name == "add" {
+                        new_items.add_in(value, gc);
+                    } else {
+                        new_items.remove_in(&value, gc);
                     }
-                    let mut new_items = items;
-                    if !new_items.iter().any(|v| v.set_eq(&extra_args[0], &self.gc)) {
-                        new_items.push(extra_args[0]);
-                    }
-                    let nr = self.gc.alloc(ObjKind::Set(new_items));
-                    return Ok(Value::obj(nr));
+                    Some(ObjKind::Set(new_items))
                 }
-                "remove" => {
-                    if is_frozen {
-                        return Err(VMError::new("cannot mutate a frozen set"));
-                    }
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("remove() requires one argument"));
-                    }
-                    let new_items: Vec<Value> = items
-                        .into_iter()
-                        .filter(|v| !v.set_eq(&extra_args[0], &self.gc))
-                        .collect();
-                    let nr = self.gc.alloc(ObjKind::Set(new_items));
-                    return Ok(Value::obj(nr));
-                }
-                "union" => {
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("union() requires one argument"));
-                    }
-                    let other = peel_other(self, extra_args[0])
-                        .ok_or_else(|| VMError::new("union() requires a set argument"))?;
-                    let mut result = items;
-                    for v in other {
-                        if !result.iter().any(|existing| existing.set_eq(&v, &self.gc)) {
-                            result.push(v);
+                "union" | "intersect" | "diff" => {
+                    one_arg(method_name)?;
+                    let other = other(method_name)?;
+                    let mut result = items().cloned().unwrap_or_default();
+                    match method_name {
+                        "union" => {
+                            for v in other.iter() {
+                                result.add_in(*v, gc);
+                            }
                         }
+                        "intersect" => result.retain(|v| other.has_in(v, gc)),
+                        _ => result.retain(|v| !other.has_in(v, gc)),
                     }
-                    let nr = self.gc.alloc(ObjKind::Set(result));
-                    return Ok(Value::obj(nr));
+                    Some(ObjKind::Set(result))
                 }
-                "intersect" => {
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("intersect() requires one argument"));
-                    }
-                    let other = peel_other(self, extra_args[0])
-                        .ok_or_else(|| VMError::new("intersect() requires a set argument"))?;
-                    let result: Vec<Value> = items
-                        .into_iter()
-                        .filter(|v| other.iter().any(|o| o.set_eq(v, &self.gc)))
-                        .collect();
-                    let nr = self.gc.alloc(ObjKind::Set(result));
-                    return Ok(Value::obj(nr));
-                }
-                "diff" => {
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("diff() requires one argument"));
-                    }
-                    let other = peel_other(self, extra_args[0])
-                        .ok_or_else(|| VMError::new("diff() requires a set argument"))?;
-                    let result: Vec<Value> = items
-                        .into_iter()
-                        .filter(|v| !other.iter().any(|o| o.set_eq(v, &self.gc)))
-                        .collect();
-                    let nr = self.gc.alloc(ObjKind::Set(result));
-                    return Ok(Value::obj(nr));
-                }
-                "to_array" => {
-                    let nr = self.gc.alloc(ObjKind::Array(items));
-                    return Ok(Value::obj(nr));
-                }
-                _ => {}
+                "to_array" => Some(ObjKind::Array(
+                    items().map(VmSet::to_vec).unwrap_or_default(),
+                )),
+                _ => None,
+            };
+            if let Some(kind) = result {
+                let nr = self.gc.alloc(kind);
+                return Ok(Value::obj(nr));
             }
         }
 
@@ -4382,7 +4304,7 @@ impl VM {
                 idx: 0,
             }),
             ObjKind::Set(items) => Some(StreamKind::SetIter {
-                items: items.clone(),
+                items: items.to_vec(),
                 idx: 0,
             }),
             ObjKind::Map(pairs) => Some(StreamKind::MapIter {
@@ -4406,7 +4328,7 @@ impl VM {
                         idx: 0,
                     }),
                     ObjKind::Set(items) => Some(StreamKind::SetIter {
-                        items: items.clone(),
+                        items: items.to_vec(),
                         idx: 0,
                     }),
                     ObjKind::Map(pairs) => Some(StreamKind::MapIter {
@@ -5080,5 +5002,32 @@ impl VM {
                 | "ceil"
                 | "to_fixed"
         )
+    }
+}
+
+/// The items of the set object `r`, if it is one.
+fn set_items(gc: &super::gc::Gc, r: GcRef) -> Option<&VmSet> {
+    match &gc.get(r)?.kind {
+        ObjKind::Set(items) => Some(items),
+        _ => None,
+    }
+}
+
+impl VM {
+    /// The set object `value` refers to (peeling one `Frozen`), and whether
+    /// it was frozen.
+    pub(super) fn peel_set(&self, value: Value) -> Option<(GcRef, bool)> {
+        let r = value.as_obj()?;
+        match &self.gc.get(r)?.kind {
+            ObjKind::Set(_) => Some((r, false)),
+            ObjKind::Frozen(inner) => {
+                let ir = inner.as_obj()?;
+                match &self.gc.get(ir)?.kind {
+                    ObjKind::Set(_) => Some((ir, true)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 }

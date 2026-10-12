@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use super::bytecode::Chunk;
 use super::compiler::{self, CompileError, CompileOptions};
 use super::machine::{VMError, VM};
-use super::value::{GcRef, ObjKind, Value, ValueKind};
+use super::value::{GcRef, ObjKind, Value, ValueKind, VmSet};
 use crate::interpreter::Value as HostValue;
 use crate::parser::ast::Program;
 
@@ -109,8 +109,12 @@ pub(crate) fn to_vm(vm: &mut VM, v: &HostValue) -> Result<Value, VMError> {
             alloc(vm, ObjKind::Tuple(items))
         }
         HostValue::Set(items) => {
-            let items = to_vm_all(vm, items)?;
-            alloc(vm, ObjKind::Set(items))
+            let items = items
+                .iter()
+                .map(|x| to_vm(vm, x))
+                .collect::<Result<Vec<_>, _>>()?;
+            let set = VmSet::collect_unchecked(items, &vm.gc);
+            alloc(vm, ObjKind::Set(set))
         }
         HostValue::Object(map) => {
             let mut out = IndexMap::with_capacity(map.len());
@@ -199,7 +203,12 @@ pub(crate) fn to_host(vm: &VM, v: Value) -> Result<HostValue, String> {
         ObjKind::BoxedInt(n) => HostValue::Int(*n),
         ObjKind::Array(items) => HostValue::Array(all(items)?),
         ObjKind::Tuple(items) => HostValue::Tuple(all(items)?),
-        ObjKind::Set(items) => HostValue::Set(all(items)?),
+        ObjKind::Set(items) => HostValue::Set(crate::interpreter::SetItems::from_values_unchecked(
+            items
+                .iter()
+                .map(|x| to_host(vm, *x))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
         ObjKind::Object(map) => match option_variant(vm, map) {
             Some(true) => HostValue::Some(Box::new(match map.get("_0") {
                 Some(inner) => to_host(vm, *inner)?,

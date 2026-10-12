@@ -1491,6 +1491,46 @@ fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, Com
     Ok(true)
 }
 
+/// Statement `s.add(e)` / `s.remove(e)` on a mutable local with a simple
+/// `e`: one `UpdateSetLocal`, in place when the local owns its set (so
+/// building a set in a loop is O(1) per element instead of copying it).
+/// Like `PushLocal`, only in statement position: the result (the receiver)
+/// is discarded. Any other receiver type takes the generic path at run time.
+fn try_compile_set_update_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, CompileError> {
+    let (receiver, method, value) = match expr {
+        Expr::MethodCall {
+            object,
+            method,
+            args,
+        } if args.len() == 1 => (object.as_ref(), method.as_str(), &args[0]),
+        Expr::Call { function, args } if args.len() == 1 => match function.as_ref() {
+            Expr::FieldAccess { object, field } => (object.as_ref(), field.as_str(), &args[0]),
+            _ => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    let op = match method {
+        "add" => SET_UPDATE_ADD,
+        "remove" => SET_UPDATE_REMOVE,
+        _ => return Ok(false),
+    };
+    let Expr::Ident(var) = receiver else {
+        return Ok(false);
+    };
+    if !is_simple_operand(value) {
+        return Ok(false);
+    }
+    let Some((reg, true)) = c.resolve_local(var) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let value_reg = c.alloc_reg()?;
+    compile_expr(c, value, value_reg)?;
+    c.emit(encode_abc(OpCode::UpdateSetLocal, reg, value_reg, op), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
 /// Store `src` into the variable `name` (local, captured or global).
 fn emit_store_var(c: &mut Compiler, name: &str, src: u8) -> Result<(), CompileError> {
     if let Some((reg, _)) = c.resolve_local(name) {
@@ -2284,7 +2324,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Match { subject, arms } => compile_match(c, subject, arms, None),
 
         Stmt::Expression(expr) => {
-            if try_compile_push_statement(c, expr)? {
+            if try_compile_push_statement(c, expr)? || try_compile_set_update_statement(c, expr)? {
                 return Ok(());
             }
             let saved = c.next_register;

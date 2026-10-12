@@ -145,6 +145,56 @@ pub struct FunctionValue {
     pub decorators: Vec<Decorator>,
 }
 
+/// A set's items: insertion-ordered and hash-indexed
+/// (`semantics::ordered_set`). Membership uses [`Value::container_eq`];
+/// items are hashed with [`Value::set_hash`], which hashes equal items
+/// alike.
+pub type SetItems = crate::semantics::ordered_set::OrderedSet<Value>;
+
+impl SetItems {
+    /// A set of `values` in order, dropping each value equal to an earlier
+    /// one (what `set(array)` does).
+    pub fn from_values(values: impl IntoIterator<Item = Value>) -> Self {
+        let mut set = SetItems::new();
+        for value in values {
+            set.add_value(value);
+        }
+        set
+    }
+
+    /// A set of `values` in order, kept as given even if some compare
+    /// equal (values converted from the VM, whose set equality differs in
+    /// corner cases, keep exactly the items they had).
+    pub fn from_values_unchecked(values: impl IntoIterator<Item = Value>) -> Self {
+        let mut set = SetItems::new();
+        for value in values {
+            set.push_unchecked(value.set_hash(), value);
+        }
+        set
+    }
+
+    /// Whether some item equals `value` (`container_eq`).
+    pub fn has_value(&self, value: &Value) -> bool {
+        self.contains(value.set_hash(), |item| Value::container_eq(item, value))
+    }
+
+    /// Add `value` unless an equal item is present; returns whether it was
+    /// added.
+    pub fn add_value(&mut self, value: Value) -> bool {
+        let hash = value.set_hash();
+        if self.contains(hash, |item| Value::container_eq(item, &value)) {
+            return false;
+        }
+        self.push_unchecked(hash, value);
+        true
+    }
+
+    /// Remove every item equal to `value`; returns whether any was.
+    pub fn remove_value(&mut self, value: &Value) -> bool {
+        self.remove_matching(value.set_hash(), |item| Value::container_eq(item, value)) > 0
+    }
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -154,7 +204,9 @@ pub enum Value {
     Bool(bool),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
-    Set(Vec<Value>),
+    /// Insertion-ordered set; hash-indexed so `has`/`add`/`remove` are
+    /// O(1) on average (see [`SetItems`]).
+    Set(SetItems),
     /// First-class Map with any-value keys. Ordered vec preserves insertion
     /// order; keys compared via `container_eq` so NaN self-matches and
     /// Int/Float promote (e.g. `1` and `1.0` collide).
@@ -197,14 +249,7 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
-            (Value::Set(a), Value::Set(b)) => {
-                // Order-independent with container-aware equality: same length
-                // + every element in A is equivalent to some element in B
-                // (handles NaN==NaN and Int/Float promotion for set semantics).
-                a.len() == b.len()
-                    && a.iter()
-                        .all(|x| b.iter().any(|y| Value::container_eq(x, y)))
-            }
+            (Value::Set(a), Value::Set(b)) => Value::sets_equal(a, b),
             (Value::Map(a), Value::Map(b)) => {
                 // Order-independent on entries. Keys use container_eq
                 // (NaN self-match, Int/Float promote). Values use full ==.
@@ -288,6 +333,78 @@ impl Value {
         }
     }
 
+    /// Order-independent set equality: same length and every item of `a`
+    /// equals (`container_eq`) some item of `b` (handles NaN == NaN and
+    /// Int/Float promotion for set semantics).
+    fn sets_equal(a: &SetItems, b: &SetItems) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .all(|x| b.contains(x.set_hash(), |y| Value::container_eq(x, y)))
+    }
+
+    /// Hash for set membership: values that are `container_eq` hash
+    /// alike (Int/Float that compare equal, every NaN, `Frozen(v)` and
+    /// `v`). Collisions only cost a comparison, so kinds whose equality is
+    /// not structural (sets and maps nested in sets, functions, channels)
+    /// hash by their kind and size alone.
+    pub fn set_hash(&self) -> u64 {
+        crate::semantics::ordered_set::finish(self.set_hash_at(0))
+    }
+
+    fn set_hash_at(&self, depth: usize) -> u64 {
+        use crate::semantics::ordered_set as h;
+        match self {
+            Value::Frozen(inner) => return inner.set_hash_at(depth),
+            Value::Int(n) => return h::hash_int(*n),
+            Value::Float(f) => return h::hash_number(*f),
+            Value::String(s) => return h::hash_str(s),
+            Value::Bool(b) => return h::mix(h::TAG_BOOL, u64::from(*b)),
+            Value::Null => return h::TAG_NULL,
+            Value::None => return h::TAG_NONE,
+            Value::BuiltIn(name) => return h::mix(h::TAG_OTHER, h::hash_str(name)),
+            _ => {}
+        }
+        let deeper = depth < h::MAX_HASH_DEPTH;
+        let ordered = |tag: u64, items: &[Value]| {
+            let start = h::mix(tag, items.len() as u64);
+            if !deeper {
+                return start;
+            }
+            items
+                .iter()
+                .fold(start, |acc, item| h::mix(acc, item.set_hash_at(depth + 1)))
+        };
+        let wrapped = |tag: u64, inner: &Value| {
+            if deeper {
+                h::mix(tag, inner.set_hash_at(depth + 1))
+            } else {
+                tag
+            }
+        };
+        match self {
+            Value::Array(items) => ordered(h::TAG_ARRAY, items),
+            Value::Tuple(items) => ordered(h::TAG_TUPLE, items),
+            Value::Set(items) => h::mix(h::TAG_SET, items.len() as u64),
+            Value::Map(pairs) => h::mix(h::TAG_MAP, pairs.len() as u64),
+            Value::Object(map) => {
+                let start = h::mix(h::TAG_OBJECT, map.len() as u64);
+                if !deeper {
+                    return start;
+                }
+                // Key order does not matter for equality: combine entries
+                // commutatively.
+                let entries = map.iter().fold(0u64, |acc, (k, v)| {
+                    acc.wrapping_add(h::finish(h::mix(h::hash_str(k), v.set_hash_at(depth + 1))))
+                });
+                h::mix(start, entries)
+            }
+            Value::ResultOk(inner) => wrapped(h::TAG_OK, inner),
+            Value::ResultErr(inner) => wrapped(h::TAG_ERR, inner),
+            Value::Some(inner) => wrapped(h::TAG_SOME, inner),
+            _ => h::TAG_OTHER,
+        }
+    }
+
     /// Container-aware equality used for set membership, set equality, and
     /// any other collection where we want NaN==NaN and Int↔Float promotion
     /// to agree with the VM's `Value::equals` semantics.
@@ -318,11 +435,7 @@ impl Value {
                         .zip(y.iter())
                         .all(|(a, b)| Value::container_eq(a, b))
             }
-            (Value::Set(x), Value::Set(y)) => {
-                x.len() == y.len()
-                    && x.iter()
-                        .all(|xv| y.iter().any(|yv| Value::container_eq(xv, yv)))
-            }
+            (Value::Set(x), Value::Set(y)) => Value::sets_equal(x, y),
             (Value::Map(x), Value::Map(y)) => {
                 x.len() == y.len()
                     && x.iter().all(|(xk, xv)| {
@@ -376,7 +489,8 @@ impl Value {
             Value::Float(n) => Shape::Float(*n),
             Value::String(s) => Shape::Sized(s.len()),
             Value::Null => Shape::Null,
-            Value::Array(a) | Value::Tuple(a) | Value::Set(a) => Shape::Sized(a.len()),
+            Value::Array(a) | Value::Tuple(a) => Shape::Sized(a.len()),
+            Value::Set(a) => Shape::Sized(a.len()),
             Value::Map(m) => Shape::Sized(m.len()),
             Value::Object(o) => Shape::Sized(o.len()),
             Value::ResultOk(_) => Shape::ResultOk,
@@ -407,7 +521,11 @@ impl Value {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
-            Value::Tuple(items) | Value::Set(items) => {
+            Value::Tuple(items) => {
+                let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
+                format!("[{}]", entries.join(", "))
+            }
+            Value::Set(items) => {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
@@ -869,11 +987,11 @@ impl Environment {
                     .map(|x| Self::dup_value(x, scope_map))
                     .collect(),
             ),
-            Value::Set(arr) => Value::Set(
-                arr.into_iter()
-                    .map(|x| Self::dup_value(x, scope_map))
-                    .collect(),
-            ),
+            // Isolating closures changes neither how an item compares nor
+            // how it hashes, so the stored hashes stay valid.
+            Value::Set(arr) => {
+                Value::Set(arr.into_map_same_hash(|x| Self::dup_value(x, scope_map)))
+            }
             Value::Map(pairs) => Value::Map(
                 pairs
                     .into_iter()
@@ -1378,7 +1496,11 @@ impl Interpreter {
         fn walk(v: &Value, path: &str, seen: &mut Seen) -> Option<String> {
             match v {
                 Value::Stream(_) => Some(path.to_string()),
-                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => a
+                Value::Array(a) | Value::Tuple(a) => a
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, x)| walk(x, &format!("{}[{}]", path, i), seen)),
+                Value::Set(a) => a
                     .iter()
                     .enumerate()
                     .find_map(|(i, x)| walk(x, &format!("{}[{}]", path, i), seen)),
@@ -1932,9 +2054,13 @@ impl Interpreter {
                 iterable,
                 body,
             } => {
-                let iter_val = self.eval_expr(iterable)?;
+                let iter_val = match self.eval_expr(iterable)? {
+                    // A set iterates its items in insertion order.
+                    Value::Set(items) => Value::Array(items.into_vec()),
+                    other => other,
+                };
                 match iter_val {
-                    Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
+                    Value::Array(items) | Value::Tuple(items) => {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
@@ -3451,16 +3577,16 @@ impl Interpreter {
                         } =>
                         {
                             let is_frozen = matches!(&obj, Value::Frozen(_));
-                            let items: Vec<Value> = match &obj {
-                                Value::Set(items) => items.clone(),
+                            let items: &SetItems = match &obj {
+                                Value::Set(items) => items,
                                 Value::Frozen(inner) => match inner.as_ref() {
-                                    Value::Set(items) => items.clone(),
-                                    _ => unreachable!(),
+                                    Value::Set(items) => items,
+                                    _ => return Err(RuntimeError::new("BUG: set receiver")),
                                 },
-                                _ => unreachable!(),
+                                _ => return Err(RuntimeError::new("BUG: set receiver")),
                             };
                             // Extract the "other" argument for set-set operations, peeling Frozen.
-                            let peel_other_set = |v: Value| -> Result<Vec<Value>, RuntimeError> {
+                            let peel_other_set = |v: Value| -> Result<SetItems, RuntimeError> {
                                 match v {
                                     Value::Set(items) => Ok(items),
                                     Value::Frozen(inner) => match *inner {
@@ -3482,9 +3608,7 @@ impl Interpreter {
                                         ));
                                     }
                                     let val = self.eval_expr(&args[0])?;
-                                    return Ok(Value::Bool(
-                                        items.iter().any(|v| Value::container_eq(v, &val)),
-                                    ));
+                                    return Ok(Value::Bool(items.has_value(&val)));
                                 }
                                 "add" => {
                                     if is_frozen {
@@ -3498,10 +3622,8 @@ impl Interpreter {
                                         ));
                                     }
                                     let val = self.eval_expr(&args[0])?;
-                                    let mut new_items = items;
-                                    if !new_items.iter().any(|v| Value::container_eq(v, &val)) {
-                                        new_items.push(val);
-                                    }
+                                    let mut new_items = items.clone();
+                                    new_items.add_value(val);
                                     return Ok(Value::Set(new_items));
                                 }
                                 "remove" => {
@@ -3516,10 +3638,8 @@ impl Interpreter {
                                         ));
                                     }
                                     let val = self.eval_expr(&args[0])?;
-                                    let new_items: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| !Value::container_eq(v, &val))
-                                        .collect();
+                                    let mut new_items = items.clone();
+                                    new_items.remove_value(&val);
                                     return Ok(Value::Set(new_items));
                                 }
                                 "union" => {
@@ -3530,11 +3650,9 @@ impl Interpreter {
                                     }
                                     let other = self.eval_expr(&args[0])?;
                                     let other_items = peel_other_set(other)?;
-                                    let mut result = items;
-                                    for v in other_items {
-                                        if !result.iter().any(|x| Value::container_eq(x, &v)) {
-                                            result.push(v);
-                                        }
+                                    let mut result = items.clone();
+                                    for v in other_items.into_vec() {
+                                        result.add_value(v);
                                     }
                                     return Ok(Value::Set(result));
                                 }
@@ -3546,12 +3664,8 @@ impl Interpreter {
                                     }
                                     let other = self.eval_expr(&args[0])?;
                                     let other_items = peel_other_set(other)?;
-                                    let result: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| {
-                                            other_items.iter().any(|x| Value::container_eq(x, v))
-                                        })
-                                        .collect();
+                                    let mut result = items.clone();
+                                    result.retain(|v| other_items.has_value(v));
                                     return Ok(Value::Set(result));
                                 }
                                 "diff" => {
@@ -3562,16 +3676,12 @@ impl Interpreter {
                                     }
                                     let other = self.eval_expr(&args[0])?;
                                     let other_items = peel_other_set(other)?;
-                                    let result: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| {
-                                            !other_items.iter().any(|x| Value::container_eq(x, v))
-                                        })
-                                        .collect();
+                                    let mut result = items.clone();
+                                    result.retain(|v| !other_items.has_value(v));
                                     return Ok(Value::Set(result));
                                 }
                                 "to_array" => {
-                                    return Ok(Value::Array(items));
+                                    return Ok(Value::Array(items.to_vec()));
                                 }
                                 _ => {}
                             }
@@ -3708,7 +3818,10 @@ impl Interpreter {
                             let kind = match obj {
                                 Value::Array(items) => StreamKind::ArrayIter { items, idx: 0 },
                                 Value::Tuple(items) => StreamKind::TupleIter { items, idx: 0 },
-                                Value::Set(items) => StreamKind::SetIter { items, idx: 0 },
+                                Value::Set(items) => StreamKind::SetIter {
+                                    items: items.into_vec(),
+                                    idx: 0,
+                                },
                                 Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
                                 Value::String(s) => StreamKind::StringIter {
                                     chars: s.chars().collect(),
@@ -3717,7 +3830,10 @@ impl Interpreter {
                                 Value::Frozen(inner) => match *inner {
                                     Value::Array(items) => StreamKind::ArrayIter { items, idx: 0 },
                                     Value::Tuple(items) => StreamKind::TupleIter { items, idx: 0 },
-                                    Value::Set(items) => StreamKind::SetIter { items, idx: 0 },
+                                    Value::Set(items) => StreamKind::SetIter {
+                                        items: items.into_vec(),
+                                        idx: 0,
+                                    },
                                     Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
                                     other => {
                                         return Err(RuntimeError::new(&format!(

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Sets are hash-indexed** (both engines, `src/semantics/ordered_set.rs`) — `s.has(x)`, `s.add(x)`, `s.remove(x)`, `contains(s, x)`, `set(array)` and the set operations no longer scan every member: lookups, adds and removals are O(1) on average. On the VM a statement `s.add(x)` / `s.remove(x)` on a mutable local updates the set in place when no other binding refers to it (new opcode `UpdateSetLocal`, like `PushLocal` for arrays); `s.has(x)` no longer copies the set. Sets still iterate in insertion order and compare members exactly as before (`1` and `1.0` are one member, NaN equals NaN, nested arrays/objects/sets compare by content). `benchmarks/interp/set_build.fg` (20k adds and 20k lookups) went from about 2.4 s to about 0.05 s on the interpreter and from about 3.4 s to about 0.03 s on the VM (release build).
+
 ### Fixed
 
 - **VM: functions can use top-level variables declared below them.** `fn f() { return late }` above `let late = 1` failed on the default VM with `[E0003] undefined variable: 'late'` (the interpreter printed `1`). Functions, lambdas, nested functions and `spawn` bodies defined above a top-level `let` (or destructuring `let`) now read and assign it once its `let` has run, in the main program, imported modules, REPL steps and HTTP handlers; calling them before that is still the interpreter's `undefined variable` error (also for an assignment, which no longer defines the variable silently), and assigning a later immutable `let` is E0006. Only such forward-referenced bindings are stored as globals; every other top-level `let` keeps its register, so top-level loops are as fast as before. Also on the VM, redeclaring a top-level (or block) binding that a closure already captured (`let x = 1`, `fn f() { return x }`, `let x = 2`) now updates what the closure sees, as on the interpreter.

@@ -47,7 +47,9 @@ enum FrozenObj {
     String(String),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
-    Set(Vec<Value>),
+    /// Items remapped to slots; the stored hashes are those of the live
+    /// set (they depend on content, not on object identity).
+    Set(VmSet),
     Object(IndexMap<String, Value>),
     Map(Vec<(Value, Value)>),
     Function(ObjFunction),
@@ -259,7 +261,7 @@ fn thaw(object: &FrozenObj, refs: &[GcRef]) -> ObjKind {
         FrozenObj::String(s) => ObjKind::String(s.clone()),
         FrozenObj::Array(items) => ObjKind::Array(r_all(items)),
         FrozenObj::Tuple(items) => ObjKind::Tuple(r_all(items)),
-        FrozenObj::Set(items) => ObjKind::Set(r_all(items)),
+        FrozenObj::Set(items) => ObjKind::Set(items.map_same_hash(r)),
         FrozenObj::Object(map) => {
             ObjKind::Object(map.iter().map(|(k, v)| (k.clone(), r(v))).collect())
         }
@@ -630,7 +632,7 @@ impl<'a> Freezer<'a> {
             ObjKind::String(s) => FrozenObj::String(s.clone()),
             ObjKind::Array(items) => FrozenObj::Array(m_all(items)),
             ObjKind::Tuple(items) => FrozenObj::Tuple(m_all(items)),
-            ObjKind::Set(items) => FrozenObj::Set(m_all(items)),
+            ObjKind::Set(items) => FrozenObj::Set(items.map_same_hash(m)),
             ObjKind::Object(map) => {
                 FrozenObj::Object(map.iter().map(|(k, v)| (k.clone(), m(v))).collect())
             }
