@@ -93,5 +93,7 @@ so its solver reimplemented the modules instead of importing them.
 | `if a { } else if b { } else { }` as an expression was a syntax error | `else if` chains in if-expressions |
 | `"\\p{L}"` interpolated `L` | `\p{..}` / `\P{..}` stay literal, like `{4}` |
 
-Writing the v2 references found 26 issues (`V2_FINDINGS.md`); all bugs among
-them are fixed in this round, with the remaining feature gaps listed there.
+Writing the v2 references found 26 issues (`V2_FINDINGS.md`). All the bugs
+are fixed in this round. Two items stay open: `Map` operations are still
+linear per call (sets are hash-indexed now; objects are the usual
+dictionary), and there is no typed dictionary that accepts object literals.
