@@ -303,8 +303,14 @@ impl<'a> Checker<'a> {
 
     /// Bring in the declarations of an imported module (all of them for a
     /// wildcard import, only `names` otherwise).
-    pub fn import_declarations(&mut self, program: &Program, names: Option<&[String]>) {
-        let wanted = |name: &str| names.is_none_or(|n| n.iter().any(|x| x == name));
+    pub fn import_declarations(&mut self, program: &Program, names: Option<&[ImportName]>) {
+        let wanted = |name: &str| names.is_none_or(|n| n.iter().any(|x| x.name == name));
+        // `import { f as g }` declares the function under its alias.
+        let alias = |name: &str| {
+            names
+                .and_then(|n| n.iter().find(|x| x.name == name))
+                .and_then(|x| x.alias.clone())
+        };
         let stmts: Vec<SpannedStmt> = program
             .statements
             .iter()
@@ -318,7 +324,15 @@ impl<'a> Checker<'a> {
                 Stmt::ImplBlock { type_name, .. } => wanted(type_name),
                 _ => false,
             })
-            .cloned()
+            .map(|s| {
+                let mut s = s.clone();
+                if let Stmt::FnDef { name, .. } = &mut s.stmt {
+                    if let Some(alias) = alias(name) {
+                        *name = alias;
+                    }
+                }
+                s
+            })
             .collect();
         self.collect_declarations(&stmts);
         // Imported function bodies are not checked here, but their return

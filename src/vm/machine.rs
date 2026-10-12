@@ -165,6 +165,13 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_method_mut",
 ];
 
+/// A module that ran in a VM (see [`VM::loaded_modules`]).
+pub(crate) struct LoadedModule {
+    pub(crate) program: Arc<crate::parser::ast::Program>,
+    /// Global-name prefix of the module's top-level names.
+    pub(crate) prefix: String,
+}
+
 pub struct VM {
     pub registers: Vec<Value>,
     pub frames: Vec<CallFrame>,
@@ -174,6 +181,10 @@ pub struct VM {
     pub static_methods: HashMap<String, IndexMap<String, Value>>,
     pub embedded_fields: HashMap<String, Vec<(String, String)>>,
     pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
+    /// Modules that already ran in this VM, by canonical path: importing
+    /// one again binds its globals instead of running it again (see
+    /// `__forge_import_module`).
+    pub(crate) loaded_modules: HashMap<std::path::PathBuf, Arc<LoadedModule>>,
     pub gc: Gc,
     pub output: Vec<String>,
     /// JIT tier state: specialization cache keyed by (prototype id, type
@@ -440,6 +451,7 @@ impl VM {
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
+            loaded_modules: HashMap::new(),
             gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
@@ -707,6 +719,9 @@ impl VM {
         }
 
         child.embedded_fields = self.embedded_fields.clone();
+        // The task has copies of the modules' globals: it must not run
+        // them again when it imports one.
+        child.loaded_modules = self.loaded_modules.clone();
 
         for (name, defaults) in &self.struct_defaults {
             let mut child_defaults = IndexMap::new();

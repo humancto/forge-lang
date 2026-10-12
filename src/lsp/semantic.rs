@@ -248,9 +248,14 @@ fn symbol_of(doc: &Arc<Doc>, occ: OccId) -> Option<Symbol> {
     match a.resolution.resolved.get(occ)? {
         Resolved::Def | Resolved::Local(_) => {
             let def = a.resolution.definition(occ)?;
-            if let Some(DefKind::Import { path }) = a.index.occurrences[def].def_kind() {
+            if let Some(DefKind::Import {
+                path,
+                name: exported,
+            }) = a.index.occurrences[def].def_kind()
+            {
+                // Through `as`, the module's definition has its own name.
                 let target = doc_for_path(&resolve_import_path(doc, path)?)?;
-                let def = top_level_def(&target, &name)?;
+                let def = top_level_def(&target, exported)?;
                 return Some(Symbol { doc: target, def });
             }
             Some(Symbol {
@@ -297,7 +302,21 @@ fn occurrences_in(doc: &Arc<Doc>, sym: &Symbol) -> Vec<OccId> {
                 .resolution
                 .definition(id)
                 .and_then(|d| a.index.occurrences[d].def_kind())
-                .is_some_and(|k| matches!(k, DefKind::Import { path } if imports_target(path))),
+                .is_some_and(|k| {
+                    // Uses of an alias (`import { a as b }`) name `b`, not
+                    // the module's `a`.
+                    matches!(k, DefKind::Import { path, name: exported }
+                        if *exported == name && imports_target(path))
+                }),
+            // The module's name in `import { a as b }`.
+            Resolved::Member if matches!(occ.role, Role::Field) => {
+                a.index.occurrences.iter().any(|d| {
+                    d.stmt == occ.stmt
+                        && d.name != name
+                        && matches!(d.def_kind(), Some(DefKind::Import { path, name: exported })
+                            if *exported == name && imports_target(path))
+                })
+            }
             Resolved::Imported(i) => a
                 .wildcard_imports
                 .get(*i)
@@ -636,7 +655,12 @@ fn describe_def(doc: &Doc, def: OccId) -> String {
         Some(DefKind::LoopVariable) => format!("(loop variable) {}: {}", o.name, ty_str),
         Some(DefKind::PatternBinding) => format!("(binding) {}: {}", o.name, ty_str),
         Some(DefKind::CatchVariable) => format!("(catch) {}", o.name),
-        Some(DefKind::Import { path }) => format!("import {{ {} }} from \"{}\"", o.name, path),
+        Some(DefKind::Import { path, name }) if *name != o.name => {
+            format!("import {{ {} as {} }} from \"{}\"", name, o.name, path)
+        }
+        Some(DefKind::Import { path, .. }) => {
+            format!("import {{ {} }} from \"{}\"", o.name, path)
+        }
         Some(DefKind::NativeImport { path }) => {
             format!("(native plugin) {} from \"{}\"", o.name, path)
         }

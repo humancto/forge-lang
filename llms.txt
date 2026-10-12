@@ -317,13 +317,16 @@ try {
 ```forge
 import { double, shout } from "utils.fg"   // selected names
 println(double(21))
+import { name as user_name } from "lib/user.fg"   // renamed: binds user_name
 import { sqrt, pi } from "math"            // members of a built-in module
 println(sqrt(16))                          // math.* stays available too
 ```
 
+`as` renames functions and variables (use it when two modules export the same name); a struct, `type`, variant or interface keeps its own name (renaming one is an import error). A module runs once per program: importing it again — from another module, or with `import "m.fg"` after `import { f } from "m.fg"` — reuses it, so its top-level code runs once and every importer shares its state (`let mut` counters, caches). Import cycles are an error (`circular import: a.fg -> b.fg -> a.fg`).
+
 Native plugins (Rust/C shared libraries built with `crates/forge-plugin`): `import native "target/release/libfoo" as foo` then `foo.add(1, 2)`, or `import { add } from native "path/libfoo"`. The platform suffix is added; paths resolve like `.fg` imports. Needs `--allow-ffi` (full trust; denied under `--sandbox` and `forge mcp`). Plugin errors are catchable runtime errors.
 
-`import "utils.fg"` brings every top-level name into scope. Paths resolve relative to the current working directory, then `forge_modules/<name>/main.fg`. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
+`import "utils.fg"` brings every top-level name into scope. A path resolves relative to the importing file first, then the current working directory, then the installed packages (`forge_modules/<name>/main.fg`, `forge_modules/<name>.fg`, `forge_modules/<name>/src/main.fg`); the `.fg` suffix is optional. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
 
 ## Collections and builtins
 
@@ -379,7 +382,7 @@ Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digi
 | `regex` | `test(text, pattern)`, `find(text, pattern)`, `find_all(text, pattern)`, `replace(text, pattern, repl)`, `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
 | `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body) |
-| `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `close()` |
+| `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `last_insert_rowid()`, `begin()`/`commit()`/`rollback()`, `close()` |
 | `pg`, `mysql` | `connect(url)`, `query(conn, sql, params?)`, `execute(conn, sql, params?)`, `close(conn)`; mysql adds `begin/commit/rollback` |
 | `jwt` | `sign(claims, secret, opts?)`, `verify(token, secret)`, `decode(token)`, `valid(token, secret)` |
 | `csv` | `parse(text, opts?)` (RFC 4180: quoted fields keep commas, quotes and line breaks; rows are objects keyed by the header; unquoted fields that are exactly an integer, a decimal or `true`/`false` become numbers/booleans, anything else (`02134`, `+1`, `1e5`, quoted text) stays a String; `opts`: `{ header: false }` gives arrays, `{ types: false }` keeps every field a String), `stringify(rows)`, `read(path, opts?)`, `write(path, rows)` |
@@ -460,9 +463,47 @@ fn search(query) -> Json {
 fn echo(body: Json) -> Json {
     return { received: body }
 }
+
+db.open("app.db")                      // opened once; every handler uses it
+db.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)")
+
+@post("/items")
+fn create(body, req) {
+    if typeof(body) != "Object" || !has_key(body, "name") {
+        return http.response(400, { error: "name is required" })
+    }
+    let token = get(req.headers, "authorization")   // lower-case names; null if absent
+    if token != "Bearer secret" {
+        return http.response(401, { error: "unauthorized" }, { "WWW-Authenticate": "Bearer" })
+    }
+    db.execute("INSERT INTO items (name) VALUES (?)", [body.name])
+    let id = db.last_insert_rowid()
+    return http.response(201, { id: id, name: body.name }, { Location: "/items/{id}" })
+}
+
+@get("/items/:id")
+fn show(id) {
+    let rows = db.query("SELECT id, name FROM items WHERE id = ?", [int(id)])
+    if len(rows) == 0 {
+        return http.response(404, { error: "no item {id}" })
+    }
+    return rows[0]
+}
+
+@delete("/items/:id")
+fn remove(id) {
+    db.execute("DELETE FROM items WHERE id = ?", [int(id)])
+    return http.response(204)              // no body
+}
 ```
 
-Handler parameters bind by name: path params (`:name`), `body`/`data` (parsed JSON body), `query`/`qs` (all query params), or a single query param by its name. Return an object to send JSON. Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. Server programs run on the bytecode VM by default (`forge --interp run` serves on the interpreter; responses are identical). Unknown decorators or non-literal `@server` arguments make the program fall back to the interpreter automatically.
+Handler parameters bind by name: path params (`:name`), `body`/`data` (the request body, `{}` when there is none), `query`/`qs` (all query params), `headers` (request headers, lower-case names), `req`/`request` (the whole request: `method`, `path`, `params`, `query`, `headers`, `body` — `null` when there is none), or a single query param by its name. Path, query and header values are Strings; read an optional one with `get(obj, key)` (indexing a missing key is an error).
+
+Request bodies are decoded by `Content-Type`: JSON (`application/json`, `*+json`) is parsed, a form (`application/x-www-form-urlencoded`) becomes an object of Strings, anything else (text, or no content type) is a String. Invalid JSON is answered `400 {"error": "invalid JSON body: ..."}` and a body that is not UTF-8 text `415`, before the handler runs.
+
+Returning a value answers `200` with it as JSON. `http.response(status, body?, headers?)` chooses the response: `status` is an Int from 200 to 599; a `null` body sends no body (`204`, redirects), a String is sent as is (`text/plain; charset=utf-8` unless a `Content-Type` header is given), anything else as JSON. Header values are Strings (numbers and Bools are converted; an array sends the header once per value, e.g. `Set-Cookie`); a value with a line break, an invalid name or `Content-Length` is a runtime error. A handler error (or `must Err(...)`) answers `500 {"error": message}`.
+
+Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@patch`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. A database the top level opens (`db.open`, `pg.connect`) is shared by every handler (and by `spawn`ed tasks): statements of concurrent requests run one at a time, a transaction (`db.begin()` ... `db.commit()`) is private to the request that opened it and is rolled back if the request ends without committing, and `db.last_insert_rowid()` is the request's own last insert. `db.open` inside a handler opens a connection for that request only. Server programs run on the bytecode VM by default (`forge --interp run` serves on the interpreter; responses are identical). Unknown decorators or non-literal `@server` arguments make the program fall back to the interpreter automatically.
 
 ## Tests
 

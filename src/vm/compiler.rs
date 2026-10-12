@@ -2836,17 +2836,17 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 // interpreter.
                 if let Some(name_list) = names {
                     for name in name_list {
-                        crate::semantics::check_builtin_module_import(path, name)
+                        crate::semantics::check_builtin_module_import(path, &name.name)
                             .map_err(|m| CompileError::new(&m))?;
                     }
                     let module_reg = c.alloc_reg()?;
                     let module_idx = c.const_str(&c.global_name(path));
                     c.emit(encode_abx(OpCode::GetGlobal, module_reg, module_idx), 0);
                     for name in name_list {
-                        let local_reg = c.add_local(name, false)?;
-                        emit_get_field(c, local_reg, module_reg, name)?;
+                        let local_reg = c.add_local(name.binding(), false)?;
+                        emit_get_field(c, local_reg, module_reg, &name.name)?;
                         if c.scope_depth == 1 {
-                            let name_idx = c.const_str(&c.global_name(name));
+                            let name_idx = c.const_str(&c.global_name(name.binding()));
                             c.emit(encode_abx(OpCode::SetGlobal, local_reg, name_idx), 0);
                         }
                     }
@@ -2856,38 +2856,61 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
 
             let resolved = resolve_import_path(c, path)?;
             let resolved_path = resolved.display().to_string();
-            let export_names = match names {
-                Some(name_list) => name_list.clone(),
-                None => import_export_names(&parse_import_program(path, &resolved)?),
+            // (module's name, name bound here)
+            let export_names: Vec<(String, String)> = match names {
+                Some(name_list) => name_list
+                    .iter()
+                    .map(|n| (n.name.clone(), n.binding().to_string()))
+                    .collect(),
+                None => import_export_names(&parse_import_program(path, &resolved)?)
+                    .into_iter()
+                    .map(|n| (n.clone(), n))
+                    .collect(),
             };
 
-            // (resolved path, requested names or `false` for all, path as written)
-            let import_args = vec![
+            // (resolved path, requested names or `false` for all, path as
+            // written[, renamed names as [name, alias] pairs])
+            let mut import_args = vec![
                 Expr::StringLit(resolved_path),
                 match names {
                     Some(name_list) => Expr::Array(
                         name_list
                             .iter()
-                            .map(|name| Expr::StringLit(name.clone()))
+                            .map(|name| Expr::StringLit(name.name.clone()))
                             .collect(),
                     ),
                     None => Expr::Bool(false),
                 },
                 Expr::StringLit(path.clone()),
             ];
+            let aliases: Vec<Expr> = names
+                .iter()
+                .flatten()
+                .filter_map(|n| {
+                    n.alias.as_ref().map(|alias| {
+                        Expr::Array(vec![
+                            Expr::StringLit(n.name.clone()),
+                            Expr::StringLit(alias.clone()),
+                        ])
+                    })
+                })
+                .collect();
+            if !aliases.is_empty() {
+                import_args.push(Expr::Array(aliases));
+            }
 
             // The module runs even when it exports nothing (top-level side
             // effects happen exactly as in the interpreter).
             let module_reg = c.alloc_reg()?;
             compile_hidden_call(c, "__forge_import_module", import_args, module_reg)?;
-            for name in export_names {
-                let local_reg = c.add_local(&name, false)?;
+            for (name, binding) in export_names {
+                let local_reg = c.add_local(&binding, false)?;
                 emit_get_field(c, local_reg, module_reg, &name)?;
                 if c.scope_depth == 1 {
                     // Top-level imports are also globals, as in the
                     // interpreter (pattern matching on imported variants
                     // looks them up by name).
-                    let name_idx = c.const_str(&c.global_name(&name));
+                    let name_idx = c.const_str(&c.global_name(&binding));
                     c.emit(encode_abx(OpCode::SetGlobal, local_reg, name_idx), 0);
                 }
             }

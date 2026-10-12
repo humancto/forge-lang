@@ -93,8 +93,8 @@ pub enum FrontendError {
 #[derive(Debug, Clone)]
 struct ImportInfo {
     path: String,
-    /// `Some` for `import { a, b } from "path"`.
-    names: Option<Vec<String>>,
+    /// `Some` for `import { a, b as c } from "path"`.
+    names: Option<Vec<crate::parser::ast::ImportName>>,
     resolved: Option<PathBuf>,
     /// Position of the `import` statement.
     line: usize,

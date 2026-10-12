@@ -1,0 +1,25 @@
+// import_alias_test.fg — `import { a as b }` renames an imported name, and a
+// module runs once per program: every importer shares its state (both
+// engines).
+
+import { bump as next, name as counter_name } from "tests/parity/modules/shared_counter.fg"
+import { bump_twice, name as user_name } from "tests/parity/modules/counter_user.fg"
+import { sqrt as root, pi as PI } from "math"
+
+@test
+fn test_alias_binds_the_new_name() {
+    assert_eq(counter_name(), "shared_counter")
+    assert_eq(user_name(), "counter_user of shared_counter")
+    assert_eq(root(9), 3.0)
+    assert_eq(PI, math.pi)
+}
+
+@test
+fn test_module_state_is_shared_between_importers() {
+    // counter_user.fg imports shared_counter.fg too: one module, one count.
+    let a = next()
+    let b = bump_twice()
+    assert_eq(b, a + 2)
+    assert_eq(next(), a + 3)
+}
+

@@ -26,11 +26,11 @@ that a model cannot guess from `llms.txt`).
 | 12 | perf | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each) | data |
 | 13 | perf | `set`/`map` are linear lists: `st.has`, `st.add`, `m.get`, `m.set` are O(n) per call on both engines | data |
 | 14 | perf | Net effect: the textbook word count over 100,000 words takes 28 s (VM) / 30 s (interp); Python takes 0.03 s | word_freq_large |
-| 15 | gap | HTTP handlers cannot set a status code or response headers, and cannot read request headers | servers |
-| 16 | gap | A database opened at the top level of a server is not visible in handlers ("no database connection open") | todo_sqlite |
-| 17 | gap | `import { a as b }` does not exist and is misparsed ("does not export 'as'"); importing a module twice runs it twice | clashing_modules |
-| 18 | gap | Request bodies must be JSON with `Content-Type: application/json`; otherwise axum answers 400/415 in text/plain | servers |
-| 19 | gap | `llms.txt` describes import resolution incorrectly | multifile |
+| 15 | gap (fixed) | HTTP handlers cannot set a status code or response headers, and cannot read request headers | servers |
+| 16 | gap (fixed) | A database opened at the top level of a server is not visible in handlers ("no database connection open") | todo_sqlite |
+| 17 | gap (fixed) | `import { a as b }` does not exist and is misparsed ("does not export 'as'"); importing a module twice runs it twice | clashing_modules |
+| 18 | gap (fixed) | Request bodies must be JSON with `Content-Type: application/json`; otherwise axum answers 400/415 in text/plain | servers |
+| 19 | gap (fixed) | `llms.txt` describes import resolution incorrectly | multifile |
 | 20 | gap | `regex` has no capture groups | logfmt_parse, ini_config_check |
 | 21 | gap | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
 | 22 | gap | `Map<String, T>` (suggested for objects by the MCP section) does not accept an object literal; there is no typed dictionary for objects | typed |
@@ -366,6 +366,14 @@ Suggested fix: let a handler return a response object, e.g.
 `Response { status, body, headers }` struct, and bind `headers` (lower-case names) like
 `query`. Document both in `llms.txt`.
 
+**Fixed:** `return http.response(404, { error: "not found" })`,
+`http.response(201, body, { Location: "/items/1" })`, `http.response(204)`; a String body
+is sent as `text/plain` unless a `Content-Type` is given. Handlers read headers through a
+`headers` parameter (lower-case names) or the whole request through `req`/`request`
+(`method`, `path`, `params`, `query`, `headers`, `body`). Status and headers are
+validated (200-599, no CR/LF injection). Both engines, `tests/server_engine_parity.rs`;
+documented in `llms.txt`.
+
 ### 16. Top-level database connections are not visible to handlers
 
 ```forge
@@ -388,6 +396,12 @@ model reads as "open the database once at start-up".
 Suggested fix: carry the connection (or its path) into request forks, or document the
 per-handler `db.open` rule in the HTTP server section.
 
+**Fixed:** the connections the top level opens (`db.open`, `pg.connect`) are shared by every
+handler (`stdlib::db_share`): statements run one at a time, a transaction belongs to the
+request that opened it and is rolled back when the request ends, and
+`db.last_insert_rowid()` is per request. `tests/server_database.rs` hammers a counter on
+both engines (plain updates and read-modify-write transactions, no lost updates).
+
 ### 17. Imports cannot be renamed; re-importing re-runs the module
 
 ```forge
@@ -404,6 +418,11 @@ module state is reset.
 Suggested fix: support `import { a as b } from "..."` (and `import "m.fg" as m` for a
 namespace object); cache a module per resolved path within a run.
 
+**Fixed:** `import { a as b } from "m.fg"` (functions and variables; renaming a struct or
+type is E0019), on both engines, the checker, the LSP and `forge fmt`. A module runs once
+per program and its importers share its state. Not done: `import "m.fg" as m` (namespace
+objects).
+
 ### 18. Request bodies must be JSON with the JSON content type
 
 A POST/PUT route uses axum's `Json` extractor: a request without
@@ -416,6 +435,11 @@ Suggested fix: bind the raw body (`body` as text when it is not JSON, or a separ
 `raw_body` parameter) and let the handler decide; at least answer framework errors as
 JSON `{"error": ...}`.
 
+**Fixed:** bodies are decoded by content type: JSON is parsed, a form becomes an object of
+Strings, anything else (or no content type) is a String; a POST without a body binds `{}`.
+Invalid JSON is `400 {"error": "invalid JSON body: ..."}`, a non-UTF-8 body `415`, both as
+JSON.
+
 ### 19. `llms.txt` describes import paths wrongly
 
 `llms.txt`: "Paths resolve relative to the current working directory, then
@@ -426,6 +450,8 @@ the `.fg` suffix is optional. (The behaviour is the useful one: expression_lib's
 `lib/parser.fg` imports `"tokenizer.fg"` from its own directory.)
 
 Suggested fix: correct the sentence.
+
+**Fixed:** `llms.txt` and the spec describe the resolution order.
 
 ### 20. No regex capture groups
 

@@ -2,6 +2,8 @@ pub mod crypto;
 pub mod csv;
 #[cfg(feature = "host")]
 pub mod db;
+#[cfg(feature = "host")]
+pub mod db_share;
 pub mod env;
 pub mod exec_module;
 pub mod fs;

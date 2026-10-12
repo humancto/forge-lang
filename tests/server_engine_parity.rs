@@ -372,3 +372,393 @@ fn websocket_echo_is_identical_on_both_engines() {
     );
     assert_eq!(vm, ws_transcript(Engine::Interpreter));
 }
+
+// ── Handler-controlled responses and request bodies ─────────────────────────
+
+const RESPONSES: &str = r#"
+@server(port: __PORT__)
+
+@get("/ping")
+fn ping() {
+    return { ok: true }
+}
+
+@post("/items")
+fn create(body, req) {
+    if typeof(body) != "Object" {
+        return http.response(400, { error: "expected an object", got: body })
+    }
+    return http.response(201, { item: body, type: get(req.headers, "content-type") }, { Location: "/items/1" })
+}
+
+@post("/echo")
+fn echo(body) {
+    return { body: body, type: typeof(body) }
+}
+
+@put("/items/:id")
+fn replace(id, req) {
+    return { id: id, method: req.method, path: req.path, params: req.params, body: req.body }
+}
+
+@patch("/items/:id")
+fn patch_item(id, body) {
+    return http.response(200, { id: id, patch: body })
+}
+
+@delete("/items/:id")
+fn remove(id) {
+    if id == "404" {
+        return http.response(404, { error: "no item {id}" })
+    }
+    return http.response(204)
+}
+
+@get("/text")
+fn text() {
+    return http.response(200, "hello there", { "Cache-Control": "no-store" })
+}
+
+@get("/html")
+fn html() {
+    return http.response(200, "<p>hi</p>", { "Content-Type": "text/html; charset=utf-8" })
+}
+
+@get("/cookies")
+fn cookies() {
+    return http.response(200, [1, 2], { "Set-Cookie": ["a=1", "b=2"], "X-Count": 2 })
+}
+
+@get("/redirect")
+fn redirect() {
+    return http.response(302, null, { Location: "/text" })
+}
+
+@get("/whoami")
+fn whoami(request, headers) {
+    return { method: request.method, auth: get(headers, "authorization"), custom: get(headers, "x-custom"), query: request.query, body: request.body }
+}
+
+@get("/injection")
+fn injection() {
+    return http.response(200, "x", { "X-Evil": "a\r\nSet-Cookie: pwned=1" })
+}
+
+@get("/bad-status")
+fn bad_status() {
+    return http.response(999, "x")
+}
+
+@get("/no-body-204")
+fn no_body_204() {
+    return http.response(204, { x: 1 })
+}
+
+@get("/hand-built")
+fn hand_built() {
+    let mut r = http.response(201, "made")
+    r.status = 202
+    return r
+}
+
+@get("/hand-built-bad")
+fn hand_built_bad() {
+    let mut r = http.response(201, "made")
+    r.headers = { "Content-Length": "1" }
+    return r
+}
+
+@get("/plain-object")
+fn plain_object() {
+    return { status: 404, body: "not a response" }
+}
+
+@get("/raises")
+fn raises() {
+    return must Err("boom")
+}
+"#;
+
+/// `(method, path, content type, body, extra headers)`.
+type Request2 = (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    Option<&'static [u8]>,
+    &'static [(&'static str, &'static str)],
+);
+
+const REQUESTS2: &[Request2] = &[
+    (
+        "POST",
+        "/items",
+        Some("application/json"),
+        Some(br#"{"a":1}"#),
+        &[],
+    ),
+    (
+        "POST",
+        "/items",
+        Some("application/json; charset=utf-8"),
+        Some(br#"{"a":[1,2]}"#),
+        &[],
+    ),
+    (
+        "POST",
+        "/items",
+        Some("application/vnd.api+json"),
+        Some(br#"{"v":true}"#),
+        &[],
+    ),
+    (
+        "POST",
+        "/items",
+        Some("application/json"),
+        Some(b"{bad"),
+        &[],
+    ),
+    ("POST", "/items", Some("application/json"), Some(b""), &[]),
+    ("POST", "/items", None, None, &[]),
+    (
+        "POST",
+        "/items",
+        Some("application/x-www-form-urlencoded"),
+        Some(b"a=1&b=x+y&a=2"),
+        &[],
+    ),
+    (
+        "POST",
+        "/items",
+        Some("text/plain"),
+        Some(b"just text"),
+        &[],
+    ),
+    ("POST", "/echo", None, Some(b"no content type"), &[]),
+    ("POST", "/echo", Some("text/csv"), Some(b"a,b\n1,2"), &[]),
+    (
+        "POST",
+        "/echo",
+        Some("application/octet-stream"),
+        Some(&[0xff, 0xfe, 0x00]),
+        &[],
+    ),
+    (
+        "POST",
+        "/echo",
+        Some("application/json"),
+        Some(b"null"),
+        &[],
+    ),
+    (
+        "PUT",
+        "/items/7",
+        Some("application/json"),
+        Some(br#"{"name":"x"}"#),
+        &[],
+    ),
+    ("PUT", "/items/7", None, None, &[]),
+    (
+        "PATCH",
+        "/items/7",
+        Some("application/json"),
+        Some(br#"{"n":2}"#),
+        &[],
+    ),
+    ("DELETE", "/items/7", None, None, &[]),
+    ("DELETE", "/items/404", None, None, &[]),
+    ("GET", "/text", None, None, &[]),
+    ("GET", "/html", None, None, &[]),
+    ("GET", "/cookies", None, None, &[]),
+    ("GET", "/redirect", None, None, &[]),
+    (
+        "GET",
+        "/whoami?x=1&y=two&x=3",
+        None,
+        None,
+        &[("Authorization", "Bearer t0k"), ("X-Custom", "yes")],
+    ),
+    ("GET", "/whoami", None, None, &[]),
+    ("GET", "/injection", None, None, &[]),
+    ("GET", "/bad-status", None, None, &[]),
+    ("GET", "/no-body-204", None, None, &[]),
+    ("GET", "/hand-built", None, None, &[]),
+    ("GET", "/hand-built-bad", None, None, &[]),
+    ("GET", "/plain-object", None, None, &[]),
+    ("GET", "/raises", None, None, &[]),
+];
+
+/// Response headers the corpus compares (the rest — date, request id —
+/// differ per request).
+const COMPARED_HEADERS: &[&str] = &[
+    "content-type",
+    "location",
+    "cache-control",
+    "set-cookie",
+    "x-count",
+    "x-evil",
+];
+
+#[derive(Debug, PartialEq)]
+struct Reply2 {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+fn send2(client: &reqwest::blocking::Client, port: u16, request: &Request2) -> Reply2 {
+    let (method, path, content_type, body, headers) = *request;
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+    let method = reqwest::Method::from_bytes(method.as_bytes()).expect("method");
+    let mut builder = client.request(method, &url);
+    if let Some(content_type) = content_type {
+        builder = builder.header("content-type", content_type);
+    }
+    if let Some(body) = body {
+        builder = builder.body(body.to_vec());
+    }
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let response = builder.send().expect("send");
+    let mut compared = Vec::new();
+    for name in COMPARED_HEADERS {
+        for value in response.headers().get_all(*name) {
+            compared.push((
+                name.to_string(),
+                value.to_str().expect("ascii header").to_string(),
+            ));
+        }
+    }
+    Reply2 {
+        status: response.status().as_u16(),
+        headers: compared,
+        body: response.text().expect("body"),
+    }
+}
+
+fn replies2(engine: Engine) -> Vec<Reply2> {
+    let port = spawn_server_on(
+        RESPONSES,
+        engine,
+        forge_lang::runtime::recursion::configure_runtime,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client");
+    REQUESTS2
+        .iter()
+        .map(|request| send2(&client, port, request))
+        .collect()
+}
+
+#[test]
+fn handler_responses_and_request_bodies_are_identical_on_both_engines() {
+    let vm = replies2(Engine::Vm);
+    let interp = replies2(Engine::Interpreter);
+    let mut mismatches = Vec::new();
+    for ((request, vm), interp) in REQUESTS2.iter().zip(&vm).zip(&interp) {
+        if vm != interp {
+            mismatches.push(format!(
+                "{} {}\n    vm:          {:?}\n    interpreter: {:?}",
+                request.0, request.1, vm, interp
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "engines disagree on {} of {} requests:\n  {}",
+        mismatches.len(),
+        REQUESTS2.len(),
+        mismatches.join("\n  ")
+    );
+
+    // What the responses are, not just that the engines agree.
+    let reply = |i: usize| &vm[i];
+    let header = |i: usize, name: &str| -> Vec<&str> {
+        reply(i)
+            .headers
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    };
+    let json = |i: usize| -> serde_json::Value {
+        serde_json::from_str(&reply(i).body).expect("JSON body")
+    };
+    let error = |i: usize| -> String { json(i)["error"].as_str().expect("error").to_string() };
+    use serde_json::json as j;
+
+    // 201 + Location, JSON body that saw the request's content type.
+    assert_eq!(reply(0).status, 201, "{:?}", reply(0));
+    assert_eq!(header(0, "location"), ["/items/1"]);
+    assert_eq!(header(0, "content-type"), ["application/json"]);
+    assert_eq!(json(0), j!({"item": {"a": 1}, "type": "application/json"}));
+    assert_eq!(reply(2).status, 201);
+    // Invalid JSON: 400 with the server's JSON error, before the handler.
+    assert_eq!(reply(3).status, 400);
+    assert!(error(3).starts_with("invalid JSON body: "), "{}", error(3));
+    // No body: `body` is `{}`.
+    assert_eq!(reply(4).status, 201);
+    assert_eq!(reply(5).status, 201);
+    assert_eq!(json(5)["item"], j!({}));
+    // A form is an object of strings (the last of a repeated name wins).
+    assert_eq!(json(6)["item"], j!({"a": "2", "b": "x y"}));
+    // Text: the handler answers 400 itself.
+    assert_eq!(reply(7).status, 400);
+    assert_eq!(
+        json(7),
+        j!({"error": "expected an object", "got": "just text"})
+    );
+    assert_eq!(json(8), j!({"body": "no content type", "type": "String"}));
+    assert_eq!(json(9)["body"], "a,b\n1,2");
+    // A body that is not text: 415.
+    assert_eq!(reply(10).status, 415);
+    assert_eq!(json(11), j!({"body": null, "type": "Null"}));
+    assert_eq!(
+        json(12),
+        j!({"id": "7", "method": "PUT", "path": "/items/7", "params": {"id": "7"}, "body": {"name": "x"}})
+    );
+    assert_eq!(json(13)["body"], serde_json::Value::Null);
+    assert_eq!(json(14), j!({"id": "7", "patch": {"n": 2}}));
+    assert_eq!((reply(15).status, reply(15).body.as_str()), (204, ""));
+    assert!(header(15, "content-type").is_empty());
+    assert_eq!(reply(16).status, 404);
+    assert_eq!(json(16), j!({"error": "no item 404"}));
+    assert_eq!(header(17, "content-type"), ["text/plain; charset=utf-8"]);
+    assert_eq!(header(17, "cache-control"), ["no-store"]);
+    assert_eq!(reply(17).body, "hello there");
+    assert_eq!(header(18, "content-type"), ["text/html; charset=utf-8"]);
+    assert_eq!(reply(18).body, "<p>hi</p>");
+    assert_eq!(header(19, "set-cookie"), ["a=1", "b=2"]);
+    assert_eq!(header(19, "x-count"), ["2"]);
+    assert_eq!(reply(19).body, "[1,2]");
+    assert_eq!(reply(20).status, 302);
+    assert_eq!(header(20, "location"), ["/text"]);
+    assert_eq!(
+        json(21),
+        j!({"method": "GET", "auth": "Bearer t0k", "custom": "yes", "query": {"x": "3", "y": "two"}, "body": null})
+    );
+    assert_eq!(json(22)["auth"], serde_json::Value::Null);
+    // Header injection is refused: 500, and nothing injected.
+    assert_eq!(reply(23).status, 500);
+    assert!(header(23, "x-evil").is_empty() && header(23, "set-cookie").is_empty());
+    assert!(error(23).contains("line breaks"), "{}", error(23));
+    assert_eq!(reply(24).status, 500);
+    assert!(error(24).contains("status must be an Int from 200 to 599"));
+    assert_eq!(reply(25).status, 500);
+    assert!(error(25).contains("cannot have a body"));
+    // A response value changed by hand is validated when it is sent.
+    assert_eq!((reply(26).status, reply(26).body.as_str()), (202, "made"));
+    assert_eq!(reply(27).status, 500);
+    assert!(
+        error(27).starts_with("invalid http.response: "),
+        "{}",
+        error(27)
+    );
+    // An ordinary object shaped like a response is still a 200 body.
+    assert_eq!(reply(28).status, 200);
+    assert_eq!(json(28), j!({"status": 404, "body": "not a response"}));
+    assert_eq!(reply(29).status, 500);
+}

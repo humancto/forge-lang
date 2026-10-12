@@ -1,0 +1,10 @@
+// expect: [1, 3, 4, shared_counter, counter_user of shared_counter, 4]
+// `import { a as b }` binds b; a module imported from several places
+// (and again with `import "..."`) runs once and keeps its state.
+import { bump, name as counter_name } from "tests/parity/modules/shared_counter.fg"
+import { bump_twice, name as user_name } from "tests/parity/modules/counter_user.fg"
+import "tests/parity/modules/shared_counter.fg"
+import { sqrt as root } from "math"
+let first = bump()
+let second = bump_twice()
+[first, second, bump(), counter_name(), user_name(), root(16)]

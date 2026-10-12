@@ -659,7 +659,7 @@ fn collect_binders(stmt: &Stmt, in_function: bool, b: &mut Binders) {
         Stmt::Import { names, .. } => match names {
             Some(names) => {
                 for name in names {
-                    add(name, b);
+                    add(name.binding(), b);
                 }
             }
             None => b.everything = true,

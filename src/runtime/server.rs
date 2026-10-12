@@ -50,11 +50,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::{
-    extract::{Json, Path, Query, State},
+    extract::{Path, State},
     http,
     http::StatusCode,
     response::{IntoResponse, Json as JsonResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{get, on, MethodFilter},
     Extension, Router,
 };
 use serde_json::Value as JsonValue;
@@ -134,25 +134,64 @@ fn extract_request_id(rid: &RequestId) -> String {
 /// is better than client-perceived hangs followed by RST.
 const DEFAULT_MAX_INFLIGHT: usize = 512;
 
-/// The inputs of one HTTP handler invocation, as extracted by axum.
+/// The inputs of one HTTP handler invocation.
 #[derive(Debug, Default)]
 pub struct HandlerRequest {
+    /// `GET`, `POST`, ...
+    pub method: String,
+    /// The request path as sent (percent-encoded, without the query).
+    pub path: String,
     pub path_params: HashMap<String, String>,
-    pub query_params: HashMap<String, String>,
-    /// Parsed JSON body (`POST` / `PUT` only), keys in document order.
+    /// Query parameters in the order they were sent (a repeated name keeps
+    /// its last value).
+    pub query_params: IndexMap<String, String>,
+    /// Request headers with lower-case names, in the order they were sent;
+    /// repeated headers are joined with `", "`.
+    pub headers: IndexMap<String, String>,
+    /// The body, decoded by its content type
+    /// ([`crate::runtime::http_response::parse_body`]); `None` when the
+    /// request has no body.
     pub body: Option<Value>,
+}
+
+fn string_object<'a>(pairs: impl IntoIterator<Item = (&'a String, &'a String)>) -> Value {
+    Value::Object(
+        pairs
+            .into_iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect(),
+    )
+}
+
+impl HandlerRequest {
+    /// The `req` / `request` argument.
+    fn request_object(&self) -> Value {
+        let mut params: Vec<(&String, &String)> = self.path_params.iter().collect();
+        params.sort();
+        let mut req = IndexMap::new();
+        req.insert("method".to_string(), Value::String(self.method.clone()));
+        req.insert("path".to_string(), Value::String(self.path.clone()));
+        req.insert("params".to_string(), string_object(params));
+        req.insert("query".to_string(), string_object(&self.query_params));
+        req.insert("headers".to_string(), string_object(&self.headers));
+        req.insert("body".to_string(), self.body.clone().unwrap_or(Value::Null));
+        Value::Object(req)
+    }
 }
 
 /// Bind a handler's arguments by parameter name. Shared by both engines so
 /// they cannot drift:
 ///
-/// - a path parameter with the same name (`/users/:id` → `id`) wins;
-/// - `body` / `data` receive the JSON body (`{}` when there is none);
+/// - a path parameter with the same name (`/users/:id` -> `id`) wins;
+/// - `body` / `data` receive the request body (`{}` when there is none);
 /// - `query` / `qs` receive every query parameter as an object;
+/// - `headers` receives the request headers (lower-case names) as an object;
+/// - `req` / `request` receive the whole request: `method`, `path`,
+///   `params`, `query`, `headers` and `body` (`null` when there is none);
 /// - any other name receives the query parameter of that name;
 /// - otherwise the argument is `null`.
 ///
-/// Path and query values are always strings.
+/// Path, query and header values are always strings.
 pub fn handler_args<'a>(
     params: impl IntoIterator<Item = &'a str>,
     request: &HandlerRequest,
@@ -169,12 +208,11 @@ pub fn handler_args<'a>(
                     .cloned()
                     .unwrap_or(Value::Object(IndexMap::new()))
             } else if name == "query" || name == "qs" {
-                let obj: IndexMap<String, Value> = request
-                    .query_params
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                    .collect();
-                Value::Object(obj)
+                string_object(&request.query_params)
+            } else if name == "headers" {
+                string_object(&request.headers)
+            } else if name == "req" || name == "request" {
+                request.request_object()
             } else if let Some(val) = request.query_params.get(name) {
                 Value::String(val.clone())
             } else {
@@ -209,11 +247,16 @@ pub trait ServeEngine: Send + Sync + 'static {
     fn fork_connection(&self, cancelled: Arc<AtomicBool>) -> Box<dyn HandlerWorker + Send>;
 }
 
+/// What an HTTP handler call produced: its return value encoded as JSON
+/// (the server turns it into the response, see [`response_for`]), or the
+/// message of the error it raised (answered `500 {"error": message}`).
+pub type HandlerOutcome = Result<JsonValue, String>;
+
 /// A forked engine instance that runs handlers.
 pub trait HandlerWorker {
-    /// Call HTTP handler `handler`: `200` with the JSON-encoded return
-    /// value, or `500` with `{"error": message}` when it fails.
-    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> (StatusCode, JsonValue);
+    /// Call HTTP handler `handler` with the arguments bound from `request`
+    /// ([`handler_args`]).
+    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> HandlerOutcome;
 
     /// Call WebSocket handler `handler` with one text message; returns the
     /// reply text (`error: message` when it fails).
@@ -272,7 +315,7 @@ impl HandlerWorker for InterpreterWorker {
     // runs, as on the VM (`vm::serve`): the counting allocator, handle
     // slots and import counts charge the thread's budget, not the
     // interpreter's meter.
-    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> (StatusCode, JsonValue) {
+    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> HandlerOutcome {
         let _limits = crate::runtime::limits::scope(self.0.resource_budget());
         call_handler(&mut self.0, handler, request)
     }
@@ -291,6 +334,9 @@ pub struct AppState {
     /// Capability policy captured when the server started, installed on
     /// every blocking thread that runs a handler.
     policy: Arc<Capabilities>,
+    /// Database connections the program's top level opened, shared by
+    /// every handler (`stdlib::db_share`).
+    databases: crate::stdlib::db_share::Databases,
 }
 
 /// Drop guard that signals cancellation when axum drops the response
@@ -335,28 +381,60 @@ fn call_handler(
     interp: &mut Interpreter,
     handler_name: &str,
     request: &HandlerRequest,
-) -> (StatusCode, JsonValue) {
-    let handler = match interp.env.get(handler_name) {
-        Some(v) => v,
-        None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": format!("handler '{}' not found", handler_name)}),
-            )
-        }
-    };
+) -> HandlerOutcome {
+    let handler = interp
+        .env
+        .get(handler_name)
+        .ok_or_else(|| format!("handler '{}' not found", handler_name))?;
 
     let args = match &handler {
         Value::Function(func) => handler_args(func.params.iter().map(|p| p.name.as_str()), request),
         _ => Vec::new(),
     };
 
-    match interp.call_function(handler, args) {
-        Ok(value) => (StatusCode::OK, forge_to_json(&value)),
-        Err(e) => (
+    interp
+        .call_function(handler, args)
+        .map(|value| forge_to_json(&value))
+        .map_err(|e| e.message)
+}
+
+/// `{"error": message}` with `status`: every error the server answers
+/// (handler errors, refused bodies, capacity) has this shape.
+fn error_response(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        JsonResponse(serde_json::json!({ "error": message })),
+    )
+        .into_response()
+}
+
+/// A handler outcome as the status and JSON body the server sends for it
+/// when it is not a response value (tests).
+#[cfg(test)]
+pub(crate) fn status_and_body(outcome: HandlerOutcome) -> (StatusCode, JsonValue) {
+    match outcome {
+        Ok(value) => (StatusCode::OK, value),
+        Err(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.message}),
+            serde_json::json!({ "error": message }),
         ),
+    }
+}
+
+/// The response for a handler call: a response value
+/// (`http.response(...)`) as it asks, any other value as `200` JSON, an
+/// error as `500`.
+pub fn response_for(outcome: HandlerOutcome) -> Response {
+    match outcome {
+        Ok(value) => match crate::runtime::http_response::ResponseSpec::from_json(&value) {
+            None => (StatusCode::OK, JsonResponse(value)).into_response(),
+            Some(Ok(spec)) => spec.into_response(),
+            Some(Err(message)) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("invalid http.response: {}", message),
+            ),
+        },
+        Err(message) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &message),
     }
 }
 
@@ -395,7 +473,7 @@ async fn run_handler(
     state: AppState,
     handler_name: String,
     request_id: String,
-    request: HandlerRequest,
+    request: Result<HandlerRequest, crate::runtime::http_response::BodyError>,
 ) -> Response {
     // Belt-and-suspenders: also record on the inner forge.handler span
     // so events emitted from this function (and via Span::current()
@@ -405,6 +483,11 @@ async fn run_handler(
     // affects the receiver -- the on_response event lives in the outer
     // span. This inner record is for handler-body events.
     tracing::Span::current().record("request_id", request_id.as_str());
+
+    let request = match request {
+        Ok(request) => request,
+        Err(refused) => return error_response(refused.status, &refused.message),
+    };
 
     let permit = match state.permits.clone().try_acquire_owned() {
         Ok(p) => p,
@@ -426,6 +509,7 @@ async fn run_handler(
 
     let engine = state.engine.clone();
     let policy = state.policy.clone();
+    let databases = state.databases.clone();
     let cancel_for_blocking = cancelled.clone();
 
     // CRITICAL: capture the current tracing span on the async side,
@@ -443,6 +527,10 @@ async fn run_handler(
     let join = tokio::task::spawn_blocking(move || {
         let _g = span.enter();
         let _policy = crate::permissions::scope(policy);
+        // The database connections the top level opened, shared by every
+        // request; a transaction stays private to the request that began
+        // it (`stdlib::db_share`).
+        let _databases = databases.enter_request();
         // The worker shares the cancel token the response-future Drop
         // guard owns, so a client disconnect short-circuits the handler
         // at its next safe point.
@@ -450,8 +538,8 @@ async fn run_handler(
         worker.call_http(&hn_for_blocking, &request)
     });
 
-    let (status, json) = match join.await {
-        Ok(pair) => pair,
+    let response = match join.await {
+        Ok(outcome) => response_for(outcome),
         Err(join_err) if join_err.is_panic() => {
             // Don't leak panic message to the client. Log it.
             let payload = join_err.into_panic();
@@ -468,19 +556,84 @@ async fn run_handler(
                 panic = %msg,
                 "handler panicked",
             );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": "internal server error"}),
-            )
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
         }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": "handler join failed"}),
-        ),
+        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "handler join failed"),
     };
 
     drop(permit);
-    (status, JsonResponse(json)).into_response()
+    response
+}
+
+/// Read one request into a [`HandlerRequest`]: query parameters, headers
+/// and the body decoded by its content type. A body that cannot be used is
+/// refused here, before the handler runs.
+async fn read_request(
+    path_params: HashMap<String, String>,
+    request: axum::extract::Request,
+) -> Result<HandlerRequest, crate::runtime::http_response::BodyError> {
+    use crate::runtime::http_response::{parse_body, BodyError, MAX_BODY_BYTES};
+    let (parts, body) = request.into_parts();
+    let query_params: IndexMap<String, String> = parts
+        .uri
+        .query()
+        .map(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut headers: IndexMap<String, String> = IndexMap::new();
+    for (name, value) in &parts.headers {
+        let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
+        headers
+            .entry(name.as_str().to_string())
+            .and_modify(|joined| {
+                joined.push_str(", ");
+                joined.push_str(&value);
+            })
+            .or_insert(value);
+    }
+    let bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
+        .await
+        .map_err(|e| {
+            if is_length_limit(&e) {
+                BodyError {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    message: format!("request body too large (limit {} bytes)", MAX_BODY_BYTES),
+                }
+            } else {
+                BodyError {
+                    status: StatusCode::BAD_REQUEST,
+                    message: format!("failed to read the request body: {}", e),
+                }
+            }
+        })?;
+    let content_type = parts
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    let body = parse_body(content_type, &bytes)?;
+    Ok(HandlerRequest {
+        method: parts.method.as_str().to_string(),
+        path: parts.uri.path().to_string(),
+        path_params,
+        query_params,
+        headers,
+        body,
+    })
+}
+
+/// Whether reading a body failed because it exceeded the limit.
+fn is_length_limit(error: &axum::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(e) = source {
+        if e.to_string().contains("length limit exceeded") {
+            return true;
+        }
+        source = e.source();
+    }
+    false
 }
 
 /// Serve `server` with handlers running on the interpreter.
@@ -511,6 +664,8 @@ pub async fn serve(engine: Arc<dyn ServeEngine>, server: &ServerPlan) -> Result<
         engine,
         permits: Arc::new(Semaphore::new(DEFAULT_MAX_INFLIGHT)),
         policy: crate::permissions::current(),
+        // `serve` starts on the thread that ran the top level.
+        databases: crate::stdlib::db_share::Databases::current(),
     };
 
     let mut app = Router::new();
@@ -519,65 +674,30 @@ pub async fn serve(engine: Arc<dyn ServeEngine>, server: &ServerPlan) -> Result<
         let axum_path = to_axum_path(&route.pattern);
         let hn = route.handler_name.clone();
 
+        let filter = match route.method.as_str() {
+            // `GET` routes answer `HEAD` too, as axum's `get` does.
+            "GET" => Some(MethodFilter::GET.or(MethodFilter::HEAD)),
+            "POST" => Some(MethodFilter::POST),
+            "PUT" => Some(MethodFilter::PUT),
+            "DELETE" => Some(MethodFilter::DELETE),
+            "PATCH" => Some(MethodFilter::PATCH),
+            _ => None,
+        };
+        if let Some(filter) = filter {
+            let hn = hn.clone();
+            let handler = move |State(state): State<AppState>,
+                                Extension(rid): Extension<RequestId>,
+                                path: Option<Path<HashMap<String, String>>>,
+                                request: axum::extract::Request| async move {
+                let request_id = extract_request_id(&rid);
+                let path_params = path.map(|Path(p)| p).unwrap_or_default();
+                let request = read_request(path_params, request).await;
+                run_handler(state, hn, request_id, request).await
+            };
+            app = app.route(&axum_path, on(filter, handler));
+            continue;
+        }
         match route.method.as_str() {
-            "GET" => {
-                let hn = hn.clone();
-                app = app.route(
-                    &axum_path,
-                    get(move |State(state): State<AppState>,
-                              Extension(rid): Extension<RequestId>,
-                              path: Option<Path<HashMap<String, String>>>,
-                              Query(query): Query<HashMap<String, String>>| async move {
-                        let request_id = extract_request_id(&rid);
-                        let request = HandlerRequest {
-                            path_params: path.map(|Path(p)| p).unwrap_or_default(),
-                            query_params: query,
-                            body: None,
-                        };
-                        run_handler(state, hn, request_id, request).await
-                    }),
-                );
-            }
-            "POST" | "PUT" => {
-                let hn = hn.clone();
-                let method = route.method.clone();
-                let handler = move |State(state): State<AppState>,
-                                    Extension(rid): Extension<RequestId>,
-                                    path: Option<Path<HashMap<String, String>>>,
-                                    Query(query): Query<HashMap<String, String>>,
-                                    Json(body): Json<crate::stdlib::json_module::Ordered>| async move {
-                    let request_id = extract_request_id(&rid);
-                    let request = HandlerRequest {
-                        path_params: path.map(|Path(p)| p).unwrap_or_default(),
-                        query_params: query,
-                        body: Some(body.0),
-                    };
-                    run_handler(state, hn, request_id, request).await
-                };
-                if method == "POST" {
-                    app = app.route(&axum_path, post(handler));
-                } else {
-                    app = app.route(&axum_path, put(handler));
-                }
-            }
-            "DELETE" => {
-                let hn = hn.clone();
-                app = app.route(
-                    &axum_path,
-                    delete(move |State(state): State<AppState>,
-                                 Extension(rid): Extension<RequestId>,
-                                 path: Option<Path<HashMap<String, String>>>,
-                                 Query(query): Query<HashMap<String, String>>| async move {
-                        let request_id = extract_request_id(&rid);
-                        let request = HandlerRequest {
-                            path_params: path.map(|Path(p)| p).unwrap_or_default(),
-                            query_params: query,
-                            body: None,
-                        };
-                        run_handler(state, hn, request_id, request).await
-                    }),
-                );
-            }
             "WS" => {
                 // WebSocket handlers hold session state across messages, so
                 // a per-request fork is the wrong model. Each connection
@@ -594,6 +714,7 @@ pub async fn serve(engine: Arc<dyn ServeEngine>, server: &ServerPlan) -> Result<
                               ws: axum::extract::WebSocketUpgrade| {
                             let engine = state.engine.clone();
                             let policy = state.policy.clone();
+                            let databases = state.databases.clone();
                             let hn = hn.clone();
                             async move {
                                 ws.on_upgrade(move |socket| async move {
@@ -643,11 +764,13 @@ pub async fn serve(engine: Arc<dyn ServeEngine>, server: &ServerPlan) -> Result<
 
                                         let worker_for_blocking = worker.clone();
                                         let policy = policy.clone();
+                                        let databases = databases.clone();
                                         let hn_for_blocking = hn.clone();
                                         let span = tracing::Span::current();
                                         let join = tokio::task::spawn_blocking(move || {
                                             let _g = span.enter();
                                             let _policy = crate::permissions::scope(policy);
+                                            let _databases = databases.enter_request();
                                             let mut worker = worker_for_blocking.lock();
                                             worker.call_ws(&hn_for_blocking, text)
                                         });
@@ -977,9 +1100,11 @@ mod tests {
             InterpreterTemplate::new(interp)
         };
         let call = |handler: &str| {
-            template
-                .fork_request(Arc::new(AtomicBool::new(false)))
-                .call_http(handler, &HandlerRequest::default())
+            status_and_body(
+                template
+                    .fork_request(Arc::new(AtomicBool::new(false)))
+                    .call_http(handler, &HandlerRequest::default()),
+            )
         };
         assert_eq!(call("work").0.as_u16(), 200);
         // Without the fork's budget on the thread, the allocator charges
@@ -1126,6 +1251,7 @@ mod tests {
             engine: Arc::new(InterpreterTemplate::new(Interpreter::new())),
             permits: Arc::new(Semaphore::new(DEFAULT_MAX_INFLIGHT)),
             policy: crate::permissions::current(),
+            databases: Default::default(),
         };
         let other = state.clone();
         assert!(Arc::ptr_eq(&state.engine, &other.engine));

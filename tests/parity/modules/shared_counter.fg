@@ -1,0 +1,18 @@
+// A module with state, for the import caching fixtures: it runs once per
+// program, however many modules import it.
+println("shared_counter: loaded")
+let mut bumps = 0
+
+fn bump() {
+    bumps = bumps + 1
+    return bumps
+}
+
+fn name() {
+    return "shared_counter"
+}
+
+// Structs keep their name: `import { Tally as T }` is an import error.
+struct Tally {
+    n: Int
+}

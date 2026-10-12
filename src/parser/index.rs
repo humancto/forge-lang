@@ -112,9 +112,12 @@ pub enum DefKind {
     /// variant reference; see `typechecker::resolve`).
     PatternBinding,
     CatchVariable,
-    /// A name brought in by `import { name } from "path"`.
+    /// A name brought in by `import { name } from "path"` (or bound to
+    /// `alias` by `import { name as alias } from "path"`).
     Import {
         path: String,
+        /// The name the module defines (`name`, also for an alias).
+        name: String,
     },
     /// A name bound by `import native "lib" [as name]` or
     /// `import { f } from native "lib"` (a plugin namespace or function).

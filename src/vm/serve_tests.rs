@@ -44,7 +44,9 @@ fn request(
     handler: &str,
     request: HandlerRequest,
 ) -> (StatusCode, JsonValue) {
-    template.fork_request(flag()).call_http(handler, &request)
+    crate::runtime::server::status_and_body(
+        template.fork_request(flag()).call_http(handler, &request),
+    )
 }
 
 #[test]
@@ -182,9 +184,10 @@ fn cancelled_flag_stops_a_running_handler() {
     let t = template("fn spin() { let mut i = 0\n while true { i = i + 1 }\n return i }\n");
     let cancelled = flag();
     cancelled.store(true, Ordering::Release);
-    let (status, body) = t
-        .fork_request(cancelled)
-        .call_http("spin", &HandlerRequest::default());
+    let (status, body) = crate::runtime::server::status_and_body(
+        t.fork_request(cancelled)
+            .call_http("spin", &HandlerRequest::default()),
+    );
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, json!({"error": "task cancelled"}));
 }
@@ -207,9 +210,11 @@ fn json_encoding_matches_the_interpreter() {
     let program = Parser::new(tokens).parse_program().expect("parse");
     let mut interp = crate::interpreter::Interpreter::new();
     interp.run(&program).expect("interpreter run");
-    let (_, interp_json) = crate::runtime::server::InterpreterTemplate::new(interp)
-        .fork_request(flag())
-        .call_http("v", &HandlerRequest::default());
+    let (_, interp_json) = crate::runtime::server::status_and_body(
+        crate::runtime::server::InterpreterTemplate::new(interp)
+            .fork_request(flag())
+            .call_http("v", &HandlerRequest::default()),
+    );
     assert_eq!(vm_json, interp_json);
 }
 
@@ -291,9 +296,11 @@ fn forks_run_under_the_template_edition() {
             .join()
             .expect("vm request");
         let (interp_status, interp_body) = std::thread::spawn(move || {
-            interp_template
-                .fork_request(flag())
-                .call_http("h", &HandlerRequest::default())
+            crate::runtime::server::status_and_body(
+                interp_template
+                    .fork_request(flag())
+                    .call_http("h", &HandlerRequest::default()),
+            )
         })
         .join()
         .expect("interpreter request");
