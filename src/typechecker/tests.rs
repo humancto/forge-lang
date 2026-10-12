@@ -1310,6 +1310,24 @@ fn immutable_assignment_is_reported() {
 }
 
 #[test]
+fn nested_push_on_an_immutable_root_is_reported() {
+    // The method form updates the place, so its root must be mutable.
+    assert_eq!(
+        codes("let grid = [[1]]\ngrid[0].push(2)"),
+        vec![Code::ImmutableAssign]
+    );
+    assert_eq!(
+        codes("struct Bag { items: [Int] }\nlet b = Bag { items: [] }\nb.items.pop()"),
+        vec![Code::ImmutableAssign]
+    );
+    assert!(codes("let mut grid = [[1]]\ngrid[0].push(2)\ngrid[0].pop()").is_empty());
+    // Unknown receivers may have their own `push` method: not reported.
+    assert!(codes("let o = { a: [1] }\no.a.push(2)").is_empty());
+    // A plain variable keeps its rule (an immutable `xs.push(v)` is pure).
+    assert!(codes("let xs = [1]\nlet ys = xs.push(2)").is_empty());
+}
+
+#[test]
 fn not_callable() {
     assert_eq!(codes("let c = 5\nc()"), vec![Code::NotCallable]);
 }

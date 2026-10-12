@@ -15,8 +15,13 @@
 //!   `a = push(a, x)` pushes in place;
 //! * `a[i] = v` and `o.k = v` update one slot instead of copying the
 //!   container twice;
-//! * `s.has(x)`, `m.get(k)`, `m.has(k)`, `m.len()`, `len(v)` and
-//!   `contains(v, x)` read the variable without copying it.
+//! * `g[k].push(x)`, `o.items.pop()`, `o.seen.add(x)` (the method form on
+//!   any field/index chain rooted at a variable) update the place in place
+//!   (`mutate_nested_place`; the VM compiles the same rules in
+//!   `try_compile_place_method`);
+//! * `s.has(x)`, `m.get(k)`, `m.has(k)`, `m.len()`, `len(v)`,
+//!   `contains(v, x)`, `get(o, k[, d])` and `has_key(o, k)` read the
+//!   variable without copying it.
 //!
 //! # Evaluation order
 //!
@@ -103,6 +108,58 @@ pub(super) fn contains_of(
             pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
         )),
         _ => Err(RuntimeError::new(crate::semantics::CONTAINS_USAGE)),
+    }
+}
+
+/// `has_key(obj, key)`, shared by the builtin and the in-place fast path.
+pub(super) fn has_key_of(obj: Option<&Value>, key: Option<&Value>) -> Result<Value, RuntimeError> {
+    match (obj, key) {
+        (Some(Value::Object(map)), Some(Value::String(key))) => {
+            Ok(Value::Bool(map.contains_key(key)))
+        }
+        _ => Err(RuntimeError::new("has_key() requires (object, key_string)")),
+    }
+}
+
+/// `get(obj, key[, default])` / `get(array, index[, default])`, shared by
+/// the builtin and the in-place fast path. Only the result is copied.
+pub(super) fn get_of(
+    obj: Option<&Value>,
+    key: Option<&Value>,
+    default: Option<&Value>,
+) -> Result<Value, RuntimeError> {
+    let default = || default.cloned().unwrap_or(Value::Null);
+    match (obj, key) {
+        (Some(obj @ Value::Object(map)), Some(Value::String(key))) => {
+            // An exact key wins over the dot-path reading
+            // (`get(counts, ".txt", 0)`).
+            if !key.contains('.') || map.contains_key(key.as_str()) {
+                return Ok(map.get(key.as_str()).cloned().unwrap_or_else(default));
+            }
+            let mut current = obj;
+            for part in key.split('.') {
+                current = match current {
+                    Value::Object(m) => match m.get(part) {
+                        Some(v) => v,
+                        None => return Ok(default()),
+                    },
+                    Value::Array(arr) => {
+                        match part.parse::<usize>().ok().and_then(|i| arr.get(i)) {
+                            Some(v) => v,
+                            None => return Ok(default()),
+                        }
+                    }
+                    _ => return Ok(default()),
+                };
+            }
+            Ok(current.clone())
+        }
+        (Some(Value::Array(arr)), Some(Value::Int(idx))) => {
+            Ok(arr.get(*idx as usize).cloned().unwrap_or_else(default))
+        }
+        _ => Err(RuntimeError::new(
+            "get() requires (object, key) or (array, index)",
+        )),
     }
 }
 
@@ -213,6 +270,9 @@ impl Interpreter {
         let (var, method, rest): (&str, &str, &[Expr]) = match function.as_ref() {
             Expr::FieldAccess { object, field } => match object.as_ref() {
                 Expr::Ident(v) => (v.as_str(), field.as_str(), args.as_slice()),
+                place @ (Expr::FieldAccess { .. } | Expr::Index { .. }) => {
+                    return self.mutate_nested_place(place, field, args, want_result)
+                }
                 _ => return None,
             },
             Expr::Ident(f)
@@ -295,6 +355,132 @@ impl Interpreter {
         }
     }
 
+    /// `place.push(x)`, `place.pop()`, `place.add(x)` and `place.remove(x)`
+    /// where `place` is a chain of fields and indexes rooted at a variable
+    /// (`groups[k].push(x)`, `o.items.pop()`, `m[0].add(x)`): the method form
+    /// updates the place, exactly as `xs.push(x)` updates a variable.
+    ///
+    /// Order (both engines): the index expressions left to right, then the
+    /// arguments, then the place is read and updated. When the value at the
+    /// place has no in-place form for the method (an object with its own
+    /// `push`, a set receiving `push`, ...) the call is an ordinary method
+    /// call on that value and nothing is stored.
+    ///
+    /// A frozen receiver raises `cannot push a frozen value` (like the
+    /// variable form); an immutable root raises the error of `o.a = v` on
+    /// it, and so does a frozen value along the path.
+    fn mutate_nested_place(
+        &mut self,
+        place: &Expr,
+        method: &str,
+        args: &[Expr],
+        want_result: bool,
+    ) -> Option<Result<Value, RuntimeError>> {
+        if !crate::semantics::is_mutating_method(method, args.len()) {
+            return None;
+        }
+        let (root, exprs) = place_path(place)?;
+        if exprs.is_empty() || !self.env.contains(root) {
+            // An unbound root: the ordinary path reports it.
+            return None;
+        }
+        Some(self.mutate_nested_steps(root, &exprs, method, args, want_result))
+    }
+
+    fn mutate_nested_steps(
+        &mut self,
+        root: &str,
+        exprs: &[Result<&str, &Expr>],
+        method: &str,
+        args: &[Expr],
+        want_result: bool,
+    ) -> Result<Value, RuntimeError> {
+        let mut steps = Vec::with_capacity(exprs.len());
+        for step in exprs {
+            steps.push(match step {
+                Ok(field) => PlaceStep::Field(field),
+                Err(index) => PlaceStep::Index(self.eval_expr(index)?),
+            });
+        }
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(self.eval_expr(arg)?);
+        }
+        let updated = self
+            .env
+            .with_binding_mut(root, |cur, mutable| {
+                let in_place = match (place_leaf(cur, &steps), method) {
+                    (Some(Value::Frozen(_)), _) => {
+                        return Err(RuntimeError::new(&crate::semantics::frozen_method(method)))
+                    }
+                    (Some(Value::Array(_)), "push" | "pop") => true,
+                    (Some(Value::Set(_)), "add" | "remove") => true,
+                    _ => false,
+                };
+                if !in_place {
+                    return Ok(None);
+                }
+                if !mutable {
+                    return Err(RuntimeError::new(&crate::semantics::immutable_reassign(
+                        root,
+                    )));
+                }
+                let mut slot = cur;
+                for step in &steps {
+                    slot = place_child(root, slot, step)?;
+                }
+                apply_mutating_method(slot, method, values.pop(), want_result).map(Some)
+            })
+            .unwrap_or_else(|| Err(RuntimeError::new(&format!("undefined: {}", root))))?;
+        if let Some(result) = updated {
+            return Ok(result);
+        }
+        // No in-place form: read the place like an expression would and
+        // call the method on its value.
+        let mut receiver = self
+            .env
+            .get(root)
+            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", root)))?;
+        for step in &steps {
+            receiver = match step {
+                PlaceStep::Field(field) => self.field_of(&receiver, field)?,
+                PlaceStep::Index(index) => Self::index_of(&receiver, index)?,
+            };
+        }
+        self.call_method_on_values(receiver, method, values)
+    }
+
+    /// `receiver.method(args...)` for already-evaluated values, through the
+    /// ordinary method dispatch (bound to hidden names in a scratch scope,
+    /// so nothing is evaluated twice).
+    fn call_method_on_values(
+        &mut self,
+        receiver: Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        const RECEIVER: &str = "\u{0}receiver";
+        self.env.push_scope();
+        self.env
+            .define_with_mutability(RECEIVER.to_string(), receiver, false);
+        let mut arg_exprs = Vec::with_capacity(args.len());
+        for (i, value) in args.into_iter().enumerate() {
+            let name = format!("\u{0}arg{}", i);
+            self.env.define_with_mutability(name.clone(), value, false);
+            arg_exprs.push(Expr::Ident(name));
+        }
+        let call = Expr::Call {
+            function: Box::new(Expr::FieldAccess {
+                object: Box::new(Expr::Ident(RECEIVER.to_string())),
+                field: method.to_string(),
+            }),
+            args: arg_exprs,
+        };
+        let result = self.eval_expr(&call);
+        self.env.pop_scope();
+        result
+    }
+
     /// Apply `f` to the mutable variable `var` in place.
     fn update_var(
         &self,
@@ -364,6 +550,40 @@ impl Interpreter {
                     })
                     .flatten()
                     .map(Ok)
+            }
+            Expr::Ident(name)
+                if (name == "get" && (args.len() == 2 || args.len() == 3))
+                    || (name == "has_key" && args.len() == 2) =>
+            {
+                // `get(counts, w, 0)` / `has_key(counts, w)`: borrow the
+                // object instead of copying it for the call.
+                let Expr::Ident(var) = &args[0] else {
+                    return None;
+                };
+                if !self.resolves_to_builtin(name)
+                    || !self.env.contains(var)
+                    || !args[1..].iter().all(|a| self.is_effect_free(a))
+                {
+                    return None;
+                }
+                let mut rest = Vec::with_capacity(args.len() - 1);
+                for arg in &args[1..] {
+                    match self.eval_expr(arg) {
+                        Ok(v) => rest.push(v),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                let result = self.env.with_value(var, |v| {
+                    if name == "get" {
+                        get_of(Some(v), rest.first(), rest.get(1))
+                    } else {
+                        has_key_of(Some(v), rest.first())
+                    }
+                })?;
+                // Errors take the ordinary path, which annotates them with
+                // the argument types (the operands are effect-free, so
+                // evaluating them again is unobservable).
+                result.ok().map(Ok)
             }
             Expr::Ident(name) if name == "len" || name == "contains" => {
                 let expected = if name == "len" { 1 } else { 2 };
@@ -767,6 +987,89 @@ fn same_place(a: &Expr, b: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// A chain of fields and indexes rooted at a variable (`g[k].a`): the root
+/// name and the steps in order (`Ok(field)` / `Err(index expression)`).
+/// `None` when `target` is not such a chain.
+fn place_path(target: &Expr) -> Option<(&str, Vec<Result<&str, &Expr>>)> {
+    let mut steps = Vec::new();
+    let mut cur = target;
+    let root = loop {
+        match cur {
+            Expr::FieldAccess { object, field } => {
+                steps.push(Ok(field.as_str()));
+                cur = object;
+            }
+            Expr::Index { object, index } => {
+                steps.push(Err(index.as_ref()));
+                cur = object;
+            }
+            Expr::Ident(name) => break name.as_str(),
+            _ => return None,
+        }
+    };
+    steps.reverse();
+    Some((root, steps))
+}
+
+/// The value a field/index chain names inside `value`, read the way an
+/// expression reads it (through frozen containers). `None` when a step
+/// does not resolve to a plain field, key or element.
+fn place_leaf<'v>(value: &'v Value, steps: &[PlaceStep<'_>]) -> Option<&'v Value> {
+    let mut cur = value;
+    for step in steps {
+        cur = match (peel_frozen(cur), step) {
+            (Value::Object(map), PlaceStep::Field(field)) => map.get(*field)?,
+            (Value::Object(map), PlaceStep::Index(Value::String(key))) => map.get(key.as_str())?,
+            (Value::Array(items), PlaceStep::Index(Value::Int(i))) => {
+                &items[crate::semantics::normalize_index(*i, items.len())?]
+            }
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
+/// `push` / `pop` on an array or `add` / `remove` on a set, in place.
+/// Returns what the method call evaluates to: the popped element, or the
+/// updated collection (copied only when `want_result`).
+fn apply_mutating_method(
+    slot: &mut Value,
+    method: &str,
+    arg: Option<Value>,
+    want_result: bool,
+) -> Result<Value, RuntimeError> {
+    let applied = match (&mut *slot, method, arg) {
+        (Value::Array(items), "push", Some(value)) => {
+            items.push(value);
+            true
+        }
+        (Value::Array(items), "pop", None) => return Ok(items.pop().unwrap_or(Value::Null)),
+        (Value::Set(items), "add", Some(value)) => {
+            if !items.iter().any(|v| Value::container_eq(v, &value)) {
+                items.push(value);
+            }
+            true
+        }
+        (Value::Set(items), "remove", Some(value)) => {
+            items.retain(|v| !Value::container_eq(v, &value));
+            true
+        }
+        _ => false,
+    };
+    if !applied {
+        return Err(RuntimeError::new(&format!(
+            "BUG: {}() has no in-place form for {}",
+            method,
+            slot.type_name()
+        )));
+    }
+    Ok(if want_result {
+        slot.clone()
+    } else {
+        Value::Null
+    })
 }
 
 fn frozen_error(root: &str) -> RuntimeError {

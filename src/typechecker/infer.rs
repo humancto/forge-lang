@@ -3219,6 +3219,19 @@ impl<'a> Checker<'a> {
 
         let ot = self.infer(object, None);
         let ot = self.cx.resolve(&ot);
+        // `o.items.push(x)` updates the place `o.items` (both engines), so
+        // like `o.items = v` it needs a mutable root. Reported only when
+        // the receiver is known to be an array/set: anything else may have
+        // its own `push` method, which updates nothing.
+        if matches!(object, Expr::FieldAccess { .. } | Expr::Index { .. })
+            && crate::semantics::is_mutating_method(method, args.len())
+            && matches!(
+                (&ot, method),
+                (Ty::Array(_), "push" | "pop") | (Ty::Set(_), "add" | "remove")
+            )
+        {
+            self.check_mutable_root(object);
+        }
         if let Ty::Named(type_name, _) = &ot {
             let type_name = type_name.clone();
             if let Some(m) = self.find_method(&type_name, method, 0) {

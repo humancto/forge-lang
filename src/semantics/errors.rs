@@ -712,6 +712,11 @@ Fix: build a modified copy (`merge(config, {debug: true})`) instead.",
                     "cannot mutate a frozen",
                     "cannot modify frozen",
                     "cannot mutate frozen",
+                    // `semantics::frozen_method`
+                    "cannot push a frozen",
+                    "cannot pop a frozen",
+                    "cannot add a frozen",
+                    "cannot remove a frozen",
                 ],
             )
         },
@@ -1029,6 +1034,8 @@ mod tests {
                 "E0005",
             ),
             (s::immutable_reassign("x"), "E0006"),
+            (s::frozen_method("push"), "E0029"),
+            (s::frozen_method("remove"), "E0029"),
             (
                 s::binary(
                     s::BinaryOp::Sub,

@@ -411,6 +411,21 @@ pub fn immutable_reassign(name: &str) -> String {
     )
 }
 
+/// The collection methods that update their receiver when it is a mutable
+/// variable or a field/index place rooted at one (`xs.push(v)`,
+/// `g[k].push(v)`, `o.items.pop()`, `s.add(v)`, `s.remove(v)`).
+pub fn is_mutating_method(method: &str, arg_count: usize) -> bool {
+    matches!(
+        (method, arg_count),
+        ("push", 1) | ("pop", 0) | ("add", 1) | ("remove", 1)
+    )
+}
+
+/// One of the [`is_mutating_method`] methods called on a frozen value.
+pub fn frozen_method(method: &str) -> String {
+    format!("cannot {} a frozen value", method)
+}
+
 pub fn check_failed(displayed_value: &str) -> String {
     let shown = if displayed_value.is_empty() {
         "\"\" (empty)"
