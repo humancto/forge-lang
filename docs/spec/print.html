@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-75c1437f.js";
+            window.path_to_searchindex_js = "searchindex-0ade6d9e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-fdd2f5ad.js"></script>
@@ -1176,11 +1176,18 @@ say fruits[2]   // cherry
 items[0] = 10
 say items  // [10, 2, 3]
 </code></pre>
-<p>The <code>push()</code> built-in appends an element:</p>
+<p>The <code>push()</code> built-in returns a new array with an element appended; assign
+it back to append. The <code>.push()</code> method appends in place:</p>
 <pre><code class="language-forge">let mut items = [1, 2]
-push(items, 3)
-say items  // [1, 2, 3]
+items = push(items, 3)
+items.push(4)
+say items  // [1, 2, 3, 4]
 </code></pre>
+<p>In edition 2026 a statement <code>push(items, 3)</code> on a mutable variable also
+appends in place (and <code>let b = push(items, 3)</code> changes <code>items</code> too); in
+edition 2027 <code>push</code> never modifies its argument, and a statement whose
+result is discarded is a type error (T0019). See
+<a href="#collection-functions"><code>push</code></a>.</p>
 <p>The <code>pop()</code> built-in removes and returns the last element:</p>
 <pre><code class="language-forge">let mut items = [1, 2, 3]
 let last = pop(items)
@@ -3147,9 +3154,10 @@ println(result)
 <p>See <a href="#import-and-export">Import and Export</a>.</p>
 <h3 id="expression-statements"><a class="header" href="#expression-statements">Expression Statements</a></h3>
 <p>Any expression can appear as a statement. The expression is evaluated and its result is discarded. This is how function calls with side effects are written.</p>
-<pre><code class="language-forge">say "hello"             // function call as statement
-push(items, 42)         // side-effecting call
+<pre><code class="language-forge">println("hello")        // function call as statement
+items.push(42)          // method call that appends to `items` in place
 </code></pre>
+<p>A call whose only effect is its result is useless as a statement. In edition 2027 the type checker rejects one such case, <code>push(items, 42)</code> (it returns a new array and changes nothing, T0019); in edition 2026 that statement still appends to a mutable <code>items</code>.</p>
 <h2 id="statement-terminators"><a class="header" href="#statement-terminators">Statement Terminators</a></h2>
 <p>Forge does not require semicolons or other explicit statement terminators. Statements are separated by newlines. Multiple statements may appear on a single line if they are unambiguous to the parser.</p>
 <pre><code class="language-forge">let x = 10
@@ -4847,6 +4855,7 @@ Math.sub(5, 3)    // 2
 <tr><td>T0016</td><td>struct literal leaves out a field without default</td><td><code>Point { x: 1 }</code></td></tr>
 <tr><td>T0017</td><td>assignment to an immutable binding</td><td><code>let x = 1</code> … <code>x = 2</code></td></tr>
 <tr><td>T0018</td><td>name read before its definition runs</td><td><code>say x</code> then <code>let x = 1</code></td></tr>
+<tr><td>T0019</td><td>result of <code>push(xs, v)</code> discarded (edition 2027 only, always an error)</td><td><code>push(xs, 3)</code> as a statement</td></tr>
 </tbody>
 </table>
 </div>
@@ -7258,16 +7267,31 @@ len({a: 1, b: 2})  // 2
 <p>Returns a new array with <code>value</code> appended to the end.</p>
 <pre><code class="language-forge">let a = [1, 2, 3]
 let b = push(a, 4)
-say b  // [1, 2, 3, 4]
+println(b)  // [1, 2, 3, 4]
+println(a)  // [1, 2, 3]
 </code></pre>
+<p>To append to a variable, assign the result (<code>xs = push(xs, v)</code>, every
+edition) or use the method form <code>xs.push(v)</code>, which appends to a <code>let mut</code>
+variable in place.</p>
 <blockquote>
-<p><strong>Note:</strong> <code>push</code> returns a new array. The original array is not modified.</p>
+<p><strong>Edition 2027:</strong> <code>push</code> never modifies its argument or any variable. A
+statement <code>push(xs, v)</code> discards the result and is a type error
+(T0019).</p>
+<p><strong>Edition 2026:</strong> when the first argument is a mutable variable (<code>let mut</code>, a function parameter, or a captured mutable variable), <code>push</code> also
+stores the new array back into it, in every position:
+<code>let b = push(xs, 4)</code> changes <code>xs</code> too, and a statement <code>push(xs, 4)</code>
+appends. With any other first argument the original is not modified.</p>
 </blockquote>
-<h2 id="poparray---array"><a class="header" href="#poparray---array">pop(array) -&gt; array</a></h2>
-<p>Returns a new array with the last element removed.</p>
-<pre><code class="language-forge">let a = [1, 2, 3]
-let b = pop(a)
-say b  // [1, 2]
+<h2 id="poparray---value"><a class="header" href="#poparray---value">pop(array) -&gt; value</a></h2>
+<p>Returns the last element of <code>array</code> (<code>null</code> when it is empty). When the
+argument is a mutable variable (<code>let mut</code> or a parameter), the element is
+also removed from it, in every edition; <code>xs.pop()</code> does the same.</p>
+<pre><code class="language-forge">let mut stack = [1, 2, 3]
+let top = pop(stack)
+println(top)    // 3
+println(stack)  // [1, 2]
+let fixed = [4, 5]
+println(pop(fixed))  // 5 (fixed is unchanged)
 </code></pre>
 <h2 id="keysobject---array"><a class="header" href="#keysobject---array">keys(object) -&gt; array</a></h2>
 <p>Returns an array of the object’s keys as strings.</p>
@@ -9186,7 +9210,7 @@ let result = 5 + 3 |&gt; double  // double(8), not 5 + double(3)
         <script src="book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="theme/forge-a793bdc8.js"></script>
+        <script src="theme/forge-cec2ffe5.js"></script>
 
         <script>
         window.addEventListener('load', function() {

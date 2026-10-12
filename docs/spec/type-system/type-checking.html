@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-75c1437f.js";
+            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -255,6 +255,7 @@
 <tr><td>T0016</td><td>struct literal leaves out a field without default</td><td><code>Point { x: 1 }</code></td></tr>
 <tr><td>T0017</td><td>assignment to an immutable binding</td><td><code>let x = 1</code> … <code>x = 2</code></td></tr>
 <tr><td>T0018</td><td>name read before its definition runs</td><td><code>say x</code> then <code>let x = 1</code></td></tr>
+<tr><td>T0019</td><td>result of <code>push(xs, v)</code> discarded (edition 2027 only, always an error)</td><td><code>push(xs, 3)</code> as a statement</td></tr>
 </tbody>
 </table>
 </div>
@@ -320,7 +321,7 @@ double(v)
         <script src="../book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="../theme/forge-a793bdc8.js"></script>
+        <script src="../theme/forge-cec2ffe5.js"></script>
 
 
 

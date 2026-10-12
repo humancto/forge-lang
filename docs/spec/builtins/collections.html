@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-75c1437f.js";
+            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -193,16 +193,31 @@ len({a: 1, b: 2})  // 2
 <p>Returns a new array with <code>value</code> appended to the end.</p>
 <pre><code class="language-forge">let a = [1, 2, 3]
 let b = push(a, 4)
-say b  // [1, 2, 3, 4]
+println(b)  // [1, 2, 3, 4]
+println(a)  // [1, 2, 3]
 </code></pre>
+<p>To append to a variable, assign the result (<code>xs = push(xs, v)</code>, every
+edition) or use the method form <code>xs.push(v)</code>, which appends to a <code>let mut</code>
+variable in place.</p>
 <blockquote>
-<p><strong>Note:</strong> <code>push</code> returns a new array. The original array is not modified.</p>
+<p><strong>Edition 2027:</strong> <code>push</code> never modifies its argument or any variable. A
+statement <code>push(xs, v)</code> discards the result and is a type error
+(T0019).</p>
+<p><strong>Edition 2026:</strong> when the first argument is a mutable variable (<code>let mut</code>, a function parameter, or a captured mutable variable), <code>push</code> also
+stores the new array back into it, in every position:
+<code>let b = push(xs, 4)</code> changes <code>xs</code> too, and a statement <code>push(xs, 4)</code>
+appends. With any other first argument the original is not modified.</p>
 </blockquote>
-<h2 id="poparray---array"><a class="header" href="#poparray---array">pop(array) -&gt; array</a></h2>
-<p>Returns a new array with the last element removed.</p>
-<pre><code class="language-forge">let a = [1, 2, 3]
-let b = pop(a)
-say b  // [1, 2]
+<h2 id="poparray---value"><a class="header" href="#poparray---value">pop(array) -&gt; value</a></h2>
+<p>Returns the last element of <code>array</code> (<code>null</code> when it is empty). When the
+argument is a mutable variable (<code>let mut</code> or a parameter), the element is
+also removed from it, in every edition; <code>xs.pop()</code> does the same.</p>
+<pre><code class="language-forge">let mut stack = [1, 2, 3]
+let top = pop(stack)
+println(top)    // 3
+println(stack)  // [1, 2]
+let fixed = [4, 5]
+println(pop(fixed))  // 5 (fixed is unchanged)
 </code></pre>
 <h2 id="keysobject---array"><a class="header" href="#keysobject---array">keys(object) -&gt; array</a></h2>
 <p>Returns an array of the object’s keys as strings.</p>
@@ -403,7 +418,7 @@ sample([1, 2, 3, 4, 5], 2)  // e.g. [4, 1]
         <script src="../book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="../theme/forge-a793bdc8.js"></script>
+        <script src="../theme/forge-cec2ffe5.js"></script>
 
 
 

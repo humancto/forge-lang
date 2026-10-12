@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-75c1437f.js";
+            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -209,11 +209,18 @@ say fruits[2]   // cherry
 items[0] = 10
 say items  // [10, 2, 3]
 </code></pre>
-<p>The <code>push()</code> built-in appends an element:</p>
+<p>The <code>push()</code> built-in returns a new array with an element appended; assign
+it back to append. The <code>.push()</code> method appends in place:</p>
 <pre><code class="language-forge">let mut items = [1, 2]
-push(items, 3)
-say items  // [1, 2, 3]
+items = push(items, 3)
+items.push(4)
+say items  // [1, 2, 3, 4]
 </code></pre>
+<p>In edition 2026 a statement <code>push(items, 3)</code> on a mutable variable also
+appends in place (and <code>let b = push(items, 3)</code> changes <code>items</code> too); in
+edition 2027 <code>push</code> never modifies its argument, and a statement whose
+result is discarded is a type error (T0019). See
+<a href="../builtins/collections.html"><code>push</code></a>.</p>
 <p>The <code>pop()</code> built-in removes and returns the last element:</p>
 <pre><code class="language-forge">let mut items = [1, 2, 3]
 let last = pop(items)
@@ -373,7 +380,7 @@ for key, value in user {
         <script src="../book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="../theme/forge-a793bdc8.js"></script>
+        <script src="../theme/forge-cec2ffe5.js"></script>
 
 
 

@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-75c1437f.js";
+            window.path_to_searchindex_js = "searchindex-0ade6d9e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-fdd2f5ad.js"></script>
@@ -233,9 +233,10 @@
 <p>See <a href="./statements/modules.html">Import and Export</a>.</p>
 <h3 id="expression-statements"><a class="header" href="#expression-statements">Expression Statements</a></h3>
 <p>Any expression can appear as a statement. The expression is evaluated and its result is discarded. This is how function calls with side effects are written.</p>
-<pre><code class="language-forge">say "hello"             // function call as statement
-push(items, 42)         // side-effecting call
+<pre><code class="language-forge">println("hello")        // function call as statement
+items.push(42)          // method call that appends to `items` in place
 </code></pre>
+<p>A call whose only effect is its result is useless as a statement. In edition 2027 the type checker rejects one such case, <code>push(items, 42)</code> (it returns a new array and changes nothing, T0019); in edition 2026 that statement still appends to a mutable <code>items</code>.</p>
 <h2 id="statement-terminators"><a class="header" href="#statement-terminators">Statement Terminators</a></h2>
 <p>Forge does not require semicolons or other explicit statement terminators. Statements are separated by newlines. Multiple statements may appear on a single line if they are unambiguous to the parser.</p>
 <pre><code class="language-forge">let x = 10
@@ -303,7 +304,7 @@ say x               // "outer"
         <script src="book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="theme/forge-a793bdc8.js"></script>
+        <script src="theme/forge-cec2ffe5.js"></script>
 
 
 
