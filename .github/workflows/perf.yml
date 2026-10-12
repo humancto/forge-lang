@@ -87,6 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           args=(--base "$RUNNER_TEMP/forge-base" --head "$RUNNER_TEMP/forge-head"
+                --base-root "$RUNNER_TEMP/base"
                 --rounds 5 --runs 2 --threshold 0.15
                 --summary "$GITHUB_STEP_SUMMARY" --json-out "$RUNNER_TEMP/bench-compare.json")
           if [ "$ALLOW" = "true" ]; then

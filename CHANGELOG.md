@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The CI performance gate (`tools/bench_compare.py --base-root`) compares only benchmarks that exist in both the base and the PR; it used to run a PR's new benchmarks on the base binary, where the code they were added for could exhaust the runner's memory.
+
 - VM: a function that assigns to a top-level variable declared both with and without `mut` (`let x = 1 ... let mut x = 2`) runs on the interpreter, which applies the declaration in force when the assignment runs; the VM used to merge both declarations' mutability.
 
 - `eval/forge_eval.py`: tasks whose time limit proves concurrency (`timed`, every `parallel` task) run one at a time after the others in `validate` and `score`, so CPU contention on a small machine cannot push them past their limit.

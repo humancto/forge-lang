@@ -83,7 +83,11 @@ carry `"batch"`. `bench.sh` exits 1 if any benchmark failed or timed out.
    once.
 2. Run `tools/bench_compare.py --rounds 5 --runs 2 --threshold 0.15`.
    Both binaries run the **head's** benchmark programs, so only the
-   engine differs. The rounds are **interleaved** (base/head, head/base,
+   engine differs. With `--base-root` (the base worktree) only programs
+   that exist in both checkouts are compared: a benchmark a PR adds has
+   no baseline, and the code it was written for may be pathological on
+   the base (a quadratic loop the PR fixes can exhaust the runner's
+   memory). New benchmarks are listed in the report. The rounds are **interleaved** (base/head, head/base,
    ...), so thermal or neighbour drift on the runner hits both sides
    equally.
 3. A benchmark is **flagged** when the head is more than 15% slower in
