@@ -1,0 +1,9 @@
+// Interpreter benchmark: build an object with 50k computed keys (`ob[k] = v`).
+fn build(n) {
+    let mut ob = {}
+    for i in range(0, n) {
+        ob["k" + str(i)] = i
+    }
+    return ob
+}
+println(len(build(50000)))

@@ -1,0 +1,9 @@
+// Interpreter benchmark: an array of 100k object literals (`recs.push({ ... })`).
+fn build(n) {
+    let mut recs = []
+    for i in range(0, n) {
+        recs.push({ id: i, name: "r" + str(i) })
+    }
+    return recs
+}
+println(len(build(100000)))

@@ -1,0 +1,13 @@
+// Interpreter benchmark: the textbook word count (eval finding 14) at the
+// top level: 100k words, 5,000 distinct, `counts[w] = get(counts, w, 0) + 1`.
+let mut words = []
+let mut seed = 42
+for i in range(0, 100000) {
+    seed = (seed * 75 + 74) % 65537
+    words.push("w" + str(seed % 5000))
+}
+let mut counts = {}
+for w in words {
+    counts[w] = get(counts, w, 0) + 1
+}
+println(len(counts))
