@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `if` expressions accept `else if` chains: `let w = if a { x } else if b { y } else { z }` was a syntax error (both engines, all editions).
+- In `"..."` strings, a regex Unicode class such as `\\p{L}` or `\\P{Lu}` is literal text, not an interpolation of `L` (like digit-only quantifiers `{4}`).
+
 - `eval/forge_eval.py validate` type-checks each reference next to a copy of its task's `files/`, so imported modules are visible to `forge check`.
 - `rows.push({id: i, ...})` (an object or tuple literal) in a loop copied the whole array on every push on the VM: quadratic, and building 20k rows was killed for running out of memory. It now appends in place like other simple values (300k rows in ~0.24 s).
 - **VM: functions can use top-level variables declared below them.** `fn f() { return late }` above `let late = 1` failed on the default VM with `[E0003] undefined variable: 'late'` (the interpreter printed `1`). Functions, lambdas, nested functions and `spawn` bodies defined above a top-level `let` (or destructuring `let`) now read and assign it once its `let` has run, in the main program, imported modules, REPL steps and HTTP handlers; calling them before that is still the interpreter's `undefined variable` error (also for an assignment, which no longer defines the variable silently), and assigning a later immutable `let` is E0006. Only such forward-referenced bindings are stored as globals; every other top-level `let` keeps its register, so top-level loops are as fast as before. Also on the VM, redeclaring a top-level (or block) binding that a closure already captured (`let x = 1`, `fn f() { return x }`, `let x = 2`) now updates what the closure sees, as on the interpreter.

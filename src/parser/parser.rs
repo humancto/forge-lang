@@ -2418,7 +2418,18 @@ impl Parser {
                 self.skip_newlines();
                 let else_body = if self.check_else_keyword() {
                     self.advance();
-                    Some(self.parse_block()?)
+                    if self.check(&Token::If) {
+                        // `else if ...`: the nested if-expression is the
+                        // else branch's value.
+                        let (line, col) = self
+                            .tokens
+                            .get(self.pos)
+                            .map_or((0, 0), |t| (t.line, t.col));
+                        let nested = self.parse_primary()?;
+                        Some(vec![SpannedStmt::new(Stmt::Expression(nested), line, col)])
+                    } else {
+                        Some(self.parse_block()?)
+                    }
                 } else {
                     None
                 };
@@ -2488,9 +2499,14 @@ impl Parser {
                 // text: there is no expression to interpolate.
                 chars.next();
                 current.push_str("{}");
-            } else if ch == '{' && Self::is_quantifier_braces(chars.clone().map(|(_, c)| c)) {
+            } else if ch == '{'
+                && (Self::is_quantifier_braces(chars.clone().map(|(_, c)| c))
+                    || current.ends_with("\\p")
+                    || current.ends_with("\\P"))
+            {
                 // `{4}`, `{2,}`, `{1,3}`: a regex quantifier, not an
                 // expression (interpolating a bare number is pointless).
+                // `\p{L}`, `\P{Lu}`: a regex Unicode class.
                 current.push('{');
                 for (_, inner) in chars.by_ref() {
                     current.push(inner);

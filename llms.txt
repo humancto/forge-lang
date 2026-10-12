@@ -74,7 +74,7 @@ println("{who} {age} {first} {rest}")
 
 Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
 
-Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. `typeof(x)` returns one of `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object` (also for struct and algebraic values), `Tuple`, `Set`, `Map`, `Result`, `Option`, `Function` (a named `fn`), `Lambda` (an anonymous `fn`), `BuiltIn`, `Channel`. Strings cannot be indexed (`s[0]` is an error): use `substring(s, start, end)`. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
+Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. `typeof(x)` returns one of `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object` (also for struct and algebraic values), `Tuple`, `Set`, `Map`, `Result`, `Option`, `Function` (a named `fn`), `Lambda` (an anonymous `fn`), `BuiltIn`, `Channel`. Strings cannot be indexed (`s[0]` is an error): use `substring(s, start, end)`. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` and Unicode classes such as `\\p{L}` are literal.
 
 ## Type annotations and checking
 
@@ -125,7 +125,7 @@ loop {
     if m >= 4 { break }
 }
 println(score > 0 && score < 100)
-let grade = if score >= 50 { "pass" } else { "fail" }   // `if` is an expression; there is no `cond ? a : b`
+let grade = if score >= 50 { "pass" } else if score >= 30 { "retry" } else { "fail" }   // `if` is an expression (with `else if`); there is no `cond ? a : b`
 println(grade)
 ```
 
