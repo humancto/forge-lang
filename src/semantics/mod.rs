@@ -767,6 +767,35 @@ pub fn check_builtin_module_import(module: &str, name: &str) -> Result<(), Strin
     }
 }
 
+/// `import { name as alias } from "path"`: `as` renames functions and
+/// variables. A struct, `type`, variant or interface keeps its name — its
+/// values, methods and patterns refer to it by name — so renaming one is an
+/// E0019 error on both engines.
+pub fn check_import_alias(
+    path: &str,
+    program: &crate::parser::ast::Program,
+    name: &str,
+    alias: &str,
+) -> Result<(), String> {
+    use crate::parser::ast::Stmt;
+    let kind = program.statements.iter().find_map(|s| match &s.stmt {
+        Stmt::StructDef { name: n, .. } if n == name => Some("a struct"),
+        Stmt::InterfaceDef { name: n, .. } if n == name => Some("an interface"),
+        Stmt::TypeDef { name: n, .. } if n == name => Some("a type"),
+        Stmt::TypeDef { variants, .. } if variants.iter().any(|v| v.name == name) => {
+            Some("a variant")
+        }
+        _ => None,
+    });
+    match kind {
+        None => Ok(()),
+        Some(kind) => Err(format!(
+            "cannot import '{}' as '{}' from '{}': '{}' is {}, and only functions and variables can be renamed\n  hint: import it under its own name: import {{ {} }} from \"{}\"",
+            name, alias, path, name, kind, name, path
+        )),
+    }
+}
+
 pub fn import_not_found(path: &str) -> String {
     format!(
         "cannot import '{}': file not found (checked relative to the importing file, {0}, {0}.fg, forge_modules/{0}/main.fg)",

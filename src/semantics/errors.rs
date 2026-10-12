@@ -1075,6 +1075,22 @@ mod tests {
             ),
             (s::import_not_found("utils"), "E0019"),
             (s::import_missing_name("utils", "x"), "E0019"),
+            (
+                s::check_import_alias(
+                    "m.fg",
+                    &crate::parser::Parser::new(
+                        crate::lexer::Lexer::new("struct P { x: Int }")
+                            .tokenize()
+                            .expect("lex"),
+                    )
+                    .parse_program()
+                    .expect("parse"),
+                    "P",
+                    "Q",
+                )
+                .expect_err("a struct cannot be renamed"),
+                "E0019",
+            ),
             ("circular import: a.fg -> b.fg -> a.fg".to_string(), "E0019"),
             (
                 "permission denied: run — run with --allow-run".to_string(),

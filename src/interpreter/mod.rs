@@ -1119,7 +1119,25 @@ pub struct Interpreter {
     /// read once at construction, carried to children (`child_context`)
     /// and forks, and passed to the shared operator rules.
     edition: crate::semantics::edition::Edition,
+    /// Modules this program already imported, by canonical path: a module
+    /// runs once per program, and every importer shares its state. Shared
+    /// by `child_context` (imports, `timeout`, `spawn`) and background
+    /// forks; an HTTP request fork starts empty (`fork_for_serving`).
+    modules: ModuleCache,
 }
+
+/// A module that ran in this program: what importing it again binds.
+pub(crate) struct LoadedModule {
+    program: Arc<Program>,
+    /// The module's scopes (shared, not copied: they are its state).
+    env: Environment,
+    method_tables: HashMap<String, IndexMap<String, Value>>,
+    static_methods: HashMap<String, IndexMap<String, Value>>,
+    embedded_fields: HashMap<String, Vec<(String, String)>>,
+    struct_defaults: HashMap<String, IndexMap<String, Value>>,
+}
+
+type ModuleCache = Arc<Mutex<HashMap<std::path::PathBuf, Arc<LoadedModule>>>>;
 
 /// Teardown: release this interpreter's own roots, and if it was the last
 /// interpreter on its heap, reclaim the scope cycles nothing else holds
@@ -1134,6 +1152,13 @@ impl Drop for Interpreter {
         self.static_methods.clear();
         self.struct_defaults.clear();
         self.squad_handles = None;
+        // The last interpreter of a program releases its imported modules,
+        // so their scope cycles are collected below.
+        if Arc::strong_count(&self.modules) == 1 {
+            let modules =
+                std::mem::take(&mut *self.modules.lock().unwrap_or_else(|e| e.into_inner()));
+            drop(modules);
+        }
         if self.heap.detach() {
             self.heap.collect(&[]);
         }
@@ -1179,6 +1204,7 @@ impl Interpreter {
             meter: crate::runtime::limits::Meter::current().with_memory_polling(),
             caps: crate::runtime::limits::Caps::current(),
             edition: crate::semantics::edition::current(),
+            modules: ModuleCache::default(),
         };
         interp.register_builtins();
         interp
@@ -1271,7 +1297,65 @@ impl Interpreter {
             .with_memory_polling();
         child.caps = self.caps;
         child.edition = self.edition;
+        child.modules = Arc::clone(&self.modules);
         child
+    }
+
+    /// The module `path` (as written in an `import`) names, run once per
+    /// program: the first import resolves, checks and runs it; later ones
+    /// (from any module of the program) reuse it and its state.
+    fn load_module(&mut self, path: &str) -> Result<Arc<LoadedModule>, RuntimeError> {
+        let base_dir = self
+            .source_file
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let file_path = crate::package::resolve_import_from(path, base_dir.as_deref())
+            .ok_or_else(|| RuntimeError::new(&crate::semantics::import_not_found(path)))?;
+        let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
+        let cached = self
+            .modules
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        if let Some(module) = cached {
+            return Ok(module);
+        }
+        // Read the path that was checked (resolved under a scoped grant).
+        let checked = crate::permissions::require_import(&file_path)
+            .map_err(|e| RuntimeError::new(&e.to_string()))?;
+        let source = std::fs::read_to_string(&checked)
+            .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
+        let program = crate::typechecker::prepare_module(&source, path, &file_path)
+            .map_err(|e| RuntimeError::new(&e))?;
+
+        // Shared cycle detection (runtime/imports.rs); the guard keeps
+        // this module on the import chain while it runs.
+        let _import_guard = crate::runtime::imports::enter_import(&file_path)
+            .map_err(|msg| RuntimeError::new(&msg))?;
+        // Same containment as ours: cancellation, output capture,
+        // and no host runtime (see `child_context`).
+        let mut import_interp = self.child_context();
+        import_interp.source_file = Some(file_path.clone());
+        import_interp.run(&program)?;
+
+        let module = Arc::new(LoadedModule {
+            program: Arc::new(program),
+            env: import_interp.env.clone(),
+            method_tables: import_interp.method_tables.clone(),
+            static_methods: import_interp.static_methods.clone(),
+            embedded_fields: import_interp.embedded_fields.clone(),
+            struct_defaults: import_interp.struct_defaults.clone(),
+        });
+        // Two tasks importing the module at once may both run it; the
+        // first to finish is the program's instance.
+        Ok(Arc::clone(
+            self.modules
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(key)
+                .or_insert(module),
+        ))
     }
 
     /// The language edition this interpreter runs programs under.
@@ -1512,6 +1596,7 @@ impl Interpreter {
         interp.debug_state = self.debug_state.clone();
         interp.output_sink = self.output_sink.clone();
         interp.edition = self.edition;
+        interp.modules = Arc::clone(&self.modules);
         interp
     }
 
@@ -2137,18 +2222,18 @@ impl Interpreter {
                     if let Some(module) = self.env.get(path) {
                         // `import { sqrt } from "math"` binds `math.sqrt`.
                         for name in names.iter().flatten() {
-                            crate::semantics::check_builtin_module_import(path, name)
+                            crate::semantics::check_builtin_module_import(path, &name.name)
                                 .map_err(|m| RuntimeError::new(&m))?;
                             let member = match &module {
-                                Value::Object(members) => members.get(name).cloned(),
+                                Value::Object(members) => members.get(&name.name).cloned(),
                                 _ => None,
                             }
                             .ok_or_else(|| {
                                 RuntimeError::new(&crate::semantics::import_missing_name(
-                                    path, name,
+                                    path, &name.name,
                                 ))
                             })?;
-                            self.env.define(name.to_string(), member);
+                            self.env.define(name.binding().to_string(), member);
                         }
                         return Ok(Signal::None);
                     }
@@ -2158,79 +2243,63 @@ impl Interpreter {
                     )));
                 }
 
-                let base_dir = self
-                    .source_file
-                    .as_ref()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                let file_path = match crate::package::resolve_import_from(path, base_dir.as_deref())
-                {
-                    Some(p) => p,
-                    None => {
-                        return Err(RuntimeError::new(&crate::semantics::import_not_found(path)));
-                    }
-                };
-                // Read the path that was checked (resolved under a scoped grant).
-                let checked = crate::permissions::require_import(&file_path)
-                    .map_err(|e| RuntimeError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&checked)
-                    .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
-                let program = crate::typechecker::prepare_module(&source, path, &file_path)
-                    .map_err(|e| RuntimeError::new(&e))?;
-
-                // Shared cycle detection (runtime/imports.rs); the guard keeps
-                // this module on the import chain while it runs.
-                let _import_guard = crate::runtime::imports::enter_import(&file_path)
-                    .map_err(|msg| RuntimeError::new(&msg))?;
-                // Same containment as ours: cancellation, output capture,
-                // and no host runtime (see `child_context`).
-                let mut import_interp = self.child_context();
-                import_interp.source_file = Some(file_path.clone());
-                import_interp.run(&program)?;
+                let module = self.load_module(path)?;
 
                 if let Some(name_list) = names {
                     for name in name_list {
-                        let val = import_interp.env.get(name).ok_or_else(|| {
-                            RuntimeError::new(&crate::semantics::import_missing_name(path, name))
+                        if let Some(alias) = &name.alias {
+                            crate::semantics::check_import_alias(
+                                path,
+                                &module.program,
+                                &name.name,
+                                alias,
+                            )
+                            .map_err(|m| RuntimeError::new(&m))?;
+                        }
+                        let val = module.env.get(&name.name).ok_or_else(|| {
+                            RuntimeError::new(&crate::semantics::import_missing_name(
+                                path, &name.name,
+                            ))
                         })?;
-                        self.env.define(name.to_string(), val);
+                        self.env.define(name.binding().to_string(), val);
                     }
                 } else {
                     // Import all top-level definitions
-                    for spanned in &program.statements {
+                    for spanned in &module.program.statements {
                         match &spanned.stmt {
                             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
-                                if let Some(val) = import_interp.env.get(name) {
+                                if let Some(val) = module.env.get(name) {
                                     self.env.define(name.clone(), val);
                                 }
                             }
                             Stmt::StructDef { name, .. } => {
-                                if let Some(val) = import_interp.env.get(name) {
+                                if let Some(val) = module.env.get(name) {
                                     self.env.define(name.clone(), val);
                                 }
                                 // Copy struct defaults and embedded fields
-                                if let Some(defaults) = import_interp.struct_defaults.get(name) {
+                                if let Some(defaults) = module.struct_defaults.get(name) {
                                     self.struct_defaults.insert(name.clone(), defaults.clone());
                                 }
-                                if let Some(embeds) = import_interp.embedded_fields.get(name) {
+                                if let Some(embeds) = module.embedded_fields.get(name) {
                                     self.embedded_fields.insert(name.clone(), embeds.clone());
                                 }
                             }
                             Stmt::TypeDef { name, variants } => {
                                 // Import each variant individually
                                 for variant in variants {
-                                    if let Some(val) = import_interp.env.get(&variant.name) {
+                                    if let Some(val) = module.env.get(&variant.name) {
                                         self.env.define(variant.name.clone(), val);
                                     }
                                 }
                                 // Import type metadata
                                 let meta_key = format!("__type_{}__", name);
-                                if let Some(val) = import_interp.env.get(&meta_key) {
+                                if let Some(val) = module.env.get(&meta_key) {
                                     self.env.define(meta_key, val);
                                 }
                             }
                             Stmt::ImplBlock { type_name, .. } => {
                                 // Copy method tables and static methods
-                                if let Some(methods) = import_interp.method_tables.get(type_name) {
+                                if let Some(methods) = module.method_tables.get(type_name) {
                                     let entry = self
                                         .method_tables
                                         .entry(type_name.clone())
@@ -2239,7 +2308,7 @@ impl Interpreter {
                                         entry.insert(k.clone(), v.clone());
                                     }
                                 }
-                                if let Some(statics) = import_interp.static_methods.get(type_name) {
+                                if let Some(statics) = module.static_methods.get(type_name) {
                                     let entry = self
                                         .static_methods
                                         .entry(type_name.clone())

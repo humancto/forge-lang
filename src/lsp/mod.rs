@@ -1034,16 +1034,19 @@ fn get_definition(uri: &str, line: usize, character: usize) -> serde_json::Value
     // Cross-file: check imported files for the symbol
     let imports = collect_imports(&text);
     for (import_path, names) in &imports {
-        // If named import, only follow if the word is in the name list
-        if let Some(name_list) = names {
-            if !name_list.iter().any(|n| n == &word) {
-                continue;
-            }
-        }
+        // If named import, only follow if the word is in the name list (the
+        // module defines it under its own name when renamed with `as`)
+        let target_name = match names {
+            Some(name_list) => match name_list.iter().find(|n| n.binding() == word) {
+                Some(n) => n.name.clone(),
+                None => continue,
+            },
+            None => word.clone(),
+        };
         if let Some(resolved) = resolve_import_for_lsp(import_path, uri) {
             if let Ok(imported_text) = std::fs::read_to_string(&resolved) {
                 let exported = collect_exported_symbols(&imported_text);
-                if let Some(symbol) = exported.iter().find(|s| s.name == word) {
+                if let Some(symbol) = exported.iter().find(|s| s.name == target_name) {
                     let target_uri = path_to_uri(&resolved);
                     return serde_json::json!({
                         "uri": target_uri,
@@ -1303,7 +1306,7 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
             if let Some(name_list) = names {
                 for n in name_list {
                     symbols.push(DocumentSymbolInfo {
-                        name: n.clone(),
+                        name: n.binding().to_string(),
                         kind: 2, // Module
                         line,
                     });
@@ -1971,7 +1974,7 @@ fn path_to_uri(path: &std::path::Path) -> String {
 }
 
 /// Extract import statements from source code.
-fn collect_imports(source: &str) -> Vec<(String, Option<Vec<String>>)> {
+fn collect_imports(source: &str) -> Vec<(String, Option<Vec<crate::parser::ast::ImportName>>)> {
     let mut lexer = crate::lexer::Lexer::new(source);
     let tokens = match lexer.tokenize() {
         Ok(t) => t,
@@ -2318,15 +2321,18 @@ mod tests {
 
     #[test]
     fn collect_imports_extracts_import_statements() {
-        let imports = collect_imports("import \"helper\"\nimport { foo, bar } from \"utils\"");
+        let imports =
+            collect_imports("import \"helper\"\nimport { foo, bar as baz } from \"utils\"");
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].0, "helper");
         assert!(imports[0].1.is_none());
         assert_eq!(imports[1].0, "utils");
-        assert_eq!(
-            imports[1].1.as_ref().unwrap(),
-            &vec!["foo".to_string(), "bar".to_string()]
-        );
+        let names = imports[1].1.as_ref().unwrap();
+        let pairs: Vec<(&str, &str)> = names
+            .iter()
+            .map(|n| (n.name.as_str(), n.binding()))
+            .collect();
+        assert_eq!(pairs, [("foo", "foo"), ("bar", "baz")]);
     }
 
     #[test]

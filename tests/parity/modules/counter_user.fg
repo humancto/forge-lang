@@ -1,0 +1,11 @@
+// Imports shared_counter.fg (relative to this file) under another name.
+import { bump as next, name as counter_name } from "shared_counter.fg"
+
+fn bump_twice() {
+    next()
+    return next()
+}
+
+fn name() {
+    return "counter_user of " + counter_name()
+}

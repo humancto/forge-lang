@@ -759,35 +759,50 @@ impl VM {
                 self.from_interp_checked(&namespace)
             }
             "__forge_import_module" => {
-                // (resolved_path, names | false, path_as_written)
-                if args.is_empty() || args.len() > 3 {
+                // (resolved_path, names | false, path_as_written, [[name, alias], ...]?)
+                if args.is_empty() || args.len() > 4 {
                     return Err(VMError::new(
-                        "__forge_import_module() requires (path, names, display_path)",
+                        "__forge_import_module() requires (path, names, display_path, aliases?)",
                     ));
                 }
 
-                let requested_names: Option<Vec<String>> =
-                    match args.get(1).map(|v| v.classify(&self.gc)) {
-                        Some(ValueKind::Obj(r)) => Some(
-                            self.gc
-                                .get(r)
-                                .and_then(|obj| match &obj.kind {
-                                    ObjKind::Array(items) => Some(
-                                        items
-                                            .iter()
-                                            .filter_map(|item| self.get_string(item))
-                                            .collect::<Vec<_>>(),
-                                    ),
-                                    _ => None,
-                                })
-                                .ok_or_else(|| {
-                                    VMError::new(
-                                        "__forge_import_module() names must be an array of strings",
-                                    )
-                                })?,
+                let strings = |vm: &Self, v: Option<&Value>| -> Option<Vec<String>> {
+                    let r = v?.as_obj()?;
+                    match &vm.gc.get(r)?.kind {
+                        ObjKind::Array(items) => Some(
+                            items
+                                .iter()
+                                .filter_map(|item| vm.get_string(item))
+                                .collect(),
                         ),
                         _ => None,
-                    };
+                    }
+                };
+                let requested_names: Option<Vec<String>> = match args.get(1) {
+                    Some(v) if v.as_obj().is_some() => {
+                        Some(strings(self, Some(v)).ok_or_else(|| {
+                            VMError::new(
+                                "__forge_import_module() names must be an array of strings",
+                            )
+                        })?)
+                    }
+                    _ => None,
+                };
+                // `import { a as b }`: the compiler binds `b`; the module
+                // must allow renaming `a`.
+                let aliases: Vec<Vec<String>> = match args.get(3).and_then(|v| v.as_obj()) {
+                    Some(r) => match self.gc.get(r).map(|o| &o.kind) {
+                        Some(ObjKind::Array(pairs)) => {
+                            let pairs = pairs.clone();
+                            pairs
+                                .iter()
+                                .filter_map(|p| strings(self, Some(p)))
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
 
                 // The compiler passes the canonical path of the module file
                 // plus the path as the user wrote it (for messages).
@@ -798,49 +813,76 @@ impl VM {
                 };
                 let file_path = crate::package::resolve_import(&resolved)
                     .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
-                // Read the path that was checked (resolved under a scoped grant).
-                let checked = crate::permissions::require_import(&file_path)
-                    .map_err(|e| VMError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&checked)
-                    .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
+                let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
 
-                let program = crate::typechecker::prepare_module(&source, &path, &file_path)
-                    .map_err(|e| VMError::new(&e))?;
+                // A module runs once per program; importing it again (from
+                // here or another module) binds the globals it left.
+                let module = match self.loaded_modules.get(&key) {
+                    Some(module) => Arc::clone(module),
+                    None => {
+                        // Read the path that was checked (resolved under a
+                        // scoped grant).
+                        let checked = crate::permissions::require_import(&file_path)
+                            .map_err(|e| VMError::new(&e.to_string()))?;
+                        let source = std::fs::read_to_string(&checked).map_err(|e| {
+                            VMError::new(&format!("cannot import '{}': {}", path, e))
+                        })?;
 
-                let export_names = requested_names
-                    .unwrap_or_else(|| crate::vm::compiler::import_export_names(&program));
+                        let program =
+                            crate::typechecker::prepare_module(&source, &path, &file_path)
+                                .map_err(|e| VMError::new(&e))?;
 
-                // Shared cycle detection (runtime/imports.rs). Checked before
-                // compiling so a cycle is reported once, not as a nested
-                // chain of compile/runtime errors.
-                let _import_guard = crate::runtime::imports::enter_import(&file_path)
-                    .map_err(|msg| VMError::new(&msg))?;
-                // The module's top-level names live under a private global
-                // prefix, so only the names imported here become visible to
-                // the importer (no leaking of helpers it did not ask for).
-                let prefix = crate::vm::compiler::module_global_prefix(&resolved);
-                let chunk = crate::vm::compiler::compile_module_with(
-                    &program,
-                    file_path.parent(),
-                    Some(&prefix),
-                )
-                .map_err(|e| {
-                    VMError::new(&format!("import '{}' compile error: {}", path, e.message))
-                })?;
-                self.execute_module(&chunk).map_err(|e| {
-                    if e.is_unwound_to_handler() || e.is_fatal() {
-                        // Control transfer (a `timeout` around the import
-                        // fired inside it) or a fatal limit: propagate as is.
-                        e
-                    } else if e.message.starts_with("circular import: ") {
-                        // Propagate the cycle report unwrapped.
-                        VMError::new(&e.message)
-                    } else {
-                        VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                        // Shared cycle detection (runtime/imports.rs).
+                        // Checked before compiling so a cycle is reported
+                        // once, not as a nested chain of compile/runtime
+                        // errors.
+                        let _import_guard = crate::runtime::imports::enter_import(&file_path)
+                            .map_err(|msg| VMError::new(&msg))?;
+                        // The module's top-level names live under a private
+                        // global prefix, so only the names imported here
+                        // become visible to the importer (no leaking of
+                        // helpers it did not ask for).
+                        let prefix = crate::vm::compiler::module_global_prefix(&resolved);
+                        let chunk = crate::vm::compiler::compile_module_with(
+                            &program,
+                            file_path.parent(),
+                            Some(&prefix),
+                        )
+                        .map_err(|e| {
+                            VMError::new(&format!("import '{}' compile error: {}", path, e.message))
+                        })?;
+                        self.execute_module(&chunk).map_err(|e| {
+                            if e.is_unwound_to_handler() || e.is_fatal() {
+                                // Control transfer (a `timeout` around the
+                                // import fired inside it) or a fatal limit:
+                                // propagate as is.
+                                e
+                            } else if e.message.starts_with("circular import: ") {
+                                // Propagate the cycle report unwrapped.
+                                VMError::new(&e.message)
+                            } else {
+                                VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                            }
+                        })?;
+                        let module = Arc::new(crate::vm::machine::LoadedModule {
+                            program: Arc::new(program),
+                            prefix,
+                        });
+                        self.loaded_modules.insert(key, Arc::clone(&module));
+                        module
                     }
-                })?;
+                };
 
-                let struct_names: std::collections::HashSet<&str> = program
+                for pair in &aliases {
+                    if let [name, alias] = pair.as_slice() {
+                        crate::semantics::check_import_alias(&path, &module.program, name, alias)
+                            .map_err(|m| VMError::new(&m))?;
+                    }
+                }
+                let export_names = requested_names
+                    .unwrap_or_else(|| crate::vm::compiler::import_export_names(&module.program));
+                let struct_names: std::collections::HashSet<&str> = module
+                    .program
                     .statements
                     .iter()
                     .filter_map(|spanned| match &spanned.stmt {
@@ -852,7 +894,7 @@ impl VM {
                 for name in export_names {
                     let value = self
                         .globals
-                        .get(&format!("{}{}", prefix, name))
+                        .get(&format!("{}{}", module.prefix, name))
                         .or_else(|| {
                             // Struct registrations are global by type name.
                             struct_names
