@@ -2180,7 +2180,7 @@ CSV (Comma-Separated Values) remains one of the most widely used data exchange f
 | `csv.read(path)`        | Read a CSV file and parse it                | `csv.read("data.csv")` → `[{...}]`                        | Array[Object] |
 | `csv.write(path, rows)` | Write an array of objects to a CSV file     | `csv.write("out.csv", rows)`                              | Null          |
 
-> **Automatic Type Detection.** `csv.parse()` inspects each cell and converts it to the most specific Forge type: integers for whole numbers, floats for decimals, booleans for "true"/"false", and strings for everything else. This means `"42"` becomes `Int(42)` and `"3.14"` becomes `Float(3.14)`.
+> **Automatic Type Detection.** `csv.parse()` converts an unquoted cell that is exactly a whole number, a plain decimal or `true`/`false` to `Int`, `Float` or `Bool`; everything else stays a string, so nothing is lost: `42` becomes `Int(42)` and `3.14` becomes `Float(3.14)`, but `02134`, `+1`, `1e5` and any quoted cell (`"42"`) stay strings. Quoted cells may contain commas, doubled quotes and line breaks (RFC 4180). Pass `{ types: false }` to keep every cell a string, or `{ header: false }` to get each row as an array.
 
 ### Core Examples
 

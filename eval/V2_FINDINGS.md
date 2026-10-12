@@ -13,14 +13,14 @@ that a model cannot guess from `llms.txt`).
 | # | Severity | Finding | Tasks it affects |
 |---|---|---|---|
 | 1 | bug | `xs.push(v)` / `xs.pop()` on a nested place (`o.a.push(x)`, `g[k].push(x)`, `m[0].push(x)`) silently does nothing | data, any grouping code |
-| 2 | bug | Interpreter: `import { Struct } from "m.fg"` loses the struct's `impl` methods | money_module, any selective import of a type |
-| 3 | bug | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
-| 4 | bug | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
-| 5 | bug | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
-| 6 | bug | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
-| 7 | bug | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
-| 8 | bug | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
-| 9 | bug | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
+| 2 | bug (fixed) | Interpreter: `import { Struct } from "m.fg"` loses the struct's `impl` methods | money_module, any selective import of a type |
+| 3 | bug (fixed) | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
+| 4 | bug (fixed) | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
+| 5 | bug (fixed) | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
+| 6 | bug (fixed) | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
+| 7 | bug (fixed) | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
+| 8 | bug (fixed) | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
+| 9 | bug (fixed) | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
 | 10 | perf | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys) | data (latest_record_wins, word_freq_large, ...) |
 | 11 | perf | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function) | data |
 | 12 | perf | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each) | data |
@@ -75,6 +75,8 @@ Reference workaround: `group_by` (one pass, insertion-ordered) or `g[k] = g[k] +
 
 ### 2. Interpreter: selectively imported structs lose their methods
 
+**Fixed:** a selective import (`import { P } from "m.fg"`) brings the module's method tables, static methods, struct defaults and embedded fields with it on the interpreter too (all of them, like the VM, which registers them when the module runs). Parity fixture `tests/parity/supported/selective_import_methods.fg`.
+
 ```forge
 // shapes.fg
 struct P { x: Int }
@@ -100,6 +102,8 @@ Reference workaround (money_module): `import "money.fg"`.
 
 ### 3. `try_receive` returns different types on the two engines
 
+**Fixed:** `try_receive` returns `Some(v)` / `None` on both engines (the VM returned `Ok(v)` / null), as `docs/part2_stdlib.md` already documented; `llms.txt` states it. Parity fixture `tests/parity/supported/try_receive_option.fg`.
+
 ```forge
 let c = channel(3)
 send(c, 5)
@@ -115,6 +119,8 @@ both engines, add it to the engine-diff fixtures, and document it in `llms.txt` 
 `try_send`/`select`.
 
 ### 4. VM, edition 2027: `[fn(...) -> ...]` parameters fail their run-time check
+
+**Fixed:** the VM decided `__types.check` on its own values only for a few shapes and converted everything else to interpreter values, where a closure becomes null, so `[fn(Int) -> Int]` failed. It now decides every check on VM values (`fits_vm` in `src/vm/builtins.rs`, the rule of `semantics::types::fits`), and a violation by a function says `got function` on both engines. Tests: `tests/edition2027/annotations_test.fg` (`function_values_fit_function_annotations`, both engines).
 
 ```forge
 fn apply_all(fs: [fn(Int) -> Int], x: Int) -> [Int] {
@@ -133,6 +139,8 @@ Suggested fix: make the VM's `__types.check` accept VM closures as `function` el
 2027 parity fixture with arrays of functions.
 
 ### 5. A `Float` annotation does not make a value a Float
+
+**Fixed:** where a declared type is enforced (edition 2027 and `--strict`), an Int checked against a declared `Float` becomes a Float (`semantics::types::widen`, mirrored by the VM's `widen_vm` and the JIT's `kind_widens`): parameters (reassigned from their check), `-> Float` results, annotated `let`s and struct fields/defaults (`__types.widen`), nested `[Float]`/`?Float`/tuples/map values/`Result`. `half(3) == 1.5` and `typeof(half(3)) == "Float"` on both engines and in JIT code. Edition 2026 without `--strict` does not instrument and does not convert (documented in docs/editions/2027.md and llms.txt: write `float(x)`). `str(3.0)` is `"3"` on both engines (unchanged), so the difference shows in arithmetic and `typeof`. Tests: `tests/edition2027/annotations_test.fg` (`float_annotations_widen_ints`), `vm::jit_tests::jit_widens_ints_checked_against_float`.
 
 ```forge
 fn half(x: Float) -> Float {
@@ -163,6 +171,8 @@ Reference workaround (typed_order_decode, shape_interface): `float(...)` when bu
 structs, with a comment.
 
 ### 6. `csv.parse` corrupts common CSV
+
+**Fixed:** `csv.parse`/`csv.read` are a character-level RFC 4180 parser (`src/stdlib/csv.rs`, shared by both engines): quoted fields keep commas, `""`, LF/CRLF and whitespace; an unterminated quote is an error; only unquoted fields that are exactly an integer, a plain decimal or `true`/`false` are converted (`02134`, `+1`, `1e5`, quoted numbers stay strings). Options `{ header: false }` and `{ types: false }`; `csv.stringify` output parses back to the same rows. Tests: `stdlib::csv::tests`, `tests/csv_rfc4180_test.fg` (both engines).
 
 ```forge
 // t.csv:
@@ -197,6 +207,8 @@ Reference workaround: a hand-written parser (csv_quoted_fields) and `split` for 
 
 ### 7. `forge check` ignores imports it cannot resolve
 
+**Fixed:** an import the checker cannot find or parse is the new T0020 (`cannot import 'does_not_exist.fg': file not found (looked for /dir/does_not_exist.fg)`, with where it looks as the help), an error from edition 2027 and under `--strict` (exit 1 from `forge check`), a warning in 2026. Its names are unknown (`Any`) instead of builtins of the same name: no false T0004 for `title()`, also after an unreadable wildcard import. Not reported when imports are skipped (`Sandbox`, MCP). Tests: `typechecker::tests::unresolved_imports_are_reported_without_cascading`, the `forge explain T0020` example test.
+
 ```forge
 import { nothing_here } from "does_not_exist.fg"
 println(nothing_here(1))
@@ -216,6 +228,8 @@ LSP, and never fall back to a builtin for an imported name.
 
 ### 8. VM error positions inside functions point at the caller
 
+**Fixed:** `forge run` reports a VM runtime error at the innermost frame that has a position (the line inside the callee, as the interpreter and the `Sandbox` already did), in human and JSON output. The interpreter now records the call stack an error unwinds through (`RuntimeError::trace`, only on the error path) and prints it like the VM (`at pick (line 2)` ... `at <main> (line 10)`). One difference remains: the VM names `impl` methods `<lambda>` in the trace, the interpreter `P::bad`. Test: `tests/cli_diagnostics.rs::runtime_errors_inside_functions_point_at_the_callee` (both engines, JSON and human).
+
 ```forge
 fn pick(xs, i) {
     let v = xs[i]
@@ -233,6 +247,8 @@ Suggested fix: use the innermost frame's position for the diagnostic on the VM, 
 interpreter, and keep the trace as extra context.
 
 ### 9. The E0013 hint suggests a builtin that edition 2027 removed
+
+**Fixed:** hints are edition-neutral instead of edition-specific: the E0013 hint is `check the spelling; print the value with println(x) (or its type with typeof(x)) to see what it contains`, valid in both editions. Also fixed: every `forge explain` example (runtime and type-checker codes) uses `println(...)` instead of `say`, E0028's example uses `let {name} = 42` instead of `unpack`, explanations of 2026-only features say so (E0021 GenZ asserts, E0022 `check`, E0023 `must`), the REPL `help` examples, the LSP completions (removed keywords and builtins are not offered in edition 2027) and the MCP server instructions (`say`). Test: `semantics::errors::tests::hints_and_examples_do_not_suggest_removed_names`.
 
 Every `no method ...` / `no field ...` error carries the hint
 `check the spelling; print the value with sus(x) to see what it contains`, also under

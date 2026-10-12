@@ -1637,6 +1637,37 @@ impl Interpreter {
         interp
     }
 
+    /// Merge an imported module's method tables, static methods, struct
+    /// defaults and embedded fields into this interpreter. Includes the
+    /// tables the module itself imported, so `impl` blocks reach every
+    /// importer however the type was brought in.
+    fn absorb_type_tables(&mut self, from: &Interpreter) {
+        for (type_name, methods) in &from.method_tables {
+            let entry = self
+                .method_tables
+                .entry(type_name.clone())
+                .or_insert_with(IndexMap::new);
+            for (k, v) in methods {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+        for (type_name, statics) in &from.static_methods {
+            let entry = self
+                .static_methods
+                .entry(type_name.clone())
+                .or_insert_with(IndexMap::new);
+            for (k, v) in statics {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+        for (name, defaults) in &from.struct_defaults {
+            self.struct_defaults.insert(name.clone(), defaults.clone());
+        }
+        for (name, embeds) in &from.embedded_fields {
+            self.embedded_fields.insert(name.clone(), embeds.clone());
+        }
+    }
+
     pub(crate) fn exec_background_block(
         &mut self,
         stmts: &[SpannedStmt],
@@ -1714,13 +1745,7 @@ impl Interpreter {
                     Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
                     Signal::None | Signal::ImplicitReturn(_) => {}
                 },
-                Err(mut e) => {
-                    if e.line == 0 {
-                        e.line = spanned.line;
-                        e.col = spanned.col;
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(e.at_statement(spanned.line, spanned.col)),
             }
         }
         Ok(Value::Null)
@@ -1732,13 +1757,7 @@ impl Interpreter {
         let plan = self.hoist_plan(&program.statements);
         for spanned in plan.order.iter().map(|&i| &program.statements[i]) {
             self.current_line = spanned.line;
-            let patch = |mut e: RuntimeError| {
-                if e.line == 0 {
-                    e.line = spanned.line;
-                    e.col = spanned.col;
-                }
-                e
-            };
+            let patch = |e: RuntimeError| e.at_statement(spanned.line, spanned.col);
             // Expression statements are evaluated exactly once; their value
             // (unless it is an output call) is the REPL result.
             if let Stmt::Expression(ref expr) = spanned.stmt {
@@ -2324,54 +2343,18 @@ impl Interpreter {
                     // Import all top-level definitions
                     for spanned in &program.statements {
                         match &spanned.stmt {
-                            Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
+                            Stmt::FnDef { name, .. }
+                            | Stmt::Let { name, .. }
+                            | Stmt::StructDef { name, .. } => {
                                 if let Some(val) = import_interp.env.get(name) {
                                     self.env.define(name.clone(), val);
                                 }
                             }
-                            Stmt::StructDef { name, .. } => {
-                                if let Some(val) = import_interp.env.get(name) {
-                                    self.env.define(name.clone(), val);
-                                }
-                                // Copy struct defaults and embedded fields
-                                if let Some(defaults) = import_interp.struct_defaults.get(name) {
-                                    self.struct_defaults.insert(name.clone(), defaults.clone());
-                                }
-                                if let Some(embeds) = import_interp.embedded_fields.get(name) {
-                                    self.embedded_fields.insert(name.clone(), embeds.clone());
-                                }
-                            }
-                            Stmt::TypeDef { name, variants } => {
+                            Stmt::TypeDef { variants, .. } => {
                                 // Import each variant individually
                                 for variant in variants {
                                     if let Some(val) = import_interp.env.get(&variant.name) {
                                         self.env.define(variant.name.clone(), val);
-                                    }
-                                }
-                                // Import type metadata
-                                let meta_key = format!("__type_{}__", name);
-                                if let Some(val) = import_interp.env.get(&meta_key) {
-                                    self.env.define(meta_key, val);
-                                }
-                            }
-                            Stmt::ImplBlock { type_name, .. } => {
-                                // Copy method tables and static methods
-                                if let Some(methods) = import_interp.method_tables.get(type_name) {
-                                    let entry = self
-                                        .method_tables
-                                        .entry(type_name.clone())
-                                        .or_insert_with(IndexMap::new);
-                                    for (k, v) in methods {
-                                        entry.insert(k.clone(), v.clone());
-                                    }
-                                }
-                                if let Some(statics) = import_interp.static_methods.get(type_name) {
-                                    let entry = self
-                                        .static_methods
-                                        .entry(type_name.clone())
-                                        .or_insert_with(IndexMap::new);
-                                    for (k, v) in statics {
-                                        entry.insert(k.clone(), v.clone());
                                     }
                                 }
                             }
@@ -2379,6 +2362,19 @@ impl Interpreter {
                         }
                     }
                 }
+                // Type metadata travels with every import, selective or
+                // not: a value built from an imported struct or variant
+                // dispatches through these tables (the VM registers them
+                // process-wide when the module runs).
+                for spanned in &program.statements {
+                    if let Stmt::TypeDef { name, .. } = &spanned.stmt {
+                        let meta_key = format!("__type_{}__", name);
+                        if let Some(val) = import_interp.env.get(&meta_key) {
+                            self.env.define(meta_key, val);
+                        }
+                    }
+                }
+                self.absorb_type_tables(&import_interp);
                 Ok(Signal::None)
             }
 
@@ -2847,13 +2843,8 @@ impl Interpreter {
     /// (`semantics::is_value_tail`). `return`/`break`/`continue` inside
     /// stop evaluation and are reported as the matching [`BlockExit`].
     fn eval_stmt_value(&mut self, spanned: &SpannedStmt) -> Result<BlockExit, RuntimeError> {
-        let patch_err = |mut e: RuntimeError| -> RuntimeError {
-            if e.line == 0 {
-                e.line = spanned.line;
-                e.col = spanned.col;
-            }
-            e
-        };
+        let patch_err =
+            |e: RuntimeError| -> RuntimeError { e.at_statement(spanned.line, spanned.col) };
         match &spanned.stmt {
             Stmt::Expression(expr) => {
                 Ok(BlockExit::Value(self.eval_expr(expr).map_err(patch_err)?))
@@ -2985,23 +2976,15 @@ impl Interpreter {
             }
             if let Stmt::Expression(expr) = stmt {
                 let want_value = keep_value && index == last_index;
-                last_expr_value = self.eval_expr_stmt(expr, want_value).map_err(|mut e| {
-                    if e.line == 0 {
-                        e.line = s.line;
-                        e.col = s.col;
-                    }
-                    e
-                })?;
+                last_expr_value = self
+                    .eval_expr_stmt(expr, want_value)
+                    .map_err(|e| e.at_statement(s.line, s.col))?;
                 continue;
             }
             last_expr_value = Value::Null;
-            result = self.exec_stmt(stmt).map_err(|mut e| {
-                if e.line == 0 {
-                    e.line = s.line;
-                    e.col = s.col;
-                }
-                e
-            })?;
+            result = self
+                .exec_stmt(stmt)
+                .map_err(|e| e.at_statement(s.line, s.col))?;
             match &result {
                 Signal::Return(_) | Signal::Break | Signal::Continue => break,
                 Signal::None | Signal::ImplicitReturn(_) => {}
@@ -3134,7 +3117,8 @@ impl Interpreter {
     /// The annotation checks `typechecker::enforce` inserts (`--strict`,
     /// edition 2027) run on every call of an annotated function:
     /// `__types.check(value, type, "<context>")` and `__types.bind("T",
-    /// "<fn>", "<names>", args..)` are decided here without cloning the
+    /// "<fn>", "<names>", args..)` (and `__types.widen(value, type)`) are
+    /// decided here without cloning the
     /// hidden module or going through builtin dispatch. Same rule and
     /// messages as the module members (`stdlib::types_module`); any other
     /// shape takes the normal call path.
@@ -3169,12 +3153,27 @@ impl Interpreter {
                     Err(e) => return Some(Err(RuntimeError::new(&e))),
                 };
                 Some(if crate::semantics::types::fits(&value, &expected) {
-                    Ok(value)
+                    Ok(crate::semantics::types::widen(&value, &expected).unwrap_or(value))
                 } else {
                     Err(RuntimeError::new(&crate::semantics::types::violation(
                         context, &expected, &value,
                     )))
                 })
+            }
+            ("widen", [value, Expr::StringLit(ty)]) => {
+                let value = match self.eval_expr(value) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let expected = match crate::semantics::types::parse_cached(ty) {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(RuntimeError::new(&e))),
+                };
+                Some(Ok(if crate::semantics::types::fits(&value, &expected) {
+                    crate::semantics::types::widen(&value, &expected).unwrap_or(value)
+                } else {
+                    value
+                }))
             }
             ("bind", [Expr::StringLit(_), Expr::StringLit(_), Expr::StringLit(_), values @ ..]) => {
                 let mut evaluated = Vec::with_capacity(values.len());
@@ -5156,7 +5155,22 @@ impl Interpreter {
                 col: 0,
             });
         }
-        let result = self.call_function_inner(func, args);
+        // Named for the error trace only if the call fails.
+        let traced = match &func {
+            Value::Function(f) => Some(Some(Arc::clone(f))),
+            Value::Lambda { .. } => Some(None),
+            _ => None,
+        };
+        let mut result = self.call_function_inner(func, args);
+        if let (Err(e), Some(callee)) = (&mut result, traced) {
+            if !e.is_early_return() && e.loop_escape.is_none() {
+                e.leave_frame(match callee {
+                    Some(f) if !f.name.is_empty() => f.name.clone(),
+                    Some(_) => "<anonymous>".to_string(),
+                    None => "<lambda>".to_string(),
+                });
+            }
+        }
         if self.debug_state.is_some() {
             self.call_stack.pop();
         }
@@ -5593,6 +5607,28 @@ pub struct RuntimeError {
     /// passes through `try`/`safe`/`retry` like the control escapes above,
     /// and through function boundaries, up to the host.
     fatal: bool,
+    /// The call stack the error unwound through (boxed: errors are passed
+    /// by value everywhere, so `RuntimeError` stays small).
+    trace: Option<Box<ErrorTrace>>,
+}
+
+/// See [`RuntimeError::trace`].
+#[derive(Debug, Clone, Default)]
+struct ErrorTrace {
+    /// The functions the error left, innermost first, each with the line
+    /// inside it (like the VM's stack trace, without `<main>`).
+    frames: Vec<TraceFrame>,
+    /// The line of the statement running in the frame the error is
+    /// unwinding through now (0 until a statement boundary records it);
+    /// after the outermost call it is the top-level line.
+    frame_line: usize,
+}
+
+/// One function an error unwound through (see [`RuntimeError::trace`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceFrame {
+    pub function: String,
+    pub line: usize,
 }
 
 /// Which loop control a `RuntimeError::loop_escape` carries.
@@ -5612,7 +5648,48 @@ impl RuntimeError {
             early_return: false,
             loop_escape: None,
             fatal: false,
+            trace: None,
         }
+    }
+
+    /// Record the statement the error left: its position becomes the
+    /// error's position if it has none, and the line of the current frame.
+    fn at_statement(mut self, line: usize, col: usize) -> Self {
+        if self.line == 0 {
+            self.line = line;
+            self.col = col;
+        }
+        let trace = self.trace.get_or_insert_with(Box::default);
+        if trace.frame_line == 0 {
+            trace.frame_line = line;
+        }
+        self
+    }
+
+    /// The error leaves a call of `function`: record the frame.
+    fn leave_frame(&mut self, function: String) {
+        let fallback = self.line;
+        let trace = self.trace.get_or_insert_with(Box::default);
+        let line = if trace.frame_line > 0 {
+            trace.frame_line
+        } else {
+            fallback
+        };
+        trace.frames.push(TraceFrame { function, line });
+        trace.frame_line = 0;
+    }
+
+    /// The functions the error unwound through, innermost first, each with
+    /// the line inside it where the error passed (empty for an error raised
+    /// at the top level).
+    pub fn trace(&self) -> &[TraceFrame] {
+        self.trace.as_deref().map_or(&[], |t| t.frames.as_slice())
+    }
+
+    /// The top-level line the error left the program from, once it unwound
+    /// out of every call (0 when unknown).
+    pub fn top_level_line(&self) -> usize {
+        self.trace.as_deref().map_or(0, |t| t.frame_line)
     }
 
     /// A fatal resource-limit error; see the `fatal` field.
@@ -5639,6 +5716,7 @@ impl RuntimeError {
             early_return: false,
             loop_escape: None,
             fatal: false,
+            trace: None,
         }
     }
 

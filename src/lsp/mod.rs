@@ -686,11 +686,21 @@ fn get_completions() -> Vec<serde_json::Value> {
         "csv", "term", "time", "jwt", "npc", "exec",
     ];
 
+    // Never offer what the edition in effect removed (`say`, `define`,
+    // `otherwise` ... in 2027).
+    let edition = crate::semantics::edition::current();
     let mut items = Vec::new();
-    for kw in &keywords {
+    let removed = |word: &str| {
+        edition >= crate::semantics::edition::Edition::E2027
+            && crate::lexer::token::REMOVED_IN_2027.contains(&word)
+    };
+    for kw in keywords.iter().filter(|kw| !removed(kw)) {
         items.push(serde_json::json!({"label": kw, "kind": 14})); // Keyword
     }
-    for bi in &builtins {
+    for bi in builtins
+        .iter()
+        .filter(|bi| crate::builtins_registry::available(bi, edition))
+    {
         items.push(serde_json::json!({"label": bi, "kind": 3})); // Function
     }
     for m in &modules {

@@ -1,0 +1,11 @@
+// expect: 42
+// Selective imports bring a type's `impl` methods, static methods and
+// field defaults with it, on both engines.
+import { P, Circle, Square } from "tests/parity/modules/typed_shapes.fg"
+let p = P { x: 21 }
+println(p.double())
+println(p.label)
+println(P.origin().x)
+println(Circle(2).area())
+println(Square(3).area())
+p.double()

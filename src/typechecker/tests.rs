@@ -1411,7 +1411,7 @@ fn edition_2027_promoted_codes() {
     // docs/editions/2027.md lists these; change both together.
     assert_eq!(
         promoted,
-        vec!["T0001", "T0002", "T0003", "T0012", "T0015", "T0016"]
+        vec!["T0001", "T0002", "T0003", "T0012", "T0015", "T0016", "T0020"]
     );
 }
 
@@ -1623,4 +1623,55 @@ fn edition_2026_statement_push_is_not_reported() {
         );
         assert!(ds.iter().all(|d| d.code != Code::DiscardedResult), "{ds:?}");
     }
+}
+
+// V2 finding 7: an import that cannot be found is reported (T0020), and the
+// names it would bring in are unknown, never the builtins of that name.
+#[test]
+fn unresolved_imports_are_reported_without_cascading() {
+    for source in [
+        "import { title } from \"no_such_module_here.fg\"\nprintln(title())\nlet f = title\nprintln(f())\n",
+        "import \"no_such_module_here.fg\"\nprintln(title())\nprintln(len())\n",
+    ] {
+        for edition in [Edition::E2026, Edition::E2027] {
+            let ds = check_in(source, false, edition);
+            assert_eq!(ds.len(), 1, "{edition:?} {source}: {ds:?}");
+            let d = &ds[0];
+            assert_eq!(d.code, Code::UnresolvedImport);
+            assert_eq!(d.span.start.line, 1);
+            assert!(
+                d.message.starts_with(
+                    "cannot import 'no_such_module_here.fg': file not found (looked for no_such_module_here.fg)"
+                ),
+                "{}",
+                d.message
+            );
+            assert_eq!(d.is_error(), edition == Edition::E2027);
+        }
+    }
+    // Builtin modules are not files.
+    let ds = check_in(
+        "import { sqrt } from \"math\"\nprintln(sqrt(4))\n",
+        false,
+        Edition::E2027,
+    );
+    assert!(ds.is_empty(), "{ds:?}");
+}
+
+#[test]
+fn imports_are_not_resolved_when_skipped() {
+    let ds = analyze(
+        "import { title } from \"no_such_module_here.fg\"\nprintln(title())\n",
+        &CheckOptions {
+            skip_imports: true,
+            edition: Some(Edition::E2027),
+            ..CheckOptions::default()
+        },
+    )
+    .expect("parses")
+    .diagnostics;
+    assert!(
+        ds.iter().all(|d| d.code != Code::UnresolvedImport),
+        "{ds:?}"
+    );
 }

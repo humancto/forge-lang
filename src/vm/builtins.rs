@@ -84,19 +84,49 @@ impl VM {
         crate::semantics::errors::user_type_name(value.type_name(&self.gc))
     }
 
-    /// `__types.check(value, type, context)` without converting values:
-    /// `Some(value)` when `value` certainly fits `type`
-    /// (`semantics::types::fits`), `None` when the shared implementation
-    /// must decide (a violation, or a case not handled here).
-    fn types_check_fast(&self, args: &[Value]) -> Option<Value> {
-        let [value, ty, _context] = args else {
-            return None;
+    /// `__types.check(value, type, context)` (and, with `raise` false,
+    /// `__types.widen(value, type)`) on VM values: the value, with Ints
+    /// widened where `type` declares Float, when it fits `type`
+    /// (`semantics::types::fits` / `widen`, mirrored by `fits_vm` /
+    /// `widen_vm`). A value that does not fit raises the shared violation
+    /// (`check`) or is returned unchanged (`widen`).
+    fn types_check(&mut self, args: &[Value], raise: bool) -> Result<Value, VMError> {
+        let usage = if raise {
+            "__types.check(value, type, context) expects two strings"
+        } else {
+            "__types.widen(value, type) expects a type string"
         };
-        let ty = match self.gc.get(ty.as_obj()?).map(|o| &o.kind) {
-            Some(ObjKind::String(s)) => crate::semantics::types::parse_cached(s).ok()?,
-            _ => return None,
+        let (Some(value), Some(ty)) = (args.first().copied(), args.get(1)) else {
+            return Err(VMError::new(usage));
         };
-        self.fits_fast(*value, &ty, 0).then_some(*value)
+        let ty = match ty.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::String(s)) => {
+                crate::semantics::types::parse_cached(s).map_err(|e| VMError::new(&e))?
+            }
+            _ => return Err(VMError::new(usage)),
+        };
+        if self.fits_vm(value, &ty, 0) {
+            return Ok(self.widen_vm(value, &ty, 0).unwrap_or(value));
+        }
+        if !raise {
+            return Ok(value);
+        }
+        let context = match args.get(2).and_then(|c| self.get_string(c)) {
+            Some(c) => c,
+            None => return Err(VMError::new(usage)),
+        };
+        // The violation message describes the value like the interpreter
+        // (functions do not cross the value conversion).
+        let described = if self.is_callable_value(&value) {
+            crate::interpreter::Value::BuiltIn(String::new())
+        } else {
+            self.args_to_interp(&[value])?
+                .pop()
+                .unwrap_or(crate::interpreter::Value::Null)
+        };
+        Err(VMError::new(&crate::semantics::types::violation(
+            &context, &ty, &described,
+        )))
     }
 
     /// `__types.bind(type_param, function, names, values...)` on VM values
@@ -149,38 +179,226 @@ impl VM {
         }
     }
 
-    /// A conservative `semantics::types::fits` on VM values: `true` only
-    /// when the value fits.
-    fn fits_fast(
+    /// The `__type__` tag of a VM object (`None` for an untagged object).
+    fn object_tag<'a>(&'a self, map: &'a IndexMap<String, Value>) -> Option<&'a str> {
+        let r = map.get("__type__")?.as_obj()?;
+        match &self.gc.get(r)?.kind {
+            ObjKind::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// `semantics::types::fits` on VM values (same rule; the VM's Option
+    /// values are `Option`-tagged objects, its functions closures).
+    fn fits_vm(
         &self,
         value: Value,
         ty: &crate::semantics::types::RuntimeType,
         depth: usize,
     ) -> bool {
         use crate::semantics::types::RuntimeType as T;
-        if depth > 64 {
+        if depth > crate::runtime::recursion::MAX_VALUE_DEPTH {
             return false;
         }
         let kind = value.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
+        if let Some(ObjKind::Frozen(inner)) = kind {
+            return self.fits_vm(*inner, ty, depth + 1);
+        }
+        let all = |items: &[Value], t: &T| items.iter().all(|v| self.fits_vm(*v, t, depth + 1));
         match (ty, kind) {
             (T::Any, _) => true,
             (T::Int, _) => value.is_int(&self.gc),
             (T::Float, _) => value.is_int(&self.gc) || value.as_float().is_some(),
             (T::Bool, _) => value.as_bool().is_some(),
             (T::Null, _) => value.is_null(),
-            (T::Option(_), _) if value.is_null() => true,
             (T::String, Some(ObjKind::String(_))) => true,
-            (T::Array(elem), Some(ObjKind::Array(items))) => {
-                items.iter().all(|v| self.fits_fast(*v, elem, depth + 1))
+            (T::Object, Some(ObjKind::Object(map))) => self.object_tag(map) != Some("Option"),
+            (T::Fn, _) => self.is_callable_value(&value),
+            (T::Array(elem), Some(ObjKind::Array(items))) => all(items, elem),
+            (T::Set(elem), Some(ObjKind::Set(items))) => all(items, elem),
+            (T::Map(k, v), Some(ObjKind::Map(pairs))) => pairs
+                .iter()
+                .all(|(a, b)| self.fits_vm(*a, k, depth + 1) && self.fits_vm(*b, v, depth + 1)),
+            (T::Tuple(types), Some(ObjKind::Tuple(items))) => {
+                types.len() == items.len()
+                    && items
+                        .iter()
+                        .zip(types)
+                        .all(|(v, t)| self.fits_vm(*v, t, depth + 1))
             }
-            (T::Named(name), Some(ObjKind::Object(map))) => map
-                .get("__type__")
-                .and_then(|t| t.as_obj())
-                .and_then(|r| self.gc.get(r))
-                .is_some_and(|o| matches!(&o.kind, ObjKind::String(s) if s == name)),
-            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.fits_fast(*v, ok, depth + 1),
-            (T::Result(_, err), Some(ObjKind::ResultErr(e))) => self.fits_fast(*e, err, depth + 1),
-            (T::Union(members), _) => members.iter().any(|m| self.fits_fast(value, m, depth + 1)),
+            (T::Option(_), _) if value.is_null() => true,
+            (T::Option(inner), _) => match self.option_parts(&value) {
+                Some(Some(payload)) => self.fits_vm(payload, inner, depth + 1),
+                Some(None) => true,
+                None => self.fits_vm(value, inner, depth + 1),
+            },
+            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.fits_vm(*v, ok, depth + 1),
+            (T::Result(_, err), Some(ObjKind::ResultErr(e))) => self.fits_vm(*e, err, depth + 1),
+            (T::Union(members), _) => members.iter().any(|m| self.fits_vm(value, m, depth + 1)),
+            (T::Named(name), Some(ObjKind::Object(map))) => {
+                self.object_tag(map) == Some(name.as_str())
+            }
+            _ => false,
+        }
+    }
+
+    /// `semantics::types::widen` on VM values (same rule): `Some(value)`
+    /// with every Int at a position `ty` declares Float made a Float, for a
+    /// value that fits `ty`; `None` when nothing changes. Containers are
+    /// copied (values, not shared).
+    fn widen_vm(
+        &mut self,
+        value: Value,
+        ty: &crate::semantics::types::RuntimeType,
+        depth: usize,
+    ) -> Option<Value> {
+        use crate::semantics::types::RuntimeType as T;
+        if depth > crate::runtime::recursion::MAX_VALUE_DEPTH
+            || !crate::semantics::types::mentions_float(ty)
+        {
+            return None;
+        }
+        if matches!(ty, T::Float) {
+            return value.as_int(&self.gc).map(|n| Value::float(n as f64));
+        }
+        if let T::Union(members) = ty {
+            if members
+                .iter()
+                .any(|m| self.fits_vm(value, m, depth + 1) && !self.widens_vm(value, m, depth + 1))
+            {
+                return None;
+            }
+            let member = members.iter().find(|m| self.fits_vm(value, m, depth + 1))?;
+            return self.widen_vm(value, member, depth + 1);
+        }
+        if !self.widens_vm(value, ty, depth) {
+            return None;
+        }
+        // A snapshot of the container (the copy that is widened below).
+        let kind = value
+            .as_obj()
+            .and_then(|r| self.gc.get(r))
+            .and_then(|o| match &o.kind {
+                ObjKind::Frozen(v) => Some(ObjKind::Frozen(*v)),
+                ObjKind::Array(items) => Some(ObjKind::Array(items.clone())),
+                ObjKind::Tuple(items) => Some(ObjKind::Tuple(items.clone())),
+                ObjKind::Map(pairs) => Some(ObjKind::Map(pairs.clone())),
+                ObjKind::ResultOk(v) => Some(ObjKind::ResultOk(*v)),
+                ObjKind::ResultErr(v) => Some(ObjKind::ResultErr(*v)),
+                _ => None,
+            });
+        let widen_items = |vm: &mut VM, items: &[Value], t: &T| -> Option<Vec<Value>> {
+            let mut out = Vec::with_capacity(items.len());
+            let mut changed = false;
+            for v in items {
+                match vm.widen_vm(*v, t, depth + 1) {
+                    Some(w) => {
+                        changed = true;
+                        out.push(w);
+                    }
+                    None => out.push(*v),
+                }
+            }
+            changed.then_some(out)
+        };
+        let kind = match (ty, kind) {
+            (_, Some(ObjKind::Frozen(inner))) => {
+                ObjKind::Frozen(self.widen_vm(inner, ty, depth + 1)?)
+            }
+            (T::Array(elem), Some(ObjKind::Array(items))) => {
+                ObjKind::Array(widen_items(self, &items, elem)?)
+            }
+            (T::Tuple(types), Some(ObjKind::Tuple(items))) if types.len() == items.len() => {
+                let mut out = Vec::with_capacity(items.len());
+                let mut changed = false;
+                for (v, t) in items.iter().zip(types) {
+                    match self.widen_vm(*v, t, depth + 1) {
+                        Some(w) => {
+                            changed = true;
+                            out.push(w);
+                        }
+                        None => out.push(*v),
+                    }
+                }
+                if !changed {
+                    return None;
+                }
+                ObjKind::Tuple(out)
+            }
+            (T::Map(_, vt), Some(ObjKind::Map(pairs))) => {
+                let values: Vec<Value> = pairs.iter().map(|(_, v)| *v).collect();
+                let widened = widen_items(self, &values, vt)?;
+                ObjKind::Map(
+                    pairs
+                        .iter()
+                        .zip(widened)
+                        .map(|((k, _), v)| (*k, v))
+                        .collect(),
+                )
+            }
+            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => {
+                ObjKind::ResultOk(self.widen_vm(v, ok, depth + 1)?)
+            }
+            (T::Result(_, err), Some(ObjKind::ResultErr(v))) => {
+                ObjKind::ResultErr(self.widen_vm(v, err, depth + 1)?)
+            }
+            (T::Option(inner), _) => {
+                return match self.option_parts(&value) {
+                    Some(Some(payload)) => {
+                        let widened = self.widen_vm(payload, inner, depth + 1)?;
+                        Some(self.alloc_option_some(widened))
+                    }
+                    Some(None) => None,
+                    None if value.is_null() => None,
+                    None => self.widen_vm(value, inner, depth + 1),
+                };
+            }
+            _ => return None,
+        };
+        Some(Value::obj(self.gc.alloc(kind)))
+    }
+
+    /// Would [`Self::widen_vm`] change `value` (without allocating)?
+    fn widens_vm(
+        &self,
+        value: Value,
+        ty: &crate::semantics::types::RuntimeType,
+        depth: usize,
+    ) -> bool {
+        use crate::semantics::types::RuntimeType as T;
+        if depth > crate::runtime::recursion::MAX_VALUE_DEPTH
+            || !crate::semantics::types::mentions_float(ty)
+        {
+            return false;
+        }
+        let kind = value.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
+        let any = |items: &[Value], t: &T| items.iter().any(|v| self.widens_vm(*v, t, depth + 1));
+        match (ty, kind) {
+            (_, Some(ObjKind::Frozen(inner))) => self.widens_vm(*inner, ty, depth + 1),
+            (T::Float, _) => value.is_int(&self.gc),
+            (T::Union(members), _) => {
+                !members.iter().any(|m| {
+                    self.fits_vm(value, m, depth + 1) && !self.widens_vm(value, m, depth + 1)
+                }) && members
+                    .iter()
+                    .find(|m| self.fits_vm(value, m, depth + 1))
+                    .is_some_and(|m| self.widens_vm(value, m, depth + 1))
+            }
+            (T::Array(elem), Some(ObjKind::Array(items))) => any(items, elem),
+            (T::Tuple(types), Some(ObjKind::Tuple(items))) if types.len() == items.len() => items
+                .iter()
+                .zip(types)
+                .any(|(v, t)| self.widens_vm(*v, t, depth + 1)),
+            (T::Map(_, vt), Some(ObjKind::Map(pairs))) => {
+                pairs.iter().any(|(_, v)| self.widens_vm(*v, vt, depth + 1))
+            }
+            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.widens_vm(*v, ok, depth + 1),
+            (T::Result(_, err), Some(ObjKind::ResultErr(v))) => self.widens_vm(*v, err, depth + 1),
+            (T::Option(inner), _) => match self.option_parts(&value) {
+                Some(Some(payload)) => self.widens_vm(payload, inner, depth + 1),
+                Some(None) => false,
+                None => !value.is_null() && self.widens_vm(value, inner, depth + 1),
+            },
             _ => false,
         }
     }
@@ -208,18 +426,10 @@ impl VM {
             // of an annotated function: decide the common cases on VM values
             // directly; anything else (and every violation, for its message)
             // takes the shared implementation.
-            "__types.check" => match self.types_check_fast(&args) {
-                Some(value) => Ok(value),
-                None => {
-                    // The shared check raises on a violation; on success
-                    // it returns its argument, which must stay the
-                    // original VM value: a round trip through interpreter
-                    // values does not preserve every kind (`Ok(1)` came
-                    // back as null).
-                    self.call_shared_module(name, &args)?;
-                    Ok(args.first().copied().unwrap_or(Value::null()))
-                }
-            },
+            // Decided on VM values (a round trip through interpreter values
+            // does not preserve every kind: closures, `Ok(1)`).
+            "__types.check" => self.types_check(&args, true),
+            "__types.widen" => self.types_check(&args, false),
             "__types.bind" => match self.types_bind_fast(&args) {
                 Some(bound) => Ok(self.alloc_string(&bound)),
                 None => self.call_shared_module(name, &args),
@@ -3367,14 +3577,14 @@ impl VM {
                 let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
                 match &*guard {
                     Some(rx) => match rx.try_recv() {
+                        // `Some(v)` / `None`, like the interpreter.
                         Ok(shared) => {
                             let val = shared_to_value(&mut self.gc, &shared);
-                            let r = self.gc.alloc(ObjKind::ResultOk(val));
-                            Ok(Value::obj(r))
+                            Ok(self.alloc_option_some(val))
                         }
-                        Err(_) => Ok(Value::null()),
+                        Err(_) => Ok(self.alloc_option_none()),
                     },
-                    None => Ok(Value::null()),
+                    None => Ok(self.alloc_option_none()),
                 }
             }
             "select" => {
