@@ -1,0 +1,254 @@
+// Edition 2027 copy of tests/nested_place_mutation_test.fg: the method
+// form updates nested places (`g[k].push(x)`, `o.a.pop()`) in 2027 too,
+// while the free function `push(xs, v)` stays pure
+// (tests/edition2027/functional_push_test.fg). Run with:
+//   forge --edition 2027 test tests/edition2027 --engine both
+
+@test
+fn push_on_a_nested_place_updates_it() {
+    let mut g = { a: [1] }
+    g["a"].push(2)
+    g.a.push(3)
+    let k = "a"
+    g[k].push(4)
+    assert_eq(g, { a: [1, 2, 3, 4] })
+    let mut arr = [[1], [2]]
+    arr[0].push(9)
+    arr[-1].push(8)
+    assert_eq(arr, [[1, 9], [2, 8]])
+}
+
+@test
+fn pop_on_a_nested_place_removes_and_returns() {
+    let mut o = { xs: [[1], [2]] }
+    let last = o.xs.pop()
+    assert_eq(last, [2])
+    assert_eq(o, { xs: [[1]] })
+    let mut grid = [[1, 2, 3]]
+    assert_eq(grid[0].pop(), 3)
+    assert_eq(grid, [[1, 2]])
+    let mut e = { s: [] }
+    assert_eq(e.s.pop(), null)
+    assert_eq(e, { s: [] })
+}
+
+@test
+fn deeper_places_update_too() {
+    let mut cfg = { a: { b: [[0]] } }
+    cfg.a.b[0].push(1)
+    cfg.a.b.push([2])
+    cfg["a"]["b"][1].push(3)
+    assert_eq(cfg, { a: { b: [[0, 1], [2, 3]] } })
+    assert_eq(cfg.a.b[1].pop(), 3)
+    assert_eq(cfg, { a: { b: [[0, 1], [2]] } })
+}
+
+@test
+fn push_evaluates_to_the_updated_array() {
+    let mut o = { xs: [1] }
+    let r = o.xs.push(2)
+    assert_eq(r, [1, 2])
+    o.xs.push(3)
+    assert_eq(r, [1, 2])
+    assert_eq(o.xs, [1, 2, 3])
+    assert_eq(len(o.xs.push(4)), 4)
+    assert_eq(o.xs, [1, 2, 3, 4])
+}
+
+@test
+fn grouping_with_a_nested_push() {
+    let pairs = [["a", 1], ["b", 2], ["a", 3], ["c", 4], ["b", 5]]
+    let mut groups = {}
+    for p in pairs {
+        let k = p[0]
+        if !has_key(groups, k) {
+            groups[k] = []
+        }
+        groups[k].push(p[1])
+    }
+    assert_eq(groups, { a: [1, 3], b: [2, 5], c: [4] })
+    let mut counts = {}
+    for p in pairs {
+        counts[p[0]] = get(counts, p[0], 0) + 1
+    }
+    assert_eq(counts, { a: 2, b: 2, c: 1 })
+}
+
+@test
+fn aliases_never_see_nested_updates() {
+    let mut g = { a: [1] }
+    let snapshot = g
+    let inner = g.a
+    g.a.push(2)
+    assert_eq(snapshot, { a: [1] })
+    assert_eq(inner, [1])
+    let mut h = { a: [1] }
+    h.a.push(2)
+    let held = [h]
+    let part = h["a"]
+    h.a.push(3)
+    h["a"].push(4)
+    assert_eq(held, [{ a: [1, 2] }])
+    assert_eq(part, [1, 2])
+    assert_eq(h, { a: [1, 2, 3, 4] })
+    let before_pop = h
+    h.a.pop()
+    assert_eq(before_pop.a, [1, 2, 3, 4])
+    assert_eq(h.a, [1, 2, 3])
+}
+
+@test
+fn pushed_values_stay_independent() {
+    let mut rows = { all: [] }
+    let mut row = [1]
+    rows.all.push(row)
+    row.push(2)
+    rows.all[0].push(9)
+    assert_eq(row, [1, 2])
+    assert_eq(rows, { all: [[1, 9]] })
+    let mut m = { cell: [0] }
+    let mut other = { cell: [5] }
+    m.cell = other.cell
+    m.cell.push(1)
+    other.cell.push(6)
+    assert_eq(m.cell, [5, 1])
+    assert_eq(other.cell, [5, 6])
+}
+
+fn add_item(o) {
+    o.items.push(99)
+    return o
+}
+
+@test
+fn a_nested_push_on_a_parameter_leaves_the_caller_alone() {
+    let mut bag = { items: [1] }
+    bag.items.push(2)
+    let out = add_item(bag)
+    assert_eq(out.items, [1, 2, 99])
+    assert_eq(bag.items, [1, 2])
+}
+
+@test
+fn a_nested_push_in_a_closure_updates_the_captured_variable() {
+    let mut state = { log: [] }
+    let note = fn(x) { state.log.push(x) }
+    note("a")
+    note("b")
+    assert_eq(state.log, ["a", "b"])
+    let seen = state
+    note("c")
+    assert_eq(seen.log, ["a", "b"])
+    assert_eq(state.log, ["a", "b", "c"])
+}
+
+@test
+fn set_add_and_remove_on_a_nested_place() {
+    let mut o = { seen: set([1]) }
+    o.seen.add(2)
+    o.seen.add(2)
+    o.seen.remove(1)
+    assert_eq(o.seen.has(2), true)
+    assert_eq(o.seen.has(1), false)
+    assert_eq(len(o.seen), 1)
+}
+
+@test
+fn index_then_arguments_then_the_place() {
+    let mut log = []
+    let mut g = { a: [], b: [] }
+    let key = fn() {
+        log.push("index")
+        return "a"
+    }
+    let value = fn() {
+        log.push("value")
+        return 1
+    }
+    g[key()].push(value())
+    assert_eq(log, ["index", "value"])
+    assert_eq(g, { a: [1], b: [] })
+    // An argument that itself updates the place: the method applies to
+    // the place's value after the arguments ran.
+    let mut h = { a: [1] }
+    let grow = fn() {
+        h.a.push(2)
+        return 3
+    }
+    h.a.push(grow())
+    assert_eq(h.a, [1, 2, 3])
+}
+
+@test
+fn an_immutable_root_is_an_error() {
+    let o = { a: [1] }
+    let mut msg = ""
+    try {
+        o.a.push(2)
+    } catch e {
+        msg = e.message
+    }
+    assert(contains(msg, "immutable"), msg)
+    assert_eq(o, { a: [1] })
+    let grid = json.parse("[[1]]")
+    assert_throws(fn() { grid[0].pop() })
+    assert_eq(grid, [[1]])
+}
+
+@test
+fn frozen_values_are_not_changed() {
+    let mut o = { a: freeze([1]) }
+    let mut msg = ""
+    try {
+        o.a.push(2)
+    } catch e {
+        msg = e.message
+    }
+    assert(contains(msg, "frozen"), msg)
+    let mut f = freeze({ a: [1] })
+    assert_throws(fn() { f.a.push(2) })
+    assert_eq(f.a, [1])
+}
+
+struct Stack {
+    items: [Int]
+}
+
+impl Stack {
+    fn push(it, x) {
+        return len(it.items) + x
+    }
+}
+
+@test
+fn a_value_with_its_own_push_method_gets_a_method_call() {
+    let mut holder = { s: Stack { items: [1, 2] } }
+    assert_eq(holder.s.push(10), 12)
+    assert_eq(holder.s.items, [1, 2])
+    let fixed = { s: Stack { items: [7] } }
+    assert_eq(fixed.s.push(1), 2)
+}
+
+@test
+fn object_building_and_record_lists_keep_value_semantics() {
+    let mut ob = {}
+    let mut copies = []
+    for i in range(0, 50) {
+        ob["k" + str(i)] = i
+        if i % 10 == 0 {
+            copies.push(ob)
+        }
+    }
+    assert_eq(len(ob), 50)
+    assert_eq(len(copies[0]), 1)
+    assert_eq(len(copies[4]), 41)
+    let mut recs = []
+    for i in range(0, 20) {
+        recs.push({ id: i })
+    }
+    let first = recs[0]
+    recs[0].id = 100
+    assert_eq(first.id, 0)
+    assert_eq(recs[0].id, 100)
+    assert_eq(recs[19], { id: 19 })
+}

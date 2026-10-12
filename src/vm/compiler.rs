@@ -934,6 +934,37 @@ fn compile_store_variable(c: &mut Compiler, name: &str, src: u8) -> Result<(), C
 fn compile_store(c: &mut Compiler, target: &Expr, src: u8) -> Result<(), CompileError> {
     match target {
         Expr::Ident(name) => compile_store_variable(c, name, src),
+        // `local.field = v` / `local[i] = v` on a mutable local: one opcode
+        // that updates the container in place when the local owns it
+        // (`vm::local_ops`). The index is evaluated before the local is
+        // read, as in the interpreter.
+        Expr::FieldAccess { object, field } if mutable_local_reg(c, object).is_some() => {
+            let reg = mutable_local_reg(c, object).expect("BUG: checked by the guard");
+            match field_operand(c, field) {
+                Some(k) => {
+                    c.emit(encode_abc(OpCode::SetFieldLocal, reg, k, src), 0);
+                    Ok(())
+                }
+                None => {
+                    let saved = c.next_register;
+                    let obj_reg = c.alloc_reg()?;
+                    compile_expr(c, object, obj_reg)?;
+                    emit_set_field(c, obj_reg, field, src)?;
+                    store_back(c, object, obj_reg)?;
+                    c.free_to(saved);
+                    Ok(())
+                }
+            }
+        }
+        Expr::Index { object, index } if mutable_local_reg(c, object).is_some() => {
+            let reg = mutable_local_reg(c, object).expect("BUG: checked by the guard");
+            let saved = c.next_register;
+            let idx_reg = c.alloc_reg()?;
+            compile_expr(c, index, idx_reg)?;
+            c.emit(encode_abc(OpCode::SetIndexLocal, reg, idx_reg, src), 0);
+            c.free_to(saved);
+            Ok(())
+        }
         Expr::FieldAccess { object, field } => {
             let saved = c.next_register;
             let obj_reg = c.alloc_reg()?;
@@ -1145,13 +1176,265 @@ fn variant_object_expr(type_name: &str, variant_name: &str, field_params: &[Stri
     Expr::Object(fields)
 }
 
-/// Methods that, called on a mutable variable, rebind that variable to the
-/// updated collection (`xs.push(v)`, `xs.pop()`, `s.add(v)`, `s.remove(v)`).
-fn is_mutating_method(method: &str, arg_count: usize) -> bool {
-    matches!(
-        (method, arg_count),
-        ("push", 1) | ("pop", 0) | ("add", 1) | ("remove", 1)
-    )
+use crate::semantics::is_mutating_method;
+
+/// A chain of fields and indexes rooted at a variable (`g[k].a`): the root
+/// name and the steps in order (`Ok(field)` / `Err(index expression)`).
+fn place_path(target: &Expr) -> Option<(&str, Vec<Result<&str, &Expr>>)> {
+    let mut steps = Vec::new();
+    let mut cur = target;
+    let root = loop {
+        match cur {
+            Expr::FieldAccess { object, field } => {
+                steps.push(Ok(field.as_str()));
+                cur = object;
+            }
+            Expr::Index { object, index } => {
+                steps.push(Err(index.as_ref()));
+                cur = object;
+            }
+            Expr::Ident(name) => break name.as_str(),
+            _ => return None,
+        }
+    };
+    steps.reverse();
+    Some((root, steps))
+}
+
+/// A step of a place whose index expression has been evaluated.
+enum PlaceKey<'a> {
+    Field(&'a str),
+    Index(u8),
+}
+
+/// `dst = container.key` with the ordinary read rules.
+fn emit_place_read(
+    c: &mut Compiler,
+    dst: u8,
+    container: u8,
+    key: &PlaceKey<'_>,
+) -> Result<(), CompileError> {
+    match key {
+        PlaceKey::Field(field) => emit_get_field(c, dst, container, field),
+        PlaceKey::Index(index) => {
+            c.emit(encode_abc(OpCode::GetIndex, dst, container, *index), 0);
+            Ok(())
+        }
+    }
+}
+
+/// `container.key = value`: replaces `container` with the updated copy.
+fn emit_place_write(
+    c: &mut Compiler,
+    container: u8,
+    key: &PlaceKey<'_>,
+    value: u8,
+) -> Result<(), CompileError> {
+    match key {
+        PlaceKey::Field(field) => emit_set_field(c, container, field, value),
+        PlaceKey::Index(index) => {
+            c.emit(encode_abc(OpCode::SetIndex, container, *index, value), 0);
+            Ok(())
+        }
+    }
+}
+
+/// The 8-bit constant index of `field`, when it fits a `*FieldLocal`
+/// operand.
+fn field_operand(c: &mut Compiler, field: &str) -> Option<u8> {
+    let idx = c.const_str(field);
+    u8::try_from(idx).ok()
+}
+
+/// `place.method(args)` where `place` is a chain of fields and indexes
+/// rooted at a variable (`groups[k].push(x)`, `o.items.pop()`) and the
+/// method is one of the mutating ones: the place is updated, as
+/// `xs.push(x)` updates a variable. The rules are the interpreter's
+/// (`Interpreter::mutate_nested_place`):
+///
+/// * the index expressions are evaluated left to right, then the
+///   arguments, then the place is read;
+/// * `__forge_method_mut_place` applies the method; only when it changed
+///   the value (a push/pop on an array, add/remove on a set) is the new
+///   value stored back, level by level (`SetIndex` / `SetField` copies,
+///   `SetIndexLocal` / `SetFieldLocal` on a local root);
+/// * on an immutable root a change is the immutable-assignment error.
+fn try_compile_place_method(
+    c: &mut Compiler,
+    place: &Expr,
+    method: &str,
+    args: &[Expr],
+    dst: u8,
+) -> Result<bool, CompileError> {
+    if !matches!(place, Expr::FieldAccess { .. } | Expr::Index { .. })
+        || !is_mutating_method(method, args.len())
+    {
+        return Ok(false);
+    }
+    let Some((root, steps)) = place_path(place) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let mut keys = Vec::with_capacity(steps.len());
+    for step in &steps {
+        keys.push(match step {
+            Ok(field) => PlaceKey::Field(field),
+            Err(index) => {
+                let r = c.alloc_reg()?;
+                compile_expr(c, index, r)?;
+                PlaceKey::Index(r)
+            }
+        });
+    }
+    let triple_reg = c.alloc_reg()?;
+    let recv_reg = c.alloc_reg()?;
+    let method_reg = c.alloc_reg()?;
+    let mut call_regs = vec![recv_reg, method_reg];
+    for arg in args {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+        call_regs.push(r);
+    }
+
+    // Read the chain: `levels[i]` holds the container the step `keys[i]`
+    // indexes (`levels[0]` is the root's value; unused when the root is a
+    // local read through `GetIndexLocal` / `GetFieldLocal`).
+    let local_root = c.resolve_local(root).map(|(reg, _)| reg);
+    let first_field = match &keys[0] {
+        PlaceKey::Field(field) => Some(field_operand(c, field)),
+        PlaceKey::Index(_) => None,
+    };
+    let use_local_ops = local_root.is_some() && first_field != Some(None);
+    let mut levels = Vec::with_capacity(keys.len() + 1);
+    for _ in 0..=keys.len() {
+        levels.push(c.alloc_reg()?);
+    }
+    if let (true, Some(reg)) = (use_local_ops, local_root) {
+        match (&keys[0], first_field) {
+            (PlaceKey::Index(index), _) => {
+                c.emit(encode_abc(OpCode::GetIndexLocal, levels[1], reg, *index), 0)
+            }
+            (PlaceKey::Field(_), Some(Some(k))) => {
+                c.emit(encode_abc(OpCode::GetFieldLocal, levels[1], reg, k), 0)
+            }
+            _ => return Err(CompileError::new("BUG: place field operand")),
+        }
+    } else {
+        compile_expr(c, &Expr::Ident(root.to_string()), levels[0])?;
+        emit_place_read(c, levels[1], levels[0], &keys[0])?;
+    }
+    for i in 1..keys.len() {
+        emit_place_read(c, levels[i + 1], levels[i], &keys[i])?;
+    }
+    c.emit(encode_abc(OpCode::Move, recv_reg, levels[keys.len()], 0), 0);
+    let method_idx = c.const_str(method);
+    c.emit(encode_abx(OpCode::LoadConst, method_reg, method_idx), 0);
+    compile_hidden_call_from_regs(c, "__forge_method_mut_place", &call_regs, triple_reg)?;
+
+    let idx_reg = c.alloc_reg()?;
+    let changed_reg = c.alloc_reg()?;
+    let zero = c.const_int(0);
+    c.emit(encode_abx(OpCode::LoadConst, idx_reg, zero), 0);
+    c.emit(
+        encode_abc(OpCode::GetIndex, changed_reg, triple_reg, idx_reg),
+        0,
+    );
+    let unchanged = c.emit_jump(OpCode::JumpIfFalse, changed_reg, 0);
+    if c.binding_mutability(root) == Some(false) {
+        compile_hidden_stmt(
+            c,
+            "__forge_raise_error",
+            vec![Expr::StringLit(crate::semantics::immutable_reassign(root))],
+        )?;
+    } else {
+        let one = c.const_int(1);
+        c.emit(encode_abx(OpCode::LoadConst, idx_reg, one), 0);
+        let leaf = levels[keys.len()];
+        c.emit(encode_abc(OpCode::GetIndex, leaf, triple_reg, idx_reg), 0);
+        // Store each level into its container, innermost first.
+        for i in (1..keys.len()).rev() {
+            emit_place_write(c, levels[i], &keys[i], levels[i + 1])?;
+        }
+        if let (true, Some(reg)) = (use_local_ops, local_root) {
+            match (&keys[0], first_field) {
+                (PlaceKey::Index(index), _) => {
+                    c.emit(encode_abc(OpCode::SetIndexLocal, reg, *index, levels[1]), 0)
+                }
+                (PlaceKey::Field(_), Some(Some(k))) => {
+                    c.emit(encode_abc(OpCode::SetFieldLocal, reg, k, levels[1]), 0)
+                }
+                _ => return Err(CompileError::new("BUG: place field operand")),
+            }
+        } else {
+            emit_place_write(c, levels[0], &keys[0], levels[1])?;
+            compile_store_variable(c, root, levels[0])?;
+        }
+    }
+    c.patch_jump(unchanged);
+    let two = c.const_int(2);
+    c.emit(encode_abx(OpCode::LoadConst, idx_reg, two), 0);
+    c.emit(encode_abc(OpCode::GetIndex, dst, triple_reg, idx_reg), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// `len(local)`, `get(local, k[, d])`, `has_key(local, k)` and
+/// `contains(local, x)` with simple other arguments: the local is passed
+/// with `PeekLocal` (not shared) to a `CallPure`, so reading an owned
+/// container does not make the next in-place update copy it
+/// (`counts[w] = get(counts, w, 0) + 1`). At run time `CallPure` only
+/// keeps the borrow when the callee really is that builtin.
+fn try_compile_pure_call(
+    c: &mut Compiler,
+    function: &Expr,
+    args: &[Expr],
+    dst: u8,
+) -> Result<bool, CompileError> {
+    let Expr::Ident(name) = function else {
+        return Ok(false);
+    };
+    let arity_ok = match name.as_str() {
+        "len" => args.len() == 1,
+        "get" => args.len() == 2 || args.len() == 3,
+        "has_key" | "contains" => args.len() == 2,
+        _ => false,
+    };
+    if !arity_ok || c.resolve_local(name).is_some() || c.binding_mutability(name).is_some() {
+        return Ok(false);
+    }
+    let Some(Expr::Ident(var)) = args.first() else {
+        return Ok(false);
+    };
+    let Some((reg, _)) = c.resolve_local(var) else {
+        return Ok(false);
+    };
+    if !args[1..].iter().all(is_simple_operand) {
+        return Ok(false);
+    }
+    let saved = c.next_register;
+    let fr = c.alloc_reg()?;
+    compile_expr(c, function, fr)?;
+    let first = c.alloc_reg()?;
+    c.emit(encode_abc(OpCode::PeekLocal, first, reg, 0), 0);
+    for arg in &args[1..] {
+        let ar = c.alloc_reg()?;
+        compile_expr(c, arg, ar)?;
+    }
+    c.emit(encode_abc(OpCode::CallPure, fr, args.len() as u8, dst), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// The register of `object` when it names a mutable local (`xs` in
+/// `xs[i] = v`), whose container the `*Local` opcodes may update.
+fn mutable_local_reg(c: &Compiler, object: &Expr) -> Option<u8> {
+    match object {
+        Expr::Ident(name) => match c.resolve_local(name) {
+            Some((reg, true)) => Some(reg),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Compile `receiver.method(args)` (or `method(receiver, args)`) where the
@@ -1310,8 +1593,9 @@ fn try_compile_push_assign(
 }
 
 /// Statement `xs.push(e)` (and, in edition 2026, `push(xs, e)`) on a
-/// mutable local with a simple `e`: one `PushLocal`, in place when the
-/// local owns its array. Only in statement position, because `push` returns
+/// mutable local: one `PushLocal`, in place when the local owns its array;
+/// statement `xs[i].push(e)` / `xs.f.push(e)`: one `PushIndexLocal` /
+/// `PushFieldLocal`. Only in statement position, because `push` returns
 /// the receiver itself and a used result would be a second reference to an
 /// owned array.
 fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, CompileError> {
@@ -1338,21 +1622,60 @@ fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, Com
         },
         _ => return Ok(false),
     };
-    let Expr::Ident(var) = receiver else {
-        return Ok(false);
-    };
-    if !is_simple_operand(value) {
-        return Ok(false);
+    // The value is evaluated before the local is read, exactly as the
+    // generic lowering (`try_compile_mutating_call`) evaluates arguments
+    // before the receiver, so any value expression may take this path.
+    let method_form = !matches!(
+        expr,
+        Expr::Call { function, .. } if matches!(function.as_ref(), Expr::Ident(_))
+    );
+    match receiver {
+        Expr::Ident(var) => {
+            let Some((reg, true)) = c.resolve_local(var) else {
+                return Ok(false);
+            };
+            let saved = c.next_register;
+            let value_reg = c.alloc_reg()?;
+            compile_expr(c, value, value_reg)?;
+            c.emit(encode_abc(OpCode::PushLocal, reg, value_reg, 0), 0);
+            c.free_to(saved);
+            Ok(true)
+        }
+        // `local[i].push(v)` / `local.field.push(v)` (method form only):
+        // index, then value, then the place is read, as in
+        // `try_compile_place_method`.
+        Expr::Index { object, index } if method_form => {
+            let Some(reg) = mutable_local_reg(c, object) else {
+                return Ok(false);
+            };
+            let saved = c.next_register;
+            let index_reg = c.alloc_reg()?;
+            compile_expr(c, index, index_reg)?;
+            let value_reg = c.alloc_reg()?;
+            compile_expr(c, value, value_reg)?;
+            c.emit(
+                encode_abc(OpCode::PushIndexLocal, reg, index_reg, value_reg),
+                0,
+            );
+            c.free_to(saved);
+            Ok(true)
+        }
+        Expr::FieldAccess { object, field } if method_form => {
+            let Some(reg) = mutable_local_reg(c, object) else {
+                return Ok(false);
+            };
+            let Some(k) = field_operand(c, field) else {
+                return Ok(false);
+            };
+            let saved = c.next_register;
+            let value_reg = c.alloc_reg()?;
+            compile_expr(c, value, value_reg)?;
+            c.emit(encode_abc(OpCode::PushFieldLocal, reg, k, value_reg), 0);
+            c.free_to(saved);
+            Ok(true)
+        }
+        _ => Ok(false),
     }
-    let Some((reg, true)) = c.resolve_local(var) else {
-        return Ok(false);
-    };
-    let saved = c.next_register;
-    let value_reg = c.alloc_reg()?;
-    compile_expr(c, value, value_reg)?;
-    c.emit(encode_abc(OpCode::PushLocal, reg, value_reg, 0), 0);
-    c.free_to(saved);
-    Ok(true)
 }
 
 /// Store `src` into the variable `name` (local, captured or global).
@@ -2829,7 +3152,9 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::Call { function, args } => {
             if let Expr::FieldAccess { object, field } = function.as_ref() {
-                if try_compile_mutating_call(c, object, field, args, dst)? {
+                if try_compile_mutating_call(c, object, field, args, dst)?
+                    || try_compile_place_method(c, object, field, args, dst)?
+                {
                     return Ok(());
                 }
                 let mut lowered_args = Vec::with_capacity(args.len() + 2);
@@ -2857,6 +3182,9 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                     }
                 }
             }
+            if try_compile_pure_call(c, function, args, dst)? {
+                return Ok(());
+            }
             let saved = c.next_register;
             let fr = c.alloc_reg()?;
             compile_expr(c, function, fr)?;
@@ -2877,6 +3205,16 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             c.free_to(saved);
         }
         Expr::FieldAccess { object, field } => {
+            // `local.field`: read without sharing the local's container,
+            // so an owned object stays owned.
+            if let Expr::Ident(name) = object.as_ref() {
+                if let Some((reg, _)) = c.resolve_local(name) {
+                    if let Some(k) = field_operand(c, field) {
+                        c.emit(encode_abc(OpCode::GetFieldLocal, dst, reg, k), 0);
+                        return Ok(());
+                    }
+                }
+            }
             let saved = c.next_register;
             let or = c.alloc_reg()?;
             compile_expr(c, object, or)?;
@@ -2884,6 +3222,20 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             c.free_to(saved);
         }
         Expr::Index { object, index } => {
+            // `local[i]` with an index that cannot change the local: read
+            // without sharing the local's container (`counts[w]`).
+            if let Expr::Ident(name) = object.as_ref() {
+                if let Some((reg, _)) = c.resolve_local(name) {
+                    if is_simple_operand(index) {
+                        let saved = c.next_register;
+                        let ir = c.alloc_reg()?;
+                        compile_expr(c, index, ir)?;
+                        c.emit(encode_abc(OpCode::GetIndexLocal, dst, reg, ir), 0);
+                        c.free_to(saved);
+                        return Ok(());
+                    }
+                }
+            }
             let saved = c.next_register;
             let or = c.alloc_reg()?;
             compile_expr(c, object, or)?;

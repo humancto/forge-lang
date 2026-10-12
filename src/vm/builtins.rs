@@ -713,7 +713,7 @@ impl VM {
                     None => {
                         if is_frozen && matches!(method.as_str(), "add" | "remove" | "push" | "pop")
                         {
-                            return Err(VMError::new(&format!("cannot {} a frozen value", method)));
+                            return Err(VMError::new(&crate::semantics::frozen_method(&method)));
                         }
                         let result = self.call_forge_method(receiver, &method, rest)?;
                         (receiver, result)
@@ -721,6 +721,28 @@ impl VM {
                 };
                 let pair = self.gc.alloc(ObjKind::Tuple(vec![new_receiver, result]));
                 Ok(Value::obj(pair))
+            }
+            "__forge_method_mut_place" => {
+                // (receiver, method, args...) -> (changed, new_receiver,
+                // result): `__forge_method_mut` plus whether the receiver
+                // was updated, so the compiler stores a field/index place
+                // back only when the method changed it.
+                if args.len() < 2 {
+                    return Err(VMError::new(
+                        "__forge_method_mut_place() requires (receiver, method, ...args)",
+                    ));
+                }
+                let receiver = args[0];
+                let method = self.get_string_arg(&args, 1)?;
+                let (updated, result) =
+                    self.method_mut_pair(receiver, &method, args[2..].to_vec())?;
+                let changed = updated.as_obj().is_some() && updated.as_obj() != receiver.as_obj();
+                let triple = self.gc.alloc(ObjKind::Tuple(vec![
+                    Value::bool_val(changed),
+                    updated,
+                    result,
+                ]));
+                Ok(Value::obj(triple))
             }
             "__forge_import_native" => {
                 // (path_as_written, base_dir | null, names | false)

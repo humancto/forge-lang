@@ -508,14 +508,26 @@ impl fmt::Debug for Value {
 pub struct GcObject {
     pub kind: ObjKind,
     pub marked: bool,
-    /// Single-owner bit: set only on a string or array that the VM created
-    /// for, and stored into, exactly one local-variable register (by
-    /// `AddLocal` / `PushLocal` / `PopLocal`). While it is set, no other
-    /// register, global, upvalue or heap object refers to the object, so
-    /// those opcodes may update it in place without breaking value
-    /// semantics. Every operation that copies a reference out of a local
-    /// register (`GetLocal`, `Move`, closure capture) clears it first.
+    /// Single-owner bit: set only on a string, array or object that the VM
+    /// created for, and stored into, exactly one local-variable register
+    /// (by `AddLocal` / `PushLocal` / `PopLocal` / `SetIndexLocal` /
+    /// `SetFieldLocal` / `PushIndexLocal` / `PushFieldLocal`). While it is
+    /// set, no other register, global, upvalue or heap object refers to the
+    /// object, so those opcodes may update it in place without breaking
+    /// value semantics. Every operation that copies a reference out of a
+    /// local register (`GetLocal`, `Move`, closure capture) clears it first.
+    /// See `vm::local_ops`.
     pub unique: bool,
+    /// Slot-owner bit: set only on an array that `PushIndexLocal` /
+    /// `PushFieldLocal` created and stored into one element of a container
+    /// that is itself uniquely owned by a local (`unique`). It is trusted
+    /// only through such a container: then that element is the array's
+    /// only reference and the push may append in place. Anything that
+    /// reads the element out of an owned container without first sharing
+    /// the container clears it (`Gc::share`), and a container never becomes
+    /// owned without its elements' bits being cleared
+    /// (`Gc::set_unique_container`). See `vm::local_ops`.
+    pub slot_owned: bool,
 }
 
 impl GcObject {
@@ -524,6 +536,7 @@ impl GcObject {
             kind,
             marked: false,
             unique: false,
+            slot_owned: false,
         }
     }
 

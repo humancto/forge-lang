@@ -102,11 +102,48 @@ pub enum OpCode {
     /// `R(A) += 1` and the next instruction (the loop-exit jump) is skipped;
     /// otherwise execution continues with that exit jump.
     ForRangeNext,
+    /// A=dst, B=local register, C=index register: `R(A) = local[R(C)]`
+    /// (`GetIndex` semantics) without copying the local's reference into
+    /// another register, so a uniquely owned container stays owned. The
+    /// compiler emits it only when evaluating the index cannot change the
+    /// local (`is_simple_operand`); the element read out is shared.
+    GetIndexLocal,
+    /// A=dst, B=local register, C=field name constant: `R(A) = local.field`
+    /// (`GetField` semantics), like `GetIndexLocal`.
+    GetFieldLocal,
+    /// A=local register, B=index register, C=value register:
+    /// `local[R(B)] = R(C)` on a mutable local (`SetIndex` + store back).
+    /// Updates the container in place when the local uniquely owns it;
+    /// otherwise stores an updated copy, which the local then owns.
+    SetIndexLocal,
+    /// A=local register, B=field name constant, C=value register:
+    /// `local.field = R(C)`, like `SetIndexLocal` (`SetField` semantics).
+    SetFieldLocal,
+    /// A=local register, B=index register, C=value register: statement
+    /// `local[R(B)].push(R(C))` on a mutable local. Appends in place when
+    /// the local owns its container and the container owns the element
+    /// (`GcObject::slot_owned`); otherwise behaves exactly like reading the
+    /// element, `__forge_method_mut` and storing both levels back.
+    PushIndexLocal,
+    /// A=local register, B=field name constant, C=value register: statement
+    /// `local.field.push(R(C))`, like `PushIndexLocal`.
+    PushFieldLocal,
+    /// A=dst, B=local register: `R(A) = local` *without* sharing it. Only
+    /// emitted for an argument of the `CallPure` that immediately follows
+    /// the call's arguments, so the copy never outlives the call.
+    PeekLocal,
+    /// A=callee register, B=argument count, C=dst: like `Call`, for a call
+    /// whose arguments may include `PeekLocal` copies. When the callee is
+    /// one of the builtins in `machine::PURE_BORROW_BUILTINS` (which never
+    /// keep or return their arguments) the call runs with the borrowed
+    /// arguments and its result is shared; otherwise every argument is
+    /// shared first and the call proceeds exactly as `Call`.
+    CallPure,
 }
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::ForRangeNext as u8 + 1 == 69);
+const _: () = assert!(OpCode::CallPure as u8 + 1 == 77);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -182,6 +219,14 @@ impl TryFrom<u8> for OpCode {
             66 => Ok(OpCode::PopLocal),
             67 => Ok(OpCode::ForRangePrep),
             68 => Ok(OpCode::ForRangeNext),
+            69 => Ok(OpCode::GetIndexLocal),
+            70 => Ok(OpCode::GetFieldLocal),
+            71 => Ok(OpCode::SetIndexLocal),
+            72 => Ok(OpCode::SetFieldLocal),
+            73 => Ok(OpCode::PushIndexLocal),
+            74 => Ok(OpCode::PushFieldLocal),
+            75 => Ok(OpCode::PeekLocal),
+            76 => Ok(OpCode::CallPure),
             _ => Err(value),
         }
     }
@@ -417,7 +462,16 @@ mod tests {
         assert_eq!(OpCode::try_from(66u8), Ok(OpCode::PopLocal));
         assert_eq!(OpCode::try_from(67u8), Ok(OpCode::ForRangePrep));
         assert_eq!(OpCode::try_from(68u8), Ok(OpCode::ForRangeNext));
-        assert_eq!(OpCode::try_from(69u8), Err(69));
+        assert_eq!(OpCode::try_from(69u8), Ok(OpCode::GetIndexLocal));
+        assert_eq!(OpCode::try_from(74u8), Ok(OpCode::PushFieldLocal));
+        assert_eq!(OpCode::try_from(76u8), Ok(OpCode::CallPure));
+        assert_eq!(OpCode::try_from(77u8), Err(77));
+        // Every byte below the count decodes to the variant with that
+        // discriminant.
+        for byte in 0..77u8 {
+            let op = OpCode::try_from(byte).expect("BUG: valid opcode byte");
+            assert_eq!(op as u8, byte);
+        }
         assert_eq!(OpCode::try_from(255u8), Err(255));
     }
 }

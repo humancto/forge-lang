@@ -235,9 +235,11 @@ fn pushing_object_and_tuple_literals_compiles_to_push_local() {
         );
         assert!(uses_push_local(&source, Edition::E2026), "{value}");
     }
-    // A literal holding a call runs user code: it stays a method call.
+    // A value holding a call runs user code; the statement still appends in
+    // place, because `PushLocal` (like the generic method call) evaluates
+    // the value before it reads the local.
     let call = "fn g() { return 1 }\nfn f() {\n let mut xs = []\n xs.push({v: g()})\n return xs\n}";
-    assert!(!uses_push_local(call, Edition::E2026));
+    assert!(uses_push_local(call, Edition::E2026));
 }
 
 #[test]

@@ -440,6 +440,30 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                 self.name_constant(ip, b as usize)?;
                 self.reg(ip, "value", c)?;
             }
+            GetIndexLocal | SetIndexLocal | PushIndexLocal => {
+                self.reg(ip, "A", a)?;
+                self.reg(ip, "B", b)?;
+                self.reg(ip, "C", c)?;
+            }
+            GetFieldLocal => {
+                self.reg(ip, "destination", a)?;
+                self.reg(ip, "local", b)?;
+                self.name_constant(ip, c as usize)?;
+            }
+            SetFieldLocal | PushFieldLocal => {
+                self.reg(ip, "local", a)?;
+                self.name_constant(ip, b as usize)?;
+                self.reg(ip, "value", c)?;
+            }
+            PeekLocal => {
+                self.reg(ip, "destination", a)?;
+                self.reg(ip, "local", b)?;
+            }
+            CallPure => {
+                self.reg(ip, "callee", a)?;
+                self.reg_range(ip, "argument", a as usize + 1, b as usize)?;
+                self.reg(ip, "destination", c)?;
+            }
             ForRangePrep => {
                 // Counting loop (vm/range_loop.rs): reads the callee in R(A)
                 // and its B arguments, writes the bounds to R(A), R(A+1)

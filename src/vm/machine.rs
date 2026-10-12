@@ -7,6 +7,7 @@ use std::time::Duration;
 use super::bytecode::*;
 use super::frame::*;
 use super::gc::Gc;
+use super::local_ops::ElemKey;
 use super::profiler::Profiler;
 use super::value::*;
 
@@ -163,7 +164,13 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_check",
     "__forge_when_matches",
     "__forge_method_mut",
+    "__forge_method_mut_place",
 ];
+
+/// Builtins a `CallPure` may call with borrowed (`PeekLocal`) arguments:
+/// they only read their arguments, never store them anywhere and never call
+/// back into Forge code. Their result is shared (`get` returns an element).
+pub(super) const PURE_BORROW_BUILTINS: &[&str] = &["len", "get", "has_key", "contains"];
 
 pub struct VM {
     pub registers: Vec<Value>,
@@ -1253,6 +1260,55 @@ impl VM {
                         let popped = self.pop_local(frame_idx, base, a)?;
                         self.registers[base + b as usize] = popped;
                     }
+                    OpCode::GetIndexLocal => {
+                        let key = ElemKey::Index(self.registers[base + c as usize]);
+                        let value = self.get_element_local(frame_idx, base, b, key)?;
+                        self.registers[base + a as usize] = value;
+                    }
+                    OpCode::GetFieldLocal => {
+                        let Constant::Str(field) = &chunk.constants[c as usize] else {
+                            return Err(VMError::new(
+                                "BUG: GetFieldLocal constant is not a string",
+                            ));
+                        };
+                        let value =
+                            self.get_element_local(frame_idx, base, b, ElemKey::Field(field))?;
+                        self.registers[base + a as usize] = value;
+                    }
+                    OpCode::SetIndexLocal => {
+                        let key = ElemKey::Index(self.registers[base + b as usize]);
+                        let value = self.registers[base + c as usize];
+                        self.set_element_local(frame_idx, base, a, key, value)?;
+                    }
+                    OpCode::SetFieldLocal => {
+                        let Constant::Str(field) = &chunk.constants[b as usize] else {
+                            return Err(VMError::new(
+                                "BUG: SetFieldLocal constant is not a string",
+                            ));
+                        };
+                        let value = self.registers[base + c as usize];
+                        self.set_element_local(frame_idx, base, a, ElemKey::Field(field), value)?;
+                    }
+                    OpCode::PushIndexLocal => {
+                        let key = ElemKey::Index(self.registers[base + b as usize]);
+                        let value = self.registers[base + c as usize];
+                        self.push_element_local(frame_idx, base, a, key, value)?;
+                    }
+                    OpCode::PushFieldLocal => {
+                        let Constant::Str(field) = &chunk.constants[b as usize] else {
+                            return Err(VMError::new(
+                                "BUG: PushFieldLocal constant is not a string",
+                            ));
+                        };
+                        let value = self.registers[base + c as usize];
+                        self.push_element_local(frame_idx, base, a, ElemKey::Field(field), value)?;
+                    }
+                    OpCode::PeekLocal => {
+                        // Not shared: the copy is an argument of the
+                        // `CallPure` that follows (see the opcode docs).
+                        let value = self.read_local(frame_idx, base, b)?;
+                        self.registers[base + a as usize] = value;
+                    }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
@@ -1289,7 +1345,7 @@ impl VM {
                             }
                         }
                     }
-                    OpCode::Call => {
+                    OpCode::Call | OpCode::CallPure => {
                         // Cooperative cancellation check at function call
                         if self.is_cancelled() {
                             return Err(VMError::new("task cancelled"));
@@ -1303,11 +1359,26 @@ impl VM {
                             args.push(self.registers[base + a as usize + 1 + i]);
                         }
 
+                        // `CallPure` arguments may be `PeekLocal` copies of
+                        // owned locals: only a builtin that never keeps or
+                        // returns its arguments may see them unshared.
+                        let borrowed =
+                            opcode == OpCode::CallPure && self.is_pure_borrow_builtin(func_val);
+                        if opcode == OpCode::CallPure && !borrowed {
+                            for v in &args {
+                                self.gc.share(*v);
+                            }
+                        }
+
                         // Direct calls of user functions follow the shared
                         // arity rule; callbacks invoked by builtins (which
                         // also use `call_value`) stay lenient.
                         self.check_direct_call_arity(func_val, args.len())?;
                         let result = self.call_value(func_val, args)?;
+                        if borrowed {
+                            // `get` returns an element of its argument.
+                            self.gc.share(result);
+                        }
                         self.registers[dst_reg] = result;
                     }
                     OpCode::Return => {
@@ -2929,6 +3000,14 @@ impl VM {
     }
 
     /// `crate::semantics::check_call_arity` for a closure called directly.
+    /// Whether `func` is one of [`PURE_BORROW_BUILTINS`].
+    fn is_pure_borrow_builtin(&self, func: Value) -> bool {
+        matches!(
+            func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
+            Some(ObjKind::NativeFunction(nf)) if PURE_BORROW_BUILTINS.contains(&nf.name.as_str())
+        )
+    }
+
     fn check_direct_call_arity(&self, func: Value, argc: usize) -> Result<(), VMError> {
         let kind = func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
         let Some(ObjKind::Closure(closure)) = kind else {
@@ -3052,7 +3131,7 @@ impl VM {
         Ok(Value::obj(self.gc.alloc(updated)))
     }
 
-    fn get_str_ref<'a>(&'a self, val: &Value) -> Option<&'a str> {
+    pub(super) fn get_str_ref<'a>(&'a self, val: &Value) -> Option<&'a str> {
         match val.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
             Some(ObjKind::String(s)) => Some(s.as_str()),
             _ => None,
