@@ -76,7 +76,8 @@ fn peel_frozen(value: &Value) -> &Value {
 pub(super) fn len_of(value: Option<&Value>) -> Result<Value, RuntimeError> {
     match value {
         Some(Value::String(s)) => Ok(Value::Int(s.chars().count() as i64)),
-        Some(Value::Array(a) | Value::Tuple(a) | Value::Set(a)) => Ok(Value::Int(a.len() as i64)),
+        Some(Value::Array(a) | Value::Tuple(a)) => Ok(Value::Int(a.len() as i64)),
+        Some(Value::Set(a)) => Ok(Value::Int(a.len() as i64)),
         Some(Value::Object(o)) => Ok(Value::Int(o.len() as i64)),
         Some(Value::Map(m)) => Ok(Value::Int(m.len() as i64)),
         _ => Err(RuntimeError::new(
@@ -94,9 +95,7 @@ pub(super) fn contains_of(
         (Some(Value::String(s)), Some(Value::String(sub))) => {
             Ok(Value::Bool(s.contains(sub.as_str())))
         }
-        (Some(Value::Set(arr)), Some(val)) => {
-            Ok(Value::Bool(arr.iter().any(|v| Value::container_eq(v, val))))
-        }
+        (Some(Value::Set(arr)), Some(val)) => Ok(Value::Bool(arr.has_value(val))),
         (Some(Value::Array(arr) | Value::Tuple(arr)), Some(val)) => {
             let needle = format!("{}", val);
             Ok(Value::Bool(arr.iter().any(|v| format!("{}", v) == needle)))
@@ -338,11 +337,9 @@ impl Interpreter {
                         return Err(RuntimeError::new(&format!("{}() requires a set", method)));
                     };
                     if adding {
-                        if !items.iter().any(|v| Value::container_eq(v, &val)) {
-                            items.push(val);
-                        }
+                        items.add_value(val);
                     } else {
-                        items.retain(|v| !Value::container_eq(v, &val));
+                        items.remove_value(&val);
                     }
                     Ok(if want_result {
                         cur.clone()
@@ -533,7 +530,7 @@ impl Interpreter {
                 self.env
                     .with_value(var, |v| match (peel_frozen(v), method, &arg) {
                         (Value::Set(items), "has", Some(x)) => {
-                            Some(Value::Bool(items.iter().any(|v| Value::container_eq(v, x))))
+                            Some(Value::Bool(items.has_value(x)))
                         }
                         (Value::Map(pairs), "has", Some(key)) => Some(Value::Bool(
                             pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
@@ -1047,13 +1044,11 @@ fn apply_mutating_method(
         }
         (Value::Array(items), "pop", None) => return Ok(items.pop().unwrap_or(Value::Null)),
         (Value::Set(items), "add", Some(value)) => {
-            if !items.iter().any(|v| Value::container_eq(v, &value)) {
-                items.push(value);
-            }
+            items.add_value(value);
             true
         }
         (Value::Set(items), "remove", Some(value)) => {
-            items.retain(|v| !Value::container_eq(v, &value));
+            items.remove_value(&value);
             true
         }
         _ => false,

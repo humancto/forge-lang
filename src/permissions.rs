@@ -737,7 +737,8 @@ pub fn scope(caps: Arc<Capabilities>) -> PolicyGuard {
 /// Wrap `f` so that, wherever it runs, it runs under the policy that is
 /// current *here* — and charges the resource budget that is current here
 /// ([`crate::runtime::limits`]) and writes its output into the capture that
-/// is current here ([`crate::runtime::stdio`]). Use for
+/// is current here ([`crate::runtime::stdio`]), with the database
+/// connections current here (`stdlib::db_share`). Use for
 /// `tokio::task::spawn_blocking` and friends.
 pub fn inherit<F, T>(f: F) -> impl FnOnce() -> T + Send + 'static
 where
@@ -748,11 +749,16 @@ where
     let budget = crate::runtime::limits::current();
     let output = crate::runtime::stdio::current_sink();
     let edition = crate::semantics::edition::current_override();
+    // Database connections the program opened (`stdlib::db_share`).
+    #[cfg(feature = "host")]
+    let databases = crate::stdlib::db_share::Databases::current();
     move || {
         let _guard = scope(caps);
         let _edition = crate::semantics::edition::scope(edition);
         let _limits = crate::runtime::limits::scope(budget);
         let _output = crate::runtime::stdio::scope(output);
+        #[cfg(feature = "host")]
+        let _databases = databases.enter();
         f()
     }
 }

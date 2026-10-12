@@ -84,19 +84,49 @@ impl VM {
         crate::semantics::errors::user_type_name(value.type_name(&self.gc))
     }
 
-    /// `__types.check(value, type, context)` without converting values:
-    /// `Some(value)` when `value` certainly fits `type`
-    /// (`semantics::types::fits`), `None` when the shared implementation
-    /// must decide (a violation, or a case not handled here).
-    fn types_check_fast(&self, args: &[Value]) -> Option<Value> {
-        let [value, ty, _context] = args else {
-            return None;
+    /// `__types.check(value, type, context)` (and, with `raise` false,
+    /// `__types.widen(value, type)`) on VM values: the value, with Ints
+    /// widened where `type` declares Float, when it fits `type`
+    /// (`semantics::types::fits` / `widen`, mirrored by `fits_vm` /
+    /// `widen_vm`). A value that does not fit raises the shared violation
+    /// (`check`) or is returned unchanged (`widen`).
+    fn types_check(&mut self, args: &[Value], raise: bool) -> Result<Value, VMError> {
+        let usage = if raise {
+            "__types.check(value, type, context) expects two strings"
+        } else {
+            "__types.widen(value, type) expects a type string"
         };
-        let ty = match self.gc.get(ty.as_obj()?).map(|o| &o.kind) {
-            Some(ObjKind::String(s)) => crate::semantics::types::parse_cached(s).ok()?,
-            _ => return None,
+        let (Some(value), Some(ty)) = (args.first().copied(), args.get(1)) else {
+            return Err(VMError::new(usage));
         };
-        self.fits_fast(*value, &ty, 0).then_some(*value)
+        let ty = match ty.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::String(s)) => {
+                crate::semantics::types::parse_cached(s).map_err(|e| VMError::new(&e))?
+            }
+            _ => return Err(VMError::new(usage)),
+        };
+        if self.fits_vm(value, &ty, 0) {
+            return Ok(self.widen_vm(value, &ty, 0).unwrap_or(value));
+        }
+        if !raise {
+            return Ok(value);
+        }
+        let context = match args.get(2).and_then(|c| self.get_string(c)) {
+            Some(c) => c,
+            None => return Err(VMError::new(usage)),
+        };
+        // The violation message describes the value like the interpreter
+        // (functions do not cross the value conversion).
+        let described = if self.is_callable_value(&value) {
+            crate::interpreter::Value::BuiltIn(String::new())
+        } else {
+            self.args_to_interp(&[value])?
+                .pop()
+                .unwrap_or(crate::interpreter::Value::Null)
+        };
+        Err(VMError::new(&crate::semantics::types::violation(
+            &context, &ty, &described,
+        )))
     }
 
     /// `__types.bind(type_param, function, names, values...)` on VM values
@@ -149,38 +179,228 @@ impl VM {
         }
     }
 
-    /// A conservative `semantics::types::fits` on VM values: `true` only
-    /// when the value fits.
-    fn fits_fast(
+    /// The `__type__` tag of a VM object (`None` for an untagged object).
+    fn object_tag<'a>(&'a self, map: &'a IndexMap<String, Value>) -> Option<&'a str> {
+        let r = map.get("__type__")?.as_obj()?;
+        match &self.gc.get(r)?.kind {
+            ObjKind::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// `semantics::types::fits` on VM values (same rule; the VM's Option
+    /// values are `Option`-tagged objects, its functions closures).
+    fn fits_vm(
         &self,
         value: Value,
         ty: &crate::semantics::types::RuntimeType,
         depth: usize,
     ) -> bool {
         use crate::semantics::types::RuntimeType as T;
-        if depth > 64 {
+        if depth > crate::runtime::recursion::MAX_VALUE_DEPTH {
             return false;
         }
         let kind = value.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
+        if let Some(ObjKind::Frozen(inner)) = kind {
+            return self.fits_vm(*inner, ty, depth + 1);
+        }
+        let all = |items: &[Value], t: &T| items.iter().all(|v| self.fits_vm(*v, t, depth + 1));
         match (ty, kind) {
             (T::Any, _) => true,
             (T::Int, _) => value.is_int(&self.gc),
             (T::Float, _) => value.is_int(&self.gc) || value.as_float().is_some(),
             (T::Bool, _) => value.as_bool().is_some(),
             (T::Null, _) => value.is_null(),
-            (T::Option(_), _) if value.is_null() => true,
             (T::String, Some(ObjKind::String(_))) => true,
-            (T::Array(elem), Some(ObjKind::Array(items))) => {
-                items.iter().all(|v| self.fits_fast(*v, elem, depth + 1))
+            (T::Object, Some(ObjKind::Object(map))) => self.object_tag(map) != Some("Option"),
+            (T::Fn, _) => self.is_callable_value(&value),
+            (T::Array(elem), Some(ObjKind::Array(items))) => all(items, elem),
+            (T::Set(elem), Some(ObjKind::Set(items))) => {
+                items.iter().all(|v| self.fits_vm(*v, elem, depth + 1))
             }
-            (T::Named(name), Some(ObjKind::Object(map))) => map
-                .get("__type__")
-                .and_then(|t| t.as_obj())
-                .and_then(|r| self.gc.get(r))
-                .is_some_and(|o| matches!(&o.kind, ObjKind::String(s) if s == name)),
-            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.fits_fast(*v, ok, depth + 1),
-            (T::Result(_, err), Some(ObjKind::ResultErr(e))) => self.fits_fast(*e, err, depth + 1),
-            (T::Union(members), _) => members.iter().any(|m| self.fits_fast(value, m, depth + 1)),
+            (T::Map(k, v), Some(ObjKind::Map(pairs))) => pairs
+                .iter()
+                .all(|(a, b)| self.fits_vm(*a, k, depth + 1) && self.fits_vm(*b, v, depth + 1)),
+            (T::Tuple(types), Some(ObjKind::Tuple(items))) => {
+                types.len() == items.len()
+                    && items
+                        .iter()
+                        .zip(types)
+                        .all(|(v, t)| self.fits_vm(*v, t, depth + 1))
+            }
+            (T::Option(_), _) if value.is_null() => true,
+            (T::Option(inner), _) => match self.option_parts(&value) {
+                Some(Some(payload)) => self.fits_vm(payload, inner, depth + 1),
+                Some(None) => true,
+                None => self.fits_vm(value, inner, depth + 1),
+            },
+            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.fits_vm(*v, ok, depth + 1),
+            (T::Result(_, err), Some(ObjKind::ResultErr(e))) => self.fits_vm(*e, err, depth + 1),
+            (T::Union(members), _) => members.iter().any(|m| self.fits_vm(value, m, depth + 1)),
+            (T::Named(name), Some(ObjKind::Object(map))) => {
+                self.object_tag(map) == Some(name.as_str())
+            }
+            _ => false,
+        }
+    }
+
+    /// `semantics::types::widen` on VM values (same rule): `Some(value)`
+    /// with every Int at a position `ty` declares Float made a Float, for a
+    /// value that fits `ty`; `None` when nothing changes. Containers are
+    /// copied (values, not shared).
+    fn widen_vm(
+        &mut self,
+        value: Value,
+        ty: &crate::semantics::types::RuntimeType,
+        depth: usize,
+    ) -> Option<Value> {
+        use crate::semantics::types::RuntimeType as T;
+        if depth > crate::runtime::recursion::MAX_VALUE_DEPTH
+            || !crate::semantics::types::mentions_float(ty)
+        {
+            return None;
+        }
+        if matches!(ty, T::Float) {
+            return value.as_int(&self.gc).map(|n| Value::float(n as f64));
+        }
+        if let T::Union(members) = ty {
+            if members
+                .iter()
+                .any(|m| self.fits_vm(value, m, depth + 1) && !self.widens_vm(value, m, depth + 1))
+            {
+                return None;
+            }
+            let member = members.iter().find(|m| self.fits_vm(value, m, depth + 1))?;
+            return self.widen_vm(value, member, depth + 1);
+        }
+        if !self.widens_vm(value, ty, depth) {
+            return None;
+        }
+        // A snapshot of the container (the copy that is widened below).
+        let kind = value
+            .as_obj()
+            .and_then(|r| self.gc.get(r))
+            .and_then(|o| match &o.kind {
+                ObjKind::Frozen(v) => Some(ObjKind::Frozen(*v)),
+                ObjKind::Array(items) => Some(ObjKind::Array(items.clone())),
+                ObjKind::Tuple(items) => Some(ObjKind::Tuple(items.clone())),
+                ObjKind::Map(pairs) => Some(ObjKind::Map(pairs.clone())),
+                ObjKind::ResultOk(v) => Some(ObjKind::ResultOk(*v)),
+                ObjKind::ResultErr(v) => Some(ObjKind::ResultErr(*v)),
+                _ => None,
+            });
+        let widen_items = |vm: &mut VM, items: &[Value], t: &T| -> Option<Vec<Value>> {
+            let mut out = Vec::with_capacity(items.len());
+            let mut changed = false;
+            for v in items {
+                match vm.widen_vm(*v, t, depth + 1) {
+                    Some(w) => {
+                        changed = true;
+                        out.push(w);
+                    }
+                    None => out.push(*v),
+                }
+            }
+            changed.then_some(out)
+        };
+        let kind = match (ty, kind) {
+            (_, Some(ObjKind::Frozen(inner))) => {
+                ObjKind::Frozen(self.widen_vm(inner, ty, depth + 1)?)
+            }
+            (T::Array(elem), Some(ObjKind::Array(items))) => {
+                ObjKind::Array(widen_items(self, &items, elem)?)
+            }
+            (T::Tuple(types), Some(ObjKind::Tuple(items))) if types.len() == items.len() => {
+                let mut out = Vec::with_capacity(items.len());
+                let mut changed = false;
+                for (v, t) in items.iter().zip(types) {
+                    match self.widen_vm(*v, t, depth + 1) {
+                        Some(w) => {
+                            changed = true;
+                            out.push(w);
+                        }
+                        None => out.push(*v),
+                    }
+                }
+                if !changed {
+                    return None;
+                }
+                ObjKind::Tuple(out)
+            }
+            (T::Map(_, vt), Some(ObjKind::Map(pairs))) => {
+                let values: Vec<Value> = pairs.iter().map(|(_, v)| *v).collect();
+                let widened = widen_items(self, &values, vt)?;
+                ObjKind::Map(
+                    pairs
+                        .iter()
+                        .zip(widened)
+                        .map(|((k, _), v)| (*k, v))
+                        .collect(),
+                )
+            }
+            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => {
+                ObjKind::ResultOk(self.widen_vm(v, ok, depth + 1)?)
+            }
+            (T::Result(_, err), Some(ObjKind::ResultErr(v))) => {
+                ObjKind::ResultErr(self.widen_vm(v, err, depth + 1)?)
+            }
+            (T::Option(inner), _) => {
+                return match self.option_parts(&value) {
+                    Some(Some(payload)) => {
+                        let widened = self.widen_vm(payload, inner, depth + 1)?;
+                        Some(self.alloc_option_some(widened))
+                    }
+                    Some(None) => None,
+                    None if value.is_null() => None,
+                    None => self.widen_vm(value, inner, depth + 1),
+                };
+            }
+            _ => return None,
+        };
+        Some(Value::obj(self.gc.alloc(kind)))
+    }
+
+    /// Would [`Self::widen_vm`] change `value` (without allocating)?
+    fn widens_vm(
+        &self,
+        value: Value,
+        ty: &crate::semantics::types::RuntimeType,
+        depth: usize,
+    ) -> bool {
+        use crate::semantics::types::RuntimeType as T;
+        if depth > crate::runtime::recursion::MAX_VALUE_DEPTH
+            || !crate::semantics::types::mentions_float(ty)
+        {
+            return false;
+        }
+        let kind = value.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
+        let any = |items: &[Value], t: &T| items.iter().any(|v| self.widens_vm(*v, t, depth + 1));
+        match (ty, kind) {
+            (_, Some(ObjKind::Frozen(inner))) => self.widens_vm(*inner, ty, depth + 1),
+            (T::Float, _) => value.is_int(&self.gc),
+            (T::Union(members), _) => {
+                !members.iter().any(|m| {
+                    self.fits_vm(value, m, depth + 1) && !self.widens_vm(value, m, depth + 1)
+                }) && members
+                    .iter()
+                    .find(|m| self.fits_vm(value, m, depth + 1))
+                    .is_some_and(|m| self.widens_vm(value, m, depth + 1))
+            }
+            (T::Array(elem), Some(ObjKind::Array(items))) => any(items, elem),
+            (T::Tuple(types), Some(ObjKind::Tuple(items))) if types.len() == items.len() => items
+                .iter()
+                .zip(types)
+                .any(|(v, t)| self.widens_vm(*v, t, depth + 1)),
+            (T::Map(_, vt), Some(ObjKind::Map(pairs))) => {
+                pairs.iter().any(|(_, v)| self.widens_vm(*v, vt, depth + 1))
+            }
+            (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.widens_vm(*v, ok, depth + 1),
+            (T::Result(_, err), Some(ObjKind::ResultErr(v))) => self.widens_vm(*v, err, depth + 1),
+            (T::Option(inner), _) => match self.option_parts(&value) {
+                Some(Some(payload)) => self.widens_vm(payload, inner, depth + 1),
+                Some(None) => false,
+                None => !value.is_null() && self.widens_vm(value, inner, depth + 1),
+            },
             _ => false,
         }
     }
@@ -208,18 +428,10 @@ impl VM {
             // of an annotated function: decide the common cases on VM values
             // directly; anything else (and every violation, for its message)
             // takes the shared implementation.
-            "__types.check" => match self.types_check_fast(&args) {
-                Some(value) => Ok(value),
-                None => {
-                    // The shared check raises on a violation; on success
-                    // it returns its argument, which must stay the
-                    // original VM value: a round trip through interpreter
-                    // values does not preserve every kind (`Ok(1)` came
-                    // back as null).
-                    self.call_shared_module(name, &args)?;
-                    Ok(args.first().copied().unwrap_or(Value::null()))
-                }
-            },
+            // Decided on VM values (a round trip through interpreter values
+            // does not preserve every kind: closures, `Ok(1)`).
+            "__types.check" => self.types_check(&args, true),
+            "__types.widen" => self.types_check(&args, false),
             "__types.bind" => match self.types_bind_fast(&args) {
                 Some(bound) => Ok(self.alloc_string(&bound)),
                 None => self.call_shared_module(name, &args),
@@ -671,42 +883,32 @@ impl VM {
                     .and_then(|r| self.gc.get(r))
                     .map(|o| &o.kind);
                 let is_frozen = matches!(kind, Some(ObjKind::Frozen(_)));
-                let updated: Option<(Vec<Value>, bool, Option<Value>)> =
-                    match (method.as_str(), kind, rest) {
-                        ("push", Some(ObjKind::Array(items)), [value]) => {
-                            let mut items = items.clone();
-                            items.push(*value);
-                            Some((items, false, None))
-                        }
-                        ("pop", Some(ObjKind::Array(items)), []) => {
-                            let mut items = items.clone();
-                            let popped = items.pop().unwrap_or(Value::null());
-                            Some((items, false, Some(popped)))
-                        }
-                        ("add", Some(ObjKind::Set(items)), [value]) => {
-                            let mut items = items.clone();
-                            if !items.iter().any(|v| v.set_eq(value, &self.gc)) {
-                                items.push(*value);
-                            }
-                            Some((items, true, None))
-                        }
-                        ("remove", Some(ObjKind::Set(items)), [value]) => {
-                            let items: Vec<Value> = items
-                                .iter()
-                                .filter(|v| !v.set_eq(value, &self.gc))
-                                .copied()
-                                .collect();
-                            Some((items, true, None))
-                        }
-                        _ => None,
-                    };
+                let updated: Option<(ObjKind, Option<Value>)> = match (method.as_str(), kind, rest)
+                {
+                    ("push", Some(ObjKind::Array(items)), [value]) => {
+                        let mut items = items.clone();
+                        items.push(*value);
+                        Some((ObjKind::Array(items), None))
+                    }
+                    ("pop", Some(ObjKind::Array(items)), []) => {
+                        let mut items = items.clone();
+                        let popped = items.pop().unwrap_or(Value::null());
+                        Some((ObjKind::Array(items), Some(popped)))
+                    }
+                    ("add", Some(ObjKind::Set(items)), [value]) => {
+                        let mut items = items.clone();
+                        items.add_in(*value, &self.gc);
+                        Some((ObjKind::Set(items), None))
+                    }
+                    ("remove", Some(ObjKind::Set(items)), [value]) => {
+                        let mut items = items.clone();
+                        items.remove_in(value, &self.gc);
+                        Some((ObjKind::Set(items), None))
+                    }
+                    _ => None,
+                };
                 let (new_receiver, result) = match updated {
-                    Some((items, is_set, explicit_result)) => {
-                        let kind = if is_set {
-                            ObjKind::Set(items)
-                        } else {
-                            ObjKind::Array(items)
-                        };
+                    Some((kind, explicit_result)) => {
                         let new_value = Value::obj(self.gc.alloc(kind));
                         (new_value, explicit_result.unwrap_or(new_value))
                     }
@@ -784,35 +986,50 @@ impl VM {
                 self.from_interp_checked(&namespace)
             }
             "__forge_import_module" => {
-                // (resolved_path, names | false, path_as_written)
-                if args.is_empty() || args.len() > 3 {
+                // (resolved_path, names | false, path_as_written, [[name, alias], ...]?)
+                if args.is_empty() || args.len() > 4 {
                     return Err(VMError::new(
-                        "__forge_import_module() requires (path, names, display_path)",
+                        "__forge_import_module() requires (path, names, display_path, aliases?)",
                     ));
                 }
 
-                let requested_names: Option<Vec<String>> =
-                    match args.get(1).map(|v| v.classify(&self.gc)) {
-                        Some(ValueKind::Obj(r)) => Some(
-                            self.gc
-                                .get(r)
-                                .and_then(|obj| match &obj.kind {
-                                    ObjKind::Array(items) => Some(
-                                        items
-                                            .iter()
-                                            .filter_map(|item| self.get_string(item))
-                                            .collect::<Vec<_>>(),
-                                    ),
-                                    _ => None,
-                                })
-                                .ok_or_else(|| {
-                                    VMError::new(
-                                        "__forge_import_module() names must be an array of strings",
-                                    )
-                                })?,
+                let strings = |vm: &Self, v: Option<&Value>| -> Option<Vec<String>> {
+                    let r = v?.as_obj()?;
+                    match &vm.gc.get(r)?.kind {
+                        ObjKind::Array(items) => Some(
+                            items
+                                .iter()
+                                .filter_map(|item| vm.get_string(item))
+                                .collect(),
                         ),
                         _ => None,
-                    };
+                    }
+                };
+                let requested_names: Option<Vec<String>> = match args.get(1) {
+                    Some(v) if v.as_obj().is_some() => {
+                        Some(strings(self, Some(v)).ok_or_else(|| {
+                            VMError::new(
+                                "__forge_import_module() names must be an array of strings",
+                            )
+                        })?)
+                    }
+                    _ => None,
+                };
+                // `import { a as b }`: the compiler binds `b`; the module
+                // must allow renaming `a`.
+                let aliases: Vec<Vec<String>> = match args.get(3).and_then(|v| v.as_obj()) {
+                    Some(r) => match self.gc.get(r).map(|o| &o.kind) {
+                        Some(ObjKind::Array(pairs)) => {
+                            let pairs = pairs.clone();
+                            pairs
+                                .iter()
+                                .filter_map(|p| strings(self, Some(p)))
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
 
                 // The compiler passes the canonical path of the module file
                 // plus the path as the user wrote it (for messages).
@@ -823,49 +1040,76 @@ impl VM {
                 };
                 let file_path = crate::package::resolve_import(&resolved)
                     .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
-                // Read the path that was checked (resolved under a scoped grant).
-                let checked = crate::permissions::require_import(&file_path)
-                    .map_err(|e| VMError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&checked)
-                    .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
+                let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
 
-                let program = crate::typechecker::prepare_module(&source, &path, &file_path)
-                    .map_err(|e| VMError::new(&e))?;
+                // A module runs once per program; importing it again (from
+                // here or another module) binds the globals it left.
+                let module = match self.loaded_modules.get(&key) {
+                    Some(module) => Arc::clone(module),
+                    None => {
+                        // Read the path that was checked (resolved under a
+                        // scoped grant).
+                        let checked = crate::permissions::require_import(&file_path)
+                            .map_err(|e| VMError::new(&e.to_string()))?;
+                        let source = std::fs::read_to_string(&checked).map_err(|e| {
+                            VMError::new(&format!("cannot import '{}': {}", path, e))
+                        })?;
 
-                let export_names = requested_names
-                    .unwrap_or_else(|| crate::vm::compiler::import_export_names(&program));
+                        let program =
+                            crate::typechecker::prepare_module(&source, &path, &file_path)
+                                .map_err(|e| VMError::new(&e))?;
 
-                // Shared cycle detection (runtime/imports.rs). Checked before
-                // compiling so a cycle is reported once, not as a nested
-                // chain of compile/runtime errors.
-                let _import_guard = crate::runtime::imports::enter_import(&file_path)
-                    .map_err(|msg| VMError::new(&msg))?;
-                // The module's top-level names live under a private global
-                // prefix, so only the names imported here become visible to
-                // the importer (no leaking of helpers it did not ask for).
-                let prefix = crate::vm::compiler::module_global_prefix(&resolved);
-                let chunk = crate::vm::compiler::compile_module_with(
-                    &program,
-                    file_path.parent(),
-                    Some(&prefix),
-                )
-                .map_err(|e| {
-                    VMError::new(&format!("import '{}' compile error: {}", path, e.message))
-                })?;
-                self.execute_module(&chunk).map_err(|e| {
-                    if e.is_unwound_to_handler() || e.is_fatal() {
-                        // Control transfer (a `timeout` around the import
-                        // fired inside it) or a fatal limit: propagate as is.
-                        e
-                    } else if e.message.starts_with("circular import: ") {
-                        // Propagate the cycle report unwrapped.
-                        VMError::new(&e.message)
-                    } else {
-                        VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                        // Shared cycle detection (runtime/imports.rs).
+                        // Checked before compiling so a cycle is reported
+                        // once, not as a nested chain of compile/runtime
+                        // errors.
+                        let _import_guard = crate::runtime::imports::enter_import(&file_path)
+                            .map_err(|msg| VMError::new(&msg))?;
+                        // The module's top-level names live under a private
+                        // global prefix, so only the names imported here
+                        // become visible to the importer (no leaking of
+                        // helpers it did not ask for).
+                        let prefix = crate::vm::compiler::module_global_prefix(&resolved);
+                        let chunk = crate::vm::compiler::compile_module_with(
+                            &program,
+                            file_path.parent(),
+                            Some(&prefix),
+                        )
+                        .map_err(|e| {
+                            VMError::new(&format!("import '{}' compile error: {}", path, e.message))
+                        })?;
+                        self.execute_module(&chunk).map_err(|e| {
+                            if e.is_unwound_to_handler() || e.is_fatal() {
+                                // Control transfer (a `timeout` around the
+                                // import fired inside it) or a fatal limit:
+                                // propagate as is.
+                                e
+                            } else if e.message.starts_with("circular import: ") {
+                                // Propagate the cycle report unwrapped.
+                                VMError::new(&e.message)
+                            } else {
+                                VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                            }
+                        })?;
+                        let module = Arc::new(crate::vm::machine::LoadedModule {
+                            program: Arc::new(program),
+                            prefix,
+                        });
+                        self.loaded_modules.insert(key, Arc::clone(&module));
+                        module
                     }
-                })?;
+                };
 
-                let struct_names: std::collections::HashSet<&str> = program
+                for pair in &aliases {
+                    if let [name, alias] = pair.as_slice() {
+                        crate::semantics::check_import_alias(&path, &module.program, name, alias)
+                            .map_err(|m| VMError::new(&m))?;
+                    }
+                }
+                let export_names = requested_names
+                    .unwrap_or_else(|| crate::vm::compiler::import_export_names(&module.program));
+                let struct_names: std::collections::HashSet<&str> = module
+                    .program
                     .statements
                     .iter()
                     .filter_map(|spanned| match &spanned.stmt {
@@ -877,7 +1121,7 @@ impl VM {
                 for name in export_names {
                     let value = self
                         .globals
-                        .get(&format!("{}{}", prefix, name))
+                        .get(&format!("{}{}", module.prefix, name))
                         .or_else(|| {
                             // Struct registrations are global by type name.
                             struct_names
@@ -927,9 +1171,8 @@ impl VM {
                         .and_then(|r| self.gc.get(r))
                         .and_then(|o| match &o.kind {
                             ObjKind::String(s) => Some(s.chars().count() as i64),
-                            ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a) => {
-                                Some(a.len() as i64)
-                            }
+                            ObjKind::Array(a) | ObjKind::Tuple(a) => Some(a.len() as i64),
+                            ObjKind::Set(a) => Some(a.len() as i64),
                             ObjKind::Object(o) => Some(o.len() as i64),
                             ObjKind::Map(pairs) => Some(pairs.len() as i64),
                             _ => None,
@@ -1034,7 +1277,7 @@ impl VM {
             },
             "set" => {
                 if args.is_empty() {
-                    let r = self.gc.alloc(ObjKind::Set(Vec::new()));
+                    let r = self.gc.alloc(ObjKind::Set(VmSet::new()));
                     return Ok(Value::obj(r));
                 }
                 if args.len() != 1 {
@@ -1042,23 +1285,20 @@ impl VM {
                 }
                 if let Some(r) = args[0].as_obj() {
                     if let Some(obj) = self.gc.get(r) {
-                        match &obj.kind {
-                            ObjKind::Array(items) | ObjKind::Tuple(items) | ObjKind::Set(items) => {
-                                // Clone to drop GC borrow, then dedup via set_eq.
-                                let source = items.clone();
-                                let mut deduped = Vec::new();
-                                for item in source {
-                                    if !deduped
-                                        .iter()
-                                        .any(|existing: &Value| existing.set_eq(&item, &self.gc))
-                                    {
-                                        deduped.push(item);
-                                    }
-                                }
-                                let nr = self.gc.alloc(ObjKind::Set(deduped));
-                                return Ok(Value::obj(nr));
+                        // Dedup via set_eq (first occurrence wins), then
+                        // allocate once the GC borrow is released.
+                        let deduped = match &obj.kind {
+                            ObjKind::Array(items) | ObjKind::Tuple(items) => {
+                                Some(VmSet::collect_dedup(items.iter().copied(), &self.gc))
                             }
-                            _ => {}
+                            ObjKind::Set(items) => {
+                                Some(VmSet::collect_dedup(items.iter().copied(), &self.gc))
+                            }
+                            _ => None,
+                        };
+                        if let Some(set) = deduped {
+                            let nr = self.gc.alloc(ObjKind::Set(set));
+                            return Ok(Value::obj(nr));
                         }
                     }
                 }
@@ -1659,9 +1899,7 @@ impl VM {
                             ObjKind::Set(items) => {
                                 // Sets use value equality (same as .has()) so that
                                 // `contains(s, 1)` and `s.has(1)` agree.
-                                let items = items.clone();
-                                let found = items.iter().any(|v| v.set_eq(val, &self.gc));
-                                return Ok(Value::bool_val(found));
+                                return Ok(Value::bool_val(items.has_in(val, &self.gc)));
                             }
                             ObjKind::Map(pairs) => {
                                 // Maps: `contains(m, k)` matches `m.has(k)`.
@@ -3405,14 +3643,14 @@ impl VM {
                 let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
                 match &*guard {
                     Some(rx) => match rx.try_recv() {
+                        // `Some(v)` / `None`, like the interpreter.
                         Ok(shared) => {
                             let val = shared_to_value(&mut self.gc, &shared);
-                            let r = self.gc.alloc(ObjKind::ResultOk(val));
-                            Ok(Value::obj(r))
+                            Ok(self.alloc_option_some(val))
                         }
-                        Err(_) => Ok(Value::null()),
+                        Err(_) => Ok(self.alloc_option_none()),
                     },
-                    None => Ok(Value::null()),
+                    None => Ok(self.alloc_option_none()),
                 }
             }
             "select" => {
@@ -4117,129 +4355,67 @@ impl VM {
 
         // Set-specific methods. Peel `Frozen(Set)` so frozen sets still
         // support read-only methods; mutating methods are rejected on
-        // frozen receivers. Clones the items Vec to drop the GC borrow
-        // before any further allocation.
-        let set_receiver: Option<(Vec<Value>, bool)> = {
-            receiver.as_obj().and_then(|r| {
-                let obj = self.gc.get(r)?;
-                match &obj.kind {
-                    ObjKind::Set(items) => Some((items.clone(), false)),
-                    ObjKind::Frozen(inner) => {
-                        let inner_r = inner.as_obj()?;
-                        let inner_obj = self.gc.get(inner_r)?;
-                        if let ObjKind::Set(items) = &inner_obj.kind {
-                            Some((items.clone(), true))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            })
-        };
-
-        if let Some((items, is_frozen)) = set_receiver {
-            // Peel "other" arg too so `a.union(frozen_b)` etc. work. Returns
-            // the inner Vec by clone to drop the GC borrow.
-            let peel_other = |vm: &Self, v: Value| -> Option<Vec<Value>> {
-                let r = v.as_obj()?;
-                let obj = vm.gc.get(r)?;
-                match &obj.kind {
-                    ObjKind::Set(inner) => Some(inner.clone()),
-                    ObjKind::Frozen(inner_val) => {
-                        let ir = inner_val.as_obj()?;
-                        let iobj = vm.gc.get(ir)?;
-                        if let ObjKind::Set(inner) = &iobj.kind {
-                            Some(inner.clone())
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
+        // frozen receivers. Lookups borrow the set; methods returning a new
+        // set build it before allocating (no GC borrow is held across an
+        // allocation).
+        if let Some((set_ref, is_frozen)) = self.peel_set(receiver) {
+            let gc = &self.gc;
+            let items = || set_items(gc, set_ref);
+            // Peel the "other" argument too so `a.union(frozen_b)` works.
+            let other = |name: &str| -> Result<&VmSet, VMError> {
+                let arg = extra_args.first().copied().unwrap_or(Value::null());
+                self.peel_set(arg)
+                    .and_then(|(r, _)| set_items(gc, r))
+                    .ok_or_else(|| VMError::new(&format!("{}() requires a set argument", name)))
+            };
+            let one_arg = |name: &str| -> Result<Value, VMError> {
+                match extra_args {
+                    [value] => Ok(*value),
+                    _ => Err(VMError::new(&format!("{}() requires one argument", name))),
                 }
             };
-            match method_name {
+            let result: Option<ObjKind> = match method_name {
                 "has" => {
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("has() requires one argument"));
-                    }
-                    let found = items.iter().any(|v| v.set_eq(&extra_args[0], &self.gc));
+                    let value = one_arg("has")?;
+                    let found = items().is_some_and(|set| set.has_in(&value, gc));
                     return Ok(Value::bool_val(found));
                 }
-                "add" => {
+                "add" | "remove" => {
                     if is_frozen {
                         return Err(VMError::new("cannot mutate a frozen set"));
                     }
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("add() requires one argument"));
+                    let value = one_arg(method_name)?;
+                    let mut new_items = items().cloned().unwrap_or_default();
+                    if method_name == "add" {
+                        new_items.add_in(value, gc);
+                    } else {
+                        new_items.remove_in(&value, gc);
                     }
-                    let mut new_items = items;
-                    if !new_items.iter().any(|v| v.set_eq(&extra_args[0], &self.gc)) {
-                        new_items.push(extra_args[0]);
-                    }
-                    let nr = self.gc.alloc(ObjKind::Set(new_items));
-                    return Ok(Value::obj(nr));
+                    Some(ObjKind::Set(new_items))
                 }
-                "remove" => {
-                    if is_frozen {
-                        return Err(VMError::new("cannot mutate a frozen set"));
-                    }
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("remove() requires one argument"));
-                    }
-                    let new_items: Vec<Value> = items
-                        .into_iter()
-                        .filter(|v| !v.set_eq(&extra_args[0], &self.gc))
-                        .collect();
-                    let nr = self.gc.alloc(ObjKind::Set(new_items));
-                    return Ok(Value::obj(nr));
-                }
-                "union" => {
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("union() requires one argument"));
-                    }
-                    let other = peel_other(self, extra_args[0])
-                        .ok_or_else(|| VMError::new("union() requires a set argument"))?;
-                    let mut result = items;
-                    for v in other {
-                        if !result.iter().any(|existing| existing.set_eq(&v, &self.gc)) {
-                            result.push(v);
+                "union" | "intersect" | "diff" => {
+                    one_arg(method_name)?;
+                    let other = other(method_name)?;
+                    let mut result = items().cloned().unwrap_or_default();
+                    match method_name {
+                        "union" => {
+                            for v in other.iter() {
+                                result.add_in(*v, gc);
+                            }
                         }
+                        "intersect" => result.retain(|v| other.has_in(v, gc)),
+                        _ => result.retain(|v| !other.has_in(v, gc)),
                     }
-                    let nr = self.gc.alloc(ObjKind::Set(result));
-                    return Ok(Value::obj(nr));
+                    Some(ObjKind::Set(result))
                 }
-                "intersect" => {
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("intersect() requires one argument"));
-                    }
-                    let other = peel_other(self, extra_args[0])
-                        .ok_or_else(|| VMError::new("intersect() requires a set argument"))?;
-                    let result: Vec<Value> = items
-                        .into_iter()
-                        .filter(|v| other.iter().any(|o| o.set_eq(v, &self.gc)))
-                        .collect();
-                    let nr = self.gc.alloc(ObjKind::Set(result));
-                    return Ok(Value::obj(nr));
-                }
-                "diff" => {
-                    if extra_args.len() != 1 {
-                        return Err(VMError::new("diff() requires one argument"));
-                    }
-                    let other = peel_other(self, extra_args[0])
-                        .ok_or_else(|| VMError::new("diff() requires a set argument"))?;
-                    let result: Vec<Value> = items
-                        .into_iter()
-                        .filter(|v| !other.iter().any(|o| o.set_eq(v, &self.gc)))
-                        .collect();
-                    let nr = self.gc.alloc(ObjKind::Set(result));
-                    return Ok(Value::obj(nr));
-                }
-                "to_array" => {
-                    let nr = self.gc.alloc(ObjKind::Array(items));
-                    return Ok(Value::obj(nr));
-                }
-                _ => {}
+                "to_array" => Some(ObjKind::Array(
+                    items().map(VmSet::to_vec).unwrap_or_default(),
+                )),
+                _ => None,
+            };
+            if let Some(kind) = result {
+                let nr = self.gc.alloc(kind);
+                return Ok(Value::obj(nr));
             }
         }
 
@@ -4401,7 +4577,7 @@ impl VM {
                 idx: 0,
             }),
             ObjKind::Set(items) => Some(StreamKind::SetIter {
-                items: items.clone(),
+                items: items.to_vec(),
                 idx: 0,
             }),
             ObjKind::Map(pairs) => Some(StreamKind::MapIter {
@@ -4425,7 +4601,7 @@ impl VM {
                         idx: 0,
                     }),
                     ObjKind::Set(items) => Some(StreamKind::SetIter {
-                        items: items.clone(),
+                        items: items.to_vec(),
                         idx: 0,
                     }),
                     ObjKind::Map(pairs) => Some(StreamKind::MapIter {
@@ -5099,5 +5275,32 @@ impl VM {
                 | "ceil"
                 | "to_fixed"
         )
+    }
+}
+
+/// The items of the set object `r`, if it is one.
+fn set_items(gc: &super::gc::Gc, r: GcRef) -> Option<&VmSet> {
+    match &gc.get(r)?.kind {
+        ObjKind::Set(items) => Some(items),
+        _ => None,
+    }
+}
+
+impl VM {
+    /// The set object `value` refers to (peeling one `Frozen`), and whether
+    /// it was frozen.
+    pub(super) fn peel_set(&self, value: Value) -> Option<(GcRef, bool)> {
+        let r = value.as_obj()?;
+        match &self.gc.get(r)?.kind {
+            ObjKind::Set(_) => Some((r, false)),
+            ObjKind::Frozen(inner) => {
+                let ir = inner.as_obj()?;
+                match &self.gc.get(ir)?.kind {
+                    ObjKind::Set(_) => Some((ir, true)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 }

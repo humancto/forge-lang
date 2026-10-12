@@ -28,6 +28,12 @@ pub fn create_module() -> Value {
         "pretty".to_string(),
         Value::BuiltIn("http.pretty".to_string()),
     );
+    // Server side: a handler's response with its own status, headers and
+    // body (`runtime::http_response`).
+    m.insert(
+        "response".to_string(),
+        Value::BuiltIn("http.response".to_string()),
+    );
     Value::Object(m)
 }
 
@@ -41,6 +47,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         "http.head" => do_request("HEAD", &args),
         "http.download" => do_download(&args),
         "http.crawl" => do_crawl(&args),
+        "http.response" => crate::runtime::http_response::make_response(&args),
         "http.pretty" => match args.first() {
             Some(Value::Object(resp)) => {
                 let status = resp

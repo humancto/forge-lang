@@ -231,6 +231,9 @@ pub struct Checker<'a> {
     /// dropped too.
     pub suppressed_regions: Vec<Span>,
     facts: TypeFacts,
+    /// A wildcard import could not be read: any global name may be
+    /// something it defines, so none is checked as the builtin.
+    pub(crate) unknown_wildcard: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -258,6 +261,7 @@ impl<'a> Checker<'a> {
             interfaces: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
+            unknown_wildcard: false,
             cx: InferCtx::default(),
             scopes: vec![HashMap::new()],
             frames: Vec::new(),
@@ -299,8 +303,14 @@ impl<'a> Checker<'a> {
 
     /// Bring in the declarations of an imported module (all of them for a
     /// wildcard import, only `names` otherwise).
-    pub fn import_declarations(&mut self, program: &Program, names: Option<&[String]>) {
-        let wanted = |name: &str| names.is_none_or(|n| n.iter().any(|x| x == name));
+    pub fn import_declarations(&mut self, program: &Program, names: Option<&[ImportName]>) {
+        let wanted = |name: &str| names.is_none_or(|n| n.iter().any(|x| x.name == name));
+        // `import { f as g }` declares the function under its alias.
+        let alias = |name: &str| {
+            names
+                .and_then(|n| n.iter().find(|x| x.name == name))
+                .and_then(|x| x.alias.clone())
+        };
         let stmts: Vec<SpannedStmt> = program
             .statements
             .iter()
@@ -314,7 +324,15 @@ impl<'a> Checker<'a> {
                 Stmt::ImplBlock { type_name, .. } => wanted(type_name),
                 _ => false,
             })
-            .cloned()
+            .map(|s| {
+                let mut s = s.clone();
+                if let Stmt::FnDef { name, .. } = &mut s.stmt {
+                    if let Some(alias) = alias(name) {
+                        *name = alias;
+                    }
+                }
+                s
+            })
             .collect();
         self.collect_declarations(&stmts);
         // Imported function bodies are not checked here, but their return
@@ -546,6 +564,8 @@ impl<'a> Checker<'a> {
             (Some(_), Some(res)) => {
                 let occs = self.occs_in_stmt(name, NameClass::Value);
                 match occs.first() {
+                    // An unreadable `import "m.fg"` may define it.
+                    Some(_) if self.unknown_wildcard => false,
                     Some(id) => matches!(res.resolved[*id], Resolved::Global),
                     // Synthesized names (`say` → println) have no
                     // occurrence; they are always the builtin.
@@ -624,6 +644,17 @@ impl<'a> Checker<'a> {
         let ty = self.lower(ann);
         self.type_params.pop();
         ty
+    }
+
+    /// The declared type of field `field` of struct `name` (generic
+    /// parameters stay `Ty::Param`).
+    pub(crate) fn struct_field_type(&self, name: &str, field: &str) -> Option<Ty> {
+        self.structs
+            .get(name)?
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .map(|f| f.ty.clone())
     }
 
     pub(crate) fn is_interface(&self, name: &str) -> bool {
@@ -2276,8 +2307,12 @@ impl<'a> Checker<'a> {
         if let Some(t) = self.variant_value_type(name) {
             return t;
         }
-        if let Some(sig) = builtins::function(name) {
-            return Ty::Fn(sig.clone());
+        // Only the builtin itself: an imported name of the same spelling
+        // (from a module that could not be read) is unknown, not the builtin.
+        if self.is_global_here(name) {
+            if let Some(sig) = builtins::function(name) {
+                return Ty::Fn(sig.clone());
+            }
         }
         Ty::Any
     }

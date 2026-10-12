@@ -1,0 +1,14 @@
+struct P { x: Int, label: String = "p" }
+impl P {
+    fn double(it) { return it.x * 2 }
+    fn origin() { return P { x: 0 } }
+}
+type Shape = Circle(Int) | Square(Int)
+impl Shape {
+    fn area(it) {
+        return match it {
+            Circle(r) => 3 * r * r,
+            Square(s) => s * s,
+        }
+    }
+}

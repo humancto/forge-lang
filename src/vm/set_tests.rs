@@ -182,3 +182,58 @@ fn vm_set_is_truthy() {
     );
     assert_eq!(output, vec!["non-empty"]);
 }
+
+/// Values covering every kind of set member, with pairs that compare equal
+/// across representations (the interpreter's tests have the same corpus).
+const SET_HASH_CORPUS: &str = r#"[1, 1.0, 0, -0.0, 0.0, math.sqrt(-1.0), "a", "b", [1, 2], [1.0, 2], [2, 1], (1, 2), {a: 1, b: 2}, {b: 2.0, a: 1}, {a: 1}, set([1, 2]), set([2.0, 1]), set([3]), Some(1), Some(1.0), None, Ok(1), Ok(1.0), Err(1), freeze([1]), [1], null, true, false, 9007199254740992, 9007199254740993, 9007199254740992.0, [[1, [2, 3.0]]], [[1, [2, 3]]], map([[1, 2]]), map([[1.0, 2]])]"#;
+
+/// Values that `set_eq` considers equal must hash equally, or a set lookup
+/// would miss them (`Value::set_hash`, `semantics::ordered_set`).
+#[test]
+fn equal_values_have_equal_set_hashes() {
+    use crate::vm::value::{ObjKind, VmSet};
+    let program = parse_program(&format!("let corpus = {}\ncorpus", SET_HASH_CORPUS));
+    let chunk = compiler::compile_repl(&program).expect("compile error");
+    let mut vm = VM::new();
+    let result = vm.execute(&chunk).expect("execution error");
+    let values: Vec<_> = match result.as_obj().and_then(|r| vm.gc.get(r)).map(|o| &o.kind) {
+        Some(ObjKind::Array(items)) => items.clone(),
+        _ => panic!("corpus is an array"),
+    };
+    let gc = &vm.gc;
+    let mut equal_pairs = 0;
+    for a in &values {
+        for b in &values {
+            if a.set_eq(b, gc) {
+                equal_pairs += 1;
+                assert_eq!(
+                    a.set_hash(gc),
+                    b.set_hash(gc),
+                    "{} and {}",
+                    a.display(gc),
+                    b.display(gc)
+                );
+            }
+        }
+    }
+    assert!(
+        equal_pairs > values.len() + 10,
+        "{} equal pairs",
+        equal_pairs
+    );
+    // Sets built from these values agree with the linear definition.
+    let set = VmSet::collect_dedup(values.iter().copied(), gc);
+    for v in &values {
+        assert!(set.has_in(v, gc), "{}", v.display(gc));
+    }
+    let mut linear: Vec<crate::vm::value::Value> = Vec::new();
+    for v in &values {
+        if !linear.iter().any(|x| x.set_eq(v, gc)) {
+            linear.push(*v);
+        }
+    }
+    assert_eq!(set.len(), linear.len());
+    for (x, y) in set.iter().zip(&linear) {
+        assert!(x.set_eq(y, gc), "{} vs {}", x.display(gc), y.display(gc));
+    }
+}

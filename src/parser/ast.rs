@@ -23,6 +23,29 @@ impl SpannedStmt {
     }
 }
 
+/// One name of `import { name [as alias] } from "path"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportName {
+    /// The name the module defines.
+    pub name: String,
+    /// The name it is bound to here, when renamed with `as`.
+    pub alias: Option<String>,
+}
+
+impl ImportName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            alias: None,
+        }
+    }
+
+    /// The name the import binds in the importing scope.
+    pub fn binding(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
+}
+
 /// What an `import native` statement binds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeBinding {
@@ -125,9 +148,11 @@ pub enum Stmt {
         catch_var: String,
         catch_body: Vec<SpannedStmt>,
     },
+    /// `import "path"` (every top-level definition) or
+    /// `import { a, b as c } from "path"`.
     Import {
         path: String,
-        names: Option<Vec<String>>,
+        names: Option<Vec<ImportName>>,
     },
     /// `import native "path" [as name]` / `import { f, g } from native "path"`:
     /// load a native plugin (see `src/plugins`). Bound names are known here,

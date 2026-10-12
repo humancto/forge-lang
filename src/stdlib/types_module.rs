@@ -18,12 +18,19 @@ pub fn create_module() -> Value {
         "bind".to_string(),
         Value::BuiltIn("__types.bind".to_string()),
     );
+    m.insert(
+        "widen".to_string(),
+        Value::BuiltIn("__types.widen".to_string()),
+    );
     Value::Object(m)
 }
 
 /// `__types.check(value, type, context)`: return `value` if it fits `type`
-/// (canonical notation, see `semantics::types`), else fail with a type
-/// error naming `context`.
+/// (canonical notation, see `semantics::types`), with Ints widened where
+/// `type` declares Float (`semantics::types::widen`), else fail with a type
+/// error naming `context`. `__types.widen(value, type)`: only the widening,
+/// never an error (annotated `let`s and struct fields, which are checked
+/// statically).
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "__types.check" => {
@@ -36,11 +43,24 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             };
             let expected = crate::semantics::types::parse_cached(&ty)?;
             if crate::semantics::types::fits(&value, &expected) {
-                Ok(value)
+                Ok(crate::semantics::types::widen(&value, &expected).unwrap_or(value))
             } else {
                 Err(crate::semantics::types::violation(
                     &context, &expected, &value,
                 ))
+            }
+        }
+        "__types.widen" => {
+            let mut args = args.into_iter();
+            let value = args.next().unwrap_or(Value::Null);
+            let Some(Value::String(ty)) = args.next() else {
+                return Err("__types.widen(value, type) expects a type string".into());
+            };
+            let expected = crate::semantics::types::parse_cached(&ty)?;
+            if crate::semantics::types::fits(&value, &expected) {
+                Ok(crate::semantics::types::widen(&value, &expected).unwrap_or(value))
+            } else {
+                Ok(value)
             }
         }
         // `__types.bind(type_param, function, names, values...)`: the type

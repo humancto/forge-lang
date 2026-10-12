@@ -456,8 +456,13 @@ fn borrowed_buf(bytes: &[u8]) -> ForgeBuf {
     }
 }
 
-fn to_abi_array(items: &[Value], arena: &mut Arena, depth: usize) -> Result<ForgeValue, String> {
-    let mut out = Vec::with_capacity(items.len());
+fn to_abi_array<'a>(
+    items: impl Iterator<Item = &'a Value>,
+    len: usize,
+    arena: &mut Arena,
+    depth: usize,
+) -> Result<ForgeValue, String> {
+    let mut out = Vec::with_capacity(len);
     for item in items {
         out.push(to_abi(item, arena, depth + 1)?);
     }
@@ -515,9 +520,10 @@ fn to_abi(v: &Value, arena: &mut Arena, depth: usize) -> Result<ForgeValue, Stri
                 buf: borrowed_buf(s.as_bytes()),
             },
         ),
-        Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
-            to_abi_array(items, arena, depth)
+        Value::Array(items) | Value::Tuple(items) => {
+            to_abi_array(items.iter(), items.len(), arena, depth)
         }
+        Value::Set(items) => to_abi_array(items.iter(), items.len(), arena, depth),
         Value::Object(map) => to_abi_object(map.iter().map(|(k, v)| (k.as_str(), v)), arena, depth),
         Value::Map(pairs) => {
             let mut entries = Vec::with_capacity(pairs.len());

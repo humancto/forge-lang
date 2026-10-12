@@ -325,3 +325,70 @@ fn building_containers_does_not_copy_them() {
         );
     }
 }
+
+#[test]
+fn sets_inside_owned_containers_keep_value_semantics() {
+    assert_output(
+        r#"
+        let mut g = { s: set([1]) }
+        g.s.add(2)
+        let snap = g
+        g.s.add(3)
+        g["t"] = set([])
+        g.t.add(1)
+        let mut loose = set([5])
+        g["u"] = loose
+        loose.add(6)
+        g.u.add(7)
+        g.s.remove(1)
+        say len(snap.s)
+        say len(g.s)
+        say g.s.has(1)
+        say len(g.t)
+        say len(loose)
+        say g.u.has(6)
+        say g.u.has(7)
+        say loose.has(7)
+        "#,
+        &["2", "2", "false", "1", "2", "false", "true", "false"],
+    );
+}
+
+#[test]
+fn forward_referenced_top_level_containers_stay_correct() {
+    // `counts` is read by a function compiled before its `let`, so it is a
+    // global, not a register: the local opcodes do not apply to it.
+    let source = r#"
+        fn total() {
+            return len(counts)
+        }
+        let mut counts = {}
+        counts["a"] = 1
+        counts["b"] = get(counts, "a", 0) + 1
+        let snap = counts
+        counts["c"] = 3
+        counts.a = 10
+        let mut groups = { a: [] }
+        groups.a.push(1)
+        let gsnap = groups
+        groups["a"].push(2)
+        say total()
+        say len(snap)
+        say counts
+        say gsnap
+        say groups
+    "#;
+    for stress in [false, true] {
+        assert_eq!(
+            run_output(source, stress),
+            [
+                "3",
+                "2",
+                r#"{ "a": 10, "b": 2, "c": 3 }"#,
+                r#"{ "a": [1] }"#,
+                r#"{ "a": [1, 2] }"#,
+            ],
+            "stress={stress}"
+        );
+    }
+}

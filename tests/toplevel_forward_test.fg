@@ -1,0 +1,95 @@
+// toplevel_forward_test.fg — functions and closures defined above a
+// top-level binding read and update it once its `let` has run, on both
+// engines (the top level is one scope). Reading it earlier is an
+// undefined variable.
+
+fn read_setting() { return setting }
+let read_setting_plus = fn(n) { return setting + n }
+fn outer_reader() {
+    let inner = fn() { return setting * 10 }
+    return inner()
+}
+fn record(x) {
+    events.push(x)
+    total = total + x
+}
+fn read_before_let() { return defined_later }
+fn assign_before_let() { assigned_later = 1 }
+fn assign_immutable() { setting = 99 }
+fn read_pair() { return [left, right] }
+fn read_fields() { return name + "/" + kind }
+fn read_redeclared() { return version }
+
+let mut early_read = ""
+try {
+    read_before_let()
+} catch e {
+    early_read = e.message
+}
+
+let mut early_write = ""
+try {
+    assign_before_let()
+} catch e {
+    early_write = e.message
+}
+
+let setting = 4
+let mut events = []
+let mut total = 0
+record(3)
+record(5)
+
+let [left, right] = ["L", "R"]
+let {name, kind} = {name: "forge", kind: "lang"}
+
+let version = 1
+let version = version + 1
+
+// A closure that captured a binding sees it redeclared in the same scope.
+let captured = "old"
+let read_captured = fn() { return captured }
+let captured = "new"
+
+let defined_later = "ok"
+let mut assigned_later = 0
+
+@test
+define test_function_reads_later_let() {
+    assert_eq(read_setting(), 4)
+    assert_eq(read_setting_plus(1), 5)
+    assert_eq(outer_reader(), 40)
+}
+
+@test
+define test_function_updates_later_mutable_let() {
+    assert_eq(events, [3, 5])
+    assert_eq(total, 8)
+}
+
+@test
+define test_reading_or_writing_before_the_let_is_undefined() {
+    assert(contains(early_read, "undefined variable"))
+    assert(contains(early_read, "defined_later"))
+    assert(contains(early_write, "undefined variable"))
+    assert_eq(defined_later, "ok")
+    assert_eq(assigned_later, 0)
+}
+
+@test
+define test_assigning_a_later_immutable_let_fails() {
+    assert_throws(fn() { assign_immutable() })
+    assert_eq(setting, 4)
+}
+
+@test
+define test_destructured_later_bindings() {
+    assert_eq(read_pair(), ["L", "R"])
+    assert_eq(read_fields(), "forge/lang")
+}
+
+@test
+define test_redeclared_top_level_binding() {
+    assert_eq(read_redeclared(), 2)
+    assert_eq(read_captured(), "new")
+}

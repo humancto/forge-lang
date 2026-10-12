@@ -247,7 +247,8 @@ fn from_shared(
                 .iter()
                 .map(|sv| from_shared(gc, sv, closures))
                 .collect();
-            let r = gc.alloc(ObjKind::Set(vals));
+            let set = VmSet::collect_unchecked(vals, gc);
+            let r = gc.alloc(ObjKind::Set(set));
             Value::obj(r)
         }
         SharedValue::Map(pairs) => {
@@ -492,6 +493,27 @@ impl Value {
         }
     }
 
+    /// Hash for set membership: values that are `set_eq` hash alike
+    /// (Int/Float that compare equal, every NaN, equal strings and
+    /// structurally equal collections). Kinds compared by identity or not
+    /// at all hash by their kind alone. See `semantics::ordered_set`.
+    pub fn set_hash(&self, gc: &Gc) -> u64 {
+        crate::semantics::ordered_set::finish(self.set_hash_at(gc, 0))
+    }
+
+    fn set_hash_at(&self, gc: &Gc, depth: usize) -> u64 {
+        use crate::semantics::ordered_set as h;
+        match self.classify(gc) {
+            ValueKind::Int(n) => h::hash_int(n),
+            ValueKind::Float(f) => h::hash_number(f),
+            ValueKind::Bool(b) => h::mix(h::TAG_BOOL, u64::from(b)),
+            ValueKind::Null => h::TAG_NULL,
+            ValueKind::Obj(r) => gc
+                .get(r)
+                .map_or(h::TAG_OTHER, |obj| obj.set_hash_at(gc, depth)),
+        }
+    }
+
     /// Check structural identity for constant dedup (no GC needed).
     #[allow(dead_code)]
     pub fn identical(&self, other: &Value) -> bool {
@@ -508,15 +530,15 @@ impl fmt::Debug for Value {
 pub struct GcObject {
     pub kind: ObjKind,
     pub marked: bool,
-    /// Single-owner bit: set only on a string, array or object that the VM
-    /// created for, and stored into, exactly one local-variable register
-    /// (by `AddLocal` / `PushLocal` / `PopLocal` / `SetIndexLocal` /
-    /// `SetFieldLocal` / `PushIndexLocal` / `PushFieldLocal`). While it is
-    /// set, no other register, global, upvalue or heap object refers to the
-    /// object, so those opcodes may update it in place without breaking
-    /// value semantics. Every operation that copies a reference out of a
-    /// local register (`GetLocal`, `Move`, closure capture) clears it first.
-    /// See `vm::local_ops`.
+    /// Single-owner bit: set only on a string, array, set or object that the
+    /// VM created for, and stored into, exactly one local-variable register
+    /// (by `AddLocal` / `PushLocal` / `PopLocal` / `UpdateSetLocal` /
+    /// `SetIndexLocal` / `SetFieldLocal` / `PushIndexLocal` /
+    /// `PushFieldLocal`). While it is set, no other register, global,
+    /// upvalue or heap object refers to the object, so those opcodes may
+    /// update it in place without breaking value semantics. Every operation
+    /// that copies a reference out of a local register (`GetLocal`, `Move`,
+    /// closure capture) clears it first. See `vm::local_ops`.
     pub unique: bool,
     /// Slot-owner bit: set only on an array that `PushIndexLocal` /
     /// `PushFieldLocal` created and stored into one element of a container
@@ -638,7 +660,11 @@ impl GcObject {
             }
             ObjKind::ResultOk(v) => format!("{{ \"Ok\": {} }}", v.to_json_string(gc)),
             ObjKind::ResultErr(v) => format!("{{ \"Err\": {} }}", v.to_json_string(gc)),
-            ObjKind::Tuple(items) | ObjKind::Set(items) => {
+            ObjKind::Tuple(items) => {
+                let entries: Vec<String> = items.iter().map(|v| v.to_json_string(gc)).collect();
+                format!("[{}]", entries.join(", "))
+            }
+            ObjKind::Set(items) => {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string(gc)).collect();
                 format!("[{}]", entries.join(", "))
             }
@@ -708,7 +734,9 @@ impl GcObject {
             (ObjKind::Set(a), ObjKind::Set(b)) => {
                 // Order-independent: same length + every element in A is in B.
                 // Uses set_eq so NaN elements match themselves.
-                a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| x.set_eq(y, gc)))
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|x| b.contains(x.set_hash(gc), |y| x.set_eq(y, gc)))
             }
             (ObjKind::Map(a), ObjKind::Map(b)) => {
                 // Order-independent on entries. Keys compared with set_eq
@@ -727,10 +755,66 @@ impl GcObject {
         }
     }
 
+    /// [`Value::set_hash`] of the value referring to this object.
+    fn set_hash_at(&self, gc: &Gc, depth: usize) -> u64 {
+        use crate::semantics::ordered_set as h;
+        if let ObjKind::String(s) = &self.kind {
+            return h::hash_str(s);
+        }
+        let deeper = depth < h::MAX_HASH_DEPTH;
+        let ordered = |tag: u64, items: &[Value]| {
+            let start = h::mix(tag, items.len() as u64);
+            if !deeper {
+                return start;
+            }
+            items.iter().fold(start, |acc, item| {
+                h::mix(acc, item.set_hash_at(gc, depth + 1))
+            })
+        };
+        let wrapped = |tag: u64, inner: &Value| {
+            if deeper {
+                h::mix(tag, inner.set_hash_at(gc, depth + 1))
+            } else {
+                tag
+            }
+        };
+        match &self.kind {
+            ObjKind::Array(items) => ordered(h::TAG_ARRAY, items),
+            ObjKind::Tuple(items) => ordered(h::TAG_TUPLE, items),
+            ObjKind::Set(items) => h::mix(h::TAG_SET, items.len() as u64),
+            ObjKind::Map(pairs) => h::mix(h::TAG_MAP, pairs.len() as u64),
+            ObjKind::Object(map) => {
+                let start = h::mix(h::TAG_OBJECT, map.len() as u64);
+                if !deeper {
+                    return start;
+                }
+                // Key order does not matter for equality.
+                let entries = map.iter().fold(0u64, |acc, (k, v)| {
+                    acc.wrapping_add(h::finish(h::mix(
+                        h::hash_str(k),
+                        v.set_hash_at(gc, depth + 1),
+                    )))
+                });
+                h::mix(start, entries)
+            }
+            ObjKind::ResultOk(inner) => wrapped(h::TAG_OK, inner),
+            ObjKind::ResultErr(inner) => wrapped(h::TAG_ERR, inner),
+            ObjKind::BoxedInt(n) => h::hash_int(*n),
+            _ => h::TAG_OTHER,
+        }
+    }
+
     pub fn trace(&self, worklist: &mut Vec<GcRef>) {
         match &self.kind {
-            ObjKind::Array(items) | ObjKind::Tuple(items) | ObjKind::Set(items) => {
+            ObjKind::Array(items) | ObjKind::Tuple(items) => {
                 for item in items {
+                    if let Some(r) = item.as_obj() {
+                        worklist.push(r);
+                    }
+                }
+            }
+            ObjKind::Set(items) => {
+                for item in items.iter() {
                     if let Some(r) = item.as_obj() {
                         worklist.push(r);
                     }
@@ -821,6 +905,56 @@ impl GcObject {
 }
 
 #[allow(dead_code)]
+/// A VM set's items: insertion-ordered and hash-indexed
+/// (`semantics::ordered_set`), compared with [`Value::set_eq`] and hashed
+/// with [`Value::set_hash`]. Hashing needs the heap, so the helpers take
+/// the `Gc` separately: use them on a set that is not borrowed from the
+/// heap (or look up through `gc.get` and update through `gc.get_mut` in
+/// two steps, as `vm::local_ops` does).
+pub type VmSet = crate::semantics::ordered_set::OrderedSet<Value>;
+
+impl VmSet {
+    /// A set of `values` in order, dropping each value `set_eq` to an
+    /// earlier one (what `set(array)` does).
+    pub fn collect_dedup(values: impl IntoIterator<Item = Value>, gc: &Gc) -> Self {
+        let mut set = VmSet::new();
+        for value in values {
+            set.add_in(value, gc);
+        }
+        set
+    }
+
+    /// A set of `values` in order, kept as given (values that already
+    /// formed a set, e.g. converted from another representation).
+    pub fn collect_unchecked(values: impl IntoIterator<Item = Value>, gc: &Gc) -> Self {
+        let mut set = VmSet::new();
+        for value in values {
+            set.push_unchecked(value.set_hash(gc), value);
+        }
+        set
+    }
+
+    /// Whether some item is `set_eq` to `value`.
+    pub fn has_in(&self, value: &Value, gc: &Gc) -> bool {
+        self.contains(value.set_hash(gc), |item| item.set_eq(value, gc))
+    }
+
+    /// Add `value` unless an equal item is present; returns whether it was.
+    pub fn add_in(&mut self, value: Value, gc: &Gc) -> bool {
+        let hash = value.set_hash(gc);
+        if self.contains(hash, |item| item.set_eq(&value, gc)) {
+            return false;
+        }
+        self.push_unchecked(hash, value);
+        true
+    }
+
+    /// Remove every item equal to `value`; returns whether any was.
+    pub fn remove_in(&mut self, value: &Value, gc: &Gc) -> bool {
+        self.remove_matching(value.set_hash(gc), |item| item.set_eq(value, gc)) > 0
+    }
+}
+
 pub enum ObjKind {
     String(String),
     Array(Vec<Value>),
@@ -836,8 +970,9 @@ pub enum ObjKind {
     Frozen(Value),
     /// Immutable, fixed-length, heterogeneous collection.
     Tuple(Vec<Value>),
-    /// Unordered collection of unique elements.
-    Set(Vec<Value>),
+    /// Collection of unique elements, in insertion order; hash-indexed
+    /// (see [`VmSet`]).
+    Set(VmSet),
     /// First-class Map with any-value keys. Ordered vec preserves insertion
     /// order; keys compared via `Value::set_eq` so NaN self-matches and
     /// Int/Float promote (e.g. `1` and `1.0` collide).
@@ -923,9 +1058,8 @@ impl ObjKind {
         let value = size_of::<Value>();
         slot + match self {
             ObjKind::String(s) => s.capacity(),
-            ObjKind::Array(items) | ObjKind::Tuple(items) | ObjKind::Set(items) => {
-                items.capacity() * value
-            }
+            ObjKind::Array(items) | ObjKind::Tuple(items) => items.capacity() * value,
+            ObjKind::Set(items) => items.heap_bytes(),
             ObjKind::Object(map) => map
                 .iter()
                 .map(|(k, _)| k.capacity() + size_of::<String>() + value + 2 * size_of::<usize>())

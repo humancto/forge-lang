@@ -573,7 +573,7 @@ impl Free {
     }
 }
 
-fn destructure_names(pattern: &DestructurePattern) -> Vec<&str> {
+pub(crate) fn destructure_names(pattern: &DestructurePattern) -> Vec<&str> {
     match pattern {
         DestructurePattern::Object(pairs) => pairs.iter().map(|(_, b)| b.as_str()).collect(),
         DestructurePattern::Array { items, rest } => items
@@ -659,7 +659,7 @@ fn collect_binders(stmt: &Stmt, in_function: bool, b: &mut Binders) {
         Stmt::Import { names, .. } => match names {
             Some(names) => {
                 for name in names {
-                    add(name, b);
+                    add(name.binding(), b);
                 }
             }
             None => b.everything = true,

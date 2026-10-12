@@ -102,6 +102,12 @@ pub enum OpCode {
     /// `R(A) += 1` and the next instruction (the loop-exit jump) is skipped;
     /// otherwise execution continues with that exit jump.
     ForRangeNext,
+    /// A=local register, B=value, C=operation (`SET_UPDATE_ADD` /
+    /// `SET_UPDATE_REMOVE`): statement `local.add(R(B))` /
+    /// `local.remove(R(B))` on a mutable local (result discarded). Updates
+    /// the set in place when the local uniquely owns it; otherwise behaves
+    /// like `__forge_method_mut` (any receiver type).
+    UpdateSetLocal,
     /// A=dst, B=local register, C=index register: `R(A) = local[R(C)]`
     /// (`GetIndex` semantics) without copying the local's reference into
     /// another register, so a uniquely owned container stays owned. The
@@ -141,9 +147,13 @@ pub enum OpCode {
     CallPure,
 }
 
+/// `UpdateSetLocal` operations (its C operand).
+pub const SET_UPDATE_ADD: u8 = 0;
+pub const SET_UPDATE_REMOVE: u8 = 1;
+
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::CallPure as u8 + 1 == 77);
+const _: () = assert!(OpCode::CallPure as u8 + 1 == 78);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -219,14 +229,15 @@ impl TryFrom<u8> for OpCode {
             66 => Ok(OpCode::PopLocal),
             67 => Ok(OpCode::ForRangePrep),
             68 => Ok(OpCode::ForRangeNext),
-            69 => Ok(OpCode::GetIndexLocal),
-            70 => Ok(OpCode::GetFieldLocal),
-            71 => Ok(OpCode::SetIndexLocal),
-            72 => Ok(OpCode::SetFieldLocal),
-            73 => Ok(OpCode::PushIndexLocal),
-            74 => Ok(OpCode::PushFieldLocal),
-            75 => Ok(OpCode::PeekLocal),
-            76 => Ok(OpCode::CallPure),
+            69 => Ok(OpCode::UpdateSetLocal),
+            70 => Ok(OpCode::GetIndexLocal),
+            71 => Ok(OpCode::GetFieldLocal),
+            72 => Ok(OpCode::SetIndexLocal),
+            73 => Ok(OpCode::SetFieldLocal),
+            74 => Ok(OpCode::PushIndexLocal),
+            75 => Ok(OpCode::PushFieldLocal),
+            76 => Ok(OpCode::PeekLocal),
+            77 => Ok(OpCode::CallPure),
             _ => Err(value),
         }
     }
@@ -462,13 +473,14 @@ mod tests {
         assert_eq!(OpCode::try_from(66u8), Ok(OpCode::PopLocal));
         assert_eq!(OpCode::try_from(67u8), Ok(OpCode::ForRangePrep));
         assert_eq!(OpCode::try_from(68u8), Ok(OpCode::ForRangeNext));
-        assert_eq!(OpCode::try_from(69u8), Ok(OpCode::GetIndexLocal));
-        assert_eq!(OpCode::try_from(74u8), Ok(OpCode::PushFieldLocal));
-        assert_eq!(OpCode::try_from(76u8), Ok(OpCode::CallPure));
-        assert_eq!(OpCode::try_from(77u8), Err(77));
+        assert_eq!(OpCode::try_from(69u8), Ok(OpCode::UpdateSetLocal));
+        assert_eq!(OpCode::try_from(70u8), Ok(OpCode::GetIndexLocal));
+        assert_eq!(OpCode::try_from(75u8), Ok(OpCode::PushFieldLocal));
+        assert_eq!(OpCode::try_from(77u8), Ok(OpCode::CallPure));
+        assert_eq!(OpCode::try_from(78u8), Err(78));
         // Every byte below the count decodes to the variant with that
         // discriminant.
-        for byte in 0..77u8 {
+        for byte in 0..78u8 {
             let op = OpCode::try_from(byte).expect("BUG: valid opcode byte");
             assert_eq!(op as u8, byte);
         }

@@ -1,0 +1,10 @@
+// expect: [1, 1]
+// A database the program opened is visible in its spawned tasks.
+db.open(":memory:")
+db.execute("CREATE TABLE t (x INTEGER)")
+let h = spawn {
+    db.execute("INSERT INTO t VALUES (1)")
+    return db.query("SELECT COUNT(*) AS c FROM t")[0].c
+}
+let in_task = await h
+[in_task, db.query("SELECT COUNT(*) AS c FROM t")[0].c]

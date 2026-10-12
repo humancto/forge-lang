@@ -121,6 +121,35 @@ say page.title
 say len(page.links)
 ```
 
+### http.response(status, body?, headers?) -> object
+
+Builds the response an HTTP handler returns when it needs a status code other than 200, response headers, or a body that is not JSON (see [Server Decorators](#server-decorators)).
+
+- `status` — an Int from 200 to 599.
+- `body` — `null` (the default) sends no body; a String is sent as is, with `Content-Type: text/plain; charset=utf-8` unless `headers` sets one; any other value is sent as JSON (`application/json` unless set).
+- `headers` — an object of header names to values. A value may be a String, a number or a Bool, or an array of them (the header is sent once per element, e.g. `Set-Cookie`).
+
+Invalid arguments raise an error when the response is built: a status outside 200-599, a body with status 204 or 304, an invalid header name, a header value containing a line break or other control character (so a value can never inject a header), and `Content-Length`, `Transfer-Encoding` or `Connection`, which the server sets.
+
+```forge
+@post("/items")
+fn create(body) {
+    return http.response(201, { id: 7 }, { Location: "/items/7" })
+}
+
+@get("/health")
+fn health() {
+    return http.response(200, "ok")          // text/plain
+}
+
+@delete("/items/:id")
+fn remove(id) {
+    return http.response(204)                // no body
+}
+```
+
+The result is an object (`{ status, headers, body }` tagged as an `HttpResponse`); a handler may adjust its fields before returning it. It is validated again when it is sent; an invalid one answers 500.
+
 ### http.pretty(response) -> null
 
 Pretty-prints an HTTP response object to stderr with color formatting.
@@ -132,7 +161,7 @@ http.pretty(resp)
 
 ## Server Decorators
 
-Forge supports declarative HTTP servers using decorators. The `@server` decorator configures the server, and `@get`, `@post`, `@put`, `@delete` decorators define route handlers.
+Forge supports declarative HTTP servers using decorators. The `@server` decorator configures the server, and `@get`, `@post`, `@put`, `@patch`, `@delete` decorators define route handlers.
 
 ```forge
 @server(port: 3000)
@@ -144,18 +173,23 @@ fn index() {
 
 @get("/users/:id")
 fn get_user(id) {
+    if id == "0" {
+        return http.response(404, { error: "no such user" })
+    }
     return { id: id, name: "User " + id }
 }
 
 @post("/users")
-fn create_user(body) {
-    say "Creating user: " + body.name
-    return { ok: true, name: body.name }
+fn create_user(body, headers) {
+    if get(headers, "authorization") == null {
+        return http.response(401, { error: "unauthorized" })
+    }
+    return http.response(201, { ok: true, name: body.name }, { Location: "/users/1" })
 }
 
 @delete("/users/:id")
 fn delete_user(id) {
-    return { deleted: id }
+    return http.response(204)
 }
 ```
 
@@ -164,12 +198,36 @@ fn delete_user(id) {
 Handler functions receive arguments based on parameter names:
 
 - **Path parameters** (`:id`, `:name`) are passed by matching the parameter name.
-- **`body`** or **`data`** receives the parsed JSON request body.
+- **`body`** or **`data`** receives the request body (`{}` when the request has none).
 - **`query`** or **`qs`** receives query string parameters as an object.
+- **`headers`** receives the request headers as an object with lower-case names (repeated headers joined with `, `).
+- **`req`** or **`request`** receives the whole request: `{ method, path, params, query, headers, body }` (`body` is `null` when there is none).
+- Any other name receives the query parameter of that name, or `null`.
+
+Path, query and header values are Strings. Use `get(headers, "x-name")` for an optional header: indexing a missing key is an error.
+
+### Request Bodies
+
+The body is decoded by its `Content-Type`:
+
+| Content type | `body` |
+| --- | --- |
+| `application/json`, `*/*+json` | the parsed JSON value |
+| `application/x-www-form-urlencoded` | an object of Strings |
+| anything else, or none | the body as a String |
+
+Invalid JSON is answered `400` and a body that is not UTF-8 text `415`, with a JSON `{"error": ...}` body, before the handler runs. Bodies are limited to 2 MiB (`413`).
+
+### Responses
+
+A returned value is sent as `200` JSON. `http.response(status, body?, headers?)` sets the status, headers and body. A runtime error in a handler answers `500 {"error": message}`.
+
+### Databases
+
+A database the program's top level opens (`db.open`, `pg.connect`) is shared by all handlers. Statements of concurrent requests run one at a time on the connection; a transaction (`db.begin()` ... `db.commit()`, or `BEGIN` in SQL) belongs to the request that opened it — other requests wait for it — and is rolled back if the request ends without committing. `db.last_insert_rowid()` returns the request's own last insert. `db.open` or `db.close` inside a handler affects that request only.
 
 ### Server Features
 
-- Built on **axum** and **tokio** for production-grade async performance.
-- **CORS** is enabled by default (permissive policy).
-- Return values are automatically serialized as JSON responses.
+- Built on **axum** and **tokio**; each request runs in an isolated fork of the program, concurrently with other requests.
+- **CORS** is same-origin by default; `@server(cors: "permissive")` allows any origin.
 - WebSocket support via the `@ws` decorator.

@@ -51,6 +51,8 @@ pub enum Code {
     /// The result of a pure call that only produces a new value is thrown
     /// away (`push(xs, v)` as a statement in edition 2027).
     DiscardedResult,
+    /// An `import` names a file that cannot be found or read.
+    UnresolvedImport,
 }
 
 impl Code {
@@ -75,6 +77,7 @@ impl Code {
         Code::ImmutableAssign,
         Code::UseBeforeDefinition,
         Code::DiscardedResult,
+        Code::UnresolvedImport,
     ];
 
     /// The stable identifier, e.g. `"T0006"`.
@@ -99,6 +102,7 @@ impl Code {
             Code::ImmutableAssign => "T0017",
             Code::UseBeforeDefinition => "T0018",
             Code::DiscardedResult => "T0019",
+            Code::UnresolvedImport => "T0020",
         }
     }
 }
@@ -134,6 +138,7 @@ impl Code {
             Code::ImmutableAssign => "assignment to an immutable variable",
             Code::UseBeforeDefinition => "name used before its definition",
             Code::DiscardedResult => "result of a pure call discarded",
+            Code::UnresolvedImport => "import not found",
         }
     }
 
@@ -162,7 +167,7 @@ to.
 
 Example:
 
-    fn greet(name: String) { say \"hi \" + name }
+    fn greet(name: String) { println(\"hi \" + name) }
     greet(42)
 
 Fix: pass a value of the parameter's type (`greet(str(42))`) or widen the
@@ -213,7 +218,7 @@ a defined name with similar spelling when there is one.
 Example:
 
     let count = 1
-    say coutn
+    println(coutn)
 
 Fix: correct the spelling or define the name first. At run time this is
 E0003."
@@ -226,7 +231,7 @@ Example:
 
     struct User { name: String }
     let u = User { name: \"Ada\" }
-    say u.email
+    println(u.email)
 
 Fix: use a declared field, or add the field to the struct. At run time this
 is E0013."
@@ -265,7 +270,7 @@ Example:
 
     fn f() {
         return 1
-        say \"done\"
+        println(\"done\")
     }
 
 Fix: delete the dead statement or move it before the exit."
@@ -278,7 +283,7 @@ Example:
 
     type Shape = Circle(Float) | Square(Float)
     let s = Circle(1.0)
-    match s { Circle(r) => say r }
+    match s { Circle(r) => println(r) }
 
 Fix: add arms for the missing variants or a wildcard `_ => ...`. At run time
 an unmatched value is E0026."
@@ -317,7 +322,7 @@ string concatenation, ...).
 Example:
 
     let n = Some(2)
-    say n + 1
+    println(n + 1)
 
 Fix: unwrap it first — `unwrap_or(n, 0) + 1`, or `match n { Some(v) => ...,
 None => ... }`."
@@ -362,7 +367,7 @@ A name is read before the statement that defines it has run.
 
 Example:
 
-    say greeting
+    println(greeting)
     let greeting = \"hi\"
 
 Fix: move the definition above its first use. Functions declared with `fn`
@@ -384,6 +389,22 @@ Fix: keep the result (`xs = push(xs, 3)`), or append in place with the
 method form (`xs.push(3)`). In edition 2026 the statement also updated a
 mutable `xs`, so this is reported only from edition 2027, always as an
 error; `forge fix --edition 2027` rewrites it to `xs = push(xs, 3)`."
+            }
+            Code::UnresolvedImport => {
+                "\
+An `import` names a file that does not exist (or cannot be read or
+parsed). Paths are resolved relative to the importing file first, then the
+working directory, then `forge_modules/`; the `.fg` suffix is optional.
+The names it would import are unknown, so nothing is checked against them.
+
+Example:
+
+    import { helper } from \"no_such_module_here.fg\"
+    println(helper(1))
+
+Fix: correct the path (the message shows where it looked), or create the
+module. An error from edition 2027 and under `--strict`, otherwise a
+warning; running the program fails at the import either way (E0019)."
             }
         }
     }
@@ -427,6 +448,8 @@ impl Code {
                 | Code::InterfaceNotSatisfied
                 | Code::UnknownType
                 | Code::MissingField
+                // The program declared a module that is not there.
+                | Code::UnresolvedImport
         )
     }
 }

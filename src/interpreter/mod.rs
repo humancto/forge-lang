@@ -145,6 +145,56 @@ pub struct FunctionValue {
     pub decorators: Vec<Decorator>,
 }
 
+/// A set's items: insertion-ordered and hash-indexed
+/// (`semantics::ordered_set`). Membership uses [`Value::container_eq`];
+/// items are hashed with [`Value::set_hash`], which hashes equal items
+/// alike.
+pub type SetItems = crate::semantics::ordered_set::OrderedSet<Value>;
+
+impl SetItems {
+    /// A set of `values` in order, dropping each value equal to an earlier
+    /// one (what `set(array)` does).
+    pub fn from_values(values: impl IntoIterator<Item = Value>) -> Self {
+        let mut set = SetItems::new();
+        for value in values {
+            set.add_value(value);
+        }
+        set
+    }
+
+    /// A set of `values` in order, kept as given even if some compare
+    /// equal (values converted from the VM, whose set equality differs in
+    /// corner cases, keep exactly the items they had).
+    pub fn from_values_unchecked(values: impl IntoIterator<Item = Value>) -> Self {
+        let mut set = SetItems::new();
+        for value in values {
+            set.push_unchecked(value.set_hash(), value);
+        }
+        set
+    }
+
+    /// Whether some item equals `value` (`container_eq`).
+    pub fn has_value(&self, value: &Value) -> bool {
+        self.contains(value.set_hash(), |item| Value::container_eq(item, value))
+    }
+
+    /// Add `value` unless an equal item is present; returns whether it was
+    /// added.
+    pub fn add_value(&mut self, value: Value) -> bool {
+        let hash = value.set_hash();
+        if self.contains(hash, |item| Value::container_eq(item, &value)) {
+            return false;
+        }
+        self.push_unchecked(hash, value);
+        true
+    }
+
+    /// Remove every item equal to `value`; returns whether any was.
+    pub fn remove_value(&mut self, value: &Value) -> bool {
+        self.remove_matching(value.set_hash(), |item| Value::container_eq(item, value)) > 0
+    }
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -154,7 +204,9 @@ pub enum Value {
     Bool(bool),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
-    Set(Vec<Value>),
+    /// Insertion-ordered set; hash-indexed so `has`/`add`/`remove` are
+    /// O(1) on average (see [`SetItems`]).
+    Set(SetItems),
     /// First-class Map with any-value keys. Ordered vec preserves insertion
     /// order; keys compared via `container_eq` so NaN self-matches and
     /// Int/Float promote (e.g. `1` and `1.0` collide).
@@ -197,14 +249,7 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
-            (Value::Set(a), Value::Set(b)) => {
-                // Order-independent with container-aware equality: same length
-                // + every element in A is equivalent to some element in B
-                // (handles NaN==NaN and Int/Float promotion for set semantics).
-                a.len() == b.len()
-                    && a.iter()
-                        .all(|x| b.iter().any(|y| Value::container_eq(x, y)))
-            }
+            (Value::Set(a), Value::Set(b)) => Value::sets_equal(a, b),
             (Value::Map(a), Value::Map(b)) => {
                 // Order-independent on entries. Keys use container_eq
                 // (NaN self-match, Int/Float promote). Values use full ==.
@@ -288,6 +333,78 @@ impl Value {
         }
     }
 
+    /// Order-independent set equality: same length and every item of `a`
+    /// equals (`container_eq`) some item of `b` (handles NaN == NaN and
+    /// Int/Float promotion for set semantics).
+    fn sets_equal(a: &SetItems, b: &SetItems) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .all(|x| b.contains(x.set_hash(), |y| Value::container_eq(x, y)))
+    }
+
+    /// Hash for set membership: values that are `container_eq` hash
+    /// alike (Int/Float that compare equal, every NaN, `Frozen(v)` and
+    /// `v`). Collisions only cost a comparison, so kinds whose equality is
+    /// not structural (sets and maps nested in sets, functions, channels)
+    /// hash by their kind and size alone.
+    pub fn set_hash(&self) -> u64 {
+        crate::semantics::ordered_set::finish(self.set_hash_at(0))
+    }
+
+    fn set_hash_at(&self, depth: usize) -> u64 {
+        use crate::semantics::ordered_set as h;
+        match self {
+            Value::Frozen(inner) => return inner.set_hash_at(depth),
+            Value::Int(n) => return h::hash_int(*n),
+            Value::Float(f) => return h::hash_number(*f),
+            Value::String(s) => return h::hash_str(s),
+            Value::Bool(b) => return h::mix(h::TAG_BOOL, u64::from(*b)),
+            Value::Null => return h::TAG_NULL,
+            Value::None => return h::TAG_NONE,
+            Value::BuiltIn(name) => return h::mix(h::TAG_OTHER, h::hash_str(name)),
+            _ => {}
+        }
+        let deeper = depth < h::MAX_HASH_DEPTH;
+        let ordered = |tag: u64, items: &[Value]| {
+            let start = h::mix(tag, items.len() as u64);
+            if !deeper {
+                return start;
+            }
+            items
+                .iter()
+                .fold(start, |acc, item| h::mix(acc, item.set_hash_at(depth + 1)))
+        };
+        let wrapped = |tag: u64, inner: &Value| {
+            if deeper {
+                h::mix(tag, inner.set_hash_at(depth + 1))
+            } else {
+                tag
+            }
+        };
+        match self {
+            Value::Array(items) => ordered(h::TAG_ARRAY, items),
+            Value::Tuple(items) => ordered(h::TAG_TUPLE, items),
+            Value::Set(items) => h::mix(h::TAG_SET, items.len() as u64),
+            Value::Map(pairs) => h::mix(h::TAG_MAP, pairs.len() as u64),
+            Value::Object(map) => {
+                let start = h::mix(h::TAG_OBJECT, map.len() as u64);
+                if !deeper {
+                    return start;
+                }
+                // Key order does not matter for equality: combine entries
+                // commutatively.
+                let entries = map.iter().fold(0u64, |acc, (k, v)| {
+                    acc.wrapping_add(h::finish(h::mix(h::hash_str(k), v.set_hash_at(depth + 1))))
+                });
+                h::mix(start, entries)
+            }
+            Value::ResultOk(inner) => wrapped(h::TAG_OK, inner),
+            Value::ResultErr(inner) => wrapped(h::TAG_ERR, inner),
+            Value::Some(inner) => wrapped(h::TAG_SOME, inner),
+            _ => h::TAG_OTHER,
+        }
+    }
+
     /// Container-aware equality used for set membership, set equality, and
     /// any other collection where we want NaN==NaN and Int↔Float promotion
     /// to agree with the VM's `Value::equals` semantics.
@@ -318,11 +435,7 @@ impl Value {
                         .zip(y.iter())
                         .all(|(a, b)| Value::container_eq(a, b))
             }
-            (Value::Set(x), Value::Set(y)) => {
-                x.len() == y.len()
-                    && x.iter()
-                        .all(|xv| y.iter().any(|yv| Value::container_eq(xv, yv)))
-            }
+            (Value::Set(x), Value::Set(y)) => Value::sets_equal(x, y),
             (Value::Map(x), Value::Map(y)) => {
                 x.len() == y.len()
                     && x.iter().all(|(xk, xv)| {
@@ -376,7 +489,8 @@ impl Value {
             Value::Float(n) => Shape::Float(*n),
             Value::String(s) => Shape::Sized(s.len()),
             Value::Null => Shape::Null,
-            Value::Array(a) | Value::Tuple(a) | Value::Set(a) => Shape::Sized(a.len()),
+            Value::Array(a) | Value::Tuple(a) => Shape::Sized(a.len()),
+            Value::Set(a) => Shape::Sized(a.len()),
             Value::Map(m) => Shape::Sized(m.len()),
             Value::Object(o) => Shape::Sized(o.len()),
             Value::ResultOk(_) => Shape::ResultOk,
@@ -407,7 +521,11 @@ impl Value {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
-            Value::Tuple(items) | Value::Set(items) => {
+            Value::Tuple(items) => {
+                let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
+                format!("[{}]", entries.join(", "))
+            }
+            Value::Set(items) => {
                 let entries: Vec<String> = items.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", entries.join(", "))
             }
@@ -869,11 +987,11 @@ impl Environment {
                     .map(|x| Self::dup_value(x, scope_map))
                     .collect(),
             ),
-            Value::Set(arr) => Value::Set(
-                arr.into_iter()
-                    .map(|x| Self::dup_value(x, scope_map))
-                    .collect(),
-            ),
+            // Isolating closures changes neither how an item compares nor
+            // how it hashes, so the stored hashes stay valid.
+            Value::Set(arr) => {
+                Value::Set(arr.into_map_same_hash(|x| Self::dup_value(x, scope_map)))
+            }
             Value::Map(pairs) => Value::Map(
                 pairs
                     .into_iter()
@@ -1119,7 +1237,25 @@ pub struct Interpreter {
     /// read once at construction, carried to children (`child_context`)
     /// and forks, and passed to the shared operator rules.
     edition: crate::semantics::edition::Edition,
+    /// Modules this program already imported, by canonical path: a module
+    /// runs once per program, and every importer shares its state. Shared
+    /// by `child_context` (imports, `timeout`, `spawn`) and background
+    /// forks; an HTTP request fork starts empty (`fork_for_serving`).
+    modules: ModuleCache,
 }
+
+/// A module that ran in this program: what importing it again binds.
+pub(crate) struct LoadedModule {
+    program: Arc<Program>,
+    /// The module's scopes (shared, not copied: they are its state).
+    env: Environment,
+    method_tables: HashMap<String, IndexMap<String, Value>>,
+    static_methods: HashMap<String, IndexMap<String, Value>>,
+    embedded_fields: HashMap<String, Vec<(String, String)>>,
+    struct_defaults: HashMap<String, IndexMap<String, Value>>,
+}
+
+type ModuleCache = Arc<Mutex<HashMap<std::path::PathBuf, Arc<LoadedModule>>>>;
 
 /// Teardown: release this interpreter's own roots, and if it was the last
 /// interpreter on its heap, reclaim the scope cycles nothing else holds
@@ -1134,6 +1270,13 @@ impl Drop for Interpreter {
         self.static_methods.clear();
         self.struct_defaults.clear();
         self.squad_handles = None;
+        // The last interpreter of a program releases its imported modules,
+        // so their scope cycles are collected below.
+        if Arc::strong_count(&self.modules) == 1 {
+            let modules =
+                std::mem::take(&mut *self.modules.lock().unwrap_or_else(|e| e.into_inner()));
+            drop(modules);
+        }
         if self.heap.detach() {
             self.heap.collect(&[]);
         }
@@ -1179,6 +1322,7 @@ impl Interpreter {
             meter: crate::runtime::limits::Meter::current().with_memory_polling(),
             caps: crate::runtime::limits::Caps::current(),
             edition: crate::semantics::edition::current(),
+            modules: ModuleCache::default(),
         };
         interp.register_builtins();
         interp
@@ -1271,7 +1415,65 @@ impl Interpreter {
             .with_memory_polling();
         child.caps = self.caps;
         child.edition = self.edition;
+        child.modules = Arc::clone(&self.modules);
         child
+    }
+
+    /// The module `path` (as written in an `import`) names, run once per
+    /// program: the first import resolves, checks and runs it; later ones
+    /// (from any module of the program) reuse it and its state.
+    fn load_module(&mut self, path: &str) -> Result<Arc<LoadedModule>, RuntimeError> {
+        let base_dir = self
+            .source_file
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let file_path = crate::package::resolve_import_from(path, base_dir.as_deref())
+            .ok_or_else(|| RuntimeError::new(&crate::semantics::import_not_found(path)))?;
+        let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
+        let cached = self
+            .modules
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        if let Some(module) = cached {
+            return Ok(module);
+        }
+        // Read the path that was checked (resolved under a scoped grant).
+        let checked = crate::permissions::require_import(&file_path)
+            .map_err(|e| RuntimeError::new(&e.to_string()))?;
+        let source = std::fs::read_to_string(&checked)
+            .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
+        let program = crate::typechecker::prepare_module(&source, path, &file_path)
+            .map_err(|e| RuntimeError::new(&e))?;
+
+        // Shared cycle detection (runtime/imports.rs); the guard keeps
+        // this module on the import chain while it runs.
+        let _import_guard = crate::runtime::imports::enter_import(&file_path)
+            .map_err(|msg| RuntimeError::new(&msg))?;
+        // Same containment as ours: cancellation, output capture,
+        // and no host runtime (see `child_context`).
+        let mut import_interp = self.child_context();
+        import_interp.source_file = Some(file_path.clone());
+        import_interp.run(&program)?;
+
+        let module = Arc::new(LoadedModule {
+            program: Arc::new(program),
+            env: import_interp.env.clone(),
+            method_tables: import_interp.method_tables.clone(),
+            static_methods: import_interp.static_methods.clone(),
+            embedded_fields: import_interp.embedded_fields.clone(),
+            struct_defaults: import_interp.struct_defaults.clone(),
+        });
+        // Two tasks importing the module at once may both run it; the
+        // first to finish is the program's instance.
+        Ok(Arc::clone(
+            self.modules
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(key)
+                .or_insert(module),
+        ))
     }
 
     /// The language edition this interpreter runs programs under.
@@ -1378,7 +1580,11 @@ impl Interpreter {
         fn walk(v: &Value, path: &str, seen: &mut Seen) -> Option<String> {
             match v {
                 Value::Stream(_) => Some(path.to_string()),
-                Value::Array(a) | Value::Tuple(a) | Value::Set(a) => a
+                Value::Array(a) | Value::Tuple(a) => a
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, x)| walk(x, &format!("{}[{}]", path, i), seen)),
+                Value::Set(a) => a
                     .iter()
                     .enumerate()
                     .find_map(|(i, x)| walk(x, &format!("{}[{}]", path, i), seen)),
@@ -1512,7 +1718,39 @@ impl Interpreter {
         interp.debug_state = self.debug_state.clone();
         interp.output_sink = self.output_sink.clone();
         interp.edition = self.edition;
+        interp.modules = Arc::clone(&self.modules);
         interp
+    }
+
+    /// Merge an imported module's method tables, static methods, struct
+    /// defaults and embedded fields into this interpreter. Includes the
+    /// tables the module itself imported, so `impl` blocks reach every
+    /// importer however the type was brought in.
+    fn absorb_type_tables(&mut self, from: &LoadedModule) {
+        for (type_name, methods) in &from.method_tables {
+            let entry = self
+                .method_tables
+                .entry(type_name.clone())
+                .or_insert_with(IndexMap::new);
+            for (k, v) in methods {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+        for (type_name, statics) in &from.static_methods {
+            let entry = self
+                .static_methods
+                .entry(type_name.clone())
+                .or_insert_with(IndexMap::new);
+            for (k, v) in statics {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+        for (name, defaults) in &from.struct_defaults {
+            self.struct_defaults.insert(name.clone(), defaults.clone());
+        }
+        for (name, embeds) in &from.embedded_fields {
+            self.embedded_fields.insert(name.clone(), embeds.clone());
+        }
     }
 
     pub(crate) fn exec_background_block(
@@ -1592,13 +1830,7 @@ impl Interpreter {
                     Signal::Continue => return Err(RuntimeError::new("continue outside of loop")),
                     Signal::None | Signal::ImplicitReturn(_) => {}
                 },
-                Err(mut e) => {
-                    if e.line == 0 {
-                        e.line = spanned.line;
-                        e.col = spanned.col;
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(e.at_statement(spanned.line, spanned.col)),
             }
         }
         Ok(Value::Null)
@@ -1610,13 +1842,7 @@ impl Interpreter {
         let plan = self.hoist_plan(&program.statements);
         for spanned in plan.order.iter().map(|&i| &program.statements[i]) {
             self.current_line = spanned.line;
-            let patch = |mut e: RuntimeError| {
-                if e.line == 0 {
-                    e.line = spanned.line;
-                    e.col = spanned.col;
-                }
-                e
-            };
+            let patch = |e: RuntimeError| e.at_statement(spanned.line, spanned.col);
             // Expression statements are evaluated exactly once; their value
             // (unless it is an output call) is the REPL result.
             if let Stmt::Expression(ref expr) = spanned.stmt {
@@ -1932,9 +2158,13 @@ impl Interpreter {
                 iterable,
                 body,
             } => {
-                let iter_val = self.eval_expr(iterable)?;
+                let iter_val = match self.eval_expr(iterable)? {
+                    // A set iterates its items in insertion order.
+                    Value::Set(items) => Value::Array(items.into_vec()),
+                    other => other,
+                };
                 match iter_val {
-                    Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
+                    Value::Array(items) | Value::Tuple(items) => {
                         for item in items {
                             self.env.push_scope();
                             self.env.define(var.clone(), item);
@@ -2137,18 +2367,18 @@ impl Interpreter {
                     if let Some(module) = self.env.get(path) {
                         // `import { sqrt } from "math"` binds `math.sqrt`.
                         for name in names.iter().flatten() {
-                            crate::semantics::check_builtin_module_import(path, name)
+                            crate::semantics::check_builtin_module_import(path, &name.name)
                                 .map_err(|m| RuntimeError::new(&m))?;
                             let member = match &module {
-                                Value::Object(members) => members.get(name).cloned(),
+                                Value::Object(members) => members.get(&name.name).cloned(),
                                 _ => None,
                             }
                             .ok_or_else(|| {
                                 RuntimeError::new(&crate::semantics::import_missing_name(
-                                    path, name,
+                                    path, &name.name,
                                 ))
                             })?;
-                            self.env.define(name.to_string(), member);
+                            self.env.define(name.binding().to_string(), member);
                         }
                         return Ok(Signal::None);
                     }
@@ -2158,94 +2388,42 @@ impl Interpreter {
                     )));
                 }
 
-                let base_dir = self
-                    .source_file
-                    .as_ref()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                let file_path = match crate::package::resolve_import_from(path, base_dir.as_deref())
-                {
-                    Some(p) => p,
-                    None => {
-                        return Err(RuntimeError::new(&crate::semantics::import_not_found(path)));
-                    }
-                };
-                // Read the path that was checked (resolved under a scoped grant).
-                let checked = crate::permissions::require_import(&file_path)
-                    .map_err(|e| RuntimeError::new(&e.to_string()))?;
-                let source = std::fs::read_to_string(&checked)
-                    .map_err(|e| RuntimeError::new(&format!("cannot import '{}': {}", path, e)))?;
-                let program = crate::typechecker::prepare_module(&source, path, &file_path)
-                    .map_err(|e| RuntimeError::new(&e))?;
-
-                // Shared cycle detection (runtime/imports.rs); the guard keeps
-                // this module on the import chain while it runs.
-                let _import_guard = crate::runtime::imports::enter_import(&file_path)
-                    .map_err(|msg| RuntimeError::new(&msg))?;
-                // Same containment as ours: cancellation, output capture,
-                // and no host runtime (see `child_context`).
-                let mut import_interp = self.child_context();
-                import_interp.source_file = Some(file_path.clone());
-                import_interp.run(&program)?;
+                let module = self.load_module(path)?;
 
                 if let Some(name_list) = names {
                     for name in name_list {
-                        let val = import_interp.env.get(name).ok_or_else(|| {
-                            RuntimeError::new(&crate::semantics::import_missing_name(path, name))
+                        if let Some(alias) = &name.alias {
+                            crate::semantics::check_import_alias(
+                                path,
+                                &module.program,
+                                &name.name,
+                                alias,
+                            )
+                            .map_err(|m| RuntimeError::new(&m))?;
+                        }
+                        let val = module.env.get(&name.name).ok_or_else(|| {
+                            RuntimeError::new(&crate::semantics::import_missing_name(
+                                path, &name.name,
+                            ))
                         })?;
-                        self.env.define(name.to_string(), val);
+                        self.env.define(name.binding().to_string(), val);
                     }
                 } else {
                     // Import all top-level definitions
-                    for spanned in &program.statements {
+                    for spanned in &module.program.statements {
                         match &spanned.stmt {
-                            Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
-                                if let Some(val) = import_interp.env.get(name) {
+                            Stmt::FnDef { name, .. }
+                            | Stmt::Let { name, .. }
+                            | Stmt::StructDef { name, .. } => {
+                                if let Some(val) = module.env.get(name) {
                                     self.env.define(name.clone(), val);
                                 }
                             }
-                            Stmt::StructDef { name, .. } => {
-                                if let Some(val) = import_interp.env.get(name) {
-                                    self.env.define(name.clone(), val);
-                                }
-                                // Copy struct defaults and embedded fields
-                                if let Some(defaults) = import_interp.struct_defaults.get(name) {
-                                    self.struct_defaults.insert(name.clone(), defaults.clone());
-                                }
-                                if let Some(embeds) = import_interp.embedded_fields.get(name) {
-                                    self.embedded_fields.insert(name.clone(), embeds.clone());
-                                }
-                            }
-                            Stmt::TypeDef { name, variants } => {
+                            Stmt::TypeDef { variants, .. } => {
                                 // Import each variant individually
                                 for variant in variants {
-                                    if let Some(val) = import_interp.env.get(&variant.name) {
+                                    if let Some(val) = module.env.get(&variant.name) {
                                         self.env.define(variant.name.clone(), val);
-                                    }
-                                }
-                                // Import type metadata
-                                let meta_key = format!("__type_{}__", name);
-                                if let Some(val) = import_interp.env.get(&meta_key) {
-                                    self.env.define(meta_key, val);
-                                }
-                            }
-                            Stmt::ImplBlock { type_name, .. } => {
-                                // Copy method tables and static methods
-                                if let Some(methods) = import_interp.method_tables.get(type_name) {
-                                    let entry = self
-                                        .method_tables
-                                        .entry(type_name.clone())
-                                        .or_insert_with(IndexMap::new);
-                                    for (k, v) in methods {
-                                        entry.insert(k.clone(), v.clone());
-                                    }
-                                }
-                                if let Some(statics) = import_interp.static_methods.get(type_name) {
-                                    let entry = self
-                                        .static_methods
-                                        .entry(type_name.clone())
-                                        .or_insert_with(IndexMap::new);
-                                    for (k, v) in statics {
-                                        entry.insert(k.clone(), v.clone());
                                     }
                                 }
                             }
@@ -2253,6 +2431,19 @@ impl Interpreter {
                         }
                     }
                 }
+                // Type metadata travels with every import, selective or
+                // not: a value built from an imported struct or variant
+                // dispatches through these tables (the VM registers them
+                // process-wide when the module runs).
+                for spanned in &module.program.statements {
+                    if let Stmt::TypeDef { name, .. } = &spanned.stmt {
+                        let meta_key = format!("__type_{}__", name);
+                        if let Some(val) = module.env.get(&meta_key) {
+                            self.env.define(meta_key, val);
+                        }
+                    }
+                }
+                self.absorb_type_tables(&module);
                 Ok(Signal::None)
             }
 
@@ -2721,13 +2912,8 @@ impl Interpreter {
     /// (`semantics::is_value_tail`). `return`/`break`/`continue` inside
     /// stop evaluation and are reported as the matching [`BlockExit`].
     fn eval_stmt_value(&mut self, spanned: &SpannedStmt) -> Result<BlockExit, RuntimeError> {
-        let patch_err = |mut e: RuntimeError| -> RuntimeError {
-            if e.line == 0 {
-                e.line = spanned.line;
-                e.col = spanned.col;
-            }
-            e
-        };
+        let patch_err =
+            |e: RuntimeError| -> RuntimeError { e.at_statement(spanned.line, spanned.col) };
         match &spanned.stmt {
             Stmt::Expression(expr) => {
                 Ok(BlockExit::Value(self.eval_expr(expr).map_err(patch_err)?))
@@ -2859,23 +3045,15 @@ impl Interpreter {
             }
             if let Stmt::Expression(expr) = stmt {
                 let want_value = keep_value && index == last_index;
-                last_expr_value = self.eval_expr_stmt(expr, want_value).map_err(|mut e| {
-                    if e.line == 0 {
-                        e.line = s.line;
-                        e.col = s.col;
-                    }
-                    e
-                })?;
+                last_expr_value = self
+                    .eval_expr_stmt(expr, want_value)
+                    .map_err(|e| e.at_statement(s.line, s.col))?;
                 continue;
             }
             last_expr_value = Value::Null;
-            result = self.exec_stmt(stmt).map_err(|mut e| {
-                if e.line == 0 {
-                    e.line = s.line;
-                    e.col = s.col;
-                }
-                e
-            })?;
+            result = self
+                .exec_stmt(stmt)
+                .map_err(|e| e.at_statement(s.line, s.col))?;
             match &result {
                 Signal::Return(_) | Signal::Break | Signal::Continue => break,
                 Signal::None | Signal::ImplicitReturn(_) => {}
@@ -3008,7 +3186,8 @@ impl Interpreter {
     /// The annotation checks `typechecker::enforce` inserts (`--strict`,
     /// edition 2027) run on every call of an annotated function:
     /// `__types.check(value, type, "<context>")` and `__types.bind("T",
-    /// "<fn>", "<names>", args..)` are decided here without cloning the
+    /// "<fn>", "<names>", args..)` (and `__types.widen(value, type)`) are
+    /// decided here without cloning the
     /// hidden module or going through builtin dispatch. Same rule and
     /// messages as the module members (`stdlib::types_module`); any other
     /// shape takes the normal call path.
@@ -3043,12 +3222,27 @@ impl Interpreter {
                     Err(e) => return Some(Err(RuntimeError::new(&e))),
                 };
                 Some(if crate::semantics::types::fits(&value, &expected) {
-                    Ok(value)
+                    Ok(crate::semantics::types::widen(&value, &expected).unwrap_or(value))
                 } else {
                     Err(RuntimeError::new(&crate::semantics::types::violation(
                         context, &expected, &value,
                     )))
                 })
+            }
+            ("widen", [value, Expr::StringLit(ty)]) => {
+                let value = match self.eval_expr(value) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let expected = match crate::semantics::types::parse_cached(ty) {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(RuntimeError::new(&e))),
+                };
+                Some(Ok(if crate::semantics::types::fits(&value, &expected) {
+                    crate::semantics::types::widen(&value, &expected).unwrap_or(value)
+                } else {
+                    value
+                }))
             }
             ("bind", [Expr::StringLit(_), Expr::StringLit(_), Expr::StringLit(_), values @ ..]) => {
                 let mut evaluated = Vec::with_capacity(values.len());
@@ -3451,16 +3645,16 @@ impl Interpreter {
                         } =>
                         {
                             let is_frozen = matches!(&obj, Value::Frozen(_));
-                            let items: Vec<Value> = match &obj {
-                                Value::Set(items) => items.clone(),
+                            let items: &SetItems = match &obj {
+                                Value::Set(items) => items,
                                 Value::Frozen(inner) => match inner.as_ref() {
-                                    Value::Set(items) => items.clone(),
-                                    _ => unreachable!(),
+                                    Value::Set(items) => items,
+                                    _ => return Err(RuntimeError::new("BUG: set receiver")),
                                 },
-                                _ => unreachable!(),
+                                _ => return Err(RuntimeError::new("BUG: set receiver")),
                             };
                             // Extract the "other" argument for set-set operations, peeling Frozen.
-                            let peel_other_set = |v: Value| -> Result<Vec<Value>, RuntimeError> {
+                            let peel_other_set = |v: Value| -> Result<SetItems, RuntimeError> {
                                 match v {
                                     Value::Set(items) => Ok(items),
                                     Value::Frozen(inner) => match *inner {
@@ -3482,9 +3676,7 @@ impl Interpreter {
                                         ));
                                     }
                                     let val = self.eval_expr(&args[0])?;
-                                    return Ok(Value::Bool(
-                                        items.iter().any(|v| Value::container_eq(v, &val)),
-                                    ));
+                                    return Ok(Value::Bool(items.has_value(&val)));
                                 }
                                 "add" => {
                                     if is_frozen {
@@ -3498,10 +3690,8 @@ impl Interpreter {
                                         ));
                                     }
                                     let val = self.eval_expr(&args[0])?;
-                                    let mut new_items = items;
-                                    if !new_items.iter().any(|v| Value::container_eq(v, &val)) {
-                                        new_items.push(val);
-                                    }
+                                    let mut new_items = items.clone();
+                                    new_items.add_value(val);
                                     return Ok(Value::Set(new_items));
                                 }
                                 "remove" => {
@@ -3516,10 +3706,8 @@ impl Interpreter {
                                         ));
                                     }
                                     let val = self.eval_expr(&args[0])?;
-                                    let new_items: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| !Value::container_eq(v, &val))
-                                        .collect();
+                                    let mut new_items = items.clone();
+                                    new_items.remove_value(&val);
                                     return Ok(Value::Set(new_items));
                                 }
                                 "union" => {
@@ -3530,11 +3718,9 @@ impl Interpreter {
                                     }
                                     let other = self.eval_expr(&args[0])?;
                                     let other_items = peel_other_set(other)?;
-                                    let mut result = items;
-                                    for v in other_items {
-                                        if !result.iter().any(|x| Value::container_eq(x, &v)) {
-                                            result.push(v);
-                                        }
+                                    let mut result = items.clone();
+                                    for v in other_items.into_vec() {
+                                        result.add_value(v);
                                     }
                                     return Ok(Value::Set(result));
                                 }
@@ -3546,12 +3732,8 @@ impl Interpreter {
                                     }
                                     let other = self.eval_expr(&args[0])?;
                                     let other_items = peel_other_set(other)?;
-                                    let result: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| {
-                                            other_items.iter().any(|x| Value::container_eq(x, v))
-                                        })
-                                        .collect();
+                                    let mut result = items.clone();
+                                    result.retain(|v| other_items.has_value(v));
                                     return Ok(Value::Set(result));
                                 }
                                 "diff" => {
@@ -3562,16 +3744,12 @@ impl Interpreter {
                                     }
                                     let other = self.eval_expr(&args[0])?;
                                     let other_items = peel_other_set(other)?;
-                                    let result: Vec<Value> = items
-                                        .into_iter()
-                                        .filter(|v| {
-                                            !other_items.iter().any(|x| Value::container_eq(x, v))
-                                        })
-                                        .collect();
+                                    let mut result = items.clone();
+                                    result.retain(|v| !other_items.has_value(v));
                                     return Ok(Value::Set(result));
                                 }
                                 "to_array" => {
-                                    return Ok(Value::Array(items));
+                                    return Ok(Value::Array(items.to_vec()));
                                 }
                                 _ => {}
                             }
@@ -3708,7 +3886,10 @@ impl Interpreter {
                             let kind = match obj {
                                 Value::Array(items) => StreamKind::ArrayIter { items, idx: 0 },
                                 Value::Tuple(items) => StreamKind::TupleIter { items, idx: 0 },
-                                Value::Set(items) => StreamKind::SetIter { items, idx: 0 },
+                                Value::Set(items) => StreamKind::SetIter {
+                                    items: items.into_vec(),
+                                    idx: 0,
+                                },
                                 Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
                                 Value::String(s) => StreamKind::StringIter {
                                     chars: s.chars().collect(),
@@ -3717,7 +3898,10 @@ impl Interpreter {
                                 Value::Frozen(inner) => match *inner {
                                     Value::Array(items) => StreamKind::ArrayIter { items, idx: 0 },
                                     Value::Tuple(items) => StreamKind::TupleIter { items, idx: 0 },
-                                    Value::Set(items) => StreamKind::SetIter { items, idx: 0 },
+                                    Value::Set(items) => StreamKind::SetIter {
+                                        items: items.into_vec(),
+                                        idx: 0,
+                                    },
                                     Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
                                     other => {
                                         return Err(RuntimeError::new(&format!(
@@ -5040,7 +5224,22 @@ impl Interpreter {
                 col: 0,
             });
         }
-        let result = self.call_function_inner(func, args);
+        // Named for the error trace only if the call fails.
+        let traced = match &func {
+            Value::Function(f) => Some(Some(Arc::clone(f))),
+            Value::Lambda { .. } => Some(None),
+            _ => None,
+        };
+        let mut result = self.call_function_inner(func, args);
+        if let (Err(e), Some(callee)) = (&mut result, traced) {
+            if !e.is_early_return() && e.loop_escape.is_none() {
+                e.leave_frame(match callee {
+                    Some(f) if !f.name.is_empty() => f.name.clone(),
+                    Some(_) => "<anonymous>".to_string(),
+                    None => "<lambda>".to_string(),
+                });
+            }
+        }
         if self.debug_state.is_some() {
             self.call_stack.pop();
         }
@@ -5477,6 +5676,28 @@ pub struct RuntimeError {
     /// passes through `try`/`safe`/`retry` like the control escapes above,
     /// and through function boundaries, up to the host.
     fatal: bool,
+    /// The call stack the error unwound through (boxed: errors are passed
+    /// by value everywhere, so `RuntimeError` stays small).
+    trace: Option<Box<ErrorTrace>>,
+}
+
+/// See [`RuntimeError::trace`].
+#[derive(Debug, Clone, Default)]
+struct ErrorTrace {
+    /// The functions the error left, innermost first, each with the line
+    /// inside it (like the VM's stack trace, without `<main>`).
+    frames: Vec<TraceFrame>,
+    /// The line of the statement running in the frame the error is
+    /// unwinding through now (0 until a statement boundary records it);
+    /// after the outermost call it is the top-level line.
+    frame_line: usize,
+}
+
+/// One function an error unwound through (see [`RuntimeError::trace`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceFrame {
+    pub function: String,
+    pub line: usize,
 }
 
 /// Which loop control a `RuntimeError::loop_escape` carries.
@@ -5496,7 +5717,48 @@ impl RuntimeError {
             early_return: false,
             loop_escape: None,
             fatal: false,
+            trace: None,
         }
+    }
+
+    /// Record the statement the error left: its position becomes the
+    /// error's position if it has none, and the line of the current frame.
+    fn at_statement(mut self, line: usize, col: usize) -> Self {
+        if self.line == 0 {
+            self.line = line;
+            self.col = col;
+        }
+        let trace = self.trace.get_or_insert_with(Box::default);
+        if trace.frame_line == 0 {
+            trace.frame_line = line;
+        }
+        self
+    }
+
+    /// The error leaves a call of `function`: record the frame.
+    fn leave_frame(&mut self, function: String) {
+        let fallback = self.line;
+        let trace = self.trace.get_or_insert_with(Box::default);
+        let line = if trace.frame_line > 0 {
+            trace.frame_line
+        } else {
+            fallback
+        };
+        trace.frames.push(TraceFrame { function, line });
+        trace.frame_line = 0;
+    }
+
+    /// The functions the error unwound through, innermost first, each with
+    /// the line inside it where the error passed (empty for an error raised
+    /// at the top level).
+    pub fn trace(&self) -> &[TraceFrame] {
+        self.trace.as_deref().map_or(&[], |t| t.frames.as_slice())
+    }
+
+    /// The top-level line the error left the program from, once it unwound
+    /// out of every call (0 when unknown).
+    pub fn top_level_line(&self) -> usize {
+        self.trace.as_deref().map_or(0, |t| t.frame_line)
     }
 
     /// A fatal resource-limit error; see the `fatal` field.
@@ -5523,6 +5785,7 @@ impl RuntimeError {
             early_return: false,
             loop_escape: None,
             fatal: false,
+            trace: None,
         }
     }
 

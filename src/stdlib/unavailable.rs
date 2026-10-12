@@ -36,6 +36,7 @@ pub const HOST_ONLY: &[(&str, &[&str])] = &[
         "http",
         &[
             "get", "post", "put", "delete", "patch", "head", "download", "crawl", "pretty",
+            "response",
         ],
     ),
     ("ws", &["connect", "send", "receive", "close"]),

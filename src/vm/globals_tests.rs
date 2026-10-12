@@ -300,3 +300,88 @@ fn fresh_vms_do_not_see_other_vms_names() {
     }
     assert_eq!(VM::new().globals.slot_count(), baseline);
 }
+
+// ---------------------------------------------------------------------------
+// Top-level bindings declared after the functions that use them
+// ---------------------------------------------------------------------------
+
+/// Names a chunk (or a nested prototype) assigns with `SetGlobal`.
+fn set_global_names(chunk: &bytecode::Chunk, out: &mut Vec<String>) {
+    use bytecode::{decode_bx, decode_op, Constant, OpCode};
+    for &inst in &chunk.code {
+        if decode_op(inst) == OpCode::SetGlobal as u8 {
+            if let Some(Constant::Str(name)) = chunk.constants.get(decode_bx(inst) as usize) {
+                out.push(name.clone());
+            }
+        }
+    }
+    for proto in &chunk.prototypes {
+        set_global_names(proto, out);
+    }
+}
+
+#[test]
+fn functions_reach_top_level_lets_declared_after_them() {
+    assert_value("fn f() {\n    return late\n}\nlet late = 1\nf()", "1");
+    assert_value(
+        "fn bump() {\n    n = n + 1\n}\nlet mut n = 1\nbump()\nbump()\nn",
+        "3",
+    );
+    assert_value(
+        "let g = fn() {\n    return [a, b]\n}\nlet [a, b] = [1, 2]\ng()",
+        "[1, 2]",
+    );
+    assert_value(
+        "fn outer() {\n    fn inner() {\n        return late * 2\n    }\n    return inner()\n}\nlet late = 21\nouter()",
+        "42",
+    );
+    assert_value(
+        "fn f() {\n    return x\n}\nlet x = 1\nlet x = x + 1\nf()",
+        "2",
+    );
+}
+
+#[test]
+fn reading_a_later_let_before_it_runs_is_undefined_on_both_engines() {
+    let src = "fn f() {\n    return late\n}\nf()\nlet late = 1";
+    let vm = vm_error(src);
+    assert_eq!(vm, crate::semantics::undefined_variable("late", None));
+    assert!(interp_error(src).ends_with(&vm), "{}", interp_error(src));
+    // A write reads the binding first, so it fails the same way instead of
+    // defining a global that the `let` would then overwrite.
+    let src = "fn f() {\n    late = 2\n}\nf()\nlet mut late = 1";
+    let vm = vm_error(src);
+    assert!(vm.starts_with("undefined variable: 'late'"), "{}", vm);
+    assert!(interp_error(src).contains("undefined variable"));
+}
+
+#[test]
+fn assigning_a_later_immutable_let_is_an_error() {
+    let src = "fn f() {\n    late = 2\n}\nlet late = 1\nf()";
+    let vm = vm_error(src);
+    assert_eq!(vm, crate::semantics::immutable_reassign("late"));
+    assert!(interp_error(src).ends_with(&vm), "{}", interp_error(src));
+}
+
+#[test]
+fn redeclaring_a_captured_top_level_let_updates_the_closure() {
+    assert_value("let x = 1\nfn f() {\n    return x\n}\nlet x = 2\nf()", "2");
+    assert_value(
+        "let x = 1\nlet f = fn() {\n    return x\n}\nlet [x] = [3]\nf()",
+        "3",
+    );
+}
+
+#[test]
+fn top_level_lets_used_only_after_their_declaration_stay_locals() {
+    // Only forward-referenced bindings become globals; every other
+    // top-level `let` keeps its register (the fast path).
+    let chunk = compile(
+        "let a = 1\nfn f() {\n    return a + late\n}\nlet late = 2\nlet mut total = 0\nfor i in range(3) {\n    total = total + f()\n}\ntotal",
+    );
+    let mut names = Vec::new();
+    set_global_names(&chunk, &mut names);
+    names.sort();
+    assert_eq!(names, ["f", "late"]);
+    assert_eq!(vm_value(&mut VM::new(), &chunk), "9");
+}

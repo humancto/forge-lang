@@ -46,7 +46,7 @@
 
 use super::bytecode::{
     decode_a, decode_b, decode_bx, decode_c, decode_op, decode_sbx, Chunk, Constant, OpCode,
-    UpvalueSource,
+    UpvalueSource, SET_UPDATE_ADD, SET_UPDATE_REMOVE,
 };
 use std::fmt;
 
@@ -481,6 +481,16 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                     return Err(self.fail(
                         Some(ip),
                         "ForRangeNext must be followed by its exit jump".to_string(),
+                    ));
+                }
+            }
+            UpdateSetLocal => {
+                self.reg(ip, "local", a)?;
+                self.reg(ip, "value", b)?;
+                if c != SET_UPDATE_ADD && c != SET_UPDATE_REMOVE {
+                    return Err(self.fail(
+                        Some(ip),
+                        format!("UpdateSetLocal has an unknown operation {}", c),
                     ));
                 }
             }

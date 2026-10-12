@@ -240,9 +240,8 @@ impl NanBoxedValue {
             match gc.get(r).map(|obj| &obj.kind) {
                 None => Shape::Null,
                 Some(ObjKind::String(s)) => Shape::Sized(s.len()),
-                Some(ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a)) => {
-                    Shape::Sized(a.len())
-                }
+                Some(ObjKind::Array(a) | ObjKind::Tuple(a)) => Shape::Sized(a.len()),
+                Some(ObjKind::Set(a)) => Shape::Sized(a.len()),
                 Some(ObjKind::Object(o)) => {
                     // VM Options are ADT objects; give them Option truthiness.
                     let field_str = |key: &str| {

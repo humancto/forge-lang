@@ -310,20 +310,14 @@ impl Interpreter {
             },
             "set" => {
                 if args.is_empty() {
-                    return Ok(Value::Set(Vec::new()));
+                    return Ok(Value::Set(SetItems::new()));
                 }
                 if args.len() != 1 {
                     return Err(RuntimeError::new("set() takes 0 or 1 argument"));
                 }
                 match &args[0] {
                     Value::Array(items) | Value::Tuple(items) => {
-                        let mut deduped: Vec<Value> = Vec::new();
-                        for item in items {
-                            if !deduped.iter().any(|v| Value::container_eq(v, item)) {
-                                deduped.push(item.clone());
-                            }
-                        }
-                        Ok(Value::Set(deduped))
+                        Ok(Value::Set(SetItems::from_values(items.iter().cloned())))
                     }
                     Value::Set(items) => Ok(Value::Set(items.clone())),
                     _ => Err(RuntimeError::new("set() requires an array or tuple")),

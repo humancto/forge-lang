@@ -171,6 +171,12 @@ const COMPILER_INTRINSICS: &[&str] = &[
 /// they only read their arguments, never store them anywhere and never call
 /// back into Forge code. Their result is shared (`get` returns an element).
 pub(super) const PURE_BORROW_BUILTINS: &[&str] = &["len", "get", "has_key", "contains"];
+/// A module that ran in a VM (see [`VM::loaded_modules`]).
+pub(crate) struct LoadedModule {
+    pub(crate) program: Arc<crate::parser::ast::Program>,
+    /// Global-name prefix of the module's top-level names.
+    pub(crate) prefix: String,
+}
 
 pub struct VM {
     pub registers: Vec<Value>,
@@ -181,6 +187,10 @@ pub struct VM {
     pub static_methods: HashMap<String, IndexMap<String, Value>>,
     pub embedded_fields: HashMap<String, Vec<(String, String)>>,
     pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
+    /// Modules that already ran in this VM, by canonical path: importing
+    /// one again binds its globals instead of running it again (see
+    /// `__forge_import_module`).
+    pub(crate) loaded_modules: HashMap<std::path::PathBuf, Arc<LoadedModule>>,
     pub gc: Gc,
     pub output: Vec<String>,
     /// JIT tier state: specialization cache keyed by (prototype id, type
@@ -447,6 +457,7 @@ impl VM {
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
+            loaded_modules: HashMap::new(),
             gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
@@ -714,6 +725,9 @@ impl VM {
         }
 
         child.embedded_fields = self.embedded_fields.clone();
+        // The task has copies of the modules' globals: it must not run
+        // them again when it imports one.
+        child.loaded_modules = self.loaded_modules.clone();
 
         for (name, defaults) in &self.struct_defaults {
             let mut child_defaults = IndexMap::new();
@@ -1309,6 +1323,10 @@ impl VM {
                         let value = self.read_local(frame_idx, base, b)?;
                         self.registers[base + a as usize] = value;
                     }
+                    OpCode::UpdateSetLocal => {
+                        let value = self.registers[base + b as usize];
+                        self.update_set_local(frame_idx, base, a, value, c == SET_UPDATE_REMOVE)?;
+                    }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
@@ -1562,12 +1580,25 @@ impl VM {
                                     Pair(Value, Value),
                                     ObjPair(String, Value),
                                 }
+                                // A set with removed items is compacted when
+                                // the loop starts so each step is an O(1)
+                                // positional read (invisible: same items,
+                                // same order). The loop's own reference is
+                                // shared, so nothing updates it in place.
+                                if i == 0 {
+                                    if let Some(ObjKind::Set(items)) =
+                                        self.gc.get_mut(r).map(|o| &mut o.kind)
+                                    {
+                                        items.make_dense();
+                                    }
+                                }
                                 let src = if let Some(o) = self.gc.get(r) {
                                     match &o.kind {
-                                        ObjKind::Array(items)
-                                        | ObjKind::Tuple(items)
-                                        | ObjKind::Set(items) => {
+                                        ObjKind::Array(items) | ObjKind::Tuple(items) => {
                                             items.get(i as usize).copied().map(IterSrc::Item)
+                                        }
+                                        ObjKind::Set(items) => {
+                                            items.get_index(i as usize).copied().map(IterSrc::Item)
                                         }
                                         ObjKind::Map(pairs) => pairs
                                             .get(i as usize)
@@ -2668,13 +2699,11 @@ impl VM {
                                 .collect();
                             crate::interpreter::Value::Tuple(converted)
                         }
-                        ObjKind::Set(items) => {
-                            let converted: Vec<crate::interpreter::Value> = items
-                                .iter()
-                                .map(|i| self.convert_to_interp_val(i))
-                                .collect();
-                            crate::interpreter::Value::Set(converted)
-                        }
+                        ObjKind::Set(items) => crate::interpreter::Value::Set(
+                            crate::interpreter::SetItems::from_values_unchecked(
+                                items.iter().map(|i| self.convert_to_interp_val(i)),
+                            ),
+                        ),
                         ObjKind::Map(pairs) => {
                             let converted: Vec<(
                                 crate::interpreter::Value,
@@ -2738,7 +2767,8 @@ impl VM {
             crate::interpreter::Value::Set(items) => {
                 let vm_items: Vec<Value> =
                     items.iter().map(|i| self.convert_interp_value(i)).collect();
-                let r = self.gc.alloc(ObjKind::Set(vm_items));
+                let set = VmSet::collect_unchecked(vm_items, &self.gc);
+                let r = self.gc.alloc(ObjKind::Set(set));
                 Value::obj(r)
             }
             crate::interpreter::Value::Map(pairs) => {
@@ -2942,9 +2972,13 @@ impl VM {
                 }
                 _ => return Err(VMError::new(&format!("no method '{}' on String", field))),
             },
-            ObjKind::Array(items) | ObjKind::Set(items) => match field {
+            ObjKind::Array(_) | ObjKind::Set(_) => match field {
                 "len" => {
-                    let len = items.len() as i64;
+                    let len = match &obj.kind {
+                        ObjKind::Set(items) => items.len(),
+                        ObjKind::Array(items) => items.len(),
+                        _ => 0,
+                    } as i64;
                     return Ok(Value::int(len, &mut self.gc));
                 }
                 _ => {
@@ -3027,7 +3061,8 @@ impl VM {
     fn collection_len(&self, src: Value) -> i64 {
         match src.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
             Some(ObjKind::String(s)) => s.chars().count() as i64,
-            Some(ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a)) => a.len() as i64,
+            Some(ObjKind::Array(a) | ObjKind::Tuple(a)) => a.len() as i64,
+            Some(ObjKind::Set(a)) => a.len() as i64,
             Some(ObjKind::Object(o)) => o.len() as i64,
             Some(ObjKind::Map(p)) => p.len() as i64,
             _ => 0,

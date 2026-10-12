@@ -12,25 +12,25 @@ that a model cannot guess from `llms.txt`).
 
 | # | Severity | Finding | Tasks it affects |
 |---|---|---|---|
-| 1 | bug | `xs.push(v)` / `xs.pop()` on a nested place (`o.a.push(x)`, `g[k].push(x)`, `m[0].push(x)`) silently does nothing. **Fixed** (commits `e9ec31c` interpreter, `4ae27a6` VM) | data, any grouping code |
-| 2 | bug | Interpreter: `import { Struct } from "m.fg"` loses the struct's `impl` methods | money_module, any selective import of a type |
-| 3 | bug | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
-| 4 | bug | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
-| 5 | bug | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
-| 6 | bug | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
-| 7 | bug | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
-| 8 | bug | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
-| 9 | bug | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
-| 10 | perf | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys). **Fixed** (`4ae27a6`) | data (latest_record_wins, word_freq_large, ...) |
-| 11 | perf | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function). **Fixed** (`ebe7a6b`, any value: `4ae27a6`) | data |
-| 12 | perf | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each). **Fixed** (`e9ec31c`) | data |
+| 1 | bug (fixed) | `xs.push(v)` / `xs.pop()` on a nested place (`o.a.push(x)`, `g[k].push(x)`, `m[0].push(x)`) silently does nothing. **Fixed** (commits `e9ec31c` interpreter, `4ae27a6` VM) | data, any grouping code |
+| 2 | bug (fixed) | Interpreter: `import { Struct } from "m.fg"` loses the struct's `impl` methods | money_module, any selective import of a type |
+| 3 | bug (fixed) | `try_receive` returns `Ok(v)`/`null` on the VM but `Some(v)`/`None` on the interpreter | parallel |
+| 4 | bug (fixed) | VM, edition 2027: a parameter declared `[fn(Int) -> Int]` rejects an array of functions at run time | typed |
+| 5 | bug (fixed) | A `Float` annotation does not convert an `Int`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1` | typed_order_decode, shape_interface |
+| 6 | bug (fixed) | `csv.parse` splits quoted fields that contain line breaks, trims quoted text and turns `"02134"` into `2134` | csv_quoted_fields, sales_report_api |
+| 7 | bug (fixed) | `forge check` does not report an import it cannot resolve; the imported names then resolve to builtins of the same name | multifile (harness fixed) |
+| 8 | bug (fixed) | The VM reports a runtime error inside a function at the caller's line (`--error-format json` too) | every task's repair round |
+| 9 | bug (fixed) | The E0013 hint tells edition-2027 users to call `sus(x)`, which 2027 removes | all |
+| 10 | perf (fixed) | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys). **Fixed** (`4ae27a6`) | data (latest_record_wins, word_freq_large, ...) |
+| 11 | perf (fixed) | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function). **Fixed** (`ebe7a6b`, any value: `4ae27a6`) | data |
+| 12 | perf (fixed) | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each). **Fixed** (`e9ec31c`) | data |
 | 13 | perf | `set`/`map` are linear lists: `st.has`, `st.add`, `m.get`, `m.set` are O(n) per call on both engines | data |
-| 14 | perf | Net effect: the textbook word count over 100,000 words takes 28 s (VM) / 30 s (interp); Python takes 0.03 s. **Fixed**: 0.13 s (VM) / 0.31 s (interp) | word_freq_large |
-| 15 | gap | HTTP handlers cannot set a status code or response headers, and cannot read request headers | servers |
-| 16 | gap | A database opened at the top level of a server is not visible in handlers ("no database connection open") | todo_sqlite |
-| 17 | gap | `import { a as b }` does not exist and is misparsed ("does not export 'as'"); importing a module twice runs it twice | clashing_modules |
-| 18 | gap | Request bodies must be JSON with `Content-Type: application/json`; otherwise axum answers 400/415 in text/plain | servers |
-| 19 | gap | `llms.txt` describes import resolution incorrectly | multifile |
+| 14 | perf (fixed) | Net effect: the textbook word count over 100,000 words takes 28 s (VM) / 30 s (interp); Python takes 0.03 s. **Fixed**: 0.13 s (VM) / 0.31 s (interp) | word_freq_large |
+| 15 | gap (fixed) | HTTP handlers cannot set a status code or response headers, and cannot read request headers | servers |
+| 16 | gap (fixed) | A database opened at the top level of a server is not visible in handlers ("no database connection open") | todo_sqlite |
+| 17 | gap (fixed) | `import { a as b }` does not exist and is misparsed ("does not export 'as'"); importing a module twice runs it twice | clashing_modules |
+| 18 | gap (fixed) | Request bodies must be JSON with `Content-Type: application/json`; otherwise axum answers 400/415 in text/plain | servers |
+| 19 | gap (fixed) | `llms.txt` describes import resolution incorrectly | multifile |
 | 20 | gap | `regex` has no capture groups | logfmt_parse, ini_config_check |
 | 21 | gap | Undocumented: `select` result shape, `exit(code)`, negative indexes, `Map` methods, `time.*` signatures, no `? :` operator, no array patterns in `match`, `typeof` names | many |
 | 22 | gap | `Map<String, T>` (suggested for objects by the MCP section) does not accept an object literal; there is no typed dictionary for objects | typed |
@@ -82,6 +82,8 @@ Reference workaround: `group_by` (one pass, insertion-ordered) or `g[k] = g[k] +
 
 ### 2. Interpreter: selectively imported structs lose their methods
 
+**Fixed:** a selective import (`import { P } from "m.fg"`) brings the module's method tables, static methods, struct defaults and embedded fields with it on the interpreter too (all of them, like the VM, which registers them when the module runs). Parity fixture `tests/parity/supported/selective_import_methods.fg`.
+
 ```forge
 // shapes.fg
 struct P { x: Int }
@@ -107,6 +109,8 @@ Reference workaround (money_module): `import "money.fg"`.
 
 ### 3. `try_receive` returns different types on the two engines
 
+**Fixed:** `try_receive` returns `Some(v)` / `None` on both engines (the VM returned `Ok(v)` / null), as `docs/part2_stdlib.md` already documented; `llms.txt` states it. Parity fixture `tests/parity/supported/try_receive_option.fg`.
+
 ```forge
 let c = channel(3)
 send(c, 5)
@@ -122,6 +126,8 @@ both engines, add it to the engine-diff fixtures, and document it in `llms.txt` 
 `try_send`/`select`.
 
 ### 4. VM, edition 2027: `[fn(...) -> ...]` parameters fail their run-time check
+
+**Fixed:** the VM decided `__types.check` on its own values only for a few shapes and converted everything else to interpreter values, where a closure becomes null, so `[fn(Int) -> Int]` failed. It now decides every check on VM values (`fits_vm` in `src/vm/builtins.rs`, the rule of `semantics::types::fits`), and a violation by a function says `got function` on both engines. Tests: `tests/edition2027/annotations_test.fg` (`function_values_fit_function_annotations`, both engines).
 
 ```forge
 fn apply_all(fs: [fn(Int) -> Int], x: Int) -> [Int] {
@@ -140,6 +146,8 @@ Suggested fix: make the VM's `__types.check` accept VM closures as `function` el
 2027 parity fixture with arrays of functions.
 
 ### 5. A `Float` annotation does not make a value a Float
+
+**Fixed:** where a declared type is enforced (edition 2027 and `--strict`), an Int checked against a declared `Float` becomes a Float (`semantics::types::widen`, mirrored by the VM's `widen_vm` and the JIT's `kind_widens`): parameters (reassigned from their check), `-> Float` results, annotated `let`s and struct fields/defaults (`__types.widen`), nested `[Float]`/`?Float`/tuples/map values/`Result`. `half(3) == 1.5` and `typeof(half(3)) == "Float"` on both engines and in JIT code. Edition 2026 without `--strict` does not instrument and does not convert (documented in docs/editions/2027.md and llms.txt: write `float(x)`). `str(3.0)` is `"3"` on both engines (unchanged), so the difference shows in arithmetic and `typeof`. Tests: `tests/edition2027/annotations_test.fg` (`float_annotations_widen_ints`), `vm::jit_tests::jit_widens_ints_checked_against_float`.
 
 ```forge
 fn half(x: Float) -> Float {
@@ -170,6 +178,8 @@ Reference workaround (typed_order_decode, shape_interface): `float(...)` when bu
 structs, with a comment.
 
 ### 6. `csv.parse` corrupts common CSV
+
+**Fixed:** `csv.parse`/`csv.read` are a character-level RFC 4180 parser (`src/stdlib/csv.rs`, shared by both engines): quoted fields keep commas, `""`, LF/CRLF and whitespace; an unterminated quote is an error; only unquoted fields that are exactly an integer, a plain decimal or `true`/`false` are converted (`02134`, `+1`, `1e5`, quoted numbers stay strings). Options `{ header: false }` and `{ types: false }`; `csv.stringify` output parses back to the same rows. Tests: `stdlib::csv::tests`, `tests/csv_rfc4180_test.fg` (both engines).
 
 ```forge
 // t.csv:
@@ -204,6 +214,8 @@ Reference workaround: a hand-written parser (csv_quoted_fields) and `split` for 
 
 ### 7. `forge check` ignores imports it cannot resolve
 
+**Fixed:** an import the checker cannot find or parse is the new T0020 (`cannot import 'does_not_exist.fg': file not found (looked for /dir/does_not_exist.fg)`, with where it looks as the help), an error from edition 2027 and under `--strict` (exit 1 from `forge check`), a warning in 2026. Its names are unknown (`Any`) instead of builtins of the same name: no false T0004 for `title()`, also after an unreadable wildcard import. Not reported when imports are skipped (`Sandbox`, MCP). Tests: `typechecker::tests::unresolved_imports_are_reported_without_cascading`, the `forge explain T0020` example test.
+
 ```forge
 import { nothing_here } from "does_not_exist.fg"
 println(nothing_here(1))
@@ -223,6 +235,8 @@ LSP, and never fall back to a builtin for an imported name.
 
 ### 8. VM error positions inside functions point at the caller
 
+**Fixed:** `forge run` reports a VM runtime error at the innermost frame that has a position (the line inside the callee, as the interpreter and the `Sandbox` already did), in human and JSON output. The interpreter now records the call stack an error unwinds through (`RuntimeError::trace`, only on the error path) and prints it like the VM (`at pick (line 2)` ... `at <main> (line 10)`). One difference remains: the VM names `impl` methods `<lambda>` in the trace, the interpreter `P::bad`. Test: `tests/cli_diagnostics.rs::runtime_errors_inside_functions_point_at_the_callee` (both engines, JSON and human).
+
 ```forge
 fn pick(xs, i) {
     let v = xs[i]
@@ -240,6 +254,8 @@ Suggested fix: use the innermost frame's position for the diagnostic on the VM, 
 interpreter, and keep the trace as extra context.
 
 ### 9. The E0013 hint suggests a builtin that edition 2027 removed
+
+**Fixed:** hints are edition-neutral instead of edition-specific: the E0013 hint is `check the spelling; print the value with println(x) (or its type with typeof(x)) to see what it contains`, valid in both editions. Also fixed: every `forge explain` example (runtime and type-checker codes) uses `println(...)` instead of `say`, E0028's example uses `let {name} = 42` instead of `unpack`, explanations of 2026-only features say so (E0021 GenZ asserts, E0022 `check`, E0023 `must`), the REPL `help` examples, the LSP completions (removed keywords and builtins are not offered in edition 2027) and the MCP server instructions (`say`). Test: `semantics::errors::tests::hints_and_examples_do_not_suggest_removed_names`.
 
 Every `no method ...` / `no field ...` error carries the hint
 `check the spelling; print the value with sus(x) to see what it contains`, also under
@@ -372,6 +388,14 @@ Suggested fix: let a handler return a response object, e.g.
 `Response { status, body, headers }` struct, and bind `headers` (lower-case names) like
 `query`. Document both in `llms.txt`.
 
+**Fixed:** `return http.response(404, { error: "not found" })`,
+`http.response(201, body, { Location: "/items/1" })`, `http.response(204)`; a String body
+is sent as `text/plain` unless a `Content-Type` is given. Handlers read headers through a
+`headers` parameter (lower-case names) or the whole request through `req`/`request`
+(`method`, `path`, `params`, `query`, `headers`, `body`). Status and headers are
+validated (200-599, no CR/LF injection). Both engines, `tests/server_engine_parity.rs`;
+documented in `llms.txt`.
+
 ### 16. Top-level database connections are not visible to handlers
 
 ```forge
@@ -394,6 +418,12 @@ model reads as "open the database once at start-up".
 Suggested fix: carry the connection (or its path) into request forks, or document the
 per-handler `db.open` rule in the HTTP server section.
 
+**Fixed:** the connections the top level opens (`db.open`, `pg.connect`) are shared by every
+handler (`stdlib::db_share`): statements run one at a time, a transaction belongs to the
+request that opened it and is rolled back when the request ends, and
+`db.last_insert_rowid()` is per request. `tests/server_database.rs` hammers a counter on
+both engines (plain updates and read-modify-write transactions, no lost updates).
+
 ### 17. Imports cannot be renamed; re-importing re-runs the module
 
 ```forge
@@ -410,6 +440,11 @@ module state is reset.
 Suggested fix: support `import { a as b } from "..."` (and `import "m.fg" as m` for a
 namespace object); cache a module per resolved path within a run.
 
+**Fixed:** `import { a as b } from "m.fg"` (functions and variables; renaming a struct or
+type is E0019), on both engines, the checker, the LSP and `forge fmt`. A module runs once
+per program and its importers share its state. Not done: `import "m.fg" as m` (namespace
+objects).
+
 ### 18. Request bodies must be JSON with the JSON content type
 
 A POST/PUT route uses axum's `Json` extractor: a request without
@@ -422,6 +457,11 @@ Suggested fix: bind the raw body (`body` as text when it is not JSON, or a separ
 `raw_body` parameter) and let the handler decide; at least answer framework errors as
 JSON `{"error": ...}`.
 
+**Fixed:** bodies are decoded by content type: JSON is parsed, a form becomes an object of
+Strings, anything else (or no content type) is a String; a POST without a body binds `{}`.
+Invalid JSON is `400 {"error": "invalid JSON body: ..."}`, a non-UTF-8 body `415`, both as
+JSON.
+
 ### 19. `llms.txt` describes import paths wrongly
 
 `llms.txt`: "Paths resolve relative to the current working directory, then
@@ -432,6 +472,8 @@ the `.fg` suffix is optional. (The behaviour is the useful one: expression_lib's
 `lib/parser.fg` imports `"tokenizer.fg"` from its own directory.)
 
 Suggested fix: correct the sentence.
+
+**Fixed:** `llms.txt` and the spec describe the resolution order.
 
 ### 20. No regex capture groups
 

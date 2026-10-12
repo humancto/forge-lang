@@ -1,0 +1,76 @@
+// expect: [1, 2, 3, 5, [7, 8], 20, 11, 3, ab, undefined variable, cannot reassign, 45, 120, late=1, 6, 4]
+// Functions, lambdas and nested functions defined above a top-level `let`
+// read and write it once it has run (the top level is one scope, as in the
+// interpreter); reading it earlier is an undefined variable.
+
+fn read_late() { return late }
+let read_lambda = fn() { return late + 1 }
+fn nested_reader() {
+    fn inner() { return late + 2 }
+    return inner()
+}
+fn bump_counter() { counter = counter + 1 }
+fn add_item(x) { items.push(x) }
+fn read_redeclared() { return shadowed }
+fn sum_pair() { return pa + pb }
+fn object_parts() { return oa + ob }
+fn early_read() { return not_yet }
+fn write_immutable() { fixed = 2 }
+fn read_acc() { return acc }
+fn call_fact(n) { return fact(n) }
+fn interpolated() { return "late={late}" }
+fn add_to_deep(n) {
+    let add = fn(m) { deep = deep + m }
+    add(n)
+}
+
+let mut early = ""
+try {
+    early_read()
+} catch e {
+    early = e.message
+}
+
+let late = 1
+let mut counter = 4
+bump_counter()
+let mut items = []
+add_item(7)
+add_item(8)
+
+// Redeclared at the top level: the function sees the latest binding.
+let shadowed = 10
+let shadowed = shadowed + 10
+
+// A captured binding redeclared later in the same scope.
+let x = 1
+fn read_x() { return x }
+let x = 11
+
+let [pa, pb] = [1, 2]
+let {oa, ob} = {oa: "a", ob: "b"}
+
+let fixed = 1
+let mut immutable_error = ""
+try {
+    write_immutable()
+} catch e {
+    immutable_error = e.message
+}
+
+let mut acc = 0
+for i in range(10) {
+    acc = acc + i
+}
+
+let fact = fn(n) {
+    if n <= 1 { return 1 }
+    return n * fact(n - 1)
+}
+
+let mut deep = 1
+add_to_deep(5)
+
+let not_yet = "now defined"
+
+[read_late(), read_lambda(), nested_reader(), counter, items, read_redeclared(), read_x(), sum_pair(), object_parts(), slice(early, 0, 18), slice(immutable_error, 0, 15), read_acc(), call_fact(5), interpolated(), deep, len(not_yet) - 7]

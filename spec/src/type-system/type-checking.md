@@ -68,6 +68,7 @@ Each diagnostic has a stable code, a precise source span, and often a help line 
 | T0017 | assignment to an immutable binding | `let x = 1` … `x = 2` |
 | T0018 | name read before its definition runs | `say x` then `let x = 1` |
 | T0019 | result of `push(xs, v)` discarded (edition 2027 only, always an error) | `push(xs, 3)` as a statement |
+| T0020 | import not found or unreadable (an error from edition 2027) | `import { f } from "missing.fg"` |
 
 Diagnostics derived from run-time rules use the engines' own rules, so they agree with what would happen: operator validity comes from the shared arithmetic rules, argument counts from the shared arity rule, and module members from the stdlib registry. Code passed to `assert_throws(fn() { ... })` is expected to fail and is not reported.
 
@@ -84,4 +85,4 @@ double(v)
 // error: type error: argument 'n' of 'double' must be Int, got String
 ```
 
-The checks are performed at run time on both engines with identical messages. They are structural and deep for collections (an `[Int]` argument is checked element by element), check struct and ADT values by their type name, accept `Int` for `Float`, and skip `Any`, generic parameters and interfaces. A correct program behaves identically with and without `--strict`.
+The checks are performed at run time on both engines with identical messages. They are structural and deep for collections (an `[Int]` argument is checked element by element), check struct and ADT values by their type name, accept `Int` for `Float`, and skip `Any`, generic parameters and interfaces. An `Int` accepted for a declared `Float` becomes a Float (also inside `[Float]`, `?Float`, tuples, map values and results, and for annotated `let`s and struct fields declared `Float`, which are otherwise checked statically only): `fn half(x: Float) -> Float { return x / 2 }` returns `1.5` for `half(3)`. Apart from that conversion, a correct program behaves identically with and without `--strict`. Edition 2027 applies the same enforcement by default; edition 2026 without `--strict` runs no checks and converts nothing.
