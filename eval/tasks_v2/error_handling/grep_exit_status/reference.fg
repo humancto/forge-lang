@@ -1,0 +1,26 @@
+// An invalid pattern makes regex.test raise; catch it once up front.
+
+let lines = fs.lines("/dev/stdin")
+let pattern = lines[0]
+let mut valid = true
+try {
+    regex.test("", pattern)
+} catch e {
+    valid = false
+}
+if !valid {
+    println("error: invalid pattern")
+    exit(2)
+}
+
+let mut count = 0
+for e in enumerate(slice(lines, 1, len(lines))) {
+    if regex.test(e.value, pattern) {
+        count += 1
+        println("{e.index + 1}:{e.value}")
+    }
+}
+println("{count} match(es)")
+if count == 0 {
+    exit(1)
+}

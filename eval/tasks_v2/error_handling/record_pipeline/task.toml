@@ -1,0 +1,67 @@
+id = "record_pipeline"
+category = "error_handling"
+title = "Validate records step by step and report the first error of each"
+prompt = """
+Each non-blank line of standard input is a student record
+`<id>,<name>,<age>,<email>,<scores>` where scores are separated by `|`. Lines are numbered
+from 1 counting only non-blank lines. Fields are not trimmed. Validate each record with
+these checks, in this order, and stop at the first failing one:
+
+1. exactly 5 fields → else `expected 5 fields, got <k>`
+2. id is digits only and greater than 0 → else `id: not a positive integer`
+3. age is digits only → else `age: not an integer`; and at most 150 → else `age: out of range`
+4. email has exactly one `@` with at least one character on each side → else `email: invalid`
+5. scores is non-empty → else `scores: empty`; every score is digits only and at most 100 →
+   else `scores: '<the first bad score>' is not a score`
+6. no earlier valid record has the same id → else `id: duplicate <id>`
+
+For a valid record, the average is the mean of its scores and the grade is `A` if the
+average is at least 90, `B` at least 80, `C` at least 70, `D` at least 60, else `F` (use
+the exact average). Print per line `line <n>: ok <name> avg=<average with exactly one
+decimal, halves rounded up> grade=<grade>` or `line <n>: error <message>`. Finally print
+`valid=<n> invalid=<n>` and `best: <names of the valid students with the highest exact
+average, in input order, separated by ", ">` (or `best: -` if there are none).
+"""
+stdin = """
+1,Ada,36,ada@example.org,95|88|100
+2,Bo,17,bo@school,70|71|74
+3,Cy,abc,cy@x.io,90
+4,Dee,151,dee@x.io,90
+5,Eve,22,eve.example.org,90
+6,Fay,30,f@y@z,90
+7,Gus,40,gus@x.io,
+8,Hal,41,hal@x.io,80|1oo|90
+1,Ivy,20,ivy@x.io,100|100
+0,Jo,20,jo@x.io,50
+10,Kim,19,kim@x.io
+11,Lee,25,lee@x.io,61|59|60|60
+12,Max,33,max@x.io,99|87|98|90
+13,Ned,29,ned@x.io,89|90
+14,Oz,29,oz@x.io,95|88|100
+15,Pia, 30,pia@x.io,90
+16,Quinn,30,@x.io,90
+17,Ray,30,ray@x.io,101
+"""
+needs = []
+expected_stdout = """
+line 1: ok Ada avg=94.3 grade=A
+line 2: ok Bo avg=71.7 grade=C
+line 3: error age: not an integer
+line 4: error age: out of range
+line 5: error email: invalid
+line 6: error email: invalid
+line 7: error scores: empty
+line 8: error scores: '1oo' is not a score
+line 9: error id: duplicate 1
+line 10: error id: not a positive integer
+line 11: error expected 5 fields, got 4
+line 12: ok Lee avg=60.0 grade=D
+line 13: ok Max avg=93.5 grade=A
+line 14: ok Ned avg=89.5 grade=B
+line 15: ok Oz avg=94.3 grade=A
+line 16: error age: not an integer
+line 17: error email: invalid
+line 18: error scores: '101' is not a score
+valid=6 invalid=12
+best: Ada, Oz
+"""

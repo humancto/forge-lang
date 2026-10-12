@@ -1,0 +1,81 @@
+id = "grep_exit_status"
+category = "error_handling"
+title = "A grep-like tool with conventional exit statuses"
+prompt = '''
+Write a small grep. The first line of standard input is a regular expression (common
+syntax: character classes, `\d`, `\b`, quantifiers like `{3}`, anchors, groups, and an
+optional leading `(?i)` for case-insensitive matching). The remaining lines are the text
+to search, numbered from 1.
+
+- If the expression is not valid, print `error: invalid pattern` and exit with status 2.
+- Otherwise print every text line that contains a match as `<line number>:<line>`, then a
+  final line `<count> match(es)`. Exit with status 0 if at least one line matched, or 1 if
+  none did.
+'''
+needs = []
+
+[[case]]
+name = "phone"
+stdin = '''
+\d{3}-\d{4}
+call 555-0199 today
+no number here
+555-01 is too short; 123-4567 works
+'''
+exit_code = 0
+expected_stdout = """
+1:call 555-0199 today
+3:555-01 is too short; 123-4567 works
+2 match(es)
+"""
+
+[[case]]
+name = "none"
+stdin = '''
+^ERROR\b
+ERRORS are fine
+an ERROR in the middle
+error lower case
+'''
+exit_code = 1
+expected_stdout = """
+0 match(es)
+"""
+
+[[case]]
+name = "unclosed"
+stdin = '''
+(unclosed
+anything
+'''
+exit_code = 2
+expected_stdout = """
+error: invalid pattern
+"""
+
+[[case]]
+name = "bad_range"
+stdin = '''
+[z-a]+
+abc
+'''
+exit_code = 2
+expected_stdout = """
+error: invalid pattern
+"""
+
+[[case]]
+name = "ignore_case"
+stdin = '''
+(?i)\bwarn(ing)?\b
+WARNING: disk
+warned twice
+a Warn here
+forewarn
+'''
+exit_code = 0
+expected_stdout = """
+1:WARNING: disk
+3:a Warn here
+2 match(es)
+"""

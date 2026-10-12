@@ -1,0 +1,57 @@
+// Retry-policy simulation: classify each outcome, compute capped
+// exponential backoff, honour a server-requested minimum wait.
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" })
+let mut cfg = {}
+for kv in split(lines[0].trim(), " ") {
+    let p = split(kv, "=")
+    cfg[p[0]] = int(p[1])
+}
+
+fn backoff(retry: Int) -> Int {
+    let raw = cfg.base_ms * int(math.pow(cfg.factor, retry - 1))
+    return min(cfg.cap_ms, raw)
+}
+
+fn is_transient(status: String) -> Bool {
+    return status == "timeout" || status == "429" || regex.test(status, "^5[0-9][0-9]$")
+}
+
+let mut succeeded = 0
+let mut failed = 0
+let mut total_wait = 0
+for line in slice(lines, 1, len(lines)) {
+    let parts = split(line.trim(), " ")
+    let job = parts[0]
+    let outcomes = split(parts[1], ",")
+    let mut waited = 0
+    let mut attempt = 0
+    loop {
+        attempt += 1
+        let out = outcomes[min(attempt, len(outcomes)) - 1]
+        if out == "ok" {
+            println("{job}: ok after {attempt} attempt(s), waited {waited}ms")
+            succeeded += 1
+            break
+        }
+        let status = split(out, ":")[0]
+        if !is_transient(status) {
+            println("{job}: permanent error {status} after {attempt} attempt(s)")
+            failed += 1
+            break
+        }
+        if attempt == cfg.max_attempts {
+            println("{job}: gave up after {attempt} attempts, waited {waited}ms")
+            failed += 1
+            break
+        }
+        let mut delay = backoff(attempt)
+        if contains(out, ":") {
+            delay = max(delay, int(split(out, ":")[1]))
+        }
+        println("{job}: attempt {attempt} {out} -> wait {delay}ms")
+        waited += delay
+    }
+    total_wait += waited
+}
+println("succeeded={succeeded} failed={failed} total_wait={total_wait}ms")

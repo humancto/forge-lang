@@ -1,0 +1,141 @@
+id = "ini_config_check"
+category = "error_handling"
+title = "Validate an INI config with line-numbered errors and exit codes"
+prompt = """
+Standard input is an INI-style configuration file. Lines are numbered from 1. Each line,
+after trimming spaces, is one of: empty; a comment starting with `#` or `;`; a section
+header `[<name>]`; or a setting `<key> = <value>` (spaces around `=` optional; the value is
+the trimmed rest of the line and must not be empty). Section names and keys consist of
+lower-case letters and `_`. A setting must come after a section header.
+
+Settings (in this order), with their rules:
+
+| setting           | type                          | required / default |
+|-------------------|-------------------------------|--------------------|
+| `server.host`     | any string                    | required           |
+| `server.port`     | integer from 1 to 65535       | required           |
+| `limits.max_conn` | integer of at least 1         | default `10`       |
+| `limits.timeout`  | number greater than 0         | default `30`       |
+| `limits.debug`    | `true` or `false`             | default `false`    |
+
+An integer is an optional `-` followed by digits; a number may also have a `.` and more
+digits.
+
+1. If a line is none of the allowed forms (or a setting comes before any section), print
+   `line <n>: syntax error` and exit with status 2 immediately.
+2. Otherwise collect validation errors, in line order:
+   `line <n>: unknown key <section>.<key>`; `line <n>: duplicate key <section>.<key>` (a key
+   set twice in the same section; the first value counts); `line <n>: <section>.<key> must
+   be an integer` / `must be a number` / `must be true or false`; and
+   `line <n>: <section>.<key> out of range` for a well-typed value outside its range. Then
+   add `missing <section>.<key>` for each required setting that is absent.
+3. If there are errors, print them and exit with status 1. Otherwise print each setting in
+   the table's order as `<section>.<key>=<value>` (values exactly as written, or the
+   default) and exit with status 0.
+"""
+needs = []
+
+[[case]]
+name = "valid"
+stdin = """
+# service config
+[server]
+host = api.example.com
+port=8443
+
+[limits]
+; tuning
+timeout = 2.5
+debug = true
+"""
+exit_code = 0
+expected_stdout = """
+server.host=api.example.com
+server.port=8443
+limits.max_conn=10
+limits.timeout=2.5
+limits.debug=true
+"""
+
+[[case]]
+name = "invalid"
+stdin = """
+[server]
+port = 70000
+colour = blue
+port = 80
+[limits]
+max_conn = 0
+timeout = fast
+debug = yes
+max_conn = 5
+timeout = -1
+"""
+exit_code = 1
+expected_stdout = """
+line 2: server.port out of range
+line 3: unknown key server.colour
+line 4: duplicate key server.port
+line 6: limits.max_conn out of range
+line 7: limits.timeout must be a number
+line 8: limits.debug must be true or false
+line 9: duplicate key limits.max_conn
+line 10: duplicate key limits.timeout
+missing server.host
+"""
+
+[[case]]
+name = "syntax"
+stdin = """
+[server]
+host = x
+port 8080
+oops
+"""
+exit_code = 2
+expected_stdout = """
+line 3: syntax error
+"""
+
+[[case]]
+name = "orphan"
+stdin = """
+# no section yet
+host = x
+"""
+exit_code = 2
+expected_stdout = """
+line 2: syntax error
+"""
+
+[[case]]
+name = "empty_host"
+stdin = """
+[server]
+host =
+port = 1
+[Limits]
+"""
+exit_code = 2
+expected_stdout = """
+line 2: syntax error
+"""
+
+[[case]]
+name = "minimal"
+stdin = """
+[server]
+host = localhost
+port = 65535
+[limits]
+max_conn = 7
+timeout = 0.25
+"""
+exit_code = 0
+expected_stdout = """
+server.host=localhost
+server.port=65535
+limits.max_conn=7
+limits.timeout=0.25
+limits.debug=false
+"""
