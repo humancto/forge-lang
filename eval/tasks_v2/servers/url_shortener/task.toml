@@ -1,0 +1,131 @@
+id = "url_shortener"
+category = "servers"
+title = "URL shortener whose state lives in a JSON file"
+prompt = """
+Write a URL-shortener HTTP server on 127.0.0.1 port 18507. Its data must be kept in the
+file `links.json` in the working directory (create it when it does not exist), so that it
+survives restarts and every request sees the effect of the previous ones. All responses
+have status 200 and a JSON body.
+
+- `POST /links` with body `{"url": <string>}`: the url must start with `http://` or
+  `https://` and contain no spaces, else respond `{"error": "invalid url"}`. Its code is
+  the first 7 hex characters of the SHA-256 of the url (lower-case hex). Respond
+  `{"code": <code>, "url": <url>, "created": true}`, or `"created": false` if that code
+  already exists (it is then left unchanged).
+- `GET /links/<code>` counts one hit and responds `{"code", "url", "hits"}` with the hit count
+  after this request; an unknown code responds `{"error": "unknown code"}`.
+- `DELETE /links/<code>` removes the link and responds `{"deleted": <code>}`, or
+  `{"error": "unknown code"}`.
+- `GET /stats` responds `{"links": <number of links>, "total_hits": <sum of hits>, "top":
+  [...]}` where `top` lists at most 3 links as `{"code", "hits"}`, most hits first, ties
+  by code ascending.
+
+The server runs until it is stopped.
+"""
+needs = ["net", "read", "write"]
+timeout = 20
+mode = "server"
+port = 18507
+expected_stdout = """
+STATUS 200
+{"links": 0, "top": [], "total_hits": 0}
+STATUS 200
+{"code": "2dce0a4", "created": true, "url": "https://example.com/a"}
+STATUS 200
+{"code": "c0e807b", "created": true, "url": "http://forge.dev/docs?x=1&y=2"}
+STATUS 200
+{"code": "2dce0a4", "created": false, "url": "https://example.com/a"}
+STATUS 200
+{"error": "invalid url"}
+STATUS 200
+{"error": "invalid url"}
+STATUS 200
+{"error": "invalid url"}
+STATUS 200
+{"code": "2dce0a4", "hits": 1, "url": "https://example.com/a"}
+STATUS 200
+{"code": "2dce0a4", "hits": 2, "url": "https://example.com/a"}
+STATUS 200
+{"code": "c0e807b", "hits": 1, "url": "http://forge.dev/docs?x=1&y=2"}
+STATUS 200
+{"error": "unknown code"}
+STATUS 200
+{"code": "6746e28", "created": true, "url": "https://example.org/zzz"}
+STATUS 200
+{"links": 3, "top": [{"code": "2dce0a4", "hits": 2}, {"code": "c0e807b", "hits": 1}, {"code": "6746e28", "hits": 0}], "total_hits": 3}
+STATUS 200
+{"deleted": "2dce0a4"}
+STATUS 200
+{"error": "unknown code"}
+STATUS 200
+{"error": "unknown code"}
+STATUS 200
+{"links": 2, "top": [{"code": "c0e807b", "hits": 1}, {"code": "6746e28", "hits": 0}], "total_hits": 1}
+"""
+
+[[request]]
+path = "/stats"
+
+[[request]]
+method = "POST"
+path = "/links"
+body = '{"url": "https://example.com/a"}'
+
+[[request]]
+method = "POST"
+path = "/links"
+body = '{"url": "http://forge.dev/docs?x=1&y=2"}'
+
+[[request]]
+method = "POST"
+path = "/links"
+body = '{"url": "https://example.com/a"}'
+
+[[request]]
+method = "POST"
+path = "/links"
+body = '{"url": "ftp://example.com/file"}'
+
+[[request]]
+method = "POST"
+path = "/links"
+body = '{"url": "https://exa mple.com"}'
+
+[[request]]
+method = "POST"
+path = "/links"
+body = '{"link": "https://example.com"}'
+
+[[request]]
+path = "/links/2dce0a4"
+
+[[request]]
+path = "/links/2dce0a4"
+
+[[request]]
+path = "/links/c0e807b"
+
+[[request]]
+path = "/links/0000000"
+
+[[request]]
+method = "POST"
+path = "/links"
+body = '{"url": "https://example.org/zzz"}'
+
+[[request]]
+path = "/stats"
+
+[[request]]
+method = "DELETE"
+path = "/links/2dce0a4"
+
+[[request]]
+method = "DELETE"
+path = "/links/2dce0a4"
+
+[[request]]
+path = "/links/2dce0a4"
+
+[[request]]
+path = "/stats"

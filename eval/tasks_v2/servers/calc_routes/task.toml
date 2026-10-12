@@ -1,0 +1,132 @@
+id = "calc_routes"
+category = "servers"
+title = "Calculator API with path parameters and number rules"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18503 with one route, `GET /calc/<op>/<a>/<b>`.
+Responses have status 200 and a JSON body.
+
+`a` and `b` are numbers written as an optional `-`, digits, and optionally `.` followed by
+digits (`7`, `-3`, `2.50`). A number with a `.` is a float (even `2.0`), otherwise an
+integer. If either is not a number, respond `{"error": "invalid number: <text>"}` (check
+`a` first). Operations:
+
+- `add`, `sub`, `mul`: the sum, difference, product.
+- `div`: a / b, always a float (`7/2` is `3.5`, `6/3` is `2.0`).
+- `idiv`: integer division rounded toward zero (`-7 idiv 2` is `-3`).
+- `mod`: the remainder with the sign of `a` (`-7 mod 3` is `-1`, `7 mod -3` is `1`).
+- `pow`: a to the power b; an integer when both are integers and b >= 0, otherwise a float.
+
+`idiv` and `mod` need two integers: otherwise respond `{"error": "integers required"}`.
+`div`, `idiv` and `mod` by zero respond `{"error": "division by zero"}`. Any other op responds
+`{"error": "unknown op: <op>"}` (checked before the numbers). Results of `add`, `sub` and
+`mul` are integers when both inputs are integers and floats otherwise.
+
+A successful response is `{"op": <op>, "a": <a>, "b": <b>, "result": <result>}` with `a` and
+`b` as JSON numbers (integer or float, as parsed). The server runs until it is stopped.
+"""
+needs = ["net"]
+timeout = 20
+mode = "server"
+port = 18503
+expected_stdout = """
+STATUS 200
+{"a": 2, "b": 40, "op": "add", "result": 42}
+STATUS 200
+{"a": 2.5, "b": -1, "op": "sub", "result": 3.5}
+STATUS 200
+{"a": -3, "b": 7, "op": "mul", "result": -21}
+STATUS 200
+{"a": 7, "b": 2, "op": "div", "result": 3.5}
+STATUS 200
+{"a": 6, "b": 3, "op": "div", "result": 2.0}
+STATUS 200
+{"a": -7, "b": 2, "op": "idiv", "result": -3}
+STATUS 200
+{"a": -7, "b": 3, "op": "mod", "result": -1}
+STATUS 200
+{"a": 7, "b": -3, "op": "mod", "result": 1}
+STATUS 200
+{"a": 2, "b": 10, "op": "pow", "result": 1024}
+STATUS 200
+{"a": 2, "b": -2, "op": "pow", "result": 0.25}
+STATUS 200
+{"a": 1.5, "b": 2, "op": "pow", "result": 2.25}
+STATUS 200
+{"error": "division by zero"}
+STATUS 200
+{"error": "integers required"}
+STATUS 200
+{"error": "invalid number: 1e3"}
+STATUS 200
+{"error": "unknown op: sqrt"}
+STATUS 200
+{"error": "unknown op: sqrt"}
+STATUS 200
+{"error": "invalid number: .5"}
+STATUS 200
+{"error": "division by zero"}
+STATUS 200
+{"a": 2.0, "b": 2, "op": "add", "result": 4.0}
+STATUS 404
+"""
+
+[[request]]
+path = "/calc/add/2/40"
+
+[[request]]
+path = "/calc/sub/2.5/-1"
+
+[[request]]
+path = "/calc/mul/-3/7"
+
+[[request]]
+path = "/calc/div/7/2"
+
+[[request]]
+path = "/calc/div/6/3"
+
+[[request]]
+path = "/calc/idiv/-7/2"
+
+[[request]]
+path = "/calc/mod/-7/3"
+
+[[request]]
+path = "/calc/mod/7/-3"
+
+[[request]]
+path = "/calc/pow/2/10"
+
+[[request]]
+path = "/calc/pow/2/-2"
+
+[[request]]
+path = "/calc/pow/1.5/2"
+
+[[request]]
+path = "/calc/div/1/0"
+
+[[request]]
+path = "/calc/mod/5.0/2"
+
+[[request]]
+path = "/calc/add/1e3/2"
+
+[[request]]
+path = "/calc/sqrt/4/2"
+
+[[request]]
+path = "/calc/sqrt/x/y"
+
+[[request]]
+path = "/calc/add/3/.5"
+
+[[request]]
+path = "/calc/idiv/9/0"
+
+[[request]]
+path = "/calc/add/2.0/2"
+
+[[request]]
+path = "/calc/add/1/2/3"
+status_only = true

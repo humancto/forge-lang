@@ -1,0 +1,103 @@
+@server(port: 18510)
+
+// Parsed by hand: the sku column must stay a string ("0042"), so every
+// field is read as text and only the numeric columns are converted.
+let LINES = filter(split(fs.read("sales.csv"), "\n"), fn(l) { return l.trim() != "" })
+let HEAD = split(LINES[0].trim(), ",")
+let ROWS = map(slice(LINES, 1, len(LINES)), fn(l) {
+    let cells = split(l.trim(), ",")
+    let mut row = {}
+    for e in enumerate(HEAD) {
+        row[e.value] = cells[e.index]
+    }
+    let units = int(row.units)
+    return {
+        date: row.date,
+        region: row.region,
+        sku: row.sku,
+        product: row.product,
+        units: units,
+        revenue: units * int(row.unit_price_cents),
+    }
+})
+
+fn by_text(a: String, b: String) -> Int {
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    return 0
+}
+
+@get("/report/:region")
+fn report(region: String) -> Json {
+    let rows = filter(ROWS, fn(r) { return r.region == region })
+    if len(rows) == 0 {
+        return { error: "unknown region" }
+    }
+    let groups = group_by(rows, fn(r) { return r.sku })
+    let totals = map(keys(groups), fn(s) {
+        return { sku: s, revenue: sum(map(groups[s], fn(r) { return r.revenue })) }
+    })
+    let ranked = sort(totals, fn(a, b) {
+        if a.revenue != b.revenue {
+            return b.revenue - a.revenue
+        }
+        return by_text(a.sku, b.sku)
+    })
+    return {
+        region: region,
+        orders: len(rows),
+        units: sum(map(rows, fn(r) { return r.units })),
+        revenue_cents: sum(map(rows, fn(r) { return r.revenue })),
+        best_sku: ranked[0].sku,
+    }
+}
+
+@get("/top")
+fn top(query) -> Json {
+    let n = get(query, "n", "3")
+    if !regex.test(n, "^[0-9]+$") || int(n) < 1 {
+        return { error: "invalid n" }
+    }
+    let by = get(query, "by", "revenue")
+    if by != "units" && by != "revenue" {
+        return { error: "invalid by" }
+    }
+    let groups = group_by(ROWS, fn(r) { return r.sku })
+    let products = map(keys(groups), fn(s) {
+        let rows = groups[s]
+        return {
+            sku: s,
+            product: rows[0].product,
+            units: sum(map(rows, fn(r) { return r.units })),
+            revenue_cents: sum(map(rows, fn(r) { return r.revenue })),
+        }
+    })
+    let ranked = sort(products, fn(a, b) {
+        let mut d = b.revenue_cents - a.revenue_cents
+        if by == "units" {
+            d = b.units - a.units
+        }
+        if d != 0 {
+            return d
+        }
+        return by_text(a.sku, b.sku)
+    })
+    return slice(ranked, 0, min(int(n), len(ranked)))
+}
+
+@get("/monthly")
+fn monthly() -> Json {
+    let groups = group_by(ROWS, fn(r) { return substring(r.date, 0, 7) })
+    return map(sort(keys(groups)), fn(m) {
+        let rows = groups[m]
+        return {
+            month: m,
+            revenue_cents: sum(map(rows, fn(r) { return r.revenue })),
+            units: sum(map(rows, fn(r) { return r.units })),
+        }
+    })
+}

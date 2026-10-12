@@ -1,0 +1,54 @@
+@server(port: 18504)
+
+let ITEMS = map(range(1, 58), fn(n) {
+    let mut tags = ["odd"]
+    if n % 2 == 0 {
+        tags = ["even"]
+    }
+    if n % 5 == 0 {
+        tags = tags + ["five"]
+    }
+    return { id: n, name: "item-{pad_start(str(n), 3, "0")}", tags: tags }
+})
+
+fn positive(v) -> Bool {
+    return regex.test(v, "^[0-9]+$") && int(v) >= 1
+}
+
+@get("/items")
+fn items(query) -> Json {
+    for name in ["page", "per_page"] {
+        if has_key(query, name) && !positive(query[name]) {
+            return { error: "invalid {name}" }
+        }
+    }
+    let page = int(get(query, "page", "1"))
+    let per = min(int(get(query, "per_page", "10")), 25)
+    let tag = get(query, "tag", null)
+    let matching = filter(ITEMS, fn(i) { return tag == null || contains(i.tags, tag) })
+    let total = len(matching)
+    let pages = (total + per - 1) / per
+    let mut suffix = ""
+    if tag != null {
+        suffix = "&tag={tag}"
+    }
+    let mut next = null
+    if page < pages {
+        next = "/items?page={page + 1}&per_page={per}{suffix}"
+    }
+    let mut prev = null
+    if page > 1 {
+        prev = "/items?page={page - 1}&per_page={per}{suffix}"
+    }
+    let start = min((page - 1) * per, total)
+    let end = min(page * per, total)
+    return {
+        page: page,
+        per_page: per,
+        total: total,
+        total_pages: pages,
+        items: slice(matching, start, end),
+        next: next,
+        prev: prev,
+    }
+}

@@ -1,0 +1,102 @@
+id = "catalog_api"
+category = "servers"
+title = "Product catalog API with filters, sorting and lookups"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18501. At start-up it reads `catalog.json` from the
+working directory: `{"products": [{"sku", "name", "category", "price_cents"}, ...]}`.
+Every response below has status 200 and a JSON body.
+
+- `GET /products` lists products. Optional query parameters, all combinable:
+  `category` (exact match), `min_price` and `max_price` (inclusive bounds on
+  `price_cents`), `sort` (`price` ascending, `-price` descending, `name` ascending;
+  without it, by `sku` ascending; ties always by `sku` ascending) and `limit` (default 10).
+  The body is `{"count": <number of matching products>, "items": [<at most limit products,
+  each the full product object>]}`.
+  If `min_price`, `max_price` or `limit` is not a non-negative integer, or `sort` is not
+  one of the three values, the body is `{"error": "invalid <parameter name>"}` (check the
+  parameters in the order `min_price`, `max_price`, `limit`, `sort` and report the first
+  bad one).
+- `GET /products/<sku>` returns the product object, or `{"error": "not found", "sku": <sku>}`.
+- `GET /categories` returns an array, sorted by category, of
+  `{"category", "count", "min_price_cents", "max_price_cents"}`.
+
+The server runs until it is stopped.
+"""
+needs = ["net", "read"]
+timeout = 20
+mode = "server"
+port = 18501
+expected_stdout = """
+STATUS 200
+{"count": 12, "items": [{"category": "books", "name": "Tea atlas", "price_cents": 2999, "sku": "BOOK-01"}, {"category": "office", "name": "Blue ink", "price_cents": 900, "sku": "INK-001"}, {"category": "kitchen", "name": "Kettle", "price_cents": 3900, "sku": "KET-001"}, {"category": "kitchen", "name": "Stoneware mug", "price_cents": 1800, "sku": "MUG-001"}, {"category": "kitchen", "name": "Travel mug", "price_cents": 2200, "sku": "MUG-002"}, {"category": "office", "name": "Dot grid pad", "price_cents": 700, "sku": "PAD-002"}, {"category": "office", "name": "Fountain pen", "price_cents": 4500, "sku": "PEN-010"}, {"category": "office", "name": "Gel pen", "price_cents": 250, "sku": "PEN-011"}, {"category": "tea", "name": "Assam", "price_cents": 900, "sku": "TEA-001"}, {"category": "tea", "name": "Darjeeling", "price_cents": 1600, "sku": "TEA-002"}]}
+STATUS 200
+{"count": 4, "items": [{"category": "tea", "name": "Assam", "price_cents": 900, "sku": "TEA-001"}, {"category": "tea", "name": "Rooibos", "price_cents": 900, "sku": "TEA-004"}, {"category": "tea", "name": "Sencha", "price_cents": 1250, "sku": "TEA-003"}, {"category": "tea", "name": "Darjeeling", "price_cents": 1600, "sku": "TEA-002"}]}
+STATUS 200
+{"count": 7, "items": [{"category": "kitchen", "name": "Travel mug", "price_cents": 2200, "sku": "MUG-002"}, {"category": "kitchen", "name": "Stoneware mug", "price_cents": 1800, "sku": "MUG-001"}, {"category": "tea", "name": "Darjeeling", "price_cents": 1600, "sku": "TEA-002"}, {"category": "tea", "name": "Sencha", "price_cents": 1250, "sku": "TEA-003"}]}
+STATUS 200
+{"count": 12, "items": [{"category": "tea", "name": "Assam", "price_cents": 900, "sku": "TEA-001"}, {"category": "office", "name": "Blue ink", "price_cents": 900, "sku": "INK-001"}, {"category": "tea", "name": "Darjeeling", "price_cents": 1600, "sku": "TEA-002"}]}
+STATUS 200
+{"count": 0, "items": []}
+STATUS 200
+{"error": "invalid min_price"}
+STATUS 200
+{"error": "invalid limit"}
+STATUS 200
+{"error": "invalid max_price"}
+STATUS 200
+{"category": "tea", "name": "Darjeeling", "price_cents": 1600, "sku": "TEA-002"}
+STATUS 200
+{"error": "not found", "sku": "NOPE-1"}
+STATUS 200
+[{"category": "books", "count": 1, "max_price_cents": 2999, "min_price_cents": 2999}, {"category": "kitchen", "count": 3, "max_price_cents": 3900, "min_price_cents": 1800}, {"category": "office", "count": 4, "max_price_cents": 4500, "min_price_cents": 250}, {"category": "tea", "count": 4, "max_price_cents": 1600, "min_price_cents": 900}]
+STATUS 200
+{"count": 4, "items": []}
+"""
+
+[[request]]
+method = "GET"
+path = "/products"
+
+[[request]]
+method = "GET"
+path = "/products?category=tea&sort=price"
+
+[[request]]
+method = "GET"
+path = "/products?min_price=900&max_price=2200&sort=-price&limit=4"
+
+[[request]]
+method = "GET"
+path = "/products?sort=name&limit=3"
+
+[[request]]
+method = "GET"
+path = "/products?category=garden"
+
+[[request]]
+method = "GET"
+path = "/products?min_price=cheap"
+
+[[request]]
+method = "GET"
+path = "/products?limit=-1"
+
+[[request]]
+method = "GET"
+path = "/products?sort=popularity&max_price=5x"
+
+[[request]]
+method = "GET"
+path = "/products/TEA-002"
+
+[[request]]
+method = "GET"
+path = "/products/NOPE-1"
+
+[[request]]
+method = "GET"
+path = "/categories"
+
+[[request]]
+method = "GET"
+path = "/products?limit=0&category=office"

@@ -1,0 +1,82 @@
+id = "paginated_items"
+category = "servers"
+title = "Paginated listing with filters and next/prev links"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18504. It serves a fixed list of 57 items with ids
+1 to 57; item n is `{"id": n, "name": "item-<n as 3 digits>", "tags": [...]}` where tags
+are `"even"` or `"odd"`, followed by `"five"` when n is a multiple of 5 (item 10 is
+`{"id": 10, "name": "item-010", "tags": ["even", "five"]}`).
+
+`GET /items` takes the optional query parameters `page` (default 1), `per_page` (default 10;
+values above 25 are treated as 25) and `tag` (only items with that tag). `page` and
+`per_page` must be integers of at least 1 (digits only); otherwise respond
+`{"error": "invalid page"}` or `{"error": "invalid per_page"}` (check `page` first).
+
+The response (status 200) is
+`{"page": p, "per_page": pp, "total": <matching items>, "total_pages": <ceil(total / pp)>, "items": [...], "next": <link or null>, "prev": <link or null>}`
+where `items` is that page's slice of the matching items in id order (empty past the
+end), `next` is the link to page p+1 when p < total_pages, and `prev` the link to page p-1
+when p > 1. A link is `/items?page=<n>&per_page=<pp>`, followed by `&tag=<tag>` when a tag
+was given. The server runs until it is stopped.
+"""
+needs = ["net"]
+timeout = 20
+mode = "server"
+port = 18504
+expected_stdout = """
+STATUS 200
+{"items": [{"id": 1, "name": "item-001", "tags": ["odd"]}, {"id": 2, "name": "item-002", "tags": ["even"]}, {"id": 3, "name": "item-003", "tags": ["odd"]}], "next": "/items?page=2&per_page=3", "page": 1, "per_page": 3, "prev": null, "total": 57, "total_pages": 19}
+STATUS 200
+{"items": [{"id": 1, "name": "item-001", "tags": ["odd"]}, {"id": 2, "name": "item-002", "tags": ["even"]}, {"id": 3, "name": "item-003", "tags": ["odd"]}, {"id": 4, "name": "item-004", "tags": ["even"]}, {"id": 5, "name": "item-005", "tags": ["odd", "five"]}, {"id": 6, "name": "item-006", "tags": ["even"]}, {"id": 7, "name": "item-007", "tags": ["odd"]}, {"id": 8, "name": "item-008", "tags": ["even"]}, {"id": 9, "name": "item-009", "tags": ["odd"]}, {"id": 10, "name": "item-010", "tags": ["even", "five"]}], "next": "/items?page=2&per_page=10", "page": 1, "per_page": 10, "prev": null, "total": 57, "total_pages": 6}
+STATUS 200
+{"items": [{"id": 51, "name": "item-051", "tags": ["odd"]}, {"id": 52, "name": "item-052", "tags": ["even"]}, {"id": 53, "name": "item-053", "tags": ["odd"]}, {"id": 54, "name": "item-054", "tags": ["even"]}, {"id": 55, "name": "item-055", "tags": ["odd", "five"]}, {"id": 56, "name": "item-056", "tags": ["even"]}, {"id": 57, "name": "item-057", "tags": ["odd"]}], "next": null, "page": 6, "per_page": 10, "prev": "/items?page=5&per_page=10", "total": 57, "total_pages": 6}
+STATUS 200
+{"items": [], "next": null, "page": 7, "per_page": 10, "prev": "/items?page=6&per_page=10", "total": 57, "total_pages": 6}
+STATUS 200
+{"items": [{"id": 45, "name": "item-045", "tags": ["odd", "five"]}, {"id": 50, "name": "item-050", "tags": ["even", "five"]}, {"id": 55, "name": "item-055", "tags": ["odd", "five"]}], "next": null, "page": 3, "per_page": 4, "prev": "/items?page=2&per_page=4&tag=five", "total": 11, "total_pages": 3}
+STATUS 200
+{"items": [{"id": 5, "name": "item-005", "tags": ["odd", "five"]}, {"id": 10, "name": "item-010", "tags": ["even", "five"]}, {"id": 15, "name": "item-015", "tags": ["odd", "five"]}, {"id": 20, "name": "item-020", "tags": ["even", "five"]}, {"id": 25, "name": "item-025", "tags": ["odd", "five"]}, {"id": 30, "name": "item-030", "tags": ["even", "five"]}, {"id": 35, "name": "item-035", "tags": ["odd", "five"]}, {"id": 40, "name": "item-040", "tags": ["even", "five"]}, {"id": 45, "name": "item-045", "tags": ["odd", "five"]}, {"id": 50, "name": "item-050", "tags": ["even", "five"]}, {"id": 55, "name": "item-055", "tags": ["odd", "five"]}], "next": null, "page": 1, "per_page": 25, "prev": null, "total": 11, "total_pages": 1}
+STATUS 200
+{"items": [], "next": null, "page": 1, "per_page": 10, "prev": null, "total": 0, "total_pages": 0}
+STATUS 200
+{"error": "invalid page"}
+STATUS 200
+{"error": "invalid page"}
+STATUS 200
+{"error": "invalid per_page"}
+STATUS 200
+{"items": [{"id": 51, "name": "item-051", "tags": ["odd"]}, {"id": 53, "name": "item-053", "tags": ["odd"]}, {"id": 55, "name": "item-055", "tags": ["odd", "five"]}, {"id": 57, "name": "item-057", "tags": ["odd"]}], "next": null, "page": 2, "per_page": 25, "prev": "/items?page=1&per_page=25&tag=odd", "total": 29, "total_pages": 2}
+"""
+
+[[request]]
+path = "/items?per_page=3"
+
+[[request]]
+path = "/items"
+
+[[request]]
+path = "/items?page=6"
+
+[[request]]
+path = "/items?page=7"
+
+[[request]]
+path = "/items?tag=five&per_page=4&page=3"
+
+[[request]]
+path = "/items?tag=five&per_page=100"
+
+[[request]]
+path = "/items?tag=blue"
+
+[[request]]
+path = "/items?page=0"
+
+[[request]]
+path = "/items?page=two&per_page=x"
+
+[[request]]
+path = "/items?per_page=-5"
+
+[[request]]
+path = "/items?page=2&per_page=30&tag=odd"

@@ -1,0 +1,146 @@
+id = "todo_sqlite"
+category = "servers"
+title = "Todo API backed by SQLite"
+prompt = """
+Write a todo-list HTTP server on 127.0.0.1 port 18508 that stores its data in the SQLite
+database file `todos.db` in the working directory (create the file and table when they do
+not exist). All responses have status 200 and a JSON body. A todo is
+`{"id": <integer>, "title": <string>, "priority": <1, 2 or 3>, "done": <boolean>}`; ids
+start at 1 and increase by one per created todo (ids of deleted todos are not reused).
+
+- `POST /todos` with body `{"title": <string>, "priority": <optional integer, default 2>}`
+  creates a todo (not done) and returns it. The title is trimmed of surrounding spaces;
+  if it is missing, not a string or empty after trimming, respond
+  `{"error": "title is required"}`; a priority that is not the integer 1, 2 or 3 gives
+  `{"error": "priority must be 1, 2 or 3"}`.
+- `GET /todos` returns `{"count": <n>, "todos": [...]}`, ordered by id. Optional query
+  parameters: `done=true` or `done=false` keeps only those todos; `sort=priority` orders
+  by priority, then id.
+- `GET /todos/<id>` returns the todo.
+- `PUT /todos/<id>` with a body that may contain `"done"` (a boolean) and/or `"title"`
+  (same rules as above) updates those fields and returns the updated todo. A `done` that
+  is not a boolean gives `{"error": "done must be a boolean"}`. Nothing is changed when
+  the body is invalid.
+- `DELETE /todos/<id>` deletes it and returns `{"deleted": <id>}`.
+
+For an id that does not exist (or is not a positive integer), these routes respond
+`{"error": "not found"}`. The server runs until it is stopped.
+"""
+needs = ["net", "read", "write", "db"]
+timeout = 20
+mode = "server"
+port = 18508
+expected_stdout = """
+STATUS 200
+{"count": 0, "todos": []}
+STATUS 200
+{"done": false, "id": 1, "priority": 1, "title": "write tests"}
+STATUS 200
+{"done": false, "id": 2, "priority": 2, "title": "ship it"}
+STATUS 200
+{"error": "title is required"}
+STATUS 200
+{"error": "priority must be 1, 2 or 3"}
+STATUS 200
+{"done": false, "id": 3, "priority": 3, "title": "drink tea"}
+STATUS 200
+{"done": true, "id": 2, "priority": 2, "title": "ship it"}
+STATUS 200
+{"error": "done must be a boolean"}
+STATUS 200
+{"done": false, "id": 3, "priority": 3, "title": "drink green tea"}
+STATUS 200
+{"error": "not found"}
+STATUS 200
+{"count": 2, "todos": [{"done": false, "id": 1, "priority": 1, "title": "write tests"}, {"done": false, "id": 3, "priority": 3, "title": "drink green tea"}]}
+STATUS 200
+{"count": 1, "todos": [{"done": true, "id": 2, "priority": 2, "title": "ship it"}]}
+STATUS 200
+{"deleted": 1}
+STATUS 200
+{"done": false, "id": 4, "priority": 2, "title": "after delete"}
+STATUS 200
+{"error": "not found"}
+STATUS 200
+{"error": "not found"}
+STATUS 200
+{"count": 3, "todos": [{"done": true, "id": 2, "priority": 2, "title": "ship it"}, {"done": false, "id": 4, "priority": 2, "title": "after delete"}, {"done": false, "id": 3, "priority": 3, "title": "drink green tea"}]}
+STATUS 200
+{"error": "not found"}
+"""
+
+[[request]]
+path = "/todos"
+
+[[request]]
+method = "POST"
+path = "/todos"
+body = '{"title": "  write tests  ", "priority": 1}'
+
+[[request]]
+method = "POST"
+path = "/todos"
+body = '{"title": "ship it"}'
+
+[[request]]
+method = "POST"
+path = "/todos"
+body = '{"title": "   "}'
+
+[[request]]
+method = "POST"
+path = "/todos"
+body = '{"title": "refactor", "priority": 5}'
+
+[[request]]
+method = "POST"
+path = "/todos"
+body = '{"title": "drink tea", "priority": 3}'
+
+[[request]]
+method = "PUT"
+path = "/todos/2"
+body = '{"done": true}'
+
+[[request]]
+method = "PUT"
+path = "/todos/1"
+body = '{"done": "yes", "title": "ignored"}'
+
+[[request]]
+method = "PUT"
+path = "/todos/3"
+body = '{"title": "drink green tea", "done": false}'
+
+[[request]]
+method = "PUT"
+path = "/todos/99"
+body = '{"done": true}'
+
+[[request]]
+path = "/todos?done=false&sort=priority"
+
+[[request]]
+path = "/todos?done=true"
+
+[[request]]
+method = "DELETE"
+path = "/todos/1"
+
+[[request]]
+method = "POST"
+path = "/todos"
+body = '{"title": "after delete", "priority": 2}'
+
+[[request]]
+path = "/todos/1"
+
+[[request]]
+path = "/todos/abc"
+
+[[request]]
+path = "/todos?sort=priority"
+
+[[request]]
+method = "DELETE"
+path = "/todos/1"

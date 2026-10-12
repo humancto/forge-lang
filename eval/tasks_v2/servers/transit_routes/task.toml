@@ -1,0 +1,82 @@
+id = "transit_routes"
+category = "servers"
+title = "Shortest-route API over a transit network"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18509. At start-up it reads `network.json` from the
+working directory: `{"edges": [{"a": <station>, "b": <station>, "minutes": <integer>}, ...]}`.
+Edges can be travelled in both directions. All responses have status 200 and a JSON body.
+
+- `GET /stations` returns an array of `{"name": <station>, "connections": <number of
+  edges at it>}` sorted by name.
+- `GET /route?from=<station>&to=<station>` returns the fastest route as
+  `{"from": ..., "to": ..., "minutes": <total>, "path": [<stations from start to end>]}`.
+  When several routes take the same time, prefer the one with fewer stations, then the
+  one whose list of station names is smallest in lexicographic order (compare names one
+  by one). From a station to itself the route is `{"minutes": 0, "path": [<station>]}`
+  plus `from` and `to`.
+
+Errors: a missing `from` or `to` parameter → `{"error": "from and to are required"}`; an
+unknown station → `{"error": "unknown station: <name>"}` (check `from` first); no
+connection between them → `{"error": "no route"}`. The server runs until it is stopped.
+"""
+needs = ["net", "read"]
+timeout = 20
+mode = "server"
+port = 18509
+expected_stdout = """
+STATUS 200
+[{"connections": 2, "name": "Ash"}, {"connections": 3, "name": "Birch"}, {"connections": 4, "name": "Cedar"}, {"connections": 4, "name": "Dogwood"}, {"connections": 3, "name": "Elm"}, {"connections": 3, "name": "Fir"}, {"connections": 1, "name": "Grove"}, {"connections": 1, "name": "Hazel"}, {"connections": 1, "name": "Ivy"}, {"connections": 2, "name": "Juniper"}]
+STATUS 200
+{"from": "Ash", "minutes": 12, "path": ["Ash", "Cedar", "Dogwood"], "to": "Dogwood"}
+STATUS 200
+{"from": "Ash", "minutes": 22, "path": ["Ash", "Birch", "Elm", "Fir", "Grove"], "to": "Grove"}
+STATUS 200
+{"from": "Grove", "minutes": 18, "path": ["Grove", "Fir", "Elm", "Birch"], "to": "Birch"}
+STATUS 200
+{"from": "Elm", "minutes": 5, "path": ["Elm", "Dogwood", "Juniper"], "to": "Juniper"}
+STATUS 200
+{"from": "Cedar", "minutes": 0, "path": ["Cedar"], "to": "Cedar"}
+STATUS 200
+{"error": "no route"}
+STATUS 200
+{"error": "unknown station: Oak"}
+STATUS 200
+{"error": "unknown station: Oak"}
+STATUS 200
+{"error": "from and to are required"}
+STATUS 200
+{"from": "Ivy", "minutes": 3, "path": ["Ivy", "Hazel"], "to": "Hazel"}
+"""
+
+[[request]]
+path = "/stations"
+
+[[request]]
+path = "/route?from=Ash&to=Dogwood"
+
+[[request]]
+path = "/route?from=Ash&to=Grove"
+
+[[request]]
+path = "/route?from=Grove&to=Birch"
+
+[[request]]
+path = "/route?from=Elm&to=Juniper"
+
+[[request]]
+path = "/route?from=Cedar&to=Cedar"
+
+[[request]]
+path = "/route?from=Ash&to=Ivy"
+
+[[request]]
+path = "/route?from=Oak&to=Ash"
+
+[[request]]
+path = "/route?from=Ash&to=Oak"
+
+[[request]]
+path = "/route?from=Ash"
+
+[[request]]
+path = "/route?from=Ivy&to=Hazel"

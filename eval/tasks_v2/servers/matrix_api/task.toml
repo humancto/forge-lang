@@ -1,0 +1,142 @@
+id = "matrix_api"
+category = "servers"
+title = "Matrix operations over JSON"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18506. All responses have status 200 and a JSON body.
+
+A matrix is a non-empty JSON array of non-empty arrays of numbers, all rows of the same
+length. Its shape is `[rows, columns]`. Arithmetic keeps JSON number types: integer
+inputs give integer results, and any float involved gives a float.
+
+- `POST /matrix/multiply` with body `{"a": <matrix>, "b": <matrix>}` returns
+  `{"result": <a × b>, "shape": <shape of the result>}`.
+- `POST /matrix/transpose` with body `{"m": <matrix>}` returns
+  `{"result": <transpose>, "shape": <shape>}`.
+- `POST /matrix/determinant` with body `{"m": <square matrix>}` returns
+  `{"determinant": <value>}` (use cofactor expansion along the first row; matrices are at
+  most 6 × 6).
+- `GET /matrix/identity/<n>` returns `{"result": <n × n identity of integers>, "shape": [n, n]}`
+  for n from 1 to 10.
+
+Errors, checked in this order: a body field that is missing or not a matrix →
+`{"error": "<field> is not a matrix"}` (check `a` before `b`); multiply with
+incompatible shapes → `{"error": "shape mismatch: <r1>x<c1> times <r2>x<c2>"}`; determinant
+of a non-square matrix → `{"error": "matrix is not square"}`; an identity size that is not
+an integer from 1 to 10 → `{"error": "n must be between 1 and 10"}`.
+
+The server runs until it is stopped.
+"""
+needs = ["net"]
+timeout = 20
+mode = "server"
+port = 18506
+expected_stdout = """
+STATUS 200
+{"result": [[58, 64], [139, 154]], "shape": [2, 2]}
+STATUS 200
+{"result": [[1.5]], "shape": [1, 1]}
+STATUS 200
+{"error": "shape mismatch: 1x2 times 1x2"}
+STATUS 200
+{"error": "a is not a matrix"}
+STATUS 200
+{"error": "b is not a matrix"}
+STATUS 200
+{"error": "a is not a matrix"}
+STATUS 200
+{"result": [[1, 4], [2, 5], [3, 6]], "shape": [3, 2]}
+STATUS 200
+{"error": "m is not a matrix"}
+STATUS 200
+{"determinant": -20}
+STATUS 200
+{"determinant": 0.0}
+STATUS 200
+{"determinant": 7}
+STATUS 200
+{"error": "matrix is not square"}
+STATUS 200
+{"result": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "shape": [3, 3]}
+STATUS 200
+{"error": "n must be between 1 and 10"}
+STATUS 200
+{"error": "n must be between 1 and 10"}
+STATUS 200
+{"error": "n must be between 1 and 10"}
+"""
+
+[[request]]
+method = "POST"
+path = "/matrix/multiply"
+body = '{"a": [[1, 2, 3], [4, 5, 6]], "b": [[7, 8], [9, 10], [11, 12]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/multiply"
+body = '{"a": [[0.5, 2]], "b": [[2], [0.25]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/multiply"
+body = '{"a": [[1, 2]], "b": [[1, 2]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/multiply"
+body = '{"a": [[1, 2], [3]], "b": [[1]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/multiply"
+body = '{"a": [[1]], "b": [["x"]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/multiply"
+body = '{"a": [], "b": [[1]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/transpose"
+body = '{"m": [[1, 2, 3], [4, 5, 6]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/transpose"
+body = '{"matrix": [[1]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/determinant"
+body = '{"m": [[2, 0, 1, 3], [1, -1, 0, 2], [0, 3, 1, 1], [4, 1, 0, -2]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/determinant"
+body = '{"m": [[1.5, 2], [3, 4]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/determinant"
+body = '{"m": [[7]]}'
+
+[[request]]
+method = "POST"
+path = "/matrix/determinant"
+body = '{"m": [[1, 2, 3], [4, 5, 6]]}'
+
+[[request]]
+method = "GET"
+path = "/matrix/identity/3"
+
+[[request]]
+method = "GET"
+path = "/matrix/identity/0"
+
+[[request]]
+method = "GET"
+path = "/matrix/identity/abc"
+
+[[request]]
+method = "GET"
+path = "/matrix/identity/11"

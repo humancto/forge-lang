@@ -1,0 +1,16 @@
+{
+  "products": [
+    {"sku": "TEA-003", "name": "Sencha", "category": "tea", "price_cents": 1250},
+    {"sku": "MUG-001", "name": "Stoneware mug", "category": "kitchen", "price_cents": 1800},
+    {"sku": "TEA-001", "name": "Assam", "category": "tea", "price_cents": 900},
+    {"sku": "PEN-010", "name": "Fountain pen", "category": "office", "price_cents": 4500},
+    {"sku": "TEA-002", "name": "Darjeeling", "category": "tea", "price_cents": 1600},
+    {"sku": "PAD-002", "name": "Dot grid pad", "category": "office", "price_cents": 700},
+    {"sku": "KET-001", "name": "Kettle", "category": "kitchen", "price_cents": 3900},
+    {"sku": "PEN-011", "name": "Gel pen", "category": "office", "price_cents": 250},
+    {"sku": "TEA-004", "name": "Rooibos", "category": "tea", "price_cents": 900},
+    {"sku": "MUG-002", "name": "Travel mug", "category": "kitchen", "price_cents": 2200},
+    {"sku": "INK-001", "name": "Blue ink", "category": "office", "price_cents": 900},
+    {"sku": "BOOK-01", "name": "Tea atlas", "category": "books", "price_cents": 2999}
+  ]
+}

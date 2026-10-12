@@ -1,0 +1,56 @@
+@server(port: 18503)
+
+let OPS = ["add", "sub", "mul", "div", "idiv", "mod", "pow"]
+
+// The parsed number (Int, or Float when written with a dot), or null.
+fn number(text: String) {
+    if !regex.test(text, "^-?[0-9]+(\\.[0-9]+)?$") {
+        return null
+    }
+    if contains(text, ".") {
+        return float(text)
+    }
+    return int(text)
+}
+
+fn compute(op: String, a, b) {
+    let both_int = typeof(a) == "Int" && typeof(b) == "Int"
+    if (op == "idiv" || op == "mod") && !both_int {
+        return { error: "integers required" }
+    }
+    if (op == "div" || op == "idiv" || op == "mod") && b == 0 {
+        return { error: "division by zero" }
+    }
+    let result = match op {
+        "add" => a + b,
+        "sub" => a - b,
+        "mul" => a * b,
+        "div" => float(a) / float(b),
+        "idiv" => a / b,                  // Int / Int truncates toward zero
+        "mod" => a % b,                   // remainder takes the sign of a
+        _ => {
+            if both_int && b >= 0 {
+                int(math.pow(a, b))
+            } else {
+                math.pow(float(a), float(b))
+            }
+        },
+    }
+    return { op: op, a: a, b: b, result: result }
+}
+
+@get("/calc/:op/:a/:b")
+fn calc(op: String, a: String, b: String) -> Json {
+    if !contains(OPS, op) {
+        return { error: "unknown op: {op}" }
+    }
+    let x = number(a)
+    if x == null {
+        return { error: "invalid number: {a}" }
+    }
+    let y = number(b)
+    if y == null {
+        return { error: "invalid number: {b}" }
+    }
+    return compute(op, x, y)
+}

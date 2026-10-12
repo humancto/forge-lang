@@ -1,0 +1,88 @@
+@server(port: 18509)
+
+let EDGES = json.parse(fs.read("network.json")).edges
+let STATIONS = sort(unique(flatten(map(EDGES, fn(e) { return [e.a, e.b] }))))
+
+fn neighbors(station: String) {
+    let mut out = []
+    for e in EDGES {
+        if e.a == station {
+            out.push({ to: e.b, minutes: e.minutes })
+        } else if e.b == station {
+            out.push({ to: e.a, minutes: e.minutes })
+        }
+    }
+    return out
+}
+
+// Order on route labels: total minutes, then stations, then names.
+fn better(x, y) -> Bool {
+    if y == null {
+        return true
+    }
+    if x.minutes != y.minutes {
+        return x.minutes < y.minutes
+    }
+    if len(x.path) != len(y.path) {
+        return len(x.path) < len(y.path)
+    }
+    for i in range(0, len(x.path)) {
+        if x.path[i] != y.path[i] {
+            return x.path[i] < y.path[i]
+        }
+    }
+    return false
+}
+
+// Dijkstra over labels {minutes, path}; O(V^2), fine for a small network.
+fn shortest(src: String, dst: String) {
+    let mut best = {}
+    best[src] = { minutes: 0, path: [src] }
+    let mut done = []
+    loop {
+        let mut current = null
+        for s in keys(best) {
+            if !contains(done, s) && (current == null || better(best[s], best[current])) {
+                current = s
+            }
+        }
+        if current == null {
+            return null
+        }
+        if current == dst {
+            return best[current]
+        }
+        done.push(current)
+        let here = best[current]
+        for n in neighbors(current) {
+            if !contains(done, n.to) {
+                let label = { minutes: here.minutes + n.minutes, path: here.path + [n.to] }
+                if better(label, get(best, n.to, null)) {
+                    best[n.to] = label
+                }
+            }
+        }
+    }
+}
+
+@get("/stations")
+fn stations() -> Json {
+    return map(STATIONS, fn(s) { return { name: s, connections: len(neighbors(s)) } })
+}
+
+@get("/route")
+fn route(query) -> Json {
+    if !has_key(query, "from") || !has_key(query, "to") {
+        return { error: "from and to are required" }
+    }
+    for name in [query.from, query.to] {
+        if !contains(STATIONS, name) {
+            return { error: "unknown station: {name}" }
+        }
+    }
+    let found = shortest(query.from, query.to)
+    if found == null {
+        return { error: "no route" }
+    }
+    return { from: query.from, to: query.to, minutes: found.minutes, path: found.path }
+}

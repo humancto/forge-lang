@@ -1,0 +1,85 @@
+@server(port: 18501)
+
+// Loaded once at start-up; every request reads this snapshot.
+let PRODUCTS = json.parse(fs.read("catalog.json")).products
+
+fn is_count(s) -> Bool {
+    return s != null && regex.test(s, "^[0-9]+$")
+}
+
+fn compare_text(a: String, b: String) -> Int {
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    return 0
+}
+
+fn order_by(items, mode) {
+    return sort(items, fn(a, b) {
+        let mut c = 0
+        if mode == "price" {
+            c = a.price_cents - b.price_cents
+        } else if mode == "-price" {
+            c = b.price_cents - a.price_cents
+        } else if mode == "name" {
+            c = compare_text(a.name, b.name)
+        }
+        if c != 0 {
+            return c
+        }
+        return compare_text(a.sku, b.sku)
+    })
+}
+
+@get("/products")
+fn list_products(query) -> Json {
+    for name in ["min_price", "max_price", "limit"] {
+        let v = get(query, name, null)
+        if v != null && !is_count(v) {
+            return { error: "invalid {name}" }
+        }
+    }
+    let mode = get(query, "sort", "")
+    if mode != "" && !contains(["price", "-price", "name"], mode) {
+        return { error: "invalid sort" }
+    }
+    let category = get(query, "category", null)
+    let lo = get(query, "min_price", null)
+    let hi = get(query, "max_price", null)
+    let matching = filter(PRODUCTS, fn(p) {
+        if category != null && p.category != category {
+            return false
+        }
+        if lo != null && p.price_cents < int(lo) {
+            return false
+        }
+        if hi != null && p.price_cents > int(hi) {
+            return false
+        }
+        return true
+    })
+    let limit = int(get(query, "limit", "10"))
+    let ordered = order_by(matching, mode)
+    return { count: len(ordered), items: slice(ordered, 0, min(limit, len(ordered))) }
+}
+
+@get("/products/:sku")
+fn product(sku: String) -> Json {
+    let found = find(PRODUCTS, fn(p) { return p.sku == sku })
+    if found == null {
+        return { error: "not found", sku: sku }
+    }
+    return found
+}
+
+@get("/categories")
+fn categories() -> Json {
+    let groups = group_by(PRODUCTS, fn(p) { return p.category })
+    return map(sort(keys(groups)), fn(c) {
+        let prices = map(groups[c], fn(p) { return p.price_cents })
+        return { category: c, count: len(prices), min_price_cents: min(prices), max_price_cents: max(prices) }
+    })
+}

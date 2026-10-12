@@ -1,0 +1,45 @@
+@server(port: 18505)
+
+fn stats(text: String) {
+    let words = map(regex.find_all(text, "[A-Za-z']+"), fn(w) { return w.lower() })
+    let counts = frequencies(words)
+    let distinct = keys(counts)
+    let ranked = sort(sort(distinct), fn(a, b) { return counts[b] - counts[a] })
+    let top = map(slice(ranked, 0, min(3, len(ranked))), fn(w) {
+        return { word: w, count: counts[w] }
+    })
+    let mut longest = null
+    for w in words {
+        if longest == null || len(w) > len(longest) {
+            longest = w
+        }
+    }
+    let segments = regex.split(text, "[.!?]+")
+    let sentences = len(filter(segments, fn(s) { return regex.test(s, "[A-Za-z]") }))
+    return {
+        words: len(words),
+        unique: len(distinct),
+        sentences: sentences,
+        top: top,
+        longest: longest,
+    }
+}
+
+@post("/analyze")
+fn analyze(body) -> Json {
+    let text = get(body, "text", null)
+    if typeof(text) != "String" {
+        return { error: "text must be a string" }
+    }
+    return stats(text)
+}
+
+@post("/analyze/batch")
+fn analyze_batch(body) -> Json {
+    let texts = get(body, "texts", null)
+    if typeof(texts) != "Array" || !all(texts, fn(t) { return typeof(t) == "String" }) {
+        return { error: "texts must be an array of strings" }
+    }
+    let results = map(texts, fn(t) { return stats(t) })
+    return { results: results, total_words: sum(map(results, fn(r) { return r.words })) }
+}

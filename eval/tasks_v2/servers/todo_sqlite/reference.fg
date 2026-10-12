@@ -1,0 +1,116 @@
+@server(port: 18508)
+
+// The database connection belongs to the thread that opened it, and each
+// request runs on its own worker: open it in every handler.
+fn open_db() {
+    db.open("todos.db")
+    db.execute("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, priority INTEGER NOT NULL, done INTEGER NOT NULL)")
+    return null
+}
+
+fn as_todo(row) {
+    return { id: row.id, title: row.title, priority: row.priority, done: row.done == 1 }
+}
+
+// The todo with this id (a path parameter), or null.
+fn fetch(id_text: String) {
+    if !regex.test(id_text, "^[0-9]+$") || int(id_text) < 1 {
+        return null
+    }
+    let rows = db.query("SELECT id, title, priority, done FROM todos WHERE id = ?", [int(id_text)])
+    if len(rows) == 0 {
+        return null
+    }
+    return as_todo(rows[0])
+}
+
+fn clean_title(body) {
+    let t = get(body, "title", null)
+    if typeof(t) != "String" || t.trim() == "" {
+        return null
+    }
+    return t.trim()
+}
+
+@post("/todos")
+fn create(body) -> Json {
+    open_db()
+    let title = clean_title(body)
+    if title == null {
+        return { error: "title is required" }
+    }
+    let priority = get(body, "priority", 2)
+    if typeof(priority) != "Int" || priority < 1 || priority > 3 {
+        return { error: "priority must be 1, 2 or 3" }
+    }
+    db.execute("INSERT INTO todos (title, priority, done) VALUES (?, ?, 0)", [title, priority])
+    let id = db.query("SELECT last_insert_rowid() AS id")[0].id
+    return fetch(str(id))
+}
+
+@get("/todos")
+fn list_todos(query) -> Json {
+    open_db()
+    let mut sql = "SELECT id, title, priority, done FROM todos"
+    let done = get(query, "done", "")
+    if done == "true" {
+        sql += " WHERE done = 1"
+    } else if done == "false" {
+        sql += " WHERE done = 0"
+    }
+    if get(query, "sort", "") == "priority" {
+        sql += " ORDER BY priority, id"
+    } else {
+        sql += " ORDER BY id"
+    }
+    let todos = map(db.query(sql), fn(r) { return as_todo(r) })
+    return { count: len(todos), todos: todos }
+}
+
+@get("/todos/:id")
+fn show(id: String) -> Json {
+    open_db()
+    let todo = fetch(id)
+    if todo == null {
+        return { error: "not found" }
+    }
+    return todo
+}
+
+@put("/todos/:id")
+fn update(id: String, body) -> Json {
+    open_db()
+    let todo = fetch(id)
+    if todo == null {
+        return { error: "not found" }
+    }
+    if has_key(body, "done") && typeof(body.done) != "Bool" {
+        return { error: "done must be a boolean" }
+    }
+    if has_key(body, "title") {
+        let title = clean_title(body)
+        if title == null {
+            return { error: "title is required" }
+        }
+        db.execute("UPDATE todos SET title = ? WHERE id = ?", [title, todo.id])
+    }
+    if has_key(body, "done") {
+        let mut flag = 0
+        if body.done {
+            flag = 1
+        }
+        db.execute("UPDATE todos SET done = ? WHERE id = ?", [flag, todo.id])
+    }
+    return fetch(id)
+}
+
+@delete("/todos/:id")
+fn remove(id: String) -> Json {
+    open_db()
+    let todo = fetch(id)
+    if todo == null {
+        return { error: "not found" }
+    }
+    db.execute("DELETE FROM todos WHERE id = ?", [todo.id])
+    return { deleted: todo.id }
+}

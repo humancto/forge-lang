@@ -1,0 +1,67 @@
+@server(port: 18507)
+
+// Every request runs in its own copy of the program, so state that must
+// outlive a request lives in links.json: load it, change it, save it.
+let STORE = "links.json"
+
+fn load_links() {
+    if !fs.exists(STORE) {
+        return {}
+    }
+    return json.parse(fs.read(STORE))
+}
+
+fn save_links(links) {
+    fs.write(STORE, json.stringify(links))
+    return null
+}
+
+@post("/links")
+fn create(body) -> Json {
+    let url = get(body, "url", null)
+    if typeof(url) != "String" || !regex.test(url, "^https?://") || contains(url, " ") {
+        return { error: "invalid url" }
+    }
+    let code = substring(crypto.sha256(url), 0, 7)
+    let mut links = load_links()
+    let created = !has_key(links, code)
+    if created {
+        links[code] = { url: url, hits: 0 }
+        save_links(links)
+    }
+    return { code: code, url: links[code].url, created: created }
+}
+
+@get("/links/:code")
+fn visit(code: String) -> Json {
+    let mut links = load_links()
+    if !has_key(links, code) {
+        return { error: "unknown code" }
+    }
+    let hits = links[code].hits + 1
+    links[code] = { url: links[code].url, hits: hits }
+    save_links(links)
+    return { code: code, url: links[code].url, hits: hits }
+}
+
+@delete("/links/:code")
+fn remove(code: String) -> Json {
+    let links = load_links()
+    if !has_key(links, code) {
+        return { error: "unknown code" }
+    }
+    save_links(omit(links, [code]))
+    return { deleted: code }
+}
+
+@get("/stats")
+fn stats() -> Json {
+    let links = load_links()
+    let codes = keys(links)
+    let ranked = sort(sort(codes), fn(a, b) { return links[b].hits - links[a].hits })
+    return {
+        links: len(codes),
+        total_hits: sum(map(codes, fn(c) { return links[c].hits })),
+        top: map(slice(ranked, 0, min(3, len(ranked))), fn(c) { return { code: c, hits: links[c].hits } }),
+    }
+}
