@@ -1,3 +1,4 @@
+use super::globals::GlobalId;
 use super::value::{GcRef, Value};
 use crate::clock::Instant;
 
@@ -25,16 +26,42 @@ pub struct TimeoutGuard {
 /// `write_local`), which is hot in top-level code whose variables are
 /// captured by top-level functions, so this is a direct index rather than a
 /// hash map. Allocates nothing until the first capture.
+///
+/// A register can also alias a global slot (`BindGlobal`) for the length of
+/// one statement: `read_local` / `write_local` then read and write the
+/// global, so the in-place local opcodes apply to a global container.
 #[derive(Default)]
 pub struct OpenUpvalues {
     cells: Vec<Option<GcRef>>,
     count: usize,
+    globals: Vec<(u8, GlobalId)>,
 }
 
 impl OpenUpvalues {
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.count == 0 && self.globals.is_empty()
+    }
+
+    /// The global register `reg` aliases, if any.
+    #[inline]
+    pub fn global(&self, reg: &u8) -> Option<GlobalId> {
+        self.globals
+            .iter()
+            .find(|(r, _)| r == reg)
+            .map(|(_, id)| *id)
+    }
+
+    /// Make `reg` an alias of global `id` (`BindGlobal`).
+    pub fn insert_global(&mut self, reg: u8, id: GlobalId) {
+        self.globals.retain(|(r, _)| *r != reg);
+        self.globals.push((reg, id));
+    }
+
+    /// Drop every global alias: a caught error abandons the statements that
+    /// bound them before their `CloseUpvalues` ran.
+    pub fn clear_globals(&mut self) {
+        self.globals.clear();
     }
 
     #[inline]
@@ -60,6 +87,9 @@ impl OpenUpvalues {
     }
 
     pub fn remove(&mut self, reg: &u8) -> Option<GcRef> {
+        if !self.globals.is_empty() {
+            self.globals.retain(|(r, _)| r != reg);
+        }
         let old = self.cells.get_mut(*reg as usize)?.take();
         if old.is_some() {
             self.count -= 1;

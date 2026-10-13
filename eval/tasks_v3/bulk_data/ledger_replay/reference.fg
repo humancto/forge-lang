@@ -7,19 +7,9 @@ fn dollars(c: Int) -> String {
     return "{c / 100}.{pad}{cents}"
 }
 
-// A non-empty run of ASCII digits. Not `regex.test(s, "^[0-9]+$")`: regex
-// functions compile their pattern on every call (eval/V3_FINDINGS.md,
-// finding 1), which is most of the run time at this input size.
+// A non-empty run of ASCII digits.
 fn is_digits(s: String) -> Bool {
-    if s == "" {
-        return false
-    }
-    for c in split(s, "") {
-        if c < "0" || c > "9" {
-            return false
-        }
-    }
-    return true
+    return regex.test(s, "^[0-9]+$")
 }
 
 // A positive integer amount, or -1.
@@ -77,12 +67,8 @@ for line in lines {
         bal[a] = 0
     }
     if op == "transfer" {
-        // The key is bound to a local first: on the VM, `obj[xs[i]] = v` (a key that
-        // is itself an index or field read) copies the whole object on every write
-        // (eval/V3_FINDINGS.md, finding 3).
-        let b = f[2]
-        if !has_key(bal, b) {
-            bal[b] = 0
+        if !has_key(bal, f[2]) {
+            bal[f[2]] = 0
         }
     }
     let mut touched = ""

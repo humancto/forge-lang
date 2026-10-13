@@ -78,6 +78,16 @@ impl VM {
             return Ok(self.registers[base + slot as usize]);
         }
         let Some(uv_ref) = open.get(&slot).copied() else {
+            if let Some(id) = open.global(&slot) {
+                // An alias of a global (`BindGlobal`), which checked that
+                // it is defined; globals are never removed.
+                let value = self
+                    .globals
+                    .get_id(id)
+                    .ok_or_else(|| VMError::new("BUG: alias of an undefined global"))?;
+                self.registers[base + slot as usize] = value;
+                return Ok(value);
+            }
             return Ok(self.registers[base + slot as usize]);
         };
         let value = self
@@ -107,14 +117,60 @@ impl VM {
                     *value = val;
                 }
             }
+        } else if let Some(id) = open.global(&slot) {
+            self.globals.set_id(id, val);
         }
     }
 
-    /// Whether local `slot` may hold a uniquely owned object: a captured
-    /// local's value is also referenced by its upvalue cell.
+    /// Whether local `slot` may hold a uniquely owned object. Every local
+    /// can: a captured local's register and its upvalue cell are one owner
+    /// (every access goes through `read_local` / `write_local`, and
+    /// `GetUpvalue` shares what it copies out of a cell), and so are an
+    /// alias register and its global slot (`GetGlobal` shares too).
     #[inline]
-    fn local_can_own(&self, frame_idx: usize, slot: u8) -> bool {
-        !self.frames[frame_idx].open_upvalues.contains_key(&slot)
+    fn local_can_own(&self, _frame_idx: usize, _slot: u8) -> bool {
+        true
+    }
+
+    /// `BindGlobal`: make register `slot` an alias of global `id` (defined)
+    /// until the statement's `CloseUpvalues`. The register mirrors the
+    /// slot: not a second reference.
+    pub(super) fn bind_global(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        id: super::globals::GlobalId,
+        value: Value,
+    ) {
+        self.frames[frame_idx].open_upvalues.insert_global(slot, id);
+        self.registers[base + slot as usize] = value;
+    }
+
+    /// `BindUpvalue`: make local `slot` an alias of the closure's captured
+    /// variable `uv_idx` (its cell becomes the local's open upvalue).
+    pub(super) fn bind_upvalue(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        uv_idx: u8,
+    ) -> Result<(), VMError> {
+        let closure = self.frames[frame_idx].closure;
+        let cell = match self.gc.get(closure).map(|o| &o.kind) {
+            Some(ObjKind::Closure(c)) => c.upvalues.get(uv_idx as usize).copied(),
+            _ => None,
+        }
+        .ok_or_else(|| VMError::new("invalid upvalue"))?;
+        let value = match self.gc.get(cell).map(|o| &o.kind) {
+            Some(ObjKind::Upvalue(uv)) => uv.value,
+            _ => return Err(VMError::new("invalid upvalue")),
+        };
+        self.frames[frame_idx].open_upvalues.insert(slot, cell);
+        // The register mirrors the cell (as for a captured local): not a
+        // second reference.
+        self.registers[base + slot as usize] = value;
+        Ok(())
     }
 
     /// The object `value` refers to, when it is uniquely owned by local
@@ -353,10 +409,11 @@ impl VM {
     /// average, where `set` returns an O(len) copy.
     ///
     /// Nothing the key and value expressions can run updates an owned
-    /// container of this local in place (the compiler admits no nested
-    /// statements there, and other frames reach the local only through an
-    /// upvalue cell, which makes it unownable), so the same owned object
-    /// still has the snapshot's entries.
+    /// container of this local in place: the compiler admits no nested
+    /// statements there, and other frames reach the local only through its
+    /// upvalue cell, which the snapshot shares first when the key or value
+    /// may call (`PEEK_SHARE_IF_CAPTURED`), so such an update copies. The
+    /// same owned object therefore still has the snapshot's entries.
     pub(super) fn map_set_local(
         &mut self,
         frame_idx: usize,
@@ -719,6 +776,75 @@ impl VM {
             }
         }
         Ok(())
+    }
+
+    /// `PushPlaceLocal`: statement `local[k1]..[kn].push(value)` with the
+    /// keys in registers `first..first+n` and the value after them. Returns
+    /// whether the push was done in place; `false` means nothing visible
+    /// changed and the compiler's generic lowering runs instead.
+    ///
+    /// In place when the local owns its container and every key names an
+    /// existing element of a plain array or object, the last one an array.
+    /// Each level below the local must be owned by the element slot holding
+    /// it (`slot_owned`, trusted only because the level above is owned);
+    /// a level that is not is replaced by a copy of itself first, which is
+    /// invisible because its container is owned, and owned from then on.
+    pub(super) fn push_place_local(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        first: u8,
+        n: u8,
+    ) -> Result<bool, VMError> {
+        let cur = self.read_local(frame_idx, base, slot)?;
+        let Some(mut container) = self.owned_by_local(frame_idx, slot, cur) else {
+            return Ok(false);
+        };
+        let operand = base + first as usize;
+        let value = self.registers[operand + n as usize];
+        for i in 0..n as usize {
+            let key = ElemKey::Index(self.registers[operand + i]);
+            let Some(pos) = self.element_position(container, &key, false) else {
+                return Ok(false);
+            };
+            let Some(element) = self.element_at(container, &pos).and_then(|v| v.as_obj()) else {
+                return Ok(false);
+            };
+            if i + 1 == n as usize {
+                return self.push_owned_array(container, pos, element, value);
+            }
+            container = match self.owned_level(container, pos, element) {
+                Some(next) => next,
+                None => return Ok(false),
+            };
+        }
+        Ok(false)
+    }
+
+    /// The intermediate level `element`, stored at `pos` in the owned
+    /// `container`, as a container owned by that slot: itself when it
+    /// already is (`slot_owned`), otherwise a copy stored in its place.
+    /// `None` when it is not a plain array or object.
+    fn owned_level(&mut self, container: GcRef, pos: Position, element: GcRef) -> Option<GcRef> {
+        let copy = match self.gc.get(element).map(|o| &o.kind) {
+            Some(ObjKind::Array(_) | ObjKind::Object(_)) if self.gc.is_slot_owned(element) => {
+                return Some(element)
+            }
+            Some(ObjKind::Array(items)) => ObjKind::Array(items.clone()),
+            Some(ObjKind::Object(map)) => ObjKind::Object(map.clone()),
+            _ => return None,
+        };
+        let copy = self.gc.alloc(copy);
+        // Its elements are still referenced by the original.
+        self.gc.set_unique_container(copy);
+        if let Some(obj) = self.gc.get_mut(copy) {
+            // Owned by the container element, not by a local register.
+            obj.unique = false;
+            obj.slot_owned = true;
+        }
+        self.store_at(container, pos, Value::obj(copy));
+        Some(copy)
     }
 
     /// The owned-container paths of `push_element_local` for `element`,

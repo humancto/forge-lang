@@ -69,6 +69,16 @@ loop instead brings it to 11 s / 6 s.
 Suggested fix: cache compiled patterns (a small LRU keyed by the pattern string, shared by
 both engines in `stdlib/regex.rs`), as Python's `re` does.
 
+**Fixed:** every `regex.*` function compiles through `regex_module::compiled`, a bounded LRU
+of 256 patterns (keyed by the pattern text, flags included; patterns over 4 KiB and invalid
+ones are not cached), thread-safe, shared by both engines. A run with a resource budget
+(sandbox, MCP, `--max-memory`) gets its own cache owned by the `Budget`, so its patterns are
+charged to it and freed with it. The repro takes ~55-80 ms on both engines (was ~670 /
+840 ms with the same debug build); `benchmarks/vm/regex_lines.fg` (50k lines, five calls
+each) went from 75 s to 0.97 s on both engines. The four workaround references
+(access_log_rollup, ledger_replay, interval_sweep, json_orders_rollup) use `regex.test`
+again.
+
 ### 2. Interpreter: array arguments of builtins are copied
 
 ```forge
@@ -93,6 +103,16 @@ interpreter for a 16,000-character line, 0.35 s on the VM.
 
 Suggested fix: let builtins that only read an array argument (`slice`, `len`, `index_of`,
 `contains`, `join`, ...) borrow it (`Environment::with_value`) instead of cloning.
+
+**Fixed:** a call of `slice`, `first`, `last`, `join`, `index_of`, `last_index_of`,
+`substring`, `starts_with`, `ends_with` (and, as before, `len`, `contains`, `get`,
+`has_key`) whose first argument is a variable or a field/index chain of one
+(`slice(chars, i, j)`, `len(o.items)`), and the array-method forms (`xs.slice(i, j)`,
+`xs.join(",")`), runs the builtin on a reference to the value under the scope lock when the
+other arguments are effect-free (`places::read_only_builtin`, shared with the builtin
+itself; errors take the ordinary path). The repro is 2-3 ms for every n (was 703 / 1112 /
+2191 ms); `benchmarks/interp/slice_scan.fg` went from 121 s to 0.12 s. nested_list_parser
+uses `join(slice(chars, start, pos), "")` again.
 
 ### 3. VM: an object key that is an index or field read copies the object
 
@@ -125,6 +145,23 @@ evaluate the key into a temporary register first. Separately, the GC should acco
 large garbage containers so a copy-per-iteration loop cannot reach gigabytes (with
 `--max-memory 1GB` the same loop stays at 1 GB, so the collector can keep up when pushed).
 
+**Fixed:** the write side (`SetIndexLocal`) already took any key; the copy came from the
+*read* `o[k]` (of `o[k] += 1`, or `get(o, k)`-style reads), which kept the in-place
+`GetIndexLocal` only for literal/variable/arithmetic keys and otherwise read the object
+with `GetLocal`, sharing it, so the next write copied it. Now a key that runs no code (index
+and field reads, interpolation, operators: `index_runs_no_code`) is evaluated first and read
+with `GetIndexLocal`; a key that may call (`o[str(i)]`) reads a `PeekLocal` snapshot of the
+local taken before the key runs (as the generic read does), then shares only the element
+(`GetIndex` + `Move`). The `CallPure` reads (`get`, `has_key`, `len`, `contains`, `m.get`)
+and `AddLocal`/`PushLocal`/`UpdateSetLocal` accept the same wider operands. In the repro
+extended with `o[it.sku] += 1`, `o[names[i]] += 1` takes 1 ms (was 1903 ms) and
+`o[it.sku] += 1` 1 ms (was 1392 ms); a plain store with a computed key
+(`o["k" + str(i)] = 7`) was already in place and was only slow behind the garbage of the
+copying loops. `benchmarks/vm/computed_keys.fg` (300k updates of a
+10k-key object) runs in 0.36 s and was killed for memory before. The GC accounting of large
+garbage containers was not changed. The bulk_data references index with `f[1]`, `it.sku`,
+`f[0]`, `f[2]` directly again.
+
 ### 4. VM: writing a top-level container from a function copies it
 
 ```forge
@@ -154,6 +191,23 @@ from a function) is 1.5 s for 900 roads for the same reason.
 Suggested fix: give upvalue/global containers the single-owner treatment locals have
 (`GcObject::unique` on the cell's value), or store the updated container back without
 copying when the cell holds the only reference.
+
+**Fixed (captured variables):** a captured local's register and its upvalue cell are now
+one owner (`GetUpvalue` shares what it copies out of a cell; every local access already
+went through the cell), so the top level updates a captured array in place, and a function
+binds each captured mutable variable it uses as a container to a hidden local aliasing the
+cell (new opcode `BindUpvalue`, bytecode format 1.7), so `parent[x] = r`, `parent[x]` and
+`graph[a].push(e)` inside the function use the in-place local opcodes. Snapshots held while
+a call may run (`PeekLocal` before a key with a call) share a captured local first
+(`PEEK_SHARE_IF_CAPTURED`), so a callee's write through the cell copies. The repro takes
+60 ms (was 3438 ms with the same debug build); `benchmarks/vm/captured_writes.fg`
+(union-find, 50k nodes) went from 15.4 s to 0.25 s, and network_components passes on the
+VM (no longer `known_failing`). A top-level `let` that a function references *before*
+its declaration is a VM global; a global slot can own its value too (`GetGlobal` shares),
+and a statement updating its container aliases it with a temporary register (`BindGlobal`),
+so a function written above the data it updates no longer copies either: the repro with
+`set_root` above the `let` takes 20 ms (was 3427 ms), `benchmarks/vm/global_writes.fg` 11.4 s
+-> 0.16 s.
 
 ### 21. VM, edition 2027: annotated hot code is ~3x slower
 
@@ -200,6 +254,14 @@ VM 830 ms, interpreter 150 ms (one-level `g[k].push(i)`: 105 / 130 ms). Not quad
 it makes the VM ~2x slower than the interpreter on access_log_rollup. Per `CLAUDE.md`,
 deeper chains take the copying read-modify-write path; `slot_owned` could extend to
 objects.
+
+**Fixed:** a statement `local[k1]..[kn].push(x)` with two or more steps first runs the new
+opcode `PushPlaceLocal`, which appends in place when the local owns its container and every
+level is a plain array or object owned by its slot (`slot_owned` now also marks objects and
+arrays at intermediate levels; a level that is not owned is replaced by a copy of itself
+once); otherwise it reports "not done" and the generic place update that follows runs. The
+repro takes ~190 ms on both engines (VM was 899 ms); `benchmarks/vm/deep_push.fg` (200k
+pushes) went from 10.8 s to 0.31 s.
 
 ---
 

@@ -9,7 +9,8 @@ const VERSION_MAJOR: u8 = 1;
 /// 6: `UpdateMapLocal`.
 /// 7: `TakeReceiver` (methods declared `mut it`).
 /// 8: `TypeCheck` (fast path of annotation checks).
-const VERSION_MINOR: u8 = 8;
+/// 9: `BindUpvalue`, `BindGlobal`, `PushPlaceLocal`, `PeekLocal` modes.
+const VERSION_MINOR: u8 = 9;
 
 #[derive(Debug)]
 pub struct SerializeError {

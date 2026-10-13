@@ -18,15 +18,9 @@ fn cmp_str(a: String, b: String) -> Int {
 }
 
 // Whether a character of s is outside ASCII (above "~"; the input has no
-// control characters). A loop instead of `regex.test`, which compiles its
-// pattern on every call (eval/V3_FINDINGS.md, finding 1).
+// control characters).
 fn has_non_ascii(s: String) -> Bool {
-    for c in split(s, "") {
-        if c > "~" {
-            return true
-        }
-    }
-    return false
+    return regex.test(s, "[^ -~]")
 }
 
 // The order's hour in UTC, from "YYYY-MM-DDTHH:MM:SS" plus "Z" or "+HH:MM".
@@ -71,11 +65,7 @@ for line in fs.lines("/dev/stdin") {
     let mut sub = 0
     for it in o.items {
         sub += it.qty * round(it.price * 100)
-        // The key is bound to a local first: on the VM, `obj[xs[i]] = v` (a key that
-        // is itself an index or field read) copies the whole object on every write
-        // (eval/V3_FINDINGS.md, finding 3).
-        let sku = it.sku
-        skus[sku] = get(skus, sku, 0) + it.qty
+        skus[it.sku] = get(skus, it.sku, 0) + it.qty
     }
     if o.coupon == "SAVE10" {
         sub -= (sub + 5) / 10

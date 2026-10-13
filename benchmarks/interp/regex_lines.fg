@@ -1,0 +1,28 @@
+// 50k log-like lines, five `regex` calls each with constant patterns
+// (V3 finding 1: every call used to compile its pattern, ~40 µs).
+let n = 50000
+let mut ok = 0
+let mut ids = 0
+let mut i = 0
+while i < n {
+    let line = "GET /api/v{i % 3}/items/{i} 200 {i % 997}ms"
+    if regex.test(line, "^(GET|POST) ") {
+        ok = ok + 1
+    }
+    if regex.test(line, " [0-9]{3} ") {
+        ok = ok + 1
+    }
+    let id = regex.find(line, "/items/[0-9]+")
+    if id != null {
+        ids = ids + 1
+    }
+    let parts = regex.split(line, "\\s+")
+    ok = ok + len(parts)
+    let caps = regex.captures(line, "/v([0-9])/")
+    if caps != null {
+        ok = ok + int(caps[1])
+    }
+    i = i + 1
+}
+println(ok)
+println(ids)

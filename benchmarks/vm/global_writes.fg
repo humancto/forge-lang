@@ -1,0 +1,40 @@
+// `captured_writes` with `find` written above the data it updates: the
+// arrays are then VM globals (a function compiled before the `let`), and
+// every write used to copy the whole array (V3 finding 4).
+fn find(start) {
+    let mut root = start
+    while parent[root] != root {
+        root = parent[root]
+    }
+    let mut x = start
+    while parent[x] != root {
+        let next = parent[x]
+        parent[x] = root
+        x = next
+    }
+    return root
+}
+
+let n = 50000
+let mut parent = range(0, n)
+let mut size = map(range(0, n), fn(i) { return 1 })
+
+let mut merges = 0
+for i in range(0, 60000) {
+    let a = (i * 7919) % n
+    let b = (i * 104729 + 13) % n
+    let ra = find(a)
+    let rb = find(b)
+    if ra != rb {
+        if size[ra] < size[rb] {
+            parent[ra] = rb
+            size[rb] += size[ra]
+        } else {
+            parent[rb] = ra
+            size[ra] += size[rb]
+        }
+        merges += 1
+    }
+}
+println(merges)
+println(size[find(0)])

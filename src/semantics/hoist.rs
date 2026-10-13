@@ -247,6 +247,31 @@ fn needed_names(stmt: &Stmt) -> HashSet<String> {
 struct Free {
     scopes: Vec<HashSet<String>>,
     out: HashSet<String>,
+    /// With `track_roots`: free names the analysed function's own body (at
+    /// `depth` 1, not its nested functions) uses as the root of a
+    /// container operation (see [`container_roots`]).
+    track_roots: bool,
+    roots: HashSet<String>,
+    depth: usize,
+}
+
+/// Free names that a function's own body (not its nested functions) uses
+/// as a container: `x[i]`, `x.f` (reads and assignment targets),
+/// `x.method(..)`, `len(x)` / `get(x, ..)` / `has_key(x, ..)` /
+/// `contains(x, ..)` / `push(x, ..)` / `pop(x)` (not `x = x + e`: a scalar
+/// counter gains nothing and pays the binding per call). The VM
+/// binds such names to a local register that mirrors the captured cell
+/// (`BindUpvalue`), so that the in-place container opcodes apply to them.
+/// Over-approximates like the free-name analysis (a name counts unless a
+/// binding certainly shadows it); the compiler checks that each name really
+/// is a captured mutable variable.
+pub fn container_roots(params: &[Param], body: &[SpannedStmt]) -> HashSet<String> {
+    let mut free = Free {
+        track_roots: true,
+        ..Free::default()
+    };
+    free.function(params, body);
+    free.roots
 }
 
 impl Free {
@@ -257,6 +282,39 @@ impl Free {
     fn use_name(&mut self, name: &str) {
         if !self.bound(name) {
             self.out.insert(name.to_string());
+        }
+    }
+
+    /// Record `expr` as a container root when it is a free name used in the
+    /// analysed function's own body.
+    fn root(&mut self, expr: &Expr) {
+        if let Expr::Ident(name) = expr {
+            if self.track_roots && self.depth == 1 && !self.bound(name) {
+                self.roots.insert(name.clone());
+            }
+        }
+    }
+
+    /// The container-root shapes of [`container_roots`] in `expr` itself.
+    fn expr_roots(&mut self, expr: &Expr) {
+        if !self.track_roots || self.depth != 1 {
+            return;
+        }
+        match expr {
+            Expr::Index { object, .. }
+            | Expr::FieldAccess { object, .. }
+            | Expr::MethodCall { object, .. } => self.root(object),
+            Expr::Call { function, args } => {
+                if let (Expr::Ident(f), Some(first)) = (function.as_ref(), args.first()) {
+                    if matches!(
+                        f.as_str(),
+                        "len" | "get" | "has_key" | "contains" | "push" | "pop"
+                    ) {
+                        self.root(first);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -286,7 +344,9 @@ impl Free {
         }
         self.scopes
             .push(params.iter().map(|p| p.name.clone()).collect());
+        self.depth += 1;
         self.block(body);
+        self.depth -= 1;
         self.scopes.pop();
     }
 
@@ -497,6 +557,7 @@ impl Free {
     }
 
     fn expr(&mut self, expr: &Expr) {
+        self.expr_roots(expr);
         match expr {
             Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) => {}
             Expr::Ident(name) => self.use_name(name),

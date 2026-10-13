@@ -1057,6 +1057,7 @@ impl VM {
         self.cancel_scopes_from(guard.scope_depth);
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
+        frame.open_upvalues.clear_globals();
         frame.ip = guard.catch_ip;
         // The safe point that called us has already refilled the countdown,
         // so the catch path's `PopTimeout` runs before the next poll.
@@ -1260,7 +1261,21 @@ impl VM {
                                 let name = self.globals.names().name_of(id);
                                 return Err(self.undefined_global(chunk, pc, &name));
                             };
+                            // Copying a reference out of the slot, which may
+                            // own it (see `BindGlobal`).
+                            self.gc.share(val);
                             self.registers[base + a as usize] = val;
+                        }
+                    }
+                    OpCode::BindGlobal => {
+                        // `GetGlobal`'s check, then an alias instead of a copy.
+                        if let Some(id) = chunk.global_id(bx, self.globals.names()) {
+                            let Some(val) = self.globals.get_id(id) else {
+                                let pc = self.frames[frame_idx].ip - 1;
+                                let name = self.globals.names().name_of(id);
+                                return Err(self.undefined_global(chunk, pc, &name));
+                            };
+                            self.bind_global(frame_idx, base, a, id, val);
                         }
                     }
                     OpCode::SetGlobal => {
@@ -1336,10 +1351,22 @@ impl VM {
                         self.push_element_local(frame_idx, base, a, ElemKey::Field(field), value)?;
                     }
                     OpCode::PeekLocal => {
-                        // Not shared: the copy is an argument of the
-                        // `CallPure` that follows (see the opcode docs).
+                        // Not shared: a snapshot used by the same statement
+                        // (see the opcode docs).
                         let value = self.read_local(frame_idx, base, b)?;
+                        if c == PEEK_SHARE_IF_CAPTURED
+                            && self.frames[frame_idx].open_upvalues.contains_key(&b)
+                        {
+                            self.gc.share(value);
+                        }
                         self.registers[base + a as usize] = value;
+                    }
+                    OpCode::BindUpvalue => {
+                        self.bind_upvalue(frame_idx, base, a, b)?;
+                    }
+                    OpCode::PushPlaceLocal => {
+                        let done = self.push_place_local(frame_idx, base, a, b, c)?;
+                        self.registers[base + b as usize + c as usize + 1] = Value::bool_val(done);
                     }
                     OpCode::UpdateSetLocal => {
                         let value = self.registers[base + b as usize];
@@ -1503,10 +1530,17 @@ impl VM {
                                 if let ObjKind::Closure(closure) = &obj.kind {
                                     if uv_idx < closure.upvalues.len() {
                                         let uv_ref = closure.upvalues[uv_idx];
-                                        if let Some(uv_obj) = self.gc.get(uv_ref) {
-                                            if let ObjKind::Upvalue(uv) = &uv_obj.kind {
-                                                self.registers[base + a as usize] = uv.value;
-                                            }
+                                        let value = match self.gc.get(uv_ref).map(|o| &o.kind) {
+                                            Some(ObjKind::Upvalue(uv)) => Some(uv.value),
+                                            _ => None,
+                                        };
+                                        if let Some(value) = value {
+                                            // Copying a reference out of the
+                                            // cell, which may own it (a
+                                            // captured local can own its
+                                            // value, see `vm::local_ops`).
+                                            self.gc.share(value);
+                                            self.registers[base + a as usize] = value;
                                         }
                                     }
                                 }
@@ -2696,6 +2730,8 @@ impl VM {
 
                 let err_value = self.runtime_error_value(&err);
                 let base = self.frames[frame_idx].base;
+                // The statement that failed may have left a global alias.
+                self.frames[frame_idx].open_upvalues.clear_globals();
                 self.registers[base + handler.error_register as usize] = err_value;
                 self.frames[frame_idx].ip = handler.catch_ip;
                 return Ok(frame_idx);

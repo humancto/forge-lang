@@ -63,6 +63,8 @@ mod async_tests;
 #[cfg(test)]
 mod callback_tests;
 #[cfg(test)]
+mod captured_container_tests;
+#[cfg(test)]
 mod container_ops_tests;
 #[cfg(test)]
 mod enum_methods_tests;
