@@ -103,9 +103,7 @@ pub(super) fn contains_of(
         (Some(Value::Object(map)), Some(Value::String(key))) => {
             Ok(Value::Bool(map.contains_key(key)))
         }
-        (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(
-            pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
-        )),
+        (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(pairs.has_key_value(key))),
         _ => Err(RuntimeError::new(crate::semantics::CONTAINS_USAGE)),
     }
 }
@@ -206,6 +204,30 @@ impl Interpreter {
             Expr::Call { function, args } => match function.as_ref() {
                 Expr::Ident(name) if PURE_BUILTINS.contains(&name.as_str()) => {
                     self.resolves_to_builtin(name) && args.iter().all(|a| self.is_effect_free(a))
+                }
+                // The intrinsic reads of a map or set held by a variable
+                // (`m.get(k)`, `m.has(k)`, `m.len()`, `s.has(x)`) run no
+                // user code.
+                Expr::FieldAccess { object, field } => {
+                    let Expr::Ident(var) = object.as_ref() else {
+                        return false;
+                    };
+                    let method = field.as_str();
+                    let arity_ok = match method {
+                        "get" | "has" => args.len() == 1,
+                        "len" => args.is_empty(),
+                        _ => false,
+                    };
+                    arity_ok
+                        && args.iter().all(|a| self.is_effect_free(a))
+                        && self
+                            .env
+                            .with_value(var, |v| match peel_frozen(v) {
+                                Value::Map(_) => true,
+                                Value::Set(_) => method == "has",
+                                _ => false,
+                            })
+                            .unwrap_or(false)
                 }
                 _ => false,
             },
@@ -532,16 +554,13 @@ impl Interpreter {
                         (Value::Set(items), "has", Some(x)) => {
                             Some(Value::Bool(items.has_value(x)))
                         }
-                        (Value::Map(pairs), "has", Some(key)) => Some(Value::Bool(
-                            pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
-                        )),
-                        (Value::Map(pairs), "get", Some(key)) => Some(
-                            pairs
-                                .iter()
-                                .find(|(k, _)| Value::container_eq(k, key))
-                                .map(|(_, v)| v.clone())
-                                .unwrap_or(Value::Null),
-                        ),
+                        (Value::Map(pairs), "has", Some(key)) => {
+                            Some(Value::Bool(pairs.has_key_value(key)))
+                        }
+                        (Value::Map(pairs), "get", Some(key)) => {
+                            Some(pairs.get_value(key).cloned().unwrap_or(Value::Null))
+                        }
+
                         (Value::Map(pairs), "len", None) => Some(Value::Int(pairs.len() as i64)),
                         _ => None,
                     })
@@ -721,6 +740,12 @@ impl Interpreter {
                 self.mutate_in_place(value, false, true)
                     .map(|result| result.map(|_| ()))
             }
+            Expr::Call { function, args } => match function.as_ref() {
+                Expr::FieldAccess { object, field } if matches!(object.as_ref(), Expr::Ident(o) if o == x) => {
+                    self.try_update_map_ident(x, field, args)
+                }
+                _ => None,
+            },
             Expr::BinOp { left, op, right }
                 if matches!(left.as_ref(), Expr::Ident(l) if l == x)
                     && !matches!(op, BinOp::And | BinOp::Or) =>
@@ -774,6 +799,52 @@ impl Interpreter {
             }
             _ => None,
         }
+    }
+
+    /// `m = m.set(k, v)` / `m = m.remove(k)` on a mutable `m` holding a
+    /// (not frozen) Map, with effect-free arguments: update the entries in
+    /// place. The method returns a copy of `m` with that change and the
+    /// assignment stores it into `m`, so updating `m` in place leaves it
+    /// holding exactly that value, without copying the map twice per call
+    /// (building a map in a loop is O(1) per entry instead of O(n)).
+    fn try_update_map_ident(
+        &mut self,
+        x: &str,
+        method: &str,
+        args: &[Expr],
+    ) -> Option<Result<(), RuntimeError>> {
+        if !matches!((method, args.len()), ("set", 2) | ("remove", 1))
+            || self.env.is_mutable(x) != Some(true)
+            || !args.iter().all(|a| self.is_effect_free(a))
+            || !self.env.with_value(x, |v| matches!(v, Value::Map(_)))?
+        {
+            return None;
+        }
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            match self.eval_expr(arg) {
+                Ok(v) => values.push(v),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        let mut values = values.into_iter();
+        let (key, value) = (values.next()?, values.next());
+        Some(
+            self.env
+                .with_value_mut(x, |cur| {
+                    let Value::Map(entries) = cur else {
+                        return Err(RuntimeError::new("BUG: map receiver changed"));
+                    };
+                    match value {
+                        Some(value) => entries.insert_value(key, value),
+                        None => {
+                            entries.remove_key(&key);
+                        }
+                    }
+                    Ok(())
+                })
+                .and_then(|inner| inner),
+        )
     }
 
     /// `p = p <op> e` (and `p <op>= e`) where `p` is a field/index place

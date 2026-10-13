@@ -1,5 +1,8 @@
-//! Storage for `Set` values on both engines: insertion-ordered, with a hash
-//! index so membership, `add` and `remove` are O(1) on average.
+//! Storage for `Set` and `Map` values on both engines: insertion-ordered,
+//! with a hash index so membership, `add`, `remove`, `get` and `set` are
+//! O(1) on average. A map is an `OrderedSet<(key, value)>` whose slots are
+//! hashed and compared by their key alone (lookups go through
+//! [`find`](OrderedSet::find), which returns the oldest match).
 //!
 //! The container does not know how to hash or compare its items: each
 //! engine computes an item's hash with its own rule (interpreter
@@ -200,6 +203,41 @@ impl<T> OrderedSet<T> {
         }
     }
 
+    /// Slot of the first live item, in insertion order, with `hash` for
+    /// which `eq` holds. Index chains run from the newest slot to the
+    /// oldest, so the whole chain is walked: with a non-transitive equality
+    /// several items may match, and a map's `get`/`set` must see the oldest
+    /// one, exactly as a linear scan would.
+    fn find_first_slot(&self, hash: u64, mut eq: impl FnMut(&T) -> bool) -> Option<usize> {
+        let Some(index) = &self.index else {
+            return self.find_slot(hash, eq);
+        };
+        let mut found = None;
+        let mut at = index.get(&hash).copied().unwrap_or(NONE);
+        while at != NONE {
+            let slot = &self.slots[at as usize];
+            if slot.hash == hash && slot.item.as_ref().is_some_and(&mut eq) {
+                found = Some(at as usize);
+            }
+            at = slot.next;
+        }
+        found
+    }
+
+    /// The first live item (in insertion order) with `hash` for which `eq`
+    /// holds.
+    pub fn find(&self, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&T> {
+        let at = self.find_first_slot(hash, eq)?;
+        self.slots[at].item.as_ref()
+    }
+
+    /// [`find`](Self::find), mutably. The caller must not change how the
+    /// item hashes or compares (a map updates only the value of a pair).
+    pub fn find_mut(&mut self, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&mut T> {
+        let at = self.find_first_slot(hash, eq)?;
+        self.slots[at].item.as_mut()
+    }
+
     /// Whether a live item with `hash` satisfies `eq`.
     pub fn contains(&self, hash: u64, eq: impl FnMut(&T) -> bool) -> bool {
         self.find_slot(hash, eq).is_some()
@@ -319,6 +357,46 @@ impl<T> OrderedSet<T> {
             }
         }
         self.index = Some(index);
+    }
+}
+
+/// Items of an [`OrderedSet`] in insertion order (`for x in &set`).
+pub struct Iter<'a, T>(std::slice::Iter<'a, Slot<T>>);
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        self.0.by_ref().find_map(|s| s.item.as_ref())
+    }
+}
+
+impl<'a, T> IntoIterator for &'a OrderedSet<T> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Iter<'a, T> {
+        Iter(self.slots.iter())
+    }
+}
+
+/// Owned items of an [`OrderedSet`] in insertion order.
+pub struct IntoIter<T>(std::vec::IntoIter<Slot<T>>);
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        self.0.by_ref().find_map(|s| s.item)
+    }
+}
+
+impl<T> IntoIterator for OrderedSet<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> IntoIter<T> {
+        IntoIter(self.slots.into_iter())
     }
 }
 
@@ -504,6 +582,33 @@ mod tests {
             );
             assert!(set.contains(finish(7), |&k| k == 1));
             assert!(!set.contains(finish(7), |&k| k == 2));
+        }
+    }
+
+    #[test]
+    fn find_returns_the_oldest_match() {
+        // A non-transitive equality: the probe matches several items, and
+        // `find` must see the first in insertion order (a map's `get` and
+        // `set`), with or without the index and after removals.
+        for n in [4, 40] {
+            let mut set: OrderedSet<(i64, char)> = OrderedSet::new();
+            for k in 0..n {
+                set.push_unchecked(finish(7), (k, 'a'));
+            }
+            let odd = |&(k, _): &(i64, char)| k % 2 == 1;
+            assert_eq!(set.find(finish(7), odd).map(|&(k, _)| k), Some(1));
+            if let Some(entry) = set.find_mut(finish(7), odd) {
+                entry.1 = 'z';
+            }
+            assert_eq!(set.iter().filter(|&&(_, t)| t == 'z').count(), 1);
+            set.remove_matching(finish(7), |&(k, _)| k < 2);
+            assert_eq!(set.find(finish(7), odd).map(|&(k, _)| k), Some(3));
+            assert_eq!(set.find(finish(8), odd), None);
+            // Iterating by reference and by value keeps the order.
+            let by_ref: Vec<i64> = (&set).into_iter().map(|&(k, _)| k).collect();
+            let by_value: Vec<i64> = set.into_iter().map(|(k, _)| k).collect();
+            assert_eq!(by_ref, by_value);
+            assert_eq!(by_ref, (2..n).collect::<Vec<_>>());
         }
     }
 

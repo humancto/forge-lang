@@ -330,13 +330,9 @@ impl VM {
             (T::Map(_, vt), Some(ObjKind::Map(pairs))) => {
                 let values: Vec<Value> = pairs.iter().map(|(_, v)| *v).collect();
                 let widened = widen_items(self, &values, vt)?;
-                ObjKind::Map(
-                    pairs
-                        .iter()
-                        .zip(widened)
-                        .map(|((k, _), v)| (*k, v))
-                        .collect(),
-                )
+                // Widening changes values only, never how a key hashes.
+                let mut widened = widened.into_iter();
+                ObjKind::Map(pairs.map_same_hash(|(k, v)| (*k, widened.next().unwrap_or(*v))))
             }
             (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => {
                 ObjKind::ResultOk(self.widen_vm(v, ok, depth + 1)?)
@@ -1659,13 +1655,13 @@ impl VM {
                 //   map(arr_of_pairs | Map)  → Map constructor
                 //   map(arr, fn)             → functional map (existing)
                 if args.is_empty() {
-                    let r = self.gc.alloc(ObjKind::Map(Vec::new()));
+                    let r = self.gc.alloc(ObjKind::Map(VmMap::new()));
                     return Ok(Value::obj(r));
                 }
                 if args.len() == 1 {
                     // Classify the source and clone-then-drop to release gc borrow.
                     enum Src {
-                        Pairs(Vec<(Value, Value)>),
+                        Pairs(VmMap),
                         Items(Vec<Value>),
                     }
                     let src: Option<Src> =
@@ -1682,7 +1678,7 @@ impl VM {
                     let pairs = match src {
                         Some(Src::Pairs(p)) => p,
                         Some(Src::Items(items)) => {
-                            let mut out: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+                            let mut out = VmMap::with_capacity(items.len());
                             for item in items {
                                 // Each item must be a 2-tuple or 2-element array.
                                 let pair =
@@ -1700,17 +1696,7 @@ impl VM {
                                     )),
                                 };
                                 // Insertion-order preservation on overwrite.
-                                let mut replaced = false;
-                                for entry in out.iter_mut() {
-                                    if entry.0.set_eq(&k, &self.gc) {
-                                        entry.1 = v;
-                                        replaced = true;
-                                        break;
-                                    }
-                                }
-                                if !replaced {
-                                    out.push((k, v));
-                                }
+                                out.insert_in(k, v, &self.gc);
                             }
                             out
                         }
@@ -1912,9 +1898,7 @@ impl VM {
                             }
                             ObjKind::Map(pairs) => {
                                 // Maps: `contains(m, k)` matches `m.has(k)`.
-                                let pairs = pairs.clone();
-                                let found = pairs.iter().any(|(k, _)| k.set_eq(val, &self.gc));
-                                return Ok(Value::bool_val(found));
+                                return Ok(Value::bool_val(pairs.has_in(val, &self.gc)));
                             }
                             ObjKind::Array(items) | ObjKind::Tuple(items) => {
                                 let found = items
@@ -4430,47 +4414,25 @@ impl VM {
 
         // Map-specific methods. Peel `Frozen(Map)` so frozen maps still
         // support read-only methods; mutating methods are rejected on
-        // frozen receivers. Clones the pairs Vec to drop the GC borrow
-        // before any further allocation.
-        let map_receiver: Option<(Vec<(Value, Value)>, bool)> = {
-            receiver.as_obj().and_then(|r| {
-                let obj = self.gc.get(r)?;
-                match &obj.kind {
-                    ObjKind::Map(pairs) => Some((pairs.clone(), false)),
-                    ObjKind::Frozen(inner) => {
-                        let inner_r = inner.as_obj()?;
-                        let inner_obj = self.gc.get(inner_r)?;
-                        if let ObjKind::Map(pairs) = &inner_obj.kind {
-                            Some((pairs.clone(), true))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            })
-        };
-
-        if let Some((pairs, is_frozen)) = map_receiver {
+        // frozen receivers. Lookups borrow the entries; methods that build
+        // a new map or array copy what they need before allocating (no GC
+        // borrow is held across an allocation).
+        if let Some((map_ref, is_frozen)) = self.peel_map(receiver) {
+            let gc = &self.gc;
+            let entries = || map_entries(gc, map_ref);
             match method_name {
                 "get" => {
                     if extra_args.len() != 1 {
                         return Err(VMError::new("get() requires one argument"));
                     }
-                    for (k, v) in &pairs {
-                        if k.set_eq(&extra_args[0], &self.gc) {
-                            return Ok(*v);
-                        }
-                    }
-                    return Ok(Value::null());
+                    let found = entries().and_then(|m| m.get_in(&extra_args[0], gc));
+                    return Ok(found.unwrap_or(Value::null()));
                 }
                 "has" => {
                     if extra_args.len() != 1 {
                         return Err(VMError::new("has() requires one argument"));
                     }
-                    let found = pairs
-                        .iter()
-                        .any(|(k, _)| k.set_eq(&extra_args[0], &self.gc));
+                    let found = entries().is_some_and(|m| m.has_in(&extra_args[0], gc));
                     return Ok(Value::bool_val(found));
                 }
                 "set" => {
@@ -4480,18 +4442,8 @@ impl VM {
                     if extra_args.len() != 2 {
                         return Err(VMError::new("set() requires two arguments"));
                     }
-                    let mut new_pairs = pairs;
-                    let mut replaced = false;
-                    for entry in new_pairs.iter_mut() {
-                        if entry.0.set_eq(&extra_args[0], &self.gc) {
-                            entry.1 = extra_args[1];
-                            replaced = true;
-                            break;
-                        }
-                    }
-                    if !replaced {
-                        new_pairs.push((extra_args[0], extra_args[1]));
-                    }
+                    let mut new_pairs = entries().cloned().unwrap_or_default();
+                    new_pairs.insert_in(extra_args[0], extra_args[1], gc);
                     let nr = self.gc.alloc(ObjKind::Map(new_pairs));
                     return Ok(Value::obj(nr));
                 }
@@ -4502,27 +4454,31 @@ impl VM {
                     if extra_args.len() != 1 {
                         return Err(VMError::new("remove() requires one argument"));
                     }
-                    let new_pairs: Vec<(Value, Value)> = pairs
-                        .into_iter()
-                        .filter(|(k, _)| !k.set_eq(&extra_args[0], &self.gc))
-                        .collect();
+                    let mut new_pairs = entries().cloned().unwrap_or_default();
+                    new_pairs.remove_in(&extra_args[0], gc);
                     let nr = self.gc.alloc(ObjKind::Map(new_pairs));
                     return Ok(Value::obj(nr));
                 }
                 "keys" => {
-                    let keys: Vec<Value> = pairs.into_iter().map(|(k, _)| k).collect();
+                    let keys: Vec<Value> = entries()
+                        .map(|m| m.iter().map(|(k, _)| *k).collect())
+                        .unwrap_or_default();
                     let nr = self.gc.alloc(ObjKind::Array(keys));
                     return Ok(Value::obj(nr));
                 }
                 "values" => {
-                    let vals: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
+                    let vals: Vec<Value> = entries()
+                        .map(|m| m.iter().map(|(_, v)| *v).collect())
+                        .unwrap_or_default();
                     let nr = self.gc.alloc(ObjKind::Array(vals));
                     return Ok(Value::obj(nr));
                 }
                 "len" => {
-                    return Ok(Value::int(pairs.len() as i64, &mut self.gc));
+                    let len = entries().map_or(0, |m| m.len());
+                    return Ok(Value::int(len as i64, &mut self.gc));
                 }
                 "to_array" => {
+                    let pairs = entries().map(VmMap::to_vec).unwrap_or_default();
                     let tuples: Vec<Value> = pairs
                         .into_iter()
                         .map(|(k, v)| {
@@ -4590,7 +4546,7 @@ impl VM {
                 idx: 0,
             }),
             ObjKind::Map(pairs) => Some(StreamKind::MapIter {
-                pairs: pairs.clone(),
+                pairs: pairs.to_vec(),
                 idx: 0,
             }),
             ObjKind::String(s) => Some(StreamKind::StringIter {
@@ -4614,7 +4570,7 @@ impl VM {
                         idx: 0,
                     }),
                     ObjKind::Map(pairs) => Some(StreamKind::MapIter {
-                        pairs: pairs.clone(),
+                        pairs: pairs.to_vec(),
                         idx: 0,
                     }),
                     _ => None,
@@ -5287,6 +5243,14 @@ impl VM {
     }
 }
 
+/// The entries of the map object `r`, if it is one.
+fn map_entries(gc: &super::gc::Gc, r: GcRef) -> Option<&VmMap> {
+    match &gc.get(r)?.kind {
+        ObjKind::Map(entries) => Some(entries),
+        _ => None,
+    }
+}
+
 /// The items of the set object `r`, if it is one.
 fn set_items(gc: &super::gc::Gc, r: GcRef) -> Option<&VmSet> {
     match &gc.get(r)?.kind {
@@ -5298,6 +5262,23 @@ fn set_items(gc: &super::gc::Gc, r: GcRef) -> Option<&VmSet> {
 impl VM {
     /// The set object `value` refers to (peeling one `Frozen`), and whether
     /// it was frozen.
+    /// The map object `value` refers to (peeling one `Frozen`), and whether
+    /// it was frozen.
+    pub(super) fn peel_map(&self, value: Value) -> Option<(GcRef, bool)> {
+        let r = value.as_obj()?;
+        match &self.gc.get(r)?.kind {
+            ObjKind::Map(_) => Some((r, false)),
+            ObjKind::Frozen(inner) => {
+                let ir = inner.as_obj()?;
+                match &self.gc.get(ir)?.kind {
+                    ObjKind::Map(_) => Some((ir, true)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn peel_set(&self, value: Value) -> Option<(GcRef, bool)> {
         let r = value.as_obj()?;
         match &self.gc.get(r)?.kind {

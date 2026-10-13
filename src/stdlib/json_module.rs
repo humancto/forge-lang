@@ -557,7 +557,9 @@ mod tests {
     fn stringify_rejects_non_string_map_keys() {
         let result = call(
             "json.stringify",
-            vec![Value::Map(vec![(Value::Int(1), s("one"))])],
+            vec![Value::Map(crate::interpreter::MapEntries::from_pairs(
+                vec![(Value::Int(1), s("one"))],
+            ))],
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("non-string key"));
@@ -588,7 +590,9 @@ mod tests {
     fn pretty_rejects_non_string_map_keys() {
         let result = call(
             "json.pretty",
-            vec![Value::Map(vec![(Value::Bool(true), Value::Int(1))])],
+            vec![Value::Map(crate::interpreter::MapEntries::from_pairs(
+                vec![(Value::Bool(true), Value::Int(1))],
+            ))],
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("non-string key"));

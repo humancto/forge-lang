@@ -1,6 +1,7 @@
 //! Local-variable access and the in-place update opcodes
-//! (`AddLocal`, `PushLocal`, `PopLocal`, `UpdateSetLocal`, and the
-//! container opcodes `GetIndexLocal` .. `CallPure`).
+//! (`AddLocal`, `PushLocal`, `PopLocal`, `UpdateSetLocal`,
+//! `UpdateMapLocal`, and the container opcodes `GetIndexLocal` ..
+//! `CallPure`).
 //!
 //! # Single-owner updates
 //!
@@ -343,6 +344,135 @@ impl VM {
         let method = if remove { "remove" } else { "add" };
         self.method_mut_local(frame_idx, base, slot, cur, method, vec![value])
             .map(|_| ())
+    }
+
+    /// `UpdateMapLocal` set: `local = local.set(key, value)`, where
+    /// `snapshot` is the local's value read before the key and value were
+    /// evaluated (the generic call's receiver). In place when the local
+    /// still holds that map and owns it: the hash index makes that O(1) on
+    /// average, where `set` returns an O(len) copy.
+    ///
+    /// Nothing the key and value expressions can run updates an owned
+    /// container of this local in place (the compiler admits no nested
+    /// statements there, and other frames reach the local only through an
+    /// upvalue cell, which makes it unownable), so the same owned object
+    /// still has the snapshot's entries.
+    pub(super) fn map_set_local(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        snapshot: Value,
+        key: Value,
+        value: Value,
+    ) -> Result<(), VMError> {
+        let cur = self.read_local(frame_idx, base, slot)?;
+        if cur.as_obj().is_some() && cur.as_obj() == snapshot.as_obj() {
+            if let Some(r) = self.owned_by_local(frame_idx, slot, cur) {
+                if matches!(self.gc.get(r).map(|o| &o.kind), Some(ObjKind::Map(_))) {
+                    // Stored values may be held elsewhere too (owned
+                    // containers never hold an element with an owner bit).
+                    self.gc.share(key);
+                    self.gc.share(value);
+                    let grown = self.with_owned_map(r, |entries, gc| {
+                        let before = entries.heap_bytes();
+                        entries.insert_in(key, value, gc);
+                        entries.heap_bytes().saturating_sub(before)
+                    })?;
+                    self.gc.note_growth(grown);
+                    return Ok(());
+                }
+            }
+        }
+        // Generic path: `snapshot.set(key, value)`, stored into the local.
+        self.gc.share(snapshot);
+        let receiver_is_map = matches!(
+            snapshot
+                .as_obj()
+                .and_then(|r| self.gc.get(r))
+                .map(|o| &o.kind),
+            Some(ObjKind::Map(_))
+        );
+        let method = self.alloc_string("set");
+        let result = self.call_native("__forge_call_method", vec![snapshot, method, key, value])?;
+        self.store_fresh_map(frame_idx, base, slot, receiver_is_map, snapshot, result);
+        Ok(())
+    }
+
+    /// `UpdateMapLocal` remove: `local = local.remove(key)`. The key was
+    /// evaluated before the local is read (as in the generic
+    /// `__forge_method_mut` lowering). In place when the local owns a map.
+    pub(super) fn map_remove_local(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        key: Value,
+    ) -> Result<(), VMError> {
+        let cur = self.read_local(frame_idx, base, slot)?;
+        if let Some(r) = self.owned_by_local(frame_idx, slot, cur) {
+            if matches!(self.gc.get(r).map(|o| &o.kind), Some(ObjKind::Map(_))) {
+                self.with_owned_map(r, |entries, gc| entries.remove_in(&key, gc))?;
+                return Ok(());
+            }
+        }
+        // Generic path, exactly the lowering of `local = local.remove(k)`:
+        // `__forge_method_mut` (whose new receiver is the result for every
+        // value that has an in-place `remove`), then the assignment.
+        let receiver_is_map = matches!(
+            cur.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
+            Some(ObjKind::Map(_) | ObjKind::Set(_))
+        );
+        let (_, result) = self.method_mut_pair(cur, "remove", vec![key])?;
+        self.store_fresh_map(frame_idx, base, slot, receiver_is_map, cur, result);
+        Ok(())
+    }
+
+    /// Run `f` on the entries of the owned map `r` with the heap available
+    /// for hashing and comparing keys: the entries are taken out of the
+    /// heap while it runs (nothing allocates or collects meanwhile, and no
+    /// key or value refers to the map itself).
+    fn with_owned_map<R>(
+        &mut self,
+        r: GcRef,
+        f: impl FnOnce(&mut super::value::VmMap, &super::gc::Gc) -> R,
+    ) -> Result<R, VMError> {
+        let Some(ObjKind::Map(slot)) = self.gc.get_mut(r).map(|o| &mut o.kind) else {
+            return Err(VMError::new("BUG: owned map changed kind"));
+        };
+        let mut entries = std::mem::take(slot);
+        let out = f(&mut entries, &self.gc);
+        if let Some(ObjKind::Map(slot)) = self.gc.get_mut(r).map(|o| &mut o.kind) {
+            *slot = entries;
+        }
+        Ok(out)
+    }
+
+    /// Store the result of a copying map update into the local. When the
+    /// receiver was a plain map (or set) the result is a map (or set) the
+    /// call just allocated, referenced by nothing else, so the local owns
+    /// it from now on.
+    fn store_fresh_map(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        receiver_is_collection: bool,
+        receiver: Value,
+        result: Value,
+    ) {
+        if let Some(r) = result.as_obj() {
+            let fresh = receiver_is_collection
+                && Some(r) != receiver.as_obj()
+                && matches!(
+                    self.gc.get(r).map(|o| &o.kind),
+                    Some(ObjKind::Map(_) | ObjKind::Set(_))
+                );
+            if fresh && self.local_can_own(frame_idx, slot) {
+                self.gc.set_unique_container(r);
+            }
+        }
+        self.write_local(frame_idx, base, slot, result);
     }
 
     /// Shared (copying) path: run `__forge_method_mut` exactly as the

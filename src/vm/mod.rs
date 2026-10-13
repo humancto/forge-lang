@@ -71,6 +71,8 @@ mod jit_tests;
 #[cfg(test)]
 mod limits_tests;
 #[cfg(test)]
+mod map_index_tests;
+#[cfg(test)]
 mod map_tests;
 #[cfg(test)]
 mod must_ask_freeze_tests;
