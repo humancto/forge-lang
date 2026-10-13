@@ -3,7 +3,7 @@ use super::gc::Gc;
 use super::nanbox::NanBoxedValue;
 use indexmap::IndexMap;
 use std::fmt;
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::mpsc::{Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
 /// Strings inside displayed collections: the interpreter's (and
@@ -20,7 +20,7 @@ pub enum VmChannelSender {
 /// Mutex<Option<...>> so `close()` can set sender to None.
 pub struct VmChannelInner {
     pub sender: Mutex<Option<VmChannelSender>>,
-    pub receiver: Mutex<Option<Receiver<SharedValue>>>,
+    pub receiver: Mutex<Option<crate::semantics::channel::Receiver<SharedValue>>>,
 }
 
 /// GC-free value representation for crossing thread boundaries.

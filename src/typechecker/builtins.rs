@@ -124,6 +124,10 @@ const SIGNATURES: &[&str] = &[
     "uuid() -> String",
     "wait(Any) -> Null",
     "fetch(Any, Any?) -> Object",
+    // Concurrency
+    "close(Any) -> Null",
+    "is_closed(Any) -> Bool",
+    "try_send(Any, Any) -> Bool",
 ];
 
 /// Members of stdlib modules with a known result type

@@ -457,7 +457,29 @@ let t = spawn {
 println(await_timeout(t, 10))  // null on timeout (milliseconds)
 ```
 
-Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `select(channels, timeout_ms?)` (`[index, value]` from the first channel with a value; `null` on timeout and also when the channels are closed), `close(ch)` (then `receive` returns `null` once the channel is drained). A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
+Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `close(ch)` (later `send`s fail with E0030; values sent before stay receivable, then `receive` returns `null`), `is_closed(ch)` (true once the channel is closed *and* drained: nothing more can arrive), `select(channels, timeout_ms?)` (`[index, value]` from the first channel with a value; skips finished channels; `null` on timeout, and at once when every channel is closed and drained). After `select` returns `null`, `all(chs, fn(c) { return is_closed(c) })` tells "all producers finished" from "timed out":
+
+```forge
+let a = channel()
+spawn {
+    send(a, 1)
+    close(a)
+}
+let mut got = []
+while true {
+    let r = select([a], 1000)
+    if r == null {
+        if is_closed(a) {
+            break       // finished, not slow
+        }
+        continue
+    }
+    got.push(r[1])
+}
+println(got)   // [1]
+```
+
+A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
 
 Tasks communicate through return values (`squad` results, `await`) and channels. Do not mutate captured variables from inside `spawn` and expect the parent to see it: the default VM gives each task its own copy (the `--interp` engine shares closure state).
 

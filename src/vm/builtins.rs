@@ -3613,7 +3613,9 @@ impl VM {
                 };
                 let inner = Arc::new(VmChannelInner {
                     sender: std::sync::Mutex::new(Some(sender)),
-                    receiver: std::sync::Mutex::new(Some(receiver)),
+                    receiver: std::sync::Mutex::new(Some(
+                        crate::semantics::channel::Receiver::new(receiver),
+                    )),
                 });
                 let r = self.gc.alloc(ObjKind::Channel(inner));
                 Ok(Value::obj(r))
@@ -3622,7 +3624,7 @@ impl VM {
                 if args.len() < 2 {
                     return Err(VMError::new("send() requires (channel, value)"));
                 }
-                let ch_arc = self.extract_channel(&args[0])?;
+                let ch_arc = self.extract_channel(args.first(), "send")?;
                 let shared = value_to_shared(&self.gc, &args[1]);
                 self.check_stream_boundary()?;
                 let guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
@@ -3645,7 +3647,7 @@ impl VM {
                 if args.is_empty() {
                     return Err(VMError::new("receive() requires (channel)"));
                 }
-                let ch_arc = self.extract_channel(&args[0])?;
+                let ch_arc = self.extract_channel(args.first(), "receive")?;
                 match self.receive_cancellable(&ch_arc)? {
                     Some(shared) => Ok(shared_to_value(&mut self.gc, &shared)),
                     None => Ok(Value::null()),
@@ -3655,7 +3657,7 @@ impl VM {
                 if args.is_empty() {
                     return Err(VMError::new("close() requires (channel)"));
                 }
-                let ch_arc = self.extract_channel(&args[0])?;
+                let ch_arc = self.extract_channel(args.first(), "close")?;
                 let mut guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = None;
                 Ok(Value::null())
@@ -3664,7 +3666,7 @@ impl VM {
                 if args.len() < 2 {
                     return Err(VMError::new("try_send() requires (channel, value)"));
                 }
-                let ch_arc = self.extract_channel(&args[0])?;
+                let ch_arc = self.extract_channel(args.first(), "try_send")?;
                 let shared = value_to_shared(&self.gc, &args[1]);
                 self.check_stream_boundary()?;
                 let guard = ch_arc.sender.lock().unwrap_or_else(|e| e.into_inner());
@@ -3677,15 +3679,13 @@ impl VM {
                 Ok(Value::bool_val(ok))
             }
             "try_receive" => {
-                if args.is_empty() {
-                    return Err(VMError::new("try_receive() requires (channel)"));
-                }
-                let ch_arc = self.extract_channel(&args[0])?;
-                let guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
-                match &*guard {
+                let ch_arc = self.extract_channel(args.first(), "try_receive")?;
+                let mut guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
+                match guard.as_mut() {
                     Some(rx) => match rx.try_recv() {
                         // `Some(v)` / `None`, like the interpreter.
                         Ok(shared) => {
+                            drop(guard);
                             let val = shared_to_value(&mut self.gc, &shared);
                             Ok(self.alloc_option_some(val))
                         }
@@ -3694,31 +3694,28 @@ impl VM {
                     None => Ok(self.alloc_option_none()),
                 }
             }
+            "is_closed" => {
+                let ch_arc = self.extract_channel(args.first(), "is_closed")?;
+                let mut guard = ch_arc.receiver.lock().unwrap_or_else(|e| e.into_inner());
+                Ok(Value::bool_val(
+                    guard.as_mut().is_none_or(|rx| rx.is_finished()),
+                ))
+            }
             "select" => {
-                if args.is_empty() {
-                    return Err(VMError::new("select() requires an array of channels"));
-                }
-                // Extract channels from the array argument
-                let channels: Vec<Arc<VmChannelInner>> = match args[0].classify(&self.gc) {
-                    ValueKind::Obj(r) => match self.gc.get(r) {
-                        Some(obj) => match &obj.kind {
-                            ObjKind::Array(items) => {
-                                let mut chs = Vec::with_capacity(items.len());
-                                for item in items {
-                                    chs.push(self.extract_channel(item)?);
-                                }
-                                chs
-                            }
-                            _ => {
-                                return Err(VMError::new("select() requires an array of channels"))
-                            }
-                        },
-                        None => return Err(VMError::new("select() requires an array of channels")),
+                const SELECT_ARGS: &str = "select() requires an array of channels";
+                let items = match args.first().map(|v| v.classify(&self.gc)) {
+                    Some(ValueKind::Obj(r)) => match self.gc.get(r).map(|o| &o.kind) {
+                        Some(ObjKind::Array(items)) => items.clone(),
+                        _ => return Err(VMError::new(SELECT_ARGS)),
                     },
-                    _ => return Err(VMError::new("select() requires an array of channels")),
+                    _ => return Err(VMError::new(SELECT_ARGS)),
                 };
-                if channels.is_empty() {
-                    return Ok(Value::null());
+                let mut channels: Vec<Arc<VmChannelInner>> = Vec::with_capacity(items.len());
+                for item in &items {
+                    channels.push(
+                        self.extract_channel(Some(item), "select")
+                            .map_err(|_| VMError::new(SELECT_ARGS))?,
+                    );
                 }
                 let timeout_ms: Option<u128> = match args.get(1).map(|v| v.classify(&self.gc)) {
                     Some(ValueKind::Int(ms)) => Some((ms).max(0) as u128),
@@ -3728,32 +3725,36 @@ impl VM {
                 let start = crate::clock::Instant::now();
                 let len = channels.len();
                 let mut offset = 0usize;
+                // `null` at once when every channel is finished (closed and
+                // drained, `semantics::channel`), else on timeout.
                 loop {
-                    let mut all_closed = true;
+                    let mut all_finished = true;
                     for i in 0..len {
                         let idx = (i + offset) % len;
-                        let rx_guard = channels[idx]
-                            .receiver
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        if let Some(ref rx) = *rx_guard {
-                            match rx.try_recv() {
-                                Ok(shared) => {
-                                    let val = shared_to_value(&mut self.gc, &shared);
-                                    let idx_val = Value::int(idx as i64, &mut self.gc);
-                                    let arr = self.gc.alloc(ObjKind::Array(vec![idx_val, val]));
-                                    return Ok(Value::obj(arr));
+                        let received = {
+                            let mut rx_guard = channels[idx]
+                                .receiver
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            match rx_guard.as_mut().map(|rx| rx.try_recv()) {
+                                Some(Ok(shared)) => Some(shared),
+                                Some(Err(std::sync::mpsc::TryRecvError::Empty)) => {
+                                    all_finished = false;
+                                    None
                                 }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                    all_closed = false;
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                    // Sender dropped (channel closed) — treat as closed
+                                Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) | None => {
+                                    None
                                 }
                             }
+                        };
+                        if let Some(shared) = received {
+                            let val = shared_to_value(&mut self.gc, &shared);
+                            let idx_val = Value::int(idx as i64, &mut self.gc);
+                            let arr = self.gc.alloc(ObjKind::Array(vec![idx_val, val]));
+                            return Ok(Value::obj(arr));
                         }
                     }
-                    if all_closed {
+                    if all_finished {
                         return Ok(Value::null());
                     }
                     if let Some(ms) = timeout_ms {
@@ -4046,16 +4047,19 @@ impl VM {
         Value::obj(r)
     }
 
-    fn extract_channel(&self, val: &Value) -> Result<Arc<VmChannelInner>, VMError> {
-        match val.classify(&self.gc) {
-            ValueKind::Obj(r) => match self.gc.get(r) {
-                Some(obj) => match &obj.kind {
-                    ObjKind::Channel(ch) => Ok(ch.clone()),
-                    _ => Err(VMError::new("expected channel")),
-                },
-                None => Err(VMError::new("dangling reference")),
+    /// The channel argument of builtin `name` (`name() requires a channel`
+    /// otherwise, the interpreter's text).
+    fn extract_channel(
+        &self,
+        val: Option<&Value>,
+        name: &str,
+    ) -> Result<Arc<VmChannelInner>, VMError> {
+        match val.map(|v| v.classify(&self.gc)) {
+            Some(ValueKind::Obj(r)) => match self.gc.get(r).map(|o| &o.kind) {
+                Some(ObjKind::Channel(ch)) => Ok(ch.clone()),
+                _ => Err(VMError::new(&format!("{}() requires a channel", name))),
             },
-            _ => Err(VMError::new("expected channel")),
+            _ => Err(VMError::new(&format!("{}() requires a channel", name))),
         }
     }
 

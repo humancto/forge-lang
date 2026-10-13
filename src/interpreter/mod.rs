@@ -26,7 +26,7 @@ pub enum ChannelSender {
 #[allow(dead_code)]
 pub struct ChannelInner {
     pub tx: std::sync::Mutex<Option<ChannelSender>>,
-    pub rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<Value>>>,
+    pub rx: std::sync::Mutex<Option<crate::semantics::channel::Receiver<Value>>>,
     pub capacity: Option<usize>,
 }
 
@@ -2253,9 +2253,9 @@ impl Interpreter {
                     Value::Channel(ch) => loop {
                         // `None` = channel closed; waits stay cancellable.
                         let next = self.wait_cancellable(|slice| {
-                            let rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
-                            match rx_guard.as_ref() {
-                                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
+                            let mut rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
+                            match rx_guard.as_mut() {
+                                Some(rx) => match rx.recv_timeout(slice) {
                                     Ok(v) => Some(Some(v)),
                                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {

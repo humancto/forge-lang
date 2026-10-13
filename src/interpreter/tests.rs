@@ -4032,9 +4032,10 @@ fn select_single_channel() {
 }
 
 #[test]
-fn select_empty_array_errors() {
-    let result = try_run_forge("select([])");
-    assert!(result.is_err());
+fn select_empty_array_is_null_like_the_vm() {
+    // No channel can produce a value: every channel is finished.
+    let result = try_run_forge("assert_eq(select([]), null)");
+    assert!(result.is_ok(), "{:?}", result.err());
 }
 
 #[test]

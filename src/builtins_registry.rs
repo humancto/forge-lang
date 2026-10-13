@@ -226,6 +226,7 @@ pub static GLOBALS: &[Builtin] = &[
     b("send", 2, 2),
     b("receive", 1, 1),
     b("close", 1, 1),
+    b("is_closed", 1, 1),
     b("try_send", 2, 2),
     b("try_receive", 1, 1),
     b("select", 1, 2),

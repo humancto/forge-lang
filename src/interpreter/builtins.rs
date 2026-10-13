@@ -532,7 +532,9 @@ impl Interpreter {
                     let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(cap);
                     Ok(Value::Channel(Arc::new(ChannelInner {
                         tx: std::sync::Mutex::new(Some(ChannelSender::Bounded(tx))),
-                        rx: std::sync::Mutex::new(Some(rx)),
+                        rx: std::sync::Mutex::new(Some(crate::semantics::channel::Receiver::new(
+                            rx,
+                        ))),
                         capacity: Some(cap),
                     })))
                 }
@@ -540,7 +542,9 @@ impl Interpreter {
                     let (tx, rx) = std::sync::mpsc::channel::<Value>();
                     Ok(Value::Channel(Arc::new(ChannelInner {
                         tx: std::sync::Mutex::new(Some(ChannelSender::Unbounded(tx))),
-                        rx: std::sync::Mutex::new(Some(rx)),
+                        rx: std::sync::Mutex::new(Some(crate::semantics::channel::Receiver::new(
+                            rx,
+                        ))),
                         capacity: None,
                     })))
                 }
@@ -569,15 +573,13 @@ impl Interpreter {
                             None => Err(RuntimeError::new("channel closed")),
                         }
                     }
-                    _ => Err(RuntimeError::new(
-                        "send() requires a channel as first argument",
-                    )),
+                    _ => Err(RuntimeError::new("send() requires a channel")),
                 }
             }
             "receive" => {
                 let ch = match args.first() {
                     Some(v) => v,
-                    None => return Err(RuntimeError::new("receive(channel) requires 1 argument")),
+                    None => return Err(RuntimeError::new("receive() requires a channel")),
                 };
                 match ch {
                     Value::Channel(inner) => {
@@ -585,9 +587,8 @@ impl Interpreter {
                         // but stay cancellable (host deadline / squad).
                         let inner = inner.clone();
                         self.wait_cancellable(|slice| match inner.rx.lock() {
-                            Ok(guard) => match guard.as_ref() {
-                                Some(receiver) => match crate::clock::recv_timeout(receiver, slice)
-                                {
+                            Ok(mut guard) => match guard.as_mut() {
+                                Some(receiver) => match receiver.recv_timeout(slice) {
                                     Ok(val) => Some(val),
                                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -599,9 +600,7 @@ impl Interpreter {
                             Err(_) => Some(Value::Null),
                         })
                     }
-                    _ => Err(RuntimeError::new(
-                        "receive() requires a channel as first argument",
-                    )),
+                    _ => Err(RuntimeError::new("receive() requires a channel")),
                 }
             }
             "reduce" => {
@@ -1413,11 +1412,7 @@ impl Interpreter {
                 }
                 let ch = match &args[0] {
                     Value::Channel(c) => c.clone(),
-                    _ => {
-                        return Err(RuntimeError::new(
-                            "try_send() first argument must be a channel",
-                        ))
-                    }
+                    _ => return Err(RuntimeError::new("try_send() requires a channel")),
                 };
                 let val = args[1].clone();
                 let tx_guard = ch.tx.lock().expect("BUG: channel mutex poisoned");
@@ -1434,22 +1429,15 @@ impl Interpreter {
                 }
             }
             "try_receive" => {
-                if args.is_empty() {
-                    return Err(RuntimeError::new("try_receive() requires a channel"));
-                }
-                let ch = match &args[0] {
-                    Value::Channel(c) => c.clone(),
-                    _ => {
-                        return Err(RuntimeError::new(
-                            "try_receive() argument must be a channel",
-                        ))
-                    }
+                let ch = match args.first() {
+                    Some(Value::Channel(c)) => c.clone(),
+                    _ => return Err(RuntimeError::new("try_receive() requires a channel")),
                 };
-                let rx_guard = ch
+                let mut rx_guard = ch
                     .rx
                     .lock()
                     .map_err(|e| RuntimeError::new(&format!("channel lock error: {}", e)))?;
-                match rx_guard.as_ref() {
+                match rx_guard.as_mut() {
                     Some(rx) => match rx.try_recv() {
                         Ok(val) => Ok(Value::Some(Box::new(val))),
                         Err(_) => Ok(Value::None),
@@ -1457,19 +1445,25 @@ impl Interpreter {
                     None => Ok(Value::None),
                 }
             }
-            "select" => {
-                if args.is_empty() {
-                    return Err(RuntimeError::new("select() requires an array of channels"));
+            "is_closed" => match args.first() {
+                Some(Value::Channel(ch)) => {
+                    let mut rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
+                    Ok(Value::Bool(
+                        rx_guard.as_mut().is_none_or(|rx| rx.is_finished()),
+                    ))
                 }
-                let channels: Vec<Arc<ChannelInner>> = match &args[0] {
-                    Value::Array(items) => {
+                _ => Err(RuntimeError::new("is_closed() requires a channel")),
+            },
+            "select" => {
+                let channels: Vec<Arc<ChannelInner>> = match args.first() {
+                    Some(Value::Array(items)) => {
                         let mut chs = Vec::with_capacity(items.len());
                         for item in items {
                             match item {
                                 Value::Channel(c) => chs.push(c.clone()),
                                 _ => {
                                     return Err(RuntimeError::new(
-                                        "select() array must contain only channels",
+                                        "select() requires an array of channels",
                                     ))
                                 }
                             }
@@ -1478,9 +1472,6 @@ impl Interpreter {
                     }
                     _ => return Err(RuntimeError::new("select() requires an array of channels")),
                 };
-                if channels.is_empty() {
-                    return Err(RuntimeError::new("select() requires a non-empty array"));
-                }
                 let timeout_ms: Option<u128> = match args.get(1) {
                     Some(Value::Int(ms)) => Some((*ms).max(0) as u128),
                     Some(Value::Float(ms)) => Some(ms.max(0.0) as u128),
@@ -1489,22 +1480,25 @@ impl Interpreter {
                 let start = crate::clock::Instant::now();
                 let len = channels.len();
                 let mut offset = 0usize;
+                // `null` at once when every channel is finished (closed and
+                // drained, `semantics::channel`), else on timeout.
                 loop {
-                    let mut all_closed = true;
+                    let mut all_finished = true;
                     for i in 0..len {
                         let idx = (i + offset) % len;
-                        let rx_guard = channels[idx]
-                            .rx
-                            .lock()
-                            .expect("BUG: channel mutex poisoned");
-                        if let Some(ref rx) = *rx_guard {
-                            all_closed = false;
-                            if let Ok(val) = rx.try_recv() {
-                                return Ok(Value::Array(vec![Value::Int(idx as i64), val]));
+                        let mut rx_guard =
+                            channels[idx].rx.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(rx) = rx_guard.as_mut() {
+                            match rx.try_recv() {
+                                Ok(val) => {
+                                    return Ok(Value::Array(vec![Value::Int(idx as i64), val]))
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => all_finished = false,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
                             }
                         }
                     }
-                    if all_closed {
+                    if all_finished {
                         return Ok(Value::Null);
                     }
                     if self.is_cancelled() {
@@ -1519,18 +1513,13 @@ impl Interpreter {
                     crate::clock::sleep(std::time::Duration::from_millis(1));
                 }
             }
-            "close" => {
-                if args.is_empty() {
-                    return Err(RuntimeError::new("close() requires a channel"));
+            "close" => match args.first() {
+                Some(Value::Channel(ch)) => {
+                    *ch.tx.lock().expect("BUG: channel mutex poisoned") = None;
+                    Ok(Value::Null)
                 }
-                match &args[0] {
-                    Value::Channel(ch) => {
-                        *ch.tx.lock().expect("BUG: channel mutex poisoned") = None;
-                        Ok(Value::Null)
-                    }
-                    _ => Err(RuntimeError::new("close() requires a channel")),
-                }
-            }
+                _ => Err(RuntimeError::new("close() requires a channel")),
+            },
             "await_all" => {
                 if args.is_empty() {
                     return Err(RuntimeError::new(

@@ -531,3 +531,14 @@ in-band end marker (merge_streams specifies one).
 
 Suggested fix: return `[index, null]` (or a `Closed` marker) once for a channel that is
 closed and drained, or add `is_closed(ch)`; document it next to `select`.
+
+**Fixed:** `is_closed(ch)` (registry, both engines, type checker) is true once a channel
+is closed *and* drained, so "finished" can never be observed while a value is still
+buffered (a channel receiver with one value of lookahead, `semantics::channel`, so asking
+consumes nothing). `select`'s results are unchanged (backward compatible: `[index, value]`
+or `null`), but it now returns `null` at once on both engines when every channel is
+finished (the interpreter used to wait out the timeout, or forever without one, as in the
+repro's second call); after a `null`, `all(chs, is_closed)` tells finished from slow.
+`[index, null]` was rejected because `null` is a valid channel value. Documented in
+`llms.txt` (with a merge loop) and `spec/src/concurrency/channels.md`; tests in
+`tests/channel_closed_test.fg` (both engines).
