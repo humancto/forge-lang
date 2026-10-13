@@ -60,11 +60,11 @@ pub(crate) fn spawn_schedule(
     interpreter: &Interpreter,
     schedule: &SchedulePlan,
 ) -> Result<(), RuntimeError> {
-    let secs = schedule_interval_seconds(interpreter, schedule)?;
+    let interval = schedule_interval(interpreter, schedule)?;
     let body = schedule.body.clone();
     let mut sched_interp = interpreter.fork_for_background_runtime();
     crate::permissions::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(secs));
+        std::thread::sleep(interval);
         let _ = sched_interp.exec_background_block(&body);
     });
     Ok(())
@@ -91,18 +91,18 @@ pub(crate) fn spawn_watch(
     Ok(())
 }
 
-fn schedule_interval_seconds(
+fn schedule_interval(
     interpreter: &Interpreter,
     schedule: &SchedulePlan,
-) -> Result<u64, RuntimeError> {
+) -> Result<std::time::Duration, RuntimeError> {
     let mut eval_interp = interpreter.fork_for_background_runtime();
-    match eval_interp.eval_expr(&schedule.interval)? {
-        Value::Int(n) => Ok(crate::semantics::schedule_interval_secs(
-            n as u64,
-            &schedule.unit,
-        )),
-        _ => Ok(60),
-    }
+    let n = match eval_interp.eval_expr(&schedule.interval)? {
+        Value::Int(n) => n as f64,
+        Value::Float(n) => n,
+        // Not a number: once a minute (the VM does the same).
+        _ => return Ok(std::time::Duration::from_secs(60)),
+    };
+    crate::semantics::schedule_interval(n, &schedule.unit).map_err(|m| RuntimeError::new(&m))
 }
 
 fn watch_path(interpreter: &Interpreter, watch: &WatchPlan) -> Result<String, RuntimeError> {
@@ -141,7 +141,9 @@ mod tests {
         interpreter.env.define("delay".to_string(), Value::Int(5));
         let plan = parse_runtime_plan("schedule every delay minutes { let tick = 1 }\n");
 
-        let secs = schedule_interval_seconds(&interpreter, &plan.schedules[0]).expect("seconds");
+        let secs = schedule_interval(&interpreter, &plan.schedules[0])
+            .expect("seconds")
+            .as_secs();
         assert_eq!(secs, 300);
     }
 

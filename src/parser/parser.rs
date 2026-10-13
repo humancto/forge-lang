@@ -1,5 +1,6 @@
 use super::ast::*;
 use super::index::{DefKind, IndexBuilder, OccId, Pos, Role, ScopeKind, Span, SyntaxIndex};
+use crate::lexer::literal_braces;
 /// Forge Parser — Recursive Descent
 /// Converts a token stream into an AST.
 /// Expression parsing uses Pratt parsing for correct precedence.
@@ -651,18 +652,51 @@ impl Parser {
         })
     }
 
-    /// Parses: wait expr seconds
+    /// Parses: wait expr [unit]
     fn parse_wait(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Wait)?;
         let duration = self.parse_expr()?;
-        if self.check(&Token::Seconds) {
-            self.advance();
-        }
+        let duration = self.parse_duration_in_seconds(duration);
 
         Ok(Stmt::Expression(Expr::Call {
             function: Box::new(Expr::Ident("wait".to_string())),
             args: vec![duration],
         }))
+    }
+
+    /// The duration unit after the number of `wait`, `timeout` or `schedule
+    /// every`, on the same line, if there is one: `seconds` (a keyword) or
+    /// one of the words of `semantics::DURATION_UNITS` (`ms`, `minute`, ...,
+    /// plain names everywhere else). Returns the canonical unit name.
+    fn parse_duration_unit(&mut self) -> Option<&'static str> {
+        let unit = match self.current_token() {
+            Token::Seconds => Some("seconds"),
+            Token::Ident(ref w) => crate::semantics::duration_unit(w),
+            _ => None,
+        };
+        if unit.is_some() {
+            self.advance();
+        }
+        unit
+    }
+
+    /// `duration` followed by an optional unit, as a number of seconds:
+    /// `500 ms` is `500 / 1000.0`, `2 minutes` is `2 * 60` (a fraction stays
+    /// exact: `0.5 seconds` is `0.5`).
+    fn parse_duration_in_seconds(&mut self, duration: Expr) -> Expr {
+        let (op, factor) = match self.parse_duration_unit() {
+            None | Some("seconds") => return duration,
+            Some("milliseconds") => (BinOp::Div, Expr::Float(1000.0)),
+            Some(unit) => (
+                BinOp::Mul,
+                Expr::Int(crate::semantics::duration_unit_seconds(unit) as i64),
+            ),
+        };
+        Expr::BinOp {
+            left: Box::new(duration),
+            op,
+            right: Box::new(factor),
+        }
     }
 
     /// Parses: try { body } catch name { handler }
@@ -700,7 +734,7 @@ impl Parser {
         match self.current_token() {
             Token::StringLit(s) => {
                 self.advance();
-                Ok(s)
+                Ok(literal_braces(&s).into_owned())
             }
             _ => Err(self.error("expected a library path string after 'native'")),
         }
@@ -796,7 +830,7 @@ impl Parser {
             let path = match self.current_token() {
                 Token::StringLit(s) => {
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 _ => return Err(self.error("expected string path after 'from'")),
             };
@@ -829,7 +863,7 @@ impl Parser {
             let path = match self.current_token() {
                 Token::StringLit(s) => {
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 Token::Ident(s) => {
                     self.advance();
@@ -1108,9 +1142,7 @@ impl Parser {
     fn parse_timeout(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Timeout)?;
         let duration = self.parse_expr()?;
-        if self.check(&Token::Seconds) {
-            self.advance();
-        }
+        let duration = self.parse_duration_in_seconds(duration);
         let body = self.parse_block()?;
         Ok(Stmt::TimeoutBlock { duration, body })
     }
@@ -1131,21 +1163,7 @@ impl Parser {
             self.advance();
         }
         let interval = self.parse_expr()?;
-        let unit = match self.current_token() {
-            Token::Seconds => {
-                self.advance();
-                "seconds".to_string()
-            }
-            Token::Ident(ref s) if s == "minutes" => {
-                self.advance();
-                "minutes".to_string()
-            }
-            Token::Ident(ref s) if s == "hours" => {
-                self.advance();
-                "hours".to_string()
-            }
-            _ => "seconds".to_string(),
-        };
+        let unit = self.parse_duration_unit().unwrap_or("seconds").to_string();
         let body = self.parse_block()?;
         Ok(Stmt::ScheduleBlock {
             interval,
@@ -1225,6 +1243,7 @@ impl Parser {
             else {
                 return Err(self.error("prompt fields must be string literals"));
             };
+            let val = literal_braces(&val).into_owned();
             self.advance();
             match key.as_str() {
                 "system" => system = val,
@@ -1275,7 +1294,7 @@ impl Parser {
                     while !self.check(&Token::RBracket) {
                         match self.current_token().clone() {
                             Token::StringLit(tool) | Token::RawStringLit(tool) => {
-                                tools.push(tool);
+                                tools.push(literal_braces(&tool).into_owned());
                                 self.advance();
                             }
                             _ => return Err(self.error("agent tools must be string literals")),
@@ -1289,7 +1308,7 @@ impl Parser {
                 }
                 "goal" => match self.current_token().clone() {
                     Token::StringLit(text) | Token::RawStringLit(text) => {
-                        goal = text;
+                        goal = literal_braces(&text).into_owned();
                         self.advance();
                     }
                     _ => return Err(self.error("agent goal must be a string literal")),
@@ -1756,7 +1775,7 @@ impl Parser {
                 Ok(Pattern::Literal(Expr::Float(n)))
             }
             Token::StringLit(ref s) => {
-                let s = s.clone();
+                let s = literal_braces(s).into_owned();
                 self.advance();
                 Ok(Pattern::Literal(Expr::StringLit(s)))
             }
@@ -2356,7 +2375,7 @@ impl Parser {
                     let token = self.pos - 1;
                     self.parse_string_interpolation(&s, token)
                 } else {
-                    Ok(Expr::StringLit(s))
+                    Ok(Expr::StringLit(literal_braces(&s).into_owned()))
                 }
             }
 
@@ -2570,7 +2589,9 @@ impl Parser {
                 }
             } else if ch == '{' {
                 if !current.is_empty() {
-                    parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                    parts.push(StringPart::Literal(
+                        literal_braces(&std::mem::take(&mut current)).into_owned(),
+                    ));
                 }
                 let mut expr_str = String::new();
                 let mut expr_start = None;
@@ -2610,7 +2631,7 @@ impl Parser {
         }
 
         if !current.is_empty() {
-            parts.push(StringPart::Literal(current));
+            parts.push(StringPart::Literal(literal_braces(&current).into_owned()));
         }
 
         if parts.len() == 1 {
@@ -2712,7 +2733,11 @@ impl Parser {
         let mut i = 1;
         while i + 1 < raw.len() {
             columns.push(tok.col + i);
-            i += if raw[i] == '\\' { 2 } else { 1 };
+            i += if raw[i] == '\\' {
+                crate::lexer::escape_source_len(raw, i)
+            } else {
+                1
+            };
         }
         columns.push(tok.col + i);
         columns
@@ -2762,9 +2787,8 @@ impl Parser {
         while !self.check(&Token::RBrace) {
             let key = match self.current_token() {
                 Token::StringLit(s) => {
-                    let s = s;
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 _ => {
                     let key = self.expect_ident()?;

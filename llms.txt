@@ -26,7 +26,7 @@ Engine flags go BEFORE the subcommand: `forge --interp run x.fg`, not `forge run
 
 ## Reading input
 
-Programs read piped standard input with `fs.lines("/dev/stdin")` (an array of lines, without the newlines) or `fs.read("/dev/stdin")` (all of it as one string). `input()` also returns all of stdin, with trailing whitespace trimmed. Command-line arguments after the file name are not passed to the program: take input from stdin.
+Programs read piped standard input with `fs.lines("/dev/stdin")` (an array of lines, without the newlines) or `fs.read("/dev/stdin")` (all of it as one string). `input()` also returns all of stdin, with trailing whitespace trimmed. Command-line arguments: `forge run main.fg --top 3 data.txt` passes everything after the file name to the program (flags included; forge's own flags go before the file). `io.args()` is the script path followed by those arguments (`["main.fg", "--top", "3", "data.txt"]`), so the arguments are `slice(io.args(), 1, len(io.args()))`. `io.args_get("--top")` is the value after a flag (`"3"`, a String; `true` for a flag followed by another flag or nothing; `null` if absent), `io.args_has("--verbose")` tests a flag, `io.args_parse()` returns `{"--top": "3", ...}`; all three ignore the arguments after a `--`. Under `--sandbox` the program still gets its arguments.
 
 ```forge
 let lines = fs.lines("/dev/stdin")
@@ -72,9 +72,9 @@ let [first, ...rest] = nums
 println("{who} {age} {first} {rest}")
 ```
 
-Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
+Numbers: literals are `42`, `1_000_000` (underscores ignored), `3.14`, and with an exponent `1e9`, `2.5e-3`, `6E+23` (an exponent always makes a Float: `1e2` is `100.0`). A whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
 
-Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. `typeof(x)` returns one of `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object` (also for struct and algebraic values), `Tuple`, `Set`, `Map`, `Result`, `Option`, `Function` (a named `fn`), `Lambda` (an anonymous `fn`), `BuiltIn`, `Channel`. Strings cannot be indexed (`s[0]` is an error): use `substring(s, start, end)`. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` and Unicode classes such as `\\p{L}` are literal.
+Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. `typeof(x)` returns one of `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object` (also for struct and algebraic values), `Tuple`, `Set`, `Map`, `Result`, `Option`, `Function` (a named `fn`), `Lambda` (an anonymous `fn`), `BuiltIn`, `Channel`. Strings cannot be indexed (`s[0]` is an error): use `substring(s, start, end)`. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Escapes in `"..."` strings: `\n` `\t` `\r` `\\` `\"`, `\{` and `\}` (a literal brace, never an interpolation), and Unicode escapes `\u{e9}` / `\u{1F600}` (1 to 6 hex digits) or `\u00e9` (exactly 4; a surrogate pair `\uD83D\uDE00` is one character); anything else (`\0`, `\x41`) is a syntax error. `chr(n)` is the one-character string for code point `n` (`chr(233) == "é"`), `ord(s)` the code point of a one-character string (`ord("A") == 65`). Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` and Unicode classes such as `\\p{L}` are literal.
 
 ## Type annotations and checking
 
@@ -426,7 +426,7 @@ println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
 
 Maps: `m.set(k, v)` and `m.remove(k)` return a new Map (a bare `m.set(k, v)` statement changes nothing), `m.get(k)` (`null` if absent), `m.has(k)`, `m.keys()`, `m.values()`, `m.len()`, `m.to_array()` (an array of `(key, value)` tuples), `for k, v in m`; `m[k]` is an error. Keys may be any value (`1` and `1.0` are one key, NaN finds NaN, arrays/objects/sets compare by content); for String keys an object (`obj[k] = v`) is simpler. Maps and sets are hash-indexed: `get`/`has`/`set`/`remove` (and set `has`/`add`/`remove`) take constant time on average, and `m = m.set(k, v)` / `m = m.remove(k)` on a `let mut` variable update it without copying the map, so building a map in a loop is linear.
 
-Other builtins: `exit(code)` (ends the program at once with that exit status; output already printed is kept), `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+Other builtins: `exit(code)` (ends the program at once with that exit status; output already printed is kept), `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `chr(n)`, `ord(s)`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)` (fractions allowed: `wait(0.25)`), `assert`, `assert_eq`.
 
 ## Standard library (always in scope)
 
@@ -447,7 +447,7 @@ Other builtins: `exit(code)` (ends the program at once with that exit status; ou
 | `term` | `red`, `green`, `bold`, `table(rows)`, `bar`, `sparkline`, `banner`, `box` |
 | `time` | `now()` → `{ iso, unix, unix_ms, year, month, day, hour, minute, second, weekday, weekday_short, day_of_year, timezone }` (UTC); `unix()` (Int seconds); `parse(s)` (`2024-03-05`, `2024-03-05 10:20:30`, `2024-03-05T10:20:30Z` or with an offset, converted to UTC) → the same object; `format(t, "%Y-%m-%d")` (`t` an object or Unix seconds, strftime pattern, default `%Y-%m-%d %H:%M:%S`, always UTC); `add(t, secs)` / `add(t, { days: 1, hours: 2 })`, `sub` → object; `diff(a, b)` (a − b) → `{ seconds, minutes, hours, days, weeks, human }`; `sleep(seconds)` |
 | `os`, `path` | `os.platform()`, `os.cpus()`; `path.join(a, b)`, `path.extname(p)`, `path.basename(p)` |
-| `io` | `prompt`, `args_parse`, `args_get`, `args_has` |
+| `io` | `args()` (script path, then the program's arguments), `args_get(flag)`, `args_has(flag)`, `args_parse()`, `prompt` |
 
 `fetch(url)` is shorthand for `http.get`. Shell builtins: `sh(cmd)`, `sh_lines`, `sh_ok`, `sh_json`, `run_command`, `pipe_to(data, cmd)` (need `--allow-run`).
 
@@ -603,7 +603,7 @@ fn cities() { return ["Oslo"] }
 - No format specs such as `{x:.2f}` or `%.2f`: write `"{to_fixed(x, 2)}"`.
 - Mutating a field or index requires a `let mut` binding.
 - A method that changes its receiver must be declared `fn name(mut it, ...)` and called on a `let mut` variable (or a field/index of one); a plain `fn name(it)` cannot assign to `it`.
-- `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
+- `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds. Statement forms take a unit after the number: `wait 250 ms`, `timeout 0.5 seconds { ... }`, `schedule every 2 minutes { ... }` (units `ms`/`millisecond(s)`, `second(s)`, `minute(s)`, `hour(s)`; fractions are exact; no unit means seconds); a `timeout` that expires raises E0031 `timeout: operation exceeded 0.5 second limit`.
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.
 - Always pass user input to SQL as a params array: `db.query("... WHERE id = ?", [id])`.
 

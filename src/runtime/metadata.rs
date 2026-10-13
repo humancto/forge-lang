@@ -274,6 +274,34 @@ mod tests {
     }
 
     #[test]
+    fn schedule_units_are_normalised() {
+        for (src, unit, interval) in [
+            ("schedule every 250 ms { }", "milliseconds", Expr::Int(250)),
+            (
+                "schedule every 1 millisecond { }",
+                "milliseconds",
+                Expr::Int(1),
+            ),
+            (
+                "schedule every 0.5 seconds { }",
+                "seconds",
+                Expr::Float(0.5),
+            ),
+            ("schedule every 1 second { }", "seconds", Expr::Int(1)),
+            ("schedule every 2 hour { }", "hours", Expr::Int(2)),
+            ("schedule every 3 { }", "seconds", Expr::Int(3)),
+        ] {
+            let plan = extract_runtime_plan(&parse_program(src));
+            assert_eq!(plan.schedules[0].unit, unit, "{src}");
+            assert_eq!(
+                format!("{:?}", plan.schedules[0].interval),
+                format!("{:?}", interval),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
     fn extracts_schedule_and_watch_metadata() {
         let prog = parse_program(
             "schedule every 5 minutes { let tick = 1 }\nwatch \"src/app.fg\" { let changed = true }\n",

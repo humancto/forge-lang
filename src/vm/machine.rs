@@ -960,9 +960,8 @@ impl VM {
     pub(super) fn wait_interrupted(&mut self) -> Result<(), VMError> {
         if let Some((_, guard)) = self.earliest_expired_timeout() {
             self.cancel_scopes_from(guard.scope_depth);
-            return Err(VMError::new(&format!(
-                "timeout: operation exceeded {} second limit",
-                guard.seconds
+            return Err(VMError::new(&crate::semantics::timeout_exceeded(
+                guard.seconds,
             )));
         }
         if self.is_cancelled() {
@@ -1049,10 +1048,7 @@ impl VM {
             self.frames.pop();
         }
 
-        let err = VMError::new(&format!(
-            "timeout: operation exceeded {} second limit",
-            guard.seconds
-        ));
+        let err = VMError::new(&crate::semantics::timeout_exceeded(guard.seconds));
         let err_value = self.runtime_error_value(&err);
         let base = self.frames[frame_idx].base;
         self.registers[base + guard.error_register as usize] = err_value;
@@ -1950,13 +1946,12 @@ impl VM {
                     }
                     OpCode::PushTimeout => {
                         let timeout_val = self.registers[base + a as usize];
-                        let seconds = if let Some(n) = timeout_val.as_int(&self.gc) {
-                            n.max(0) as u64
-                        } else if let Some(n) = timeout_val.as_float() {
-                            n.max(0.0) as u64
-                        } else {
-                            5
-                        };
+                        let seconds =
+                            crate::semantics::timeout_seconds(match timeout_val.as_int(&self.gc) {
+                                Some(n) => n as f64,
+                                // Not a number: 5 seconds (as the interpreter).
+                                None => timeout_val.as_float().unwrap_or(5.0),
+                            });
                         let catch_ip = {
                             let frame = &self.frames[frame_idx];
                             (frame.ip as i64 + sbx as i64) as usize
@@ -1990,8 +1985,13 @@ impl VM {
                     OpCode::Schedule => {
                         let closure_val = self.registers[base + a as usize];
                         let interval_val = self.registers[base + b as usize];
-                        let secs = if let Some(n) = interval_val.as_int(&self.gc) {
-                            if n > 0 {
+                        let n = if let Some(n) = interval_val.as_int(&self.gc) {
+                            Some(n as f64)
+                        } else {
+                            interval_val.as_float()
+                        };
+                        let interval = match n {
+                            Some(n) => {
                                 // Read unit string from register C
                                 let unit_val = self.registers[base + c as usize];
                                 let unit_str = if let Some(r) = unit_val.as_obj() {
@@ -2005,19 +2005,16 @@ impl VM {
                                 } else {
                                     String::new()
                                 };
-                                crate::semantics::schedule_interval_secs(n as u64, &unit_str)
-                            } else {
-                                return Err(VMError::new(
-                                    "schedule interval must be a positive integer",
-                                ));
+                                crate::semantics::schedule_interval(n, &unit_str)
+                                    .map_err(|m| VMError::new(&m))?
                             }
-                        } else {
-                            60 // Non-integer defaults to 60s (matches interpreter)
+                            // Not a number: once a minute (matches interpreter)
+                            None => Duration::from_secs(60),
                         };
 
                         self.spawn_host_task(HostTask::Schedule {
                             closure: closure_val,
-                            interval: Duration::from_secs(secs),
+                            interval,
                         });
                         self.drain_stream_boundary_flags();
                     }

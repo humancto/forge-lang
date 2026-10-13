@@ -24,15 +24,21 @@ pub fn create_module() -> Value {
     Value::Object(m)
 }
 
-/// The host process's command line. Like stdin it belongs to the host:
-/// without the `process` capability (embedders, `forge mcp`) a script sees
-/// no arguments, so it cannot read secrets passed on the host's command line.
-fn host_args() -> Vec<String> {
-    if crate::permissions::require(crate::permissions::Capability::Process, "args").is_ok() {
-        std::env::args().collect()
-    } else {
-        Vec::new()
-    }
+/// The program's command line: its script path, then the arguments after
+/// it (`runtime::program_args`). Not the host's: forge's own flags are never
+/// in it, and a sandboxed run sees only what its host passed.
+fn program_args() -> Vec<String> {
+    crate::runtime::program_args::current().to_vec()
+}
+
+/// The arguments `args_parse`/`args_get`/`args_has` look at: those after
+/// the script path, up to a `--` (what follows it is never an option).
+fn option_args() -> Vec<String> {
+    program_args()
+        .into_iter()
+        .skip(1)
+        .take_while(|a| a != "--")
+        .collect()
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
@@ -57,11 +63,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Ok(Value::Null)
         }
         "io.args" => {
-            let args: Vec<Value> = host_args().into_iter().map(Value::String).collect();
+            let args: Vec<Value> = program_args().into_iter().map(Value::String).collect();
             Ok(Value::Array(args))
         }
         "io.args_parse" => {
-            let cli_args: Vec<String> = host_args();
+            let cli_args: Vec<String> = option_args();
             let mut result = IndexMap::new();
             let mut i = 0;
             while i < cli_args.len() {
@@ -86,7 +92,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Some(Value::String(s)) => s.clone(),
                 _ => return Err("io.args_get() requires a flag string".to_string()),
             };
-            let cli_args: Vec<String> = host_args();
+            let cli_args: Vec<String> = option_args();
             for (i, arg) in cli_args.iter().enumerate() {
                 if *arg == flag {
                     if i + 1 < cli_args.len() && !cli_args[i + 1].starts_with("--") {
@@ -102,7 +108,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Some(Value::String(s)) => s.clone(),
                 _ => return Err("io.args_has() requires a flag string".to_string()),
             };
-            let cli_args: Vec<String> = host_args();
+            let cli_args: Vec<String> = option_args();
             Ok(Value::Bool(cli_args.contains(&flag)))
         }
         _ => Err(format!("unknown io function: {}", name)),

@@ -98,6 +98,8 @@ const SIGNATURES: &[&str] = &[
     "slugify(String) -> String",
     "snake_case(String) -> String",
     "camel_case(String) -> String",
+    "chr(Int) -> String",
+    "ord(String) -> Int",
     // Results and options
     "is_ok(Any) -> Bool",
     "is_err(Any) -> Bool",

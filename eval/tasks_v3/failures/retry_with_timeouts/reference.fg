@@ -1,23 +1,20 @@
-// Retry each call (a `retry` block) with a per-attempt time limit. An
-// attempt is simulated: `x` fails at once, a number of milliseconds sleeps
-// that long and then succeeds. The time limit uses spawn + await_timeout:
-// `timeout 0.15 seconds { ... }` truncates its limit to 0 seconds and fails
-// at once, and there is no millisecond unit (eval/V3_FINDINGS.md, finding 10).
+// Retry each call (a `retry` block) with a per-attempt time limit (a
+// `timeout` block). An attempt is simulated: `x` fails at once, a number of
+// milliseconds sleeps that long and then succeeds.
 
 fn attempt(spec: String) -> String {
     if spec == "x" {
         return "error"
     }
-    let ms = int(spec)
-    let task = spawn {
-        wait(ms / 1000.0)
-        return "ok"
-    }
-    let r = await_timeout(task, 150)
-    if r == null {
+    let secs = int(spec) / 1000.0
+    try {
+        timeout 150 ms {
+            wait(secs)
+        }
+    } catch e {
         return "timeout"
     }
-    return r
+    return "ok"
 }
 
 for line in fs.lines("/dev/stdin") {

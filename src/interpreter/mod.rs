@@ -2830,11 +2830,11 @@ impl Interpreter {
             },
 
             Stmt::TimeoutBlock { duration, body } => {
-                let secs = match self.eval_expr(duration)? {
-                    Value::Int(n) => n.max(0) as u64,
-                    Value::Float(n) => n.max(0.0) as u64,
-                    _ => 5,
-                };
+                let secs = crate::semantics::timeout_seconds(match self.eval_expr(duration)? {
+                    Value::Int(n) => n as f64,
+                    Value::Float(n) => n,
+                    _ => 5.0,
+                });
                 let body = body.clone();
                 let task = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Tasks)
                     .map_err(|m| RuntimeError::new(&m))?;
@@ -2856,8 +2856,10 @@ impl Interpreter {
                 })?;
                 // Wait for the body or the deadline, waking up regularly so
                 // a cancel of *this* program is not held up by a long limit.
-                let deadline =
-                    crate::clock::Instant::now().checked_add(std::time::Duration::from_secs(secs));
+                let deadline = Some(crate::semantics::timeout_deadline(
+                    crate::clock::Instant::now(),
+                    secs,
+                ));
                 let outcome = loop {
                     let slice = match deadline {
                         Some(d) => d.saturating_duration_since(crate::clock::Instant::now()),
@@ -2890,10 +2892,7 @@ impl Interpreter {
                         cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                         // Give the thread a moment to notice and exit
                         let _ = handle.join();
-                        Err(RuntimeError::new(&format!(
-                            "timeout: operation exceeded {} second limit",
-                            secs
-                        )))
+                        Err(RuntimeError::new(&crate::semantics::timeout_exceeded(secs)))
                     }
                     Err(_) => Err(RuntimeError::new("timeout: execution failed")),
                 }

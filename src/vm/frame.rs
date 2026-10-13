@@ -10,7 +10,7 @@ pub struct ExceptionHandler {
 #[derive(Clone, Copy)]
 pub struct TimeoutGuard {
     pub deadline: Instant,
-    pub seconds: u64,
+    pub seconds: f64,
     pub catch_ip: usize,
     pub error_register: u8,
     pub handler_base: usize,

@@ -61,13 +61,13 @@ pub enum Capability {
     Run,
     /// LLM calls (`ask`).
     Ai,
-    /// Host-process state: `exit()`, `cd()`, reading the host's stdin
-    /// (`input()`, `io.prompt`, `term.confirm`, `term.menu`) and its command
-    /// line (`io.args*`). Always granted by the CLI; denied by default for
-    /// embedders so a script cannot kill the host, consume its stdin (which
-    /// `forge mcp` uses for the protocol) or read its arguments. Without it,
-    /// stdin reads behave like an empty stream, no prompt is printed and the
-    /// argument list is empty.
+    /// Host-process state: `exit()`, `cd()` and reading the host's stdin
+    /// (`input()`, `io.prompt`, `term.confirm`, `term.menu`). Always granted
+    /// by the CLI; denied by default for embedders so a script cannot kill
+    /// the host or consume its stdin (which `forge mcp` uses for the
+    /// protocol). Without it, stdin reads behave like an empty stream and no
+    /// prompt is printed. (`io.args*` never read the host's command line:
+    /// they return the program's own arguments, `runtime::program_args`.)
     Process,
     /// Load native code: `import native "libfoo"`. A loaded library runs
     /// with the full privileges of the process, outside every other check,
@@ -749,12 +749,14 @@ where
     let budget = crate::runtime::limits::current();
     let output = crate::runtime::stdio::current_sink();
     let edition = crate::semantics::edition::current_override();
+    let program_args = crate::runtime::program_args::current_override();
     // Database connections the program opened (`stdlib::db_share`).
     #[cfg(feature = "host")]
     let databases = crate::stdlib::db_share::Databases::current();
     move || {
         let _guard = scope(caps);
         let _edition = crate::semantics::edition::scope(edition);
+        let _program_args = crate::runtime::program_args::scope(program_args);
         let _limits = crate::runtime::limits::scope(budget);
         let _output = crate::runtime::stdio::scope(output);
         #[cfg(feature = "host")]

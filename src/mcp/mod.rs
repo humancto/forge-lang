@@ -783,6 +783,12 @@ fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
                         "type": "string",
                         "description": "Forge source code to run."
                     },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional. Command-line arguments for the program: \
+                                        io.args() returns [\"<run_forge>\", ...args]."
+                    },
                     "session_id": {
                         "type": "string",
                         "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
@@ -1378,6 +1384,15 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
             return tool_error("`session_id` must be 1-128 letters, digits, `_`, `-`, `.` or `:`")
         }
     };
+    // The program's command line: its name, then the caller's arguments.
+    let mut program_args = vec!["<run_forge>".to_string()];
+    match args.get("args") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(items)) if items.iter().all(Value::is_string) => {
+            program_args.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+        Some(_) => return tool_error("`args` must be an array of strings"),
+    }
     let mut limits = run_limits(config, session_id.is_some());
     match args.get("max_fuel") {
         None | Some(Value::Null) => {}
@@ -1391,6 +1406,7 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
         .max_output(CAPTURE_LIMIT.max(config.max_response_bytes))
         .limits(limits.clone())
         .source_label("<run_forge>")
+        .args(program_args)
         .engine(config.engine);
     let started = Instant::now();
     let (outcome, session) = match session_id {
@@ -1897,6 +1913,33 @@ mod tests {
         assert_eq!(r(8)["content"][0]["text"], "(no output)");
         assert_eq!(r(8)["structuredContent"]["stderr"], "");
         assert!(r(8)["content"].get(1).is_none());
+    }
+
+    #[test]
+    fn run_forge_passes_program_arguments() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            run_forge_passes_program_arguments_on(engine);
+        }
+    }
+
+    fn run_forge_passes_program_arguments_on(engine: Engine) {
+        let call = |id: i64, args: &str| {
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{args}}}}}\n"
+            )
+        };
+        let input = [
+            call(1, r#"{"code":"say io.args()","args":["--top","3"]}"#),
+            call(2, r#"{"code":"say io.args()"}"#),
+            call(3, r#"{"code":"say 1","args":"--top"}"#),
+        ]
+        .concat();
+        let msgs = session(&input, deny_all(engine));
+        let r = |id| by_id(&msgs, id)["result"].clone();
+        assert_eq!(r(1)["content"][0]["text"], "[<run_forge>, --top, 3]\n");
+        assert_eq!(r(2)["content"][0]["text"], "[<run_forge>]\n");
+        assert_eq!(r(3)["isError"], true);
     }
 
     #[test]

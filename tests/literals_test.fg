@@ -1,0 +1,22 @@
+// literals_test.fg — number literal spellings (exponents).
+
+@test
+fn test_exponent_literals_are_floats() {
+    assert_eq(1e2, 100.0)
+    assert_eq(typeof(1e2), "Float")
+    assert_eq(1.5e-3, 0.0015)
+    assert_eq(2E+10, 20000000000.0)
+    assert_eq(1_000e1_0, 10000000000000.0)
+    assert_eq(-2.5e3, -2500.0)
+    assert_eq(str(1e2), "100")
+}
+
+@test
+fn test_exponent_literals_in_expressions() {
+    let x = 3e2-1
+    assert_eq(x, 299.0)
+    let tiny = 1e-9
+    assert(tiny > 0.0 && tiny < 0.000001)
+    let xs = [1e0, 1e1, 1e2]
+    assert_eq(sum(xs), 111.0)
+}

@@ -9,9 +9,8 @@ fn field(v) -> String {
     return s
 }
 
-// The byte-order mark U+FEFF, made with a JSON escape: Forge string literals
-// have no \u escape and there is no chr() (eval/V3_FINDINGS.md, finding 19).
-let bom = json.parse("\"\\ufeff\"")
+// The byte-order mark U+FEFF.
+let bom = "\u{feff}"
 let mut text = fs.read("/dev/stdin")
 if starts_with(text, bom) {
     text = substring(text, 1, len(text))

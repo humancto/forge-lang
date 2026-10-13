@@ -164,3 +164,150 @@ Converts a string to camelCase.
 camel_case("hello_world")    // "helloWorld"
 camel_case("some string")    // "someString"
 ```
+
+## chr(code_point) -> string
+
+Returns the one-character string for a Unicode code point (an `Int` from 0 to 1114111, U+10FFFF). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.
+
+```forge
+chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+```
+
+## ord(string) -> int
+
+Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.
+
+```forge
+ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+```
+
+## chr(code_point) -> string
+
+Returns the one-character string for a Unicode code point (an `Int` from 0 to 1114111, `0x10FFFF`). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.
+
+```forge
+chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+```
+
+## ord(string) -> int
+
+Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.
+
+```forge
+ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+```
+
+## chr(code_point) -> string
+
+Returns the one-character string for a Unicode code point (an `Int` from 0 to 1114111, `0x10FFFF`). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.
+
+```forge
+chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+```
+
+## ord(string) -> int
+
+Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.
+
+```forge
+ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+```
+
+## chr(code_point) -> string
+
+Returns the one-character string for a Unicode code point (an `Int` from 0 to 1114111, `0x10FFFF`). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.
+
+```forge
+chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+```
+
+## ord(string) -> int
+
+Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.
+
+```forge
+ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+```
+
+## chr(code_point) -> string
+
+Returns the one-character string for a Unicode code point (an `Int` from 0 to 1114111, `0x10FFFF`). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.
+
+```forge
+chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+```
+
+## ord(string) -> int
+
+Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.
+
+```forge
+ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+```
+
+## chr(code_point) -> string
+
+Returns the one-character string for a Unicode code point (an `Int` from 0 to 1114111, `0x10FFFF`). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.
+
+```forge
+chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+```
+
+## ord(string) -> int
+
+Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.
+
+```forge
+ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+```
+
+## chr(code_point) -> string
+
+Returns the one-character string for a Unicode code point (an `Int` from 0 to 1114111, `0x10FFFF`). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.
+
+```forge
+chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+```
+
+## ord(string) -> int
+
+Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.
+
+```forge
+ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+```

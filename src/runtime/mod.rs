@@ -16,6 +16,7 @@ pub mod limits;
 pub mod metadata;
 #[cfg(not(feature = "host"))]
 mod no_host;
+pub mod program_args;
 pub mod recursion;
 #[cfg(feature = "host")]
 pub mod server;

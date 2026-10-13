@@ -1,8 +1,5 @@
-// A word-count tool configured by command-line options. Known failing:
-// `forge run main.fg --top 3` rejects the extra arguments, and io.args()
-// returns the host's whole command line (forge's own flags included) and
-// nothing at all under --sandbox (eval/V3_FINDINGS.md, finding 13). The
-// script's arguments are taken as everything after the script path.
+// A word-count tool configured by command-line options. `io.args()` is the
+// script path followed by the program's arguments (`forge run main.fg --top 3`).
 
 let usage_text = "usage: wordtool [--top N] [--min-length N] [--ignore-case] [--]"
 
@@ -12,17 +9,8 @@ fn usage(msg: String) {
     exit(2)
 }
 
-fn script_args() -> [String] {
-    let argv = io.args()
-    for e in enumerate(argv) {
-        if ends_with(e.value, ".fg") {
-            return slice(argv, e.index + 1, len(argv))
-        }
-    }
-    return []
-}
-
-let args = script_args()
+let argv = io.args()
+let args = slice(argv, 1, len(argv))
 let mut top = 5
 let mut min_len = 1
 let mut ignore_case = false

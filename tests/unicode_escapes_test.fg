@@ -1,0 +1,54 @@
+// unicode_escapes_test.fg — string escapes (`\u{XXXX}`, `\uXXXX`, escaped
+// braces) and the chr/ord builtins.
+
+@test
+fn test_unicode_escapes() {
+    assert_eq("\u{e9}", "é")
+    assert_eq("café", "café")
+    assert_eq("\u{1F600}", "😀")
+    assert_eq("😀", "😀")
+    assert_eq(len("\u{feff}x"), 2)
+    assert_eq(ord("\u{feff}"), 65279)
+    assert_eq("tab\there", "tab" + chr(9) + "here")
+    assert_eq("a\r\n", "a" + chr(13) + chr(10))
+    assert_eq("q\"\\", "q" + chr(34) + chr(92))
+}
+
+@test
+fn test_escaped_braces_are_literal() {
+    let x = 5
+    assert_eq("\{x\}", "{" + "x" + "}")
+    assert_eq("\u{7B}x\u{7D}", "{" + "x" + "}")
+    assert_eq("{x} \{x\}", "5 " + chr(123) + "x" + chr(125))
+    assert_eq(len("\{\}"), 2)
+}
+
+@test
+fn test_chr_and_ord() {
+    assert_eq(chr(65), "A")
+    assert_eq(chr(233), "é")
+    assert_eq(chr(128512), "😀")
+    assert_eq(ord("A"), 65)
+    assert_eq(ord("😀"), 128512)
+    assert_eq(chr(ord("a") + 1), "b")
+    assert_eq(join(map([104, 105], fn(n) { return chr(n) }), ""), "hi")
+    assert_eq(typeof(ord("x")), "Int")
+}
+
+@test
+fn test_chr_and_ord_errors() {
+    assert_throws(fn() { chr(-1) })
+    assert_throws(fn() { chr(55296) })
+    assert_throws(fn() { chr(1114112) })
+    assert_throws(fn() { chr("A") })
+    assert_throws(fn() { ord("") })
+    assert_throws(fn() { ord("ab") })
+    assert_throws(fn() { ord(65) })
+    let mut code = ""
+    try {
+        chr(1114112)
+    } catch e {
+        code = e.code
+    }
+    assert_eq(code, "E0015")
+}

@@ -413,6 +413,23 @@ Suggested fix: parse the duration as a Float (`semantics::timeout_deadline` alre
 saturates), print it as given in the message, and accept `milliseconds`/`ms` like
 `schedule` units.
 
+**Fixed:** the limit is kept as a Float on both engines (`semantics::timeout_seconds`,
+`timeout_deadline(now, f64)`, exact to the nanosecond, still saturating), and the error prints
+it as a Forge number (`semantics::timeout_exceeded`: `exceeded 0.5 second limit`, still E0031).
+`wait`, `timeout` and `schedule every` share one unit list (`semantics::DURATION_UNITS`):
+`milliseconds`/`millisecond`/`ms`, `seconds`/`second`, `minutes`/`minute`, `hours`/`hour`
+(before, `wait` and `timeout` took only `seconds`, `schedule` only the three plurals). The
+words are matched after the number on the same line, not reserved, so `ms`, `second`, ... stay
+ordinary names in both editions. The parser turns `wait`/`timeout` units into seconds (`500
+ms` is `500 / 1000.0`, `2 minutes` is `2 * 60`); `schedule` keeps the canonical unit name and
+takes a fractional interval (`semantics::schedule_interval`), which must be positive on both
+engines (the interpreter used to spin on `every 0 seconds` and wrap a negative interval to
+centuries; a Float interval silently became 60 s). There are no `retry` delays to convert.
+retry_with_timeouts' reference now uses `timeout 150 ms { ... }`. Tests:
+`tests/durations_test.fg`, `tests/edition2027/durations_test.fg` (both engines),
+`semantics::tests::duration_units`, `durations_saturate_instead_of_panicking`,
+`runtime::metadata::tests::schedule_units_are_normalised`.
+
 ### 11. Interpreter: a struct method named `push` calls the builtin
 
 ```forge
@@ -530,6 +547,23 @@ returns only them (script name first, like `sys.argv`); allow them under `--sand
 (they come from the caller, not the host environment). word_tool_args is marked known
 failing until then.
 
+**Fixed:** `forge run file.fg [args...]` passes everything after the script path to the
+program, flags included (clap trailing var args): forge's own flags go before the file
+(`forge --interp run x.fg`, `forge run --allow-run x.fg`), and `forge run x.fg --interp`
+gives `--interp` to the program. `io.args()` is exactly the program's command line, like
+`sys.argv`: the script path as given, then the arguments (`["main.fg", "--top", "3"]`);
+`io.args_parse`/`args_get`/`args_has` look at the arguments after the path, up to a `--`.
+The arguments live in `runtime::program_args` (set once by the CLI, overridable per thread,
+carried into spawned tasks by `permissions::inherit`), never in the host's argv, so they do
+not depend on the `process` capability and `--sandbox` runs get them. A `Sandbox` sees only
+`Sandbox::args` (default empty), whatever its capabilities; MCP `run_forge` takes an optional
+`args` array (`io.args()` is `["<run_forge>", ...args]`). Binaries from `forge build --aot`
+/ `--native` see their own argv (the launcher fallback passes it to `forge run`).
+word_tool_args is no longer known failing (its reference reads `slice(io.args(), 1, ...)`).
+Tests: `tests/program_args_cli.rs` (both engines, with and without `--sandbox`),
+`run_forge_passes_program_arguments` (MCP), `host_stdin_and_argv_are_not_readable_without_process`
+(security), `runtime::program_args::tests`.
+
 ### 14. Exponent literals
 
 ```forge
@@ -541,6 +575,14 @@ lexer reads `1` and the name `e2`. Models write `1e9`, `2.5e-3` freely.
 
 Suggested fix: lex `digits[.digits](e|E)[+-]digits` as a Float literal; if exponents are
 deliberately unsupported, make `1e2` a syntax error that says so.
+
+**Fixed:** the lexer reads `digits[.digits](e|E)[+|-]digits` as one Float literal (`1e2` is
+`100.0`, `1.5e-3`, `2E+10`, `1_000e1_0`); digits must follow the `e` (after an optional sign),
+so `2ex` is still `2` then the name `ex`, and a literal too large for a Float (`1e999`) is a
+syntax error. `forge fmt` keeps the spelling (it is one token, so `1e-3` is not spaced as a
+subtraction); constants are ordinary Floats for the VM, the serializer and the JIT. Tests:
+`lexer::tests::test_exponent_floats`, `tests/literals_test.fg` and
+`tests/edition2027/literals_test.fg` (both engines); `llms.txt` and the spec list the forms.
 
 ### 15. JSON numbers lose their kind and precision
 
@@ -594,6 +636,20 @@ or built with `json.parse("\"\\ufeff\"")`, as csv_normalize does.
 
 Suggested fix: support `\u{XXXX}` (and `\uXXXX`), add `chr(n)`/`ord(s)`, and list the
 escapes in `llms.txt`.
+
+**Fixed:** `"..."` literals accept `\u{XXXX}` (1 to 6 hex digits) and `\uXXXX` (exactly 4;
+a UTF-16 surrogate pair `\uD83D\uDE00` is one character, as in JSON and JavaScript). A lone
+surrogate, a value above `10FFFF` or a malformed escape is a syntax error that says how to
+write it, and an unknown escape lists the valid ones. `chr(n)` and `ord(s)` are builtins on
+both engines (registry, type checker signatures `chr(Int) -> String`, `ord(String) -> Int`;
+`semantics::text` holds the rules, so invalid arguments are the same E0015 on both, with the
+argument type appended centrally). On the way: `\{` and `\}` produced a brace that still
+started an interpolation (`"\{x\}"` printed the value of `x`); escaped braces (also
+`\u{7B}`/`\u{7D}`) are now literal (the lexer marks them with the noncharacters U+FDD0/U+FDD1,
+which a literal therefore cannot contain). `llms.txt` and the spec list every escape.
+csv_normalize's reference now writes the byte-order mark as `"\u{feff}"`. Tests:
+`lexer::tests::test_unicode_escapes`, `test_invalid_escapes`, `semantics::text::tests`,
+`tests/unicode_escapes_test.fg` and `tests/edition2027/unicode_escapes_test.fg` (both engines).
 
 ### 20. `select` cannot report a closed channel
 

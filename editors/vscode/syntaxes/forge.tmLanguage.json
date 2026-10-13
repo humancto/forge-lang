@@ -47,7 +47,7 @@
       ]
     },
     "numbers": {
-      "match": "\\b(0x[0-9a-fA-F]+|0b[01]+|0o[0-7]+|\\d+\\.\\d+|\\d+(_\\d+)*)\\b",
+      "match": "\\b(0x[0-9a-fA-F]+|0b[01]+|0o[0-7]+|\\d[\\d_]*(\\.\\d[\\d_]*)?[eE][+-]?\\d[\\d_]*|\\d+\\.\\d+|\\d+(_\\d+)*)\\b",
       "name": "constant.numeric.forge"
     },
     "keywords": {

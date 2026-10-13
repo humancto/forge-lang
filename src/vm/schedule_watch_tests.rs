@@ -102,8 +102,8 @@ fn vm_schedule_zero_interval_errors() {
     let result = vm.execute(&chunk);
     assert!(result.is_err(), "zero interval should error");
     assert!(
-        result.unwrap_err().message.contains("positive integer"),
-        "error should mention positive integer"
+        result.unwrap_err().message.contains("positive number"),
+        "error should mention positive number"
     );
 }
 
