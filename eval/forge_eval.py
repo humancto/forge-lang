@@ -47,7 +47,11 @@ TASKS_DIR = os.path.join(EVAL_DIR, "tasks")
 TIERS = {
     "v1": TASKS_DIR,
     "v2": os.path.join(EVAL_DIR, "tasks_v2"),
+    "v3": os.path.join(EVAL_DIR, "tasks_v3"),
 }
+# Inputs produced by a task's `generator` script are cached here, outside
+# the task directories (ignored by version control).
+GENERATED_DIR = os.path.join(EVAL_DIR, ".generated")
 LLMS_TXT = os.path.join(REPO_ROOT, "llms.txt")
 
 LANGS = {
@@ -77,6 +81,15 @@ TIER_CATEGORIES = {
         "error_handling",
         "typed",
         "data",
+    ],
+    "v3": [
+        "modules",
+        "services",
+        "bulk_data",
+        "deep_algorithms",
+        "failures",
+        "pipelines",
+        "cli_text",
     ],
 }
 EDITIONS = ["2026", "2027"]
@@ -339,6 +352,12 @@ class Task:
         self.data = data
         self.tier = tier
         self.id = data.get("id", "")
+        # `generator`: a deterministic script (standard-library Python) that
+        # prints the content of a `stdin_file` missing from the task
+        # directory; see `generated_input`.
+        self.generator = data.get("generator")
+        self.generated_sha256 = dict(data.get("generated_sha256", {}))
+        self.generator_errors = []
         self.category = data.get("category", "")
         self.title = data.get("title", "")
         self.prompt = data.get("prompt", "").strip()
@@ -347,6 +366,9 @@ class Task:
         self.expected = data.get("expected_stdout", "")
         self.needs = list(data.get("needs", []))
         self.timeout = float(data.get("timeout", DEFAULT_TIMEOUT))
+        # `max_memory = "1GB"`: passed to Forge as --max-memory, so a run
+        # that balloons fails fast instead of exhausting the machine.
+        self.max_memory = data.get("max_memory")
         # The time limit proves that work overlaps (sleeps in concurrent
         # tasks), so the run must not compete for the CPU with other runs:
         # see `map_timed_last`.
@@ -359,6 +381,18 @@ class Task:
         self.sort_lines = bool(data.get("sort_lines", False))
         self.float_tolerance = data.get("float_tolerance")
         self.exit_code = data.get("exit_code", 0)
+        self.expected_stderr = data.get("expected_stderr")
+        # `answer = "files"`: the solution is several files in one text, each
+        # starting with a `// file: <path>` line (`# file:` in Python); see
+        # `split_answer_files`. Files the task provides in files/ win over
+        # the answer's (a provided main.fg is the driver that imports them).
+        self.answer = data.get("answer", "single")
+        # A reference that cannot pass today because of a Forge bug: validate
+        # reports it separately instead of failing. `known_failing_on` names
+        # the excused runs (labels such as "forge-vm-2027", or "check" for
+        # the type checker); empty means every Forge run and the check.
+        self.known_failing = data.get("known_failing")
+        self.known_failing_on = [str(x) for x in data.get("known_failing_on", [])]
         # Editions the task is scored under (a typed task may be 2027-only).
         self.editions = [str(e) for e in data.get("editions", EDITIONS)]
         # Several runs of one program (`[[case]]`): each has its own stdin,
@@ -371,6 +405,7 @@ class Task:
                 "args": list(c.get("args", [])),
                 "expected": c.get("expected_stdout", ""),
                 "exit_code": c.get("exit_code", 0),
+                "expected_stderr": c.get("expected_stderr"),
             })
         if self.cases and "expected_stdout" not in data:
             self.expected = "\n".join(
@@ -381,12 +416,24 @@ class Task:
         """`stdin`, or the content of `stdin_file` (relative to the task
         directory; for inputs too large to inline)."""
         if "stdin_file" in table:
-            path = os.path.join(self.dir, table["stdin_file"])
-            if os.path.isfile(path):
+            path = self.stdin_path(table["stdin_file"])
+            if path and os.path.isfile(path):
                 with open(path, encoding="utf-8") as f:
                     return f.read()
             return None
         return table.get("stdin")
+
+    def stdin_path(self, name):
+        """Where `stdin_file = name` is: in the task directory, else (with a
+        `generator`) in the generated-input cache, generating it first."""
+        path = os.path.join(self.dir, name)
+        if os.path.isfile(path) or not self.generator:
+            return path
+        try:
+            return generated_input(self, name)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            self.generator_errors.append(str(e))
+            return None
 
     def applies_to(self, edition):
         """Whether the task is scored under `edition` (None: the default, 2026)."""
@@ -421,7 +468,8 @@ class Task:
         if not isinstance(self.exit_code, int):
             out.append("exit_code must be an integer")
         if self.cases:
-            if set(self.data) & {"expected_stdout", "stdin", "stdin_file", "args", "exit_code"}:
+            if set(self.data) & {"expected_stdout", "stdin", "stdin_file", "args", "exit_code",
+                                 "expected_stderr"}:
                 out.append("tasks with [[case]] put stdin/args/expected_stdout in the cases")
             if self.mode == "server":
                 out.append("server tasks cannot have [[case]]")
@@ -432,13 +480,30 @@ class Task:
                 if "expected_stdout" not in c:
                     out.append("every [[case]] needs expected_stdout")
                 bad_keys = set(c) - {"name", "stdin", "stdin_file", "args", "expected_stdout",
-                                     "exit_code"}
+                                     "exit_code", "expected_stderr"}
                 if bad_keys:
                     out.append("unknown case keys: {}".format(sorted(bad_keys)))
         for r in self.requests:
-            bad_keys = set(r) - {"method", "path", "body", "headers", "status_only"}
+            bad_keys = set(r) - {"method", "path", "body", "headers", "status_only",
+                                 "concurrent", "wait", "show_headers"}
             if bad_keys:
                 out.append("unknown request keys: {}".format(sorted(bad_keys)))
+            if "concurrent" in r and (not isinstance(r["concurrent"], int)
+                                      or r["concurrent"] < 1):
+                out.append("request `concurrent` must be a positive integer")
+        if self.answer not in ("single", "files"):
+            out.append("answer must be \"single\" or \"files\"")
+        if self.known_failing is not None and not re.match(
+                r"^V\d+ finding \d+", str(self.known_failing)):
+            out.append("known_failing must name a finding (\"V3 finding <n>\")")
+        if self.known_failing_on and self.known_failing is None:
+            out.append("known_failing_on without known_failing")
+        if self.generator:
+            if not os.path.isfile(os.path.join(self.dir, self.generator)):
+                out.append("generator {} not found".format(self.generator))
+            out.extend("generator: {}".format(e) for e in self.generator_errors)
+        if self.generated_sha256 and not self.generator:
+            out.append("generated_sha256 without generator")
         bad = set(self.needs) - CAPABILITIES
         if bad:
             out.append("unknown needs: {}".format(sorted(bad)))
@@ -452,7 +517,8 @@ class Task:
             if "stdin_file" in table:
                 if "stdin" in table:
                     out.append("stdin and stdin_file are exclusive")
-                if not os.path.isfile(os.path.join(self.dir, table["stdin_file"])):
+                path = self.stdin_path(table["stdin_file"])
+                if not path or not os.path.isfile(path):
                     out.append("stdin_file {} not found".format(table["stdin_file"]))
         if self.uses_fixture() and "net" not in self.needs:
             out.append("tasks using {base_url} or {closed_url} need `net`")
@@ -463,8 +529,13 @@ class Task:
             "id", "category", "title", "prompt", "stdin", "args", "expected_stdout",
             "needs", "timeout", "mode", "output_files", "request", "trim",
             "sort_lines", "float_tolerance", "notes", "tags", "port",
-            "exit_code", "editions", "case", "stdin_file",
+            "exit_code", "editions", "case", "stdin_file", "expected_stderr", "answer",
+            "known_failing", "known_failing_on", "generator", "generated_sha256",
+            "max_memory",
         }
+        if self.max_memory is not None and not re.fullmatch(
+                r"[0-9]+(KB|MB|GB)", str(self.max_memory)):
+            out.append("max_memory must look like \"512MB\" or \"1GB\"")
         if unknown:
             out.append("unknown keys: {}".format(sorted(unknown)))
         return out
@@ -479,11 +550,160 @@ class Task:
         if self.cases:
             return self.cases
         return [{"name": None, "stdin": self.stdin, "args": self.args,
-                 "expected": self.expected, "exit_code": self.exit_code}]
+                 "expected": self.expected, "exit_code": self.exit_code,
+                 "expected_stderr": self.expected_stderr}]
+
+    def excused(self, label):
+        """Whether a failing `label` run (or "check") is a known failure."""
+        if self.known_failing is None or label == "python":
+            return False
+        return not self.known_failing_on or label in self.known_failing_on
 
 
 def case_header(name, exit_code):
     return "=== case {} (exit {})".format(name, exit_code)
+
+
+_GENERATE_LOCK = threading.Lock()
+
+
+def generated_input(task, name):
+    """The path of `name` produced by `task.generator`: the script runs as
+    `python3 <generator> <name>` in the task directory and prints the file's
+    content. The result is cached under GENERATED_DIR/<task id>/ and checked
+    against `generated_sha256[name]` when the task gives one, so a
+    generator that is not deterministic is caught instead of silently
+    changing the expected output."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or not re.fullmatch(r"[A-Za-z0-9_-]+", task.id):
+        raise RuntimeError("bad generated file name {!r}".format(name))
+    out_dir = os.path.join(GENERATED_DIR, task.id)
+    path = os.path.join(out_dir, name)
+    want = task.generated_sha256.get(name)
+    with _GENERATE_LOCK:
+        if os.path.isfile(path):
+            if not want or file_sha256(path) == want:
+                return path
+        os.makedirs(out_dir, exist_ok=True)
+        p = subprocess.run([sys.executable or "python3", task.generator, name], cwd=task.dir,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        if p.returncode != 0:
+            raise RuntimeError("{} {} failed: {}".format(
+                task.generator, name, p.stderr.decode("utf-8", "replace")[-300:]))
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(p.stdout)
+        os.replace(tmp, path)
+        if want and file_sha256(path) != want:
+            raise RuntimeError("{} produced {} with sha256 {}, task.toml says {}".format(
+                task.generator, name, file_sha256(path), want))
+        return path
+
+
+def file_sha256(path):
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+FILE_MARKERS = {
+    "forge": re.compile(r"^\s*//\s*file:\s*(\S+)\s*$"),
+    "python": re.compile(r"^\s*#\s*file:\s*(\S+)\s*$"),
+}
+
+
+def file_marker_example(lang):
+    return {"forge": "// file: main.fg", "python": "# file: main.py"}[lang]
+
+
+def split_answer_files(text, lang):
+    """Split a multi-file answer into [(relative path, content)].
+
+    Each file starts with a marker line `// file: <path>` (`# file: <path>`
+    for Python) and runs until the next marker. Paths are relative, use `/`,
+    stay inside the working directory and end in the language's extension.
+    Blank and comment lines before the first marker are ignored; other code
+    there belongs to `main.<ext>` (prepended when the answer also has a
+    marked main file). An answer without any marker is the single file
+    `main.<ext>`. Raises ValueError for a bad or duplicated path."""
+    ext = LANGS[lang]["ext"]
+    marker = FILE_MARKERS[lang]
+    comment = "//" if lang == "forge" else "#"
+    main = "main." + ext
+    files = []
+    lead = []
+    current = None
+    for line in text.splitlines(True):
+        m = marker.match(line)
+        if m:
+            name = m.group(1).strip("`'\"")
+            norm = os.path.normpath(name).replace(os.sep, "/")
+            if (os.path.isabs(name) or norm.startswith("..") or norm != name.lstrip("./")
+                    or not re.fullmatch(r"[A-Za-z0-9_./-]+", name)
+                    or not name.endswith("." + ext)):
+                raise ValueError("bad file path in marker: {!r}".format(name))
+            if any(n == norm for n, _ in files):
+                raise ValueError("file {} appears twice".format(norm))
+            current = [norm, []]
+            files.append(current)
+        elif current is None:
+            lead.append(line)
+        else:
+            current[1].append(line)
+    out = [(n, "".join(body)) for n, body in files]
+    code = [l for l in lead if l.strip() and not l.strip().startswith(comment)]
+    if not out:
+        return [(main, text)]
+    if code:
+        for i, (n, body) in enumerate(out):
+            if n == main:
+                out[i] = (n, "".join(lead) + body)
+                break
+        else:
+            out.insert(0, (main, "".join(lead)))
+    return out
+
+
+def copy_provided_files(task, workdir):
+    """Copy the task's files/ into `workdir` (replacing what is there)."""
+    if not os.path.isdir(task.files_dir()):
+        return
+    for name in os.listdir(task.files_dir()):
+        src = os.path.join(task.files_dir(), name)
+        dst = os.path.join(workdir, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        else:
+            shutil.copy(src, dst)
+
+
+def prepare_workdir(task, lang, source_path, workdir):
+    """Lay out a solution in `workdir` the way it runs and return the path
+    of the entry file (`main.fg` / `main.py`). A single-file task gets the
+    task's files/ plus the solution as main.<ext>. An `answer = "files"`
+    task gets the answer's files, then the task's files/ over them (a
+    provided driver cannot be replaced). Raises ValueError for an answer
+    that cannot be split."""
+    ext = LANGS[lang]["ext"]
+    entry = os.path.join(workdir, "main." + ext)
+    if task.answer != "files":
+        copy_provided_files(task, workdir)
+        shutil.copy(source_path, entry)
+        return entry
+    with open(source_path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    for name, content in split_answer_files(text, lang):
+        path = os.path.join(workdir, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    copy_provided_files(task, workdir)
+    if not os.path.isfile(entry):
+        raise ValueError("the answer has no main.{} (and the task provides none)".format(ext))
+    return entry
 
 
 def tier_names(tier):
@@ -753,6 +973,8 @@ def forge_command(cfg, task, workdir, source, extra_args, port=None):
     if cfg.edition:
         cmd += ["--edition", cfg.edition]
     cmd += ["--sandbox", "--error-format", "json", "--max-time", str(task.timeout)]
+    if task.max_memory:
+        cmd += ["--max-memory", task.max_memory]
     needs = set(task.needs)
     reads = [workdir] if "read" in needs else []
     if cfg.grant_stdin_file:
@@ -782,17 +1004,12 @@ def run_program(cfg, task, source_path, case=None):
     case_stdin, case_args = case["stdin"], case["args"]
     workdir = tempfile.mkdtemp(prefix="forge-eval-")
     try:
-        if os.path.isdir(task.files_dir()):
-            for name in os.listdir(task.files_dir()):
-                src = os.path.join(task.files_dir(), name)
-                dst = os.path.join(workdir, name)
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst)
-                else:
-                    shutil.copy(src, dst)
-        ext = LANGS[cfg.lang]["ext"]
-        source = os.path.join(workdir, "main." + ext)
-        shutil.copy(source_path, source)
+        try:
+            source = prepare_workdir(task, cfg.lang, source_path, workdir)
+        except ValueError as e:
+            return {"stdout": "", "stderr": "answer files: {}".format(e), "returncode": None,
+                    "timed_out": False, "duration": 0, "transcript": "", "command": [],
+                    "bad_answer": str(e)}
         subs = {"workdir": workdir}
         used = json.dumps([case_args, case_stdin])
         if "{base_url}" in used:
@@ -837,6 +1054,7 @@ def run_program(cfg, task, source_path, case=None):
             transcript += "--- {} ---\n{}".format(name, content)
         result["transcript"] = transcript
         result["command"] = cmd
+        result["stderr_text"] = program_stderr(cfg.lang, result["stderr"])
         return result
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -871,6 +1089,22 @@ def run_process(cmd, cwd, env, stdin, timeout):
 
 
 def http_request(method, url, body=None, timeout=5, headers=None):
+    status, text, _ = http_request_full(method, url, body, timeout, headers)
+    return status, text
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Report a 3xx answer as it is instead of following it."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def http_request_full(method, url, body=None, timeout=5, headers=None):
+    """(status, body text, response headers with lower-case names)."""
     data = None
     sent = {}
     if body is not None:
@@ -879,10 +1113,54 @@ def http_request(method, url, body=None, timeout=5, headers=None):
     sent.update(headers or {})
     req = urllib.request.Request(url, data=data, method=method, headers=sent)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace")
+        with _OPENER.open(req, timeout=timeout) as resp:
+            got = {k.lower(): v for k, v in resp.headers.items()}
+            return resp.status, resp.read().decode("utf-8", "replace"), got
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
+        got = {k.lower(): v for k, v in (e.headers or {}).items()}
+        return e.code, e.read().decode("utf-8", "replace"), got
+
+
+def request_transcript(req, base, i=None):
+    """One request's transcript entry: `STATUS <code>`, the requested
+    response headers (`<name>: <value>`, `<missing>` when absent) and, unless
+    `status_only`, the canonical body. `{i}` in the path and body is the
+    copy's number (1..n) of a `concurrent` request."""
+    path, body = req["path"], req.get("body")
+    if i is not None:
+        path = path.replace("{i}", str(i))
+        body = body.replace("{i}", str(i)) if body is not None else None
+    timeout = 30 if i is not None else 10
+    status, text, headers = http_request_full(
+        req.get("method", "GET"), base + path, body, timeout=timeout, headers=req.get("headers"))
+    lines = ["STATUS {}".format(status)]
+    for name in req.get("show_headers", []):
+        lines.append("{}: {}".format(name.lower(), headers.get(name.lower(), "<missing>")))
+    if not req.get("status_only"):
+        lines.append(canonical_body(text))
+    return "\n".join(lines)
+
+
+def concurrent_transcript(req, base):
+    """Send `concurrent` copies of a request at once. The transcript is
+    `CONCURRENT <n>` followed by each distinct answer (sorted) with its
+    count, `x<count> STATUS ...`, so it does not depend on the order in
+    which the server handled them."""
+    n = int(req["concurrent"])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(n, 64)) as pool:
+        def one(i):
+            try:
+                return request_transcript(req, base, i)
+            except Exception as e:  # connection reset, timeout...
+                return "ERROR {}".format(type(e).__name__)
+        answers = list(pool.map(one, range(1, n + 1)))
+    counts = {}
+    for a in answers:
+        counts[a] = counts.get(a, 0) + 1
+    lines = ["CONCURRENT {}".format(n)]
+    for a in sorted(counts):
+        lines.append("x{} {}".format(counts[a], a))
+    return "\n".join(lines)
 
 
 def canonical_body(text):
@@ -920,14 +1198,13 @@ def run_server(cmd, cwd, env, task, port):
         if up:
             base = "http://127.0.0.1:{}".format(port)
             for req in task.requests:
+                if req.get("wait"):
+                    time.sleep(float(req["wait"]))
+                if req.get("concurrent"):
+                    out_lines.append(concurrent_transcript(req, base))
+                    continue
                 try:
-                    status, body = http_request(
-                        req.get("method", "GET"), base + req["path"], req.get("body"),
-                        headers=req.get("headers"))
-                    if req.get("status_only"):
-                        out_lines.append("STATUS {}".format(status))
-                    else:
-                        out_lines.append("STATUS {}\n{}".format(status, canonical_body(body)))
+                    out_lines.append(request_transcript(req, base))
                 except Exception as e:  # connection reset, timeout...
                     out_lines.append("ERROR {}".format(type(e).__name__))
         elif proc.poll() is None:
@@ -1015,6 +1292,19 @@ def parse_forge_diagnostics(stderr):
     return diags
 
 
+def program_stderr(lang, stderr):
+    """What the program itself wrote to stderr: for Forge, without the
+    `--error-format json` diagnostic lines the runner adds."""
+    if lang != "forge":
+        return stderr
+    keep = []
+    for line in stderr.splitlines(True):
+        if parse_forge_diagnostics(line):
+            continue
+        keep.append(line)
+    return "".join(keep)
+
+
 PY_EXC = re.compile(r"^(\w+(?:\.\w+)*(?:Error|Exception|Exit|Interrupt|Warning)|\w+Error)(?::\s*(.*))?$")
 
 
@@ -1100,9 +1390,17 @@ def evaluate(cfg, task, source_path):
     runs = []
     for case in task.run_cases():
         result = run_program(cfg, task, source_path, case)
+        if result.get("bad_answer"):
+            return {"status": "fail", "class": "no_code", "code": None,
+                    "message": result["bad_answer"], "warnings": [], "duration": 0,
+                    "stdout": "", "stderr": result["stderr"]}
         expected_exit = case["exit_code"] if task.mode != "server" else 0
+        stderr_ok = (case.get("expected_stderr") is None or outputs_match(
+            result.get("stderr_text", ""), task, case["expected_stderr"]))
+        result["stderr_ok"] = stderr_ok
         passed = (result.get("returncode") == expected_exit and not result.get("timed_out")
-                  and outputs_match(result["transcript"], task, case["expected"]))
+                  and outputs_match(result["transcript"], task, case["expected"])
+                  and stderr_ok)
         runs.append((case, result, passed, expected_exit))
     # The first failing run decides the class; a task with [[case]] tables
     # reports every case's output under a `=== case <name> (exit <code>)`
@@ -1111,6 +1409,11 @@ def evaluate(cfg, task, source_path):
         (r for r in runs if not r[2]), runs[0])
     passed = all(r[2] for r in runs)
     klass, code, message, warnings = classify(cfg.lang, result, passed, expected_exit)
+    stderr_diff = []
+    if klass == "wrong_output" and not result.get("stderr_ok", True):
+        stderr_diff = diff_snippet(case["expected_stderr"], result.get("stderr_text", ""), task)
+        if message is None and outputs_match(result["transcript"], task, case["expected"]):
+            message = "stderr differs"
     if task.cases:
         transcript = "\n".join(
             case_header(c["name"], r.get("returncode")) + "\n" + r["transcript"].strip("\n")
@@ -1134,7 +1437,8 @@ def evaluate(cfg, task, source_path):
         "stderr": stderr[-4000:],
     }
     if klass == "wrong_output":
-        out["diff"] = diff_snippet(task.expected, transcript, task)
+        out["diff"] = diff_snippet(task.expected, transcript, task) + [
+            "stderr " + d for d in stderr_diff]
     return out
 
 
@@ -1183,28 +1487,38 @@ def check_reference(forge, task, edition):
     as `main.fg` next to a copy of the task's `files/`, the way it runs, so
     the modules it imports are visible to the checker."""
     workdir = tempfile.mkdtemp(prefix="forge-eval-check-")
+    diags = []
     try:
-        if os.path.isdir(task.files_dir()):
-            for name in os.listdir(task.files_dir()):
-                src = os.path.join(task.files_dir(), name)
-                dst = os.path.join(workdir, name)
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst)
-                else:
-                    shutil.copy(src, dst)
-        shutil.copy(task.reference("forge"), os.path.join(workdir, "main.fg"))
-        cmd = [forge, "--edition", edition, "check", "--format", "json", "main.fg"]
         try:
-            p = subprocess.run(cmd, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=60)
-        except subprocess.TimeoutExpired:
-            return [{"code": "timeout", "message": "forge check timed out"}]
+            prepare_workdir(task, "forge", task.reference("forge"), workdir)
+        except ValueError as e:
+            return [{"code": "answer", "message": str(e)}]
+        # Every .fg file of a multi-file answer is checked (the entry
+        # alone would not report a module's warnings).
+        names = ["main.fg"]
+        if task.answer == "files":
+            with open(task.reference("forge"), encoding="utf-8") as f:
+                names = [n for n, _ in split_answer_files(f.read(), "forge")]
+            if "main.fg" not in names:
+                names.insert(0, "main.fg")
+        for name in names:
+            cmd = [forge, "--edition", edition, "check", "--format", "json", name]
+            try:
+                p = subprocess.run(cmd, cwd=workdir, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=60)
+            except subprocess.TimeoutExpired:
+                diags.append({"code": "timeout", "message": "forge check timed out"})
+                continue
+            out = p.stdout.decode("utf-8", "replace") + p.stderr.decode("utf-8", "replace")
+            found = parse_forge_diagnostics(out)
+            if p.returncode != 0 and not found:
+                found = [{"code": "exit {}".format(p.returncode), "message": out.strip()[-300:]}]
+            if name != "main.fg":
+                for d in found:
+                    d["line"] = "{}:{}".format(name, d.get("line"))
+            diags.extend(found)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-    out = p.stdout.decode("utf-8", "replace") + p.stderr.decode("utf-8", "replace")
-    diags = parse_forge_diagnostics(out)
-    if p.returncode != 0 and not diags:
-        diags = [{"code": "exit {}".format(p.returncode), "message": out.strip()[-300:]}]
     return diags
 
 
@@ -1259,6 +1573,7 @@ def cmd_validate(args):
         if c.label() not in [x.label() for x in configs]:
             configs.append(c)
     failures = []
+    known = []
     start = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         # References must also be clean for the type checker (warnings
@@ -1266,11 +1581,17 @@ def cmd_validate(args):
         # A task pinned to 2026 is checked in 2026.
         checks = {pool.submit(check_reference, forge, t, max(t.editions)): t
                   for t in tasks if os.path.isfile(t.reference("forge"))}
+        check_failed = set()
         for fut in concurrent.futures.as_completed(checks):
+            t = checks[fut]
             for d in fut.result():
-                problems.append("{}: reference.fg:{}: {} {} ({})".format(
-                    checks[fut].id, d.get("line"), d.get("code"), d.get("message"),
-                    d.get("severity")))
+                text = "{}: reference.fg:{}: {} {} ({})".format(
+                    t.id, d.get("line"), d.get("code"), d.get("message"), d.get("severity"))
+                if t.excused("check"):
+                    known.append(text)
+                    check_failed.add(t.id)
+                else:
+                    problems.append(text)
     def run_reference(job):
         t, c = job
         r = evaluate(c, t, t.reference(c.lang))
@@ -1282,16 +1603,28 @@ def cmd_validate(args):
         return r
 
     results = map_timed_last(run_reference, jobs, lambda j: j[0], args.jobs)
+    failed_known = set(check_failed)
     for (t, c), r in zip(jobs, results):
         if r["status"] != "pass":
             failures.append((t, c, r))
+            if t.excused(c.label()):
+                failed_known.add(t.id)
     for t, c, r in sorted(failures, key=lambda x: (x[0].id, x[1].label())):
-        problems.append("{} [{}]: {} {} {}".format(
+        out = known if t.excused(c.label()) else problems
+        out.append("{} [{}]: {} {} {}".format(
             t.id, c.label(), r["class"], r.get("code") or "", (r.get("message") or "").strip()))
         for d in r.get("diff", []):
-            problems.append("    " + d)
+            out.append("    " + d)
         if args.verbose and r.get("stderr"):
-            problems.append("    stderr: " + r["stderr"].strip().replace("\n", "\n            "))
+            out.append("    stderr: " + r["stderr"].strip().replace("\n", "\n            "))
+    # A known-failing task whose excused runs all pass now: its finding is
+    # probably fixed, so the mark should go (reported, not a failure).
+    ran = {}
+    for t, c in jobs:
+        ran.setdefault(t.id, {"check"}).add(c.label())
+    fixed = sorted({t.id for t in tasks if t.known_failing is not None
+                    and t.id not in failed_known
+                    and set(t.known_failing_on) <= ran.get(t.id, set())})
     elapsed = time.time() - start
     print("forge: {}".format(forge))
     for tier in TIERS:
@@ -1304,6 +1637,16 @@ def cmd_validate(args):
                 "{} {}".format(k, v) for k, v in sorted(per_cat.items()))))
     print("runs: {} across {} in {:.1f}s".format(
         len(jobs), ", ".join(c.label() for c in configs), elapsed))
+    marked = sorted({t.id: t.known_failing for t in tasks if t.known_failing is not None}.items())
+    if marked:
+        print("\nKNOWN FAILING ({} tasks, not counted as failures):".format(len(marked)))
+        for tid, why in marked:
+            print("  {}: {}".format(tid, why))
+        for k in known:
+            print("    " + k)
+    if fixed:
+        print("\nNOTE: known-failing tasks that pass now (remove `known_failing`): {}".format(
+            ", ".join(fixed)))
     if problems:
         print("\nFAILED ({} problems):".format(len(problems)))
         for p in problems:
@@ -1346,17 +1689,33 @@ def system_prompt(lang, context):
 def user_prompt(task, lang="forge"):
     """The task prompt; a Forge task that is scored in one edition only says
     which (the program runs as `forge --edition <E> run main.fg`)."""
+    text = task.prompt
+    if task.answer == "files":
+        ext = LANGS[lang]["ext"]
+        text += (
+            "\n\nYour answer consists of several files. Put all of them in one code block "
+            "and start each file with a line `{}` naming its path relative to the working "
+            "directory (`main.{}` is the program that runs).".format(
+                file_marker_example(lang).replace("main." + ext, "<path>"), ext))
     if lang == "forge" and len(task.editions) == 1:
-        return task.prompt + (
+        text += (
             "\n\nThe program runs with Forge edition {0} "
             "(`forge --edition {0} run main.fg`).".format(task.editions[0]))
-    return task.prompt
+    return text
 
 
-def extract_code(response, lang):
+def extract_code(response, lang, multi=False):
     """The code block to run: the first block fenced with the language's
-    tag, else the longest fenced block, else the raw text."""
+    tag, else the longest fenced block, else the raw text. With `multi`
+    (an `answer = "files"` task), every fenced block that holds a file
+    marker is kept, joined in order, so an answer may put each file in a
+    block of its own."""
     blocks = re.findall(r"```([\w+-]*)[^\n]*\n(.*?)(?:```|\Z)", response, re.S)
+    if multi:
+        marker = FILE_MARKERS[lang]
+        marked = [b for _, b in blocks if any(marker.match(l) for l in b.splitlines())]
+        if len(marked) > 1:
+            return "".join(b if b.endswith("\n") else b + "\n" for b in marked), "files"
     tags = {"forge": ("forge", "fg"), "python": ("python", "py", "python3")}[lang]
     for tag, body in blocks:
         if tag.lower() in tags and body.strip():
@@ -1593,7 +1952,7 @@ def cmd_generate(args):
             return task.id, "error: {}".format(e)
         with open(os.path.join(tdir, "response.txt"), "w", encoding="utf-8") as f:
             f.write(reply)
-        code, how = extract_code(reply, lang)
+        code, how = extract_code(reply, lang, task.answer == "files")
         with open(sol, "w", encoding="utf-8") as f:
             f.write(code)
         status = "ok ({})".format(how)
@@ -1611,7 +1970,7 @@ def cmd_generate(args):
                     return task.id, status + "; repair error: {}".format(e)
                 with open(os.path.join(tdir, "response2.txt"), "w", encoding="utf-8") as f:
                     f.write(reply2)
-                code2, _ = extract_code(reply2, lang)
+                code2, _ = extract_code(reply2, lang, task.answer == "files")
                 with open(os.path.join(tdir, "solution2." + ext), "w", encoding="utf-8") as f:
                     f.write(code2)
                 status += "; repaired"
@@ -1671,6 +2030,9 @@ def cmd_score(args):
         r = evaluate(cfg, task, os.path.join(tdir, "solution." + ext))
         r["id"] = task.id
         r["category"] = task.category
+        if task.known_failing is not None and lang == "forge":
+            # The reference itself fails today: a failure here may be the bug.
+            r["known_failing"] = task.known_failing
         r2 = os.path.join(tdir, "solution2." + ext)
         if os.path.isfile(r2):
             rr = evaluate(cfg, task, r2)
@@ -1803,6 +2165,8 @@ def render_report_md(report):
                 head += " (warnings: {})".format(", ".join(r["warnings"]))
             if r.get("repair"):
                 head += " → repair: {}".format(r["repair"]["status"])
+            if r.get("known_failing"):
+                head += " [reference fails too: {}]".format(r["known_failing"])
             lines.append(head)
             for d in r.get("diff", [])[:3]:
                 lines.append("  - {}".format(md_escape(d)[:200]))
@@ -2002,26 +2366,30 @@ def cmd_selftest(args):
            "message_prefix")
 
     n_v2 = selftest_v2_features(forge, args, expect)
+    n_v3 = selftest_v3_features(forge, args, expect)
 
     if failures:
         print("selftest FAILED:")
         for f in failures:
             print("  " + f)
         return 1
-    print("selftest OK ({} scoring cases, {} v2 harness checks)".format(
-        len(SELFTEST_CASES) + 1, n_v2))
+    print("selftest OK ({} scoring cases, {} v2 and {} v3 harness checks)".format(
+        len(SELFTEST_CASES) + 1, n_v2, n_v3))
     return 0
 
 
-def make_selftest_task(root, category, data, files):
-    """A throwaway task under `root` (not one of the real tiers)."""
+def make_selftest_task(root, category, data, files, tier="v2"):
+    """A throwaway task under `root` (not one of the real tiers). `files`
+    maps paths inside the task directory (e.g. `files/main.fg`) to text."""
     tdir = os.path.join(root, category, data["id"])
     os.makedirs(tdir, exist_ok=True)
     for name, text in files.items():
-        with open(os.path.join(tdir, name), "w", encoding="utf-8") as f:
+        path = os.path.join(tdir, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             f.write(text)
     data = dict(data, category=category, title="selftest", prompt="selftest")
-    return Task(tdir, data, "v2")
+    return Task(tdir, data, tier)
 
 
 def selftest_v2_features(forge, args, expect):
@@ -2193,6 +2561,176 @@ def selftest_v2_features(forge, args, expect):
     return checks[0]
 
 
+def selftest_v3_features(forge, args, expect):
+    """Harness features added for the v3 tier: multi-file answers (splitting,
+    extraction, provided drivers winning), generated inputs, expected_stderr,
+    known-failing marks, max_memory, and the server runner's concurrent
+    requests, waits and response headers. Returns the number of checks."""
+    checks = [0]
+
+    def check(cond, what):
+        checks[0] += 1
+        expect(cond, "v3: " + what)
+
+    # Splitting multi-file answers.
+    text = ("// my answer\n\n// file: main.fg\nimport { f } from \"lib/util.fg\"\nprintln(f())\n"
+            "// file: lib/util.fg\nfn f() { return 1 }\n")
+    got = split_answer_files(text, "forge")
+    check([n for n, _ in got] == ["main.fg", "lib/util.fg"]
+          and got[1][1] == "fn f() { return 1 }\n", "split_answer_files {!r}".format(got))
+    check(split_answer_files("println(1)\n", "forge") == [("main.fg", "println(1)\n")],
+          "an answer without markers is main.fg")
+    got = split_answer_files("let x = 1\n// file: lib.fg\nfn g() { return 2 }\n", "forge")
+    check([n for n, _ in got] == ["main.fg", "lib.fg"] and got[0][1] == "let x = 1\n",
+          "code before the first marker belongs to main.fg: {!r}".format(got))
+    got = split_answer_files("# file: main.py\nimport helper\n# file: helper.py\nX = 1\n", "python")
+    check([n for n, _ in got] == ["main.py", "helper.py"], "python markers")
+    for bad in ("// file: ../x.fg\n", "// file: /abs.fg\n", "// file: a.py\n",
+                "// file: a.fg\n// file: ./a.fg\n"):
+        try:
+            split_answer_files(bad, "forge")
+            check(False, "bad marker accepted: {!r}".format(bad))
+        except ValueError:
+            check(True, "bad marker rejected")
+    reply = ("Here:\n```forge\n// file: main.fg\nprintln(1)\n```\nand\n"
+             "```forge\n// file: lib.fg\nfn f() { return 1 }\n```\n")
+    code, how = extract_code(reply, "forge", multi=True)
+    check(how == "files" and [n for n, _ in split_answer_files(code, "forge")] == [
+        "main.fg", "lib.fg"], "extract_code joins marked blocks: {!r}".format(how))
+    check(extract_code(reply, "forge")[0] == "// file: main.fg\nprintln(1)\n",
+          "extract_code unchanged for single-file tasks")
+
+    root = tempfile.mkdtemp(prefix="forge-eval-selftest-v3-")
+    try:
+        fcfg = RunConfig("forge", forge, args.engine)
+        pcfg = RunConfig("python", python=args.python)
+
+        def write(name, content):
+            path = os.path.join(root, name)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return path
+
+        # A multi-file answer whose driver main.fg the task provides.
+        driver = ("import { greet } from \"lib/greet.fg\"\nimport { count } from \"lib/state.fg\"\n"
+                  "println(greet(\"Ada\"))\nprintln(count())\n")
+        mtask = make_selftest_task(root, "modules", {
+            "id": "st_multi", "answer": "files", "expected_stdout": "hi Ada\n2\n"},
+            {"files/main.fg": driver}, tier="v3")
+        check("// file: <path>" in user_prompt(mtask, "forge")
+              and "# file: <path>" in user_prompt(mtask, "python"), "multi-file prompt note")
+        answer = write("multi.fg", (
+            "// file: lib/state.fg\nlet mut n = 0\nfn bump() {\n    n += 1\n    return n\n}\n"
+            "fn count() -> Int {\n    return n\n}\n"
+            "// file: lib/greet.fg\nimport { bump } from \"state.fg\"\n"
+            "fn greet(name: String) -> String {\n    bump()\n    bump()\n"
+            "    return \"hi {name}\"\n}\n"
+            "// file: main.fg\nprintln(\"the driver must win\")\n"))
+        r = evaluate(fcfg, mtask, answer)
+        check(r["status"] == "pass", "multi-file answer with a provided driver: {} {} {}".format(
+            r["class"], r.get("diff"), r.get("stderr", "")[-300:]))
+        bad = write("bad_multi.fg", "// file: ../escape.fg\nprintln(1)\n")
+        r = evaluate(fcfg, mtask, bad)
+        check(r["class"] == "no_code" and "bad file path" in (r.get("message") or ""),
+              "a bad multi-file answer is no_code: {} {}".format(r["class"], r.get("message")))
+        own = make_selftest_task(root, "modules", {
+            "id": "st_multi_own", "answer": "files", "expected_stdout": "3\n"}, {}, tier="v3")
+        answer = write("own.fg", "// file: main.fg\nimport { three } from \"m.fg\"\nprintln(three())\n"
+                                 "// file: m.fg\nfn three() { return 3 }\n")
+        r = evaluate(fcfg, own, answer)
+        check(r["status"] == "pass", "multi-file answer with its own main.fg: {} {}".format(
+            r["class"], r.get("stderr", "")[-300:]))
+        nomain = write("nomain.fg", "// file: m.fg\nfn three() { return 3 }\n")
+        r = evaluate(fcfg, own, nomain)
+        check(r["class"] == "no_code", "a multi-file answer without main.fg is no_code")
+
+        # Generated inputs: cached, checked against the recorded sha256.
+        gen = ("import sys\nname = sys.argv[1]\n"
+               "sys.stdout.write(''.join('{}\\n'.format(i) for i in range(1, 1001)))\n")
+        payload = "".join("{}\n".format(i) for i in range(1, 1001)).encode()
+        import hashlib
+        sha = hashlib.sha256(payload).hexdigest()
+        gtask_data = {"id": "st_generated", "stdin_file": "nums.txt", "generator": "gen.py",
+                      "generated_sha256": {"nums.txt": sha}, "expected_stdout": "500500\n"}
+        gtask = make_selftest_task(root, "bulk_data", gtask_data, {"gen.py": gen}, tier="v3")
+        check(gtask.stdin == payload.decode() and not gtask.generator_errors,
+              "generated stdin: {}".format(gtask.generator_errors))
+        cached = os.path.join(GENERATED_DIR, "st_generated", "nums.txt")
+        check(os.path.isfile(cached), "generated input is cached")
+        sum_fg = write("sum.fg", "let mut t = 0\nfor l in fs.lines(\"/dev/stdin\") {\n"
+                                 "    if l != \"\" {\n        t += int(l)\n    }\n}\nprintln(t)\n")
+        r = evaluate(fcfg, gtask, sum_fg)
+        check(r["status"] == "pass", "generated stdin reaches the program: {}".format(r["class"]))
+        bad_data = dict(gtask_data, id="st_generated_bad", generated_sha256={"nums.txt": "0" * 64})
+        btask = make_selftest_task(root, "bulk_data", bad_data, {"gen.py": gen}, tier="v3")
+        check(any("sha256" in p for p in btask.problems()),
+              "a generator whose output changed is a schema problem: {}".format(btask.problems()))
+        shutil.rmtree(os.path.join(GENERATED_DIR, "st_generated"), ignore_errors=True)
+        shutil.rmtree(os.path.join(GENERATED_DIR, "st_generated_bad"), ignore_errors=True)
+
+        # expected_stderr (Forge diagnostics lines are not program output).
+        stask = make_selftest_task(root, "cli_text", {
+            "id": "st_stderr", "case": [
+                {"name": "ok", "stdin": "x\n", "expected_stdout": "out\n",
+                 "expected_stderr": "warn: x\n", "exit_code": 2}]}, {}, tier="v3")
+        good = write("stderr.fg", "println(\"out\")\neprintln(\"warn: {input()}\")\nexit(2)\n")
+        r = evaluate(fcfg, stask, good)
+        check(r["status"] == "pass", "expected_stderr on forge: {} {} {}".format(
+            r["class"], r.get("message"), r.get("diff")))
+        wrong = write("stderr_wrong.fg", "println(\"out\")\neprintln(\"oops\")\nexit(2)\n")
+        r = evaluate(fcfg, stask, wrong)
+        check(r["class"] == "wrong_output" and "stderr differs" in (r.get("message") or ""),
+              "wrong stderr: {} {}".format(r["class"], r.get("message")))
+        good_py = write("stderr.py", "import sys\nprint('out')\n"
+                                     "sys.stderr.write('warn: ' + sys.stdin.read().strip() + '\\n')\n"
+                                     "sys.exit(2)\n")
+        r = evaluate(pcfg, stask, good_py)
+        check(r["status"] == "pass", "expected_stderr on python: {}".format(r.get("message")))
+        check(program_stderr("forge", '{"code": "T0006", "message": "m", "severity": "warning"}\n'
+                                      "real\n") == "real\n", "program_stderr drops diagnostics")
+
+        # Known-failing marks and max_memory.
+        kf = make_selftest_task(root, "bulk_data", {
+            "id": "st_known", "expected_stdout": "", "known_failing": "V3 finding 1",
+            "known_failing_on": ["forge-vm"], "max_memory": "64MB"}, {}, tier="v3")
+        check(kf.excused("forge-vm") and not kf.excused("forge-interp")
+              and not kf.excused("python"), "excused labels")
+        check("--max-memory" in forge_command(fcfg, kf, root, "main.fg", []), "max_memory flag")
+        bad_kf = make_selftest_task(root, "bulk_data", {
+            "id": "st_known_bad", "expected_stdout": "", "known_failing": "flaky",
+            "max_memory": "lots"}, {}, tier="v3")
+        probs = bad_kf.problems()
+        check(any("known_failing" in p for p in probs) and any("max_memory" in p for p in probs),
+              "known_failing/max_memory schema: {}".format(probs))
+
+        # Server runner: concurrent copies, a wait and response headers.
+        port = free_port()
+        srv = ('@server(port: {})\n\n@get("/hi/:name")\nfn hi(name: String) {{\n'
+               '    return http.response(201, {{ hi: name }}, {{ "X-Name": name }})\n}}\n'
+               ).format(port)
+        srv_task = make_selftest_task(root, "services", {
+            "id": "st_concurrent", "mode": "server", "port": port, "needs": ["net"],
+            "timeout": 20,
+            "request": [
+                {"path": "/hi/x{i}", "concurrent": 3, "show_headers": ["X-Name"]},
+                {"path": "/hi/later", "wait": 0.2, "show_headers": ["x-name", "X-Absent"]},
+                {"path": "/hi/n", "concurrent": 4, "status_only": True},
+            ],
+            "expected_stdout": (
+                'CONCURRENT 3\nx1 STATUS 201\nx-name: x1\n{"hi": "x1"}\n'
+                'x1 STATUS 201\nx-name: x2\n{"hi": "x2"}\n'
+                'x1 STATUS 201\nx-name: x3\n{"hi": "x3"}\n'
+                'STATUS 201\nx-name: later\nx-absent: <missing>\n{"hi": "later"}\n'
+                'CONCURRENT 4\nx4 STATUS 201\n'),
+        }, {}, tier="v3")
+        r = evaluate(fcfg, srv_task, write("srv.fg", srv))
+        check(r["status"] == "pass", "concurrent server requests: {} {} {}".format(
+            r["class"], r.get("diff"), r.get("stderr", "")[-300:]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    return checks[0]
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2208,8 +2746,8 @@ def main(argv=None):
         p.add_argument("--category", help="comma-separated categories")
         if tier:
             p.add_argument("--tier", choices=list(TIERS) + ["all"], default=tier,
-                           help="task tier: v1 (eval/tasks), v2 (eval/tasks_v2) or all "
-                                "(default: {})".format(tier))
+                           help="task tier: v1 (eval/tasks), v2 (eval/tasks_v2), "
+                                "v3 (eval/tasks_v3) or all (default: {})".format(tier))
         p.add_argument("--jobs", type=int, default=jobs, help="parallel workers")
         if run_opts:
             p.add_argument("--forge", help="forge binary (default: $FORGE_BIN, target/, PATH)")

@@ -20,7 +20,11 @@ eval/
     www/                     optional: served by the local HTTP fixture (http tasks)
     input.txt                optional: a large stdin (`stdin_file`)
   tasks_v2/<category>/<id>/  tier v2: 50 harder tasks, same layout (see "Tier v2" below)
+  tasks_v3/<category>/<id>/  tier v3: multi-file answers, services, large generated inputs
+                             (see "Tier v3" below); gen_input.py makes a task's large input
   V2_FINDINGS.md             Forge bugs and llms.txt gaps found while writing tier v2
+  V3_FINDINGS.md             the same for tier v3
+  .generated/                inputs produced by task generators (cached, not committed)
   runs/                      generated runs and reports (git-ignored)
   packs/, answers/           blind packs and the answers to them (git-ignored)
 ```
@@ -46,7 +50,8 @@ Every command accepts `--tasks id1,id2`, `--category a,b`, `--jobs N` and `--for
 default forge binary is `$FORGE_BIN`, then `target/debug/forge`, then `target/release/forge`,
 then `forge` on `PATH`.
 
-`--tier v1|v2|all` selects the task set: `v1` is `eval/tasks`, `v2` is `eval/tasks_v2`.
+`--tier v1|v2|v3|all` selects the task set: `v1` is `eval/tasks`, `v2` is `eval/tasks_v2`,
+`v3` is `eval/tasks_v3`.
 `validate` and `score` default to `all` (`score` takes the task list from the run's
 `meta.json`), `generate` and `blind-pack` to `v1`, so commands written before tier v2
 existed behave as they did. To measure tier v2:
@@ -81,6 +86,14 @@ This command runs every reference solution and compares its output with `expecte
 
 All runs go through the same sandboxed runner that `score` uses, so a reference that passes
 proves that the task's `needs` grants are enough.
+
+A task whose reference cannot pass today because of a Forge bug carries
+`known_failing = "V3 finding <n>"` (and optionally `known_failing_on = ["forge-vm",
+"forge-vm-2027", "check", ...]`, the run labels it excuses; without it every Forge run and the
+type check are excused). `validate` lists such failures under `KNOWN FAILING` and does not
+count them; Python runs are never excused. When every excused run passes, `validate` prints
+a note that the mark can go (it does not fail). `score` still scores these tasks normally and
+marks them in the report, because a correct solution may fail on the same bug.
 
 ### `generate`
 
@@ -170,7 +183,11 @@ classified correctly. It also checks answer parsing, code extraction and the TOM
 and, with throwaway tasks, the tier-v2 harness features: tier loading, edition pinning,
 `[[case]]` runs with exit codes and `stdin_file`, the server runner (a Forge and a Python
 server, `status_only`, request headers, a server that exits early) and the fixture's
-per-run `flaky/`, `auth/` and `headers` routes and `{closed_url}`. CI and
+per-run `flaky/`, `auth/` and `headers` routes and `{closed_url}`. For tier v3 it checks
+multi-file answers (splitting, bad paths, extraction from several blocks, a provided driver
+winning over the answer's `main.fg`, module state shared between the answer's files),
+generated inputs (caching and the sha256 check), `expected_stderr`, `known_failing` and
+`max_memory`, and the server runner's `concurrent`, `wait` and `show_headers`. CI and
 `cargo test --test eval_tasks` run it.
 
 ## Metrics
@@ -205,11 +222,13 @@ tolerance).
 
 ## Adding a task
 
-1. Create `eval/tasks/<category>/<id>/` (tier v1) or `eval/tasks_v2/<category>/<id>/`
-   (tier v2). The `id` must equal the directory name and be unique across both tiers. The
-   v1 categories are `basics`, `strings`, `collections`, `structs_adts`, `errors`,
-   `json_csv`, `functional`, `algorithms`, `concurrency`, `http`, `files`; the v2 ones are
-   `servers`, `http_client`, `multifile`, `parallel`, `error_handling`, `typed`, `data`.
+1. Create `eval/tasks/<category>/<id>/` (tier v1), `eval/tasks_v2/<category>/<id>/`
+   (tier v2) or `eval/tasks_v3/<category>/<id>/` (tier v3). The `id` must equal the
+   directory name and be unique across all tiers. The v1 categories are `basics`,
+   `strings`, `collections`, `structs_adts`, `errors`, `json_csv`, `functional`,
+   `algorithms`, `concurrency`, `http`, `files`; the v2 ones are `servers`, `http_client`,
+   `multifile`, `parallel`, `error_handling`, `typed`, `data`; the v3 ones are `modules`,
+   `services`, `bulk_data`, `deep_algorithms`, `failures`, `pipelines`, `cli_text`.
 2. Write `task.toml`:
 
    ```toml
@@ -233,9 +252,34 @@ tolerance).
 
    To run the program several times with different inputs, replace `stdin`/`stdin_file`,
    `expected_stdout` and `exit_code` with `[[case]]` tables, each with an optional `name`,
-   `stdin` or `stdin_file`, `expected_stdout` and `exit_code`. The task passes when every
-   case prints its output and exits with its status; reports show each case's output under
-   `=== case <name> (exit <status>)`.
+   `stdin` or `stdin_file`, `expected_stdout`, `expected_stderr` and `exit_code`. The task
+   passes when every case prints its output and exits with its status; reports show each
+   case's output under `=== case <name> (exit <status>)`.
+
+   Keys added for tier v3 (any tier may use them):
+
+   - `expected_stderr = """..."""` (top level or per case): the program's standard error
+     must match too (same normalisation as stdout). Forge's `--error-format json`
+     diagnostic lines are removed first, so only what the program wrote counts.
+   - `answer = "files"`: the solution is several files in one text. Each starts with a
+     marker line `// file: <path>` (`# file: <path>` in Python) and runs to the next marker;
+     paths are relative, use `/`, may not leave the working directory and end in `.fg`
+     (`.py`). An answer without markers is `main.fg`. The files are written into the
+     working directory, then the task's `files/` are copied over them, so a task can
+     provide the driver `main.fg` that imports the modules the solver writes. `generate`
+     tells the model about the markers and joins several marked code blocks; a bad answer
+     (an unsafe path, no `main.fg`) is `no_code`. The reference is written in the same
+     format, and `validate` type-checks each of its `.fg` files.
+   - `generator = "gen_input.py"` with `stdin_file = "input.txt"`: when `input.txt` is not
+     in the task directory, the harness runs `python3 gen_input.py input.txt` there (it
+     prints the file; standard library only, deterministic: use its own PRNG, not
+     `random`) and caches the output in `eval/.generated/<id>/`.
+     `generated_sha256 = { "input.txt" = "<hex>" }` pins the content: a generator that
+     changes is a schema problem instead of a silently different test. Use it for inputs
+     of more than about 1 MB, so the repository does not carry them.
+   - `max_memory = "1GB"`: passed to Forge as `--max-memory`, so a solution whose memory
+     balloons fails quickly (as `timeout`) instead of exhausting the machine.
+   - `known_failing` / `known_failing_on`: see `validate` above.
 
    Write the prompt the way a user would ask, without naming a language. Spell out the exact
    output format, including decimals, separators and tie-breaking. Programs get their input
@@ -274,8 +318,17 @@ order. A task that fails on Forge for a model shows something to fix.
   `STATUS <code>` plus the canonical JSON body (only the status line with `status_only`)
   with `expected_stdout`. Forge's `@server(port: ...)` needs a literal port, so a server
   task names a fixed `port` in its prompt and in `port = ...` (tier v1 uses 18471, tier v2
-  18501-18510). Runs that share a port are serialised within one harness process. The
-  server's output goes to files, so a server that logs every request cannot block.
+  18501-18510, tier v3 18521-18530). Runs that share a port are serialised within one
+  harness process. The server's output goes to files, so a server that logs every request
+  cannot block.
+- More `[[request]]` keys (tier v3): `show_headers = ["Location", "ETag"]` adds a line
+  `<lower-case name>: <value>` (or `<missing>`) per header after the `STATUS` line;
+  `wait = 1.5` sleeps that many seconds before sending (for background work); and
+  `concurrent = 40` sends 40 copies at once (`{i}` in the path and body becomes 1..40)
+  and records `CONCURRENT 40` followed by each distinct answer with its count
+  (`x38 STATUS 201`, then its headers and body), sorted, so the transcript does not depend
+  on the order the server handled them. Redirects are not followed: a 3xx answer is
+  recorded as it is.
 
 ## Tier v2
 
