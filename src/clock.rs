@@ -130,8 +130,10 @@ mod tests {
         });
         assert!(done.is_ok());
         assert!(start.elapsed() >= Duration::from_millis(120));
-        // At least one poll per slice, plus the final one.
-        assert!(polls >= 3, "{}", polls);
+        // One poll before each slice and one at the deadline. Slices are at
+        // most 50 ms, but a timer that oversleeps (macOS) can make the
+        // first slice reach the deadline, so only two polls are certain.
+        assert!(polls >= 2, "{}", polls);
 
         let start = Instant::now();
         let mut polls = 0;
