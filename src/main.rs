@@ -1627,7 +1627,13 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             interpreter.source_file =
                 Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
         }
-        interpreter.set_defer_host_runtime(true);
+        // As on the VM: only a server defers `schedule`/`watch` start-up to
+        // the end of the top level (`host::launch` starts them from the
+        // final state). A plain script starts them where they are written,
+        // so they run while the top level runs.
+        let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
+        let serving = runtime_plan.server.is_some();
+        interpreter.set_defer_host_runtime(serving);
         match interpreter.run(&program) {
             Ok(_) => {}
             Err(e) => {
@@ -1637,10 +1643,11 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
         }
         exit_if_limit_tripped();
 
-        let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
-        if let Err(e) = runtime::host::launch(interpreter, &runtime_plan).await {
-            eprintln!("{}", errors::format_simple_error(&e.message));
-            process::exit(1);
+        if serving {
+            if let Err(e) = runtime::host::launch(interpreter, &runtime_plan).await {
+                eprintln!("{}", errors::format_simple_error(&e.message));
+                process::exit(1);
+            }
         }
     }
 }

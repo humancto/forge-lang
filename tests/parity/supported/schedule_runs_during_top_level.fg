@@ -1,0 +1,17 @@
+// A `schedule` block in a plain script runs while the top level runs, on
+// both engines (the interpreter used to start it only after the top level,
+// i.e. never). Its body works on its own copy of the variables, kept from
+// one run to the next; an error in one run does not stop the next.
+let ticks = channel()
+let mut n = 0
+schedule every 1 seconds {
+    n += 1
+    send(ticks, "tick {n}")
+    if n == 1 {
+        let empty = []
+        println(empty[5])
+    }
+}
+println(receive(ticks))
+println(receive(ticks))
+println("the top level still sees n = {n}")

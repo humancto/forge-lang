@@ -333,7 +333,9 @@ Error codes: every runtime error has a stable code, the same on both engines; ty
 | `E0038` | ValueError | `int("12x")`, `float("abc")`: text is not a number |
 | `E0039` | ValueError | invalid JSON (`json.parse`, `fs.read_json`, `sh_json`) |
 | `E0040` | ValueError | invalid regex pattern |
-| `E0041` | RuntimeError | `retry n times` exhausted (the message ends with the last attempt's error) | For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+| `E0041` | RuntimeError | `retry n times` exhausted (the message ends with the last attempt's error) |
+
+For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
 ```forge
 try {
@@ -511,6 +513,57 @@ println(got)   // [1]
 A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
 
 Tasks communicate through return values (`squad` results, `await`) and channels. Do not mutate captured variables from inside `spawn` and expect the parent to see it: the default VM gives each task its own copy (the `--interp` engine shares closure state).
+
+## Retry, timeout, schedule
+
+Three statement blocks (all editions). They are statements, not expressions: `let r = retry 3 times { ... }` does not parse. To get a value out, assign to a `let mut` declared before the block, or `return` from inside it in a function (a `return`, `break` or `continue` inside the block leaves it at once, without retrying).
+
+```forge
+let mut calls = 0
+fn flaky() {
+    calls += 1
+    if calls < 3 {
+        let empty = []
+        return empty[0]     // fails twice: index out of bounds
+    }
+    return "ok on attempt {calls}"
+}
+
+fn fetch_with_retry() {
+    retry 5 times {
+        return flaky()      // the first attempt that does not fail returns
+    }
+}
+println(fetch_with_retry())    // ok on attempt 3
+
+try {
+    retry 2 times {
+        assert(false, "still down")
+    }
+} catch e {
+    println("{e.code}: {e.message}")   // E0041: retry failed after 2 attempts: assertion failed: still down
+}
+
+try {
+    timeout 1 seconds {
+        wait(3)
+    }
+} catch e {
+    println("{e.code}: {e.message}")   // E0031: timeout: operation exceeded 1 second limit
+}
+```
+
+- `retry n times { body }` runs `body` until it finishes without an error, at most `n` times, waiting 100 ms, 200 ms, ... between attempts. Any runtime error is retried (resource limits are not). When every attempt fails it raises E0041 `retry failed after n attempts: <the last error>`. `n` is an Int (0 or less: the block never runs and the error is raised at once).
+- `timeout n seconds { body }` stops `body` (including waits, `receive`, loops and calls inside it) after `n` whole seconds and raises E0031 `timeout: operation exceeded n second limit`; catch it with `try`/`catch`.
+- `schedule every n seconds { body }` (or `minutes`, `hours`) runs `body` repeatedly in the background, first after one interval, while the rest of the program continues; it stops when the program ends (a script's top level returns, or never for an HTTP server). It works on its own copy of the program's variables (kept from one run to the next, never seen by the rest of the program), so report results through a channel, a file or a database, not by assigning variables. An error in one run is ignored; the next run still happens. In an `@server` program schedules start after the top level, next to the server.
+
+```forge
+let ticks = channel()
+schedule every 1 seconds {
+    send(ticks, "tick")
+}
+println(receive(ticks))   // after about a second: tick
+```
 
 ## HTTP server
 

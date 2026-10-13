@@ -492,6 +492,19 @@ finding 10 for fractions).
 Suggested fix: add a short section to `llms.txt` with the three blocks, their statement
 form, units and errors; give exhausted retries their own code.
 
+**Fixed:** `llms.txt` has a "Retry, timeout, schedule" section (statement form; values
+leave through a variable or `return`, and `return`/`break` leave without retrying; the
+100 ms, 200 ms, ... back-off; `timeout` units and E0031; `schedule` units, first run after
+one interval, its own copy of the variables, errors ignored), with examples run on both
+engines in both editions; `spec/src/dual-syntax/innovation.md` says the same. Exhausted
+retries are E0041 (finding 17). `retry` stays statement-only: an expression form would be
+a new `Expr` variant in both engines, the checker, hoisting and the formatter, while
+`return` inside the block already covers it. Writing the examples found a divergence:
+`forge run --interp` deferred `schedule`/`watch` start-up to the end of the top level even
+without a server, so a script's schedule never ran; it is now deferred only for `@server`
+programs, as on the VM (`tests/parity/supported/schedule_runs_during_top_level.fg`). Tests:
+`tests/retry_timeout_test.fg` (both engines, both editions).
+
 ### 17. Unclassified runtime errors
 
 Code E0000 (type `RuntimeError`) for `int("12x")`, `float("abc")`, any `json.parse` error,
