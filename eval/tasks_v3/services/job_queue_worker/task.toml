@@ -1,0 +1,131 @@
+id = "job_queue_worker"
+category = "services"
+title = "Job queue API with a background worker"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18525 that accepts jobs and processes them in the
+background. Keep the jobs in the SQLite database file `jobs.db` in the working directory
+(create it when missing). All bodies are JSON.
+
+- `POST /jobs` with `{"kind": ..., "input": ...}` enqueues a job and answers 202
+  `{"id": <id>, "status": "queued"}` with `Location: /jobs/<id>` (ids start at 1). It must
+  not do the job's work itself. Validation, in this order: kind not `"sum"`, `"words"` or
+  `"fail"`: 422 `{"error": "kind must be sum, words or fail"}`; a `sum` job whose input is
+  not an array of integers: 422 `{"error": "sum needs an array of integers"}`; a `words`
+  job whose input is not a string: 422 `{"error": "words needs a string"}` (a `fail` job
+  takes any input).
+- A background worker runs once every second and processes every queued job, oldest
+  first: a `sum` job becomes `done` with result = the sum of its integers; a `words` job
+  becomes `done` with result = its number of words (runs of non-whitespace); a `fail` job
+  becomes `failed` with error `"job asked to fail"`. So every job is finished at most
+  about two seconds after it was created, even if nobody asks for it.
+- `GET /jobs/<id>`: `{"id", "kind", "status", "result", "error"}` (`status` is `queued`,
+  `done` or `failed`; `result` and `error` are `null` when not set), or 404
+  `{"error": "no such job"}`.
+- `GET /jobs` (optional `?status=<status>`): `{"jobs": [<ids, ascending>]}`.
+- `GET /stats`: `{"queued": <n>, "done": <n>, "failed": <n>}`.
+
+The server runs until it is stopped.
+"""
+needs = ["net", "read", "write", "db"]
+timeout = 40
+# The background worker runs on wall-clock time: run alone.
+timed = true
+mode = "server"
+port = 18525
+expected_stdout = """
+STATUS 202
+location: /jobs/1
+{"id": 1, "status": "queued"}
+STATUS 202
+{"id": 2, "status": "queued"}
+STATUS 202
+{"id": 3, "status": "queued"}
+STATUS 422
+{"error": "sum needs an array of integers"}
+STATUS 422
+{"error": "words needs a string"}
+STATUS 422
+{"error": "kind must be sum, words or fail"}
+STATUS 404
+{"error": "no such job"}
+STATUS 200
+{"error": null, "id": 1, "kind": "sum", "result": 10, "status": "done"}
+STATUS 200
+{"error": null, "id": 2, "kind": "words", "result": 3, "status": "done"}
+STATUS 200
+{"error": "job asked to fail", "id": 3, "kind": "fail", "result": null, "status": "failed"}
+STATUS 200
+{"jobs": [1, 2]}
+CONCURRENT 20
+x20 STATUS 202
+STATUS 200
+{"done": 22, "failed": 1, "queued": 0}
+STATUS 404
+{"error": "no such job"}
+STATUS 200
+{"jobs": [3]}
+"""
+
+[[request]]
+method = "POST"
+path = "/jobs"
+body = '{"kind": "sum", "input": [1, 2, 3, 4]}'
+show_headers = ["Location"]
+
+[[request]]
+method = "POST"
+path = "/jobs"
+body = '{"kind": "words", "input": "  the quick\\tbrown fox  "}'
+
+[[request]]
+method = "POST"
+path = "/jobs"
+body = '{"kind": "fail", "input": null}'
+
+[[request]]
+method = "POST"
+path = "/jobs"
+body = '{"kind": "sum", "input": [1, "2"]}'
+
+[[request]]
+method = "POST"
+path = "/jobs"
+body = '{"kind": "words", "input": 5}'
+
+[[request]]
+method = "POST"
+path = "/jobs"
+body = '{"kind": "sleep"}'
+
+[[request]]
+path = "/jobs/9"
+
+[[request]]
+path = "/jobs/1"
+wait = 2.5
+
+[[request]]
+path = "/jobs/2"
+
+[[request]]
+path = "/jobs/3"
+
+[[request]]
+path = "/jobs?status=done"
+
+[[request]]
+method = "POST"
+path = "/jobs"
+body = '{"kind": "sum", "input": [{i}, {i}, 100]}'
+concurrent = 20
+status_only = true
+
+[[request]]
+path = "/stats"
+wait = 2.5
+
+[[request]]
+path = "/jobs/24"
+
+[[request]]
+path = "/jobs?status=failed"

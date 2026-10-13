@@ -1,0 +1,126 @@
+// Batches of ledger operations in SQLite transactions: the first failing
+// operation rolls its whole batch back. Overdrafts are caught from the
+// table's CHECK constraint (the database raises; try/catch turns it into
+// an Err).
+
+if fs.exists("ledger.db") {
+    fs.remove("ledger.db")
+}
+db.open("ledger.db")
+db.execute("CREATE TABLE accounts (name TEXT PRIMARY KEY, balance INTEGER NOT NULL CHECK (balance >= 0))")
+
+fn exists(name: String) -> Bool {
+    return len(db.query("SELECT name FROM accounts WHERE name = ?", [name])) > 0
+}
+
+fn is_count(s: String) -> Bool {
+    return regex.test(s, "^[0-9]+$")
+}
+
+fn apply(words: [String]) -> Result<Int, String> {
+    let op = words[0]
+    if op == "open" && len(words) == 3 && is_count(words[2]) {
+        if exists(words[1]) {
+            return Err("account {words[1]} exists")
+        }
+        db.execute("INSERT INTO accounts (name, balance) VALUES (?, ?)", [words[1], int(words[2])])
+        return Ok(1)
+    }
+    let mut names = []
+    let mut amount = ""
+    if (op == "deposit" || op == "withdraw") && len(words) == 3 {
+        names = [words[1]]
+        amount = words[2]
+    } else if op == "transfer" && len(words) == 4 {
+        names = [words[1], words[2]]
+        amount = words[3]
+    } else {
+        return Err("bad operation")
+    }
+    if !is_count(amount) || int(amount) == 0 {
+        return Err("invalid amount")
+    }
+    for n in names {
+        if !exists(n) {
+            return Err("unknown account {n}")
+        }
+    }
+    let x = int(amount)
+    if op == "deposit" {
+        db.execute("UPDATE accounts SET balance = balance + ? WHERE name = ?", [x, names[0]])
+        return Ok(1)
+    }
+    try {
+        db.execute("UPDATE accounts SET balance = balance - ? WHERE name = ?", [x, names[0]])
+    } catch e {
+        return Err("insufficient funds in {names[0]}")
+    }
+    if op == "transfer" {
+        db.execute("UPDATE accounts SET balance = balance + ? WHERE name = ?", [x, names[1]])
+    }
+    return Ok(1)
+}
+
+let mut in_batch = false
+let mut batches = 0
+let mut done_ops = 0
+let mut failure = ""
+let mut n = 0
+for line in fs.lines("/dev/stdin") {
+    n += 1
+    let words = filter(split(line.trim(), " "), fn(w) { return w != "" })
+    if len(words) == 0 || starts_with(words[0], "#") {
+        continue
+    }
+    if len(words) == 1 && words[0] == "begin" {
+        batches += 1
+        in_batch = true
+        done_ops = 0
+        failure = ""
+        db.begin()
+        continue
+    }
+    if len(words) == 1 && words[0] == "end" {
+        if failure == "" {
+            db.commit()
+            println("batch {batches}: committed {done_ops} operations")
+        } else {
+            db.rollback()
+            println("batch {batches}: rolled back ({failure})")
+        }
+        in_batch = false
+        continue
+    }
+    if in_batch {
+        if failure == "" {
+            match apply(words) {
+                Ok(k) => {
+                    done_ops += k
+                },
+                Err(msg) => {
+                    failure = "{msg} at line {n}"
+                },
+            }
+        }
+        continue
+    }
+    db.begin()
+    match apply(words) {
+        Ok(k) => {
+            db.commit()
+            println("line {n}: ok")
+        },
+        Err(msg) => {
+            db.rollback()
+            println("line {n}: {msg}")
+        },
+    }
+}
+
+let rows = db.query("SELECT name, balance FROM accounts ORDER BY name")
+let mut total = 0
+for r in rows {
+    println("{r.name} {r.balance}")
+    total += r.balance
+}
+println("total {total}")

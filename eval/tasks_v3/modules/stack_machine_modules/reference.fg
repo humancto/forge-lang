@@ -1,0 +1,194 @@
+// file: vm/ops.fg
+// Instructions and the assembler.
+
+type Op = Push(Int) | Pop | Add | Sub | Mul | Div | Dup | Swap | Over | Jz(Int) | Jmp(Int) | Print | Halt
+
+fn parse_program(src: String) -> Result<[Op], String> {
+    // First pass: labels -> instruction index; second pass: instructions.
+    let mut labels = {}
+    let mut count = 0
+    let mut n = 0
+    for raw in split(src, "\n") {
+        n += 1
+        let line = clean(raw)
+        if line == "" {
+            continue
+        }
+        if ends_with(line, ":") {
+            let name = substring(line, 0, len(line) - 1)
+            if has_key(labels, name) {
+                return Err("line {n}: duplicate label {name}")
+            }
+            labels[name] = count
+        } else {
+            count += 1
+        }
+    }
+    let mut ops: [Op] = []
+    n = 0
+    for raw in split(src, "\n") {
+        n += 1
+        let line = clean(raw)
+        if line == "" || ends_with(line, ":") {
+            continue
+        }
+        let words = filter(split(line, " "), fn(w) { return w != "" })
+        let op = words[0]
+        let simple = { pop: Pop, add: Add, sub: Sub, mul: Mul, div: Div, dup: Dup, swap: Swap, over: Over, print: Print, halt: Halt }
+        if has_key(simple, op) && len(words) == 1 {
+            ops.push(simple[op])
+        } else if op == "push" && len(words) == 2 {
+            if !regex.test(words[1], "^-?[0-9]+$") {
+                return Err("line {n}: bad number {words[1]}")
+            }
+            ops.push(Push(int(words[1])))
+        } else if (op == "jz" || op == "jmp") && len(words) == 2 {
+            if !has_key(labels, words[1]) {
+                return Err("line {n}: unknown label {words[1]}")
+            }
+            let target: Int = labels[words[1]]
+            if op == "jz" {
+                ops.push(Jz(target))
+            } else {
+                ops.push(Jmp(target))
+            }
+        } else {
+            return Err("line {n}: unknown instruction {line}")
+        }
+    }
+    return Ok(ops)
+}
+
+// A line without its comment (from `#`) and surrounding spaces.
+fn clean(raw: String) -> String {
+    let hash = index_of(raw, "#")
+    if hash >= 0 {
+        return substring(raw, 0, hash).trim()
+    }
+    return raw.trim()
+}
+
+// file: vm/stack.fg
+// A generic stack as a value: operations return the new stack.
+
+struct Stack<T> {
+    items: [T]
+}
+
+fn empty_stack() -> Stack<Int> {
+    return Stack { items: [] }
+}
+
+fn push_value<T>(s: Stack<T>, x: T) -> Stack<T> {
+    return Stack { items: s.items + [x] }
+}
+
+fn depth<T>(s: Stack<T>) -> Int {
+    return len(s.items)
+}
+
+// The value `k` places below the top (0 is the top).
+fn peek_at<T>(s: Stack<T>, k: Int) -> T {
+    return s.items[len(s.items) - 1 - k]
+}
+
+fn drop_top<T>(s: Stack<T>, k: Int) -> Stack<T> {
+    return Stack { items: slice(s.items, 0, len(s.items) - k) }
+}
+
+// file: vm/machine.fg
+// Runs a program and collects what it prints.
+import { Op, Push, Pop, Add, Sub, Mul, Div, Dup, Swap, Over, Jz, Jmp, Print, Halt } from "ops.fg"
+import { Stack, empty_stack, push_value, depth, peek_at, drop_top } from "stack.fg"
+
+fn needs(name: String) -> Int {
+    return match name {
+        "add" | "sub" | "mul" | "div" | "swap" | "over" => 2,
+        "pop" | "dup" | "jz" | "print" => 1,
+        _ => 0,
+    }
+}
+
+fn op_name(op: Op) -> String {
+    return match op {
+        Push(n) => "push",
+        Pop => "pop",
+        Add => "add",
+        Sub => "sub",
+        Mul => "mul",
+        Div => "div",
+        Dup => "dup",
+        Swap => "swap",
+        Over => "over",
+        Jz(t) => "jz",
+        Jmp(t) => "jmp",
+        Print => "print",
+        Halt => "halt",
+    }
+}
+
+fn run(ops: [Op], max_steps: Int) -> Result<[Int], String> {
+    let mut s = empty_stack()
+    let mut out: [Int] = []
+    let mut pc = 0
+    let mut steps = 0
+    while pc < len(ops) {
+        steps += 1
+        if steps > max_steps {
+            return Err("step limit exceeded")
+        }
+        let op = ops[pc]
+        if depth(s) < needs(op_name(op)) {
+            return Err("stack underflow at {pc}")
+        }
+        pc += 1
+        match op {
+            Push(n) => {
+                s = push_value(s, n)
+            },
+            Pop => {
+                s = drop_top(s, 1)
+            },
+            Dup => {
+                s = push_value(s, peek_at(s, 0))
+            },
+            Over => {
+                s = push_value(s, peek_at(s, 1))
+            },
+            Swap => {
+                let a = peek_at(s, 0)
+                let b = peek_at(s, 1)
+                s = push_value(push_value(drop_top(s, 2), a), b)
+            },
+            Print => {
+                out.push(peek_at(s, 0))
+                s = drop_top(s, 1)
+            },
+            Jz(t) => {
+                let v = peek_at(s, 0)
+                s = drop_top(s, 1)
+                if v == 0 {
+                    pc = t
+                }
+            },
+            Jmp(t) => {
+                pc = t
+            },
+            Halt => {
+                return Ok(out)
+            },
+            _ => {
+                let b = peek_at(s, 0)
+                let a = peek_at(s, 1)
+                s = drop_top(s, 2)
+                let name = op_name(op)
+                if name == "div" && b == 0 {
+                    return Err("division by zero at {pc - 1}")
+                }
+                let r = if name == "add" { a + b } else if name == "sub" { a - b } else if name == "mul" { a * b } else { a / b }
+                s = push_value(s, r)
+            },
+        }
+    }
+    return Ok(out)
+}

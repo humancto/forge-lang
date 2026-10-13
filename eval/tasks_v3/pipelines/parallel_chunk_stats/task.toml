@@ -1,0 +1,44 @@
+id = "parallel_chunk_stats"
+category = "pipelines"
+title = "Per-chunk statistics computed by eight concurrent tasks"
+prompt = """
+Standard input has about 160,000 lines `<sensor>,<value>` (value an integer, or something
+that is not an integer such as `NaN`); ignore blank lines. Split the lines, in order, into
+8 chunks of `ceil(lines / 8)` lines each (the last chunk may be shorter) and compute each
+chunk's statistics in its own concurrent task:
+
+`chunk <k>: n=<valid values> bad=<invalid values> sum=<sum> min=<min> max=<max>`
+
+(k from 1, printed in chunk order). Then merge the chunk results (do not recompute them
+from the lines) and print `all: n=<n> bad=<bad> sum=<sum> min=<min> max=<max>`, and finally
+the 3 sensors with the largest sum of values followed by the 3 with the smallest, as
+`<sensor> n=<values> sum=<sum>`, all six in order of decreasing sum (ties: sensor name
+ascending).
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+generator = "gen_input.py"
+generated_sha256 = { "input.txt" = "c695bddba8aec06150bf2c1824e2835d3f4ea0caea1c10c6547cd0129b0142be" }
+needs = []
+timeout = 40
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
+expected_stdout = """
+chunk 1: n=19977 bad=23 sum=183718 min=-10000 max=10000
+chunk 2: n=19982 bad=18 sum=1471074 min=-10000 max=9999
+chunk 3: n=19989 bad=11 sum=-866438 min=-9999 max=10000
+chunk 4: n=19981 bad=19 sum=106968 min=-10000 max=10000
+chunk 5: n=19983 bad=17 sum=-584744 min=-10000 max=10000
+chunk 6: n=19974 bad=26 sum=-1664756 min=-10000 max=9999
+chunk 7: n=19985 bad=15 sum=23453 min=-10000 max=10000
+chunk 8: n=19979 bad=21 sum=-851108 min=-10000 max=10000
+all: n=159850 bad=150 sum=-2181833 min=-10000 max=10000
+s16 n=3922 sum=787158
+s26 n=4093 sum=714353
+s24 n=4036 sum=599253
+s21 n=4074 sum=-687127
+s32 n=3966 sum=-687312
+s19 n=3944 sum=-959996
+"""

@@ -1,0 +1,59 @@
+id = "unicode_report"
+category = "cli_text"
+title = "Text report that counts characters, not bytes"
+prompt = """
+Standard input is UTF-8 text in many scripts. A character here is a Unicode code point
+(so `é` written as one code point is one character, and an emoji is one character).
+Number the non-blank lines from 1 and print for each, without trimming the line:
+
+```
+<n>: chars=<characters> words=<words> first3=<first 3 characters> padded=[<p>]
+   upper=<the line in upper case>
+   reversed=<the line's characters in reverse order>
+```
+
+Words are maximal runs of non-whitespace characters. `<p>` is the first 12 characters of
+the line, padded on the right with `.` to exactly 12 characters. Upper case follows the
+Unicode rules (for example `ß` becomes `SS`).
+
+After all lines print `words: <total words> distinct: <distinct words, compared after
+lower-casing>`, then `longest: <the longest word> (<its characters> chars)` (the first one
+on a tie, as written), then `sorted: ` followed by the distinct lower-cased words sorted
+by code point and separated by single spaces.
+"""
+needs = []
+stdin = """
+Grüße aus Köln — straße
+naïve café, résumé
+日本語のテキスト 東京
+emoji 🎉 party 🎉!
+Ελληνικά και English
+  leading and trailing
+ok
+"""
+expected_stdout = """
+1: chars=23 words=5 first3=Grü padded=[Grüße aus Kö]
+   upper=GRÜSSE AUS KÖLN — STRASSE
+   reversed=eßarts — nlöK sua eßürG
+2: chars=18 words=3 first3=naï padded=[naïve café, ]
+   upper=NAÏVE CAFÉ, RÉSUMÉ
+   reversed=émusér ,éfac evïan
+3: chars=11 words=2 first3=日本語 padded=[日本語のテキスト 東京.]
+   upper=日本語のテキスト 東京
+   reversed=京東 トスキテの語本日
+4: chars=16 words=4 first3=emo padded=[emoji 🎉 part]
+   upper=EMOJI 🎉 PARTY 🎉!
+   reversed=!🎉 ytrap 🎉 ijome
+5: chars=20 words=3 first3=Ελλ padded=[Ελληνικά και]
+   upper=ΕΛΛΗΝΙΚΆ ΚΑΙ ENGLISH
+   reversed=hsilgnE ιακ άκινηλλΕ
+6: chars=22 words=3 first3=  l padded=[  leading an]
+   upper=  LEADING AND TRAILING
+   reversed=gniliart dna gnidael  
+7: chars=2 words=1 first3=ok padded=[ok..........]
+   upper=OK
+   reversed=ko
+words: 21 distinct: 21
+longest: 日本語のテキスト (8 chars)
+sorted: and aus café, emoji english grüße köln leading naïve ok party résumé straße trailing ελληνικά και — 日本語のテキスト 東京 🎉 🎉!
+"""

@@ -1,0 +1,133 @@
+// Sweep 150,000 half-open intervals: one sort of the start/end events for
+// the overlap, one sort per room to merge.
+
+fn by_start(a, b) -> Int {
+    if a[0] != b[0] {
+        return a[0] - b[0]
+    }
+    return a[1] - b[1]
+}
+
+// Merged blocks of [start, end] pairs.
+fn merge(iv) {
+    let sorted_iv = sort(iv, by_start)
+    let mut blocks = []
+    let mut cur_s = -1
+    let mut cur_e = -1
+    for p in sorted_iv {
+        if cur_s >= 0 && p[0] <= cur_e {
+            if p[1] > cur_e {
+                cur_e = p[1]
+            }
+        } else {
+            if cur_s >= 0 {
+                blocks.push([cur_s, cur_e])
+            }
+            cur_s = p[0]
+            cur_e = p[1]
+        }
+    }
+    if cur_s >= 0 {
+        blocks.push([cur_s, cur_e])
+    }
+    return blocks
+}
+
+// A non-empty run of ASCII digits. Not `regex.test(s, "^[0-9]+$")`: regex
+// functions compile their pattern on every call (eval/V3_FINDINGS.md,
+// finding 1), which is most of the run time at this input size.
+fn is_digits(s: String) -> Bool {
+    if s == "" {
+        return false
+    }
+    for c in split(s, "") {
+        if c < "0" || c > "9" {
+            return false
+        }
+    }
+    return true
+}
+
+let mut count = 0
+let mut skipped = 0
+let mut by_room = {}
+let mut all_iv = []
+// Events as one Int each: 2t for an end, 2t + 1 for a start, so a plain
+// numeric sort puts an end before a start at the same time (half-open).
+let mut events = []
+
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    let f = split(line.trim(), " ")
+    if len(f) != 3 || !is_digits(f[1]) || !is_digits(f[2]) || int(f[2]) <= int(f[1]) {
+        skipped += 1
+        continue
+    }
+    let s = int(f[1])
+    let e = int(f[2])
+    count += 1
+    // The key is bound to a local first: on the VM, `obj[xs[i]] = v` (a key that
+    // is itself an index or field read) copies the whole object on every write
+    // (eval/V3_FINDINGS.md, finding 3).
+    let room = f[0]
+    if !has_key(by_room, room) {
+        by_room[room] = []
+    }
+    by_room[room].push([s, e])
+    all_iv.push([s, e])
+    events.push(2 * s + 1)
+    events.push(2 * e)
+}
+
+let mut cur = 0
+let mut best = 0
+let mut best_t = 0
+for ev in sort(events) {
+    if ev % 2 == 1 {
+        cur += 1
+    } else {
+        cur -= 1
+    }
+    if cur > best {
+        best = cur
+        best_t = ev / 2
+    }
+}
+
+let mut stats = []
+for room, iv in by_room {
+    let blocks = merge(iv)
+    let mut busy = 0
+    let mut longest = 0
+    for b in blocks {
+        busy += b[1] - b[0]
+        longest = max(longest, b[1] - b[0])
+    }
+    stats.push({ room: room, busy: busy, blocks: len(blocks), longest: longest })
+}
+
+println("intervals: {count}")
+println("skipped: {skipped}")
+println("rooms: {len(stats)}")
+println("max overlap: {best} at {best_t}")
+println("top rooms:")
+let ranked = sort(stats, fn(a, b) {
+    if a.busy != b.busy {
+        return b.busy - a.busy
+    }
+    if a.room < b.room {
+        return -1
+    }
+    return 1
+})
+for r in slice(ranked, 0, 5) {
+    println("{r.room} busy={r.busy} blocks={r.blocks} longest={r.longest}")
+}
+let union = merge(all_iv)
+let mut total = 0
+for b in union {
+    total += b[1] - b[0]
+}
+println("union: {total} in {len(union)} blocks")

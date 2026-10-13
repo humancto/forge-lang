@@ -1,0 +1,45 @@
+// A pool of 4 workers fed from a bounded job channel; results come back on
+// a second channel tagged with their index and are printed in input order.
+
+let mut jobs = []
+for line in fs.lines("/dev/stdin") {
+    let f = split(line.trim(), " ")
+    if len(f) == 3 {
+        jobs.push({ id: f[0], ms: int(f[1]), text: f[2] })
+    }
+}
+
+let work = channel(4)
+let results = channel()
+let workers = 4
+
+for w in range(0, workers) {
+    spawn {
+        loop {
+            let job = receive(work)
+            if job == null {
+                break
+            }
+            wait(job.ms / 1000.0)
+            let out = "{job.text.upper()}/{len(job.text)}"
+            send(results, { index: job.index, out: out })
+        }
+    }
+}
+
+spawn {
+    for i in range(0, len(jobs)) {
+        send(work, merge(jobs[i], { index: i }))
+    }
+    close(work)
+}
+
+let mut outs = map(jobs, fn(j) { return "" })
+for k in range(0, len(jobs)) {
+    let r = receive(results)
+    outs[r.index] = r.out
+}
+for i in range(0, len(jobs)) {
+    println("{jobs[i].id} -> {outs[i]}")
+}
+println("done: {len(jobs)} jobs")

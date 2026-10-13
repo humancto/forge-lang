@@ -1,0 +1,84 @@
+id = "batch_rollback"
+category = "failures"
+title = "All-or-nothing ledger batches in SQLite transactions"
+prompt = """
+Keep a ledger in the SQLite database file `ledger.db` in the working directory: delete the
+file if it exists, then create a table of accounts (name, balance) whose balance can never
+be negative. Standard input is a script; words are separated by spaces, lines are
+numbered from 1, and blank lines and lines starting with `#` are ignored.
+
+Operations (amounts are positive integers written with digits only):
+- `open <name> <initial balance>` (the initial balance may be 0): fails with
+  `account <name> exists` if it exists;
+- `deposit <name> <amount>`, `withdraw <name> <amount>`,
+  `transfer <from> <to> <amount>`.
+
+Checks, in order: a line that is none of these shapes (wrong word count or unknown word)
+fails with `bad operation`; an amount that is not a positive integer: `invalid amount`;
+an account that does not exist (checked in the order named): `unknown account <name>`; a
+withdrawal or transfer larger than the balance: `insufficient funds in <name>`.
+
+A line `begin` starts a batch, which ends at the line `end` (batches are not nested).
+Inside a batch the operations run in one database transaction; after the first operation
+that fails, the remaining operations of the batch are skipped, and at `end` the whole
+batch is rolled back (none of its changes remain): print
+`batch <k>: rolled back (<reason> at line <n>)` with the failing operation's reason and
+line. Otherwise commit and print `batch <k>: committed <number of operations>
+operations`. Batches are numbered from 1. An operation outside a batch runs on its own:
+print `line <n>: ok` or `line <n>: <reason>`.
+
+At the end, print every account as `<name> <balance>` sorted by name, then
+`total <sum of balances>`, reading them back from the database.
+"""
+needs = ["read", "write", "db"]
+stdin = """
+# accounts
+open alice 100
+open bob 50
+open carol 0
+open bob 10
+begin
+transfer alice bob 30
+deposit carol 5
+end
+begin
+transfer bob carol 70
+withdraw carol 100
+deposit alice 1000
+end
+begin
+deposit alice 7
+transfer alice dave 1
+withdraw alice 1
+end
+withdraw bob 81
+withdraw bob 80
+transfer carol carol 0
+transfer carol alice
+deposit zed 5
+refund alice 5
+begin
+open dave 10
+transfer carol dave 75
+end
+"""
+expected_stdout = """
+line 2: ok
+line 3: ok
+line 4: ok
+line 5: account bob exists
+batch 1: committed 2 operations
+batch 2: rolled back (insufficient funds in carol at line 12)
+batch 3: rolled back (unknown account dave at line 17)
+line 20: insufficient funds in bob
+line 21: ok
+line 22: invalid amount
+line 23: bad operation
+line 24: unknown account zed
+line 25: bad operation
+batch 4: rolled back (insufficient funds in carol at line 28)
+alice 70
+bob 0
+carol 5
+total 75
+"""

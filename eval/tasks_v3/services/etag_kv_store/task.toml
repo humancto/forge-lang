@@ -1,0 +1,184 @@
+id = "etag_kv_store"
+category = "services"
+title = "Text key-value store with ETags and conditional requests"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18523: a key-value store whose values are text,
+kept in the SQLite database file `kv.db` in the working directory (create it when missing).
+
+Keys come from the URL path `/kv/<key>`, percent-decoded (`/kv/hello%20world` is the key
+`hello world`). A valid key is 1 to 64 characters from `A-Z a-z 0-9`, space, `_`, `.`,
+`-`; for any other key the routes below answer 400 `{"error": "bad key"}`.
+
+The ETag of a value is `"` + the first 16 lower-case hex digits of the SHA-256 of the
+value's UTF-8 text + `"` (the quotes are part of the header value).
+
+- `PUT /kv/<key>`: the value is the request body exactly as sent (whatever its
+  Content-Type: a JSON body is stored as its text, not re-encoded; an empty body is the
+  empty string). Preconditions: with a header `If-Match: <etag>`, answer 412
+  `{"error": "precondition failed"}` unless the key exists and its current ETag equals it;
+  with `If-None-Match: *`, answer 412 the same way if the key exists. Otherwise store the
+  value and answer 201 (new key) or 200 (replaced) with
+  `{"key": <key>, "version": <n>}` (a key's version is 1 when created and grows by one
+  per replacement) and the header `ETag: <etag of the new value>`.
+- `GET /kv/<key>`: 404 `{"error": "no such key"}` if missing. If the request has
+  `If-None-Match` equal to the current ETag, answer 304 with no body and the `ETag` header.
+  Otherwise answer 200 with the value itself as the body,
+  `Content-Type: text/plain; charset=utf-8` and the `ETag` header.
+- `DELETE /kv/<key>`: 204 with no body, or 404 `{"error": "no such key"}`.
+- `GET /kv` (optional query parameter `prefix`): 200
+  `{"keys": [<keys starting with prefix, sorted>], "count": <n>}`.
+
+Other responses are JSON. The server runs until it is stopped.
+"""
+needs = ["net", "read", "write", "db"]
+timeout = 30
+mode = "server"
+port = 18523
+expected_stdout = """
+STATUS 200
+{"count": 0, "keys": []}
+STATUS 201
+etag: "2cf24dba5fb0a30e"
+{"key": "greeting", "version": 1}
+STATUS 200
+etag: "2cf24dba5fb0a30e"
+content-type: text/plain; charset=utf-8
+hello
+STATUS 304
+etag: "2cf24dba5fb0a30e"
+
+STATUS 200
+etag: "09ca7e4eaa6e8ae9"
+{"key": "greeting", "version": 2}
+STATUS 412
+{"error": "precondition failed"}
+STATUS 412
+{"error": "precondition failed"}
+STATUS 201
+{"key": "hello world", "version": 1}
+STATUS 200
+content-type: text/plain; charset=utf-8
+héllo ✓
+STATUS 400
+{"error": "bad key"}
+STATUS 400
+{"error": "bad key"}
+STATUS 201
+etag: "f9d86028c6e0d64e"
+{"key": "doc", "version": 1}
+STATUS 200
+{"a": 1}
+STATUS 200
+{"count": 1, "keys": ["greeting"]}
+STATUS 204
+
+STATUS 404
+{"error": "no such key"}
+STATUS 404
+{"error": "no such key"}
+STATUS 201
+etag: "e3b0c44298fc1c14"
+{"key": "empty", "version": 1}
+STATUS 200
+etag: "e3b0c44298fc1c14"
+
+STATUS 200
+{"count": 3, "keys": ["doc", "empty", "hello world"]}
+"""
+
+[[request]]
+path = "/kv"
+
+[[request]]
+method = "PUT"
+path = "/kv/greeting"
+body = "hello"
+headers = { "Content-Type" = "text/plain" }
+show_headers = ["ETag"]
+
+[[request]]
+path = "/kv/greeting"
+show_headers = ["ETag", "Content-Type"]
+
+[[request]]
+path = "/kv/greeting"
+headers = { "If-None-Match" = '"2cf24dba5fb0a30e"' }
+show_headers = ["ETag"]
+
+[[request]]
+method = "PUT"
+path = "/kv/greeting"
+body = "hello, world"
+headers = { "Content-Type" = "text/plain", "If-Match" = '"2cf24dba5fb0a30e"' }
+show_headers = ["ETag"]
+
+[[request]]
+method = "PUT"
+path = "/kv/greeting"
+body = "stale"
+headers = { "Content-Type" = "text/plain", "If-Match" = '"2cf24dba5fb0a30e"' }
+
+[[request]]
+method = "PUT"
+path = "/kv/greeting"
+body = "create only"
+headers = { "Content-Type" = "text/plain", "If-None-Match" = "*" }
+
+[[request]]
+method = "PUT"
+path = "/kv/hello%20world"
+body = "héllo ✓"
+headers = { "Content-Type" = "text/plain; charset=utf-8" }
+
+[[request]]
+path = "/kv/hello%20world"
+show_headers = ["Content-Type"]
+
+[[request]]
+method = "PUT"
+path = "/kv/bad%2Fkey"
+body = "z"
+headers = { "Content-Type" = "text/plain" }
+
+[[request]]
+method = "PUT"
+path = "/kv/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+body = "too long"
+headers = { "Content-Type" = "text/plain" }
+
+[[request]]
+method = "PUT"
+path = "/kv/doc"
+body = '{"a": 1}'
+show_headers = ["ETag"]
+
+[[request]]
+path = "/kv/doc"
+
+[[request]]
+path = "/kv?prefix=gr"
+
+[[request]]
+method = "DELETE"
+path = "/kv/greeting"
+
+[[request]]
+method = "DELETE"
+path = "/kv/greeting"
+
+[[request]]
+path = "/kv/greeting"
+
+[[request]]
+method = "PUT"
+path = "/kv/empty"
+body = ""
+headers = { "Content-Type" = "text/plain" }
+show_headers = ["ETag"]
+
+[[request]]
+path = "/kv/empty"
+show_headers = ["ETag"]
+
+[[request]]
+path = "/kv"

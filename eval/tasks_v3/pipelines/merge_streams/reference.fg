@@ -1,0 +1,48 @@
+// Merge several producers' channels with select; a producer that goes
+// quiet without sending `end` is reported as stalled after 500 ms of
+// silence. (select returns null both on a timeout and for closed channels,
+// so the end of a stream is an explicit `end` message.)
+
+let mut specs = []
+for line in fs.lines("/dev/stdin") {
+    let f = split(line.trim(), " ")
+    if len(f) == 4 {
+        specs.push({ name: f[0], every: int(f[1]), count: int(f[2]), ends: f[3] == "ends" })
+    }
+}
+
+let chans = map(specs, fn(s) { return channel() })
+for i in range(0, len(specs)) {
+    let s = specs[i]
+    let ch = chans[i]
+    spawn {
+        for k in range(1, s.count + 1) {
+            wait(s.every / 1000.0)
+            send(ch, "{s.name}-{k}")
+        }
+        if s.ends {
+            send(ch, "end")
+        }
+    }
+}
+
+let mut items = map(specs, fn(s) { return [] })
+let mut ended = map(specs, fn(s) { return false })
+let mut open = len(specs)
+while open > 0 {
+    let got = select(chans, 500)
+    if got == null {
+        break
+    }
+    let i = got[0]
+    if got[1] == "end" {
+        ended[i] = true
+        open -= 1
+    } else {
+        items[i].push(got[1])
+    }
+}
+for i in range(0, len(specs)) {
+    let status = if ended[i] { "ended" } else { "stalled" }
+    println("{specs[i].name}: {join(items[i], ",")} ({len(items[i])} items, {status})")
+}

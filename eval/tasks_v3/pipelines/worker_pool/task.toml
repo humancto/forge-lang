@@ -1,0 +1,88 @@
+id = "worker_pool"
+category = "pipelines"
+title = "A bounded pool of four workers fed through channels"
+prompt = """
+Each non-blank line of standard input is a job `<id> <milliseconds> <word>`. Processing a
+job takes the given number of milliseconds (simulate the work by sleeping) and produces
+`<the word in upper case>/<number of characters in the word>` (for example `café` gives
+`CAFÉ/4`).
+
+Process the jobs with a pool of exactly 4 concurrent workers that take jobs from a shared
+queue (a worker takes the next job when it finishes one; never more than 4 jobs in
+progress). Print one line per job in input order, `<id> -> <result>`, and then
+`done: <number of jobs> jobs`.
+
+There are 32 jobs of 150-250 ms (about 6.4 seconds of work in total); the program must
+finish within 4 seconds.
+"""
+needs = []
+timeout = 4
+stdin = """
+job01 150 alpha
+job02 187 bravo
+job03 224 charlie
+job04 161 delta
+job05 198 echo
+job06 235 foxtrot
+job07 172 golf
+job08 209 hotel
+job09 246 india
+job10 183 juliett
+job11 220 kilo
+job12 157 lima
+job13 194 mike
+job14 231 november
+job15 168 oscar
+job16 205 papa
+job17 242 quebec
+job18 179 romeo
+job19 216 sierra
+job20 153 tango
+job21 190 uniform
+job22 227 victor
+job23 164 whiskey
+job24 201 xray
+job25 238 yankee
+job26 175 zulu
+job27 212 straße
+job28 249 café
+job29 186 naïve
+job30 223 smörgås
+job31 160 ok
+job32 197 end
+"""
+expected_stdout = """
+job01 -> ALPHA/5
+job02 -> BRAVO/5
+job03 -> CHARLIE/7
+job04 -> DELTA/5
+job05 -> ECHO/4
+job06 -> FOXTROT/7
+job07 -> GOLF/4
+job08 -> HOTEL/5
+job09 -> INDIA/5
+job10 -> JULIETT/7
+job11 -> KILO/4
+job12 -> LIMA/4
+job13 -> MIKE/4
+job14 -> NOVEMBER/8
+job15 -> OSCAR/5
+job16 -> PAPA/4
+job17 -> QUEBEC/6
+job18 -> ROMEO/5
+job19 -> SIERRA/6
+job20 -> TANGO/5
+job21 -> UNIFORM/7
+job22 -> VICTOR/6
+job23 -> WHISKEY/7
+job24 -> XRAY/4
+job25 -> YANKEE/6
+job26 -> ZULU/4
+job27 -> STRASSE/6
+job28 -> CAFÉ/4
+job29 -> NAÏVE/5
+job30 -> SMÖRGÅS/7
+job31 -> OK/2
+job32 -> END/3
+done: 32 jobs
+"""

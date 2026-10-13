@@ -1,0 +1,188 @@
+// Typed route planner (edition 2027): structs for roads and paths, an
+// interface for the cost metric, Dijkstra with a binary heap kept in a local
+// array (sifted in place).
+
+struct Edge {
+    to: String,
+    km: Int,
+    minutes: Int
+}
+
+struct Step {
+    from: String,
+    km: Int,
+    minutes: Int
+}
+
+interface Metric {
+    fn cost(e: Edge) -> Int
+}
+
+struct ByDistance {
+    name: String = "distance"
+}
+
+struct ByTime {
+    name: String = "time"
+}
+
+impl Metric for ByDistance {
+    fn cost(it, e: Edge) -> Int {
+        return e.km
+    }
+}
+
+impl Metric for ByTime {
+    fn cost(it, e: Edge) -> Int {
+        return e.minutes
+    }
+}
+
+struct Search {
+    dist: Object,
+    prev: Object
+}
+
+let mut graph = {}
+
+fn add_road(a: String, b: String, km: Int, minutes: Int) {
+    if !has_key(graph, a) {
+        graph[a] = []
+    }
+    if !has_key(graph, b) {
+        graph[b] = []
+    }
+    graph[a].push(Edge { to: b, km: km, minutes: minutes })
+    graph[b].push(Edge { to: a, km: km, minutes: minutes })
+    return null
+}
+
+fn dijkstra(src: String, metric: Metric) -> Search {
+    let mut dist = {}
+    let mut prev = {}
+    let mut done = set([])
+    dist[src] = 0
+    // Heap entries are [cost, town]; the smallest cost is at index 0.
+    let mut heap = [[0, src]]
+    while len(heap) > 0 {
+        let top = heap[0]
+        let last = heap.pop()
+        if len(heap) > 0 {
+            heap[0] = last
+            let mut i = 0
+            loop {
+                let l = 2 * i + 1
+                let r = l + 1
+                let mut m = i
+                if l < len(heap) && heap[l][0] < heap[m][0] {
+                    m = l
+                }
+                if r < len(heap) && heap[r][0] < heap[m][0] {
+                    m = r
+                }
+                if m == i {
+                    break
+                }
+                let t = heap[i]
+                heap[i] = heap[m]
+                heap[m] = t
+                i = m
+            }
+        }
+        let d: Int = top[0]
+        let u: String = top[1]
+        if done.has(u) {
+            continue
+        }
+        done.add(u)
+        for e in graph[u] {
+            let nd = d + metric.cost(e)
+            if !has_key(dist, e.to) || nd < dist[e.to] {
+                let v = e.to
+                dist[v] = nd
+                prev[v] = Step { from: u, km: e.km, minutes: e.minutes }
+                heap.push([nd, v])
+                let mut j = len(heap) - 1
+                while j > 0 && heap[(j - 1) / 2][0] > heap[j][0] {
+                    let p = (j - 1) / 2
+                    let t = heap[j]
+                    heap[j] = heap[p]
+                    heap[p] = t
+                    j = p
+                }
+            }
+        }
+    }
+    return Search { dist: dist, prev: prev }
+}
+
+fn route(a: String, b: String, metric: Metric) -> String {
+    let none = "no route from {a} to {b}"
+    if !has_key(graph, a) || !has_key(graph, b) {
+        return none
+    }
+    let s = dijkstra(a, metric)
+    if !has_key(s.dist, b) {
+        return none
+    }
+    let mut path = [b]
+    let mut km = 0
+    let mut minutes = 0
+    let mut cur = b
+    while cur != a {
+        let step: Step = s.prev[cur]
+        km += step.km
+        minutes += step.minutes
+        path.push(step.from)
+        cur = step.from
+    }
+    return "{join(reverse(path), " -> ")}: {km} km, {minutes} min"
+}
+
+fn reachable(a: String, limit: Int) -> String {
+    let mut near = []
+    if has_key(graph, a) {
+        let s = dijkstra(a, ByTime {})
+        for town, d in s.dist {
+            if town != a && d <= limit {
+                near.push({ town: town, d: d })
+            }
+        }
+    }
+    let ranked = sort(near, fn(x, y) {
+        if x.d != y.d {
+            return x.d - y.d
+        }
+        if x.town < y.town {
+            return -1
+        }
+        return 1
+    })
+    let mut text = "reachable from {a} within {limit} min: {len(ranked)}"
+    if len(ranked) > 0 {
+        let parts = map(slice(ranked, 0, 5), fn(x) { return "{x.town} {x.d}" })
+        text += " (nearest: {join(parts, ", ")})"
+    }
+    return text
+}
+
+for line in fs.lines("/dev/stdin") {
+    let f = filter(split(line.trim(), " "), fn(w) { return w != "" })
+    if len(f) == 0 {
+        continue
+    }
+    let cmd = f[0]
+    if cmd == "road" {
+        add_road(f[1], f[2], int(f[3]), int(f[4]))
+    } else if cmd == "route" {
+        if f[3] == "distance" {
+            println(route(f[1], f[2], ByDistance {}))
+        } else {
+            println(route(f[1], f[2], ByTime {}))
+        }
+    } else if cmd == "reachable" {
+        println(reachable(f[1], int(f[2])))
+    } else {
+        println("error: unknown command {cmd}")
+    }
+}

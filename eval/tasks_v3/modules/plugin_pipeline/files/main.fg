@@ -1,0 +1,17 @@
+// main.fg (provided): runs a text pipeline built from plugins.
+import { describe } from "plugins/api.fg"
+import { registry } from "plugins/registry.fg"
+import { run } from "pipeline.fg"
+
+let lines = fs.lines("/dev/stdin")
+println("plugins: {join(map(registry(), fn(p) { return describe(p) }), ", ")}")
+let specs = filter(split(lines[0], " "), fn(s) { return s != "" })
+match run(specs, slice(lines, 1, len(lines))) {
+    Ok(out) => {
+        for l in out {
+            println("| {l}")
+        }
+        println("{len(out)} lines")
+    },
+    Err(msg) => println("error: {msg}"),
+}

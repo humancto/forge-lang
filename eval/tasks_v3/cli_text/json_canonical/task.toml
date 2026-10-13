@@ -1,0 +1,55 @@
+id = "json_canonical"
+category = "cli_text"
+title = "Canonical compact JSON that keeps integers and floats apart"
+prompt = '''
+Each line of standard input should be one JSON document. Lines are numbered from 1; skip
+blank lines. For a line that is not valid JSON print `<n>: invalid`. Otherwise print
+
+`<n>: <kind> depth=<d> numbers=<c> <canonical>`
+
+- kind: `object`, `array`, `string`, `number`, `boolean` or `null` (the top-level value);
+- d: the nesting depth (0 for a scalar, 1 for `[]` or `[1]`, 2 for `[[1]]` or `{"a":[]}`);
+- c: how many numbers the document contains, at any depth;
+- canonical: the document re-encoded without any whitespace, object keys in their
+  original order (when a key repeats, the last value wins, at the key's first position);
+  strings with only `"` `\` and the control characters U+0000-U+001F escaped (`\n`, `\r`,
+  `\t`, `\b`, `\f`, others as `\u00XX` with lower-case hex) and every other character,
+  including non-ASCII ones, written as itself (escapes such as `é` or the surrogate
+  pair `😀` in the input are decoded). A number written without a fraction or
+  exponent is an integer and is printed as an integer; every other number is a float and
+  is printed in the shortest form that reads back as the same float, with at least one
+  digit after the decimal point (`1.0`, `100.0` for `1e2`, `0.0025`, `1.5`). The data's
+  floats have magnitudes between 0.0001 and 10^15 and its integers fit in 64 bits.
+'''
+needs = []
+stdin = '''
+{"b": 1, "a": [true, null, 1.50], "c": {"d": []}}
+[1.0, 1e2, 2.5E-3, -7, 0.1, 9223372036854775807, -12.0e1]
+"café 😀 \"quoted\" back\\slash tab\t nl\n bell\u0007 nul\u0000 esc\u001b"
+{"a": 1, "a": 2, "b": {"a": 3}}
+
+  [ ]
+{}
+42
+-3.75
+true
+null
+{"unterminated": [1, 2}
+[[[[["deep"]]]], {"k": {"k": {"k": 0.5}}}]
+{"ünïcode": "日本", "emoji 🎉": ["🎉"]}
+'''
+expected_stdout = """
+1: object depth=3 numbers=2 {"b":1,"a":[true,null,1.5],"c":{"d":[]}}
+2: array depth=1 numbers=7 [1.0,100.0,0.0025,-7,0.1,9223372036854775807,-120.0]
+3: string depth=0 numbers=0 "café 😀 \\"quoted\\" back\\\\slash tab\\t nl\\n bell\\u0007 nul\\u0000 esc\\u001b"
+4: object depth=2 numbers=2 {"a":2,"b":{"a":3}}
+6: array depth=1 numbers=0 []
+7: object depth=1 numbers=0 {}
+8: number depth=0 numbers=1 42
+9: number depth=0 numbers=1 -3.75
+10: boolean depth=0 numbers=0 true
+11: null depth=0 numbers=0 null
+12: invalid
+13: array depth=5 numbers=1 [[[[["deep"]]]],{"k":{"k":{"k":0.5}}}]
+14: object depth=2 numbers=0 {"ünïcode":"日本","emoji 🎉":["🎉"]}
+"""

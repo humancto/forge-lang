@@ -1,0 +1,107 @@
+// Deduplicate 50,000 customers by normalized e-mail and join 220,000
+// orders to them: objects keyed by customer id and by e-mail.
+
+fn dollars(c: Int) -> String {
+    let cents = c % 100
+    let pad = if cents < 10 { "0" } else { "" }
+    return "{c / 100}.{pad}{cents}"
+}
+
+fn normalize(email: String) -> String {
+    let e = email.trim().lower()
+    let at = last_index_of(e, "@")
+    let mut local = substring(e, 0, at)
+    let mut dom = substring(e, at + 1, len(e))
+    let plus = index_of(local, "+")
+    if plus >= 0 {
+        local = substring(local, 0, plus)
+    }
+    if dom == "gmail.com" || dom == "googlemail.com" {
+        local = replace(local, ".", "")
+        dom = "gmail.com"
+    }
+    return "{local}@{dom}"
+}
+
+let mut section = ""
+let mut canon_of_email = {}
+let mut info = {}
+let mut n_customers = 0
+let mut orders = 0
+let mut orphans = 0
+let mut stats = {}
+let mut months = {}
+
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    if starts_with(line, "#") {
+        section = substring(line, 1, len(line)).trim()
+        continue
+    }
+    let f = split(line, ",")
+    if section == "customers" {
+        n_customers += 1
+        let cid = f[0]
+        let key = normalize(f[2])
+        info[cid] = { name: f[1], email: key }
+        if !has_key(canon_of_email, key) || cid < canon_of_email[key] {
+            canon_of_email[key] = cid
+        }
+    } else {
+        orders += 1
+        let cid = f[1]
+        if !has_key(info, cid) {
+            orphans += 1
+            continue
+        }
+        let c = canon_of_email[info[cid].email]
+        let cents = int(f[2])
+        let date = f[3]
+        if !has_key(stats, c) {
+            stats[c] = { id: c, orders: 0, total: 0, first: date, last: date }
+        }
+        stats[c].orders += 1
+        stats[c].total += cents
+        if date < stats[c].first {
+            stats[c].first = date
+        }
+        if date > stats[c].last {
+            stats[c].last = date
+        }
+        if starts_with(date, "2026-") {
+            let m = substring(date, 0, 7)
+            if !has_key(months, m) {
+                months[m] = { cents: 0, n: 0 }
+            }
+            months[m].cents += cents
+            months[m].n += 1
+        }
+    }
+}
+
+let people = len(keys(canon_of_email))
+println("customers: {n_customers}")
+println("people: {people}")
+println("merged: {n_customers - people}")
+println("orders: {orders}")
+println("orphans: {orphans}")
+println("top spenders:")
+let ranked = sort(values(stats), fn(a, b) {
+    if a.total != b.total {
+        return b.total - a.total
+    }
+    if a.id < b.id {
+        return -1
+    }
+    return 1
+})
+for s in slice(ranked, 0, 10) {
+    let who = info[s.id]
+    println("{s.id} {who.name} {who.email} orders={s.orders} total={dollars(s.total)} first={s.first} last={s.last}")
+}
+println("2026 by month:")
+for m in sort(keys(months)) {
+    println("{m} {dollars(months[m].cents)} ({months[m].n})")
+}

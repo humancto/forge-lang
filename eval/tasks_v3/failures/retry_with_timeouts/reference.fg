@@ -1,0 +1,41 @@
+// Retry each call (a `retry` block) with a per-attempt time limit. An
+// attempt is simulated: `x` fails at once, a number of milliseconds sleeps
+// that long and then succeeds. The time limit uses spawn + await_timeout:
+// `timeout 0.15 seconds { ... }` truncates its limit to 0 seconds and fails
+// at once, and there is no millisecond unit (eval/V3_FINDINGS.md, finding 10).
+
+fn attempt(spec: String) -> String {
+    if spec == "x" {
+        return "error"
+    }
+    let ms = int(spec)
+    let task = spawn {
+        wait(ms / 1000.0)
+        return "ok"
+    }
+    let r = await_timeout(task, 150)
+    if r == null {
+        return "timeout"
+    }
+    return r
+}
+
+for line in fs.lines("/dev/stdin") {
+    let f = split(line.trim(), " ")
+    if len(f) != 3 {
+        continue
+    }
+    let name = f[0]
+    let specs = split(f[1], ",")
+    let mut outcomes = []
+    try {
+        retry int(f[2]) times {
+            let outcome = attempt(specs[len(outcomes)])
+            outcomes.push(outcome)
+            assert(outcome == "ok", outcome)
+        }
+        println("{name}: ok after {len(outcomes)} attempts ({join(outcomes, ", ")})")
+    } catch e {
+        println("{name}: gave up after {len(outcomes)} attempts ({join(outcomes, ", ")})")
+    }
+}

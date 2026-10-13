@@ -1,0 +1,114 @@
+id = "csvlite_package"
+category = "modules"
+title = "Write a local package with internal modules for a provided program"
+answer = "files"
+# On the VM a name the package entry imports (a re-export) cannot be
+# imported from the package (E0019); the interpreter allows it.
+known_failing = "V3 finding 9"
+known_failing_on = ["forge-vm", "forge-vm-2027"]
+prompt = '''
+The working directory already contains this `main.fg`, which you must not change (it is
+provided as is when your files are run):
+
+```forge
+// main.fg (provided): uses the csvlite package from forge_modules/.
+import { read_table, format_table, describe_column } from "csvlite"
+
+match read_table(fs.read("/dev/stdin")) {
+    Ok(t) => {
+        println(format_table(t))
+        println("rows: {t.count()}")
+        for h in t.headers {
+            println(describe_column(t, h))
+        }
+    },
+    Err(e) => println("error: {e}"),
+}
+```
+
+Write the package `csvlite` as an installed package in `forge_modules/csvlite/` with its
+entry file `forge_modules/csvlite/main.fg`. Keep the implementation in several modules
+under `forge_modules/csvlite/src/` (at least one for the table type and reading, one for
+formatting and one for column statistics), imported by the entry file with paths relative
+to it.
+
+- `read_table(text)` parses CSV text (RFC 4180: fields may be quoted; quoted fields may
+  contain commas, line breaks and doubled quotes `""`; every field stays text, no number
+  conversion) and returns `Ok(table)` or `Err(message)`. Empty lines are ignored. The first
+  row holds the column names (trimmed of surrounding spaces). No rows at all:
+  `Err("empty input")`. A data row (numbered from 1) with a different number of fields:
+  `Err("row <n> has <k> fields, expected <m>")`. A table is a struct with a `headers`
+  field (the column names) and a method `count()` (the number of data rows).
+- `format_table(table)` returns the table as text: a header line, a rule line, and one line
+  per data row. Each column is as wide as its longest cell (header included, counting
+  characters); cells are separated by ` | `; header cells and text cells are padded on the
+  right, numbers (an optional `-`, digits, optionally `.` and digits) on the left; trailing
+  spaces at the end of a line are removed. The rule line is `-` repeated for each column's
+  width, joined with `-+-`.
+- `describe_column(table, name)`: if the column has at least one row and every value is a
+  number, `<name>: numeric min=<min> max=<max> mean=<mean>`, each with exactly two
+  decimals (rounded half away from zero); otherwise
+  `<name>: text distinct=<number of distinct values> longest=<the longest value, the first
+  one on a tie>`.
+'''
+needs = ["read"]
+
+[[case]]
+name = "table"
+stdin = '''
+city,  pop , area,note
+Oslo,709037,454.0,"capital, ""Norway"""
+Bergen,291940,465.3,west
+
+Tromsø,78745,2521,"north
+of the circle"
+Ås,20575,101.52,
+'''
+expected_stdout = """
+city   | pop    | area   | note
+-------+--------+--------+--------------------
+Oslo   | 709037 |  454.0 | capital, "Norway"
+Bergen | 291940 |  465.3 | west
+Tromsø |  78745 |   2521 | north
+of the circle
+Ås     |  20575 | 101.52 |
+rows: 4
+city: text distinct=4 longest=Bergen
+pop: numeric min=20575.00 max=709037.00 mean=275074.25
+area: numeric min=101.52 max=2521.00 mean=885.46
+note: text distinct=4 longest=north
+of the circle
+"""
+
+[[case]]
+name = "ragged"
+stdin = '''
+a,b
+1,2
+3
+'''
+expected_stdout = """
+error: row 2 has 1 fields, expected 2
+"""
+
+[[case]]
+name = "empty"
+stdin = """
+
+"""
+expected_stdout = """
+error: empty input
+"""
+
+[[case]]
+name = "header_only"
+stdin = """
+x,y
+"""
+expected_stdout = """
+x | y
+--+--
+rows: 0
+x: text distinct=0 longest=
+y: text distinct=0 longest=
+"""

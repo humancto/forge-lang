@@ -1,0 +1,13 @@
+// main.fg (provided): uses the csvlite package from forge_modules/.
+import { read_table, format_table, describe_column } from "csvlite"
+
+match read_table(fs.read("/dev/stdin")) {
+    Ok(t) => {
+        println(format_table(t))
+        println("rows: {t.count()}")
+        for h in t.headers {
+            println(describe_column(t, h))
+        }
+    },
+    Err(e) => println("error: {e}"),
+}

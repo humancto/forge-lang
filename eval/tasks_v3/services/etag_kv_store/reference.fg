@@ -1,0 +1,76 @@
+@server(port: 18523)
+
+// Values are stored as the request's raw body text (`raw_body`), so a JSON
+// body is kept byte for byte instead of being re-encoded.
+db.open("kv.db")
+db.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, version INTEGER NOT NULL)")
+
+fn etag(value: String) -> String {
+    return "\"" + substring(crypto.sha256(value), 0, 16) + "\""
+}
+
+fn valid_key(key: String) -> Bool {
+    return regex.test(key, "^[A-Za-z0-9 _.-]{1,64}$")
+}
+
+fn current(key: String) {
+    let rows = db.query("SELECT v, version FROM kv WHERE k = ?", [key])
+    if len(rows) == 0 {
+        return null
+    }
+    return rows[0]
+}
+
+@get("/kv")
+fn list_keys(query) {
+    let prefix = get(query, "prefix", "")
+    let keys = filter(map(db.query("SELECT k FROM kv ORDER BY k"), fn(r) { return r.k }), fn(k) { return starts_with(k, prefix) })
+    return { keys: keys, count: len(keys) }
+}
+
+@get("/kv/:key")
+fn read_key(key: String, headers) {
+    if !valid_key(key) {
+        return http.response(400, { error: "bad key" })
+    }
+    let row = current(key)
+    if row == null {
+        return http.response(404, { error: "no such key" })
+    }
+    let tag = etag(row.v)
+    if get(headers, "if-none-match") == tag {
+        return http.response(304, null, { ETag: tag })
+    }
+    return http.response(200, row.v, { ETag: tag, "Content-Type": "text/plain; charset=utf-8" })
+}
+
+@put("/kv/:key")
+fn write_key(key: String, headers, raw_body: String) {
+    if !valid_key(key) {
+        return http.response(400, { error: "bad key" })
+    }
+    let row = current(key)
+    let if_match = get(headers, "if-match")
+    if if_match != null && (row == null || etag(row.v) != if_match) {
+        return http.response(412, { error: "precondition failed" })
+    }
+    if get(headers, "if-none-match") == "*" && row != null {
+        return http.response(412, { error: "precondition failed" })
+    }
+    let version = if row == null { 1 } else { row.version + 1 }
+    db.execute("INSERT OR REPLACE INTO kv (k, v, version) VALUES (?, ?, ?)", [key, raw_body, version])
+    let status = if row == null { 201 } else { 200 }
+    return http.response(status, { key: key, version: version }, { ETag: etag(raw_body) })
+}
+
+@delete("/kv/:key")
+fn delete_key(key: String) {
+    if !valid_key(key) {
+        return http.response(400, { error: "bad key" })
+    }
+    if current(key) == null {
+        return http.response(404, { error: "no such key" })
+    }
+    db.execute("DELETE FROM kv WHERE k = ?", [key])
+    return http.response(204)
+}

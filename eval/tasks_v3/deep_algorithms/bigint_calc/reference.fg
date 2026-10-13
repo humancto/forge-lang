@@ -1,0 +1,179 @@
+// Arbitrary-precision integers as a sign and an array of base-10000 limbs
+// (least significant first).
+
+let base = 10000
+
+struct Big {
+    neg: Bool,
+    limbs: [Int]
+}
+
+fn trim_limbs(xs: [Int]) -> [Int] {
+    let mut out = xs
+    while len(out) > 1 && out[len(out) - 1] == 0 {
+        out.pop()
+    }
+    return out
+}
+
+fn make(neg: Bool, limbs: [Int]) -> Big {
+    let t = trim_limbs(limbs)
+    let zero = len(t) == 1 && t[0] == 0
+    return Big { neg: neg && !zero, limbs: t }
+}
+
+fn parse_big(s: String) -> Big {
+    let neg = starts_with(s, "-")
+    let digits = if neg { substring(s, 1, len(s)) } else { s }
+    let mut limbs = []
+    let mut end = len(digits)
+    while end > 0 {
+        let start = max(0, end - 4)
+        limbs.push(int(substring(digits, start, end)))
+        end = start
+    }
+    return make(neg, limbs)
+}
+
+fn cmp_mag(a: [Int], b: [Int]) -> Int {
+    if len(a) != len(b) {
+        return len(a) - len(b)
+    }
+    let mut i = len(a) - 1
+    while i >= 0 {
+        if a[i] != b[i] {
+            return a[i] - b[i]
+        }
+        i -= 1
+    }
+    return 0
+}
+
+fn add_mag(a: [Int], b: [Int]) -> [Int] {
+    let mut out = []
+    let mut carry = 0
+    for i in range(0, max(len(a), len(b))) {
+        let x = (if i < len(a) { a[i] } else { 0 }) + (if i < len(b) { b[i] } else { 0 }) + carry
+        out.push(x % base)
+        carry = x / base
+    }
+    if carry > 0 {
+        out.push(carry)
+    }
+    return out
+}
+
+// a - b for |a| >= |b|.
+fn sub_mag(a: [Int], b: [Int]) -> [Int] {
+    let mut out = []
+    let mut borrow = 0
+    for i in range(0, len(a)) {
+        let mut x = a[i] - borrow - (if i < len(b) { b[i] } else { 0 })
+        borrow = 0
+        if x < 0 {
+            x += base
+            borrow = 1
+        }
+        out.push(x)
+    }
+    return trim_limbs(out)
+}
+
+fn mul_mag(a: [Int], b: [Int]) -> [Int] {
+    let mut out = map(range(0, len(a) + len(b)), fn(i) { return 0 })
+    for i in range(0, len(a)) {
+        let mut carry = 0
+        for j in range(0, len(b)) {
+            let x = out[i + j] + a[i] * b[j] + carry
+            out[i + j] = x % base
+            carry = x / base
+        }
+        let mut k = i + len(b)
+        while carry > 0 {
+            let x = out[k] + carry
+            out[k] = x % base
+            carry = x / base
+            k += 1
+        }
+    }
+    return trim_limbs(out)
+}
+
+fn add(a: Big, b: Big) -> Big {
+    if a.neg == b.neg {
+        return make(a.neg, add_mag(a.limbs, b.limbs))
+    }
+    if cmp_mag(a.limbs, b.limbs) >= 0 {
+        return make(a.neg, sub_mag(a.limbs, b.limbs))
+    }
+    return make(b.neg, sub_mag(b.limbs, a.limbs))
+}
+
+fn negate(a: Big) -> Big {
+    return make(!a.neg, a.limbs)
+}
+
+fn mul(a: Big, b: Big) -> Big {
+    return make(a.neg != b.neg, mul_mag(a.limbs, b.limbs))
+}
+
+fn to_text(a: Big) -> String {
+    let mut parts = [str(a.limbs[len(a.limbs) - 1])]
+    let mut i = len(a.limbs) - 2
+    while i >= 0 {
+        parts.push(pad_start(str(a.limbs[i]), 4, "0"))
+        i -= 1
+    }
+    let sign = if a.neg { "-" } else { "" }
+    return sign + join(parts, "")
+}
+
+fn is_int(s: String) -> Bool {
+    return regex.test(s, "^-?[0-9]+$")
+}
+
+fn evaluate(f: [String]) -> Result<Big, String> {
+    if len(f) == 2 && f[0] == "fact" && regex.test(f[1], "^[0-9]+$") {
+        let mut r = parse_big("1")
+        for i in range(2, int(f[1]) + 1) {
+            r = mul(r, parse_big(str(i)))
+        }
+        return Ok(r)
+    }
+    if len(f) == 3 && is_int(f[0]) && is_int(f[2]) && (f[1] == "+" || f[1] == "-" || f[1] == "*") {
+        let a = parse_big(f[0])
+        let b = parse_big(f[2])
+        if f[1] == "+" {
+            return Ok(add(a, b))
+        }
+        if f[1] == "-" {
+            return Ok(add(a, negate(b)))
+        }
+        return Ok(mul(a, b))
+    }
+    if len(f) == 3 && f[1] == "^" && is_int(f[0]) && regex.test(f[2], "^[0-9]+$") {
+        let a = parse_big(f[0])
+        let mut r = parse_big("1")
+        for i in range(0, int(f[2])) {
+            r = mul(r, a)
+        }
+        return Ok(r)
+    }
+    return Err("bad expression")
+}
+
+for line in fs.lines("/dev/stdin") {
+    let f = filter(split(line.trim(), " "), fn(w) { return w != "" })
+    if len(f) == 0 {
+        continue
+    }
+    match evaluate(f) {
+        Ok(r) => {
+            let s = to_text(r)
+            let digits = if r.neg { substring(s, 1, len(s)) } else { s }
+            let dsum = sum(map(split(digits, ""), fn(c) { return int(c) }))
+            println("{s} ({len(digits)} digits, digit sum {dsum})")
+        },
+        Err(msg) => println("error: {msg}"),
+    }
+}

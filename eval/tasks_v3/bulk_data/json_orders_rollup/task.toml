@@ -1,0 +1,70 @@
+id = "json_orders_rollup"
+category = "bulk_data"
+title = "Aggregate 80,000 JSON order lines"
+prompt = """
+Each line of standard input is one order as a JSON object (about 80,000 lines, some of them
+not valid JSON):
+
+```json
+{"id": "o000001", "ts": "2026-02-14T10:15:00+02:00",
+ "user": {"id": 42, "country": "DE", "tier": "gold"},
+ "items": [{"sku": "SKU-007", "qty": 2, "price": 19.99}],
+ "coupon": null, "note": "caf\\u00e9"}
+```
+
+(each order is on one line). `ts` ends in `Z` or a `+HH:MM` / `-HH:MM` UTC offset;
+`coupon` is `null`, `"SAVE10"` or `"FREESHIP"`; `tier` is `free`, `silver` or `gold`;
+prices have at most two decimals; `note` is any string (non-ASCII text may be written
+raw or as `\\u` escapes).
+
+Skip empty lines. A line that is not valid JSON, an order whose `user` has no `country`,
+and an order with an empty `items` array are invalid: count them and ignore them.
+
+For every valid order, its total in cents is the sum over items of `qty` times the price
+in cents (the price times 100, rounded to the nearest integer); with coupon `SAVE10`,
+subtract 10% of that sum in cents, rounded half up (`(sum + 5) / 10` with integer
+division). Write money as `<whole>.<cents>` with two cent digits.
+
+Print `orders: <valid orders>`, then `invalid: <invalid lines>`, then `by country:` and one
+line per country, highest revenue first (ties: country code ascending):
+`<country> orders=<n> revenue=<sum of its order totals> avg=<revenue / orders>` (the
+average in cents rounded half up); then `top skus:` and the 5 SKUs with the largest total
+quantity as `<sku> qty=<total>` (ties: SKU ascending); then
+`coupons: SAVE10=<n> FREESHIP=<n> none=<n>`; then
+`tiers: free=<n> silver=<n> gold=<n>`; then `busiest utc hour: <HH> (<n> orders)`, the
+hour of day (00-23, two digits) in UTC with the most orders, the earliest hour on a tie;
+then `notes: non-ascii=<orders whose note contains a non-ASCII character> longest=<the
+largest number of characters (Unicode code points) in a note>`.
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+generator = "gen_input.py"
+generated_sha256 = { "input.txt" = "0d219f6a4d958726dcf735ebd8547affb1946447d78f7c42bd426d935d7c9eac" }
+needs = []
+timeout = 40
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
+expected_stdout = """
+orders: 79410
+invalid: 590
+by country:
+FR orders=11463 revenue=8558288.85 avg=746.60
+NO orders=11482 revenue=8549379.25 avg=744.59
+BR orders=11447 revenue=8467492.28 avg=739.71
+JP orders=11303 revenue=8408183.14 avg=743.89
+DE orders=11177 revenue=8370728.72 avg=748.92
+IN orders=11322 revenue=8351638.98 avg=737.65
+US orders=11216 revenue=8265520.85 avg=736.94
+top skus:
+SKU-000 qty=15763
+SKU-001 qty=10385
+SKU-002 qty=9348
+SKU-003 qty=8993
+SKU-004 qty=8079
+coupons: SAVE10=15807 FREESHIP=15813 none=47790
+tiers: free=26646 silver=26239 gold=26525
+busiest utc hour: 09 (3441 orders)
+notes: non-ascii=49375 longest=12
+"""
