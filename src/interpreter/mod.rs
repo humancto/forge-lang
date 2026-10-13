@@ -195,6 +195,63 @@ impl SetItems {
     }
 }
 
+/// A map's `(key, value)` entries: insertion-ordered and hash-indexed by
+/// key (`semantics::ordered_set`). Keys are compared with
+/// [`Value::container_eq`] and hashed with [`Value::set_hash`], exactly
+/// like set items, so `1` and `1.0` are one key and NaN finds NaN.
+pub type MapEntries = crate::semantics::ordered_set::OrderedSet<(Value, Value)>;
+
+impl MapEntries {
+    /// A map of `pairs` in order; a key equal to an earlier one replaces
+    /// that entry's value and keeps its position (what `map(pairs)` does).
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (Value, Value)>) -> Self {
+        let mut map = MapEntries::new();
+        for (key, value) in pairs {
+            map.insert_value(key, value);
+        }
+        map
+    }
+
+    /// A map of `pairs` in order, kept as given even if some keys compare
+    /// equal (entries converted from the VM keep exactly what they had).
+    pub fn from_pairs_unchecked(pairs: impl IntoIterator<Item = (Value, Value)>) -> Self {
+        let mut map = MapEntries::new();
+        for (key, value) in pairs {
+            map.push_unchecked(key.set_hash(), (key, value));
+        }
+        map
+    }
+
+    /// The value of the first entry whose key equals `key`.
+    pub fn get_value(&self, key: &Value) -> Option<&Value> {
+        self.find(key.set_hash(), |(k, _)| Value::container_eq(k, key))
+            .map(|(_, v)| v)
+    }
+
+    /// Whether some entry's key equals `key`.
+    pub fn has_key_value(&self, key: &Value) -> bool {
+        self.contains(key.set_hash(), |(k, _)| Value::container_eq(k, key))
+    }
+
+    /// `m.set(key, value)` in place: replace the value of the first entry
+    /// whose key equals `key` (keeping that entry's key and position), or
+    /// append a new entry.
+    pub fn insert_value(&mut self, key: Value, value: Value) {
+        let hash = key.set_hash();
+        if let Some(entry) = self.find_mut(hash, |(k, _)| Value::container_eq(k, &key)) {
+            entry.1 = value;
+            return;
+        }
+        self.push_unchecked(hash, (key, value));
+    }
+
+    /// `m.remove(key)` in place: remove every entry whose key equals `key`;
+    /// returns whether any was.
+    pub fn remove_key(&mut self, key: &Value) -> bool {
+        self.remove_matching(key.set_hash(), |(k, _)| Value::container_eq(k, key)) > 0
+    }
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -207,10 +264,11 @@ pub enum Value {
     /// Insertion-ordered set; hash-indexed so `has`/`add`/`remove` are
     /// O(1) on average (see [`SetItems`]).
     Set(SetItems),
-    /// First-class Map with any-value keys. Ordered vec preserves insertion
-    /// order; keys compared via `container_eq` so NaN self-matches and
-    /// Int/Float promote (e.g. `1` and `1.0` collide).
-    Map(Vec<(Value, Value)>),
+    /// First-class Map with any-value keys, in insertion order; hash-indexed
+    /// by key so `get`/`set`/`has`/`remove` are O(1) on average (see
+    /// [`MapEntries`]). Keys compare via `container_eq`: NaN self-matches
+    /// and Int/Float promote (`1` and `1.0` collide).
+    Map(MapEntries),
     /// Lazy iterator. Single-use; terminal ops drain it. Rc-shared so
     /// combinators can wrap upstreams without cloning cursor state.
     Stream(Arc<Mutex<StreamCell>>),
@@ -253,10 +311,13 @@ impl PartialEq for Value {
             (Value::Map(a), Value::Map(b)) => {
                 // Order-independent on entries. Keys use container_eq
                 // (NaN self-match, Int/Float promote). Values use full ==.
+                // Every entry with an equal key hashes alike, so probing
+                // `b`'s index finds exactly what a scan of `b` would.
                 a.len() == b.len()
                     && a.iter().all(|(ak, av)| {
-                        b.iter()
-                            .any(|(bk, bv)| Value::container_eq(ak, bk) && av == bv)
+                        b.contains(ak.set_hash(), |(bk, bv)| {
+                            Value::container_eq(ak, bk) && av == bv
+                        })
                     })
             }
             (Value::Object(a), Value::Object(b)) => a == b,
@@ -439,7 +500,7 @@ impl Value {
             (Value::Map(x), Value::Map(y)) => {
                 x.len() == y.len()
                     && x.iter().all(|(xk, xv)| {
-                        y.iter().any(|(yk, yv)| {
+                        y.contains(xk.set_hash(), |(yk, yv)| {
                             Value::container_eq(xk, yk) && Value::container_eq(xv, yv)
                         })
                     })
@@ -1019,17 +1080,12 @@ impl Environment {
             Value::Set(arr) => {
                 Value::Set(arr.into_map_same_hash(|x| Self::dup_value(x, scope_map)))
             }
-            Value::Map(pairs) => Value::Map(
-                pairs
-                    .into_iter()
-                    .map(|(k, val)| {
-                        (
-                            Self::dup_value(k, scope_map),
-                            Self::dup_value(val, scope_map),
-                        )
-                    })
-                    .collect(),
-            ),
+            Value::Map(pairs) => Value::Map(pairs.into_map_same_hash(|(k, val)| {
+                (
+                    Self::dup_value(k, scope_map),
+                    Self::dup_value(val, scope_map),
+                )
+            })),
             Value::Object(o) => Value::Object(
                 o.into_iter()
                     .map(|(k, val)| (k, Self::dup_value(val, scope_map)))
@@ -3856,14 +3912,15 @@ impl Interpreter {
                                 )
                         } =>
                         {
-                            let is_frozen = matches!(&obj, Value::Frozen(_));
-                            let pairs: Vec<(Value, Value)> = match &obj {
-                                Value::Map(pairs) => pairs.clone(),
-                                Value::Frozen(inner) => match inner.as_ref() {
-                                    Value::Map(pairs) => pairs.clone(),
-                                    _ => unreachable!(),
+                            // `obj` is already this call's own copy of the
+                            // receiver: take its entries without copying.
+                            let (pairs, is_frozen): (MapEntries, bool) = match obj {
+                                Value::Map(pairs) => (pairs, false),
+                                Value::Frozen(inner) => match *inner {
+                                    Value::Map(pairs) => (pairs, true),
+                                    _ => return Err(RuntimeError::new("BUG: map receiver")),
                                 },
-                                _ => unreachable!(),
+                                _ => return Err(RuntimeError::new("BUG: map receiver")),
                             };
                             match method_name {
                                 "get" => {
@@ -3873,12 +3930,10 @@ impl Interpreter {
                                         ));
                                     }
                                     let key = self.eval_expr(&args[0])?;
-                                    for (k, v) in &pairs {
-                                        if Value::container_eq(k, &key) {
-                                            return Ok(v.clone());
-                                        }
-                                    }
-                                    return Ok(Value::Null);
+                                    return Ok(pairs
+                                        .get_value(&key)
+                                        .cloned()
+                                        .unwrap_or(Value::Null));
                                 }
                                 "has" => {
                                     if args.len() != 1 {
@@ -3887,9 +3942,7 @@ impl Interpreter {
                                         ));
                                     }
                                     let key = self.eval_expr(&args[0])?;
-                                    return Ok(Value::Bool(
-                                        pairs.iter().any(|(k, _)| Value::container_eq(k, &key)),
-                                    ));
+                                    return Ok(Value::Bool(pairs.has_key_value(&key)));
                                 }
                                 "set" => {
                                     if is_frozen {
@@ -3905,17 +3958,7 @@ impl Interpreter {
                                     let key = self.eval_expr(&args[0])?;
                                     let val = self.eval_expr(&args[1])?;
                                     let mut new_pairs = pairs;
-                                    let mut replaced = false;
-                                    for entry in new_pairs.iter_mut() {
-                                        if Value::container_eq(&entry.0, &key) {
-                                            entry.1 = val.clone();
-                                            replaced = true;
-                                            break;
-                                        }
-                                    }
-                                    if !replaced {
-                                        new_pairs.push((key, val));
-                                    }
+                                    new_pairs.insert_value(key, val);
                                     return Ok(Value::Map(new_pairs));
                                 }
                                 "remove" => {
@@ -3930,10 +3973,8 @@ impl Interpreter {
                                         ));
                                     }
                                     let key = self.eval_expr(&args[0])?;
-                                    let new_pairs: Vec<(Value, Value)> = pairs
-                                        .into_iter()
-                                        .filter(|(k, _)| !Value::container_eq(k, &key))
-                                        .collect();
+                                    let mut new_pairs = pairs;
+                                    new_pairs.remove_key(&key);
                                     return Ok(Value::Map(new_pairs));
                                 }
                                 "keys" => {
@@ -3974,7 +4015,11 @@ impl Interpreter {
                                     items: items.into_vec(),
                                     idx: 0,
                                 },
-                                Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
+                                Value::Map(pairs) => StreamKind::MapIter {
+                                    pairs: pairs.into_vec(),
+                                    idx: 0,
+                                },
+
                                 Value::String(s) => StreamKind::StringIter {
                                     chars: s.chars().collect(),
                                     idx: 0,
@@ -3986,7 +4031,10 @@ impl Interpreter {
                                         items: items.into_vec(),
                                         idx: 0,
                                     },
-                                    Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
+                                    Value::Map(pairs) => StreamKind::MapIter {
+                                        pairs: pairs.into_vec(),
+                                        idx: 0,
+                                    },
                                     other => {
                                         return Err(RuntimeError::new(&format!(
                                             "stream() not supported on {}",

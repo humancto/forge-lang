@@ -7889,6 +7889,72 @@ fn equal_values_have_equal_set_hashes() {
     }
 }
 
+/// Map keys use the set rules (`container_eq`, `set_hash`): a hash-indexed
+/// map built from values that compare equal agrees with the linear
+/// definition (`get` finds the oldest equal key, `set` replaces its value
+/// and keeps its position, `remove` drops every equal key).
+#[test]
+fn map_lookups_agree_with_a_linear_scan() {
+    let Value::Array(values) = run_forge(&format!("let corpus = {}\ncorpus", SET_HASH_CORPUS))
+    else {
+        panic!("corpus is an array");
+    };
+    let mut map = MapEntries::new();
+    let mut linear: Vec<(Value, Value)> = Vec::new();
+    for (i, k) in values.iter().enumerate() {
+        let v = Value::Int(i as i64);
+        map.insert_value(k.clone(), v.clone());
+        match linear.iter_mut().find(|(x, _)| Value::container_eq(x, k)) {
+            Some(entry) => entry.1 = v,
+            None => linear.push((k.clone(), v)),
+        }
+    }
+    assert_eq!(map.len(), linear.len());
+    for ((mk, mv), (lk, lv)) in map.iter().zip(&linear) {
+        assert!(Value::container_eq(mk, lk), "{} vs {}", mk, lk);
+        assert_eq!(mv, lv);
+    }
+    for k in &values {
+        let expected = linear
+            .iter()
+            .find(|(x, _)| Value::container_eq(x, k))
+            .map(|e| &e.1);
+        assert_eq!(map.get_value(k), expected, "{}", k);
+        assert!(map.has_key_value(k));
+    }
+    // Equal maps compare equal whatever their order.
+    let reversed = MapEntries::from_pairs(map.iter().rev().cloned());
+    assert!(Value::Map(map.clone()) == Value::Map(reversed));
+    for k in &values {
+        map.remove_key(k);
+    }
+    assert!(map.is_empty());
+}
+
+#[test]
+fn map_set_on_a_variable_updates_in_place_with_value_semantics() {
+    let out = run_forge(
+        r#"
+        let mut m = map()
+        for i in range(0, 300) {
+            m = m.set(i % 100, i)
+            if m.has(i) { m = m.set(i, m.get(i) + 1) }
+        }
+        let a = m
+        m = m.set("new", 1)
+        m = m.remove(0)
+        let mut f = freeze(map([(1, 2)]))
+        let mut frozen = "no error"
+        try { f = f.set(1, 3) } catch e { frozen = e.message }
+        [a.len(), m.len(), a.get(0), m.get(0), m.get(99), a.has("new"), frozen]
+        "#,
+    );
+    assert_eq!(
+        format!("{}", out),
+        "[100, 100, 200, null, 299, false, cannot mutate a frozen map]"
+    );
+}
+
 /// The set representation must not make every `Value` bigger: it has to
 /// fit in the space the largest other variant (`Object`) already takes.
 #[test]

@@ -298,6 +298,11 @@ impl Gc {
         let children: Vec<GcRef> = match self.get(r).map(|o| &o.kind) {
             Some(ObjKind::Array(items)) => items.iter().filter_map(|v| v.as_obj()).collect(),
             Some(ObjKind::Object(map)) => map.values().filter_map(|v| v.as_obj()).collect(),
+            Some(ObjKind::Map(entries)) => entries
+                .iter()
+                .flat_map(|(k, v)| [k.as_obj(), v.as_obj()])
+                .flatten()
+                .collect(),
             _ => Vec::new(),
         };
         for child in children {

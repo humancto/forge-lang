@@ -1332,6 +1332,18 @@ impl VM {
                         let value = self.registers[base + b as usize];
                         self.update_set_local(frame_idx, base, a, value, c == SET_UPDATE_REMOVE)?;
                     }
+                    OpCode::UpdateMapLocal => {
+                        let operand = base + b as usize;
+                        if c == MAP_UPDATE_SET {
+                            let snapshot = self.registers[operand];
+                            let key = self.registers[operand + 1];
+                            let value = self.registers[operand + 2];
+                            self.map_set_local(frame_idx, base, a, snapshot, key, value)?;
+                        } else {
+                            let key = self.registers[operand];
+                            self.map_remove_local(frame_idx, base, a, key)?;
+                        }
+                    }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
@@ -1386,7 +1398,7 @@ impl VM {
                         // owned locals: only a builtin that never keeps or
                         // returns its arguments may see them unshared.
                         let borrowed =
-                            opcode == OpCode::CallPure && self.is_pure_borrow_builtin(func_val);
+                            opcode == OpCode::CallPure && self.is_pure_borrow_call(func_val, &args);
                         if opcode == OpCode::CallPure && !borrowed {
                             for v in &args {
                                 self.gc.share(*v);
@@ -1591,10 +1603,10 @@ impl VM {
                                 // same order). The loop's own reference is
                                 // shared, so nothing updates it in place.
                                 if i == 0 {
-                                    if let Some(ObjKind::Set(items)) =
-                                        self.gc.get_mut(r).map(|o| &mut o.kind)
-                                    {
-                                        items.make_dense();
+                                    match self.gc.get_mut(r).map(|o| &mut o.kind) {
+                                        Some(ObjKind::Set(items)) => items.make_dense(),
+                                        Some(ObjKind::Map(entries)) => entries.make_dense(),
+                                        _ => {}
                                     }
                                 }
                                 let src = if let Some(o) = self.gc.get(r) {
@@ -1606,7 +1618,7 @@ impl VM {
                                             items.get_index(i as usize).copied().map(IterSrc::Item)
                                         }
                                         ObjKind::Map(pairs) => pairs
-                                            .get(i as usize)
+                                            .get_index(i as usize)
                                             .map(|(k, v)| IterSrc::Pair(*k, *v)),
                                         ObjKind::Object(map) => map
                                             .iter()
@@ -2708,18 +2720,13 @@ impl VM {
                                 items.iter().map(|i| self.convert_to_interp_val(i)),
                             ),
                         ),
-                        ObjKind::Map(pairs) => {
-                            let converted: Vec<(
-                                crate::interpreter::Value,
-                                crate::interpreter::Value,
-                            )> = pairs
-                                .iter()
-                                .map(|(k, v)| {
+                        ObjKind::Map(pairs) => crate::interpreter::Value::Map(
+                            crate::interpreter::MapEntries::from_pairs_unchecked(pairs.iter().map(
+                                |(k, v)| {
                                     (self.convert_to_interp_val(k), self.convert_to_interp_val(v))
-                                })
-                                .collect();
-                            crate::interpreter::Value::Map(converted)
-                        }
+                                },
+                            )),
+                        ),
                         ObjKind::Frozen(inner) => self.convert_to_interp_val(inner),
                         ObjKind::Stream(_) => {
                             // Streams cannot cross the VM/interpreter boundary.
@@ -2780,7 +2787,9 @@ impl VM {
                     .iter()
                     .map(|(k, v)| (self.convert_interp_value(k), self.convert_interp_value(v)))
                     .collect();
-                let r = self.gc.alloc(ObjKind::Map(vm_pairs));
+                let map = VmMap::collect_unchecked(vm_pairs, &self.gc);
+                let r = self.gc.alloc(ObjKind::Map(map));
+
                 Value::obj(r)
             }
             crate::interpreter::Value::ResultOk(inner) => {
@@ -3044,12 +3053,40 @@ impl VM {
     }
 
     /// `crate::semantics::check_call_arity` for a closure called directly.
-    /// Whether `func` is one of [`PURE_BORROW_BUILTINS`].
-    fn is_pure_borrow_builtin(&self, func: Value) -> bool {
-        matches!(
-            func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
-            Some(ObjKind::NativeFunction(nf)) if PURE_BORROW_BUILTINS.contains(&nf.name.as_str())
-        )
+    /// Whether calling `func` with `args` only reads the arguments: `func`
+    /// is one of [`PURE_BORROW_BUILTINS`], or it is `__forge_call_method`
+    /// calling an intrinsic read of a map or set (`m.get(k)`, `m.has(k)`,
+    /// `m.len()`, `s.has(x)`), which run no Forge code and keep nothing.
+    fn is_pure_borrow_call(&self, func: Value, args: &[Value]) -> bool {
+        let name = match func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::NativeFunction(nf)) => nf.name.as_str(),
+            _ => return false,
+        };
+        if PURE_BORROW_BUILTINS.contains(&name) {
+            return true;
+        }
+        if name != "__forge_call_method" {
+            return false;
+        }
+        let (Some(receiver), Some(method)) = (args.first(), args.get(1)) else {
+            return false;
+        };
+        let Some(method) =
+            method
+                .as_obj()
+                .and_then(|r| self.gc.get(r))
+                .and_then(|o| match &o.kind {
+                    ObjKind::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+        else {
+            return false;
+        };
+        if self.peel_map(*receiver).is_some() {
+            matches!(method, "get" | "has" | "len")
+        } else {
+            self.peel_set(*receiver).is_some() && method == "has"
+        }
     }
 
     fn check_direct_call_arity(&self, func: Value, argc: usize) -> Result<(), VMError> {

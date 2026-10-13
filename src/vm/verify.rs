@@ -46,7 +46,7 @@
 
 use super::bytecode::{
     decode_a, decode_b, decode_bx, decode_c, decode_op, decode_sbx, Chunk, Constant, OpCode,
-    UpvalueSource, SET_UPDATE_ADD, SET_UPDATE_REMOVE,
+    UpvalueSource, MAP_UPDATE_REMOVE, MAP_UPDATE_SET, SET_UPDATE_ADD, SET_UPDATE_REMOVE,
 };
 use std::fmt;
 
@@ -494,6 +494,21 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                     ));
                 }
             }
+            UpdateMapLocal => {
+                self.reg(ip, "local", a)?;
+                let operands = match c {
+                    MAP_UPDATE_SET => 3,
+                    MAP_UPDATE_REMOVE => 1,
+                    _ => {
+                        return Err(self.fail(
+                            Some(ip),
+                            format!("UpdateMapLocal has an unknown operation {}", c),
+                        ))
+                    }
+                };
+                self.reg_range(ip, "operand", b as usize, operands)?;
+            }
+
             Jump => self.target(ip, sbx, false)?,
             Loop => self.target(ip, sbx, true)?,
             JumpIfFalse | JumpIfTrue | PushHandler | PushTimeout => {

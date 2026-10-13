@@ -145,15 +145,33 @@ pub enum OpCode {
     /// arguments and its result is shared; otherwise every argument is
     /// shared first and the call proceeds exactly as `Call`.
     CallPure,
+    /// A=local register, B=first operand register, C=operation
+    /// (`MAP_UPDATE_SET` / `MAP_UPDATE_REMOVE`): `local = local.set(k, v)`
+    /// / `local = local.remove(k)` on a mutable local.
+    ///
+    /// Set: `R(B)` = the local's value read (with `PeekLocal`, not shared)
+    /// *before* the key `R(B+1)` and value `R(B+2)` were evaluated, as the
+    /// generic call reads its receiver first. When the local still holds
+    /// that same map and owns it, the entry is updated in place; otherwise
+    /// the result of `R(B).set(k, v)` (`__forge_call_method`) is stored.
+    ///
+    /// Remove: `R(B)` = the key; the local is read afterwards, as the
+    /// generic `__forge_method_mut` lowering does. In place when the local
+    /// owns a map; otherwise exactly that lowering.
+    UpdateMapLocal,
 }
 
 /// `UpdateSetLocal` operations (its C operand).
 pub const SET_UPDATE_ADD: u8 = 0;
 pub const SET_UPDATE_REMOVE: u8 = 1;
 
+/// `UpdateMapLocal` operations (its C operand).
+pub const MAP_UPDATE_SET: u8 = 0;
+pub const MAP_UPDATE_REMOVE: u8 = 1;
+
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::CallPure as u8 + 1 == 78);
+const _: () = assert!(OpCode::UpdateMapLocal as u8 + 1 == 79);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -238,6 +256,7 @@ impl TryFrom<u8> for OpCode {
             75 => Ok(OpCode::PushFieldLocal),
             76 => Ok(OpCode::PeekLocal),
             77 => Ok(OpCode::CallPure),
+            78 => Ok(OpCode::UpdateMapLocal),
             _ => Err(value),
         }
     }
@@ -477,10 +496,11 @@ mod tests {
         assert_eq!(OpCode::try_from(70u8), Ok(OpCode::GetIndexLocal));
         assert_eq!(OpCode::try_from(75u8), Ok(OpCode::PushFieldLocal));
         assert_eq!(OpCode::try_from(77u8), Ok(OpCode::CallPure));
-        assert_eq!(OpCode::try_from(78u8), Err(78));
+        assert_eq!(OpCode::try_from(78u8), Ok(OpCode::UpdateMapLocal));
+        assert_eq!(OpCode::try_from(79u8), Err(79));
         // Every byte below the count decodes to the variant with that
         // discriminant.
-        for byte in 0..78u8 {
+        for byte in 0..79u8 {
             let op = OpCode::try_from(byte).expect("BUG: valid opcode byte");
             assert_eq!(op as u8, byte);
         }

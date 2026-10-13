@@ -338,13 +338,11 @@ pub fn widen(value: &Value, ty: &RuntimeType) -> Option<Value> {
         (T::Map(_, vt), Value::Map(pairs)) => {
             let values: Vec<Value> = pairs.iter().map(|(_, v)| v.clone()).collect();
             let widened = all(&values, vt)?;
-            Some(Value::Map(
-                pairs
-                    .iter()
-                    .zip(widened)
-                    .map(|((k, _), v)| (k.clone(), v))
-                    .collect(),
-            ))
+            // Widening changes values only, never how a key hashes.
+            let mut widened = widened.into_iter();
+            Some(Value::Map(pairs.map_same_hash(|(k, v)| {
+                (k.clone(), widened.next().unwrap_or_else(|| v.clone()))
+            })))
         }
         (T::ObjectOf(vt), Value::Object(map)) => {
             let changed: Vec<(String, Value)> = map
@@ -663,7 +661,7 @@ mod tests {
         // Every shape is valid canonical notation.
         for v in [
             Value::Tuple(vec![Value::Int(1), Value::Null]),
-            Value::Map(vec![]),
+            Value::Map(Default::default()),
         ] {
             let shape = param_shape(&v).expect("has a shape");
             assert!(fits(&v, &t(&shape)), "{}", shape);

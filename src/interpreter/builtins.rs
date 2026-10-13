@@ -36,7 +36,7 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
     match arg {
         Value::Map(pairs) => Ok(Value::Map(pairs.clone())),
         Value::Array(items) | Value::Tuple(items) => {
-            let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+            let mut pairs = MapEntries::with_capacity(items.len());
             for item in items {
                 let (k, v) = match item {
                     Value::Tuple(t) if t.len() == 2 => (t[0].clone(), t[1].clone()),
@@ -49,17 +49,7 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
                 };
                 // Preserve insertion-order-on-overwrite: if key already
                 // present, update the existing slot in place.
-                let mut replaced = false;
-                for entry in pairs.iter_mut() {
-                    if Value::container_eq(&entry.0, &k) {
-                        entry.1 = v.clone();
-                        replaced = true;
-                        break;
-                    }
-                }
-                if !replaced {
-                    pairs.push((k, v));
-                }
+                pairs.insert_value(k, v);
             }
             Ok(Value::Map(pairs))
         }
@@ -353,7 +343,7 @@ impl Interpreter {
                 //   map(arr_of_pairs | Map)  → Map constructor
                 //   map(arr, fn)             → functional map (existing)
                 if args.is_empty() {
-                    return Ok(Value::Map(Vec::new()));
+                    return Ok(Value::Map(MapEntries::new()));
                 }
                 if args.len() == 1 {
                     return build_map_from(&args[0]);

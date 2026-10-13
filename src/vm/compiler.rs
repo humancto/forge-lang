@@ -1893,6 +1893,155 @@ fn try_compile_set_update_statement(c: &mut Compiler, expr: &Expr) -> Result<boo
     Ok(true)
 }
 
+/// Whether compiling `expr` emits no statement-level code of its own
+/// frame: only operands, operators, field/index reads and calls that are
+/// not one of the mutating method forms (`push`/`pop`/`add`/`remove`,
+/// which may update a local in place). Calls may run any code, but other
+/// frames reach this frame's locals only through upvalue cells, which keep
+/// a local from owning its value; so evaluating such an expression cannot
+/// update an owned container of this frame's locals in place.
+fn has_no_inline_updates(expr: &Expr) -> bool {
+    let all = |items: &[Expr]| items.iter().all(has_no_inline_updates);
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
+        Expr::StringInterp(parts) => parts.iter().all(|part| match part {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(e) => has_no_inline_updates(e),
+        }),
+        Expr::Array(items) | Expr::Tuple(items) => all(items),
+        Expr::Object(fields) => fields.iter().all(|(_, e)| has_no_inline_updates(e)),
+        Expr::BinOp { left, right, .. } => {
+            has_no_inline_updates(left) && has_no_inline_updates(right)
+        }
+        Expr::UnaryOp { operand, .. } => has_no_inline_updates(operand),
+        Expr::Spread(inner) | Expr::Freeze(inner) => has_no_inline_updates(inner),
+        Expr::FieldAccess { object, .. } => has_no_inline_updates(object),
+        Expr::Index { object, index } => {
+            has_no_inline_updates(object) && has_no_inline_updates(index)
+        }
+        Expr::Call { function, args } => {
+            let mutating = match function.as_ref() {
+                Expr::FieldAccess { field, .. } => is_mutating_method(field, args.len()),
+                Expr::Ident(name) => matches!(name.as_str(), "push" | "pop"),
+                _ => false,
+            };
+            !mutating && has_no_inline_updates(function) && all(args)
+        }
+        Expr::MethodCall {
+            object,
+            method,
+            args,
+        } => !is_mutating_method(method, args.len()) && has_no_inline_updates(object) && all(args),
+        _ => false,
+    }
+}
+
+/// `m = m.set(k, v)` / `m = m.remove(k)` on a mutable local whose key and
+/// value expressions update no local in place (`has_no_inline_updates`):
+/// one `UpdateMapLocal`, which updates the map in place when the local
+/// owns it, so building a map in a loop is O(1) per entry instead of a
+/// copy per entry. Evaluation order is the generic lowering's: `set`
+/// reads its receiver first (the `PeekLocal` snapshot), `remove` (a
+/// mutating method name, lowered through `__forge_method_mut`) last.
+fn try_compile_map_update(
+    c: &mut Compiler,
+    target: &Expr,
+    value: &Expr,
+) -> Result<bool, CompileError> {
+    let Expr::Ident(name) = target else {
+        return Ok(false);
+    };
+    let (receiver, method, args) = match value {
+        Expr::MethodCall {
+            object,
+            method,
+            args,
+        } => (object.as_ref(), method.as_str(), args.as_slice()),
+        Expr::Call { function, args } => match function.as_ref() {
+            Expr::FieldAccess { object, field } => {
+                (object.as_ref(), field.as_str(), args.as_slice())
+            }
+            _ => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    if !matches!(receiver, Expr::Ident(r) if r == name) {
+        return Ok(false);
+    }
+    let op = match (method, args.len()) {
+        ("set", 2) => MAP_UPDATE_SET,
+        ("remove", 1) => MAP_UPDATE_REMOVE,
+        _ => return Ok(false),
+    };
+    if !args.iter().all(has_no_inline_updates) {
+        return Ok(false);
+    }
+    let Some((reg, true)) = c.resolve_local(name) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let first = c.alloc_reg()?;
+    if op == MAP_UPDATE_SET {
+        c.emit(encode_abc(OpCode::PeekLocal, first, reg, 0), 0);
+        for arg in args {
+            let r = c.alloc_reg()?;
+            compile_expr(c, arg, r)?;
+        }
+    } else {
+        compile_expr(c, &args[0], first)?;
+    }
+    c.emit(encode_abc(OpCode::UpdateMapLocal, reg, first, op), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// `m.get(k)`, `m.has(k)`, `m.len()` (and `s.has(x)`) on a local with
+/// simple arguments: the local is passed with `PeekLocal` (not shared) to
+/// a `CallPure` of `__forge_call_method`, so reading an owned map does not
+/// make the next in-place update copy it (`m = m.set(w, m.get(w) + 1)`).
+/// At run time `CallPure` keeps the borrow only when the receiver really
+/// is a map (or a set, for `has`); anything else gets the ordinary call.
+fn try_compile_method_peek(
+    c: &mut Compiler,
+    receiver: &Expr,
+    method: &str,
+    args: &[Expr],
+    dst: u8,
+) -> Result<bool, CompileError> {
+    let arity_ok = match method {
+        "get" | "has" => args.len() == 1,
+        "len" => args.is_empty(),
+        _ => false,
+    };
+    let Expr::Ident(var) = receiver else {
+        return Ok(false);
+    };
+    if !arity_ok || !args.iter().all(is_simple_operand) {
+        return Ok(false);
+    }
+    let Some((reg, _)) = c.resolve_local(var) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let fr = c.alloc_reg()?;
+    compile_expr(c, &Expr::Ident("__forge_call_method".to_string()), fr)?;
+    let recv = c.alloc_reg()?;
+    c.emit(encode_abc(OpCode::PeekLocal, recv, reg, 0), 0);
+    let method_reg = c.alloc_reg()?;
+    let method_idx = c.const_str(method);
+    c.emit(encode_abx(OpCode::LoadConst, method_reg, method_idx), 0);
+    for arg in args {
+        let ar = c.alloc_reg()?;
+        compile_expr(c, arg, ar)?;
+    }
+    c.emit(
+        encode_abc(OpCode::CallPure, fr, (args.len() + 2) as u8, dst),
+        0,
+    );
+    c.free_to(saved);
+    Ok(true)
+}
+
 /// Store `src` into the variable `name` (local, captured or global).
 fn emit_store_var(c: &mut Compiler, name: &str, src: u8) -> Result<(), CompileError> {
     if let Some((reg, _)) = c.resolve_local(name) {
@@ -2434,6 +2583,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Assign { target, value } => {
             if try_compile_add_local(c, target, value)?
                 || try_compile_push_assign(c, target, value)?
+                || try_compile_map_update(c, target, value)?
             {
                 return Ok(());
             }
@@ -3472,6 +3622,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             if let Expr::FieldAccess { object, field } = function.as_ref() {
                 if try_compile_mutating_call(c, object, field, args, dst)?
                     || try_compile_place_method(c, object, field, args, dst)?
+                    || try_compile_method_peek(c, object, field, args, dst)?
                 {
                     return Ok(());
                 }
@@ -3785,7 +3936,9 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             method,
             args,
         } => {
-            if try_compile_mutating_call(c, object, method, args, dst)? {
+            if try_compile_mutating_call(c, object, method, args, dst)?
+                || try_compile_method_peek(c, object, method, args, dst)?
+            {
                 return Ok(());
             }
             let mut lowered_args = Vec::with_capacity(args.len() + 2);
