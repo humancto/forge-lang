@@ -1435,12 +1435,18 @@ fn field_operand(c: &mut Compiler, field: &str) -> Option<u8> {
 ///   value stored back, level by level (`SetIndex` / `SetField` copies,
 ///   `SetIndexLocal` / `SetFieldLocal` on a local root);
 /// * on an immutable root a change is the immutable-assignment error.
+///
+/// With `statement` (the result is discarded), a `push` on a chain of two
+/// or more steps rooted at a mutable local first tries `PushPlaceLocal`
+/// (`r[k].lat.push(x)` in place); the generic code runs only when that
+/// reports it could not.
 fn try_compile_place_method(
     c: &mut Compiler,
     place: &Expr,
     method: &str,
     args: &[Expr],
     dst: u8,
+    statement: bool,
 ) -> Result<bool, CompileError> {
     if !matches!(place, Expr::FieldAccess { .. } | Expr::Index { .. })
         || !is_mutating_method(method, args.len())
@@ -1470,6 +1476,37 @@ fn try_compile_place_method(
         let r = c.alloc_reg()?;
         compile_expr(c, arg, r)?;
         call_regs.push(r);
+    }
+
+    // `local[k1]..[kn].push(v)` as a statement: try in place first.
+    let mut in_place_done = None;
+    if let (true, "push", [_], Some((reg, true))) = (
+        statement && keys.len() >= 2 && keys.len() <= 32,
+        method,
+        args,
+        c.resolve_local(root),
+    ) {
+        let n = keys.len();
+        let block = c.alloc_reg()?;
+        for _ in 0..=n {
+            c.alloc_reg()?;
+        }
+        for (i, key) in keys.iter().enumerate() {
+            let r = block + i as u8;
+            match key {
+                PlaceKey::Index(index) => c.emit(encode_abc(OpCode::Move, r, *index, 0), 0),
+                PlaceKey::Field(field) => {
+                    let k = c.const_str(field);
+                    c.emit(encode_abx(OpCode::LoadConst, r, k), 0);
+                }
+            }
+        }
+        c.emit(
+            encode_abc(OpCode::Move, block + n as u8, call_regs[2], 0),
+            0,
+        );
+        c.emit(encode_abc(OpCode::PushPlaceLocal, reg, block, n as u8), 0);
+        in_place_done = Some(c.emit_jump(OpCode::JumpIfTrue, block + n as u8 + 1, 0));
     }
 
     // Read the chain: `levels[i]` holds the container the step `keys[i]`
@@ -1553,6 +1590,10 @@ fn try_compile_place_method(
     let two = c.const_int(2);
     c.emit(encode_abx(OpCode::LoadConst, idx_reg, two), 0);
     c.emit(encode_abc(OpCode::GetIndex, dst, triple_reg, idx_reg), 0);
+    if let Some(jump) = in_place_done {
+        // The statement's value is discarded: `dst` is not written.
+        c.patch_jump(jump);
+    }
     c.free_to(saved);
     Ok(true)
 }
@@ -1791,6 +1832,19 @@ fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, Com
         expr,
         Expr::Call { function, .. } if matches!(function.as_ref(), Expr::Ident(_))
     );
+    // `local[k].f.push(v)` and deeper chains: `PushPlaceLocal`, then the
+    // generic place update when it cannot push in place.
+    if method_form
+        && matches!(receiver, Expr::Index { object, .. } | Expr::FieldAccess { object, .. }
+            if !matches!(object.as_ref(), Expr::Ident(_)))
+    {
+        let saved = c.next_register;
+        let dst = c.alloc_reg()?;
+        let done =
+            try_compile_place_method(c, receiver, "push", std::slice::from_ref(value), dst, true)?;
+        c.free_to(saved);
+        return Ok(done);
+    }
     match receiver {
         Expr::Ident(var) => {
             let Some((reg, true)) = c.resolve_local(var) else {
@@ -3709,7 +3763,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         Expr::Call { function, args } => {
             if let Expr::FieldAccess { object, field } = function.as_ref() {
                 if try_compile_mutating_call(c, object, field, args, dst)?
-                    || try_compile_place_method(c, object, field, args, dst)?
+                    || try_compile_place_method(c, object, field, args, dst, false)?
                     || try_compile_method_peek(c, object, field, args, dst)?
                 {
                     return Ok(());

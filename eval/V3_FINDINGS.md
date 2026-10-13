@@ -231,6 +231,14 @@ it makes the VM ~2x slower than the interpreter on access_log_rollup. Per `CLAUD
 deeper chains take the copying read-modify-write path; `slot_owned` could extend to
 objects.
 
+**Fixed:** a statement `local[k1]..[kn].push(x)` with two or more steps first runs the new
+opcode `PushPlaceLocal`, which appends in place when the local owns its container and every
+level is a plain array or object owned by its slot (`slot_owned` now also marks objects and
+arrays at intermediate levels; a level that is not owned is replaced by a copy of itself
+once); otherwise it reports "not done" and the generic place update that follows runs. The
+repro takes ~190 ms on both engines (VM was 899 ms); `benchmarks/vm/deep_push.fg` (200k
+pushes) went from 10.8 s to 0.31 s.
+
 ---
 
 ## Bugs

@@ -746,6 +746,75 @@ impl VM {
         Ok(())
     }
 
+    /// `PushPlaceLocal`: statement `local[k1]..[kn].push(value)` with the
+    /// keys in registers `first..first+n` and the value after them. Returns
+    /// whether the push was done in place; `false` means nothing visible
+    /// changed and the compiler's generic lowering runs instead.
+    ///
+    /// In place when the local owns its container and every key names an
+    /// existing element of a plain array or object, the last one an array.
+    /// Each level below the local must be owned by the element slot holding
+    /// it (`slot_owned`, trusted only because the level above is owned);
+    /// a level that is not is replaced by a copy of itself first, which is
+    /// invisible because its container is owned, and owned from then on.
+    pub(super) fn push_place_local(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        first: u8,
+        n: u8,
+    ) -> Result<bool, VMError> {
+        let cur = self.read_local(frame_idx, base, slot)?;
+        let Some(mut container) = self.owned_by_local(frame_idx, slot, cur) else {
+            return Ok(false);
+        };
+        let operand = base + first as usize;
+        let value = self.registers[operand + n as usize];
+        for i in 0..n as usize {
+            let key = ElemKey::Index(self.registers[operand + i]);
+            let Some(pos) = self.element_position(container, &key, false) else {
+                return Ok(false);
+            };
+            let Some(element) = self.element_at(container, &pos).and_then(|v| v.as_obj()) else {
+                return Ok(false);
+            };
+            if i + 1 == n as usize {
+                return self.push_owned_array(container, pos, element, value);
+            }
+            container = match self.owned_level(container, pos, element) {
+                Some(next) => next,
+                None => return Ok(false),
+            };
+        }
+        Ok(false)
+    }
+
+    /// The intermediate level `element`, stored at `pos` in the owned
+    /// `container`, as a container owned by that slot: itself when it
+    /// already is (`slot_owned`), otherwise a copy stored in its place.
+    /// `None` when it is not a plain array or object.
+    fn owned_level(&mut self, container: GcRef, pos: Position, element: GcRef) -> Option<GcRef> {
+        let copy = match self.gc.get(element).map(|o| &o.kind) {
+            Some(ObjKind::Array(_) | ObjKind::Object(_)) if self.gc.is_slot_owned(element) => {
+                return Some(element)
+            }
+            Some(ObjKind::Array(items)) => ObjKind::Array(items.clone()),
+            Some(ObjKind::Object(map)) => ObjKind::Object(map.clone()),
+            _ => return None,
+        };
+        let copy = self.gc.alloc(copy);
+        // Its elements are still referenced by the original.
+        self.gc.set_unique_container(copy);
+        if let Some(obj) = self.gc.get_mut(copy) {
+            // Owned by the container element, not by a local register.
+            obj.unique = false;
+            obj.slot_owned = true;
+        }
+        self.store_at(container, pos, Value::obj(copy));
+        Some(copy)
+    }
+
     /// The owned-container paths of `push_element_local` for `element`,
     /// stored at `pos` in the owned `container`. Returns `false` (nothing
     /// done) when `element` is not a plain array.

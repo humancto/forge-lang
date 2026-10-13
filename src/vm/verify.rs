@@ -562,6 +562,14 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                 self.reg(ip, "local", a)?;
                 self.upvalue(ip, b)?;
             }
+            PushPlaceLocal => {
+                self.reg(ip, "local", a)?;
+                if c == 0 {
+                    return Err(self.fail(Some(ip), "PushPlaceLocal has no steps".to_string()));
+                }
+                // The keys, the value and the result flag.
+                self.reg_range(ip, "operand", b as usize, c as usize + 2)?;
+            }
             CloseUpvalues => {
                 self.reg(ip, "first", a)?;
                 self.reg(ip, "last", b)?;
@@ -833,6 +841,18 @@ mod tests {
             "upvalue index 0",
         );
         rejects(&with(encode_abc(OpCode::BindUpvalue, 200, 0, 0)), "200");
+    }
+
+    #[test]
+    fn rejects_bad_push_place() {
+        rejects(
+            &with(encode_abc(OpCode::PushPlaceLocal, 0, 0, 0)),
+            "no steps",
+        );
+        rejects(
+            &with(encode_abc(OpCode::PushPlaceLocal, 0, 0, 200)),
+            "operand",
+        );
     }
 
     #[test]

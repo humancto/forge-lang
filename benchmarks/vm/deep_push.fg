@@ -1,0 +1,16 @@
+// 200k pushes through a two-level place, `r[k].lat.push(i)`, into 12
+// groups (V3 finding 22: each push used to copy the inner array).
+let mut r = {}
+for i in range(0, 200000) {
+    let k = "k{i % 12}"
+    if !has_key(r, k) {
+        r[k] = { lat: [], errors: 0 }
+    }
+    r[k].lat.push(i)
+}
+let mut total = 0
+for k, g in r {
+    total = total + len(g.lat)
+}
+println(total)
+println(len(r.k5.lat))

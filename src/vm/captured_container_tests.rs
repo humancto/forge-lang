@@ -2,7 +2,8 @@
 //! (`vm::local_ops`): captured variables (a function updating a top-level
 //! array through `BindUpvalue`, the declaring frame updating a captured
 //! local), index reads whose key is an index or field read or a call
-//! (`GetIndexLocal` / `PeekLocal` snapshots). Every fast path must be
+//! (`GetIndexLocal` / `PeekLocal` snapshots), and pushes through a chain of
+//! two or more levels (`PushPlaceLocal`). Every fast path must be
 //! unobservable: values taken before a write (aliases, arguments, closure
 //! results, elements read out, spawned tasks) never change, under GC stress
 //! too, and the loops must not copy the container per step.
@@ -414,7 +415,7 @@ fn captured_writes_do_not_copy_per_step() {
 }
 
 #[test]
-fn computed_keys_do_not_copy_per_step() {
+fn computed_keys_and_deep_pushes_do_not_copy_per_step() {
     let keyed = |n: usize| {
         format!(
             "fn f(n) {{\n let names = map(range(0, 50), fn(i) {{ return \"k{{i}}\" }})\n let mut o = {{}}\n for k in names {{\n o[k] = 0\n }}\n for i in range(0, n) {{\n o[names[i % 50]] += 1\n }}\n return o\n}}\nf({n})\n"
@@ -426,4 +427,10 @@ fn computed_keys_do_not_copy_per_step() {
         "{}",
         extra_allocations(keyed)
     );
+    let deep = |n: usize| {
+        format!(
+            "fn f(n) {{\n let mut r = {{ k: {{ lat: [] }} }}\n for i in range(0, n) {{\n r.k.lat.push(i)\n }}\n return r\n}}\nf({n})\n"
+        )
+    };
+    assert!(extra_allocations(deep) < 200, "{}", extra_allocations(deep));
 }

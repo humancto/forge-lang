@@ -1336,6 +1336,10 @@ impl VM {
                     OpCode::BindUpvalue => {
                         self.bind_upvalue(frame_idx, base, a, b)?;
                     }
+                    OpCode::PushPlaceLocal => {
+                        let done = self.push_place_local(frame_idx, base, a, b, c)?;
+                        self.registers[base + b as usize + c as usize + 1] = Value::bool_val(done);
+                    }
                     OpCode::UpdateSetLocal => {
                         let value = self.registers[base + b as usize];
                         self.update_set_local(frame_idx, base, a, value, c == SET_UPDATE_REMOVE)?;
