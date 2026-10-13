@@ -1,0 +1,61 @@
+id = "bigint_calc"
+category = "deep_algorithms"
+title = "Exact arithmetic on integers with hundreds of digits"
+prompt = """
+Each non-blank line of standard input is an expression with integers of any size (far
+beyond 64 bits). Tokens are separated by spaces. An integer is an optional `-` followed
+by digits (leading zeros allowed: `007` is 7, `-0` is 0).
+
+- `<a> + <b>`, `<a> - <b>`, `<a> * <b>`;
+- `<a> ^ <n>`: a to the power n (n is digits only; `x ^ 0` is 1);
+- `fact <n>`: n factorial (n is digits only; `fact 0` is 1).
+
+Anything else prints `error: bad expression`. For a valid expression print the exact
+result in decimal (no leading zeros, `-` only for negative results, zero as `0`),
+followed by ` (<number of digits> digits, digit sum <sum of its digits>)` (the sign is not
+a digit).
+
+Results have up to about 600 digits; the program must finish within a few seconds.
+"""
+needs = []
+timeout = 30
+stdin = """
+123456789012345678901234567890 + 987654321098765432109876543210
+1 - 100000000000000000000000000000000000000000
+-99999999999999999999 * 99999999999999999999
+00012 * -0
+-5 + 5
+9223372036854775807 + 1
+-9223372036854775808 - 1
+2 ^ 256
+-3 ^ 101
+12345678901234567890 ^ 0
+fact 0
+fact 25
+fact 200
+3 % 4
+fact -5
+2 ^ -1
+12 +
+1.5 + 2
+"""
+expected_stdout = """
+1111111110111111111011111111100 (31 digits, digit sum 27)
+-99999999999999999999999999999999999999999 (41 digits, digit sum 369)
+-9999999999999999999800000000000000000001 (40 digits, digit sum 180)
+0 (1 digits, digit sum 0)
+0 (1 digits, digit sum 0)
+9223372036854775808 (19 digits, digit sum 89)
+-9223372036854775809 (19 digits, digit sum 90)
+115792089237316195423570985008687907853269984665640564039457584007913129639936 (78 digits, digit sum 376)
+-1546132562196033993109383389296863818106322566003 (49 digits, digit sum 207)
+1 (1 digits, digit sum 1)
+1 (1 digits, digit sum 1)
+15511210043330985984000000 (26 digits, digit sum 72)
+788657867364790503552363213932185062295135977687173263294742533244359449963403342920304284011984623904177212138919638830257642790242637105061926624952829931113462857270763317237396988943922445621451664240254033291864131227428294853277524242407573903240321257405579568660226031904170324062351700858796178922222789623703897374720000000000000000000000000000000000000000000000000 (375 digits, digit sum 1404)
+error: bad expression
+error: bad expression
+error: bad expression
+error: bad expression
+error: bad expression
+"""

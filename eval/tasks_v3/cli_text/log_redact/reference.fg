@@ -1,0 +1,43 @@
+// Parse structured log lines with regex captures, unquote values, and
+// redact e-mail addresses and IPv4 addresses with regex.replace.
+
+let head = """^(?<date>\d{4}-\d{2}-\d{2}) (?<time>\d{2}:\d{2}:\d{2}) \[(?<level>[A-Z]+)\] (?<module>[a-z]+(?:\.[a-z]+)*)(?<rest>(?: .*)?)$"""
+let pair = """([a-z_]+)=("(?:[^"\\]|\\.)*"|\S+)"""
+
+fn redact(v: String) -> String {
+    let masked = regex.replace(v, """([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})""", "$1***@$2")
+    return regex.replace(masked, """\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\b""", "$1.x")
+}
+
+let mut levels = {}
+let mut users = set([])
+let mut n = 0
+for line in fs.lines("/dev/stdin") {
+    n += 1
+    if line.trim() == "" {
+        continue
+    }
+    let m = regex.captures(line, head)
+    if m == null {
+        println("skipped line {n}")
+        continue
+    }
+    let mut fields = []
+    for p in regex.captures_all(m[5], pair) {
+        let key = p[1]
+        let mut value = p[2]
+        if starts_with(value, "\"") {
+            value = regex.replace(substring(value, 1, len(value) - 1), """\\(.)""", "$1")
+        }
+        if key == "user" {
+            users.add(value)
+        }
+        fields.push("{key}={redact(value)}")
+    }
+    let level = m[3]
+    levels[level] = get(levels, level, 0) + 1
+    let text = "{m[1]}T{m[2]} {pad_end(level, 5)} {m[4]} {join(fields, "; ")}"
+    println(regex.replace(text, " +$", ""))
+}
+println("levels: {join(map(sort(keys(levels)), fn(k) { return "{k}={levels[k]}" }), " ")}")
+println("users: {join(sort(users.to_array()), ", ")}")

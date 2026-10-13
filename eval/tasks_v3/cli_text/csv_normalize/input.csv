@@ -1,0 +1,12 @@
+﻿id,name,amount,notes
+007, Ada ,12.5,"first, with comma"
+010,Bo,"1234",plain
+003,"Cy ""the kid""",-4.25,"multi
+line
+note"
+011,Dee,,empty amount
+012,Eve,12.50,"  padded  "
+013,Fay,abc,bad amount
+014,Gus, 3.1 ,"x"
+015,Hal,7.123,too many decimals
+016,Ivy,0.99,"quote "" inside"

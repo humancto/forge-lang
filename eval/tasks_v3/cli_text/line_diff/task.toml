@@ -1,0 +1,217 @@
+id = "line_diff"
+category = "cli_text"
+title = "A line diff tool: changes on stdout, summary on stderr, exit status"
+prompt = """
+Write a small `diff` tool. Standard input holds two texts separated by a line that is
+exactly `=====`: the old text (lines A) before it and the new text (lines B) after it.
+
+Compute a longest common subsequence of the lines with this dynamic program: let
+`L[i][j]` be the length of the longest common subsequence of A[i..] and B[j..] (0-based,
+`L[n][*] = L[*][m] = 0`). Then walk from i = 0, j = 0 while i < n or j < m:
+
+- if i < n, j < m and A[i] == B[j]: the line is unchanged; i++, j++;
+- else if j >= m, or i < n and L[i+1][j] >= L[i][j+1]: print `-<i+1>: <A[i]>` (a deleted
+  line, numbered in the old text); i++;
+- else print `+<j+1>: <B[j]>` (an inserted line, numbered in the new text); j++.
+
+Then, on standard error, print `<d> deleted, <k> inserted, <u> unchanged` and exit with
+status 1 if anything was deleted or inserted; otherwise print nothing on stdout, print
+`no differences (<n> lines)` on standard error and exit with status 0.
+
+Texts can have 700 lines each; the program must finish within a few seconds.
+"""
+needs = []
+timeout = 30
+generator = "gen_input.py"
+generated_sha256 = { "big.txt" = "26994e1507c5e850ecfccef40939f858091fb885a7801513592dceb698aaa83f" }
+
+[[case]]
+name = "small"
+stdin = """
+apple
+banana
+cherry
+date
+=====
+apple
+blueberry
+cherry
+date
+elderberry
+"""
+expected_stdout = """
+-2: banana
++2: blueberry
++5: elderberry
+"""
+expected_stderr = """
+1 deleted, 2 inserted, 3 unchanged
+"""
+exit_code = 1
+
+[[case]]
+name = "same"
+stdin = """
+one
+two
+=====
+one
+two
+"""
+expected_stdout = ""
+expected_stderr = """
+no differences (2 lines)
+"""
+
+[[case]]
+name = "empty_old"
+stdin = """
+=====
+new 1
+new 2
+"""
+expected_stdout = """
++1: new 1
++2: new 2
+"""
+expected_stderr = """
+0 deleted, 2 inserted, 0 unchanged
+"""
+exit_code = 1
+
+[[case]]
+name = "big"
+stdin_file = "big.txt"
+expected_stdout = """
++4: inserted 83
+-39: } else =
+-44: let {
++44: let { // changed
++49: inserted 50
+-68: if {
++69: if { // changed
++87: inserted 622
++89: inserted 308
+-98: fn fn items
++101: fn fn items // changed
++103: inserted 219
++115: inserted 962
+-118: items = else if
++123: items = else if // changed
++127: inserted 773
+-126: else let fn let let
++132: else let fn let let // changed
++156: inserted 670
+-152: if total x }
++159: if total x } // changed
++173: inserted 480
+-193: if total + if
++201: if total + if // changed
++205: inserted 729
++215: inserted 191
+-208: } let x fn
+-215: total return if
++224: inserted 748
++225: total return if // changed
++228: inserted 36
+-226: { else total
+-236: =
+-241: } items let else x
++256: inserted 312
+-255: let + total
++264: let + total // changed
++279: inserted 290
++286: inserted 407
++292: inserted 49
+-291: items items
++303: items items // changed
++319: inserted 588
+-309: let let { total {
+-330: total
+-332: let items }
++343: let items } // changed
+-344: x
++357: inserted 5
+-349: fn
+-350: + items
++360: inserted 830
++372: inserted 125
++376: inserted 452
++381: inserted 968
+-380: { let
+-394: total x
++406: total x // changed
++415: inserted 22
++420: inserted 811
++434: inserted 342
+-423: if
++438: if // changed
+-427: fn if 1 { +
++442: inserted 219
++443: fn if 1 { + // changed
+-430: fn { else
++446: inserted 960
+-436: { }
++452: { } // changed
++457: inserted 868
+-442: fn return } }
++459: fn return } } // changed
+-445: } { }
+-450: { else return return
+-453: = + 1
++468: inserted 202
++469: = + 1 // changed
++474: inserted 11
+-464: fn let if
+-474: else 1
++490: inserted 741
++491: else 1 // changed
++495: inserted 439
+-479: = return
++497: = return // changed
+-489: } else
++507: } else // changed
+-516: + if else total if
++534: + if else total if // changed
++539: inserted 744
+-522: fn total return { items
+-529: else
++551: inserted 331
+-540: return else fn { return
+-545: return else if else
+-548: if
++573: inserted 407
+-566: x } let }
++582: x } let } // changed
+-581: 1
++597: 1 // changed
+-592: } items } if
+-593: x
+-595: fn fn
++609: fn fn // changed
++614: inserted 160
+-601: else 1 =
+-602: 1
++616: inserted 840
++617: else 1 = // changed
++619: inserted 295
+-606: if = if
++622: if = if // changed
+-615: let
++651: inserted 986
+-639: {
+-640: return
+-647: if fn
+-654: {
++667: { // changed
+-661: fn
++674: fn // changed
+-673: } fn if else else
++686: } fn if else else // changed
++695: inserted 917
+-697: items x } x 1
+"""
+expected_stderr = """
+57 deleted, 70 inserted, 643 unchanged
+"""
+exit_code = 1

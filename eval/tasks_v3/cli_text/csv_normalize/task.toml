@@ -1,0 +1,36 @@
+id = "csv_normalize"
+category = "cli_text"
+title = "Normalize a messy CSV export (BOM, CRLF, quoted line breaks)"
+prompt = """
+Standard input is a CSV export from a spreadsheet tool: UTF-8 that may start with a
+byte-order mark (U+FEFF, which is not part of the first column name), CRLF line endings,
+and RFC 4180 quoting (quoted fields may contain commas, doubled quotes `""` and line
+breaks). Rows that are completely empty are ignored. The first row is the header; column
+names are trimmed; the columns `id`, `name`, `amount` and `notes` are present (in any
+order). All fields are text: keep `id` exactly as written (`007` stays `007`).
+
+For each data row (numbered from 1 in input order): the amount, trimmed, is empty (0
+cents) or an optional `-`, digits, and optionally `.` with one or two digits (`12.5` is
+1250 cents, `-4.25` is -425); any other amount makes the row bad: skip it and remember its
+number. The name is trimmed. In the notes, every line break (CRLF or LF) becomes ` / `.
+
+Print CSV with LF line endings: the header `id,name,amount_cents,notes`, then the good rows
+sorted by amount_cents descending, ties by id ascending (as text). A field is quoted only
+if it contains a comma, a double quote, CR or LF, or starts or ends with a space; inside
+quotes a `"` is doubled. Finally print
+`# <rows> rows, total <sum of amount_cents>, bad rows: <bad row numbers separated by
+spaces, or none>`.
+"""
+stdin_file = "input.csv"
+needs = []
+expected_stdout = '''
+id,name,amount_cents,notes
+010,Bo,123400,plain
+007,Ada,1250,"first, with comma"
+012,Eve,1250,"  padded  "
+014,Gus,310,x
+016,Ivy,99,"quote "" inside"
+011,Dee,0,empty amount
+003,"Cy ""the kid""",-425,multi / line / note
+# 7 rows, total 125884, bad rows: 6 8
+'''

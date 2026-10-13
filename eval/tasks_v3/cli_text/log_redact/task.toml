@@ -1,0 +1,51 @@
+id = "log_redact"
+category = "cli_text"
+title = "Parse structured log lines and redact personal data"
+prompt = '''
+Each line of standard input should be a log line:
+
+`<YYYY-MM-DD> <HH:MM:SS> [<LEVEL>] <module> <key>=<value> <key>=<value> ...`
+
+where LEVEL is upper-case letters, module is lower-case words joined by dots (`auth.login`),
+and there may be no key=value pairs at all. A key is lower-case letters and `_`. A value is
+either a run of non-space characters, or a double-quoted string that may contain spaces and
+backslash escapes (`\"` is a quote, `\\` a backslash; a backslash before any character
+stands for that character). Lines are numbered from 1; skip blank lines. For a line that
+does not have this shape (the date, time, level and module part) print
+`skipped line <n>`. (Text between pairs that is not a pair is ignored.)
+
+For every other line print
+`<date>T<time> <LEVEL padded with spaces to 5 characters> <module> <k1>=<v1>; <k2>=<v2>; ...`
+(values unquoted and unescaped, trailing spaces removed), with personal data redacted in
+the values: in an e-mail address (`local@domain.tld`, local part of letters, digits and
+`._%+-`, domain of letters, digits, `.` and `-`, tld at least two letters) keep the first
+character of the local part and replace the rest of it with `***`; in an IPv4 address
+(four 1-3 digit groups) replace the last group with `x`.
+
+Finally print `levels: ` and `<LEVEL>=<count>` for each level, sorted by level and
+separated by spaces, and `users: ` followed by the distinct values of `user` keys
+(unredacted, after unquoting), sorted and separated by `, `.
+'''
+needs = []
+stdin = '''
+2026-03-01 12:00:01 [INFO] auth.login user=ada ip=10.0.0.7 msg="welcome back"
+2026-03-01 12:00:05 [WARN] auth.login user=bob ip=192.168.10.200 msg="bad password for bob@example.com" attempt=3
+2026-03-01 12:01:00 [ERROR] billing.charge user="Ada L." card=4111 note="said \"refund\" twice" contact=ada.lovelace@mail.example.org
+2026-03-01 12:02:00 [INFO] cron
+not a log line
+2026-03-01 12:03:00 [debug] app.start
+2026-03-01 12:04:00 [INFO] app.cache hits=95 ratio=0.95 path=C:\\tmp\\x upstream=10.1.2.3:8080
+2026-03-01 12:05:00 [WARN] auth.login user=bob ip=10.0.0.255 junk msg="locked"
+'''
+expected_stdout = """
+2026-03-01T12:00:01 INFO  auth.login user=ada; ip=10.0.0.x; msg=welcome back
+2026-03-01T12:00:05 WARN  auth.login user=bob; ip=192.168.10.x; msg=bad password for b***@example.com; attempt=3
+2026-03-01T12:01:00 ERROR billing.charge user=Ada L.; card=4111; note=said "refund" twice; contact=a***@mail.example.org
+2026-03-01T12:02:00 INFO  cron
+skipped line 5
+skipped line 6
+2026-03-01T12:04:00 INFO  app.cache hits=95; ratio=0.95; path=C:\\\\tmp\\\\x; upstream=10.1.2.x:8080
+2026-03-01T12:05:00 WARN  auth.login user=bob; ip=10.0.0.x; msg=locked
+levels: ERROR=1 INFO=3 WARN=2
+users: Ada L., ada, bob
+"""

@@ -418,7 +418,9 @@ class Task:
         if "stdin_file" in table:
             path = self.stdin_path(table["stdin_file"])
             if path and os.path.isfile(path):
-                with open(path, encoding="utf-8") as f:
+                # newline="": a file with CRLF line endings reaches the
+                # program as it is.
+                with open(path, encoding="utf-8", newline="") as f:
                     return f.read()
             return None
         return table.get("stdin")
