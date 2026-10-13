@@ -78,7 +78,7 @@ Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plu
 
 ## Type annotations and checking
 
-Annotation syntax: `Int`, `[Int]`, `?String` (or `Option<String>`), `Result<Int, String>`, `Map<String, Int>`, `Set<Int>`, `(Int, String)`, `fn(Int, Int) -> Bool`, `Any`, user structs/types, generics `fn first<T>(xs: [T]) -> T`, `struct Box<T> { value: T }`.
+Annotation syntax: `Int`, `[Int]`, `?String` (or `Option<String>`), `Result<Int, String>`, `Object` (any object), `Object<Int>` (an object whose values are all Int: a typed dictionary, e.g. `let ages: Object<Int> = { ada: 36 }` or a parsed JSON object), `Map<String, Int>` (a `Map` value from `map()`; an object literal is not a Map), `Set<Int>`, `(Int, String)`, `fn(Int, Int) -> Bool`, `Any`, user structs/types, generics `fn first<T>(xs: [T]) -> T`, `struct Box<T> { value: T }`.
 
 ```forge
 fn apply(f: fn(Int) -> Int, x: Int) -> Int { return f(x) }
@@ -323,7 +323,13 @@ println(double(21))
 import { name as user_name } from "lib/user.fg"   // renamed: binds user_name
 import { sqrt, pi } from "math"            // members of a built-in module
 println(sqrt(16))                          // math.* stays available too
+import "lib/geo.fg" as geo                 // namespace: geo.<name>
+println(geo.area(geo.Circle(2.0)))         // functions, variables, variants
+let p = geo.Point { x: 1, y: 2 }           // structs: geo.Point { ... }, geo.Point.origin()
+match shape { geo.Circle(r) => r, geo.Dot => 0.0 }   // variants in patterns
 ```
+
+`import "m.fg" as m` binds `m` to a read-only namespace object: its members are the module's top-level functions, `let` variables, variants and structs (plus `m.__module__`, the path). It is the same module run as every other import of the file (shared state); a variable member is the value when the import ran, like `import { x }` — read changing state through a function. `m.nope` is error E0013 `module 'm.fg' has no member 'nope'` with a did-you-mean (T0008 statically, and `m.f(x)` is checked against `f`'s signature); `m.x = 1` is the immutable-assignment error. `m` can be passed around (`typeof(m)` is `Object`). Built-in modules cannot be renamed (`import "math" as m` is E0019).
 
 `as` renames functions and variables (use it when two modules export the same name); a struct, `type`, variant or interface keeps its own name (renaming one is an import error). A module runs once per program: importing it again — from another module, or with `import "m.fg"` after `import { f } from "m.fg"` — reuses it, so its top-level code runs once and every importer shares its state (`let mut` counters, caches). This holds across `spawn` tasks too: a module first imported inside a task is not run again when the program or another task imports it (a task importing a module another task is still running waits for it). But a task works on a copy of the program's state, so what a task writes to a module's variables is not seen outside it: return results with `await` or channels. Import cycles are an error (`circular import: a.fg -> b.fg -> a.fg`).
 
@@ -522,7 +528,7 @@ Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and
 
 ## MCP tools (forge mcp serve)
 
-`forge mcp serve tools.fg` serves the file's `@tool` functions to AI agents over the Model Context Protocol. Parameter types become the JSON Schema (`Int` integer, `Float` number, `String`, `Bool`, `[T]` array, `Object`/`Map<String, T>` object, a struct object, `?T`/`Option<T>` or a default make it optional); the return type becomes the output schema (`Result<T, E>` describes `T`).
+`forge mcp serve tools.fg` serves the file's `@tool` functions to AI agents over the Model Context Protocol. Parameter types become the JSON Schema (`Int` integer, `Float` number, `String`, `Bool`, `[T]` array, `Object` object, `Object<T>` object whose values are `T` (`additionalProperties`), a struct object, `?T`/`Option<T>` or a default make it optional; the arguments arrive as Forge values of those types, so declare a JSON object parameter `Object<T>`, not `Map<String, T>`); the return type becomes the output schema (`Result<T, E>` describes `T`).
 
 ```
 struct Report { city: String, temp_c: Float }

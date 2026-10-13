@@ -1800,6 +1800,168 @@ fn renaming_a_type_in_an_import_is_reported() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// `import "path" as m`: `m.f(x)` is checked against the module's signature
+// (arity and argument types, as for a direct import), an unknown member is
+// T0008 with a suggestion, and `m.S { ... }` / `m.V(...)` patterns resolve
+// to the module's struct and variants.
+#[test]
+fn namespace_imports_are_checked_against_the_module() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_namespace_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("geo.fg"),
+        "let mut count = 0\n\
+         fn add(a: Int, b: Int) -> Int { return a + b }\n\
+         fn bump() {\n    count = count + 1\n    return count\n}\n\
+         struct Point { x: Int, y: Int = 0 }\n\
+         type Shape = Circle(Float) | Dot\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    let check = |source: &str, edition| {
+        analyze(
+            source,
+            &CheckOptions {
+                file: Some(main.clone()),
+                edition: Some(edition),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("parses")
+        .diagnostics
+    };
+    // Correct uses are silent in both editions.
+    let ok = "import \"geo.fg\" as geo\n\
+              let n: Int = geo.add(1, 2) + geo.bump()\n\
+              let p = geo.Point { x: n }\n\
+              let k = match geo.Circle(1.0) {\n    geo.Circle(r) => r,\n    geo.Dot => 0.0,\n}\n\
+              println(p.x, k, geo.count, geo.__module__)\n";
+    for edition in [Edition::E2026, Edition::E2027] {
+        let ds = check(ok, edition);
+        assert!(ds.is_empty(), "{edition:?}: {ds:?}");
+    }
+    let found = |source: &str| -> Vec<(String, String)> {
+        check(source, Edition::E2027)
+            .iter()
+            .map(|d| (d.code.as_str().to_string(), d.message.clone()))
+            .collect()
+    };
+    // Arity and argument types, as for `import { add }`.
+    let ds = found("import \"geo.fg\" as geo\nprintln(geo.add(1))\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0004", "{ds:?}");
+    let ds = found("import \"geo.fg\" as geo\nprintln(geo.add(1, \"x\"))\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0002", "{ds:?}");
+    // An unknown member, with the module's closest name.
+    let ds = check(
+        "import \"geo.fg\" as geo\nprintln(geo.ad(1, 2))\n",
+        Edition::E2027,
+    );
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].code.as_str(), "T0008");
+    assert_eq!(ds[0].message, "module 'geo.fg' has no member 'ad'");
+    assert_eq!(ds[0].help.as_deref(), Some("did you mean 'add'?"));
+    assert_eq!((ds[0].span.start.line, ds[0].span.start.col), (2, 13));
+    let ds = found("import \"geo.fg\" as geo\nlet p = geo.Pointt { x: 1 }\n");
+    assert_eq!(
+        ds,
+        vec![(
+            "T0008".to_string(),
+            "module 'geo.fg' has no struct 'Pointt'".to_string()
+        )]
+    );
+    // The namespace binding is immutable.
+    let ds = found("import \"geo.fg\" as geo\ngeo.count = 3\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0017", "{ds:?}");
+    // A local of the same name shadows the namespace.
+    assert!(check(
+        "import \"geo.fg\" as geo\nfn f(geo) { return geo.anything }\nprintln(f({anything: 1}))\n",
+        Edition::E2027
+    )
+    .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// V2 finding 22: `Object<T>` is a typed dictionary that object literals
+// and JSON objects satisfy; `Map<K, V>` stays the Map value type, and
+// annotating an object as one says how to fix it.
+#[test]
+fn typed_objects_check_their_values() {
+    let fine = "let ages: Object<Int> = { ada: 36, alan: 41 }\n\
+                let n: Int = ages.ada + ages[\"alan\"]\n\
+                let mut prices: Object<Float> = { a: 1, b: 2.5 }\n\
+                prices.c = 3\n\
+                prices[\"d\"] = 4.5\n\
+                let parsed: Object<[String]> = json.parse(\"{}\")\n\
+                let any: Object = ages\n\
+                let empty: Object<String> = {}\n\
+                let maybe: ?Object<Int> = { x: 1 }\n\
+                fn total(c: Object<Int>) -> Int {\n    let mut s = 0\n    for k, v in c {\n        s = s + v\n    }\n    return s\n}\n\
+                println(n, total(ages), total({ z: 1 }), parsed, any, empty, maybe, prices)\n";
+    assert!(errors_for(fine).is_empty(), "{:?}", errors_for(fine));
+
+    let found = |src: &str| -> Vec<(Code, String)> {
+        errors_for(src)
+            .into_iter()
+            .map(|d| (d.code, d.message))
+            .collect()
+    };
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1, b: \"x\" }"),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: 'c' declared as Object<Int> but assigned Object<String>".to_string()
+        )]
+    );
+    assert_eq!(
+        found("fn f(c: Object<Int>) { return c }\nprintln(f({ a: true }))"),
+        vec![(
+            Code::ArgumentType,
+            "argument 1 of 'f': expected Object<Int> but got Object<Bool>".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1 }\nlet s: String = c.a"),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: 's' declared as String but assigned Int".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let mut c: Object<Int> = { a: 1 }\nc.b = \"x\""),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: field 'b' is Int but assigned String".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let mut c: Object<Int> = {}\nc[\"k\"] = [1]").len(),
+        1
+    );
+    // A Map annotation on an object: the hint names `Object<T>`.
+    let ds = errors_for("let c: Map<String, Int> = { a: 1 }");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(
+        ds[0].message,
+        "type mismatch: 'c' declared as Map<String, Int> but assigned Object"
+    );
+    assert_eq!(
+        ds[0].help.as_deref(),
+        Some("an object is not a Map: annotate it Object<Int> (an object whose values are Int), or build a Map with map()")
+    );
+    // An `Object<T>` is not a Map either.
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1 }\nlet m: Map<String, Int> = c").len(),
+        1
+    );
+}
+
 #[test]
 fn imports_are_not_resolved_when_skipped() {
     let ds = analyze(

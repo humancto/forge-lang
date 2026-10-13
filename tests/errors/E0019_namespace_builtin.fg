@@ -1,0 +1,2 @@
+import "math" as m
+println(m.sqrt(4))

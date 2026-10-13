@@ -1,0 +1,38 @@
+// A module imported as a namespace (`import "namespace_geo.fg" as geo`):
+// functions, variables, a struct with methods and an algebraic type.
+let TAU = 6.28
+let mut created = 0
+
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+fn next_id() {
+    created = created + 1
+    return created
+}
+
+struct Point {
+    x: Int,
+    y: Int = 0
+}
+
+impl Point {
+    fn sum(it) {
+        return it.x + it.y
+    }
+
+    fn origin() {
+        return Point { x: 0, y: 0 }
+    }
+}
+
+type Shape = Circle(Float) | Square(Float) | Dot
+
+fn area(s) {
+    return match s {
+        Circle(r) => 3.0 * r * r,
+        Square(w) => w * w,
+        _ => 0.0,
+    }
+}

@@ -154,6 +154,15 @@ pub enum Stmt {
         path: String,
         names: Option<Vec<ImportName>>,
     },
+    /// `import "path" as name`: bind `name` to the module's namespace, an
+    /// object whose members are the module's top-level functions,
+    /// variables, variants and structs (`semantics::namespace_members`),
+    /// plus `__module__` (the path as written). The module itself runs
+    /// once per program, like any other import of it.
+    ImportNamespace {
+        path: String,
+        name: String,
+    },
     /// `import native "path" [as name]` / `import { f, g } from native "path"`:
     /// load a native plugin (see `src/plugins`). Bound names are known here,
     /// at parse time; nothing is loaded until the statement runs.
@@ -300,6 +309,10 @@ pub enum Expr {
     StructInit {
         name: String,
         fields: Vec<(String, Expr)>,
+        /// `m.Point { ... }`: the namespace (`import "..." as m`) the
+        /// struct is read from. Both engines check that `m.Point` is the
+        /// module's struct `Point` before building the value.
+        namespace: Option<String>,
     },
     Block(Vec<SpannedStmt>),
 }

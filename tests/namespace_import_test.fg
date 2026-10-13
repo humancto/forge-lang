@@ -1,0 +1,71 @@
+// namespace_import_test.fg — `import "path" as m` binds a read-only
+// namespace: an object of the module's top-level functions, variables,
+// variants and structs (plus `__module__`). The module runs once per
+// program, so the namespace shares state with every other import of it
+// (both engines).
+
+import "tests/parity/modules/namespace_geo.fg" as geo
+import "tests/parity/modules/shared_counter.fg" as counter
+import { bump } from "tests/parity/modules/shared_counter.fg"
+
+@test
+fn test_functions_and_variables() {
+    assert_eq(geo.add(2, 3), 5)
+    assert_eq(geo.TAU, 6.28)
+    assert_eq(geo.area(geo.Square(3.0)), 9.0)
+}
+
+@test
+fn test_structs_through_the_namespace() {
+    let p = geo.Point { x: 4, y: 1 }
+    assert_eq(p.sum(), 5)
+    // Defaults come from the module's struct definition.
+    assert_eq(geo.Point { x: 2 }.y, 0)
+    // Static methods through the namespace's struct.
+    assert_eq(geo.Point.origin().sum(), 0)
+    assert_eq(typeof(p), "Object")
+}
+
+@test
+fn test_variants_and_patterns() {
+    let shapes = [geo.Circle(1.0), geo.Square(2.0), geo.Dot]
+    let names = map(shapes, fn(s) {
+        return match s {
+            geo.Circle(r) => "circle " + str(r),
+            geo.Square(w) => "square " + str(w),
+            geo.Dot => "dot",
+        }
+    })
+    assert_eq(names, ["circle 1", "square 2", "dot"])
+}
+
+@test
+fn test_module_state_is_shared() {
+    // `bump` and `counter.bump` are the same function of one module run.
+    let a = bump()
+    assert_eq(counter.bump(), a + 1)
+    assert_eq(bump(), a + 2)
+}
+
+@test
+fn test_namespace_is_a_value() {
+    assert_eq(geo.__module__, "tests/parity/modules/namespace_geo.fg")
+    assert(has_key(geo, "add"))
+    assert(!has_key(geo, "Shape"))
+    let call_add = fn(m) { return m.add(1, 1) }
+    assert_eq(call_add(geo), 2)
+}
+
+@test
+fn test_unknown_member_is_an_error() {
+    try {
+        geo.ad(1, 2)
+        assert(false)
+    } catch e {
+        assert_eq(e.message, "module 'tests/parity/modules/namespace_geo.fg' has no member 'ad'")
+        assert_eq(e.hint, "did you mean 'add'?")
+        assert_eq(e.code, "E0013")
+    }
+    let missing = safe { geo.nothing }
+    assert_eq(missing, null)
+}

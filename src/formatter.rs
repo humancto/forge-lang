@@ -699,11 +699,21 @@ mod tests {
 
     #[test]
     fn keeps_type_annotations_intact() {
-        let src = "let f: fn(Int, String) -> Bool = g\nlet o: Option<Option<Int>> = None\nlet t: (Int, String) = (1, \"a\")\n";
+        let src = "let f: fn(Int, String) -> Bool = g\nlet o: Option<Option<Int>> = None\nlet t: (Int, String) = (1, \"a\")\nlet c: Object<[Int]> = { a: [1] }\n";
         assert_eq!(format_source(src), src);
         assert_eq!(
             format_source("let f:fn(Int,String)->Bool=g\n"),
             "let f: fn(Int, String) -> Bool = g\n"
+        );
+    }
+
+    #[test]
+    fn keeps_namespace_imports_intact() {
+        let src = "import \"geo.fg\" as geo\nlet p = geo.Point { x: 1 }\nmatch s {\n    geo.Circle(r) => r,\n    geo.Dot => 0,\n}\n";
+        assert_eq!(format_source(src), src);
+        assert_eq!(
+            format_source("import \"geo.fg\"   as   geo\nlet p = geo.Point{x:1}\n"),
+            "import \"geo.fg\" as geo\nlet p = geo.Point { x: 1 }\n"
         );
     }
 

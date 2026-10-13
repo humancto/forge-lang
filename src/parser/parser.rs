@@ -31,6 +31,10 @@ pub struct Parser {
     /// Edition 2027 or later: report the removed natural-syntax forms
     /// (`parser/removed.rs`). Read once, when the parser is created.
     report_removed: bool,
+    /// Names bound by `import "path" as name` so far: `name.Point { ... }`
+    /// is a struct literal only after such an import (elsewhere
+    /// `a.B { x: 1 }` keeps its old meaning).
+    namespaces: std::collections::HashSet<String>,
 }
 
 /// Deepest nesting of expressions, statements, patterns and type
@@ -51,6 +55,7 @@ impl Parser {
             or_alternative: false,
             report_removed: crate::semantics::edition::current()
                 >= crate::semantics::edition::Edition::E2027,
+            namespaces: std::collections::HashSet::new(),
         }
     }
 
@@ -836,6 +841,19 @@ impl Parser {
                     ));
                 }
             };
+            // import "path" as name
+            if matches!(self.current_token(), Token::Ident(ref s) if s == "as") {
+                self.advance();
+                let name = self.expect_ident()?;
+                let name_span = self.prev_span();
+                let end = self.prev_end();
+                if let Some(ix) = self.index.as_mut() {
+                    let def = ix.def(&name, name_span, DefKind::Namespace { path: path.clone() });
+                    ix.set_visible_from(def, end);
+                }
+                self.namespaces.insert(name.clone());
+                return Ok(Stmt::ImportNamespace { path, name });
+            }
             Ok(Stmt::Import { path, names: None })
         }
     }
@@ -1657,6 +1675,36 @@ impl Parser {
                 let name = name.clone();
                 self.advance();
 
+                // A variant of a module namespace: `geo.Circle(r)`, `geo.Dot`
+                // (after `import "geo.fg" as geo`). Patterns match variants
+                // by name, so this is the constructor pattern `Circle(r)`.
+                if self.check(&Token::Dot) && self.namespaces.contains(&name) {
+                    let receiver = self.note_prev(&name, Role::Ref);
+                    self.advance();
+                    let variant = self.expect_ident()?;
+                    let member = self.note_prev(&variant, Role::Field);
+                    if let (Some(ix), Some(member), Some(receiver)) =
+                        (self.index.as_mut(), member, receiver)
+                    {
+                        ix.member_of(member, receiver);
+                    }
+                    let mut fields = Vec::new();
+                    if self.check(&Token::LParen) {
+                        self.advance();
+                        while !self.check(&Token::RParen) {
+                            fields.push(self.parse_or_pattern()?);
+                            if self.check(&Token::Comma) {
+                                self.advance();
+                            }
+                        }
+                        self.expect(Token::RParen)?;
+                    }
+                    return Ok(Pattern::Constructor {
+                        name: variant,
+                        fields,
+                    });
+                }
+
                 // Check for constructor pattern: Name(fields...)
                 if self.check(&Token::LParen) {
                     self.note_prev(&name, Role::Ref);
@@ -2195,6 +2243,11 @@ impl Parser {
     /// Postfix: calls, field access, indexing, try (?)
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
+        // The occurrence of a bare identifier receiver (`m` in `m.f`).
+        let ident_occ = match (&expr, self.index.as_ref()) {
+            (Expr::Ident(name), Some(ix)) => ix.last_occurrence_named(name),
+            _ => None,
+        };
 
         loop {
             match self.current_token() {
@@ -2210,7 +2263,33 @@ impl Parser {
                 Token::Dot => {
                     self.advance();
                     let field = self.expect_ident()?;
-                    self.note_prev(&field, Role::Field);
+                    let field_occ = self.note_prev(&field, Role::Field);
+                    // `name.member`: remember the receiver's occurrence so
+                    // a namespace member (`import "m" as m; m.f`) can be
+                    // resolved to the module's definition.
+                    if let (Expr::Ident(_), Some(field_occ), Some(object_occ)) =
+                        (&expr, field_occ, ident_occ)
+                    {
+                        if let Some(ix) = self.index.as_mut() {
+                            ix.member_of(field_occ, object_occ);
+                        }
+                    }
+                    if let Expr::Ident(ns) = &expr {
+                        if self.namespaces.contains(ns)
+                            && field.chars().next().is_some_and(|c| c.is_uppercase())
+                            && self.check(&Token::LBrace)
+                            && self.brace_opens_struct_fields()
+                        {
+                            let namespace = ns.clone();
+                            let fields = self.parse_struct_fields()?;
+                            expr = Expr::StructInit {
+                                name: field,
+                                fields,
+                                namespace: Some(namespace),
+                            };
+                            continue;
+                        }
+                    }
                     expr = Expr::FieldAccess {
                         object: Box::new(expr),
                         field,
@@ -2311,23 +2390,12 @@ impl Parser {
                 self.advance();
                 let name = self.expect_ident()?;
                 self.note_prev(&name, Role::TypeRef);
-                self.expect(Token::LBrace)?;
-                self.skip_newlines();
-                let mut fields = Vec::new();
-                while !self.check(&Token::RBrace) {
-                    let field_name = self.expect_ident()?;
-                    self.note_prev(&field_name, Role::Field);
-                    self.expect(Token::Colon)?;
-                    let value = self.parse_expr()?;
-                    fields.push((field_name, value));
-                    self.skip_newlines();
-                    if self.check(&Token::Comma) {
-                        self.advance();
-                    }
-                    self.skip_newlines();
-                }
-                self.expect(Token::RBrace)?;
-                Ok(Expr::StructInit { name, fields })
+                let fields = self.parse_struct_fields()?;
+                Ok(Expr::StructInit {
+                    name,
+                    fields,
+                    namespace: None,
+                })
             }
 
             Token::Ident(ref name) => {
@@ -2340,23 +2408,12 @@ impl Parser {
                     && self.brace_opens_struct_fields()
                 {
                     self.note_prev(&name, Role::TypeRef);
-                    self.advance();
-                    self.skip_newlines();
-                    let mut fields = Vec::new();
-                    while !self.check(&Token::RBrace) {
-                        let field_name = self.expect_ident()?;
-                        self.note_prev(&field_name, Role::Field);
-                        self.expect(Token::Colon)?;
-                        let value = self.parse_expr()?;
-                        fields.push((field_name, value));
-                        self.skip_newlines();
-                        if self.check(&Token::Comma) {
-                            self.advance();
-                        }
-                        self.skip_newlines();
-                    }
-                    self.expect(Token::RBrace)?;
-                    Ok(Expr::StructInit { name, fields })
+                    let fields = self.parse_struct_fields()?;
+                    Ok(Expr::StructInit {
+                        name,
+                        fields,
+                        namespace: None,
+                    })
                 } else {
                     self.note_prev(&name, Role::Ref);
                     Ok(Expr::Ident(name))
@@ -2946,6 +3003,27 @@ impl Parser {
     /// fields (`}` or `field:` next, newlines skipped) rather than a block.
     /// `if c == QUOTE {` followed by a statement is a block, so a
     /// capitalised constant can end an `if`/`while` condition.
+    /// `{ field: value, ... }` of a struct literal, at the `{`.
+    fn parse_struct_fields(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {
+        self.expect(Token::LBrace)?;
+        self.skip_newlines();
+        let mut fields = Vec::new();
+        while !self.check(&Token::RBrace) {
+            let field_name = self.expect_ident()?;
+            self.note_prev(&field_name, Role::Field);
+            self.expect(Token::Colon)?;
+            let value = self.parse_expr()?;
+            fields.push((field_name, value));
+            self.skip_newlines();
+            if self.check(&Token::Comma) {
+                self.advance();
+            }
+            self.skip_newlines();
+        }
+        self.expect(Token::RBrace)?;
+        Ok(fields)
+    }
+
     fn brace_opens_struct_fields(&self) -> bool {
         let mut offset = 1;
         while self.peek_token(offset) == Token::Newline {

@@ -95,6 +95,8 @@ struct ImportInfo {
     path: String,
     /// `Some` for `import { a, b as c } from "path"`.
     names: Option<Vec<crate::parser::ast::ImportName>>,
+    /// `Some(m)` for `import "path" as m`.
+    namespace: Option<String>,
     resolved: Option<PathBuf>,
     /// Position of the `import` statement.
     line: usize,
@@ -244,7 +246,7 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
     let wildcard_imports: Vec<ImportedNames> = imports
         .iter()
         .zip(&loaded)
-        .filter(|(i, _)| i.names.is_none() && !is_builtin_module(&i.path))
+        .filter(|(i, _)| i.names.is_none() && i.namespace.is_none() && !is_builtin_module(&i.path))
         .map(|(i, program)| ImportedNames {
             path: i.path.clone(),
             names: program.as_ref().map(exported_names),
@@ -259,7 +261,9 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
     let mut checker = infer::Checker::new(policy, Some(&index), Some(&resolution));
     checker.unknown_wildcard = wildcard_imports.iter().any(|i| i.names.is_none());
     for (info, program) in imports.iter().zip(&loaded) {
-        if let Some(program) = program {
+        if let Some(name) = &info.namespace {
+            checker.import_namespace(name, &info.path, program.as_ref());
+        } else if let Some(program) = program {
             checker.import_declarations(program, info.names.as_deref());
         }
     }
@@ -345,6 +349,19 @@ fn collect_imports(program: &Program, base_dir: Option<&Path>, skip: bool) -> Ve
             Stmt::Import { path, names } => Some(ImportInfo {
                 path: path.clone(),
                 names: names.clone(),
+                namespace: None,
+                line: s.line,
+                col: s.col,
+                resolved: if skip || is_builtin_module(path) {
+                    None
+                } else {
+                    crate::package::resolve_import_from(path, base_dir)
+                },
+            }),
+            Stmt::ImportNamespace { path, name } => Some(ImportInfo {
+                path: path.clone(),
+                names: None,
+                namespace: Some(name.clone()),
                 line: s.line,
                 col: s.col,
                 resolved: if skip || is_builtin_module(path) {

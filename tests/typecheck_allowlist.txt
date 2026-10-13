@@ -19,6 +19,8 @@ tests/interpreter_behavior_test.fg:403 T0006  # asserts function parameters do n
 tests/interpreter_behavior_test.fg:934 T0006  # asserts `safe { }` recovers from an undefined variable
 tests/language_spec_test.fg:41 T0017  # asserts reassigning an immutable binding raises
 tests/language_spec_test.fg:1528 T0006  # asserts reading an undefined variable raises
+tests/namespace_import_test.fg:62 T0008  # asserts an unknown namespace member raises E0013 with a suggestion
+tests/namespace_import_test.fg:69 T0008  # asserts `safe { }` recovers from an unknown namespace member
 tests/parity/supported/hoisted_functions.fg:10 T0018  # parity fixture: a hoisted function is undefined above the variable it reads
 tests/parity/supported/call_arity.fg:13 T0004  # parity fixture: arity error text on both engines
 tests/parity/supported/call_arity.fg:18 T0004  # parity fixture: arity error text on both engines

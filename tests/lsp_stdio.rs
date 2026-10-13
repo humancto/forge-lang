@@ -501,3 +501,99 @@ fn lsp_follows_renamed_imports() {
     assert_eq!(in_main[0]["newText"], "double");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `import "lib.fg" as lib`: `lib.helper` leads to `helper` in lib.fg, and
+/// renaming `helper` there renames the member in `lib.helper(...)`.
+#[test]
+fn lsp_follows_namespace_members() {
+    let dir = std::env::temp_dir().join(format!("forge-lsp-ns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let lib_src = "fn helper(x: Int) -> Int { return x * 2 }\n";
+    std::fs::write(dir.join("lib.fg"), lib_src).unwrap();
+    let main_src = "import \"lib.fg\" as lib\nlet x = lib.helper(2)\nprintln(x)\n";
+    std::fs::write(dir.join("ns.fg"), main_src).unwrap();
+    let lib = format!("file://{}", dir.join("lib.fg").display());
+    let main = format!("file://{}", dir.join("ns.fg").display());
+
+    let mut server = StdioServer::spawn("lsp");
+    server.send(request(
+        1,
+        "initialize",
+        json!({"processId": null, "rootUri": format!("file://{}", dir.display()), "capabilities": {}}),
+    ));
+    let _ = response_for(&server, 1);
+    server.send(notification("initialized", json!({})));
+    server.send(notification(
+        "textDocument/didOpen",
+        json!({"textDocument": {"uri": main, "languageId": "forge", "version": 1, "text": main_src}}),
+    ));
+    let note = server.recv_until("publishDiagnostics", |m| {
+        m["method"] == "textDocument/publishDiagnostics"
+    });
+    assert_eq!(note["params"]["diagnostics"], json!([]), "{}", note);
+
+    // Definition of `helper` in `lib.helper` is the function in lib.fg.
+    server.send(request(2, "textDocument/definition", at(&main, 1, 13)));
+    let def = response_for(&server, 2);
+    assert_eq!(def["uri"], lib, "{}", def);
+    assert_eq!(def["range"]["start"], json!({"line": 0, "character": 3}));
+
+    // Hover on the namespace names the import.
+    server.send(request(3, "textDocument/hover", at(&main, 1, 9)));
+    let hover = response_for(&server, 3)["contents"]["value"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(hover.contains("import \"lib.fg\" as lib"), "{}", hover);
+
+    // Renaming `helper` from lib.fg edits the definition and `lib.helper`.
+    server.send(notification(
+        "textDocument/didOpen",
+        json!({"textDocument": {"uri": lib, "languageId": "forge", "version": 1, "text": lib_src}}),
+    ));
+    server.send(request(
+        4,
+        "textDocument/rename",
+        json!({"textDocument": {"uri": lib}, "position": {"line": 0, "character": 4}, "newName": "double"}),
+    ));
+    let edit = response_for(&server, 4);
+    assert_eq!(
+        edit["changes"][&lib].as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        edit
+    );
+    let in_main = edit["changes"][&main]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(in_main.len(), 1, "{}", edit);
+    assert_eq!(
+        in_main[0]["range"]["start"],
+        json!({"line": 1, "character": 12})
+    );
+    assert_eq!(in_main[0]["newText"], "double");
+
+    // Renaming from the use site edits both files the same way.
+    server.send(request(
+        5,
+        "textDocument/rename",
+        json!({"textDocument": {"uri": main}, "position": {"line": 1, "character": 14}, "newName": "twice"}),
+    ));
+    let edit = response_for(&server, 5);
+    assert_eq!(
+        edit["changes"][&lib].as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        edit
+    );
+    assert_eq!(
+        edit["changes"][&main].as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        edit
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

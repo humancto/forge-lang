@@ -813,6 +813,116 @@ pub fn check_import_alias(
     }
 }
 
+/// The key of a module namespace object (`import "path" as m`) that holds
+/// the path as written. Internal (`__`) keys are not members.
+pub const NAMESPACE_MODULE_KEY: &str = "__module__";
+
+/// One member of a module namespace (`import "path" as m`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceMember {
+    /// A top-level function, variable or variant: `m.name` is the value
+    /// the module's top level left in it (read when the import runs, like
+    /// `import { name }`).
+    Value(String),
+    /// A struct: `m.Name` is the struct marker
+    /// (`{__kind__: "struct", name: "Name"}`, the VM's value of a struct
+    /// name) and `m.Name { ... }` builds an instance.
+    Struct(String),
+}
+
+impl NamespaceMember {
+    pub fn name(&self) -> &str {
+        match self {
+            NamespaceMember::Value(n) | NamespaceMember::Struct(n) => n,
+        }
+    }
+}
+
+/// The members of `import "path" as m`, in definition order: the module's
+/// top-level `fn`s, `let`s, the variants of its `type`s and its structs.
+/// Both engines build the namespace object from this list, so it prints
+/// and compares the same on both. (Type names and interfaces are not
+/// values; their tables travel with the import as for every import.)
+pub fn namespace_members(program: &crate::parser::ast::Program) -> Vec<NamespaceMember> {
+    use crate::parser::ast::Stmt;
+    let mut out: Vec<NamespaceMember> = Vec::new();
+    let mut push = |m: NamespaceMember| {
+        if !out.iter().any(|o| o.name() == m.name()) {
+            out.push(m);
+        }
+    };
+    for s in &program.statements {
+        match &s.stmt {
+            Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
+                push(NamespaceMember::Value(name.clone()))
+            }
+            Stmt::TypeDef { variants, .. } => {
+                for v in variants {
+                    push(NamespaceMember::Value(v.name.clone()));
+                }
+            }
+            Stmt::StructDef { name, .. } => push(NamespaceMember::Struct(name.clone())),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `import "math" as m`: built-in modules are always in scope under their
+/// own name; a namespace import of one is an E0019 error on both engines.
+pub fn namespace_of_builtin_module(path: &str, name: &str) -> String {
+    format!(
+        "cannot import '{}' as '{}': '{}' is a built-in module and is always available as `{}`\n  hint: call its functions directly ({}.<name>), or import some of them: import {{ name }} from \"{}\"",
+        path, name, path, path, path, path
+    )
+}
+
+/// Reading `m.field` where `m` is a module namespace without that member.
+/// `keys` are the namespace's keys (internal `__` keys are ignored).
+pub fn no_module_member<'a>(
+    module: &str,
+    field: &str,
+    keys: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let mut keys: Vec<&str> = keys.into_iter().filter(|k| !k.starts_with("__")).collect();
+    keys.sort_unstable();
+    let hint = match errors::suggest_name(field, [keys.iter().copied()]) {
+        Some(similar) => format!("did you mean '{}'?", similar),
+        None if keys.is_empty() => format!("module '{}' defines no top-level names", module),
+        None => {
+            let more = if keys.len() > 8 { ", ..." } else { "" };
+            let shown: Vec<&str> = keys.iter().copied().take(8).collect();
+            format!("its members are: {}{}", shown.join(", "), more)
+        }
+    };
+    format!(
+        "module '{}' has no member '{}'\n  hint: {}",
+        module, field, hint
+    )
+}
+
+/// The error for reading a missing field of an object: the namespace form
+/// ([`no_module_member`]) when the object is a module namespace (its
+/// `__module__` key is `module`), [`no_field`] otherwise.
+pub fn missing_member<'a>(
+    module: Option<&str>,
+    field: &str,
+    keys: impl IntoIterator<Item = &'a str>,
+) -> String {
+    match module {
+        Some(module) => no_module_member(module, field, keys),
+        None => no_field(field, keys),
+    }
+}
+
+/// `ns.Name { ... }` where `ns.Name` is not a struct of a module namespace.
+pub fn not_a_namespace_struct(namespace: &str, name: &str) -> String {
+    format!(
+        "'{}.{}' is not a struct\n  hint: `{}.{} {{ ... }}` builds a struct defined in the module imported with `import \"...\" as {}`",
+        namespace, name, namespace, name, namespace
+    )
+}
+
 pub fn import_not_found(path: &str) -> String {
     format!(
         "cannot import '{}': file not found (checked relative to the importing file, {0}, {0}.fg, forge_modules/{0}/main.fg)",

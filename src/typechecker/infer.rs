@@ -89,6 +89,22 @@ struct Binding {
     declared: Option<Ty>,
     kind: BindKind,
     id: usize,
+    /// Bound by `import "path" as name` (see `Checker::namespaces`).
+    namespace: bool,
+}
+
+/// What the checker knows about a module namespace (`import "path" as m`).
+#[derive(Debug, Clone, Default)]
+struct NamespaceInfo {
+    /// The path as written (named in diagnostics, like the engines do).
+    path: String,
+    /// The module's functions, with their signatures (`m.f(x)`).
+    functions: HashMap<String, Callable>,
+    /// Every member name (`semantics::namespace_members`); `None` when the
+    /// module could not be read (members are then unknown, not missing).
+    members: Option<Vec<String>>,
+    /// The module's structs (`m.Point { ... }`).
+    structs: HashSet<String>,
 }
 
 struct FnFrame {
@@ -238,6 +254,9 @@ pub struct Checker<'a> {
     /// (`import_declarations`): their names resolve in that module, not in
     /// the file being checked.
     foreign: Option<ForeignModule>,
+    /// Module namespaces of the file's top-level `import "path" as m`,
+    /// by binding name (`import_namespace`).
+    namespaces: HashMap<String, NamespaceInfo>,
 }
 
 /// Name resolution for an imported module's function bodies. The syntax
@@ -281,6 +300,7 @@ impl<'a> Checker<'a> {
             functions: HashMap::new(),
             unknown_wildcard: false,
             foreign: None,
+            namespaces: HashMap::new(),
             cx: InferCtx::default(),
             scopes: vec![HashMap::new()],
             frames: Vec::new(),
@@ -379,6 +399,127 @@ impl<'a> Checker<'a> {
         self.mute = mute;
         self.diagnostics = before;
         self.foreign = saved_foreign;
+    }
+
+    /// Bring in `import "path" as binding`: the module's structs, types,
+    /// interfaces and methods are declared under their own names (both
+    /// engines register them by name), its functions only as members of
+    /// the namespace (`m.f(x)` is checked against the module's signature).
+    /// `program` is `None` when the module could not be read.
+    pub fn import_namespace(&mut self, binding: &str, path: &str, program: Option<&Program>) {
+        let Some(program) = program else {
+            self.namespaces.insert(
+                binding.to_string(),
+                NamespaceInfo {
+                    path: path.to_string(),
+                    ..NamespaceInfo::default()
+                },
+            );
+            return;
+        };
+        let decls: Vec<SpannedStmt> = program
+            .statements
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.stmt,
+                    Stmt::StructDef { .. }
+                        | Stmt::TypeDef { .. }
+                        | Stmt::InterfaceDef { .. }
+                        | Stmt::ImplBlock { .. }
+                        | Stmt::FnDef { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        let types: Vec<SpannedStmt> = decls
+            .iter()
+            .filter(|s| !matches!(s.stmt, Stmt::FnDef { .. }))
+            .cloned()
+            .collect();
+        self.collect_declarations(&types);
+        // The module's functions live in their own table while their
+        // signatures are collected and their bodies inferred (names in
+        // them resolve in the module, `ForeignModule`).
+        let saved_functions = std::mem::take(&mut self.functions);
+        let fns: Vec<SpannedStmt> = decls
+            .iter()
+            .filter(|s| matches!(s.stmt, Stmt::FnDef { .. }))
+            .cloned()
+            .collect();
+        self.collect_declarations(&fns);
+        let (binders, unknown) = crate::semantics::hoist::module_binders(&program.statements);
+        let kept: HashSet<String> = self.functions.keys().cloned().collect();
+        let saved_foreign = self.foreign.replace(ForeignModule {
+            binders,
+            unknown,
+            kept,
+        });
+        let before = std::mem::take(&mut self.diagnostics);
+        let mute = std::mem::replace(&mut self.mute, true);
+        self.infer_return_types(&decls);
+        self.mute = mute;
+        self.diagnostics = before;
+        self.foreign = saved_foreign;
+        let functions = std::mem::replace(&mut self.functions, saved_functions);
+        let members = crate::semantics::namespace_members(program);
+        let structs = members
+            .iter()
+            .filter_map(|m| match m {
+                crate::semantics::NamespaceMember::Struct(n) => Some(n.clone()),
+                crate::semantics::NamespaceMember::Value(_) => None,
+            })
+            .collect();
+        self.namespaces.insert(
+            binding.to_string(),
+            NamespaceInfo {
+                path: path.to_string(),
+                functions,
+                members: Some(members.iter().map(|m| m.name().to_string()).collect()),
+                structs,
+            },
+        );
+    }
+
+    /// The namespace `name` denotes here (a visible `import ... as name`).
+    fn namespace_here(&self, name: &str) -> Option<&NamespaceInfo> {
+        match self.lookup(name) {
+            Some(b) if b.namespace => self.namespaces.get(name),
+            _ => None,
+        }
+    }
+
+    /// The type of namespace member `m.field`, reporting an unknown member
+    /// (T0010, the engines' E0013).
+    fn namespace_member_type(&mut self, ns: &str, field: &str) -> Ty {
+        let Some(info) = self.namespace_here(ns).cloned() else {
+            return Ty::Any;
+        };
+        let Some(members) = &info.members else {
+            return Ty::Any;
+        };
+        let ty = if field == crate::semantics::NAMESPACE_MODULE_KEY {
+            Ty::String
+        } else if let Some(c) = info.functions.get(field) {
+            Ty::Fn(c.sig.clone())
+        } else if members.iter().any(|m| m == field) {
+            self.variant_value_type(field).unwrap_or(Ty::Any)
+        } else {
+            let mut candidates = members.clone();
+            candidates.sort();
+            let (help, fixes) = self.unknown_member_fix(field, &candidates);
+            let span = self.name_span(field, NameClass::Field);
+            self.report(
+                Code::UnknownMember,
+                span,
+                format!("module '{}' has no member '{}'", info.path, field),
+                help,
+                fixes,
+            );
+            Ty::Any
+        };
+        self.record_field_type(field, &ty);
+        ty
     }
 
     fn walk_program(&mut self, program: &Program) {
@@ -668,6 +809,7 @@ impl<'a> Checker<'a> {
                     declared,
                     kind,
                     id,
+                    namespace: false,
                 },
             );
         }
@@ -1352,7 +1494,8 @@ impl<'a> Checker<'a> {
                 let it = self.cx.resolve(&it);
                 let (t1, t2) = match (&it, var2.is_some()) {
                     (Ty::Array(e) | Ty::Set(e), _) => (*e.clone(), Ty::Any),
-                    (Ty::Object, _) | (Ty::Named(..), _) => (Ty::String, Ty::Any),
+                    (Ty::ObjectOf(v), true) => (Ty::String, *v.clone()),
+                    (Ty::Object | Ty::ObjectOf(_), _) | (Ty::Named(..), _) => (Ty::String, Ty::Any),
                     (Ty::Map(k, v), true) => (*k.clone(), *v.clone()),
                     (Ty::Map(k, v), false) => (Ty::Tuple(vec![*k.clone(), *v.clone()]), Ty::Any),
                     _ => (Ty::Any, Ty::Any),
@@ -1430,6 +1573,13 @@ impl<'a> Checker<'a> {
                 (self.cx.join(&t1, &t2), flow)
             }
             Stmt::Import { .. } => (Ty::Null, Flow::Normal),
+            Stmt::ImportNamespace { name, .. } => {
+                self.bind(name, Ty::Object, None, BindKind::Immutable);
+                if let Some(b) = self.scopes.last_mut().and_then(|s| s.get_mut(name)) {
+                    b.namespace = true;
+                }
+                (Ty::Null, Flow::Normal)
+            }
             Stmt::ImportNative { binding, .. } => {
                 // Plugin functions are untyped at the ABI: everything is Any.
                 match binding {
@@ -1673,7 +1823,11 @@ impl<'a> Checker<'a> {
             Expr::FieldAccess { object, field } => {
                 let ot = self.infer(object, None);
                 let ot = self.cx.resolve(&ot);
-                let declared = self.struct_field(&ot, field);
+                let declared = match &ot {
+                    // `Object<T>`: every field is a `T`.
+                    Ty::ObjectOf(v) => Some(*v.clone()),
+                    _ => self.struct_field(&ot, field),
+                };
                 let vt = self.infer(value, declared.as_ref());
                 if let Some(d) = declared {
                     let span = self.expr_span_or(value, self.name_span(field, NameClass::Field));
@@ -1687,9 +1841,21 @@ impl<'a> Checker<'a> {
                 self.check_mutable_root(object);
             }
             Expr::Index { object, index } => {
-                self.infer(object, None);
+                let ot = self.infer(object, None);
                 self.infer(index, None);
-                self.infer(value, None);
+                match self.cx.resolve(&ot) {
+                    // `o[key] = v` on an `Object<T>`: `v` must be a `T`.
+                    Ty::ObjectOf(d) => {
+                        let vt = self.infer(value, Some(&d));
+                        let span = self.expr_span(value);
+                        self.expect_assignable(&d, &vt, span, |e, a| {
+                            format!("type mismatch: a value of Object<{}> assigned {}", e, a)
+                        });
+                    }
+                    _ => {
+                        self.infer(value, None);
+                    }
+                }
                 self.check_mutable_root(object);
             }
             other => {
@@ -2083,7 +2249,11 @@ impl<'a> Checker<'a> {
                         let st = st.clone();
                         self.check_interface_satisfaction(&st, iface, span)
                     }
-                    t if t.is_unknown() || matches!(t, Ty::Object | Ty::Never) => true,
+                    t if t.is_unknown()
+                        || matches!(t, Ty::Object | Ty::ObjectOf(_) | Ty::Never) =>
+                    {
+                        true
+                    }
                     _ => {
                         let m = msg(&e, &a);
                         self.simple(code, span, m);
@@ -2098,8 +2268,18 @@ impl<'a> Checker<'a> {
             return true;
         }
         self.cx.rollback(snap);
-        let m = msg(&self.cx.finalize(&e), &self.cx.finalize(&a));
-        self.simple(code, span, m);
+        let (e, a) = (self.cx.finalize(&e), self.cx.finalize(&a));
+        let m = msg(&e, &a);
+        // A `Map` is its own value type: an object literal or parsed JSON
+        // object never is one (V2 finding 22).
+        let help = match (&e, &a) {
+            (Ty::Map(_, v), Ty::Object | Ty::ObjectOf(_)) => Some(format!(
+                "an object is not a Map: annotate it Object<{}> (an object whose values are {}), or build a Map with map()",
+                v, v
+            )),
+            _ => None,
+        };
+        self.report(code, span, m, help, Vec::new());
         false
     }
 
@@ -2134,6 +2314,9 @@ impl<'a> Checker<'a> {
                 Box::new(self.upcast_to_interfaces(k1, k2, span)),
                 Box::new(self.upcast_to_interfaces(v1, v2, span)),
             ),
+            (Ty::ObjectOf(x), Ty::ObjectOf(y)) => {
+                Ty::ObjectOf(Box::new(self.upcast_to_interfaces(x, y, span)))
+            }
             (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => Ty::Tuple(
                 xs.iter()
                     .zip(ys)
@@ -2263,10 +2446,51 @@ impl<'a> Checker<'a> {
                 Ty::array(elem.or(expected_elem).unwrap_or(Ty::Any))
             }
             Expr::Object(fields) => {
+                // Against `Object<T>`, the values are checked like the
+                // elements of an array literal against `[T]`: the first
+                // value that does not fit decides the type, so the
+                // mismatch is reported against the declaration.
+                let expected_value = match expected.map(|e| self.cx.resolve(e)) {
+                    Some(Ty::ObjectOf(v)) => Some(*v),
+                    Some(Ty::Option(inner)) => match *inner {
+                        Ty::ObjectOf(v) => Some(*v),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(expected_value) = expected_value else {
+                    for (_, v) in fields {
+                        self.infer(v, None);
+                    }
+                    return Ty::Object;
+                };
+                let mut joined: Option<Ty> = None;
+                let mut misfit: Option<Ty> = None;
                 for (_, v) in fields {
-                    self.infer(v, None);
+                    let t = match v {
+                        // `{...other}`: the values of `other`.
+                        Expr::Spread(inner) => match self.infer(inner, None) {
+                            Ty::ObjectOf(v) => *v,
+                            _ => Ty::Any,
+                        },
+                        _ => self.infer(v, Some(&expected_value)),
+                    };
+                    if misfit.is_none() {
+                        let snap = self.cx.snapshot();
+                        if !self.cx.assign(&expected_value, &t) {
+                            self.cx.rollback(snap);
+                            misfit = Some(t.clone());
+                        }
+                    }
+                    joined = Some(match joined {
+                        None => t,
+                        Some(prev) => self.cx.join(&prev, &t),
+                    });
                 }
-                Ty::Object
+                if let Some(bad) = misfit {
+                    return Ty::ObjectOf(Box::new(bad));
+                }
+                Ty::ObjectOf(Box::new(joined.unwrap_or(expected_value)))
             }
             Expr::Tuple(items) => Ty::Tuple(items.iter().map(|i| self.infer(i, None)).collect()),
             Expr::BinOp { left, op, right } => self.infer_binop(expr, left, op, right),
@@ -2289,6 +2513,7 @@ impl<'a> Checker<'a> {
                     (Ty::Array(e), _) => *e,
                     (Ty::String, _) => Ty::String,
                     (Ty::Map(_, v), _) => *v,
+                    (Ty::ObjectOf(v), _) => *v,
                     (Ty::Tuple(items), _) => match index.as_ref() {
                         Expr::Int(i) => usize::try_from(*i)
                             .ok()
@@ -2376,7 +2601,37 @@ impl<'a> Checker<'a> {
                 };
                 self.infer_call(&callee, args)
             }
-            Expr::StructInit { name, fields } => self.infer_struct_init(name, fields),
+            Expr::StructInit {
+                name,
+                fields,
+                namespace,
+            } => {
+                if let Some(ns) = namespace {
+                    let known = self.namespace_here(ns).cloned();
+                    if let Some(NamespaceInfo {
+                        path,
+                        members: Some(_),
+                        structs,
+                        ..
+                    }) = known
+                    {
+                        if !structs.contains(name) {
+                            let span = self.name_span(name, NameClass::Field);
+                            let mut candidates: Vec<String> = structs.into_iter().collect();
+                            candidates.sort();
+                            let (help, fixes) = self.unknown_member_fix(name, &candidates);
+                            self.report(
+                                Code::UnknownMember,
+                                span,
+                                format!("module '{}' has no struct '{}'", path, name),
+                                help,
+                                fixes,
+                            );
+                        }
+                    }
+                }
+                self.infer_struct_init(name, fields)
+            }
             Expr::Block(stmts) => {
                 let (t, _) = self.check_body(stmts);
                 t
@@ -2619,6 +2874,10 @@ impl<'a> Checker<'a> {
     fn infer_field_access(&mut self, object: &Expr, field: &str) -> Ty {
         // Module member: `math.sqrt`.
         if let Expr::Ident(module) = object {
+            // Namespace member: `import "m.fg" as m; m.f`.
+            if self.namespace_here(module).is_some() {
+                return self.namespace_member_type(module, field);
+            }
             if self.is_global_here(module) {
                 if let Some(info) = builtins::module(module) {
                     let ty = if info.members.contains(field) {
@@ -2678,6 +2937,8 @@ impl<'a> Checker<'a> {
                     },
                 }
             }
+            // `Object<T>`: every field is a `T`.
+            Ty::ObjectOf(v) => *v.clone(),
             _ => Ty::Any,
         };
         self.record_field_type(field, &ty);
@@ -3052,14 +3313,16 @@ impl<'a> Checker<'a> {
                 let t = args.first().map(|a| self.infer(a, None));
                 match t.map(|t| self.cx.resolve(&t)) {
                     Some(Ty::Map(k, _)) => Ty::array(*k),
-                    Some(Ty::Object) | Some(Ty::Named(..)) => Ty::array(Ty::String),
+                    Some(Ty::Object | Ty::ObjectOf(_)) | Some(Ty::Named(..)) => {
+                        Ty::array(Ty::String)
+                    }
                     _ => Ty::array(Ty::Any),
                 }
             }
             "values" => {
                 let t = args.first().map(|a| self.infer(a, None));
                 match t.map(|t| self.cx.resolve(&t)) {
-                    Some(Ty::Map(_, v)) => Ty::array(*v),
+                    Some(Ty::Map(_, v)) | Some(Ty::ObjectOf(v)) => Ty::array(*v),
                     _ => Ty::array(Ty::Any),
                 }
             }
@@ -3299,6 +3562,18 @@ impl<'a> Checker<'a> {
         let span = self.name_span(method, NameClass::Field);
         // Module function: `math.sqrt(x)`.
         if let Expr::Ident(module) = object {
+            // Namespace function: `import "m.fg" as m; m.f(x)`, checked
+            // against the module's signature like a direct import.
+            if self.namespace_here(module).is_some() {
+                let ft = self.namespace_member_type(module, method);
+                let label = format!("{}.{}", module, method);
+                return match self.cx.resolve(&ft) {
+                    Ty::Fn(f) => {
+                        self.call_signature(&label, &f, args, has_spread, span, CallKind::User)
+                    }
+                    other => self.call_value(&other, &label, args, has_spread, span, true),
+                };
+            }
             if self.is_global_here(module) && builtins::module(module).is_some() {
                 let ft = self.infer_field_access(object, method);
                 return match ft {
@@ -3409,7 +3684,7 @@ impl<'a> Checker<'a> {
 
         // Builtin used as a method: `xs.map(f)` is `map(xs, f)`.
         if let Some(sig) = builtins::function(method).cloned() {
-            if !matches!(ot, Ty::Object | Ty::Named(..))
+            if !matches!(ot, Ty::Object | Ty::ObjectOf(_) | Ty::Named(..))
                 || crate::builtins_registry::global(method).is_some()
             {
                 let subst = self.instantiate(&sig);
@@ -3479,7 +3754,7 @@ fn operand_of(ty: &Ty) -> Option<crate::semantics::Operand<'static>> {
         Ty::Bool => Operand::Bool,
         Ty::Null => Operand::Null,
         // A struct instance is an object at run time.
-        Ty::Named(..) | Ty::Object => Operand::Other("Object"),
+        Ty::Named(..) | Ty::Object | Ty::ObjectOf(_) => Operand::Other("Object"),
         other => Operand::Other(other.runtime_name()?),
     })
 }
@@ -3596,8 +3871,18 @@ fn collect_expr_names(expr: &Expr, out: &mut Vec<(String, NameClass)>) {
                 collect_expr_names(v, out);
             }
         }
-        Expr::StructInit { name, fields } => {
-            out.push((name.clone(), NameClass::Type));
+        Expr::StructInit {
+            name,
+            fields,
+            namespace,
+        } => {
+            match namespace {
+                Some(ns) => {
+                    out.push((ns.clone(), NameClass::Value));
+                    out.push((name.clone(), NameClass::Field));
+                }
+                None => out.push((name.clone(), NameClass::Type)),
+            }
             for (k, v) in fields {
                 out.push((k.clone(), NameClass::Field));
                 collect_expr_names(v, out);

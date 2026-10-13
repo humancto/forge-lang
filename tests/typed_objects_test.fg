@@ -1,0 +1,47 @@
+// typed_objects_test.fg — `Object<T>` annotates an object used as a
+// dictionary (string keys, values of type T). Object literals and parsed
+// JSON objects fit it; `o.key`, `o[key]` and `for k, v in o` have type T.
+// (Run-time checks of annotated boundaries: tests/edition2027.)
+
+fn total(counts: Object<Int>) -> Int {
+    let mut sum = 0
+    for k, v in counts {
+        sum = sum + v
+    }
+    return sum
+}
+
+fn longest(groups: Object<[String]>) -> String {
+    let mut best = ""
+    for k, names in groups {
+        if len(names) > len(get(groups, best, [])) {
+            best = k
+        }
+    }
+    return best
+}
+
+@test
+fn test_object_literals_fit() {
+    let ages: Object<Int> = { ada: 36, alan: 41 }
+    assert_eq(total(ages), 77)
+    assert_eq(ages.ada + ages["alan"], 77)
+    assert_eq(longest({ a: ["x"], b: ["x", "y"] }), "b")
+}
+
+@test
+fn test_json_objects_fit() {
+    let counts: Object<Int> = json.parse("""{"a": 1, "b": 2}""")
+    assert_eq(total(counts), 3)
+    assert_eq(typeof(counts), "Object")
+}
+
+@test
+fn test_typed_objects_are_objects() {
+    let mut c: Object<Int> = { a: 1 }
+    c.b = 2
+    c["z"] = 26
+    assert_eq(keys(c), ["a", "b", "z"])
+    assert_eq(values(c), [1, 2, 26])
+    assert(has_key(c, "z"))
+}

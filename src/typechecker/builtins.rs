@@ -339,6 +339,7 @@ pub fn builtin_generic(name: &str, args: &[Ty]) -> Option<Ty> {
         ("array" | "list", 1) => Ty::array(arg(0)),
         ("set", 1) => Ty::Set(Box::new(arg(0))),
         ("map", 2) => Ty::Map(Box::new(arg(0)), Box::new(arg(1))),
+        ("object", 1) => Ty::ObjectOf(Box::new(arg(0))),
         _ => return None,
     })
 }

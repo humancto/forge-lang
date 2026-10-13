@@ -156,6 +156,7 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_register_agent",
     "__forge_raise_error",
     "__forge_import_module",
+    "__forge_import_namespace",
     "__forge_import_native",
     "__forge_get_field",
     "__forge_set_field",
@@ -2949,7 +2950,13 @@ impl VM {
                         ))
                     })?);
                 } else {
-                    return Err(VMError::new(&crate::semantics::no_field(
+                    // A module namespace (`import "m" as m`) names its
+                    // module in the error.
+                    let module = map
+                        .get(crate::semantics::NAMESPACE_MODULE_KEY)
+                        .and_then(|v| self.get_string(v));
+                    return Err(VMError::new(&crate::semantics::missing_member(
+                        module.as_deref(),
                         field,
                         map.keys().map(String::as_str),
                     )));

@@ -98,6 +98,10 @@ impl Instrumenter<'_> {
             Ty::Array(e) => format!("[{}]", inner(e)),
             Ty::Set(e) => format!("Set<{}>", inner(e)),
             Ty::Map(k, v) => format!("Map<{},{}>", inner(k), inner(v)),
+            Ty::ObjectOf(v) => match self.canonical(v) {
+                Some(v) => format!("Object<{}>", v),
+                None => "Object".into(),
+            },
             Ty::Result(o, e) => format!("Result<{},{}>", inner(o), inner(e)),
             Ty::Option(t) => format!("?{}", self.canonical(t)?),
             Ty::Tuple(items) => format!(
@@ -295,6 +299,7 @@ impl Instrumenter<'_> {
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Import { .. }
+            | Stmt::ImportNamespace { .. }
             | Stmt::ImportNative { .. }
             | Stmt::PromptDef { .. }
             | Stmt::AgentDef { .. } => {}
@@ -320,7 +325,7 @@ impl Instrumenter<'_> {
                     self.expr(e);
                 }
             }
-            Expr::StructInit { name, fields } => {
+            Expr::StructInit { name, fields, .. } => {
                 for (field, e) in fields.iter_mut() {
                     self.expr(e);
                     // Fields declared Float take Ints as Floats.

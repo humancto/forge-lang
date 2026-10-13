@@ -1557,7 +1557,8 @@ mod tests {
              @tool(description: \"d\")\n\
              @param(n: \"count\")\n\
              fn t(n: Int, f: Float, s: String, b: Bool, xs: [Int], m: Map<String, Int>, \
-                  o: Object, p: Point, maybe: ?String, opt: Option<Int>, any, d: Int = 3) -> Point { return p }",
+                  o: Object, p: Point, maybe: ?String, opt: Option<Int>, any, \
+                  scores: Object<Float>, tags: Object<[String]>, d: Int = 3) -> Point { return p }",
         )
         .expect("loads");
         let defs = set.tool_definitions(Duration::from_secs(30));
@@ -1576,6 +1577,15 @@ mod tests {
         );
         assert_eq!(props["m"]["additionalProperties"]["type"], "integer");
         assert_eq!(props["o"], json!({"type": "object"}));
+        // `Object<T>`: a JSON object whose values are `T`.
+        assert_eq!(
+            props["scores"],
+            json!({"type": "object", "additionalProperties": {"type": "number"}})
+        );
+        assert_eq!(
+            props["tags"],
+            json!({"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}})
+        );
         assert_eq!(props["p"]["required"], json!(["x", "y"]));
         assert_eq!(props["p"]["properties"]["label"]["default"], "p");
         assert_eq!(props["maybe"]["type"], json!(["string", "null"]));
@@ -1584,7 +1594,7 @@ mod tests {
         assert_eq!(props["d"]["default"], 3);
         assert_eq!(
             schema["required"],
-            json!(["n", "f", "s", "b", "xs", "m", "o", "p", "any"])
+            json!(["n", "f", "s", "b", "xs", "m", "o", "p", "any", "scores", "tags"])
         );
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(defs[0]["outputSchema"]["title"], "Point");

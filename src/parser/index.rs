@@ -124,6 +124,11 @@ pub enum DefKind {
     NativeImport {
         path: String,
     },
+    /// A module namespace bound by `import "path" as name`; its members
+    /// (`name.f`) are the module's top-level definitions.
+    Namespace {
+        path: String,
+    },
     Struct,
     Interface,
     /// `type Name = ...` (an algebraic data type or a union alias).
@@ -214,6 +219,10 @@ impl NameOcc {
 pub struct SyntaxIndex {
     pub occurrences: Vec<NameOcc>,
     pub scopes: Vec<Scope>,
+    /// `name.member` with a bare identifier receiver: the `member` field
+    /// occurrence → the `name` occurrence. Resolution of a namespace member
+    /// (`import "m" as m; m.f`) goes through it.
+    pub receivers: std::collections::HashMap<OccId, OccId>,
 }
 
 impl SyntaxIndex {
@@ -231,6 +240,12 @@ impl SyntaxIndex {
             }
         }
         best
+    }
+
+    /// The receiver occurrence of a field occurrence (`m` for the `f` of
+    /// `m.f`), when the receiver is a bare identifier.
+    pub fn receiver_of(&self, field: OccId) -> Option<OccId> {
+        self.receivers.get(&field).copied()
     }
 
     /// The chain of scopes from `scope` out to the file scope.
@@ -256,6 +271,7 @@ impl IndexBuilder {
     pub(crate) fn new() -> Self {
         Self {
             index: SyntaxIndex {
+                receivers: Default::default(),
                 occurrences: Vec::new(),
                 scopes: vec![Scope {
                     kind: ScopeKind::File,
@@ -343,6 +359,17 @@ impl IndexBuilder {
         self.push(name, span, role)
     }
 
+    /// The most recent occurrence of `name` (a receiver just parsed).
+    pub(crate) fn last_occurrence_named(&self, name: &str) -> Option<OccId> {
+        let id = self.index.occurrences.len().checked_sub(1)?;
+        (self.index.occurrences[id].name == name).then_some(id)
+    }
+
+    /// Record that field occurrence `field` is read from `receiver`.
+    pub(crate) fn member_of(&mut self, field: OccId, receiver: OccId) {
+        self.index.receivers.insert(field, receiver);
+    }
+
     /// Merge the index of a nested parse (a string interpolation) into this
     /// one, translating its positions with `map` and re-parenting its file
     /// scope onto the current scope.
@@ -360,6 +387,12 @@ impl IndexBuilder {
                 start: map(scope.start),
                 end: map(scope.end),
             });
+        }
+        let occ_base = self.index.occurrences.len();
+        for (field, receiver) in nested.receivers {
+            self.index
+                .receivers
+                .insert(occ_base + field, occ_base + receiver);
         }
         for occ in nested.occurrences {
             self.index.occurrences.push(NameOcc {

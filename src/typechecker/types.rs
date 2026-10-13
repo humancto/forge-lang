@@ -34,6 +34,9 @@ pub enum Ty {
     /// A dynamic object (`{ ... }` literals, `Json`, parsed JSON). Field
     /// access on it is unchecked.
     Object,
+    /// `Object<T>`: a string-keyed object whose every value is a `T`
+    /// (a typed dictionary; `Map<K, V>` is the `Map` value type instead).
+    ObjectOf(Box<Ty>),
     Fn(FnTy),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
@@ -114,7 +117,7 @@ impl Ty {
     pub fn visit(&self, f: &mut dyn FnMut(&Ty)) {
         f(self);
         match self {
-            Ty::Array(t) | Ty::Set(t) | Ty::Option(t) => t.visit(f),
+            Ty::Array(t) | Ty::Set(t) | Ty::Option(t) | Ty::ObjectOf(t) => t.visit(f),
             Ty::Map(k, v) | Ty::Result(k, v) => {
                 k.visit(f);
                 v.visit(f);
@@ -155,6 +158,7 @@ impl Ty {
             Ty::Array(t) => Ty::Array(Box::new(t.map(f))),
             Ty::Set(t) => Ty::Set(Box::new(t.map(f))),
             Ty::Option(t) => Ty::Option(Box::new(t.map(f))),
+            Ty::ObjectOf(t) => Ty::ObjectOf(Box::new(t.map(f))),
             Ty::Map(k, v) => Ty::Map(Box::new(k.map(f)), Box::new(v.map(f))),
             Ty::Result(k, v) => Ty::Result(Box::new(k.map(f)), Box::new(v.map(f))),
             Ty::Tuple(items) => Ty::Tuple(items.iter().map(|t| t.map(f)).collect()),
@@ -184,7 +188,7 @@ impl Ty {
             Ty::Tuple(_) => "Tuple",
             Ty::Set(_) => "Set",
             Ty::Map(_, _) => "Map",
-            Ty::Object => "Object",
+            Ty::Object | Ty::ObjectOf(_) => "Object",
             Ty::Fn(_) => "Function",
             Ty::Result(_, _) => "Result",
             _ => return None,
@@ -219,6 +223,7 @@ impl fmt::Display for Ty {
             Ty::Set(t) => write!(f, "Set<{}>", t),
             Ty::Map(k, v) => write!(f, "Map<{}, {}>", k, v),
             Ty::Object => write!(f, "Object"),
+            Ty::ObjectOf(t) => write!(f, "Object<{}>", t),
             Ty::Fn(fun) => {
                 write!(f, "fn(")?;
                 for (i, p) in fun.params.iter().enumerate() {
@@ -430,6 +435,16 @@ impl InferCtx {
                 args1.iter().zip(&args2).all(|(x, y)| self.assign(x, y))
             }
             (Ty::Object, Ty::Named(..)) | (Ty::Named(..), Ty::Object) => true,
+            // `Object<T>`: values compare element-wise; an object whose
+            // values are unknown (`Object`, a struct) may fit (checked at
+            // run time under `--strict` / edition 2027), and every
+            // `Object<T>` is an `Object`.
+            (Ty::ObjectOf(x), Ty::ObjectOf(y)) => {
+                let (x, y) = (x.clone(), y.clone());
+                self.assign(&x, &y)
+            }
+            (Ty::ObjectOf(_), Ty::Object | Ty::Named(..))
+            | (Ty::Object | Ty::Named(..), Ty::ObjectOf(_)) => true,
             (Ty::Fn(f1), Ty::Fn(f2)) => {
                 let (f1, f2) = (f1.clone(), f2.clone());
                 // A function that requires more arguments than the expected
@@ -476,6 +491,11 @@ impl InferCtx {
                 let (x, y) = (x.clone(), y.clone());
                 Ty::array(self.join(&x, &y))
             }
+            (Ty::ObjectOf(x), Ty::ObjectOf(y)) => {
+                let (x, y) = (x.clone(), y.clone());
+                Ty::ObjectOf(Box::new(self.join(&x, &y)))
+            }
+            (Ty::ObjectOf(_), Ty::Object) | (Ty::Object, Ty::ObjectOf(_)) => Ty::Object,
             (Ty::Result(o1, e1), Ty::Result(o2, e2)) => {
                 let (o1, e1, o2, e2) = (o1.clone(), e1.clone(), o2.clone(), e2.clone());
                 Ty::result(self.join(&o1, &o2), self.join(&e1, &e2))
@@ -576,5 +596,26 @@ mod tests {
             "fn(Int, String) -> Bool"
         );
         assert_eq!(Ty::Tuple(vec![Ty::Int]).to_string(), "(Int,)");
+        assert_eq!(
+            Ty::ObjectOf(Box::new(Ty::array(Ty::Int))).to_string(),
+            "Object<[Int]>"
+        );
+    }
+
+    #[test]
+    fn typed_objects_compare_values() {
+        let mut cx = InferCtx::default();
+        let ints = Ty::ObjectOf(Box::new(Ty::Int));
+        let floats = Ty::ObjectOf(Box::new(Ty::Float));
+        assert!(cx.assign(&floats, &ints));
+        assert!(!cx.assign(&ints, &floats));
+        assert!(!cx.assign(&ints, &Ty::ObjectOf(Box::new(Ty::String))));
+        // Untyped objects may fit; typed ones are objects.
+        assert!(cx.assign(&ints, &Ty::Object));
+        assert!(cx.assign(&Ty::Object, &ints));
+        // A Map is not an object.
+        assert!(!cx.assign(&ints, &Ty::Map(Box::new(Ty::String), Box::new(Ty::Int))));
+        assert!(!cx.assign(&Ty::Map(Box::new(Ty::String), Box::new(Ty::Int)), &ints));
+        assert_eq!(cx.join(&ints, &floats), floats);
     }
 }
