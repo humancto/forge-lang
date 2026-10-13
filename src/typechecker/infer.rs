@@ -1942,6 +1942,25 @@ impl<'a> Checker<'a> {
         (self.cx.join(&t1, &t2), flow)
     }
 
+    /// Run `f` with each binding in `facts` narrowed, then restore the
+    /// bindings' types.
+    fn with_narrowing(&mut self, facts: &[(String, Narrowing)], f: impl FnOnce(&mut Self)) {
+        let originals: Vec<(String, Ty)> = facts
+            .iter()
+            .filter_map(|(name, _)| self.lookup(name).map(|b| (name.clone(), b.ty.clone())))
+            .collect();
+        for (name, fact) in facts {
+            if let Some((_, original)) = originals.iter().find(|(n, _)| n == name) {
+                let resolved = self.cx.resolve(original);
+                self.set_binding_type(name, fact.apply(&resolved));
+            }
+        }
+        f(self);
+        for (name, ty) in &originals {
+            self.set_binding_type(name, ty.clone());
+        }
+    }
+
     fn narrowing_facts(&self, expr: &Expr) -> Vec<(String, Narrowing)> {
         let is_null = |e: &Expr| matches!(e, Expr::Ident(n) if n == "null" || n == "None");
         match expr {
@@ -2743,6 +2762,32 @@ impl<'a> Checker<'a> {
     }
 
     fn infer_binop(&mut self, whole: &Expr, left: &Expr, op: &BinOp, right: &Expr) -> Ty {
+        if matches!(op, BinOp::And | BinOp::Or) {
+            // The right operand runs only when the left one was true (`&&`)
+            // or false (`||`), so it sees the left operand's narrowing:
+            // `x != null && x > 0`, `x == null || v < x` (V3 finding 18).
+            self.infer(left, None);
+            // Only null tests: they remove a false positive (T0014) and
+            // cannot introduce a diagnostic the operand would not get
+            // inside the matching `if`.
+            let facts = self.narrowing_facts(left);
+            let facts: Vec<_> = if *op == BinOp::And {
+                facts
+            } else if facts.len() == 1 {
+                // `!(a && b)` says nothing about `a` or `b` alone.
+                facts.into_iter().map(|(n, f)| (n, f.invert())).collect()
+            } else {
+                Vec::new()
+            };
+            let facts: Vec<_> = facts
+                .into_iter()
+                .filter(|(_, f)| matches!(f, Narrowing::NonNull | Narrowing::IsNull))
+                .collect();
+            self.with_narrowing(&facts, |me| {
+                me.infer(right, None);
+            });
+            return Ty::Bool;
+        }
         let lt = self.infer(left, None);
         let rt = self.infer(right, None);
         let lt = self.cx.resolve(&lt);

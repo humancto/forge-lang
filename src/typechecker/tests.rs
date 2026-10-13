@@ -544,6 +544,63 @@ fn narrowing_unknown_not_narrowed() {
     assert!(w.is_empty());
 }
 
+// V3 finding 18: the right operand of `||` / `&&` sees the left one's
+// null test.
+#[test]
+fn narrowing_or_right_operand_after_eq_null() {
+    let src = "fn lowest(xs: [Int]) {\n  let mut lo = null\n  for v in xs {\n    if lo == null || v < lo {\n      lo = v\n    }\n  }\n  return lo\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.is_empty(),
+        "`lo == null || v < lo` is guarded: {:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn narrowing_and_right_operand_after_not_null() {
+    let w = warnings_for("fn f(x: ?Int) -> Bool {\n  return x != null && x > 3\n}");
+    assert!(
+        w.is_empty(),
+        "`x != null && x > 3` is guarded: {:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn narrowing_operands_stay_sound() {
+    // `x == null && x > 3`, `x != null || x > 3`: x is null there, a
+    // certain run-time error.
+    for src in [
+        "fn f(x: ?Int) -> Bool {\n  return x == null && x > 3\n}",
+        "fn f(x: ?Int) -> Bool {\n  return x != null || x > 3\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.iter()
+                .any(|w| w.message.contains("cannot be applied to Null")),
+            "{:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+    // The wrong test, or a test of another variable, guards nothing; and
+    // the narrowing ends with the expression.
+    for src in [
+        "fn f(x: ?Int, y: ?Int) -> Bool {\n  return y != null && x > 3\n}",
+        // `!(a && b)` false says nothing about a or b alone.
+        "fn f(x: ?Int, y: ?Int) -> Bool {\n  return (x == null && y == null) || x > 3\n}",
+        "fn f(x: ?Int) -> Bool {\n  let a = x != null && x > 3\n  return x > 3\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.iter().any(|w| w.code == Code::OptionMisuse),
+            "expected T0014 for {:?}, got {:?}",
+            src,
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+}
+
 #[test]
 fn match_some_constructor_narrows() {
     // Match with Some(...) constructor pattern should narrow Option to inner type

@@ -5,9 +5,9 @@ fn stats(part) {
     let mut n = 0
     let mut bad = 0
     let mut total = 0
-    // Not `let mut lo = null` with `lo == null || v < lo`: the type checker
-    // warns T0014 ("Option type used in operation") on the guarded comparison
-    // (eval/V3_FINDINGS.md, finding 18).
+    // A counter rather than `let mut lo = null` with `lo == null || v < lo`,
+    // which the type checker used to warn about (T0014; eval/V3_FINDINGS.md,
+    // finding 18, fixed). Both forms are fine now.
     let mut lo = 0
     let mut hi = 0
     let mut sensors = {}
