@@ -1,0 +1,114 @@
+// file: forge_modules/csvlite/main.fg
+// Package entry. The functions live in src/; the entry wraps them because
+// on the VM a name a module only imports (a re-export) cannot be imported
+// from it (E0019; the interpreter allows it) (eval/V3_FINDINGS.md, finding 9).
+import { parse_table } from "src/table.fg"
+import { render } from "src/format.fg"
+import { describe } from "src/stats.fg"
+
+fn read_table(text: String) {
+    return parse_table(text)
+}
+
+fn format_table(t) -> String {
+    return render(t)
+}
+
+fn describe_column(t, name: String) -> String {
+    return describe(t, name)
+}
+
+// file: forge_modules/csvlite/src/table.fg
+// The table type and the CSV reader.
+
+struct Table {
+    headers: [String],
+    rows: [[String]]
+}
+
+impl Table {
+    fn count(it) -> Int {
+        return len(it.rows)
+    }
+
+    fn column(it, name: String) -> [String] {
+        let i = index_of(it.headers, name)
+        return map(it.rows, fn(r) { return r[i] })
+    }
+}
+
+fn parse_table(text: String) {
+    let rows = filter(csv.parse(text, { header: false, types: false }), fn(r) {
+        return !(len(r) == 1 && r[0] == "") && len(r) > 0
+    })
+    if len(rows) == 0 {
+        return Err("empty input")
+    }
+    let headers = map(rows[0], fn(h) { return h.trim() })
+    let data = slice(rows, 1, len(rows))
+    for e in enumerate(data) {
+        if len(e.value) != len(headers) {
+            return Err("row {e.index + 1} has {len(e.value)} fields, expected {len(headers)}")
+        }
+    }
+    return Ok(Table { headers: headers, rows: data })
+}
+
+// file: forge_modules/csvlite/src/numbers.fg
+// Shared number helpers.
+
+fn is_number(s: String) -> Bool {
+    return regex.test(s, "^-?[0-9]+(\\.[0-9]+)?$")
+}
+
+// file: forge_modules/csvlite/src/format.fg
+// Fixed-width rendering; numbers right-aligned.
+import { is_number } from "numbers.fg"
+
+fn render(t) -> String {
+    let mut widths = map(t.headers, fn(h) { return len(h) })
+    for r in t.rows {
+        for i in range(0, len(r)) {
+            widths[i] = max(widths[i], len(r[i]))
+        }
+    }
+    let mut head = []
+    let mut rule = []
+    for i in range(0, len(t.headers)) {
+        head.push(pad_end(t.headers[i], widths[i]))
+        rule.push(repeat_str("-", widths[i]))
+    }
+    let mut lines = [join(head, " | ").trim_end(), join(rule, "-+-")]
+    for r in t.rows {
+        let mut cells = []
+        for i in range(0, len(r)) {
+            if is_number(r[i]) {
+                cells.push(pad_start(r[i], widths[i]))
+            } else {
+                cells.push(pad_end(r[i], widths[i]))
+            }
+        }
+        lines.push(join(cells, " | ").trim_end())
+    }
+    return join(lines, "\n")
+}
+
+// file: forge_modules/csvlite/src/stats.fg
+// Column summaries.
+import { is_number } from "numbers.fg"
+
+fn describe(t, name: String) -> String {
+    let col = t.column(name)
+    if len(col) > 0 && all(col, fn(v) { return is_number(v) }) {
+        let xs = map(col, fn(v) { return float(v) })
+        let mean = sum(xs) / len(xs)
+        return "{name}: numeric min={to_fixed(min(xs), 2)} max={to_fixed(max(xs), 2)} mean={to_fixed(mean, 2)}"
+    }
+    let mut longest = ""
+    for v in col {
+        if len(v) > len(longest) {
+            longest = v
+        }
+    }
+    return "{name}: text distinct={len(unique(col))} longest={longest}"
+}

@@ -1,0 +1,80 @@
+id = "unit_aliases"
+category = "modules"
+title = "Modules with clashing names, constants and a shared log for a provided driver"
+answer = "files"
+prompt = '''
+The working directory already contains this `main.fg`, which you must not change (it is
+provided as is when your files are run):
+
+```forge
+// main.fg (provided): converts values with two modules that export the same names.
+import { convert as to_metric, unit as metric_unit } from "units/metric.fg"
+import { convert as to_imperial, unit as imperial_unit } from "units/imperial.fg"
+import { history, count as conversions } from "units/log.fg"
+import { INCH_CM, MILE_KM } from "units/constants.fg"
+
+println("1 in = {INCH_CM} cm, 1 mi = {MILE_KM} km")
+for line in fs.lines("/dev/stdin") {
+    let parts = split(line.trim(), " ")
+    if len(parts) != 2 {
+        continue
+    }
+    let v = float(parts[0])
+    let u = parts[1]
+    match to_metric(v, u) {
+        Ok(r) => println("{line.trim()} = {r} {metric_unit(u)}"),
+        Err(e) => {
+            match to_imperial(v, u) {
+                Ok(r) => println("{line.trim()} = {r} {imperial_unit(u)}"),
+                Err(e2) => println("error: {e} / {e2}"),
+            }
+        },
+    }
+}
+println("conversions: {conversions()}")
+println("history: {join(history(), ", ")}")
+```
+
+Write the four modules it imports:
+
+- `units/constants.fg`: top-level constants `INCH_CM = 2.54` (cm per inch),
+  `MILE_KM = 1.609344` (km per mile), `LB_KG = 0.45359237` (kg per pound) and
+  `GAL_L = 3.785411784` (litres per US gallon).
+- `units/log.fg`: a conversion log kept in module state: `record(entry)` appends an entry,
+  `history()` returns the entries in order, `count()` their number.
+- `units/metric.fg`: `convert(value, unit)` converts from the imperial units `in`, `mi`,
+  `lb`, `gal`, `F` (Fahrenheit) to `cm`, `km`, `kg`, `l`, `C`; `unit(u)` names the target
+  unit of u. `units/imperial.fg`: the same names, converting from `cm`, `km`, `kg`, `l`,
+  `C` to `in`, `mi`, `lb`, `gal`, `F`. Both use the constants module (C = (F - 32) * 5 / 9).
+  `convert` returns `Ok(<result with exactly 2 decimals, rounded half away from zero>)`
+  and records `<from unit>-><to unit>` (for example `mi->km`) in the shared log, or
+  returns `Err("unknown imperial unit <u>")` / `Err("unknown metric unit <u>")` without
+  recording anything.
+'''
+needs = ["read"]
+stdin = """
+12 in
+26.2 mi
+100 F
+-40 C
+180 cm
+5 gal
+70 kg
+3 parsecs
+0 km
+1
+"""
+expected_stdout = """
+1 in = 2.54 cm, 1 mi = 1.609344 km
+12 in = 30.48 cm
+26.2 mi = 42.16 km
+100 F = 37.78 C
+-40 C = -40.00 F
+180 cm = 70.87 in
+5 gal = 18.93 l
+70 kg = 154.32 lb
+error: unknown imperial unit parsecs / unknown metric unit parsecs
+0 km = 0.00 mi
+conversions: 8
+history: in->cm, mi->km, F->C, C->F, cm->in, gal->l, kg->lb, km->mi
+"""

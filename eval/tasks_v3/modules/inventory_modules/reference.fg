@@ -1,0 +1,128 @@
+// file: inventory/item.fg
+// An inventory item and its parser.
+
+struct Item {
+    sku: String,
+    name: String,
+    qty: Int,
+    price_cents: Int
+}
+
+impl Item {
+    fn label(it) -> String {
+        return "{it.sku} ({it.name})"
+    }
+
+    fn value(it) -> Int {
+        return it.qty * it.price_cents
+    }
+}
+
+// "sku|name|qty|price" -> Item. The price is "<units>" or "<units>.<1-2 digits>".
+fn parse_item(text: String) -> Result<Item, String> {
+    let f = split(text, "|")
+    if len(f) != 4 {
+        return Err("expected 4 fields")
+    }
+    let sku = f[0].trim()
+    if !regex.test(sku, "^[A-Z]{2}-[0-9]{3}$") {
+        return Err("bad sku {sku}")
+    }
+    let name = f[1].trim()
+    if name == "" {
+        return Err("missing name")
+    }
+    let qty = f[2].trim()
+    if !regex.test(qty, "^[0-9]+$") || int(qty) == 0 {
+        return Err("bad quantity {qty}")
+    }
+    let price = f[3].trim()
+    let m = regex.captures(price, "^([0-9]+)(?:\\.([0-9]{1,2}))?$")
+    if m == null {
+        return Err("bad price {price}")
+    }
+    let mut cents = int(m[1]) * 100
+    if m[2] != null {
+        let frac = if len(m[2]) == 1 { m[2] + "0" } else { m[2] }
+        cents += int(frac)
+    }
+    return Ok(Item { sku: sku, name: name, qty: int(qty), price_cents: cents })
+}
+
+// file: inventory/store.fg
+// The stock: module state shared by every importer.
+import { Item } from "item.fg"
+
+let mut stock = {}
+let mut ops = 0
+
+fn add(item: Item) -> Int {
+    let mut qty = item.qty
+    if has_key(stock, item.sku) {
+        qty += stock[item.sku].qty
+    }
+    stock[item.sku] = Item { sku: item.sku, name: item.name, qty: qty, price_cents: item.price_cents }
+    ops += 1
+    return qty
+}
+
+fn take(sku: String, n: Int) -> Result<Int, String> {
+    if !has_key(stock, sku) {
+        return Err("unknown sku {sku}")
+    }
+    let have = stock[sku].qty
+    if n > have {
+        return Err("only {have} {sku} in stock")
+    }
+    let left = have - n
+    if left == 0 {
+        stock = omit(stock, [sku])
+    } else {
+        let old = stock[sku]
+        stock[sku] = Item { sku: sku, name: old.name, qty: left, price_cents: old.price_cents }
+    }
+    ops += 1
+    return Ok(left)
+}
+
+fn items() -> [Item] {
+    return map(sort(keys(stock)), fn(k) { return stock[k] })
+}
+
+fn operations() -> Int {
+    return ops
+}
+
+// file: report.fg
+// A summary of the shared stock.
+import { items } from "inventory/store.fg"
+
+fn dollars(c: Int) -> String {
+    let cents = c % 100
+    let pad = if cents < 10 { "0" } else { "" }
+    return "{c / 100}.{pad}{cents}"
+}
+
+fn summary() -> String {
+    let all = items()
+    let mut units = 0
+    let mut total = 0
+    for i in all {
+        units += i.qty
+        total += i.value()
+    }
+    let mut lines = ["report: {len(all)} skus, {units} units, value {dollars(total)}"]
+    let ranked = sort(all, fn(a, b) {
+        if a.value() != b.value() {
+            return b.value() - a.value()
+        }
+        if a.sku < b.sku {
+            return -1
+        }
+        return 1
+    })
+    for i in ranked {
+        lines.push("  {i.label()} x{i.qty} = {dollars(i.value())}")
+    }
+    return join(lines, "\n")
+}

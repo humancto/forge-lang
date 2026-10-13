@@ -1,0 +1,26 @@
+// main.fg (provided): converts values with two modules that export the same names.
+import { convert as to_metric, unit as metric_unit } from "units/metric.fg"
+import { convert as to_imperial, unit as imperial_unit } from "units/imperial.fg"
+import { history, count as conversions } from "units/log.fg"
+import { INCH_CM, MILE_KM } from "units/constants.fg"
+
+println("1 in = {INCH_CM} cm, 1 mi = {MILE_KM} km")
+for line in fs.lines("/dev/stdin") {
+    let parts = split(line.trim(), " ")
+    if len(parts) != 2 {
+        continue
+    }
+    let v = float(parts[0])
+    let u = parts[1]
+    match to_metric(v, u) {
+        Ok(r) => println("{line.trim()} = {r} {metric_unit(u)}"),
+        Err(e) => {
+            match to_imperial(v, u) {
+                Ok(r) => println("{line.trim()} = {r} {imperial_unit(u)}"),
+                Err(e2) => println("error: {e} / {e2}"),
+            }
+        },
+    }
+}
+println("conversions: {conversions()}")
+println("history: {join(history(), ", ")}")

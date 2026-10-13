@@ -1,0 +1,159 @@
+// file: plugins/api.fg
+// The plugin interface every text plugin implements.
+
+interface Plugin {
+    fn name() -> String
+    fn apply(lines: [String]) -> [String]
+}
+
+fn describe(p: Plugin) -> String {
+    return "<{p.name()}>"
+}
+
+// file: plugins/text.fg
+// Plugins that rewrite every line.
+// `import "api.fg"`, not `import { Plugin } from "api.fg"`: the VM cannot
+// import an interface by name (E0019 "does not export"; eval/V3_FINDINGS.md,
+// finding 7).
+import "api.fg"
+
+struct Trim {
+    id: String = "trim"
+}
+
+struct Lower {
+    id: String = "lower"
+}
+
+struct Upper {
+    id: String = "upper"
+}
+
+impl Plugin for Trim {
+    fn name(it) -> String {
+        return it.id
+    }
+
+    fn apply(it, lines: [String]) -> [String] {
+        return map(lines, fn(l) { return l.trim() })
+    }
+}
+
+impl Plugin for Lower {
+    fn name(it) -> String {
+        return it.id
+    }
+
+    fn apply(it, lines: [String]) -> [String] {
+        return map(lines, fn(l) { return l.lower() })
+    }
+}
+
+impl Plugin for Upper {
+    fn name(it) -> String {
+        return it.id
+    }
+
+    fn apply(it, lines: [String]) -> [String] {
+        return map(lines, fn(l) { return l.upper() })
+    }
+}
+
+// file: plugins/filters.fg
+// Plugins that keep or drop whole lines.
+// `import "api.fg"`, not `import { Plugin } from "api.fg"`: the VM cannot
+// import an interface by name (E0019 "does not export"; eval/V3_FINDINGS.md,
+// finding 7).
+import "api.fg"
+
+struct Dedupe {
+    id: String = "dedupe"
+}
+
+struct NonEmpty {
+    id: String = "nonempty"
+}
+
+struct Grep {
+    pattern: String
+}
+
+impl Plugin for Dedupe {
+    fn name(it) -> String {
+        return it.id
+    }
+
+    fn apply(it, lines: [String]) -> [String] {
+        let mut seen = set([])
+        let mut out = []
+        for l in lines {
+            if !seen.has(l) {
+                seen.add(l)
+                out.push(l)
+            }
+        }
+        return out
+    }
+}
+
+impl Plugin for NonEmpty {
+    fn name(it) -> String {
+        return it.id
+    }
+
+    fn apply(it, lines: [String]) -> [String] {
+        return filter(lines, fn(l) { return l != "" })
+    }
+}
+
+impl Plugin for Grep {
+    fn name(it) -> String {
+        return "grep={it.pattern}"
+    }
+
+    fn apply(it, lines: [String]) -> [String] {
+        return filter(lines, fn(l) { return contains(l, it.pattern) })
+    }
+}
+
+// file: plugins/registry.fg
+// The registered plugins, and lookup by name.
+import { Trim, Lower, Upper } from "text.fg"
+import { Dedupe, NonEmpty, Grep } from "filters.fg"
+
+fn registry() {
+    return [Trim {}, Lower {}, Upper {}, Dedupe {}, NonEmpty {}]
+}
+
+fn find(spec: String) {
+    if starts_with(spec, "grep=") && len(spec) > 5 {
+        return Some(Grep { pattern: substring(spec, 5, len(spec)) })
+    }
+    for p in registry() {
+        if p.name() == spec {
+            return Some(p)
+        }
+    }
+    return None
+}
+
+// file: pipeline.fg
+// Runs plugins by name, in order.
+import { find } from "plugins/registry.fg"
+
+fn run(specs: [String], lines: [String]) -> Result<[String], String> {
+    let mut plugins = []
+    for s in specs {
+        match find(s) {
+            Some(p) => plugins.push(p),
+            None => {
+                return Err("unknown plugin {s}")
+            },
+        }
+    }
+    let mut out = lines
+    for p in plugins {
+        out = p.apply(out)
+    }
+    return Ok(out)
+}

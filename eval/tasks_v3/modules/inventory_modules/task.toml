@@ -1,0 +1,114 @@
+id = "inventory_modules"
+category = "modules"
+title = "Write three modules for a provided inventory driver"
+answer = "files"
+prompt = '''
+The working directory already contains this `main.fg`, which you must not change (it is
+provided as is when your files are run):
+
+```forge
+// main.fg (provided): reads commands and drives the modules.
+import { Item, parse_item } from "inventory/item.fg"
+import { add, take, items, operations } from "inventory/store.fg"
+import { summary } from "report.fg"
+
+for line in fs.lines("/dev/stdin") {
+    let cmd = line.trim()
+    if cmd == "" {
+        continue
+    }
+    if starts_with(cmd, "add ") {
+        match parse_item(substring(cmd, 4, len(cmd))) {
+            Ok(item) => println("added {item.label()}: {add(item)} in stock"),
+            Err(msg) => println("error: {msg}"),
+        }
+    } else if starts_with(cmd, "take ") {
+        let parts = split(cmd, " ")
+        match take(parts[1], int(parts[2])) {
+            Ok(left) => println("took {parts[2]} {parts[1]}: {left} left"),
+            Err(msg) => println("error: {msg}"),
+        }
+    } else if cmd == "report" {
+        println(summary())
+    } else {
+        println("error: unknown command")
+    }
+}
+println("operations: {operations()}")
+println("skus: {join(map(items(), fn(i) { return i.sku }), ",")}")
+```
+
+Write the three modules it imports:
+
+1. `inventory/item.fg`: a struct `Item` with fields `sku` (String), `name` (String), `qty`
+   (Int) and `price_cents` (Int), and methods `label()` returning `"<sku> (<name>)"` and
+   `value()` returning `qty * price_cents`. A function `parse_item(text)` that parses
+   `sku|name|qty|price` (fields separated by `|`, each trimmed of spaces) and returns
+   `Ok(item)` or `Err(message)`, checking in this order: not exactly 4 fields:
+   `expected 4 fields`; sku not two upper-case letters, `-`, three digits:
+   `bad sku <sku>`; empty name: `missing name`; qty not a positive integer (digits only):
+   `bad quantity <qty>`; price not digits optionally followed by `.` and one or two
+   digits: `bad price <price>` (`4.5` is 450 cents, `4.05` is 405, `4` is 400).
+2. `inventory/store.fg`: the stock, kept in module state. `add(item)` adds the item's
+   quantity to the stock of its sku (a new sku starts at 0); the item's name and price
+   replace any earlier ones; it returns the new quantity. `take(sku, n)` returns
+   `Err("unknown sku <sku>")` for a sku not in stock, `Err("only <qty> <sku> in stock")`
+   when n is more than the stock, else lowers the stock and returns `Ok(<what is left>)`; a
+   sku whose stock reaches 0 leaves the stock entirely. `items()` returns the items in
+   stock (with their current quantities) sorted by sku; `operations()` returns how many
+   `add`/`take` calls succeeded.
+3. `report.fg` (in the top directory): `summary()` returns the text
+   `report: <n> skus, <total units> units, value <total value>` followed by one line per
+   item in stock, highest value first (ties by sku ascending):
+   `  <label> x<qty> = <value>` (two leading spaces). Money is written
+   `<whole>.<cents>` with two cent digits. It must read the same stock that `main.fg`
+   changes through `inventory/store.fg`.
+'''
+needs = ["read"]
+stdin = """
+add AB-001|Widget|5|4.50
+add CD-200| Gadget |2|19.99
+add ab-001|Bad|1|1
+add EF-300|  |1|1
+add EF-300|Gizmo|0|1
+add EF-300|Gizmo|3|2.5.0
+add EF-300|Gizmo|3
+add EF-300|Gizmo|10|0.05
+add AB-001|Widget v2|5|5
+report
+take AB-001 4
+take CD-200 3
+take ZZ-999 1
+take CD-200 2
+take EF-300 10
+add CD-200|Gadget|1|20
+report
+list
+"""
+expected_stdout = """
+added AB-001 (Widget): 5 in stock
+added CD-200 (Gadget): 2 in stock
+error: bad sku ab-001
+error: missing name
+error: bad quantity 0
+error: bad price 2.5.0
+error: expected 4 fields
+added EF-300 (Gizmo): 10 in stock
+added AB-001 (Widget v2): 10 in stock
+report: 3 skus, 22 units, value 90.48
+  AB-001 (Widget v2) x10 = 50.00
+  CD-200 (Gadget) x2 = 39.98
+  EF-300 (Gizmo) x10 = 0.50
+took 4 AB-001: 6 left
+error: only 2 CD-200 in stock
+error: unknown sku ZZ-999
+took 2 CD-200: 0 left
+took 10 EF-300: 0 left
+added CD-200 (Gadget): 1 in stock
+report: 2 skus, 7 units, value 50.00
+  AB-001 (Widget v2) x6 = 30.00
+  CD-200 (Gadget) x1 = 20.00
+error: unknown command
+operations: 8
+skus: AB-001,CD-200
+"""

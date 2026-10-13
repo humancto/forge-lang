@@ -1,0 +1,15 @@
+// main.fg (provided): assembles and runs a stack-machine program.
+import { parse_program } from "vm/ops.fg"
+import { run } from "vm/machine.fg"
+
+let src = fs.read("/dev/stdin")
+match parse_program(src) {
+    Ok(ops) => {
+        println("{len(ops)} instructions")
+        match run(ops, 10000) {
+            Ok(out) => println("output: {join(map(out, fn(n) { return str(n) }), " ")}"),
+            Err(e) => println("runtime error: {e}"),
+        }
+    },
+    Err(e) => println("parse error: {e}"),
+}
