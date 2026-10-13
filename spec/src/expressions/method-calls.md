@@ -10,6 +10,10 @@ expression.method(arguments)
 
 The left operand (the **receiver**) is evaluated first, then the method is resolved, then arguments are evaluated left to right.
 
+Exception: `push`, `pop`, `add` and `remove` called on a mutable variable (`xs.push(f())`, `m = m.remove(g())`) evaluate their arguments first and read the variable afterwards, whatever it holds, so an argument that updates the variable is not overwritten. On a field/index place (`g[k].push(x)`) the index expressions come first, then the arguments, then the place is read.
+
+When the receiver is a place (a variable, or fields and indexes of one) and the method is a user method declared `mut it`, the method's final `it` is assigned back to that place when it returns; see [Method Blocks](../type-system/method-blocks.md#receivers-are-read-only-mut-it-updates-them).
+
 ## Method Dispatch
 
 When evaluating `obj.method(args)`, the interpreter follows this resolution order:

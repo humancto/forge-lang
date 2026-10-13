@@ -10,7 +10,9 @@ GiveBlock        = "give" TypeName AbilityClause? "{" MethodDef* "}"
 ImplBlock        = "impl" (TypeName | AbilityForType) "{" MethodDef* "}"
 AbilityClause    = "the" "power" InterfaceName
 AbilityForType   = InterfaceName "for" TypeName
-MethodDef        = ("fn" | "define") Identifier "(" ParamList ")" Block
+MethodDef        = ("fn" | "define") Identifier "(" MethodParams ")" Block
+MethodParams     = ["mut"] Receiver ("," Param)* | ParamList
+Receiver         = "it" | "self"
 TypeName         = Identifier
 InterfaceName    = Identifier
 ```
@@ -65,6 +67,65 @@ When the interpreter encounters `p.greet()`, it:
 3. Looks up `"greet"` in `method_tables["Person"]`.
 4. Prepends `p` to the argument list as the `it` parameter.
 5. Calls the resolved function with the full argument list.
+
+## Receivers Are Read-Only; `mut it` Updates Them
+
+Forge values are copied, so `it` is the method's own copy of the receiver.
+A plain receiver is **immutable**: assigning to `it`, to one of its fields or
+elements (`it.n += 1`), or calling a mutating method on a part of it
+(`it.items.push(x)`) is the immutable-assignment error (E0006 at run time,
+T0017 from the type checker). This way an update can never be silently lost.
+
+A method that updates its receiver declares it `mut it`. When such a method
+returns normally (an explicit `return`, its last expression, or a `?` early
+return), the final value of `it` is written back to the place the method was
+called on, as if by an assignment:
+
+```forge
+struct Counter {
+    n: Int
+}
+
+impl Counter {
+    fn inc(mut it) {
+        it.n += 1
+        return it.n
+    }
+}
+
+let mut c = Counter { n: 0 }
+c.inc()                        // c.n == 1
+let mut cs = [Counter { n: 0 }]
+cs[0].inc()                    // elements and fields are places too
+let mut o = { c: Counter { n: 5 } }
+o.c.inc()                      // o.c.n == 6
+```
+
+Rules (both engines):
+
+- `mut` is allowed only on a method's receiver: the first parameter of a
+  method in a `give`/`impl` block, named `it` (or `self`). `mut` on any other
+  parameter is a syntax error.
+- The receiver place is a variable or a chain of fields and indexes rooted at
+  one. Its index expressions are evaluated once, before the arguments; the
+  receiver is read before the arguments too (for `push`/`pop`/`add`/`remove`
+  on a plain variable, after them, like the collection methods).
+- Writing back is an assignment to the place: on an immutable (`let`) root it
+  is E0006 (`cannot reassign immutable variable`), reported statically as
+  T0017. It happens after the method returns, so the method's own effects
+  (output) have happened.
+- A `mut it` method called on a value that is not a place (`make().inc()`,
+  `a.b().inc()`, a literal) raises E0006 `cannot update a temporary value`
+  (T0017 statically): the update would have nowhere to go.
+- If the method raises an error, nothing is written back.
+- Aliases do not observe the update (`let w = c; c.inc()` leaves `w`
+  unchanged): only the place the method was called on changes.
+- The same holds for methods of algebraic `type`s (`it = Green` replaces the
+  receiver), for methods called through an interface-typed value, and for a
+  method found on an embedded field (`outer.hit()` updates `outer.inner`).
+- A struct's own method named like a collection method (`push`, `pop`,
+  `add`, `remove`) is called like any other method: with `mut it` it updates
+  the receiver, without it the variable is unchanged.
 
 ## Static Methods
 
