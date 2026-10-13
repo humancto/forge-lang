@@ -1,0 +1,65 @@
+id = "access_log_rollup"
+category = "bulk_data"
+title = "Roll up a 150,000-line access log"
+prompt = """
+Standard input is a web server access log of about 150,000 lines. A valid line has exactly
+7 fields separated by single spaces:
+
+`<timestamp> <client ip> <method> <path> <status> <latency ms> <bytes>`
+
+for example `2026-03-01T00:00:01Z 10.0.3.7 GET /api/users/123?x=1 200 35 1234`. The
+timestamp is `YYYY-MM-DDTHH:MM:SSZ`; status, latency and bytes are non-negative integers
+(digits only). Ignore empty lines and lines starting with `#`. Any other line that is not
+valid (wrong number of fields, or a status/latency/bytes field that is not all digits) is
+malformed: count it and skip it.
+
+The route of a request is its path without the query string (everything from the first
+`?`), with every path segment that consists only of digits replaced by `:id`
+(`/api/orders/7/items/3?x=1` becomes `/api/orders/:id/items/:id`). A route is identified
+by method and route together.
+
+Print, in this order:
+
+1. `requests: <number of valid lines>`
+2. `malformed: <number of malformed lines>`
+3. `status: 2xx=<n> 3xx=<n> 4xx=<n> 5xx=<n>` (by the first digit of the status)
+4. `top routes:` then the 8 routes with the most requests (ties: route text ascending,
+   then method ascending), one per line:
+   `<method> <route> n=<requests> p50=<p> p95=<p> p99=<p> max=<max latency> 5xx=<requests with status >= 500>`.
+   Percentiles use the nearest-rank method on the route's latencies sorted ascending: the
+   q-th percentile of n values is the value at 1-based position ceil(q * n / 100).
+5. `top clients:` then the 5 client IPs with the most requests as `<ip> <count>` (ties:
+   IP text ascending).
+6. `peak minute: <YYYY-MM-DDTHH:MM> <count>`: the minute (first 16 characters of the
+   timestamp) with the most requests; the earliest one on a tie.
+7. `bytes: <sum of the bytes field>`
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+generator = "gen_input.py"
+generated_sha256 = { "input.txt" = "4e68188cea694d4bf8b7969bb13d3573e43db0cebafc64daccf43ccdc4b93926" }
+needs = []
+timeout = 60
+expected_stdout = """
+requests: 149693
+malformed: 140
+status: 2xx=136222 3xx=4609 4xx=7066 5xx=1796
+top routes:
+GET /api/users/:id n=38480 p50=22 p95=41 p99=698 max=1616 5xx=429
+GET /api/orders/:id n=25833 p50=22 p95=41 p99=720 max=1420 5xx=323
+GET /api/users n=15725 p50=22 p95=41 p99=698 max=1863 5xx=201
+GET /health n=12724 p50=22 p95=41 p99=697 max=1033 5xx=166
+GET /api/orders/:id/items/:id n=11584 p50=22 p95=41 p99=732 max=1531 5xx=150
+GET /api/search n=10206 p50=22 p95=41 p99=691 max=1341 5xx=122
+GET /static/app.js n=9089 p50=22 p95=41 p99=696 max=1800 5xx=111
+POST /api/login n=7802 p50=22 p95=41 p99=688 max=1113 5xx=81
+top clients:
+10.0.1.198 3041
+10.0.3.204 2589
+10.0.0.207 2141
+10.0.2.61 1915
+10.0.3.98 1740
+peak minute: 2026-03-02T11:15 90
+bytes: 1502996656
+"""

@@ -1,0 +1,69 @@
+id = "ledger_replay"
+category = "bulk_data"
+title = "Replay 200,000 ledger operations"
+prompt = """
+Standard input has 200,000 lines, each one ledger operation (fields separated by single
+spaces; amounts are in cents):
+
+- `deposit <account> <amount>`
+- `withdraw <account> <amount>`
+- `transfer <from account> <to account> <amount>`
+- `freeze <account>` / `unfreeze <account>`
+
+A line is valid when it has exactly one of these shapes (the right number of fields and a
+known operation), every amount is a positive integer written with digits only, and a
+transfer's two accounts differ. Invalid lines are counted and ignored.
+
+Accounts start with balance 0, not frozen; an account exists from the first valid line
+that names it (even if that operation is then rejected). Rules, applied line by line:
+
+- `freeze` / `unfreeze`: always applied (freezing a frozen account changes nothing).
+- `deposit`: rejected as `frozen` if the account is frozen.
+- `withdraw`: rejected as `frozen` if frozen, else as `insufficient` if the balance is
+  smaller than the amount.
+- `transfer`: rejected as `frozen` if either account is frozen, else as `insufficient`
+  if the sender's balance is smaller than the amount.
+
+Every operation that is not rejected is applied. Write money as `<whole>.<cents>` with
+two cent digits (`123456` cents is `1234.56`, `5` is `0.05`). Print:
+
+```
+lines: <number of lines>
+applied: <applied operations>
+rejected: frozen=<n> insufficient=<n>
+invalid: <invalid lines>
+accounts: <number of accounts>
+frozen: <accounts frozen at the end>
+total: <sum of all balances>
+top:
+<account> <balance>          (5 lines: highest balances, ties by account name ascending)
+peak: <account> <balance> at line <n>
+```
+
+The peak is the highest balance any account reached right after an applied deposit (the
+depositing account) or transfer (the receiving account); lines are numbered from 1 and
+the first line that reached the highest value counts.
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+generator = "gen_input.py"
+generated_sha256 = { "input.txt" = "c5701249c6fcf29f3108a350da9783240e80a56faae232cdf377bac45dbf9d32" }
+needs = []
+timeout = 40
+expected_stdout = """
+lines: 200000
+applied: 131628
+rejected: frozen=51705 insufficient=14606
+invalid: 2061
+accounts: 5821
+frozen: 2095
+total: 9535629.96
+top:
+AC15253 9787.20
+AC29326 7055.20
+AC75175 6994.35
+AC22013 6929.27
+AC81982 6690.66
+peak: AC15253 10012.77 at line 197858
+"""

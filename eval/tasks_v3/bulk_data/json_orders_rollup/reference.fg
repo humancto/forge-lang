@@ -1,0 +1,131 @@
+// Aggregate 80,000 JSON order lines: json.parse per line inside try/catch,
+// integer cents throughout.
+
+fn dollars(c: Int) -> String {
+    let cents = c % 100
+    let pad = if cents < 10 { "0" } else { "" }
+    return "{c / 100}.{pad}{cents}"
+}
+
+fn cmp_str(a: String, b: String) -> Int {
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    return 0
+}
+
+// Whether a character of s is outside ASCII (above "~"; the input has no
+// control characters). A loop instead of `regex.test`, which compiles its
+// pattern on every call (eval/V3_FINDINGS.md, finding 1).
+fn has_non_ascii(s: String) -> Bool {
+    for c in split(s, "") {
+        if c > "~" {
+            return true
+        }
+    }
+    return false
+}
+
+// The order's hour in UTC, from "YYYY-MM-DDTHH:MM:SS" plus "Z" or "+HH:MM".
+fn utc_hour(ts: String) -> Int {
+    let h = int(substring(ts, 11, 13))
+    if ends_with(ts, "Z") {
+        return h
+    }
+    let n = len(ts)
+    let off = int(substring(ts, n - 5, n - 3))
+    let sign = if substring(ts, n - 6, n - 5) == "+" { 1 } else { -1 }
+    return ((h - sign * off) % 24 + 24) % 24
+}
+
+let mut orders = 0
+let mut invalid = 0
+let mut rev = {}
+let mut count = {}
+let mut skus = {}
+let mut coupons = { SAVE10: 0, FREESHIP: 0, none: 0 }
+let mut tiers = { free: 0, silver: 0, gold: 0 }
+let mut hours = {}
+let mut non_ascii = 0
+let mut longest = 0
+
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    let mut o = null
+    try {
+        o = json.parse(line)
+    } catch e {
+        invalid += 1
+        continue
+    }
+    if !has_key(o.user, "country") || len(o.items) == 0 {
+        invalid += 1
+        continue
+    }
+    orders += 1
+    let mut sub = 0
+    for it in o.items {
+        sub += it.qty * round(it.price * 100)
+        // The key is bound to a local first: on the VM, `obj[xs[i]] = v` (a key that
+        // is itself an index or field read) copies the whole object on every write
+        // (eval/V3_FINDINGS.md, finding 3).
+        let sku = it.sku
+        skus[sku] = get(skus, sku, 0) + it.qty
+    }
+    if o.coupon == "SAVE10" {
+        sub -= (sub + 5) / 10
+    }
+    let c = o.user.country
+    rev[c] = get(rev, c, 0) + sub
+    count[c] = get(count, c, 0) + 1
+    let coupon = if o.coupon == null { "none" } else { o.coupon }
+    coupons[coupon] += 1
+    let tier = o.user.tier
+    tiers[tier] += 1
+    let h = str(utc_hour(o.ts))
+    hours[h] = get(hours, h, 0) + 1
+    if has_non_ascii(o.note) {
+        non_ascii += 1
+    }
+    longest = max(longest, len(o.note))
+}
+
+println("orders: {orders}")
+println("invalid: {invalid}")
+println("by country:")
+let countries = sort(keys(rev), fn(a, b) {
+    if rev[a] != rev[b] {
+        return rev[b] - rev[a]
+    }
+    return cmp_str(a, b)
+})
+for c in countries {
+    let n = count[c]
+    println("{c} orders={n} revenue={dollars(rev[c])} avg={dollars((2 * rev[c] + n) / (2 * n))}")
+}
+println("top skus:")
+let top = sort(entries(skus), fn(a, b) {
+    if a[1] != b[1] {
+        return b[1] - a[1]
+    }
+    return cmp_str(a[0], b[0])
+})
+for e in slice(top, 0, 5) {
+    println("{e[0]} qty={e[1]}")
+}
+println("coupons: SAVE10={coupons.SAVE10} FREESHIP={coupons.FREESHIP} none={coupons.none}")
+println("tiers: free={tiers.free} silver={tiers.silver} gold={tiers.gold}")
+let busiest = sort(entries(hours), fn(a, b) {
+    if a[1] != b[1] {
+        return b[1] - a[1]
+    }
+    return int(a[0]) - int(b[0])
+})[0]
+let hh = if int(busiest[0]) < 10 { "0{busiest[0]}" } else { busiest[0] }
+println("busiest utc hour: {hh} ({busiest[1]} orders)")
+println("notes: non-ascii={non_ascii} longest={longest}")
