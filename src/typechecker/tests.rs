@@ -1310,6 +1310,54 @@ fn immutable_assignment_is_reported() {
 }
 
 #[test]
+fn method_receivers_are_read_only_unless_mut_it() {
+    let counter = "struct C { n: Int }\nimpl C {\n    fn inc(mut it) { it.n += 1 }\n    fn get(it) { return it.n }\n}\nfn make() { return C { n: 0 } }\n";
+    // Writing to a plain receiver.
+    assert_eq!(
+        codes("struct P { n: Int }\nimpl P {\n    fn bump(it) { it.n += 1 }\n}"),
+        vec![Code::ImmutableAssign]
+    );
+    assert_eq!(
+        codes("struct P { xs: [Int] }\nimpl P {\n    fn add(it, x: Int) { it.xs.push(x) }\n}"),
+        vec![Code::ImmutableAssign]
+    );
+    assert_eq!(
+        codes("struct P { n: Int }\nimpl P {\n    fn reset(it) { it = P { n: 0 } }\n}"),
+        vec![Code::ImmutableAssign]
+    );
+    // A `mut it` receiver may be updated, through any place.
+    assert!(codes(&format!(
+        "{counter}let mut c = make()\nc.inc()\nlet mut cs = [make()]\ncs[0].inc()\nlet mut o = {{ c: make() }}\no.c.inc()"
+    ))
+    .is_empty());
+    // ... but not on an immutable root or a temporary.
+    assert_eq!(
+        codes(&format!("{counter}let c = make()\nc.inc()")),
+        vec![Code::ImmutableAssign]
+    );
+    assert_eq!(
+        codes(&format!("{counter}make().inc()")),
+        vec![Code::ImmutableAssign]
+    );
+    // Read-only methods are fine anywhere; a copy of `it` is mutable.
+    assert!(codes(&format!(
+        "{counter}let c = make()\nc.get()\nmake().get()\nimpl C {{\n    fn bumped(it) {{\n        let mut copy = it\n        copy.n += 1\n        return copy\n    }}\n}}"
+    ))
+    .is_empty());
+    // A `mut it` method calling another one on `it`; a plain one cannot.
+    assert!(codes(&format!(
+        "{counter}impl C {{\n    fn twice(mut it) {{\n        it.inc()\n        it.inc()\n    }}\n}}"
+    ))
+    .is_empty());
+    assert_eq!(
+        codes(&format!(
+            "{counter}impl C {{\n    fn bad(it) {{\n        it.inc()\n    }}\n}}"
+        )),
+        vec![Code::ImmutableAssign]
+    );
+}
+
+#[test]
 fn nested_push_on_an_immutable_root_is_reported() {
     // The method form updates the place, so its root must be mutable.
     assert_eq!(

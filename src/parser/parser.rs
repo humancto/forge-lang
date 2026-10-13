@@ -1375,6 +1375,7 @@ impl Parser {
             return Err(self.error("expected 'fn' or 'define'"));
         }
         let name = self.expect_ident()?;
+        let in_method = self.impl_owner.is_some();
         let def = match self.impl_owner.take() {
             Some(owner) => self.note_def(&name, DefKind::Method { owner }),
             None => self.note_def(&name, DefKind::Function),
@@ -1384,7 +1385,7 @@ impl Parser {
             let type_params = p.parse_type_params()?;
 
             p.expect(Token::LParen)?;
-            let params = p.parse_params()?;
+            let params = p.parse_params_in(in_method)?;
             p.expect(Token::RParen)?;
 
             let return_type = if p.check(&Token::Arrow) {
@@ -2048,11 +2049,7 @@ impl Parser {
         };
 
         Ok(Expr::Lambda {
-            params: vec![Param {
-                name: "it".to_string(),
-                type_ann: None,
-                default: None,
-            }],
+            params: vec![Param::plain("it", None, None)],
             body: vec![SpannedStmt::unspanned(Stmt::Return(Some(predicate)))],
         })
     }
@@ -2817,9 +2814,30 @@ impl Parser {
     /// Parameters, visible from the start of the enclosing (function or
     /// lambda) scope.
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
+        self.parse_params_in(false)
+    }
+
+    /// Parameters of a function, or of a method of an `impl` block when
+    /// `in_method`: there a first parameter named `it` (or `self`) is the
+    /// receiver, and only it may be declared `mut` (`fn inc(mut it)`).
+    fn parse_params_in(&mut self, in_method: bool) -> Result<Vec<Param>, ParseError> {
         let mut params = Vec::new();
         while !self.check(&Token::RParen) {
+            let declared_mut = self.check(&Token::Mut);
+            if declared_mut {
+                self.advance();
+            }
             let name = self.expect_ident()?;
+            let is_receiver =
+                in_method && params.is_empty() && crate::semantics::is_receiver_name(&name);
+            if declared_mut && !is_receiver {
+                return Err(self.error(crate::semantics::MUT_PARAM_NOT_RECEIVER));
+            }
+            let kind = match (is_receiver, declared_mut) {
+                (true, true) => ParamKind::MutReceiver,
+                (true, false) => ParamKind::Receiver,
+                _ => ParamKind::Plain,
+            };
             let def = self.note_def(&name, DefKind::Parameter);
             self.hoist(def);
 
@@ -2841,6 +2859,7 @@ impl Parser {
                 name,
                 type_ann,
                 default,
+                kind,
             });
 
             if self.check(&Token::Comma) {
@@ -3200,6 +3219,48 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[test]
+    fn method_receivers_and_mut_it() {
+        let program = parse_program(
+            "impl C {\n    fn a(it, x) { x }\n    fn b(mut it) { it }\n    fn new(n) { n }\n}\nfn f(it) { it }",
+        );
+        let Stmt::ImplBlock { methods, .. } = &program.statements[0].stmt else {
+            panic!("expected an impl block");
+        };
+        let kinds: Vec<Vec<ParamKind>> = methods
+            .iter()
+            .map(|m| match &m.stmt {
+                Stmt::FnDef { params, .. } => params.iter().map(|p| p.kind).collect(),
+                _ => panic!("expected a method"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                vec![ParamKind::Receiver, ParamKind::Plain],
+                vec![ParamKind::MutReceiver],
+                vec![ParamKind::Plain],
+            ]
+        );
+        let Stmt::FnDef { params, .. } = &program.statements[1].stmt else {
+            panic!("expected a function");
+        };
+        assert_eq!(params[0].kind, ParamKind::Plain);
+        for bad in [
+            "fn f(mut it) { }",
+            "impl C {\n    fn a(it, mut x) { }\n}",
+            "impl C {\n    fn a(mut x) { }\n}",
+            "let f = fn(mut it) { it }",
+        ] {
+            let e = parse_err(bad);
+            assert!(
+                e.message.contains("receiver can be declared `mut`"),
+                "{bad}: {}",
+                e.message
+            );
+        }
     }
 
     fn parse_err(input: &str) -> ParseError {

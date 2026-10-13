@@ -393,8 +393,12 @@ impl VM {
                 .map(|o| &o.kind),
             Some(ObjKind::Map(_))
         );
+        // A user method declared `mut it` updates the local too, but the
+        // assignment then overwrites it with the result: drop the update.
         let method = self.alloc_string("set");
-        let result = self.call_native("__forge_call_method", vec![snapshot, method, key, value])?;
+        let result =
+            self.call_native("__forge_call_method_at", vec![snapshot, method, key, value])?;
+        self.pending_receiver = None;
         self.store_fresh_map(frame_idx, base, slot, receiver_is_map, snapshot, result);
         Ok(())
     }

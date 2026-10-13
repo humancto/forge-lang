@@ -6,6 +6,7 @@ use crate::parser::ast::*;
 /// Walks the AST and executes it directly.
 /// Phase 1 only — replaced by bytecode VM in Phase 3.
 use indexmap::IndexMap;
+use places::PlaceStep;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -1325,6 +1326,46 @@ pub struct Interpreter {
     /// by `child_context` (imports, `timeout`, `spawn`) and background
     /// forks; an HTTP request fork starts empty (`fork_for_serving`).
     modules: ModuleCache,
+    /// Set when a method declared `mut it` returns: the function (by
+    /// pointer) and the final value of its receiver. Taken by the method
+    /// dispatch that called that very function (`call_user_method`).
+    receiver_out: Option<(usize, Value)>,
+}
+
+/// A user method found for a receiver: the function, and the embedded
+/// field it was found through (`outer.inner_method()` delegation).
+pub(super) struct FoundMethod {
+    func: Value,
+    embedded: Option<String>,
+}
+
+/// Whether `func` is a method whose receiver is declared `mut it`.
+fn is_mut_method(func: &Value) -> bool {
+    matches!(func, Value::Function(f)
+        if f.params.first().is_some_and(|p| p.kind == ParamKind::MutReceiver))
+}
+
+/// The field/index chain `object` names when it is a place rooted at a
+/// variable (`c`, `xs[i]`, `o.f[k]`): the root and the steps.
+fn receiver_place_path(object: &Expr) -> Option<(&str, Vec<Result<&str, &Expr>>)> {
+    let mut steps = Vec::new();
+    let mut cur = object;
+    let root = loop {
+        match cur {
+            Expr::FieldAccess { object, field } => {
+                steps.push(Ok(field.as_str()));
+                cur = object;
+            }
+            Expr::Index { object, index } => {
+                steps.push(Err(index.as_ref()));
+                cur = object;
+            }
+            Expr::Ident(name) => break name.as_str(),
+            _ => return None,
+        }
+    };
+    steps.reverse();
+    Some((root, steps))
 }
 
 /// A module that ran in this program: what importing it again binds.
@@ -1406,6 +1447,7 @@ impl Interpreter {
             caps: crate::runtime::limits::Caps::current(),
             edition: crate::semantics::edition::current(),
             modules: ModuleCache::default(),
+            receiver_out: None,
         };
         interp.register_builtins();
         interp
@@ -3561,7 +3603,42 @@ impl Interpreter {
                     return result;
                 }
                 if let Expr::FieldAccess { object, field } = function.as_ref() {
-                    let obj = self.eval_expr(object)?;
+                    // A receiver that is a place (`c`, `xs[i]`, `o.f`) can
+                    // take back the update of a method declared `mut it`.
+                    // Index expressions with effects are evaluated once,
+                    // in order, while reading the receiver; effect-free
+                    // ones are evaluated again when needed.
+                    let place =
+                        receiver_place_path(object).filter(|(root, _)| self.env.contains(root));
+                    let mut walked: Option<Vec<PlaceStep<'_>>> = None;
+                    let obj = match &place {
+                        Some((root, exprs))
+                            if exprs.iter().any(
+                                |step| matches!(step, Err(index) if !self.is_effect_free(index)),
+                            ) =>
+                        {
+                            let mut value = self.env.get(root).ok_or_else(|| {
+                                RuntimeError::new(&format!("undefined: {}", root))
+                            })?;
+                            let mut steps = Vec::with_capacity(exprs.len());
+                            for step in exprs {
+                                match step {
+                                    Ok(field) => {
+                                        value = self.field_of(&value, field)?;
+                                        steps.push(PlaceStep::Field(field));
+                                    }
+                                    Err(index) => {
+                                        let index = self.eval_expr(index)?;
+                                        value = Self::index_of(&value, &index)?;
+                                        steps.push(PlaceStep::Index(index));
+                                    }
+                                }
+                            }
+                            walked = Some(steps);
+                            value
+                        }
+                        _ => self.eval_expr(object)?,
+                    };
                     let method_name = field.as_str();
                     let known_methods = [
                         "map",
@@ -3694,45 +3771,45 @@ impl Interpreter {
                                 Some(Value::String(t)) => t.clone(),
                                 _ => String::new(),
                             };
-                            // Clone func out before calling self methods
-                            let func_opt = self
-                                .method_tables
-                                .get(&type_name)
-                                .and_then(|m| m.get(method_name))
-                                .cloned();
-                            if let Some(func) = func_opt {
-                                let mut full_args = vec![obj.clone()];
-                                for arg in args {
-                                    full_args.push(self.eval_expr(arg)?);
-                                }
-                                check_method_call_arity(&func, method_name, args.len(), true)?;
-                                return self.call_function(func, full_args);
-                            }
-                            // Check embedded fields for delegation
-                            let embeds = self.embedded_fields.get(&type_name).cloned();
-                            if let Some(embedded) = embeds {
-                                for (embed_field, embed_type) in &embedded {
-                                    let efunc = self
-                                        .method_tables
-                                        .get(embed_type)
-                                        .and_then(|m| m.get(method_name))
-                                        .cloned();
-                                    if let Some(func) = efunc {
-                                        let embed_obj =
-                                            map.get(embed_field).cloned().unwrap_or(Value::Null);
-                                        let mut full_args = vec![embed_obj];
-                                        for arg in args {
-                                            full_args.push(self.eval_expr(arg)?);
+                            if let Some(found) = self.user_method_of(&obj, method_name) {
+                                // A `mut it` method writes its receiver back:
+                                // fix the place's indexes before the
+                                // arguments run.
+                                let steps = match (&place, walked) {
+                                    (Some(_), Some(steps)) => Some(steps),
+                                    (Some((_, exprs)), None) if is_mut_method(&found.func) => {
+                                        let mut steps = Vec::with_capacity(exprs.len());
+                                        for step in exprs {
+                                            steps.push(match step {
+                                                Ok(field) => PlaceStep::Field(field),
+                                                Err(index) => {
+                                                    PlaceStep::Index(self.eval_expr(index)?)
+                                                }
+                                            });
                                         }
-                                        check_method_call_arity(
-                                            &func,
-                                            method_name,
-                                            args.len(),
-                                            true,
-                                        )?;
-                                        return self.call_function(func, full_args);
+                                        Some(steps)
+                                    }
+                                    _ => None,
+                                };
+                                let mut values = Vec::with_capacity(args.len());
+                                for arg in args {
+                                    values.push(self.eval_expr(arg)?);
+                                }
+                                let (result, updated) =
+                                    self.call_found_method(found, &obj, method_name, values)?;
+                                if let Some(updated) = updated {
+                                    match (&place, steps) {
+                                        (Some((root, _)), Some(steps)) => {
+                                            self.assign_receiver_place(root, &steps, updated)?
+                                        }
+                                        _ => {
+                                            return Err(RuntimeError::new(
+                                                &crate::semantics::temporary_receiver(method_name),
+                                            ))
+                                        }
                                     }
                                 }
+                                return Ok(result);
                             }
                             // Fall through to known_methods / error
                             if known_methods.contains(&method_name) {
@@ -3821,7 +3898,7 @@ impl Interpreter {
                                 "add" => {
                                     if is_frozen {
                                         return Err(RuntimeError::new(
-                                            "cannot add to a frozen set",
+                                            &crate::semantics::frozen_method("add", "set"),
                                         ));
                                     }
                                     if args.len() != 1 {
@@ -3837,7 +3914,7 @@ impl Interpreter {
                                 "remove" => {
                                     if is_frozen {
                                         return Err(RuntimeError::new(
-                                            "cannot remove from a frozen set",
+                                            &crate::semantics::frozen_method("remove", "set"),
                                         ));
                                     }
                                     if args.len() != 1 {
@@ -3947,7 +4024,7 @@ impl Interpreter {
                                 "set" => {
                                     if is_frozen {
                                         return Err(RuntimeError::new(
-                                            "cannot mutate a frozen map",
+                                            &crate::semantics::frozen_method("set", "map"),
                                         ));
                                     }
                                     if args.len() != 2 {
@@ -3964,7 +4041,7 @@ impl Interpreter {
                                 "remove" => {
                                     if is_frozen {
                                         return Err(RuntimeError::new(
-                                            "cannot mutate a frozen map",
+                                            &crate::semantics::frozen_method("remove", "map"),
                                         ));
                                     }
                                     if args.len() != 1 {
@@ -5345,8 +5422,102 @@ impl Interpreter {
                     .and_then(|d| self.eval_expr(d).ok())
                     .unwrap_or(Value::Null),
             };
-            self.env.define(param.name.clone(), val);
+            // A method's plain receiver `it` is immutable (E0006); `mut it`
+            // is handed back to the caller when the method returns.
+            self.env
+                .define_with_mutability(param.name.clone(), val, param.is_mutable());
         }
+    }
+
+    /// The user method `obj.method(...)` calls, if any: the receiver's type
+    /// has it in its method table (unless the object has a field of that
+    /// name, which is called instead), or one of its embedded fields'
+    /// types does.
+    pub(super) fn user_method_of(&self, obj: &Value, method: &str) -> Option<FoundMethod> {
+        let Value::Object(map) = obj else {
+            return None;
+        };
+        if map.contains_key(method) {
+            return None;
+        }
+        let Some(Value::String(type_name)) = map.get("__type__") else {
+            return None;
+        };
+        if let Some(func) = self
+            .method_tables
+            .get(type_name)
+            .and_then(|m| m.get(method))
+        {
+            return Some(FoundMethod {
+                func: func.clone(),
+                embedded: None,
+            });
+        }
+        for (embed_field, embed_type) in self.embedded_fields.get(type_name)? {
+            if let Some(func) = self
+                .method_tables
+                .get(embed_type)
+                .and_then(|m| m.get(method))
+            {
+                return Some(FoundMethod {
+                    func: func.clone(),
+                    embedded: Some(embed_field.clone()),
+                });
+            }
+        }
+        None
+    }
+
+    /// Call a method found by [`Interpreter::user_method_of`] on
+    /// `receiver` with evaluated arguments: its result and, when it is
+    /// declared `mut it`, the updated receiver (for an embedded method, the
+    /// outer value with that field replaced).
+    pub(super) fn call_found_method(
+        &mut self,
+        found: FoundMethod,
+        receiver: &Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<(Value, Option<Value>), RuntimeError> {
+        check_method_call_arity(&found.func, method, args.len(), true)?;
+        let this = match (&found.embedded, receiver) {
+            (Some(field), Value::Object(map)) => map.get(field).cloned().unwrap_or(Value::Null),
+            _ => receiver.clone(),
+        };
+        let mut full_args = Vec::with_capacity(args.len() + 1);
+        full_args.push(this);
+        full_args.extend(args);
+        let (result, updated) = self.call_user_method(found.func, full_args)?;
+        let updated = match (updated, found.embedded, receiver) {
+            (Some(inner), Some(field), Value::Object(map)) => {
+                let mut outer = map.clone();
+                outer.insert(field, inner);
+                Some(Value::Object(outer))
+            }
+            (updated, _, _) => updated,
+        };
+        Ok((result, updated))
+    }
+
+    /// Call a user method: its result and, when it is declared `mut it`,
+    /// its receiver's final value (handed over by `call_function_inner`
+    /// for this very function).
+    fn call_user_method(
+        &mut self,
+        func: Value,
+        args: Vec<Value>,
+    ) -> Result<(Value, Option<Value>), RuntimeError> {
+        let id = match &func {
+            Value::Function(f) => Some(Arc::as_ptr(f) as usize),
+            _ => None,
+        };
+        self.receiver_out = None;
+        let result = self.call_function(func, args)?;
+        let updated = match self.receiver_out.take() {
+            Some((from, value)) if Some(from) == id => Some(value),
+            _ => None,
+        };
+        Ok((result, updated))
     }
 
     pub fn call_function(&mut self, func: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -5421,6 +5592,12 @@ impl Interpreter {
                 self.env.push_scope();
                 self.bind_params(params, args);
                 let result = self.exec_stmts(body);
+                if let Some(receiver) = params.first().filter(|p| p.kind == ParamKind::MutReceiver)
+                {
+                    if let Some(value) = self.env.get(&receiver.name) {
+                        self.receiver_out = Some((Arc::as_ptr(&func) as usize, value));
+                    }
+                }
                 self.env = saved_env;
 
                 match result {

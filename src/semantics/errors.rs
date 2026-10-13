@@ -246,8 +246,22 @@ Example:
     x = 2              // cannot reassign immutable variable 'x'
 
 Fix: declare it mutable: `let mut x = 1` (natural syntax: `set mut x to 1`),
-or bind a new name instead of reassigning. Reported statically as T0017.",
-        matches: |h| h.starts_with("cannot reassign immutable variable"),
+or bind a new name instead of reassigning. Reported statically as T0017.
+
+A method's receiver `it` is immutable too, unless the method declares it
+`mut it`; such a method writes the updated receiver back to the variable
+(or field/index of one) it was called on, which therefore must be mutable:
+
+    impl Counter {
+        fn inc(mut it) { it.n += 1 }
+    }
+    let mut c = Counter { n: 0 }
+    c.inc()                    // c.n is 1
+    make_counter().inc()       // cannot update a temporary value",
+        matches: |h| {
+            h.starts_with("cannot reassign immutable variable")
+                || h.starts_with("cannot update a temporary value")
+        },
     },
     ErrorCode {
         code: "E0007",
@@ -718,6 +732,11 @@ Fix: build a modified copy (`merge(config, {debug: true})`) instead.",
                     "cannot modify frozen",
                     "cannot mutate frozen",
                     // `semantics::frozen_method`
+                    "cannot push to a frozen",
+                    "cannot pop from a frozen",
+                    "cannot add to a frozen",
+                    "cannot remove from a frozen",
+                    // its wording before v0.12
                     "cannot push a frozen",
                     "cannot pop a frozen",
                     "cannot add a frozen",
@@ -1159,8 +1178,12 @@ mod tests {
                 "E0005",
             ),
             (s::immutable_reassign("x"), "E0006"),
-            (s::frozen_method("push"), "E0029"),
-            (s::frozen_method("remove"), "E0029"),
+            (s::frozen_method("push", "array"), "E0029"),
+            (s::frozen_method("pop", "array"), "E0029"),
+            (s::frozen_method("add", "set"), "E0029"),
+            (s::frozen_method("remove", "map"), "E0029"),
+            (s::immutable_reassign("it"), "E0006"),
+            (s::temporary_receiver("inc"), "E0006"),
             (
                 s::binary(
                     s::BinaryOp::Sub,

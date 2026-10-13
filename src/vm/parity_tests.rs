@@ -1186,8 +1186,33 @@ fn parity_function_arguments_are_copies() {
 #[test]
 fn parity_methods_do_not_mutate_receiver() {
     assert_cross_backend_value(
-        "struct Counter { n: Int }\ngive Counter {\n    fn bump(it) {\n        it.n = it.n + 1\n        return it.n\n    }\n}\nlet mut c = Counter { n: 0 }\nlet a = c.bump()\nlet b = c.bump()\n[a, b, c.n]",
+        "struct Counter { n: Int }\ngive Counter {\n    fn bump(it) {\n        let mut copy = it\n        copy.n = copy.n + 1\n        return copy.n\n    }\n}\nlet mut c = Counter { n: 0 }\nlet a = c.bump()\nlet b = c.bump()\n[a, b, c.n]",
         "[1, 1, 0]",
+    );
+}
+
+#[test]
+fn parity_mut_it_methods_write_the_receiver_back() {
+    let counter = "struct Counter { n: Int }\nimpl Counter {\n    fn bump(mut it) {\n        it.n = it.n + 1\n        return it.n\n    }\n}\n";
+    assert_cross_backend_value(
+        &format!("{counter}let mut c = Counter {{ n: 0 }}\nlet a = c.bump()\nlet b = c.bump()\n[a, b, c.n]"),
+        "[1, 2, 2]",
+    );
+    assert_cross_backend_value(
+        &format!("{counter}let mut cs = [Counter {{ n: 0 }}]\nlet mut o = {{ c: Counter {{ n: 5 }} }}\ncs[0].bump()\no.c.bump()\n[cs[0].n, o.c.n]"),
+        "[1, 6]",
+    );
+    assert_cross_backend_error_contains(
+        &format!("{counter}let c = Counter {{ n: 0 }}\nc.bump()"),
+        "cannot reassign immutable variable 'c'",
+    );
+    assert_cross_backend_error_contains(
+        &format!("{counter}Counter {{ n: 0 }}.bump()"),
+        "cannot update a temporary value",
+    );
+    assert_cross_backend_error_contains(
+        "struct P { n: Int }\nimpl P {\n    fn bump(it) {\n        it.n = 1\n    }\n}\nlet mut p = P { n: 0 }\np.bump()",
+        "cannot reassign immutable variable 'it'",
     );
 }
 

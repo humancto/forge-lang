@@ -33,8 +33,9 @@ say cnt
 struct Counter { n: Int }
 give Counter {
     fn bump(it) {
-        it.n = it.n + 1
-        return it.n
+        let mut copy = it
+        copy.n = copy.n + 1
+        return copy.n
     }
 }
 let mut c = Counter { n: 0 }

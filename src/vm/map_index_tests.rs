@@ -243,7 +243,7 @@ fn map_updates_on_other_receivers_keep_their_errors() {
         ),
         (
             "let mut m = freeze(map([(1, 2)]))\nm = m.remove(1)",
-            "cannot remove a frozen value",
+            "cannot remove from a frozen map",
         ),
         (
             "let mut m = [1, 2]\nm = m.set(1, 3)",

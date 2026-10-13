@@ -946,6 +946,14 @@ otherwise { z() }
     }
 
     #[test]
+    fn formats_mut_receivers() {
+        let src = "impl Counter {\nfn inc( mut it ,k){\nit.n+=k\n}\n}\n";
+        let want = "impl Counter {\n    fn inc(mut it, k) {\n        it.n += k\n    }\n}\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want, "idempotent");
+    }
+
+    #[test]
     fn ambiguous_tokens_keep_their_original_spacing() {
         let src = "let m: Map<String, Int> = x\nlet t = a<b\nlet u = a < b\nlet v = f()?\n";
         assert_eq!(fmt(src), src);

@@ -511,7 +511,7 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
 
             Jump => self.target(ip, sbx, false)?,
             Loop => self.target(ip, sbx, true)?,
-            JumpIfFalse | JumpIfTrue | PushHandler | PushTimeout => {
+            JumpIfFalse | JumpIfTrue | PushHandler | PushTimeout | TakeReceiver => {
                 self.reg(ip, "operand", a)?;
                 self.target(ip, sbx, false)?;
             }

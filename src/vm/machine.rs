@@ -166,6 +166,8 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_when_matches",
     "__forge_method_mut",
     "__forge_method_mut_place",
+    "__forge_call_method_at",
+    "__forge_receiver_out",
 ];
 
 /// Builtins a `CallPure` may call with borrowed (`PeekLocal`) arguments:
@@ -198,6 +200,18 @@ pub struct VM {
     /// One list per module whose top level is running here: the modules
     /// it imported (its snapshot's dependencies).
     pub(super) module_imports: Vec<Vec<std::path::PathBuf>>,
+    /// Set by `__forge_receiver_out`, which a method declared `mut it`
+    /// calls right before each of its returns: the frame's closure and the
+    /// final value of `it`. Taken by the method dispatch that called it
+    /// (`VM::call_user_method`), which accepts it only from that closure.
+    /// A GC root.
+    pub(super) receiver_out: Option<(GcRef, Value)>,
+    /// The updated receiver of the last `__forge_call_method_at`, for the
+    /// `TakeReceiver` right after it. A GC root.
+    pub(super) pending_receiver: Option<Value>,
+    /// The updated receiver of the user method `call_forge_method_value`
+    /// just called, handed to `call_forge_method_full` (pinned).
+    pub(super) method_updated: Option<Value>,
     pub gc: Gc,
     pub output: Vec<String>,
     /// JIT tier state: specialization cache keyed by (prototype id, type
@@ -467,6 +481,9 @@ impl VM {
             loaded_modules: HashMap::new(),
             module_registry: Arc::default(),
             module_imports: Vec::new(),
+            receiver_out: None,
+            pending_receiver: None,
+            method_updated: None,
             gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
@@ -1663,6 +1680,13 @@ impl VM {
                         let val = self.registers[base + c as usize];
                         self.registers[base + a as usize] = self.index_set(target, idx, val)?;
                     }
+                    OpCode::TakeReceiver => match self.pending_receiver.take() {
+                        Some(updated) => self.registers[base + a as usize] = updated,
+                        None => {
+                            self.frames[frame_idx].ip =
+                                (self.frames[frame_idx].ip as isize + sbx as isize) as usize;
+                        }
+                    },
                     OpCode::JumpIfArg => {
                         if self.frames[frame_idx].argc > a as usize {
                             self.frames[frame_idx].ip =
@@ -2203,6 +2227,11 @@ impl VM {
                 for task in self.deferred_host_tasks.iter().flatten() {
                     roots.extend(task.closure().as_obj());
                 }
+                if let Some((closure, value)) = self.receiver_out {
+                    roots.push(closure);
+                    roots.extend(value.as_obj());
+                }
+                roots.extend(self.pending_receiver.and_then(|v| v.as_obj()));
                 self.gc.collect(&roots);
                 if self.gc.memory_exceeded() {
                     let limit = self.gc.memory_limit().unwrap_or(0);
@@ -3065,7 +3094,7 @@ impl VM {
         if PURE_BORROW_BUILTINS.contains(&name) {
             return true;
         }
-        if name != "__forge_call_method" {
+        if name != "__forge_call_method" && name != "__forge_call_method_at" {
             return false;
         }
         let (Some(receiver), Some(method)) = (args.first(), args.get(1)) else {

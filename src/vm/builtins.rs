@@ -909,59 +909,17 @@ impl VM {
             "__forge_method_mut" => {
                 // (receiver, method, args...) -> (new_receiver, result).
                 // In-place forms on a mutable variable: push/pop on arrays,
-                // add/remove on sets. Anything else is an ordinary method
-                // call that leaves the receiver unchanged.
+                // add/remove on sets, and user methods declared `mut it`
+                // (whose final `it` is the new receiver). Anything else is
+                // an ordinary method call that leaves the receiver unchanged.
                 if args.len() < 2 {
                     return Err(VMError::new(
                         "__forge_method_mut() requires (receiver, method, ...args)",
                     ));
                 }
-                let receiver = args[0];
                 let method = self.get_string_arg(&args, 1)?;
-                let rest = &args[2..];
-                let kind = receiver
-                    .as_obj()
-                    .and_then(|r| self.gc.get(r))
-                    .map(|o| &o.kind);
-                let is_frozen = matches!(kind, Some(ObjKind::Frozen(_)));
-                let updated: Option<(ObjKind, Option<Value>)> = match (method.as_str(), kind, rest)
-                {
-                    ("push", Some(ObjKind::Array(items)), [value]) => {
-                        let mut items = items.clone();
-                        items.push(*value);
-                        Some((ObjKind::Array(items), None))
-                    }
-                    ("pop", Some(ObjKind::Array(items)), []) => {
-                        let mut items = items.clone();
-                        let popped = items.pop().unwrap_or(Value::null());
-                        Some((ObjKind::Array(items), Some(popped)))
-                    }
-                    ("add", Some(ObjKind::Set(items)), [value]) => {
-                        let mut items = items.clone();
-                        items.add_in(*value, &self.gc);
-                        Some((ObjKind::Set(items), None))
-                    }
-                    ("remove", Some(ObjKind::Set(items)), [value]) => {
-                        let mut items = items.clone();
-                        items.remove_in(value, &self.gc);
-                        Some((ObjKind::Set(items), None))
-                    }
-                    _ => None,
-                };
-                let (new_receiver, result) = match updated {
-                    Some((kind, explicit_result)) => {
-                        let new_value = Value::obj(self.gc.alloc(kind));
-                        (new_value, explicit_result.unwrap_or(new_value))
-                    }
-                    None => {
-                        if is_frozen && matches!(method.as_str(), "add" | "remove" | "push" | "pop")
-                        {
-                            return Err(VMError::new(&crate::semantics::frozen_method(&method)));
-                        }
-                        let result = self.call_forge_method(receiver, &method, rest)?;
-                        (receiver, result)
-                    }
-                };
+                let (_, new_receiver, result) =
+                    self.method_mut_apply(args[0], &method, &args[2..])?;
                 let pair = self.gc.alloc(ObjKind::Tuple(vec![new_receiver, result]));
                 Ok(Value::obj(pair))
             }
@@ -975,17 +933,47 @@ impl VM {
                         "__forge_method_mut_place() requires (receiver, method, ...args)",
                     ));
                 }
-                let receiver = args[0];
                 let method = self.get_string_arg(&args, 1)?;
-                let (updated, result) =
-                    self.method_mut_pair(receiver, &method, args[2..].to_vec())?;
-                let changed = updated.as_obj().is_some() && updated.as_obj() != receiver.as_obj();
+                let (changed, updated, result) =
+                    self.method_mut_apply(args[0], &method, &args[2..])?;
                 let triple = self.gc.alloc(ObjKind::Tuple(vec![
                     Value::bool_val(changed),
                     updated,
                     result,
                 ]));
                 Ok(Value::obj(triple))
+            }
+            "__forge_call_method_at" => {
+                // (receiver, method, args...) -> result, for a receiver that
+                // is a place (a variable, or a field/index chain rooted at
+                // one): a method declared `mut it` leaves its updated
+                // receiver in `pending_receiver`, which the `TakeReceiver`
+                // compiled right after this call stores back into the place.
+                if args.len() < 2 {
+                    return Err(VMError::new(
+                        "__forge_call_method_at() requires (receiver, method_name, ...args)",
+                    ));
+                }
+                self.pending_receiver = None;
+                let method_name = self.get_string_arg(&args, 1)?;
+                let (result, updated) =
+                    self.call_forge_method_full(args[0], &method_name, &args[2..])?;
+                self.pending_receiver = updated;
+                Ok(result)
+            }
+            "__forge_receiver_out" => {
+                // (it): called by a method declared `mut it` right before
+                // each of its returns. Recorded with the calling frame's
+                // closure, so only the dispatch that called this very
+                // method takes it (`call_user_method`).
+                let value = args.first().copied().unwrap_or(Value::null());
+                let closure = self
+                    .frames
+                    .last()
+                    .map(|frame| frame.closure)
+                    .ok_or_else(|| VMError::new("BUG: __forge_receiver_out outside a frame"))?;
+                self.receiver_out = Some((closure, value));
+                Ok(Value::null())
             }
             "__forge_import_native" => {
                 // (path_as_written, base_dir | null, names | false)
@@ -4348,7 +4336,126 @@ impl VM {
         }
     }
 
+    /// `receiver.method(args...)` where the receiver is not a place (a
+    /// temporary): a method declared `mut it` has nowhere to write its
+    /// updated receiver, so calling one is an error
+    /// (`semantics::temporary_receiver`).
     fn call_forge_method(
+        &mut self,
+        receiver: Value,
+        method_name: &str,
+        extra_args: &[Value],
+    ) -> Result<Value, VMError> {
+        let (result, updated) = self.call_forge_method_full(receiver, method_name, extra_args)?;
+        if updated.is_some() {
+            return Err(VMError::new(&crate::semantics::temporary_receiver(
+                method_name,
+            )));
+        }
+        Ok(result)
+    }
+
+    /// The in-place method forms (`__forge_method_mut`): `(changed,
+    /// new_receiver, result)`. Arrays get `push`/`pop` and sets
+    /// `add`/`remove` on a copy; a user method declared `mut it` returns its
+    /// final `it`; anything else is an ordinary method call and leaves the
+    /// receiver unchanged.
+    pub(super) fn method_mut_apply(
+        &mut self,
+        receiver: Value,
+        method: &str,
+        rest: &[Value],
+    ) -> Result<(bool, Value, Value), VMError> {
+        let kind = receiver
+            .as_obj()
+            .and_then(|r| self.gc.get(r))
+            .map(|o| &o.kind);
+        let frozen_kind = match kind {
+            Some(ObjKind::Frozen(inner)) => Some(inner.type_name(&self.gc).to_ascii_lowercase()),
+            _ => None,
+        };
+        let updated: Option<(ObjKind, Option<Value>)> = match (method, kind, rest) {
+            ("push", Some(ObjKind::Array(items)), [value]) => {
+                let mut items = items.clone();
+                items.push(*value);
+                Some((ObjKind::Array(items), None))
+            }
+            ("pop", Some(ObjKind::Array(items)), []) => {
+                let mut items = items.clone();
+                let popped = items.pop().unwrap_or(Value::null());
+                Some((ObjKind::Array(items), Some(popped)))
+            }
+            ("add", Some(ObjKind::Set(items)), [value]) => {
+                let mut items = items.clone();
+                items.add_in(*value, &self.gc);
+                Some((ObjKind::Set(items), None))
+            }
+            ("remove", Some(ObjKind::Set(items)), [value]) => {
+                let mut items = items.clone();
+                items.remove_in(value, &self.gc);
+                Some((ObjKind::Set(items), None))
+            }
+            _ => None,
+        };
+        match updated {
+            Some((kind, explicit_result)) => {
+                let new_value = Value::obj(self.gc.alloc(kind));
+                Ok((true, new_value, explicit_result.unwrap_or(new_value)))
+            }
+            None => {
+                if let Some(frozen_kind) = frozen_kind {
+                    if crate::semantics::is_mutating_method(method, rest.len()) {
+                        return Err(VMError::new(&crate::semantics::frozen_method(
+                            method,
+                            &frozen_kind,
+                        )));
+                    }
+                }
+                let (result, updated) = self.call_forge_method_full(receiver, method, rest)?;
+                Ok(match updated {
+                    Some(new_receiver) => (true, new_receiver, result),
+                    None => (false, receiver, result),
+                })
+            }
+        }
+    }
+
+    /// Call a user method (`func`, from a method table) and return its
+    /// result and, when it is declared `mut it`, its receiver's final
+    /// value (recorded by `__forge_receiver_out` from that same closure).
+    fn call_user_method(
+        &mut self,
+        func: Value,
+        args: Vec<Value>,
+    ) -> Result<(Value, Option<Value>), VMError> {
+        self.receiver_out = None;
+        let result = self.call_value(func, args)?;
+        let updated = match self.receiver_out.take() {
+            Some((closure, value)) if Some(closure) == func.as_obj() => {
+                self.gc.pin_values(&[value]);
+                Some(value)
+            }
+            _ => None,
+        };
+        Ok((result, updated))
+    }
+
+    /// Dispatch `receiver.method_name(extra_args...)`: the method's result
+    /// and, for a user method declared `mut it`, the updated receiver,
+    /// which the caller must store back into the place the receiver came
+    /// from (or refuse, see [`VM::call_forge_method`]).
+    pub(super) fn call_forge_method_full(
+        &mut self,
+        receiver: Value,
+        method_name: &str,
+        extra_args: &[Value],
+    ) -> Result<(Value, Option<Value>), VMError> {
+        self.method_updated = None;
+        let result = self.call_forge_method_value(receiver, method_name, extra_args)?;
+        Ok((result, self.method_updated.take()))
+    }
+
+    fn call_forge_method_value(
         &mut self,
         receiver: Value,
         method_name: &str,
@@ -4431,7 +4538,9 @@ impl VM {
                 let mut full_args = Vec::with_capacity(extra_args.len() + 1);
                 full_args.push(receiver.clone());
                 full_args.extend(extra_args.iter().cloned());
-                return self.call_value(func, full_args);
+                let (result, updated) = self.call_user_method(func, full_args)?;
+                self.method_updated = updated;
+                return Ok(result);
             }
 
             if let Some(embed_defs) = self.embedded_fields.get(&type_name).cloned() {
@@ -4452,7 +4561,16 @@ impl VM {
                         let mut full_args = Vec::with_capacity(extra_args.len() + 1);
                         full_args.push(embed_value);
                         full_args.extend(extra_args.iter().cloned());
-                        return self.call_value(func, full_args);
+                        let (result, updated) = self.call_user_method(func, full_args)?;
+                        // A `mut it` method of the embedded value: the
+                        // updated receiver is the outer value with that
+                        // field replaced.
+                        if let Some(inner) = updated {
+                            let outer = self.set_field(receiver, &embed_field, inner)?;
+                            self.gc.pin_values(&[outer]);
+                            self.method_updated = Some(outer);
+                        }
+                        return Ok(result);
                     }
                 }
             }
@@ -4487,7 +4605,10 @@ impl VM {
                 }
                 "add" | "remove" => {
                     if is_frozen {
-                        return Err(VMError::new("cannot mutate a frozen set"));
+                        return Err(VMError::new(&crate::semantics::frozen_method(
+                            method_name,
+                            "set",
+                        )));
                     }
                     let value = one_arg(method_name)?;
                     let mut new_items = items().cloned().unwrap_or_default();
@@ -4549,7 +4670,7 @@ impl VM {
                 }
                 "set" => {
                     if is_frozen {
-                        return Err(VMError::new("cannot mutate a frozen map"));
+                        return Err(VMError::new(&crate::semantics::frozen_method("set", "map")));
                     }
                     if extra_args.len() != 2 {
                         return Err(VMError::new("set() requires two arguments"));
@@ -4561,7 +4682,9 @@ impl VM {
                 }
                 "remove" => {
                     if is_frozen {
-                        return Err(VMError::new("cannot mutate a frozen map"));
+                        return Err(VMError::new(&crate::semantics::frozen_method(
+                            "remove", "map",
+                        )));
                     }
                     if extra_args.len() != 1 {
                         return Err(VMError::new("remove() requires one argument"));
