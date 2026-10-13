@@ -1006,15 +1006,9 @@ impl VM {
     /// when a `timeout` deadline passes or the run or an enclosing scope is
     /// cancelled, so a sandbox deadline can reclaim the thread.
     pub(super) fn sleep_with_timeout_checks(&mut self, duration: Duration) -> Result<(), VMError> {
-        let total_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-        let mut elapsed = 0u64;
-        while elapsed < total_ms {
-            self.wait_interrupted()?;
-            let chunk = std::cmp::min(50, total_ms - elapsed);
-            crate::clock::sleep(Duration::from_millis(chunk));
-            elapsed += chunk;
-        }
-        self.wait_interrupted()
+        // Shared with the interpreter's `wait` (one deadline, not a count
+        // of slices: see `clock::sleep_interruptible`).
+        crate::clock::sleep_interruptible(duration, || self.wait_interrupted())
     }
 
     fn handle_timeout_expiry(&mut self) -> Result<usize, VMError> {

@@ -510,35 +510,22 @@ impl Interpreter {
                 self.write_output(&text.join(" ").to_lowercase(), true);
                 Ok(Value::Null)
             }
-            "wait" => match args.first() {
-                Some(Value::Int(secs)) => {
-                    let total_ms = ((*secs).max(0) as u64).saturating_mul(1000);
-                    let mut elapsed = 0u64;
-                    while elapsed < total_ms {
-                        if self.is_cancelled() {
-                            return Err(RuntimeError::new("cancelled"));
-                        }
-                        let chunk = std::cmp::min(100, total_ms - elapsed);
-                        crate::clock::sleep(std::time::Duration::from_millis(chunk));
-                        elapsed += chunk;
+            "wait" => {
+                let duration = match args.first() {
+                    Some(Value::Int(secs)) => std::time::Duration::from_secs((*secs).max(0) as u64),
+                    Some(Value::Float(secs)) => crate::semantics::seconds_f64(*secs),
+                    _ => return Err(RuntimeError::new("wait() requires a number of seconds")),
+                };
+                // Cancellable, against one deadline (shared with the VM).
+                crate::clock::sleep_interruptible(duration, || {
+                    if self.is_cancelled() {
+                        Err(RuntimeError::new("cancelled"))
+                    } else {
+                        Ok(())
                     }
-                    Ok(Value::Null)
-                }
-                Some(Value::Float(secs)) => {
-                    let total_ms = (secs.max(0.0) * 1000.0) as u64;
-                    let mut elapsed = 0u64;
-                    while elapsed < total_ms {
-                        if self.is_cancelled() {
-                            return Err(RuntimeError::new("cancelled"));
-                        }
-                        let chunk = std::cmp::min(100, total_ms - elapsed);
-                        crate::clock::sleep(std::time::Duration::from_millis(chunk));
-                        elapsed += chunk;
-                    }
-                    Ok(Value::Null)
-                }
-                _ => Err(RuntimeError::new("wait() requires a number of seconds")),
-            },
+                })?;
+                Ok(Value::Null)
+            }
             "channel" => match args.first() {
                 Some(Value::Int(n)) => {
                     let cap = (*n).max(0) as usize;

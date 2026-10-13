@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`wait` is no longer late once per 50 ms** (both engines). `wait(s)` sleeps in short slices to stay cancellable, and counted the slices instead of looking at the clock, so on a system whose timers oversleep (macOS CI) every slice added its oversleep: `wait(0.1)` cost two oversleeps on the VM (50 ms slices) and a channel pipeline of `wait(0.1)` stages ran as slowly as a serial one there (eval finding 27). Both engines now sleep against one deadline (`clock::sleep_interruptible`): a `wait` is late by at most one oversleep, and still stops within 50 ms when cancelled or when a `timeout` expires.
 - The CI performance gate (`tools/bench_compare.py --base-root`) compares only benchmarks that exist in both the base and the PR; it used to run a PR's new benchmarks on the base binary, where the code they were added for could exhaust the runner's memory.
 
 - VM: a function that assigns to a top-level variable declared both with and without `mut` (`let x = 1 ... let mut x = 2`) runs on the interpreter, which applies the declaration in force when the assignment runs; the VM used to merge both declarations' mutability.
