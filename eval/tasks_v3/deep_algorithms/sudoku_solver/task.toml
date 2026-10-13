@@ -1,0 +1,30 @@
+id = "sudoku_solver"
+category = "deep_algorithms"
+title = "Backtracking sudoku solver that detects several solutions"
+prompt = """
+Standard input holds sudoku puzzles, one per line: 81 characters, row by row, `1`-`9` for
+a given digit and `.` for an empty cell. Skip blank lines and lines starting with `#`;
+number the remaining lines 1, 2, ... in order. For puzzle k print one line:
+
+- `puzzle k: malformed` if the line is not exactly 81 characters from `.123456789`;
+- `puzzle k: invalid` if two givens conflict (the same digit twice in a row, a column or
+  a 3x3 box);
+- `puzzle k: no solution` if no way of filling the empty cells is valid;
+- otherwise `puzzle k: <81-digit solution> unique` if there is exactly one solution, or
+  `puzzle k: <81-digit solution> multiple` if there are several, where the printed
+  solution is the smallest one when the 81 digits are read as a number.
+
+(Lines are trimmed of surrounding spaces first.)
+"""
+stdin_file = "puzzles.txt"
+needs = []
+timeout = 40
+expected_stdout = """
+puzzle 1: 534678912672195348198342567859761423426853791713924856961537284287419635345286179 unique
+puzzle 2: 519748632783652419426139875357986241264317598198524367975863124832491756641275983 unique
+puzzle 3: 534678912672195348198342567859761423426853791713924856961537284287419635345286179 multiple
+puzzle 4: invalid
+puzzle 5: malformed
+puzzle 6: no solution
+puzzle 7: malformed
+"""

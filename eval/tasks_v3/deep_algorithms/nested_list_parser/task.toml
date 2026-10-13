@@ -1,0 +1,78 @@
+id = "nested_list_parser"
+category = "deep_algorithms"
+title = "Parse deeply nested integer lists with exact error positions"
+prompt = """
+Each non-blank line of standard input should hold exactly one value of this grammar:
+
+```
+value := integer | list
+list  := "[" "]"  |  "[" value ("," value)* "]"
+integer := "-"? digit+
+```
+
+Spaces may appear before and after any value, bracket or comma; no other characters are
+allowed. Lists can be nested very deeply (up to 3,000 levels on one line).
+
+For a valid line print
+`depth=<d> lists=<l> ints=<i> weighted=<w>`, where d is the maximum list nesting depth
+(0 for a bare integer, 1 for `[1]`), l the number of lists, i the number of integers, and
+w the sum over all integers of the integer times its depth (the number of lists that
+enclose it). Integers fit in 64 bits; leading zeros are allowed (`007` is 7).
+
+For an invalid line print `error at col <c>: unexpected <thing>`, where c is the 1-based
+column of the first character at which the line stops being a prefix of any valid line,
+and thing is that character in single quotes (`'x'`), or `end of line` when the line
+ended too early. Examples: `[1,,2]` gives `error at col 4: unexpected ','`;
+`[1, [2]` gives `error at col 8: unexpected end of line`; `[3]]` gives
+`error at col 4: unexpected ']'`.
+"""
+needs = []
+timeout = 30
+generator = "gen_input.py"
+generated_sha256 = { "deep.txt" = "e9b8fb5dad9bc7cbeb4dceed1f56ce989a764c9500b31d26867e35dfb8f91240" }
+
+[[case]]
+name = "small"
+stdin = """
+[1, [2, 3], [], [[-4]]]
+  42
+-7
+[1,,2]
+[1 2]
+[1, [2]
+[--3]
+[3]]
+[ ]
+[-]
+x
+[[], [[]], [[], [[]]]]
+[1, 2,]
+[007, -0]
+"""
+expected_stdout = """
+depth=3 lists=5 ints=4 weighted=-1
+depth=0 lists=0 ints=1 weighted=0
+depth=0 lists=0 ints=1 weighted=0
+error at col 4: unexpected ','
+error at col 4: unexpected '2'
+error at col 8: unexpected end of line
+error at col 3: unexpected '-'
+error at col 4: unexpected ']'
+depth=1 lists=1 ints=0 weighted=0
+error at col 3: unexpected ']'
+error at col 1: unexpected 'x'
+depth=4 lists=8 ints=0 weighted=0
+error at col 7: unexpected ']'
+depth=1 lists=1 ints=2 weighted=7
+"""
+
+[[case]]
+name = "deep"
+stdin_file = "deep.txt"
+expected_stdout = """
+depth=3000 lists=3000 ints=4000 weighted=9002999000
+depth=1500 lists=1500 ints=2000 weighted=336598750
+depth=2500 lists=2500 ints=0 weighted=0
+error at col 4001: unexpected end of line
+depth=10 lists=10 ints=14 weighted=583
+"""

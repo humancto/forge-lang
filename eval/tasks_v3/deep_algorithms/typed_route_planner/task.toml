@@ -1,0 +1,88 @@
+id = "typed_route_planner"
+category = "deep_algorithms"
+title = "Typed shortest-path route planner with an interface for the metric"
+editions = ["2027"]
+prompt = """
+Write a typed program: declare the types of every function's parameters and result, use
+structs for roads and search results, and an interface for the cost metric with two
+implementations (distance and time).
+
+Each non-blank line of standard input is a command (words separated by spaces):
+
+- `road <A> <B> <km> <minutes>`: a two-way road between towns A and B (positive integers).
+  All roads come before the first query.
+- `route <A> <B> distance` or `route <A> <B> time`: find the path from A to B with the
+  smallest total km (distance) or total minutes (time) and print
+  `<A> -> <town> -> ... -> <B>: <total km> km, <total minutes> min` (both totals along the
+  chosen path). If A equals B print `<A>: 0 km, 0 min`. If either town has no roads or B
+  cannot be reached, print `no route from <A> to <B>`. The test data has no ties between
+  different shortest paths.
+- `reachable <A> <limit>`: the towns other than A whose fastest travel time (minutes) from
+  A is at most limit. Print `reachable from <A> within <limit> min: <count>`, followed
+  (only when count > 0) by ` (nearest: ` and the up to 5 nearest of them as
+  `<town> <minutes>` separated by `, ` (by minutes, ties by town name ascending) and `)`.
+  A town without roads reaches nothing.
+- anything else: print `error: unknown command <first word>`.
+
+There are 300 towns, 900 roads and about 50 queries; the program must finish within a few
+seconds.
+"""
+stdin_file = "input.txt"
+generator = "gen_input.py"
+generated_sha256 = { "input.txt" = "b84fc4fc0a5e8c71e31bd8112f337878a9f905b3a1438a731ade127b8c5c50fe" }
+needs = []
+timeout = 30
+expected_stdout = """
+Tubefo -> Muliki -> Kurive -> Hamumu -> Tolura -> Nuduga -> Danuha: 75099 km, 278657 min
+Gezece -> Fakeho -> Bapefo -> Fecele -> Subiko: 257361 km, 111982 min
+Cativi -> Vudavu -> Befoli -> Tafelo -> Hufohe -> Mefohe -> Sosive -> Liceve -> Subiko -> Zipuvu -> Tudici: 128871 km, 408841 min
+Kupimu -> Bagaze -> Lazile: 78561 km, 103868 min
+Hevebi -> Docebo -> Vuneri -> Tafelo -> Befoli -> Vudavu -> Hohefe -> Loveru -> Darigo -> Fuhenu: 118402 km, 444261 min
+Ruzane -> Regeso -> Bimupu -> Sinibo -> Kikohi: 170510 km, 122303 min
+Halofa -> Zogabo -> Hevebi -> Hakeso -> Rumafu: 100303 km, 196923 min
+Fuhenu -> Dutare -> Kohefa: 150598 km, 41919 min
+Zumeki -> Lucogu -> Tubefo -> Muliki -> Kurive -> Casece -> Cepoce: 186182 km, 490757 min
+Tofiva -> Vafoni -> Mudine -> Kenelo -> Mefohe: 233674 km, 130573 min
+Meneba -> Puvici -> Bafago -> Sepuve -> Cativi -> Cakeke -> Hogape -> Firavu: 89756 km, 418088 min
+Kocuho -> Zuvimu -> Dutare -> Kohefa -> Falube -> Vamave -> Rizaze -> Kuroke -> Lebazi -> Dehone -> Zubasi -> Licuga -> Penube: 654076 km, 190265 min
+Fuveba -> Bazalu -> Sikani -> Vileto -> Rusidi -> Sinibo -> Copenu -> Sicofo: 123611 km, 382952 min
+Senuru -> Tusaco -> Nuduga -> Danuha -> Rapore -> Ponopi -> Funavu: 284766 km, 101668 min
+Devigu -> Vudani -> Hotofa -> Nimaga -> Kupadi -> Femade: 82765 km, 250382 min
+Gehige -> Firavu -> Figami -> Rovudo -> Vamave -> Falube -> Kohefa -> Dutare -> Mirabo: 429713 km, 135832 min
+Vamave -> Reteku -> Zabosa -> Fogazi -> Zicili -> Dobaza -> Pesolu -> Kikohi: 91873 km, 360664 min
+Ruzane -> Kikaku -> Dapivu -> Firavu -> Figami: 335210 km, 122896 min
+Fosagi -> Zokacu -> Bafago -> Sepuve -> Cativi -> Cakeke -> Hogape -> Menite -> Mobapu: 95362 km, 503946 min
+Kohefa -> Falube -> Vamave -> Rizaze -> Kuroke -> Lebazi -> Befoli -> Vudavu: 411999 km, 95119 min
+Dedava -> Fukeli -> Kabaza -> Ganono -> Negaku -> Ziregi -> Haluze: 112874 km, 408976 min
+Zisubo -> Tevino -> Bimupu -> Lebazi -> Kuroke -> Rizaze -> Vamave -> Fipate -> Kaheci: 624551 km, 121656 min
+Danuha -> Rivopi -> Reteku: 61353 km, 66019 min
+Lucogu -> Pecova -> Sepuve -> Donici -> Sosive -> Rapore -> Kovodo: 431494 km, 119535 min
+Zidibi -> Resiku -> Kuroke -> Makesu -> Regeso -> Bimupu -> Zilopa -> Lanane -> Fepeza -> Sinibo -> Copenu: 144494 km, 540987 min
+Norasi -> Nuduga -> Reteku -> Bimupu -> Sinibo -> Nicatu: 354036 km, 38156 min
+Nipisa -> Nimaga -> Hotofa -> Mopuvu -> Lanane: 53453 km, 139335 min
+Fifeho -> Paloce -> Danuha -> Pukone: 164617 km, 68688 min
+Gosifu -> Copenu -> Tolura -> Nuduga -> Danuha: 103786 km, 181683 min
+Ruzane -> Nilepi -> Zuvimu -> Dutare -> Kohefa -> Falube -> Vamave -> Kozunu -> Neduhe -> Subiko -> Pocefo: 606396 km, 131932 min
+Zubasi -> Kupimu -> Tisoma -> Zuhiza -> Zoledi -> Zabosa -> Fogazi: 109072 km, 293177 min
+Ravifa -> Kuroke -> Lebazi -> Cepoce -> Timamu -> Zeveco: 263987 km, 107090 min
+Casece -> Hovuge -> Sanapu -> Zicili -> Dobaza -> Pesolu -> Sodohu -> Huciro -> Cudogu -> Pecova -> Gucuti: 219110 km, 430048 min
+Mahufi -> Netovu: 43541 km, 88458 min
+Pavivi -> Rupaha -> Kovodo -> Hevebi -> Zogabo -> Halofa -> Regeso -> Makesu -> Kuroke: 155695 km, 363268 min
+Vudavu -> Ripufe -> Donici -> Sosive -> Mefohe: 126085 km, 140994 min
+Kikaku -> Lipove -> Vafoni -> Kaheci: 127638 km, 204303 min
+Tofiva -> Fakeho -> Rupuhe -> Nosaru -> Cesipa: 156871 km, 124052 min
+Fovupu -> Fukeli -> Dedava -> Bagaze -> Lovaca -> Lakadi: 139662 km, 235382 min
+Hogape -> Menite -> Nuduga -> Danuha -> Rapore -> Vecigi: 251452 km, 103794 min
+no route from Biceta to Isle
+Isle -> Atoll: 5 km, 9 min
+no route from Hesevi to Nowhere
+Vafoni: 0 km, 0 min
+reachable from Sovohe within 44571 min: 7 (nearest: Bosule 10627, Dilubi 13153, Pomece 27002, Sodohu 31356, Huzopo 36488)
+reachable from Lebazi within 31113 min: 23 (nearest: Dehone 2157, Bimupu 5486, Cepoce 6268, Sinibo 12533, Nicatu 13833)
+reachable from Bafago within 21020 min: 1 (nearest: Luhuze 20861)
+reachable from Punoru within 38315 min: 1 (nearest: Kisane 29221)
+reachable from Zisubo within 22876 min: 1 (nearest: Tevino 11045)
+reachable from Rizaze within 22563 min: 4 (nearest: Kuroke 3532, Vamave 7779, Falube 12785, Kohefa 21748)
+reachable from Atoll within 100 min: 1 (nearest: Isle 9)
+error: unknown command teleport
+"""
