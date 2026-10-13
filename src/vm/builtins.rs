@@ -651,11 +651,12 @@ impl VM {
                 if args.len() != 1 {
                     return Err(VMError::new("__forge_retry_count() requires (count)"));
                 }
-                if let Some(n) = args[0].as_int(&self.gc) {
-                    Ok(Value::int(n.max(0), &mut self.gc))
-                } else {
-                    Ok(Value::int(3, &mut self.gc))
-                }
+                let count = match args[0].classify(&self.gc) {
+                    ValueKind::Int(n) => Some(n),
+                    _ => None,
+                };
+                let attempts = crate::semantics::retry_attempts(count);
+                Ok(Value::int(attempts, &mut self.gc))
             }
             "__forge_retry_wait" => {
                 if args.len() != 1 {
@@ -690,11 +691,13 @@ impl VM {
                         })
                         .map(|value| value.display(&self.gc))
                         .unwrap_or_default(),
+                    // No attempt was made (a count of 0).
+                    ValueKind::Null => String::new(),
                     _ => args[1].display(&self.gc),
                 };
-                Err(VMError::new(&format!(
-                    "retry failed after {} attempts: {}",
-                    count, last_error
+                Err(VMError::new(&crate::semantics::retry_exhausted(
+                    count,
+                    &last_error,
                 )))
             }
             "__forge_where_filter" => {
@@ -1266,7 +1269,9 @@ impl VM {
                         return s
                             .parse::<i64>()
                             .map(|n| Value::int(n, &mut self.gc))
-                            .map_err(|_| VMError::new(&format!("cannot convert '{}' to Int", s)));
+                            .map_err(|_| {
+                                VMError::new(&crate::semantics::invalid_number(&s, "Int"))
+                            });
                     }
                     Err(VMError::new("int() requires number, bool, or string"))
                 }
@@ -1280,7 +1285,7 @@ impl VM {
                     if let Some(obj) = self.gc.get(r) {
                         if let ObjKind::String(s) = &obj.kind {
                             return s.parse::<f64>().map(Value::float).map_err(|_| {
-                                VMError::new(&format!("cannot convert '{}' to Float", s))
+                                VMError::new(&crate::semantics::invalid_number(s, "Float"))
                             });
                         }
                     }
@@ -2378,8 +2383,10 @@ impl VM {
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| VMError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let interp_val = crate::stdlib::json_module::parse_str(stdout.trim())
-                    .map_err(|e| VMError::new(&format!("sh_json parse error: {}", e)))?;
+                let interp_val =
+                    crate::stdlib::json_module::parse_str(stdout.trim()).map_err(|e| {
+                        VMError::new(&crate::stdlib::json_module::parse_error("sh_json", &e))
+                    })?;
                 self.from_interp_checked(&interp_val)
             }
             "sh_ok" => {

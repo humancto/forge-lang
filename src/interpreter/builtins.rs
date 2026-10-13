@@ -151,7 +151,7 @@ impl Interpreter {
                 Some(Value::String(s)) => s
                     .parse::<i64>()
                     .map(Value::Int)
-                    .map_err(|_| RuntimeError::new(&format!("cannot convert '{}' to Int", s))),
+                    .map_err(|_| RuntimeError::new(&crate::semantics::invalid_number(s, "Int"))),
                 _ => Err(RuntimeError::new("int() requires number, bool, or string")),
             },
             "float" => match args.first() {
@@ -160,7 +160,7 @@ impl Interpreter {
                 Some(Value::String(s)) => s
                     .parse::<f64>()
                     .map(Value::Float)
-                    .map_err(|_| RuntimeError::new(&format!("cannot convert '{}' to Float", s))),
+                    .map_err(|_| RuntimeError::new(&crate::semantics::invalid_number(s, "Float"))),
                 _ => Err(RuntimeError::new("float() requires number or string")),
             },
             "push" => {
@@ -1715,8 +1715,9 @@ impl Interpreter {
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                crate::stdlib::json_module::parse_str(stdout.trim())
-                    .map_err(|e| RuntimeError::new(&format!("sh_json parse error: {}", e)))
+                crate::stdlib::json_module::parse_str(stdout.trim()).map_err(|e| {
+                    RuntimeError::new(&crate::stdlib::json_module::parse_error("sh_json", &e))
+                })
             }
             "sh_ok" => {
                 let _subprocess =

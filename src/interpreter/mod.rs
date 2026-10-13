@@ -2758,10 +2758,10 @@ impl Interpreter {
             }
 
             Stmt::RetryBlock { count, body } => {
-                let max = match self.eval_expr(count)? {
-                    Value::Int(n) => n as usize,
-                    _ => 3,
-                };
+                let max = crate::semantics::retry_attempts(match self.eval_expr(count)? {
+                    Value::Int(n) => Some(n),
+                    _ => None,
+                });
                 let mut last_err = String::new();
                 for attempt in 0..max {
                     match self.exec_body(body) {
@@ -2777,9 +2777,8 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(RuntimeError::new(&format!(
-                    "retry failed after {} attempts: {}",
-                    max, last_err
+                Err(RuntimeError::new(&crate::semantics::retry_exhausted(
+                    max, &last_err,
                 )))
             }
 

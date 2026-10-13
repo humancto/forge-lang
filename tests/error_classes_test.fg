@@ -1,0 +1,76 @@
+// error_classes_test.fg — errors that used to be unclassified E0000 have
+// their own codes, and `e.type` is a function of the code (V3 finding 17).
+
+fn caught(f) {
+    try {
+        f()
+    } catch e {
+        return e
+    }
+    return null
+}
+
+@test
+fn test_bad_number_text_is_e0038() {
+    let e = caught(fn() { return int("12x") })
+    assert_eq(e.code, "E0038")
+    assert_eq(e.type, "ValueError")
+    assert_eq(e.message, "cannot convert '12x' to Int")
+    assert_eq(caught(fn() { return float("abc") }).code, "E0038")
+    assert_eq(caught(fn() { return int("3.5") }).code, "E0038")
+    // A value of the wrong kind is still a builtin argument error.
+    assert_eq(caught(fn() { return int([1]) }).code, "E0015")
+}
+
+@test
+fn test_bad_json_is_e0039() {
+    let e = caught(fn() { return json.parse("[1, 2,") })
+    assert_eq(e.code, "E0039")
+    assert_eq(e.type, "ValueError")
+    assert(e.message.starts_with("JSON parse error: "))
+    assert_eq(caught(fn() { return json.parse("") }).code, "E0039")
+}
+
+@test
+fn test_bad_pattern_is_e0040() {
+    let e = caught(fn() { return regex.test("a(b", "(") })
+    assert_eq(e.code, "E0040")
+    assert_eq(e.message, "invalid regex '(': unclosed group")
+    assert_eq(caught(fn() { return regex.find_all("x", "[a-") }).code, "E0040")
+}
+
+@test
+fn test_exhausted_retry_is_e0041() {
+    let mut attempts = 0
+    let e = caught(fn() {
+        retry 2 times {
+            attempts += 1
+            let parts = split("a", ",")
+            return parts[3]
+        }
+    })
+    assert_eq(e.code, "E0041")
+    assert(e.message.starts_with("retry failed after 2 attempts: "))
+    assert(e.message.contains("out of bounds"))
+}
+
+@test
+fn test_type_follows_the_code() {
+    let missing_field = caught(fn() {
+        let o = { a: 1 }
+        return o.b
+    })
+    let missing_key = caught(fn() {
+        let o = { a: 1 }
+        return o["b"]
+    })
+    assert_eq(missing_field.code, "E0013")
+    assert_eq(missing_field.type, "ReferenceError")
+    assert_eq(missing_key.code, "E0010")
+    assert_eq(missing_key.type, "ReferenceError")
+    let bad_index = caught(fn() { return null["x"] })
+    assert_eq(bad_index.code, "E0011")
+    assert_eq(bad_index.type, "TypeError")
+    assert_eq(caught(fn() { return 1 / 0 }).type, "ArithmeticError")
+    assert_eq(caught(fn() { return [1][4] }).type, "IndexError")
+}

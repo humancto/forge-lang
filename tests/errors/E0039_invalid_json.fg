@@ -1,0 +1,2 @@
+// A malformed JSON document
+let data = json.parse("[1, 2,")

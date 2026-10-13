@@ -304,7 +304,36 @@ try {
 
 There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 
-Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, `E0036` HTTP request timed out, `E0037` HTTP connection failed, ...); type-checker diagnostics are `T0001`–`T0021`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error `e` has `e.message` (without the hint), `e.type`, `e.code` and `e.hint` (the error's suggestion, or `null`). For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+Error codes: every runtime error has a stable code, the same on both engines; type-checker diagnostics are `T0001`–`T0021`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error `e` has `e.message` (without the hint), `e.code`, `e.hint` (the error's suggestion, or `null`) and `e.type`, a category that is the same for every error of a code (shown in the table). Branch on `e.code`, not on message text. The runtime codes:
+
+| code | `e.type` | raised by |
+|---|---|---|
+| `E0000` | RuntimeError | anything without a more specific code (e.g. `toml.parse` of bad text) |
+| `E0003` | ReferenceError | undefined name |
+| `E0004` / `E0005` | TypeError | calling a non-function / wrong argument count |
+| `E0006` | TypeError | assigning to an immutable binding |
+| `E0007` | TypeError | operator on unsupported types (`[1] * 2`) |
+| `E0008` | ArithmeticError | division or modulo by zero |
+| `E0009` | IndexError | index out of bounds (`xs[5]`) |
+| `E0010` | ReferenceError | missing key (`m["nope"]`) |
+| `E0011` | TypeError | value cannot be indexed that way (`null["x"]`, `5[0]`, `"abc"[0]`: use `substring`) |
+| `E0012` / `E0014` | TypeError | field access on `null` / on a non-object |
+| `E0013` | ReferenceError | unknown field or method |
+| `E0015` | TypeError | bad builtin argument (`len(5)`, `join([1], 5)`) |
+| `E0016` | RuntimeError | stdlib operation failed (`fs.read` of a missing file, a failed command) |
+| `E0017` | TypeError | value does not match its annotation (edition 2027, `--strict`) |
+| `E0019` / `E0020` | ReferenceError / RuntimeError | import failed / permission denied |
+| `E0021` | AssertionError | `assert`, `assert_eq`, ... failed |
+| `E0023` / `E0024` | RuntimeError | `unwrap` of `None`/`Err` / `?` on an `Err` at the top level |
+| `E0026` | RuntimeError | no `match` arm matched |
+| `E0030` | RuntimeError | `send` on a closed channel |
+| `E0031` | TimeoutError | `timeout` block expired, `--max-time`, cancelled |
+| `E0034` | TypeError | edition 2027: `"a" + 1` |
+| `E0036` / `E0037` | TimeoutError / ConnectionError | HTTP request timed out / could not connect |
+| `E0038` | ValueError | `int("12x")`, `float("abc")`: text is not a number |
+| `E0039` | ValueError | invalid JSON (`json.parse`, `fs.read_json`, `sh_json`) |
+| `E0040` | ValueError | invalid regex pattern |
+| `E0041` | RuntimeError | `retry n times` exhausted (the message ends with the last attempt's error) | For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
 ```forge
 try {

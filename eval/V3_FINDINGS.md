@@ -504,6 +504,18 @@ Suggested fix: classify conversion errors (E0015 or a new code), JSON parse erro
 invalid patterns; list E0011 (and the codes error_code_report shows: E0016, E0021, E0026,
 E0031) in `llms.txt`.
 
+**Fixed:** four codes appended to `semantics::errors`, each raised through a shared helper
+and with a fixture in `tests/errors/`: E0038 text that is not a number (`int("12x")`,
+`float("abc")`; a value of the wrong kind such as `int([1])` stays E0015), E0039 invalid
+JSON (`json.parse`, `fs.read_json`, `sh_json`), E0040 invalid regex (now one line:
+`invalid regex '(': unclosed group`) and E0041 an exhausted `retry` (tried before every
+other class, so the quoted last error cannot re-code it). `e.type` is now a function of
+the code (`errors::error_type`), so a missing key and an unknown field are both
+`ReferenceError`; new category `ValueError` for E0038–E0040. `llms.txt` lists the runtime
+codes with their types (E0011, E0016, E0021, E0026, E0031 included). The E0000 fixture is
+now a `toml.parse` failure. Tests: `tests/error_classes_test.fg` (both engines, both
+editions), `helpers_classify_to_their_codes`, `error_type_follows_the_code`.
+
 ### 19. No Unicode escapes in string literals
 
 `"\u00e9"` and `"\u{feff}"` are `[E0001] unknown escape: \u`; the accepted escapes are

@@ -131,9 +131,9 @@ const MAX_INDENT: i64 = 16;
 /// somewhere other than `json.parse` (`fs.read_json: JSON parse error: ...`).
 pub fn parse_error(context: &str, e: &serde_json::Error) -> String {
     if context.is_empty() {
-        format!("JSON parse error: {}", e)
+        format!("{}: {}", crate::semantics::JSON_PARSE_ERROR, e)
     } else {
-        format!("{}: JSON parse error: {}", context, e)
+        format!("{}: {}: {}", context, crate::semantics::JSON_PARSE_ERROR, e)
     }
 }
 

@@ -46,14 +46,16 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "regex.test" => match (args.first(), args.get(1)) {
             (Some(Value::String(text)), Some(Value::String(pattern))) => {
-                let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| crate::semantics::invalid_regex(pattern, &e))?;
                 Ok(Value::Bool(re.is_match(text)))
             }
             _ => Err("regex.test() requires (text, pattern) strings".to_string()),
         },
         "regex.find" => match (args.first(), args.get(1)) {
             (Some(Value::String(text)), Some(Value::String(pattern))) => {
-                let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| crate::semantics::invalid_regex(pattern, &e))?;
                 match re.find(text) {
                     Some(m) => Ok(Value::String(m.as_str().to_string())),
                     None => Ok(Value::Null),
@@ -63,7 +65,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "regex.find_all" => match (args.first(), args.get(1)) {
             (Some(Value::String(text)), Some(Value::String(pattern))) => {
-                let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| crate::semantics::invalid_regex(pattern, &e))?;
                 let matches: Vec<Value> = re
                     .find_iter(text)
                     .map(|m| Value::String(m.as_str().to_string()))
@@ -78,7 +81,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Some(Value::String(pattern)),
                 Some(Value::String(replacement)),
             ) => {
-                let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| crate::semantics::invalid_regex(pattern, &e))?;
                 Ok(Value::String(
                     re.replace_all(text, replacement.as_str()).to_string(),
                 ))
@@ -87,7 +91,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "regex.split" => match (args.first(), args.get(1)) {
             (Some(Value::String(text)), Some(Value::String(pattern))) => {
-                let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| crate::semantics::invalid_regex(pattern, &e))?;
                 let parts: Vec<Value> = re
                     .split(text)
                     .map(|s| Value::String(s.to_string()))
@@ -98,14 +103,16 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
         "regex.captures" => match (args.first(), args.get(1)) {
             (Some(Value::String(text)), Some(Value::String(pattern))) => {
-                let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| crate::semantics::invalid_regex(pattern, &e))?;
                 Ok(re.captures(text).map_or(Value::Null, |c| groups(&c)))
             }
             _ => Err("regex.captures() requires (text, pattern) strings".to_string()),
         },
         "regex.captures_all" => match (args.first(), args.get(1)) {
             (Some(Value::String(text)), Some(Value::String(pattern))) => {
-                let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {}", e))?;
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| crate::semantics::invalid_regex(pattern, &e))?;
                 Ok(Value::Array(
                     re.captures_iter(text).map(|c| groups(&c)).collect(),
                 ))

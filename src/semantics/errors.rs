@@ -117,12 +117,12 @@ pub static RUNTIME_ERRORS: &[ErrorCode] = &[
         hint: "see the message above; run with --interp for a second opinion if it looks like an engine bug",
         explanation: "\
 A runtime error that has no more specific code. Most errors raised by the
-standard library with custom text (for example a failed `json.parse`) land
+standard library with custom text (for example a failed `toml.parse`) land
 here, as do errors created by your own code with a custom message.
 
 Example:
 
-    let data = json.parse(\"{not json\")
+    let config = toml.parse(\"= no key\")
 
 Fix: read the message — it names the operation that failed. Wrap code that
 can fail in `try { ... } catch e { ... }` (the caught object has `message`,
@@ -449,7 +449,8 @@ Fix: pass the expected type, converting first when needed (`str(5)`,
         hint: "the operation itself failed (file, network, parse, ...); see the message for the cause",
         explanation: "\
 A builtin or stdlib member received valid arguments but the operation
-failed: a file that does not exist, a network error, malformed JSON, ...
+failed: a file that does not exist, a failed command, ... (malformed JSON
+is E0039, a network failure E0036/E0037).
 
 Example:
 
@@ -887,6 +888,76 @@ Fix: check the URL, start the server, or catch the error:
 `try { ... } catch e { if e.code == \"E0037\" { ... } }`.",
         matches: crate::semantics::net::is_connect_headline,
     },
+    ErrorCode {
+        code: "E0038",
+        title: "text is not a number",
+        hint: "check the text first (`regex.test(s, \"^-?[0-9]+$\")`) or catch the error",
+        explanation: "\
+`int(text)` or `float(text)` got a String that is not a number of that
+kind: letters, an empty string, `\"3.5\"` for `int`, surrounding spaces.
+
+Example:
+
+    let n = int(\"12x\")      // cannot convert '12x' to Int
+
+Fix: clean the text (`s.trim()`), convert in two steps for a decimal
+(`int(float(\"3.5\"))`), or handle bad input:
+`try { int(s) } catch e { if e.code == \"E0038\" { ... } }`.",
+        matches: |h| h.starts_with("cannot convert '") && (h.ends_with("' to Int") || h.ends_with("' to Float")),
+    },
+    ErrorCode {
+        code: "E0039",
+        title: "invalid JSON",
+        hint: "the text is not valid JSON; the message gives the line and column of the problem",
+        explanation: "\
+JSON text could not be parsed: `json.parse`, `fs.read_json`, `sh_json`, or
+`json(text)` got something that is not a JSON document (a trailing comma,
+single quotes, an unquoted key, an empty string, ...).
+
+Example:
+
+    let data = json.parse(\"{not json\")    // JSON parse error: key must be a string at line 1 column 2
+
+Fix: fix the producer of the text, or validate first with `json.valid(text)`,
+or catch it: `try { json.parse(text) } catch e { if e.code == \"E0039\" { ... } }`.",
+        matches: |h| h.starts_with(crate::semantics::JSON_PARSE_ERROR) || h.contains(": JSON parse error: "),
+    },
+    ErrorCode {
+        code: "E0040",
+        title: "invalid regular expression",
+        hint: "check the pattern's syntax; escape special characters such as ( [ . * + ? with a backslash",
+        explanation: "\
+A `regex.*` function got a pattern that is not a valid regular expression:
+an unclosed group or class, a dangling quantifier, an unknown escape, ...
+The pattern syntax is Rust's `regex` crate (no look-around or
+backreferences).
+
+Example:
+
+    regex.test(\"a(b\", \"(\")     // invalid regex '(': unclosed group
+
+Fix: correct the pattern. To match text literally, escape the special
+characters: `\"\\\\(\"` matches `(`.",
+        matches: |h| h.starts_with("invalid regex"),
+    },
+    ErrorCode {
+        code: "E0041",
+        title: "retry attempts exhausted",
+        hint: "every attempt of the `retry` block failed; the message ends with the last attempt's error",
+        explanation: "\
+`retry n times { ... }` ran its block n times and every attempt raised an
+error (it waits 100 ms, 200 ms, ... between attempts). The message ends with
+the error of the last attempt.
+
+Example:
+
+    retry 3 times { risky() }   // retry failed after 3 attempts: connection refused by ...
+
+Fix: handle the failure — `try { retry 3 times { ... } } catch e { ... }` —
+or fix the cause named after the colon. Errors that are not about the block
+(`return`, `break`, fuel or memory limits) are not retried.",
+        matches: |h| h.starts_with(crate::semantics::RETRY_EXHAUSTED_PREFIX),
+    },
 ];
 
 /// The code of a syntax error: `E0001` for the lexer, `E0002` for the
@@ -914,11 +985,20 @@ pub fn classify(message: &str) -> &'static ErrorCode {
     // The broad builtin classes (anything starting with `name()`) are
     // tried after every specific class, so `unwrap() called on None` is
     // E0023, not "invalid argument to a builtin".
+    // Wrappers that quote another error after a fixed prefix
+    // (`retry failed after 3 attempts: <error>`) are tried first, so the
+    // quoted error cannot decide the code.
     let is_fallback = |e: &&ErrorCode| FALLBACK_CODES.contains(&e.code);
+    let is_first = |e: &&ErrorCode| FIRST_CODES.contains(&e.code);
     RUNTIME_ERRORS
         .iter()
-        .skip(1)
-        .filter(|e| !is_fallback(e))
+        .filter(is_first)
+        .chain(
+            RUNTIME_ERRORS
+                .iter()
+                .skip(1)
+                .filter(|e| !is_fallback(e) && !is_first(e)),
+        )
         .chain(RUNTIME_ERRORS.iter().filter(is_fallback))
         .find(|e| (e.matches)(inner))
         .unwrap_or(GENERIC)
@@ -926,6 +1006,9 @@ pub fn classify(message: &str) -> &'static ErrorCode {
 
 /// Classes matched only after all others (see [`classify`]).
 const FALLBACK_CODES: &[&str] = &["E0015", "E0016"];
+
+/// Classes matched before all others (see [`classify`]).
+const FIRST_CODES: &[&str] = &["E0041"];
 
 /// Look up a runtime code (`"E0009"`, case-insensitive).
 pub fn lookup(code: &str) -> Option<&'static ErrorCode> {
@@ -988,30 +1071,35 @@ pub fn hint_for(message: &str) -> &str {
     message_hint(message).unwrap_or(classify(message).hint)
 }
 
-/// The legacy `type` field of a caught error object (`catch e { e.type }`).
-/// Kept for compatibility; new code should prefer `e.code`. Only the
-/// headline is inspected, so words in a hint (a field named `type` in a
-/// did-you-mean) cannot change it.
+/// The `type` field of a caught error object (`catch e { e.type }`): a
+/// coarse category of the error's code ([`error_type`]), so every error of
+/// one code has the same type. Prefer `e.code` for decisions.
 pub fn legacy_error_type(message: &str) -> &'static str {
-    let message = headline(message);
-    if crate::semantics::net::is_timeout_headline(message) {
-        "TimeoutError"
-    } else if crate::semantics::net::is_connect_headline(message) {
-        "ConnectionError"
-    } else if message.contains("type") || message.contains("Type") {
-        "TypeError"
-    } else if message.contains("division by zero") || message.contains("modulo by zero") {
-        "ArithmeticError"
-    } else if message.contains("assertion") {
-        "AssertionError"
-    } else if message.contains("index") || message.contains("out of bounds") {
-        "IndexError"
-    } else if message.contains("not found") || message.contains("undefined") {
-        "ReferenceError"
-    } else if message.contains("immutable") || message.contains("cannot reassign") {
-        "TypeError"
-    } else {
-        "RuntimeError"
+    error_type(classify(message).code)
+}
+
+/// The category (`e.type`) of a runtime error code. Every code is listed;
+/// the categories are: `TypeError` (a value of the wrong kind),
+/// `ReferenceError` (a name, key, field or module that does not exist),
+/// `IndexError`, `ArithmeticError`, `ValueError` (text that does not parse
+/// as what was asked: number, JSON, pattern), `AssertionError`,
+/// `TimeoutError`, `ConnectionError`, `SyntaxError` and `RuntimeError`
+/// (everything else).
+pub fn error_type(code: &str) -> &'static str {
+    match code {
+        "E0004" | "E0005" | "E0006" | "E0007" | "E0011" | "E0012" | "E0014" | "E0015" | "E0017"
+        | "E0028" | "E0029" | "E0034" => "TypeError",
+        "E0003" | "E0010" | "E0013" | "E0019" => "ReferenceError",
+        "E0009" => "IndexError",
+        "E0008" => "ArithmeticError",
+        "E0038" | "E0039" | "E0040" => "ValueError",
+        "E0021" | "E0022" => "AssertionError",
+        "E0031" | "E0036" => "TimeoutError",
+        "E0037" => "ConnectionError",
+        "E0001" | "E0002" | "E0035" => "SyntaxError",
+        // E0000 E0016 E0018 E0020 E0023 E0024 E0025 E0026 E0027 E0030
+        // E0032 E0033 E0041
+        _ => "RuntimeError",
     }
 }
 
@@ -1305,10 +1393,87 @@ mod tests {
                 "http.get error: request failed: bad redirect".to_string(),
                 "E0016",
             ),
+            (s::invalid_number("12x", "Int"), "E0038"),
+            (s::invalid_number("abc", "Float"), "E0038"),
+            (
+                "JSON parse error: expected value at line 1 column 1".to_string(),
+                "E0039",
+            ),
+            (
+                "fs.read_json: JSON parse error: EOF while parsing".to_string(),
+                "E0039",
+            ),
+            (
+                s::invalid_regex(
+                    "(",
+                    &"regex parse error:\n    (\n    ^\nerror: unclosed group",
+                ),
+                "E0040",
+            ),
+            (s::retry_exhausted(3, "division by zero"), "E0041"),
+            // The quoted error does not decide the code.
+            (
+                s::retry_exhausted(2, "timeout: operation exceeded 1 second limit"),
+                "E0041",
+            ),
+            (s::retry_exhausted(0, ""), "E0041"),
+            (
+                format!("task error: {}", s::retry_exhausted(1, "x")),
+                "E0041",
+            ),
         ];
         for (message, code) in cases {
             assert_eq!(classify(&message).code, code, "{:?}", message);
         }
+        assert_eq!(
+            s::invalid_regex(
+                "(",
+                &"regex parse error:\n    (\n    ^\nerror: unclosed group"
+            ),
+            "invalid regex '(': unclosed group"
+        );
+        assert_eq!(
+            s::retry_exhausted(1, "boom\n  hint: h"),
+            "retry failed after 1 attempt: boom"
+        );
+        assert_eq!(s::retry_exhausted(0, ""), "retry failed after 0 attempts");
+    }
+
+    /// `e.type` is a function of the code, so one code never has two types
+    /// (an unknown field used to be `RuntimeError`, a missing key
+    /// `ReferenceError`).
+    #[test]
+    fn error_type_follows_the_code() {
+        let known = [
+            "TypeError",
+            "ReferenceError",
+            "IndexError",
+            "ArithmeticError",
+            "ValueError",
+            "AssertionError",
+            "TimeoutError",
+            "ConnectionError",
+            "SyntaxError",
+            "RuntimeError",
+        ];
+        for e in RUNTIME_ERRORS {
+            assert!(known.contains(&error_type(e.code)), "{}", e.code);
+        }
+        assert_eq!(
+            legacy_error_type("no field 'nmae' on object"),
+            "ReferenceError"
+        );
+        assert_eq!(legacy_error_type("key 'b' not found"), "ReferenceError");
+        assert_eq!(
+            legacy_error_type("cannot convert '12x' to Int"),
+            "ValueError"
+        );
+        assert_eq!(legacy_error_type("division by zero"), "ArithmeticError");
+        assert_eq!(
+            legacy_error_type(&crate::semantics::index_out_of_bounds(3, "array", 3)),
+            "IndexError"
+        );
+        assert_eq!(legacy_error_type("something odd happened"), "RuntimeError");
     }
 
     #[test]
@@ -1318,7 +1483,7 @@ mod tests {
         assert_eq!(caught.message, "no field 'b' on object");
         assert_eq!(caught.hint.as_deref(), Some("available fields: a"));
         assert_eq!(caught.code, "E0013");
-        assert_eq!(caught.error_type, "RuntimeError");
+        assert_eq!(caught.error_type, "ReferenceError");
         let plain = caught_error_fields("assert_eq failed\n  left: 1\n  right: 2");
         assert_eq!(plain.message, "assert_eq failed\n  left: 1\n  right: 2");
         assert_eq!(plain.hint, None);
@@ -1349,7 +1514,7 @@ mod tests {
         );
         assert_eq!(
             legacy_error_type(&s::no_field("x", ["type"])),
-            "RuntimeError"
+            "ReferenceError"
         );
         assert_eq!(legacy_error_type(&s::immutable_reassign("x")), "TypeError");
         let timeout = format!(

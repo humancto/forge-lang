@@ -1,0 +1,8 @@
+// Every attempt fails: the last attempt's error is quoted, but the code is
+// the retry's
+let mut tries = 0
+retry 2 times {
+    tries += 1
+    let parts = [1, 2]
+    println(parts[tries + 5])
+}
