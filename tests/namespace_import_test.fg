@@ -1,8 +1,8 @@
 // namespace_import_test.fg — `import "path" as m` binds a read-only
 // namespace: an object of the module's top-level functions, variables,
-// variants and structs (plus `__module__`). The module runs once per
-// program, so the namespace shares state with every other import of it
-// (both engines).
+// types, variants, interfaces, structs and re-exports (plus `__module__`).
+// The module runs once per program, so the namespace shares state with
+// every other import of it (both engines).
 
 import "tests/parity/modules/namespace_geo.fg" as geo
 import "tests/parity/modules/shared_counter.fg" as counter
@@ -51,7 +51,8 @@ fn test_module_state_is_shared() {
 fn test_namespace_is_a_value() {
     assert_eq(geo.__module__, "tests/parity/modules/namespace_geo.fg")
     assert(has_key(geo, "add"))
-    assert(!has_key(geo, "Shape"))
+    // A `type` name is a member too: its description.
+    assert_eq(geo.Shape.variants, ["Circle", "Square", "Dot"])
     let call_add = fn(m) { return m.add(1, 1) }
     assert_eq(call_add(geo), 2)
 }

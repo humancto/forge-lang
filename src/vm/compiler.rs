@@ -79,6 +79,10 @@ pub struct Compiler {
     /// that names the importer did not ask for never leak into its globals.
     global_prefix: Option<String>,
     module_globals: HashSet<String>,
+    /// Names a module's top-level bare `import "path"`s bind, by resolved
+    /// path: read once when the module's global names are collected
+    /// ([`compile_module_with`]) and reused when the import is compiled.
+    wildcard_imports: HashMap<PathBuf, Vec<String>>,
     /// Source line currently being compiled. Top-level loops update this
     /// from `SpannedStmt` before each statement so any `emit` that passes
     /// `0` for the line picks up a real source span instead.
@@ -172,6 +176,7 @@ impl Compiler {
             base_dir: None,
             global_prefix: None,
             module_globals: HashSet::new(),
+            wildcard_imports: HashMap::new(),
             current_line: 0,
             current_col: 0,
             branch_overflow: false,
@@ -667,7 +672,10 @@ impl Compiler {
     }
 }
 
-/// Names a module defines at top level (and therefore exports).
+/// The names an imported module keeps under its private global prefix:
+/// what its top level defines (functions, variables, destructured names,
+/// types and variants) and what its imports bind (re-exports). Structs and
+/// interfaces are registered under their own name instead.
 fn module_top_level_names(program: &Program) -> HashSet<String> {
     let mut names = HashSet::new();
     for spanned in &program.statements {
@@ -675,8 +683,20 @@ fn module_top_level_names(program: &Program) -> HashSet<String> {
             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
                 names.insert(name.clone());
             }
+            Stmt::Destructure { pattern, .. } => match pattern {
+                DestructurePattern::Object(fields) => {
+                    names.extend(fields.iter().map(|(_, name)| name.clone()));
+                }
+                DestructurePattern::Array { items, rest } => {
+                    names.extend(items.iter().chain(rest.iter()).cloned());
+                }
+                DestructurePattern::Tuple(items) => names.extend(items.iter().cloned()),
+            },
             Stmt::TypeDef { name, variants } => {
                 names.insert(format!("__type_{}__", name));
+                if crate::semantics::type_name_is_value(name, variants) {
+                    names.insert(name.clone());
+                }
                 for variant in variants {
                     names.insert(variant.name.clone());
                 }
@@ -684,6 +704,7 @@ fn module_top_level_names(program: &Program) -> HashSet<String> {
             _ => {}
         }
     }
+    names.extend(crate::semantics::import_bindings(program));
     names
 }
 
@@ -777,6 +798,26 @@ pub fn compile_module_with(
     if let Some(prefix) = global_prefix {
         c.global_prefix = Some(prefix.to_string());
         c.module_globals = module_top_level_names(program);
+        // A bare `import "path"` binds the other module's names here; they
+        // are this module's names too (it can re-export them), so they need
+        // the prefix before any function referring to them is compiled.
+        for spanned in &program.statements {
+            if let Stmt::Import { path, names: None } = &spanned.stmt {
+                if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                    continue;
+                }
+                // Errors are reported when the import itself is compiled.
+                let Ok(resolved) = resolve_import_path(&c, path) else {
+                    continue;
+                };
+                let Ok(imported) = parse_import_program(path, &resolved) else {
+                    continue;
+                };
+                let names = import_export_names(&imported);
+                c.module_globals.extend(names.iter().cloned());
+                c.wildcard_imports.insert(resolved, names);
+            }
+        }
     }
     compile_top_level(&mut c, program)?;
     c.check_branches()?;
@@ -1251,15 +1292,17 @@ pub(crate) fn import_export_names(program: &Program) -> Vec<String> {
         .iter()
         .filter_map(|spanned| match &spanned.stmt {
             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => Some(vec![name.clone()]),
-            // Like the interpreter, `import "x"` brings in a module's ADT
-            // constructors and type metadata too.
+            // Like the interpreter, `import "x"` brings in a module's type
+            // names, ADT constructors and type metadata too.
             Stmt::TypeDef { name, variants } => Some(
-                variants
-                    .iter()
-                    .map(|variant| variant.name.clone())
+                crate::semantics::type_name_is_value(name, variants)
+                    .then(|| name.clone())
+                    .into_iter()
+                    .chain(variants.iter().map(|variant| variant.name.clone()))
                     .chain(std::iter::once(format!("__type_{}__", name)))
                     .collect(),
             ),
+            Stmt::InterfaceDef { name, .. } => Some(vec![name.clone()]),
             _ => None,
         })
         .flatten()
@@ -2730,6 +2773,11 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 compile_set_global_expr(c, &variant.name, constructor)?;
             }
 
+            // The type's name is a value too (its description), like a
+            // struct or interface name, so it can be imported.
+            if crate::semantics::type_name_is_value(name, variants) {
+                compile_set_global_expr(c, name, type_metadata_expr(name, variants))?;
+            }
             compile_set_global_expr(
                 c,
                 &format!("__type_{}__", name),
@@ -2863,14 +2911,26 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     Target::Global(_) | Target::Reused(_) => item_reg,
                 };
                 c.emit(encode_abc(OpCode::GetIndex, dst, parts_reg, idx_reg), 0);
+                // A module's top-level names are also its globals (what an
+                // importer reads), as for `let`.
+                let module_global = c.module_mode && c.scope_depth == 1;
                 match slot {
-                    Target::Fresh(_) => {}
+                    Target::Fresh(reg) => {
+                        if module_global {
+                            let name_idx = c.const_str(&c.global_name(targets[index]));
+                            c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                        }
+                    }
                     Target::Global(name) => {
                         let name_idx = c.const_str(&c.global_name(&name));
                         c.emit(encode_abx(OpCode::SetGlobal, item_reg, name_idx), 0);
                     }
                     Target::Reused(reg) => {
                         c.emit(encode_abc(OpCode::SetLocal, reg, item_reg, 0), 0);
+                        if module_global {
+                            let name_idx = c.const_str(&c.global_name(targets[index]));
+                            c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                        }
                     }
                 }
             }
@@ -3222,10 +3282,13 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     .iter()
                     .map(|n| (n.name.clone(), n.binding().to_string()))
                     .collect(),
-                None => import_export_names(&parse_import_program(path, &resolved)?)
-                    .into_iter()
-                    .map(|n| (n.clone(), n))
-                    .collect(),
+                None => match c.wildcard_imports.get(&resolved) {
+                    Some(names) => names.clone(),
+                    None => import_export_names(&parse_import_program(path, &resolved)?),
+                }
+                .into_iter()
+                .map(|n| (n.clone(), n))
+                .collect(),
             };
 
             // (resolved path, requested names or `false` for all, path as
