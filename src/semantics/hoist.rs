@@ -542,8 +542,13 @@ impl Free {
                 self.use_name(name);
                 self.bind(name);
             }
-            Pattern::Constructor { name, fields } => {
-                self.use_name(name);
+            Pattern::Constructor {
+                name,
+                fields,
+                namespace,
+            } => {
+                // `ns.Name(..)` reads the namespace, not a variable `Name`.
+                self.use_name(namespace.as_ref().unwrap_or(name));
                 for f in fields {
                     self.pattern(f);
                 }

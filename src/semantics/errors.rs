@@ -418,9 +418,11 @@ Fix: correct the name. To read a field that may be absent, use
         matches: |h| {
             starts_with_any(h, &["no field '", "no method '", "unknown method"])
                 || (h.starts_with("cannot call '") && h.contains("' on "))
-                // `semantics::no_module_member`, `not_a_namespace_struct`
+                // `semantics::no_module_member`, `not_a_namespace_struct`,
+                // `not_a_namespace_variant`
                 || (h.starts_with("module '") && h.contains("' has no member '"))
                 || (h.starts_with('\'') && h.ends_with("' is not a struct"))
+                || (h.starts_with('\'') && h.ends_with("' is not a variant"))
         },
     },
     ErrorCode {
@@ -1305,6 +1307,7 @@ mod tests {
             (s::no_field("nmae", ["name"]), "E0013"),
             (s::no_module_member("m.fg", "ad", ["add"]), "E0013"),
             (s::not_a_namespace_struct("m", "add"), "E0013"),
+            (s::not_a_namespace_variant("m", "add"), "E0013"),
             (s::namespace_of_builtin_module("math", "m"), "E0019"),
             (s::field_access("x", "Int"), "E0014"),
             (

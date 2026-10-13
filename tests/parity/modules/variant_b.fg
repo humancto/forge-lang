@@ -1,0 +1,2 @@
+// variant_a.fg's variant names on another type (`U`).
+type U = Item(Int) | Mark

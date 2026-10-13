@@ -480,9 +480,14 @@ pub enum Pattern {
     Wildcard,
     Literal(Expr),
     Binding(String),
+    /// `Name(fields...)`, or `ns.Name(fields...)` with `namespace` set
+    /// (after `import "m.fg" as ns`): a namespaced pattern matches only
+    /// values built by that namespace's member `Name`
+    /// (`semantics::namespaced_variant_matches`).
     Constructor {
         name: String,
         fields: Vec<Pattern>,
+        namespace: Option<String>,
     },
     /// `p1 | p2 | ...`: matches when any alternative matches; the first
     /// matching alternative supplies the bindings. The parser requires

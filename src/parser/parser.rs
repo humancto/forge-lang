@@ -1696,8 +1696,9 @@ impl Parser {
                 self.advance();
 
                 // A variant of a module namespace: `geo.Circle(r)`, `geo.Dot`
-                // (after `import "geo.fg" as geo`). Patterns match variants
-                // by name, so this is the constructor pattern `Circle(r)`.
+                // (after `import "geo.fg" as geo`). The namespace stays in
+                // the pattern: it matches only values that `geo.Circle`
+                // builds, not a same-named variant of another type.
                 if self.check(&Token::Dot) && self.namespaces.contains(&name) {
                     let receiver = self.note_prev(&name, Role::Ref);
                     self.advance();
@@ -1722,6 +1723,7 @@ impl Parser {
                     return Ok(Pattern::Constructor {
                         name: variant,
                         fields,
+                        namespace: Some(name),
                     });
                 }
 
@@ -1737,7 +1739,11 @@ impl Parser {
                         }
                     }
                     self.expect(Token::RParen)?;
-                    Ok(Pattern::Constructor { name, fields })
+                    Ok(Pattern::Constructor {
+                        name,
+                        fields,
+                        namespace: None,
+                    })
                 } else if self.or_alternative {
                     // The first alternative defines this name (checked by
                     // `parse_or_pattern`): it is the same variable.

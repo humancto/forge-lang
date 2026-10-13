@@ -646,6 +646,38 @@ impl VM {
 
                 Ok(Value::bool_val(true))
             }
+            "__forge_variant_pattern" => {
+                // (value, member, namespace, name): `namespace.name(..)` in a
+                // pattern, where `member` is `namespace.name`.
+                if args.len() != 4 {
+                    return Err(VMError::new(
+                        "__forge_variant_pattern() requires (value, member, namespace, name)",
+                    ));
+                }
+                let namespace = self.get_string_arg(&args, 2)?;
+                let name = self.get_string_arg(&args, 3)?;
+                let member = self.variant_member(&args[1]);
+                let field = |key: &str| {
+                    args[0]
+                        .as_obj()
+                        .and_then(|r| self.gc.get(r))
+                        .and_then(|o| match &o.kind {
+                            ObjKind::Object(map) => map.get(key).copied(),
+                            _ => None,
+                        })
+                        .and_then(|v| self.get_string(&v))
+                };
+                let (value_type, value_variant) = (field("__type__"), field("__variant__"));
+                let matched = crate::semantics::namespaced_variant_matches(
+                    &namespace,
+                    &name,
+                    member.as_ref().map(|(t, v)| (t.as_str(), v.as_str())),
+                    value_type.as_deref(),
+                    value_variant.as_deref(),
+                )
+                .map_err(|e| VMError::new(&e))?;
+                Ok(Value::bool_val(matched))
+            }
             "__forge_retry_count" => {
                 if args.len() != 1 {
                     return Err(VMError::new("__forge_retry_count() requires (count)"));
@@ -4308,6 +4340,25 @@ impl VM {
                 .get("__variant__")
                 .and_then(|value| self.get_string(value))
         })
+    }
+
+    /// The `(type, variant)` a namespace member constructs: a compiled ADT
+    /// constructor (`Chunk::adt_variant`), an interpreter one
+    /// (`adt:Type:Variant:n`) or a unit variant (an object holding only its
+    /// `__type__` and `__variant__`). `None` for anything else.
+    fn variant_member(&self, value: &Value) -> Option<(String, String)> {
+        let obj = self.gc.get(value.as_obj()?)?;
+        match &obj.kind {
+            ObjKind::Closure(closure) => closure.function.chunk.adt_variant.clone(),
+            ObjKind::Function(f) => f.chunk.adt_variant.clone(),
+            ObjKind::NativeFunction(nf) => crate::semantics::adt_constructor_parts(&nf.name)
+                .map(|(t, v)| (t.to_string(), v.to_string())),
+            ObjKind::Object(map) if map.len() == 2 => {
+                let text = |key: &str| map.get(key).and_then(|v| self.get_string(v));
+                Some((text("__type__")?, text("__variant__")?))
+            }
+            _ => None,
+        }
     }
 
     fn struct_marker_name(&self, value: &Value) -> Option<String> {

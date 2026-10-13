@@ -1,0 +1,23 @@
+// expect: [b 2, a 1, b mark, b 5, other, 4]
+// `ns.Variant(..)` patterns keep their namespace: two modules whose types
+// both have an `Item` variant never match each other's values; a
+// re-exported variant matches the type it was defined in; a bare
+// `Item(..)` still matches by name.
+import "tests/parity/modules/variant_a.fg" as a
+import "tests/parity/modules/variant_b.fg" as b
+import "tests/parity/modules/variant_reexport.fg" as r
+import { Item } from "tests/parity/modules/variant_b.fg"
+fn which(v) {
+    return match v {
+        a.Item(n) => "a " + str(n),
+        b.Item(n) => "b " + str(n),
+        a.Mark => "a mark",
+        b.Mark => "b mark",
+        _ => "other",
+    }
+}
+let bare = match a.Item(4) {
+    Item(n) => n,
+    _ => -1,
+}
+[which(b.Item(2)), which(a.Item(1)), which(b.Mark), which(r.Item(5)), which({__variant__: "Item", _0: 1}), bare]

@@ -2106,6 +2106,21 @@ fn namespace_imports_are_checked_against_the_module() {
             "module 'geo.fg' has no struct 'Pointt'".to_string()
         )]
     );
+    // A namespaced pattern naming no member of the namespace (the engines'
+    // E0013), at the member's position; field patterns are still typed.
+    let ds = check(
+        "import \"geo.fg\" as geo\nmatch geo.Dot {\n    geo.Circel(r) => println(r),\n    _ => println(0),\n}\n",
+        Edition::E2027,
+    );
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].code.as_str(), "T0008");
+    assert_eq!(ds[0].message, "module 'geo.fg' has no member 'Circel'");
+    assert_eq!(ds[0].help.as_deref(), Some("did you mean 'Circle'?"));
+    assert_eq!((ds[0].span.start.line, ds[0].span.start.col), (3, 9));
+    assert!(found(
+        "import \"geo.fg\" as geo\nmatch geo.Circle(1.0) {\n    geo.Circle(r) => println(r + 1.0),\n    geo.Dot => println(0),\n}\n"
+    )
+    .is_empty());
     // The namespace binding is immutable.
     let ds = found("import \"geo.fg\" as geo\ngeo.count = 3\n");
     assert_eq!(ds.len(), 1, "{ds:?}");
