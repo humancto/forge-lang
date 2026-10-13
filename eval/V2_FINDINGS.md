@@ -559,6 +559,25 @@ Suggested fix: let an object literal (or `Object`) be assignable to `Map<String,
 its values fit, or add an `Object<T>`/`{String: T}` annotation; state the rule in
 `llms.txt`.
 
+**Fixed:** `Object<T>` is the typed dictionary: an object (string keys, as every object)
+whose values are all `T`. `let ages: Object<Int> = { ada: 36 }`, a parsed JSON object, and
+`fn total(counts: Object<Int>)` all work; the checker checks an object literal's values
+against `T` (`T0001 ... declared as Object<Int> but assigned Object<String>`), types `o.k`,
+`o[k]` and `for k, v in o` as `T`, and checks `o.k = v`; under `--strict` and in edition 2027
+annotated boundaries check it at run time on both engines (`type error: argument 'counts'
+of 'total' must be Object<Int>, got Object`, the shared rule in `semantics::types` and the
+VM's `fits_vm`), and `Object<Float>` turns Int values into Floats. `Object<T>` was chosen
+over `{String: T}` because it extends the existing `Object` annotation, already parses as a
+generic everywhere (formatter, LSP, MCP), has no key type that could only ever be `String`,
+and reads unambiguously next to `Map<K, V>`. `Map<String, T>` stays the `Map` value type (an
+object is not a Map, so assigning one stays T0001, now with the help `annotate it
+Object<Int> ..., or build a Map with map()`). MCP tool parameters typed `Object<T>` are
+JSON objects with `additionalProperties` of `T`'s schema; `llms.txt` lists `Object<T>` in
+the annotation syntax and the MCP parameter types. Tests: `tests/typed_objects_test.fg`,
+`tests/edition2027/typed_objects_test.fg` (both engines),
+`typechecker::tests::typed_objects_check_their_values`, `semantics::types` and
+`typechecker::types` unit tests, the MCP schema test.
+
 ### 23. HTTP client errors
 
 `http.get(url, { timeout: 1 })` against a server that answers after 2 s and `http.get` of

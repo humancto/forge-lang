@@ -1494,7 +1494,8 @@ impl<'a> Checker<'a> {
                 let it = self.cx.resolve(&it);
                 let (t1, t2) = match (&it, var2.is_some()) {
                     (Ty::Array(e) | Ty::Set(e), _) => (*e.clone(), Ty::Any),
-                    (Ty::Object, _) | (Ty::Named(..), _) => (Ty::String, Ty::Any),
+                    (Ty::ObjectOf(v), true) => (Ty::String, *v.clone()),
+                    (Ty::Object | Ty::ObjectOf(_), _) | (Ty::Named(..), _) => (Ty::String, Ty::Any),
                     (Ty::Map(k, v), true) => (*k.clone(), *v.clone()),
                     (Ty::Map(k, v), false) => (Ty::Tuple(vec![*k.clone(), *v.clone()]), Ty::Any),
                     _ => (Ty::Any, Ty::Any),
@@ -1822,7 +1823,11 @@ impl<'a> Checker<'a> {
             Expr::FieldAccess { object, field } => {
                 let ot = self.infer(object, None);
                 let ot = self.cx.resolve(&ot);
-                let declared = self.struct_field(&ot, field);
+                let declared = match &ot {
+                    // `Object<T>`: every field is a `T`.
+                    Ty::ObjectOf(v) => Some(*v.clone()),
+                    _ => self.struct_field(&ot, field),
+                };
                 let vt = self.infer(value, declared.as_ref());
                 if let Some(d) = declared {
                     let span = self.expr_span_or(value, self.name_span(field, NameClass::Field));
@@ -1836,9 +1841,21 @@ impl<'a> Checker<'a> {
                 self.check_mutable_root(object);
             }
             Expr::Index { object, index } => {
-                self.infer(object, None);
+                let ot = self.infer(object, None);
                 self.infer(index, None);
-                self.infer(value, None);
+                match self.cx.resolve(&ot) {
+                    // `o[key] = v` on an `Object<T>`: `v` must be a `T`.
+                    Ty::ObjectOf(d) => {
+                        let vt = self.infer(value, Some(&d));
+                        let span = self.expr_span(value);
+                        self.expect_assignable(&d, &vt, span, |e, a| {
+                            format!("type mismatch: a value of Object<{}> assigned {}", e, a)
+                        });
+                    }
+                    _ => {
+                        self.infer(value, None);
+                    }
+                }
                 self.check_mutable_root(object);
             }
             other => {
@@ -2232,7 +2249,11 @@ impl<'a> Checker<'a> {
                         let st = st.clone();
                         self.check_interface_satisfaction(&st, iface, span)
                     }
-                    t if t.is_unknown() || matches!(t, Ty::Object | Ty::Never) => true,
+                    t if t.is_unknown()
+                        || matches!(t, Ty::Object | Ty::ObjectOf(_) | Ty::Never) =>
+                    {
+                        true
+                    }
                     _ => {
                         let m = msg(&e, &a);
                         self.simple(code, span, m);
@@ -2247,8 +2268,18 @@ impl<'a> Checker<'a> {
             return true;
         }
         self.cx.rollback(snap);
-        let m = msg(&self.cx.finalize(&e), &self.cx.finalize(&a));
-        self.simple(code, span, m);
+        let (e, a) = (self.cx.finalize(&e), self.cx.finalize(&a));
+        let m = msg(&e, &a);
+        // A `Map` is its own value type: an object literal or parsed JSON
+        // object never is one (V2 finding 22).
+        let help = match (&e, &a) {
+            (Ty::Map(_, v), Ty::Object | Ty::ObjectOf(_)) => Some(format!(
+                "an object is not a Map: annotate it Object<{}> (an object whose values are {}), or build a Map with map()",
+                v, v
+            )),
+            _ => None,
+        };
+        self.report(code, span, m, help, Vec::new());
         false
     }
 
@@ -2283,6 +2314,9 @@ impl<'a> Checker<'a> {
                 Box::new(self.upcast_to_interfaces(k1, k2, span)),
                 Box::new(self.upcast_to_interfaces(v1, v2, span)),
             ),
+            (Ty::ObjectOf(x), Ty::ObjectOf(y)) => {
+                Ty::ObjectOf(Box::new(self.upcast_to_interfaces(x, y, span)))
+            }
             (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => Ty::Tuple(
                 xs.iter()
                     .zip(ys)
@@ -2412,10 +2446,51 @@ impl<'a> Checker<'a> {
                 Ty::array(elem.or(expected_elem).unwrap_or(Ty::Any))
             }
             Expr::Object(fields) => {
+                // Against `Object<T>`, the values are checked like the
+                // elements of an array literal against `[T]`: the first
+                // value that does not fit decides the type, so the
+                // mismatch is reported against the declaration.
+                let expected_value = match expected.map(|e| self.cx.resolve(e)) {
+                    Some(Ty::ObjectOf(v)) => Some(*v),
+                    Some(Ty::Option(inner)) => match *inner {
+                        Ty::ObjectOf(v) => Some(*v),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(expected_value) = expected_value else {
+                    for (_, v) in fields {
+                        self.infer(v, None);
+                    }
+                    return Ty::Object;
+                };
+                let mut joined: Option<Ty> = None;
+                let mut misfit: Option<Ty> = None;
                 for (_, v) in fields {
-                    self.infer(v, None);
+                    let t = match v {
+                        // `{...other}`: the values of `other`.
+                        Expr::Spread(inner) => match self.infer(inner, None) {
+                            Ty::ObjectOf(v) => *v,
+                            _ => Ty::Any,
+                        },
+                        _ => self.infer(v, Some(&expected_value)),
+                    };
+                    if misfit.is_none() {
+                        let snap = self.cx.snapshot();
+                        if !self.cx.assign(&expected_value, &t) {
+                            self.cx.rollback(snap);
+                            misfit = Some(t.clone());
+                        }
+                    }
+                    joined = Some(match joined {
+                        None => t,
+                        Some(prev) => self.cx.join(&prev, &t),
+                    });
                 }
-                Ty::Object
+                if let Some(bad) = misfit {
+                    return Ty::ObjectOf(Box::new(bad));
+                }
+                Ty::ObjectOf(Box::new(joined.unwrap_or(expected_value)))
             }
             Expr::Tuple(items) => Ty::Tuple(items.iter().map(|i| self.infer(i, None)).collect()),
             Expr::BinOp { left, op, right } => self.infer_binop(expr, left, op, right),
@@ -2438,6 +2513,7 @@ impl<'a> Checker<'a> {
                     (Ty::Array(e), _) => *e,
                     (Ty::String, _) => Ty::String,
                     (Ty::Map(_, v), _) => *v,
+                    (Ty::ObjectOf(v), _) => *v,
                     (Ty::Tuple(items), _) => match index.as_ref() {
                         Expr::Int(i) => usize::try_from(*i)
                             .ok()
@@ -2861,6 +2937,8 @@ impl<'a> Checker<'a> {
                     },
                 }
             }
+            // `Object<T>`: every field is a `T`.
+            Ty::ObjectOf(v) => *v.clone(),
             _ => Ty::Any,
         };
         self.record_field_type(field, &ty);
@@ -3235,14 +3313,16 @@ impl<'a> Checker<'a> {
                 let t = args.first().map(|a| self.infer(a, None));
                 match t.map(|t| self.cx.resolve(&t)) {
                     Some(Ty::Map(k, _)) => Ty::array(*k),
-                    Some(Ty::Object) | Some(Ty::Named(..)) => Ty::array(Ty::String),
+                    Some(Ty::Object | Ty::ObjectOf(_)) | Some(Ty::Named(..)) => {
+                        Ty::array(Ty::String)
+                    }
                     _ => Ty::array(Ty::Any),
                 }
             }
             "values" => {
                 let t = args.first().map(|a| self.infer(a, None));
                 match t.map(|t| self.cx.resolve(&t)) {
-                    Some(Ty::Map(_, v)) => Ty::array(*v),
+                    Some(Ty::Map(_, v)) | Some(Ty::ObjectOf(v)) => Ty::array(*v),
                     _ => Ty::array(Ty::Any),
                 }
             }
@@ -3604,7 +3684,7 @@ impl<'a> Checker<'a> {
 
         // Builtin used as a method: `xs.map(f)` is `map(xs, f)`.
         if let Some(sig) = builtins::function(method).cloned() {
-            if !matches!(ot, Ty::Object | Ty::Named(..))
+            if !matches!(ot, Ty::Object | Ty::ObjectOf(_) | Ty::Named(..))
                 || crate::builtins_registry::global(method).is_some()
             {
                 let subst = self.instantiate(&sig);
@@ -3674,7 +3754,7 @@ fn operand_of(ty: &Ty) -> Option<crate::semantics::Operand<'static>> {
         Ty::Bool => Operand::Bool,
         Ty::Null => Operand::Null,
         // A struct instance is an object at run time.
-        Ty::Named(..) | Ty::Object => Operand::Other("Object"),
+        Ty::Named(..) | Ty::Object | Ty::ObjectOf(_) => Operand::Other("Object"),
         other => Operand::Other(other.runtime_name()?),
     })
 }

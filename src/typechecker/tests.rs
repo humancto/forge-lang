@@ -1888,6 +1888,80 @@ fn namespace_imports_are_checked_against_the_module() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// V2 finding 22: `Object<T>` is a typed dictionary that object literals
+// and JSON objects satisfy; `Map<K, V>` stays the Map value type, and
+// annotating an object as one says how to fix it.
+#[test]
+fn typed_objects_check_their_values() {
+    let fine = "let ages: Object<Int> = { ada: 36, alan: 41 }\n\
+                let n: Int = ages.ada + ages[\"alan\"]\n\
+                let mut prices: Object<Float> = { a: 1, b: 2.5 }\n\
+                prices.c = 3\n\
+                prices[\"d\"] = 4.5\n\
+                let parsed: Object<[String]> = json.parse(\"{}\")\n\
+                let any: Object = ages\n\
+                let empty: Object<String> = {}\n\
+                let maybe: ?Object<Int> = { x: 1 }\n\
+                fn total(c: Object<Int>) -> Int {\n    let mut s = 0\n    for k, v in c {\n        s = s + v\n    }\n    return s\n}\n\
+                println(n, total(ages), total({ z: 1 }), parsed, any, empty, maybe, prices)\n";
+    assert!(errors_for(fine).is_empty(), "{:?}", errors_for(fine));
+
+    let found = |src: &str| -> Vec<(Code, String)> {
+        errors_for(src)
+            .into_iter()
+            .map(|d| (d.code, d.message))
+            .collect()
+    };
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1, b: \"x\" }"),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: 'c' declared as Object<Int> but assigned Object<String>".to_string()
+        )]
+    );
+    assert_eq!(
+        found("fn f(c: Object<Int>) { return c }\nprintln(f({ a: true }))"),
+        vec![(
+            Code::ArgumentType,
+            "argument 1 of 'f': expected Object<Int> but got Object<Bool>".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1 }\nlet s: String = c.a"),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: 's' declared as String but assigned Int".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let mut c: Object<Int> = { a: 1 }\nc.b = \"x\""),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: field 'b' is Int but assigned String".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let mut c: Object<Int> = {}\nc[\"k\"] = [1]").len(),
+        1
+    );
+    // A Map annotation on an object: the hint names `Object<T>`.
+    let ds = errors_for("let c: Map<String, Int> = { a: 1 }");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(
+        ds[0].message,
+        "type mismatch: 'c' declared as Map<String, Int> but assigned Object"
+    );
+    assert_eq!(
+        ds[0].help.as_deref(),
+        Some("an object is not a Map: annotate it Object<Int> (an object whose values are Int), or build a Map with map()")
+    );
+    // An `Object<T>` is not a Map either.
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1 }\nlet m: Map<String, Int> = c").len(),
+        1
+    );
+}
+
 #[test]
 fn imports_are_not_resolved_when_skipped() {
     let ds = analyze(

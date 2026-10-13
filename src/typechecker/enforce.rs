@@ -98,6 +98,10 @@ impl Instrumenter<'_> {
             Ty::Array(e) => format!("[{}]", inner(e)),
             Ty::Set(e) => format!("Set<{}>", inner(e)),
             Ty::Map(k, v) => format!("Map<{},{}>", inner(k), inner(v)),
+            Ty::ObjectOf(v) => match self.canonical(v) {
+                Some(v) => format!("Object<{}>", v),
+                None => "Object".into(),
+            },
             Ty::Result(o, e) => format!("Result<{},{}>", inner(o), inner(e)),
             Ty::Option(t) => format!("?{}", self.canonical(t)?),
             Ty::Tuple(items) => format!(

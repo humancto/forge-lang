@@ -221,6 +221,13 @@ impl VM {
             (T::Map(k, v), Some(ObjKind::Map(pairs))) => pairs
                 .iter()
                 .all(|(a, b)| self.fits_vm(*a, k, depth + 1) && self.fits_vm(*b, v, depth + 1)),
+            (T::ObjectOf(v), Some(ObjKind::Object(map))) => {
+                self.object_tag(map) != Some("Option")
+                    && map
+                        .iter()
+                        .filter(|(k, _)| crate::semantics::types::is_object_value_key(k))
+                        .all(|(_, x)| self.fits_vm(*x, v, depth + 1))
+            }
             (T::Tuple(types), Some(ObjKind::Tuple(items))) => {
                 types.len() == items.len()
                     && items
@@ -285,6 +292,7 @@ impl VM {
                 ObjKind::Array(items) => Some(ObjKind::Array(items.clone())),
                 ObjKind::Tuple(items) => Some(ObjKind::Tuple(items.clone())),
                 ObjKind::Map(pairs) => Some(ObjKind::Map(pairs.clone())),
+                ObjKind::Object(map) => Some(ObjKind::Object(map.clone())),
                 ObjKind::ResultOk(v) => Some(ObjKind::ResultOk(*v)),
                 ObjKind::ResultErr(v) => Some(ObjKind::ResultErr(*v)),
                 _ => None,
@@ -337,6 +345,28 @@ impl VM {
                         .map(|((k, _), v)| (*k, v))
                         .collect(),
                 )
+            }
+            (T::ObjectOf(vt), Some(ObjKind::Object(map))) => {
+                let mut map = map;
+                let keys: Vec<String> = map
+                    .keys()
+                    .filter(|k| crate::semantics::types::is_object_value_key(k))
+                    .cloned()
+                    .collect();
+                let mut changed = false;
+                for k in keys {
+                    let Some(v) = map.get(&k).copied() else {
+                        continue;
+                    };
+                    if let Some(w) = self.widen_vm(v, vt, depth + 1) {
+                        changed = true;
+                        map.insert(k, w);
+                    }
+                }
+                if !changed {
+                    return None;
+                }
+                ObjKind::Object(map)
             }
             (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => {
                 ObjKind::ResultOk(self.widen_vm(v, ok, depth + 1)?)
@@ -394,6 +424,10 @@ impl VM {
             (T::Map(_, vt), Some(ObjKind::Map(pairs))) => {
                 pairs.iter().any(|(_, v)| self.widens_vm(*v, vt, depth + 1))
             }
+            (T::ObjectOf(vt), Some(ObjKind::Object(map))) => map
+                .iter()
+                .filter(|(k, _)| crate::semantics::types::is_object_value_key(k))
+                .any(|(_, v)| self.widens_vm(*v, vt, depth + 1)),
             (T::Result(ok, _), Some(ObjKind::ResultOk(v))) => self.widens_vm(*v, ok, depth + 1),
             (T::Result(_, err), Some(ObjKind::ResultErr(v))) => self.widens_vm(*v, err, depth + 1),
             (T::Option(inner), _) => match self.option_parts(&value) {

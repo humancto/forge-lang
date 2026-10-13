@@ -13,9 +13,13 @@
 //!
 //! ```text
 //! T := Any | Int | Float | String | Bool | Null | Object | Fn
-//!    | [T] | ?T | Set<T> | Map<T, T> | Result<T, T> | (T, ...)
+//!    | [T] | ?T | Set<T> | Map<T, T> | Object<T> | Result<T, T> | (T, ...)
 //!    | Union<T, ...> | Named:Name
 //! ```
+//!
+//! `Object<T>` is a string-keyed object (an object literal, parsed JSON)
+//! whose every value fits `T`; internal `__` keys (`__type__`, ...) are not
+//! values. `Map<K, V>` is the `Map` value type, never an object.
 
 use crate::interpreter::Value;
 use std::cell::RefCell;
@@ -36,6 +40,8 @@ pub enum RuntimeType {
     Option(Box<RuntimeType>),
     Set(Box<RuntimeType>),
     Map(Box<RuntimeType>, Box<RuntimeType>),
+    /// `Object<T>`: an object whose values all fit `T`.
+    ObjectOf(Box<RuntimeType>),
     Result(Box<RuntimeType>, Box<RuntimeType>),
     Tuple(Vec<RuntimeType>),
     Union(Vec<RuntimeType>),
@@ -67,6 +73,7 @@ impl std::fmt::Display for RuntimeType {
             RuntimeType::Option(t) => write!(f, "?{}", t),
             RuntimeType::Set(t) => write!(f, "Set<{}>", t),
             RuntimeType::Map(k, v) => write!(f, "Map<{}, {}>", k, v),
+            RuntimeType::ObjectOf(v) => write!(f, "Object<{}>", v),
             RuntimeType::Result(o, e) => write!(f, "Result<{}, {}>", o, e),
             RuntimeType::Tuple(items) => {
                 write!(f, "(")?;
@@ -155,6 +162,7 @@ fn parse_at(c: &[char], pos: &mut usize, depth: usize) -> Result<RuntimeType, St
         };
         return match word.as_str() {
             "Set" if args.len() == 1 => Ok(RuntimeType::Set(Box::new(args.remove(0)))),
+            "Object" if args.len() == 1 => Ok(RuntimeType::ObjectOf(Box::new(args.remove(0)))),
             "Map" => {
                 let (k, v) = two(&mut args)?;
                 Ok(RuntimeType::Map(Box::new(k), Box::new(v)))
@@ -195,6 +203,18 @@ pub fn parse_cached(src: &str) -> Result<Rc<RuntimeType>, String> {
     Ok(ty)
 }
 
+/// The values of an object that `Object<T>` constrains: every field except
+/// the internal `__` ones (`__type__`, `__variant__`, `__module__`).
+pub fn is_object_value_key(key: &str) -> bool {
+    !key.starts_with("__")
+}
+
+fn object_values(map: &indexmap::IndexMap<String, Value>) -> impl Iterator<Item = &Value> {
+    map.iter()
+        .filter(|(k, _)| is_object_value_key(k))
+        .map(|(_, v)| v)
+}
+
 fn type_tag(map: &indexmap::IndexMap<String, Value>) -> Option<&str> {
     match map.get("__type__") {
         Some(Value::String(t)) => Some(t),
@@ -231,6 +251,10 @@ pub fn fits(value: &Value, ty: &RuntimeType) -> bool {
         },
         T::Map(k, v) => match value {
             Value::Map(pairs) => pairs.iter().all(|(a, b)| fits(a, k) && fits(b, v)),
+            _ => false,
+        },
+        T::ObjectOf(v) => match value {
+            Value::Object(map) => object_values(map).all(|x| fits(x, v)),
             _ => false,
         },
         T::Tuple(items) => match value {
@@ -322,6 +346,21 @@ pub fn widen(value: &Value, ty: &RuntimeType) -> Option<Value> {
                     .collect(),
             ))
         }
+        (T::ObjectOf(vt), Value::Object(map)) => {
+            let changed: Vec<(String, Value)> = map
+                .iter()
+                .filter(|(k, _)| is_object_value_key(k))
+                .filter_map(|(k, v)| widen(v, vt).map(|w| (k.clone(), w)))
+                .collect();
+            if changed.is_empty() {
+                return None;
+            }
+            let mut map = map.clone();
+            for (k, v) in changed {
+                map.insert(k, v);
+            }
+            Some(Value::Object(map))
+        }
         (T::Result(ok, _), Value::ResultOk(v)) => {
             widen(v, ok).map(|v| Value::ResultOk(Box::new(v)))
         }
@@ -356,7 +395,7 @@ pub fn mentions_float(ty: &RuntimeType) -> bool {
     match ty {
         T::Float => true,
         T::Array(t) | T::Option(t) => mentions_float(t),
-        T::Map(_, v) => mentions_float(v),
+        T::Map(_, v) | T::ObjectOf(v) => mentions_float(v),
         T::Result(o, e) => mentions_float(o) || mentions_float(e),
         T::Tuple(items) | T::Union(items) => items.iter().any(mentions_float),
         T::Any
@@ -513,6 +552,12 @@ mod tests {
             RuntimeType::Union(vec![RuntimeType::Int, RuntimeType::Named("Point".into())])
         );
         assert_eq!(t("(Int, String)").to_string(), "(Int, String)");
+        assert_eq!(
+            t("Object<[Int]>"),
+            RuntimeType::ObjectOf(Box::new(RuntimeType::Array(Box::new(RuntimeType::Int))))
+        );
+        assert_eq!(t("Object<?Float>").to_string(), "Object<?Float>");
+        assert!(parse("Object<Int, Int>").is_err());
         assert!(parse("Strin").is_err());
         assert!(parse("[Int").is_err());
         assert!(parse("Int extra").is_err());
@@ -545,7 +590,39 @@ mod tests {
             ),
             (point.clone(), "Named:Point", true),
             (point.clone(), "Named:Other", false),
-            (point, "Object", true),
+            (point.clone(), "Object", true),
+            (point, "Object<Int>", true),
+            (
+                Value::Object(
+                    [
+                        ("a".to_string(), Value::Int(1)),
+                        ("b".to_string(), Value::Int(2)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                "Object<Int>",
+                true,
+            ),
+            (
+                Value::Object(
+                    [
+                        ("a".to_string(), Value::Int(1)),
+                        ("b".to_string(), Value::String("x".into())),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                "Object<Int>",
+                false,
+            ),
+            (Value::Object(Default::default()), "Object<String>", true),
+            (Value::Map(vec![]), "Object<Int>", false),
+            (
+                Value::Object([("a".to_string(), Value::Int(1))].into_iter().collect()),
+                "Map<String, Int>",
+                false,
+            ),
             (
                 Value::ResultErr(Box::new(Value::String("e".into()))),
                 "Result<Int, String>",

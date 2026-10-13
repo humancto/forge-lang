@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn keeps_type_annotations_intact() {
-        let src = "let f: fn(Int, String) -> Bool = g\nlet o: Option<Option<Int>> = None\nlet t: (Int, String) = (1, \"a\")\n";
+        let src = "let f: fn(Int, String) -> Bool = g\nlet o: Option<Option<Int>> = None\nlet t: (Int, String) = (1, \"a\")\nlet c: Object<[Int]> = { a: [1] }\n";
         assert_eq!(format_source(src), src);
         assert_eq!(
             format_source("let f:fn(Int,String)->Bool=g\n"),
