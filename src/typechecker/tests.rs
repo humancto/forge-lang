@@ -1994,3 +1994,60 @@ fn structs_fit_interfaces_inside_generic_types() {
         w
     );
 }
+
+// V3 findings 8 and 9: a `type` name can be imported and used in
+// annotations, and a name a module imports (a re-export) is checked
+// against its definition in the module that defines it.
+#[test]
+fn imported_types_and_reexports_are_checked() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_reexports_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(dir.join("pkg")).expect("temp dir");
+    std::fs::write(
+        dir.join("pkg/core.fg"),
+        "fn twice(x: Int) -> Int { return x * 2 }\nstruct Pt { x: Int }\ntype Tok = Num(Int) | End\n",
+    )
+    .expect("write module");
+    std::fs::write(
+        dir.join("pkg/lib.fg"),
+        "import { twice as double, Pt, Tok, Num, End } from \"core.fg\"\nfn quad(x: Int) -> Int { return double(double(x)) }\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    let check = |source: &str, edition| {
+        analyze(
+            source,
+            &CheckOptions {
+                file: Some(main.clone()),
+                edition: Some(edition),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("parses")
+        .diagnostics
+    };
+    let clean = "import { Tok, Num, End } from \"pkg/core.fg\"\n\
+                 import { double, quad, Pt } from \"pkg/lib.fg\"\n\
+                 import \"pkg/lib.fg\" as lib\n\
+                 fn show(t: Tok) -> String {\n    return match t {\n        Num(n) => str(n),\n        End => \"end\",\n    }\n}\n\
+                 let p: Pt = lib.Pt { x: 1 }\n\
+                 println(show(Num(double(2))) + str(quad(1)) + str(p.x))\n";
+    for edition in [Edition::E2026, Edition::E2027] {
+        let ds = check(clean, edition);
+        assert!(ds.is_empty(), "{edition:?}: {ds:?}");
+    }
+    // The re-exported function keeps its signature (under the alias).
+    let ds = check(
+        "import { double } from \"pkg/lib.fg\"\nprintln(double(\"x\"))\n",
+        Edition::E2027,
+    );
+    assert_eq!(
+        ds.iter().map(|d| d.code.as_str()).collect::<Vec<_>>(),
+        vec!["T0002"],
+        "{ds:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
