@@ -3994,7 +3994,7 @@ impl VM {
                 let source = std::fs::read_to_string(&checked)
                     .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
 
-                let program = crate::typechecker::prepare_module(&source, &path, &file_path)
+                let program = crate::typechecker::prepare_module(&source, path, &file_path)
                     .map_err(|e| VMError::new(&e))?;
 
                 // Shared cycle detection (runtime/imports.rs).
