@@ -568,6 +568,45 @@ fn narrowing_and_right_operand_after_not_null() {
 }
 
 #[test]
+fn narrowing_false_or_proves_both_negations() {
+    // `if best == null || v < best { return v }`: afterwards best is set.
+    for src in [
+        "fn f(best: ?Int, v: Int) -> Int {\n  if best == null || v < best {\n    return v\n  }\n  return best\n}",
+        "fn f(best: ?Int, v: Int) -> Int {\n  if best == null || v < best {\n    return v\n  } else {\n    return best\n  }\n}",
+        "fn f(best: ?Int) -> Int {\n  if !(best != null) { return 0 }\n  return best\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.is_empty(),
+            "{:?}: {:?}",
+            src,
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn narrowing_false_and_proves_nothing() {
+    // The else of `x != null && y != null` knows neither is null nor set:
+    // `x` stays `?Int` (it used to become Null: `x + 1` there was a false
+    // certain error, and this assignment passed).
+    let src = "fn f(x: ?Int, y: ?Int) -> Int {\n  if x != null && y != null {\n    return x + y\n  } else {\n    let z: Null = x\n    return 0\n  }\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.len() == 1 && w[0].message.contains("type mismatch"),
+        "{:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+    let src = "fn f(x: ?Int, y: ?Int) -> Int {\n  if x != null && y != null {\n    return 0\n  }\n  return x\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.iter().any(|w| w.message.contains("return type mismatch")),
+        "{:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn narrowing_operands_stay_sound() {
     // `x == null && x > 3`, `x != null || x > 3`: x is null there, a
     // certain run-time error.
