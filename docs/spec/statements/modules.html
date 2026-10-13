@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
+            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -187,22 +187,35 @@
 <p>To import all top-level definitions from another Forge source file:</p>
 <pre><code class="language-forge">import "utils.fg"
 </code></pre>
-<p>The import path is a string literal specifying the file to load. The interpreter resolves the path relative to the current working directory and checks the following locations in order:</p>
+<p>The import path is a string literal specifying the file to load. It is resolved in this order:</p>
 <ol>
-<li><code>{path}</code> – the exact path as given</li>
-<li><code>{path}.fg</code> – with the <code>.fg</code> extension appended</li>
-<li><code>forge_modules/{path}/main.fg</code> – in the <code>forge_modules</code> directory</li>
+<li>relative to the directory of the importing file;</li>
+<li>relative to the current working directory;</li>
+<li>as an installed package: <code>forge_modules/{path}/main.fg</code>, <code>forge_modules/{path}.fg</code>, <code>forge_modules/{path}/src/main.fg</code>.</li>
 </ol>
-<p>If no file is found at any of these locations, a runtime error is produced.</p>
+<p>The <code>.fg</code> extension is optional. If no file is found, the import fails with error <code>E0019</code>.</p>
 <h2 id="import-semantics"><a class="header" href="#import-semantics">Import Semantics</a></h2>
-<p>When a file is imported, the following steps occur:</p>
+<p>The first time a program imports a file:</p>
 <ol>
-<li>The source file is read and parsed.</li>
-<li>A <strong>new interpreter instance</strong> is created.</li>
-<li>The imported file is executed in the new interpreter.</li>
-<li>Top-level definitions (<code>fn</code> and <code>let</code> bindings) are copied into the importing file’s scope.</li>
+<li>The source file is read, parsed and (from edition 2027) type-checked.</li>
+<li>Its top-level statements run once, in a context of their own.</li>
+<li>The module is remembered for the rest of the program, by its canonical path.</li>
 </ol>
-<p>Importantly, each import creates a fresh interpreter. Side effects in the imported file (such as printing) occur during import. The imported file does not share mutable state with the importing file.</p>
+<p>Each <code>import</code> statement then binds names from the module: every top-level definition (<code>fn</code>, <code>let</code>, <code>struct</code>, <code>type</code> and its variants, <code>impl</code> methods) for <code>import "file.fg"</code>, or the listed names for a selective import. Importing a file that already ran — from the same file, from another module, or with <code>import "file.fg"</code> after <code>import { f } from "file.fg"</code> — binds names again but does not run the module again, so every importer shares the module’s state:</p>
+<pre><code class="language-forge">// counter.fg
+let mut count = 0
+fn bump() {
+    count = count + 1
+    return count
+}
+</code></pre>
+<pre><code class="language-forge">// main.fg
+import { bump } from "counter.fg"
+import { report } from "stats.fg"   // stats.fg also imports counter.fg
+say bump()                          // 1
+say report()                        // sees the same counter
+</code></pre>
+<p>A <code>let</code> binding is copied when it is imported: the importer gets its value at the time of the import. Functions read the module’s current state.</p>
 <pre><code class="language-forge">// utils.fg
 fn double(x) { x * 2 }
 fn triple(x) { x * 3 }
@@ -221,7 +234,16 @@ say double(5)       // 10
 say PI              // 3.14159
 // triple is NOT imported
 </code></pre>
-<p>Only the listed names are copied into the current scope.</p>
+<p>Only the listed names are bound in the current scope. A name the module does not define is error <code>E0019</code>.</p>
+<h3 id="renaming-with-as"><a class="header" href="#renaming-with-as">Renaming with <code>as</code></a></h3>
+<p><code>name as alias</code> binds an imported function or variable under another name, for example when two modules export the same name:</p>
+<pre><code class="language-forge">import { name as user_name } from "user.fg"
+import { name as team_name } from "team.fg"
+import { sqrt as root } from "math"
+say user_name()
+say root(16)        // 4.0
+</code></pre>
+<p>Only functions and variables can be renamed. Structs, <code>type</code> definitions, their variants and interfaces keep their name — their values, methods and <code>match</code> patterns refer to it — so <code>import { Point as P } from "geometry.fg"</code> is error <code>E0019</code>. <code>as</code> is not available in native imports (<code>import native "lib" as name</code> names the whole library instead).</p>
 <h2 id="built-in-modules"><a class="header" href="#built-in-modules">Built-in Modules</a></h2>
 <p>Forge’s standard library modules (<code>math</code>, <code>fs</code>, <code>io</code>, <code>crypto</code>, <code>db</code>, <code>pg</code>, <code>env</code>, <code>json</code>, <code>regex</code>, <code>log</code>, <code>term</code>, <code>http</code>, <code>csv</code>, <code>exec</code>, <code>time</code>) are automatically available without import. Attempting to <code>import</code> a built-in module name produces an error with guidance:</p>
 <pre><code class="language-forge">import "math"
@@ -246,16 +268,19 @@ let c = get_config()
 say c.debug                 // true
 </code></pre>
 <h2 id="circular-imports"><a class="header" href="#circular-imports">Circular Imports</a></h2>
-<p>Forge does not detect or prevent circular imports. A circular import chain will cause infinite recursion and a stack overflow. It is the programmer’s responsibility to avoid circular dependencies.</p>
+<p>A module that imports itself, directly or through other modules, is error <code>E0019</code> with the chain:</p>
+<pre><code>circular import: a.fg -&gt; b.fg -&gt; a.fg
+</code></pre>
+<p>Move the shared code into a third module to break the cycle.</p>
 <h2 id="no-namespacing"><a class="header" href="#no-namespacing">No Namespacing</a></h2>
-<p>Imported definitions are placed directly into the importing file’s scope. There is no namespace or module prefix for file imports. If two imported files define the same name, the later import overwrites the earlier one.</p>
-<pre><code class="language-forge">import "a.fg"       // defines fn helper()
-import "b.fg"       // also defines fn helper() -- overwrites a.fg's version
+<p>Imported definitions are placed directly into the importing file’s scope. There is no namespace or module prefix for file imports. If two imported files define the same name, the later import overwrites the earlier one; import one of them under another name with <code>as</code> to keep both.</p>
+<pre><code class="language-forge">import "a.fg"                              // defines fn helper()
+import { helper as b_helper } from "b.fg"  // b.fg's helper, renamed
 </code></pre>
 <h2 id="no-export-keyword"><a class="header" href="#no-export-keyword">No Export Keyword</a></h2>
 <p>Forge does not have an explicit <code>export</code> keyword. All top-level <code>fn</code> and <code>let</code> bindings in a file are automatically available for import by other files.</p>
 <h2 id="re-imports"><a class="header" href="#re-imports">Re-Imports</a></h2>
-<p>Importing the same file multiple times re-executes it each time. There is no import caching or module singleton behavior for file imports.</p>
+<p>A file runs once per program. Importing it again binds its names again (for <code>let</code> bindings, their current values) without re-running its top-level code. The REPL keeps imported modules for the whole session; restart it to load a changed file. An HTTP request handler that imports a file runs it in that request’s own isolated copy of the program.</p>
 
                     </main>
 

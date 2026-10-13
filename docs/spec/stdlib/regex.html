@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
+            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -214,7 +214,26 @@ regex.find_all("aabbaab", "a+")
 regex.replace("2024-01-15", "(\\d{4})-(\\d{2})-(\\d{2})", "$2/$3/$1")
 // "01/15/2024"
 </code></pre>
-<p>The <code>replacement</code> string supports capture group references (<code>$1</code>, <code>$2</code>, etc.).</p>
+<p>The <code>replacement</code> string can refer to capture groups: <code>$0</code> is the whole match, <code>$1</code>, <code>$2</code>, … the numbered groups, <code>$name</code> or <code>${name}</code> a named group (<code>(?&lt;name&gt;...)</code> or <code>(?P&lt;name&gt;...)</code>), and <code>$$</code> is a literal <code>$</code>. A reference to a group that did not take part in the match is empty. A name runs as far as letters, digits and <code>_</code> go, so <code>$1a</code> refers to a group named <code>1a</code> (empty): write <code>${1}a</code>. In a <code>"..."</code> string <code>{name}</code> interpolates, so write <code>${name}</code> references in a triple-quoted string:</p>
+<pre><code class="language-forge">regex.replace("2024-01-15", """(?&lt;y&gt;\d{4})-(\d{2})""", """${y}/${2}""")
+// "2024/01-15"
+</code></pre>
+<h3 id="regexcapturestext-pattern---array--null"><a class="header" href="#regexcapturestext-pattern---array--null">regex.captures(text, pattern) -&gt; array | null</a></h3>
+<p>Returns the capture groups of the first match of <code>pattern</code> in <code>text</code>, or <code>null</code> if there is no match. Element 0 is the whole match, then every group in the pattern from left to right (named groups are numbered too); a group that did not take part in the match is <code>null</code>.</p>
+<pre><code class="language-forge">regex.captures("user=ada id=7", "user=(\\w+) id=(\\d+)")
+// ["user=ada id=7", "ada", "7"]
+
+regex.captures("port", "(\\w+)(:(\\d+))?")
+// ["port", "port", null, null]
+
+regex.captures("nothing", "user=(\\w+)")
+// null
+</code></pre>
+<h3 id="regexcaptures_alltext-pattern---array"><a class="header" href="#regexcaptures_alltext-pattern---array">regex.captures_all(text, pattern) -&gt; array</a></h3>
+<p>Returns one array of groups (as <code>regex.captures</code> returns it) per non-overlapping match, in order; <code>[]</code> when nothing matches.</p>
+<pre><code class="language-forge">regex.captures_all("a=1, b=22", "(\\w)=(\\d+)")
+// [["a=1", "a", "1"], ["b=22", "b", "22"]]
+</code></pre>
 <h3 id="regexsplittext-pattern---array"><a class="header" href="#regexsplittext-pattern---array">regex.split(text, pattern) -&gt; array</a></h3>
 <p>Splits <code>text</code> by occurrences of <code>pattern</code> and returns an array of substrings.</p>
 <pre><code class="language-forge">regex.split("one,,two,,,three", ",+")

@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
+            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -184,8 +184,10 @@
                         <h1 id="csv"><a class="header" href="#csv">csv</a></h1>
 <p>CSV parsing and serialization. Uses comma-separated values with automatic type inference for fields.</p>
 <h2 id="functions"><a class="header" href="#functions">Functions</a></h2>
-<h3 id="csvparsestring---array"><a class="header" href="#csvparsestring---array">csv.parse(string) -&gt; array</a></h3>
-<p>Parses a CSV string into an array of objects. The first line is treated as headers. Values are automatically converted to <code>int</code>, <code>float</code>, or <code>bool</code> where possible; otherwise they remain strings.</p>
+<h3 id="csvparsestring-options---array"><a class="header" href="#csvparsestring-options---array">csv.parse(string, options?) -&gt; array</a></h3>
+<p>Parses a CSV string (RFC 4180) into an array of objects. The first record is treated as headers. Fields are separated by commas and records by LF or CRLF; a field in double quotes may contain commas, line breaks and doubled quotes (<code>""</code>), and is kept exactly as written. Whitespace around an unquoted field is ignored, blank lines are skipped, a missing field is <code>""</code>, and an unterminated quoted field is an error.</p>
+<p>Unquoted fields that are exactly an integer (<code>42</code>, <code>-7</code>), a decimal (<code>3.25</code>) or <code>true</code>/<code>false</code> are converted to <code>int</code>, <code>float</code> or <code>bool</code>; everything else stays a string, so no information is lost: <code>02134</code>, <code>+1</code>, <code>-0</code>, <code>1e5</code>, <code>.5</code>, integers beyond 64 bits and every quoted field are strings.</p>
+<p><code>options</code> is an object: <code>header: false</code> returns each record as an array of fields, <code>types: false</code> keeps every field a string.</p>
 <pre><code class="language-forge">let data = csv.parse("name,age,active\nAlice,30,true\nBob,25,false")
 say data[0].name    // "Alice"
 say data[0].age     // 30
@@ -203,9 +205,9 @@ say output
 // Alice,30
 // Bob,25
 </code></pre>
-<p>Values containing commas or quotes are automatically quoted.</p>
-<h3 id="csvreadpath---array"><a class="header" href="#csvreadpath---array">csv.read(path) -&gt; array</a></h3>
-<p>Reads a CSV file from disk and parses it into an array of objects. Equivalent to <code>csv.parse(fs.read(path))</code>.</p>
+<p>Values containing commas, quotes or line breaks, with surrounding whitespace, or strings that <code>csv.parse</code> would convert (<code>"42"</code>, <code>"true"</code>) are quoted, so <code>csv.parse(csv.stringify(rows))</code> gives the rows back.</p>
+<h3 id="csvreadpath-options---array"><a class="header" href="#csvreadpath-options---array">csv.read(path, options?) -&gt; array</a></h3>
+<p>Reads a CSV file from disk and parses it into an array of objects. Equivalent to <code>csv.parse(fs.read(path), options)</code>.</p>
 <pre><code class="language-forge">let users = csv.read("users.csv")
 for user in users {
     say user.name + ": " + str(user.email)

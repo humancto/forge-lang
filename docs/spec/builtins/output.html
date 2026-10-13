@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
+            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -182,7 +182,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="output-functions"><a class="header" href="#output-functions">Output Functions</a></h1>
-<p>Functions for printing to stdout. All output functions accept any number of arguments, which are converted to strings and joined with spaces.</p>
+<p>Functions for printing to stdout (and, with <code>eprint</code>/<code>eprintln</code>, to stderr). All output functions accept any number of arguments, which are converted to strings and joined with spaces.</p>
 <h2 id="printargs---null"><a class="header" href="#printargs---null">print(…args) -&gt; null</a></h2>
 <p>Prints arguments to stdout <strong>without</strong> a trailing newline.</p>
 <pre><code class="language-forge">print("loading")
@@ -196,6 +196,13 @@ print("\n")
 println("x =", 42)
 // Hello, world!
 // x = 42
+</code></pre>
+<h2 id="eprintargs---null"><a class="header" href="#eprintargs---null">eprint(…args) -&gt; null</a></h2>
+<p>Prints arguments to stderr <strong>without</strong> a trailing newline.</p>
+<h2 id="eprintlnargs---null"><a class="header" href="#eprintlnargs---null">eprintln(…args) -&gt; null</a></h2>
+<p>Prints arguments to stderr <strong>with</strong> a trailing newline. Use it for warnings and errors of command-line programs, so stdout carries only the program’s result.</p>
+<pre><code class="language-forge">eprintln("warning: skipped line", 3)
+// (on stderr) warning: skipped line 3
 </code></pre>
 <h2 id="sayargs---null"><a class="header" href="#sayargs---null">say(…args) -&gt; null</a></h2>
 <p>Alias for <code>println</code>. Prints arguments followed by a newline. This is the idiomatic Forge output function.</p>
@@ -215,7 +222,8 @@ say "The answer is", 42
 <h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
 <ul>
 <li><code>print</code> and <code>println</code> are classic-style. <code>say</code>, <code>yell</code>, and <code>whisper</code> are Forge-style.</li>
-<li>All five functions write to stdout (not stderr). For stderr output, use the <code>log</code> module.</li>
+<li><code>print</code>, <code>println</code>, <code>say</code>, <code>yell</code> and <code>whisper</code> write to stdout; <code>eprint</code> and <code>eprintln</code> write the same text to stderr. <code>log.*</code> also writes to stderr, as structured events with a timestamp and level.</li>
+<li><code>eprint</code> and <code>eprintln</code> exist in every edition (edition 2027 removes <code>say</code>, <code>yell</code> and <code>whisper</code>).</li>
 <li>Arguments of any type are auto-converted to their string representation.</li>
 </ul>
 

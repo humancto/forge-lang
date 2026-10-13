@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0ade6d9e.js";
+            window.path_to_searchindex_js = "searchindex-bd740dd4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-fdd2f5ad.js"></script>
@@ -212,17 +212,28 @@
 <pre><code class="language-forge">try {
     let x = 1 / 0
 } catch e {
-    say e.message    // "division by zero"
-    say e.type       // "ArithmeticError"
+    println(e.message)    // "division by zero"
+    println(e.type)       // "ArithmeticError"
+    println(e.code)       // "E0008"
+    println(e.hint)       // "check that the divisor is not zero before dividing"
 }
 </code></pre>
-<p>The catch variable receives an object with <code>message</code> and <code>type</code> fields. Error types are inferred from the error message content:</p>
+<p>The catch variable receives an object with four fields, in this order:</p>
+<ul>
+<li><code>message</code> — the error message without its hint line (usually one line; an assertion’s <code>left:</code>/<code>right:</code> lines are kept).</li>
+<li><code>type</code> — a legacy classification (table below). Prefer <code>code</code>.</li>
+<li><code>code</code> — the stable error code (<code>E0008</code>), as <code>forge explain</code> lists it.</li>
+<li><code>hint</code> — the suggestion the error carries (<code>"available fields: a, b"</code>, <code>"did you mean 'count'?"</code>), or <code>null</code> when it has none.</li>
+</ul>
+<p>The <code>type</code> is derived from the message’s first line:</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Error Type</th><th>Triggered By</th></tr>
 </thead>
 <tbody>
+<tr><td><code>TimeoutError</code></td><td>An HTTP request timed out (<code>E0036</code>)</td></tr>
+<tr><td><code>ConnectionError</code></td><td>An HTTP connection failed (<code>E0037</code>)</td></tr>
 <tr><td><code>TypeError</code></td><td>Message contains “type” or “Type”</td></tr>
 <tr><td><code>ArithmeticError</code></td><td>Message contains “division by zero”</td></tr>
 <tr><td><code>AssertionError</code></td><td>Message contains “assertion”</td></tr>

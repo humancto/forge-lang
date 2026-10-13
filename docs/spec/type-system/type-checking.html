@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
+            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -256,6 +256,8 @@
 <tr><td>T0017</td><td>assignment to an immutable binding</td><td><code>let x = 1</code> … <code>x = 2</code></td></tr>
 <tr><td>T0018</td><td>name read before its definition runs</td><td><code>say x</code> then <code>let x = 1</code></td></tr>
 <tr><td>T0019</td><td>result of <code>push(xs, v)</code> discarded (edition 2027 only, always an error)</td><td><code>push(xs, 3)</code> as a statement</td></tr>
+<tr><td>T0020</td><td>import not found or unreadable (an error from edition 2027)</td><td><code>import { f } from "missing.fg"</code></td></tr>
+<tr><td>T0021</td><td>an import renames a struct, <code>type</code>, variant or interface (an error from edition 2027)</td><td><code>import { Point as P } from "geometry.fg"</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -268,7 +270,7 @@ let v = json.parse("\"seven\"")   // Any
 double(v)
 // error: type error: argument 'n' of 'double' must be Int, got String
 </code></pre>
-<p>The checks are performed at run time on both engines with identical messages. They are structural and deep for collections (an <code>[Int]</code> argument is checked element by element), check struct and ADT values by their type name, accept <code>Int</code> for <code>Float</code>, and skip <code>Any</code>, generic parameters and interfaces. A correct program behaves identically with and without <code>--strict</code>.</p>
+<p>The checks are performed at run time on both engines with identical messages. They are structural and deep for collections (an <code>[Int]</code> argument is checked element by element), check struct and ADT values by their type name, accept <code>Int</code> for <code>Float</code>, and skip <code>Any</code>, generic parameters and interfaces. An <code>Int</code> accepted for a declared <code>Float</code> becomes a Float (also inside <code>[Float]</code>, <code>?Float</code>, tuples, map values and results, and for annotated <code>let</code>s and struct fields declared <code>Float</code>, which are otherwise checked statically only): <code>fn half(x: Float) -&gt; Float { return x / 2 }</code> returns <code>1.5</code> for <code>half(3)</code>. Apart from that conversion, a correct program behaves identically with and without <code>--strict</code>. Edition 2027 applies the same enforcement by default; edition 2026 without <code>--strict</code> runs no checks and converts nothing.</p>
 
                     </main>
 

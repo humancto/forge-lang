@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-0ade6d9e.js";
+            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -196,10 +196,11 @@ runtime/server.rs builds axum Router
 axum + tokio serve requests
     |
     v
-Each request locks the Interpreter mutex,
-calls the handler function, serializes the return value as JSON
+Each request forks the program's state (VM template or interpreter),
+decodes the body, calls the handler on the blocking pool,
+and builds the response from its return value
 </code></pre>
-<p>The server implementation lives in <code>src/runtime/server.rs</code> (~354 lines).</p>
+<p>The server implementation lives in <code>src/runtime/server.rs</code>, with response values and body decoding in <code>src/runtime/http_response.rs</code>.</p>
 <h2 id="server-configuration"><a class="header" href="#server-configuration">Server Configuration</a></h2>
 <p>The <code>@server</code> decorator configures the server:</p>
 <pre><code class="language-forge">@server(port: 3000, host: "0.0.0.0")
@@ -233,6 +234,8 @@ fn create_user(body) {
 </code></pre>
 <h3 id="putpath"><a class="header" href="#putpath">@put(path?)</a></h3>
 <p>Registers a function as a PUT handler.</p>
+<h3 id="patchpath"><a class="header" href="#patchpath">@patch(path?)</a></h3>
+<p>Registers a function as a PATCH handler.</p>
 <h3 id="deletepath"><a class="header" href="#deletepath">@delete(path?)</a></h3>
 <p>Registers a function as a DELETE handler.</p>
 <h3 id="wspath"><a class="header" href="#wspath">@ws(path?)</a></h3>
@@ -252,7 +255,7 @@ fn get_user(id) {
 </code></pre>
 <p>The Forge path syntax (<code>:id</code>) is internally converted to axum’s brace syntax (<code>{id}</code>).</p>
 <h2 id="handler-parameters"><a class="header" href="#handler-parameters">Handler Parameters</a></h2>
-<p>Handler functions receive arguments based on their parameter names:</p>
+<p>Handler functions receive arguments based on their parameter names (<code>runtime::server::handler_args</code>, shared by both engines):</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -260,20 +263,27 @@ fn get_user(id) {
 </thead>
 <tbody>
 <tr><td>Name matching a path param</td><td>URL path parameter</td></tr>
-<tr><td><code>body</code> or <code>data</code></td><td>Parsed JSON request body</td></tr>
+<tr><td><code>body</code> or <code>data</code></td><td>Request body, decoded by content type (<code>{}</code> when absent)</td></tr>
 <tr><td><code>query</code> or <code>qs</code></td><td>Query string as an object</td></tr>
+<tr><td><code>headers</code></td><td>Request headers, lower-case names</td></tr>
+<tr><td><code>raw_body</code></td><td>The body’s exact text (<code>""</code> when there is none)</td></tr>
+<tr><td><code>req</code> or <code>request</code></td><td><code>{ method, path, params, query, headers, body, raw_body }</code></td></tr>
 <tr><td>Name matching a query param</td><td>Individual query parameter</td></tr>
 <tr><td>Other</td><td><code>null</code></td></tr>
 </tbody>
 </table>
 </div>
 <pre><code class="language-forge">@post("/search")
-fn search(body, query) {
+fn search(body, query, req) {
     say "Search body: " + str(body)
     say "Query params: " + str(query)
+    say "Method: " + req.method
     return { results: [] }
 }
 </code></pre>
+<p>Request bodies are decoded before the handler runs (<code>runtime::http_response::read_body</code>): a body that is not UTF-8 is refused (<code>415</code>), JSON content types are parsed (<code>400</code> if invalid), <code>application/x-www-form-urlencoded</code> becomes an object of Strings, and anything else is a String. The undecoded text is kept as <code>raw_body</code>. These errors, like every error the server answers itself, have a JSON <code>{"error": ...}</code> body.</p>
+<h2 id="responses"><a class="header" href="#responses">Responses</a></h2>
+<p>A handler’s return value is encoded as JSON on the engine that ran it, and the server builds the response from that JSON, so both engines answer byte-identically. A value built by <code>http.response(status, body?, headers?)</code> is an object tagged <code>__type__: "HttpResponse"</code>; the server validates it (<code>ResponseSpec::from_json</code>) and sends its status, headers and body (<code>null</code>: no body; String: as is, <code>text/plain</code> by default; anything else: JSON). Every other value is a <code>200</code> JSON body.</p>
 <h2 id="json-serialization"><a class="header" href="#json-serialization">JSON Serialization</a></h2>
 <p>Return values from handlers are automatically serialized to JSON:</p>
 <div class="table-wrapper">
@@ -299,11 +309,12 @@ fn search(body, query) {
 <p>If a handler function throws a runtime error, the server returns HTTP 500 with:</p>
 <pre><code class="language-json">{ "error": "error message here" }
 </code></pre>
+<p>An invalid response value (an out-of-range status, a header value with a line break, …) also answers 500, with <code>invalid http.response: ...</code>.</p>
 <h2 id="cors"><a class="header" href="#cors">CORS</a></h2>
-<p>CORS is enabled by default with a permissive policy (all origins, all methods, all headers). This is suitable for development; production deployments should add appropriate restrictions at the reverse proxy level.</p>
+<p>CORS is same-origin by default. <code>@server(cors: "permissive")</code> allows any origin, method and header.</p>
 <h2 id="concurrency-model"><a class="header" href="#concurrency-model">Concurrency Model</a></h2>
-<p>The interpreter is wrapped in an <code>Arc&lt;Mutex&lt;Interpreter&gt;&gt;</code>. Each incoming request acquires the mutex lock, calls the handler, and releases it. This means handlers execute serially – only one request is processed at a time.</p>
-<p>For high-throughput scenarios, consider running multiple Forge server instances behind a load balancer.</p>
+<p>Each request runs in its own fork of the program’s state after the top level ran (a frozen VM template, or the interpreter’s <code>fork_for_serving</code>), on tokio’s blocking pool. Handlers run in parallel; mutations a handler makes to top-level variables are private to its request.</p>
+<p>Database connections opened by the top level are shared by the forks (<code>stdlib::db_share</code>): a mutex serializes statements, and a transaction belongs to the request that opened it (other requests wait for it, at most 30 seconds) and is rolled back when that request ends.</p>
 
                     </main>
 

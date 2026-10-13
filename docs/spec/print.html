@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0ade6d9e.js";
+            window.path_to_searchindex_js = "searchindex-bd740dd4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-fdd2f5ad.js"></script>
@@ -3885,22 +3885,35 @@ while i &lt; 5 {
 <p>To import all top-level definitions from another Forge source file:</p>
 <pre><code class="language-forge">import "utils.fg"
 </code></pre>
-<p>The import path is a string literal specifying the file to load. The interpreter resolves the path relative to the current working directory and checks the following locations in order:</p>
+<p>The import path is a string literal specifying the file to load. It is resolved in this order:</p>
 <ol>
-<li><code>{path}</code> – the exact path as given</li>
-<li><code>{path}.fg</code> – with the <code>.fg</code> extension appended</li>
-<li><code>forge_modules/{path}/main.fg</code> – in the <code>forge_modules</code> directory</li>
+<li>relative to the directory of the importing file;</li>
+<li>relative to the current working directory;</li>
+<li>as an installed package: <code>forge_modules/{path}/main.fg</code>, <code>forge_modules/{path}.fg</code>, <code>forge_modules/{path}/src/main.fg</code>.</li>
 </ol>
-<p>If no file is found at any of these locations, a runtime error is produced.</p>
+<p>The <code>.fg</code> extension is optional. If no file is found, the import fails with error <code>E0019</code>.</p>
 <h2 id="import-semantics"><a class="header" href="#import-semantics">Import Semantics</a></h2>
-<p>When a file is imported, the following steps occur:</p>
+<p>The first time a program imports a file:</p>
 <ol>
-<li>The source file is read and parsed.</li>
-<li>A <strong>new interpreter instance</strong> is created.</li>
-<li>The imported file is executed in the new interpreter.</li>
-<li>Top-level definitions (<code>fn</code> and <code>let</code> bindings) are copied into the importing file’s scope.</li>
+<li>The source file is read, parsed and (from edition 2027) type-checked.</li>
+<li>Its top-level statements run once, in a context of their own.</li>
+<li>The module is remembered for the rest of the program, by its canonical path.</li>
 </ol>
-<p>Importantly, each import creates a fresh interpreter. Side effects in the imported file (such as printing) occur during import. The imported file does not share mutable state with the importing file.</p>
+<p>Each <code>import</code> statement then binds names from the module: every top-level definition (<code>fn</code>, <code>let</code>, <code>struct</code>, <code>type</code> and its variants, <code>impl</code> methods) for <code>import "file.fg"</code>, or the listed names for a selective import. Importing a file that already ran — from the same file, from another module, or with <code>import "file.fg"</code> after <code>import { f } from "file.fg"</code> — binds names again but does not run the module again, so every importer shares the module’s state:</p>
+<pre><code class="language-forge">// counter.fg
+let mut count = 0
+fn bump() {
+    count = count + 1
+    return count
+}
+</code></pre>
+<pre><code class="language-forge">// main.fg
+import { bump } from "counter.fg"
+import { report } from "stats.fg"   // stats.fg also imports counter.fg
+say bump()                          // 1
+say report()                        // sees the same counter
+</code></pre>
+<p>A <code>let</code> binding is copied when it is imported: the importer gets its value at the time of the import. Functions read the module’s current state.</p>
 <pre><code class="language-forge">// utils.fg
 fn double(x) { x * 2 }
 fn triple(x) { x * 3 }
@@ -3919,7 +3932,16 @@ say double(5)       // 10
 say PI              // 3.14159
 // triple is NOT imported
 </code></pre>
-<p>Only the listed names are copied into the current scope.</p>
+<p>Only the listed names are bound in the current scope. A name the module does not define is error <code>E0019</code>.</p>
+<h3 id="renaming-with-as"><a class="header" href="#renaming-with-as">Renaming with <code>as</code></a></h3>
+<p><code>name as alias</code> binds an imported function or variable under another name, for example when two modules export the same name:</p>
+<pre><code class="language-forge">import { name as user_name } from "user.fg"
+import { name as team_name } from "team.fg"
+import { sqrt as root } from "math"
+say user_name()
+say root(16)        // 4.0
+</code></pre>
+<p>Only functions and variables can be renamed. Structs, <code>type</code> definitions, their variants and interfaces keep their name — their values, methods and <code>match</code> patterns refer to it — so <code>import { Point as P } from "geometry.fg"</code> is error <code>E0019</code>. <code>as</code> is not available in native imports (<code>import native "lib" as name</code> names the whole library instead).</p>
 <h2 id="built-in-modules"><a class="header" href="#built-in-modules">Built-in Modules</a></h2>
 <p>Forge’s standard library modules (<code>math</code>, <code>fs</code>, <code>io</code>, <code>crypto</code>, <code>db</code>, <code>pg</code>, <code>env</code>, <code>json</code>, <code>regex</code>, <code>log</code>, <code>term</code>, <code>http</code>, <code>csv</code>, <code>exec</code>, <code>time</code>) are automatically available without import. Attempting to <code>import</code> a built-in module name produces an error with guidance:</p>
 <pre><code class="language-forge">import "math"
@@ -3944,16 +3966,19 @@ let c = get_config()
 say c.debug                 // true
 </code></pre>
 <h2 id="circular-imports"><a class="header" href="#circular-imports">Circular Imports</a></h2>
-<p>Forge does not detect or prevent circular imports. A circular import chain will cause infinite recursion and a stack overflow. It is the programmer’s responsibility to avoid circular dependencies.</p>
+<p>A module that imports itself, directly or through other modules, is error <code>E0019</code> with the chain:</p>
+<pre><code>circular import: a.fg -&gt; b.fg -&gt; a.fg
+</code></pre>
+<p>Move the shared code into a third module to break the cycle.</p>
 <h2 id="no-namespacing"><a class="header" href="#no-namespacing">No Namespacing</a></h2>
-<p>Imported definitions are placed directly into the importing file’s scope. There is no namespace or module prefix for file imports. If two imported files define the same name, the later import overwrites the earlier one.</p>
-<pre><code class="language-forge">import "a.fg"       // defines fn helper()
-import "b.fg"       // also defines fn helper() -- overwrites a.fg's version
+<p>Imported definitions are placed directly into the importing file’s scope. There is no namespace or module prefix for file imports. If two imported files define the same name, the later import overwrites the earlier one; import one of them under another name with <code>as</code> to keep both.</p>
+<pre><code class="language-forge">import "a.fg"                              // defines fn helper()
+import { helper as b_helper } from "b.fg"  // b.fg's helper, renamed
 </code></pre>
 <h2 id="no-export-keyword"><a class="header" href="#no-export-keyword">No Export Keyword</a></h2>
 <p>Forge does not have an explicit <code>export</code> keyword. All top-level <code>fn</code> and <code>let</code> bindings in a file are automatically available for import by other files.</p>
 <h2 id="re-imports"><a class="header" href="#re-imports">Re-Imports</a></h2>
-<p>Importing the same file multiple times re-executes it each time. There is no import caching or module singleton behavior for file imports.</p>
+<p>A file runs once per program. Importing it again binds its names again (for <code>let</code> bindings, their current values) without re-running its top-level code. The REPL keeps imported modules for the whole session; restart it to load a changed file. An HTTP request handler that imports a file runs it in that request’s own isolated copy of the program.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="type-system"><a class="header" href="#type-system">Type System</a></h1>
 <p>This chapter defines the type system of Forge. Forge is dynamically typed at runtime but provides structural mechanisms for organizing data and behavior: struct definitions, method attachment, interface contracts, composition via embedding, and structural satisfaction checking.</p>
@@ -4856,6 +4881,8 @@ Math.sub(5, 3)    // 2
 <tr><td>T0017</td><td>assignment to an immutable binding</td><td><code>let x = 1</code> … <code>x = 2</code></td></tr>
 <tr><td>T0018</td><td>name read before its definition runs</td><td><code>say x</code> then <code>let x = 1</code></td></tr>
 <tr><td>T0019</td><td>result of <code>push(xs, v)</code> discarded (edition 2027 only, always an error)</td><td><code>push(xs, 3)</code> as a statement</td></tr>
+<tr><td>T0020</td><td>import not found or unreadable (an error from edition 2027)</td><td><code>import { f } from "missing.fg"</code></td></tr>
+<tr><td>T0021</td><td>an import renames a struct, <code>type</code>, variant or interface (an error from edition 2027)</td><td><code>import { Point as P } from "geometry.fg"</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -4868,7 +4895,7 @@ let v = json.parse("\"seven\"")   // Any
 double(v)
 // error: type error: argument 'n' of 'double' must be Int, got String
 </code></pre>
-<p>The checks are performed at run time on both engines with identical messages. They are structural and deep for collections (an <code>[Int]</code> argument is checked element by element), check struct and ADT values by their type name, accept <code>Int</code> for <code>Float</code>, and skip <code>Any</code>, generic parameters and interfaces. A correct program behaves identically with and without <code>--strict</code>.</p>
+<p>The checks are performed at run time on both engines with identical messages. They are structural and deep for collections (an <code>[Int]</code> argument is checked element by element), check struct and ADT values by their type name, accept <code>Int</code> for <code>Float</code>, and skip <code>Any</code>, generic parameters and interfaces. An <code>Int</code> accepted for a declared <code>Float</code> becomes a Float (also inside <code>[Float]</code>, <code>?Float</code>, tuples, map values and results, and for annotated <code>let</code>s and struct fields declared <code>Float</code>, which are otherwise checked statically only): <code>fn half(x: Float) -&gt; Float { return x / 2 }</code> returns <code>1.5</code> for <code>half(3)</code>. Apart from that conversion, a correct program behaves identically with and without <code>--strict</code>. Edition 2027 applies the same enforcement by default; edition 2026 without <code>--strict</code> runs no checks and converts nothing.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h1>
 <p>This chapter defines Forge’s error handling mechanisms. Forge uses a multi-layered approach: Result types for explicit error values, the <code>?</code> operator for propagation, <code>safe</code> blocks for error suppression, <code>must</code> for crash-on-error semantics, and <code>check</code> for declarative validation.</p>
@@ -4901,17 +4928,28 @@ double(v)
 <pre><code class="language-forge">try {
     let x = 1 / 0
 } catch e {
-    say e.message    // "division by zero"
-    say e.type       // "ArithmeticError"
+    println(e.message)    // "division by zero"
+    println(e.type)       // "ArithmeticError"
+    println(e.code)       // "E0008"
+    println(e.hint)       // "check that the divisor is not zero before dividing"
 }
 </code></pre>
-<p>The catch variable receives an object with <code>message</code> and <code>type</code> fields. Error types are inferred from the error message content:</p>
+<p>The catch variable receives an object with four fields, in this order:</p>
+<ul>
+<li><code>message</code> — the error message without its hint line (usually one line; an assertion’s <code>left:</code>/<code>right:</code> lines are kept).</li>
+<li><code>type</code> — a legacy classification (table below). Prefer <code>code</code>.</li>
+<li><code>code</code> — the stable error code (<code>E0008</code>), as <code>forge explain</code> lists it.</li>
+<li><code>hint</code> — the suggestion the error carries (<code>"available fields: a, b"</code>, <code>"did you mean 'count'?"</code>), or <code>null</code> when it has none.</li>
+</ul>
+<p>The <code>type</code> is derived from the message’s first line:</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Error Type</th><th>Triggered By</th></tr>
 </thead>
 <tbody>
+<tr><td><code>TimeoutError</code></td><td>An HTTP request timed out (<code>E0036</code>)</td></tr>
+<tr><td><code>ConnectionError</code></td><td>An HTTP connection failed (<code>E0037</code>)</td></tr>
 <tr><td><code>TypeError</code></td><td>Message contains “type” or “Type”</td></tr>
 <tr><td><code>ArithmeticError</code></td><td>Message contains “division by zero”</td></tr>
 <tr><td><code>AssertionError</code></td><td>Message contains “assertion”</td></tr>
@@ -6444,8 +6482,10 @@ say json.pretty(obj, 4)
 <h1 id="csv"><a class="header" href="#csv">csv</a></h1>
 <p>CSV parsing and serialization. Uses comma-separated values with automatic type inference for fields.</p>
 <h2 id="functions-8"><a class="header" href="#functions-8">Functions</a></h2>
-<h3 id="csvparsestring---array"><a class="header" href="#csvparsestring---array">csv.parse(string) -&gt; array</a></h3>
-<p>Parses a CSV string into an array of objects. The first line is treated as headers. Values are automatically converted to <code>int</code>, <code>float</code>, or <code>bool</code> where possible; otherwise they remain strings.</p>
+<h3 id="csvparsestring-options---array"><a class="header" href="#csvparsestring-options---array">csv.parse(string, options?) -&gt; array</a></h3>
+<p>Parses a CSV string (RFC 4180) into an array of objects. The first record is treated as headers. Fields are separated by commas and records by LF or CRLF; a field in double quotes may contain commas, line breaks and doubled quotes (<code>""</code>), and is kept exactly as written. Whitespace around an unquoted field is ignored, blank lines are skipped, a missing field is <code>""</code>, and an unterminated quoted field is an error.</p>
+<p>Unquoted fields that are exactly an integer (<code>42</code>, <code>-7</code>), a decimal (<code>3.25</code>) or <code>true</code>/<code>false</code> are converted to <code>int</code>, <code>float</code> or <code>bool</code>; everything else stays a string, so no information is lost: <code>02134</code>, <code>+1</code>, <code>-0</code>, <code>1e5</code>, <code>.5</code>, integers beyond 64 bits and every quoted field are strings.</p>
+<p><code>options</code> is an object: <code>header: false</code> returns each record as an array of fields, <code>types: false</code> keeps every field a string.</p>
 <pre><code class="language-forge">let data = csv.parse("name,age,active\nAlice,30,true\nBob,25,false")
 say data[0].name    // "Alice"
 say data[0].age     // 30
@@ -6463,9 +6503,9 @@ say output
 // Alice,30
 // Bob,25
 </code></pre>
-<p>Values containing commas or quotes are automatically quoted.</p>
-<h3 id="csvreadpath---array"><a class="header" href="#csvreadpath---array">csv.read(path) -&gt; array</a></h3>
-<p>Reads a CSV file from disk and parses it into an array of objects. Equivalent to <code>csv.parse(fs.read(path))</code>.</p>
+<p>Values containing commas, quotes or line breaks, with surrounding whitespace, or strings that <code>csv.parse</code> would convert (<code>"42"</code>, <code>"true"</code>) are quoted, so <code>csv.parse(csv.stringify(rows))</code> gives the rows back.</p>
+<h3 id="csvreadpath-options---array"><a class="header" href="#csvreadpath-options---array">csv.read(path, options?) -&gt; array</a></h3>
+<p>Reads a CSV file from disk and parses it into an array of objects. Equivalent to <code>csv.parse(fs.read(path), options)</code>.</p>
 <pre><code class="language-forge">let users = csv.read("users.csv")
 for user in users {
     say user.name + ": " + str(user.email)
@@ -6513,7 +6553,26 @@ regex.find_all("aabbaab", "a+")
 regex.replace("2024-01-15", "(\\d{4})-(\\d{2})-(\\d{2})", "$2/$3/$1")
 // "01/15/2024"
 </code></pre>
-<p>The <code>replacement</code> string supports capture group references (<code>$1</code>, <code>$2</code>, etc.).</p>
+<p>The <code>replacement</code> string can refer to capture groups: <code>$0</code> is the whole match, <code>$1</code>, <code>$2</code>, … the numbered groups, <code>$name</code> or <code>${name}</code> a named group (<code>(?&lt;name&gt;...)</code> or <code>(?P&lt;name&gt;...)</code>), and <code>$$</code> is a literal <code>$</code>. A reference to a group that did not take part in the match is empty. A name runs as far as letters, digits and <code>_</code> go, so <code>$1a</code> refers to a group named <code>1a</code> (empty): write <code>${1}a</code>. In a <code>"..."</code> string <code>{name}</code> interpolates, so write <code>${name}</code> references in a triple-quoted string:</p>
+<pre><code class="language-forge">regex.replace("2024-01-15", """(?&lt;y&gt;\d{4})-(\d{2})""", """${y}/${2}""")
+// "2024/01-15"
+</code></pre>
+<h3 id="regexcapturestext-pattern---array--null"><a class="header" href="#regexcapturestext-pattern---array--null">regex.captures(text, pattern) -&gt; array | null</a></h3>
+<p>Returns the capture groups of the first match of <code>pattern</code> in <code>text</code>, or <code>null</code> if there is no match. Element 0 is the whole match, then every group in the pattern from left to right (named groups are numbered too); a group that did not take part in the match is <code>null</code>.</p>
+<pre><code class="language-forge">regex.captures("user=ada id=7", "user=(\\w+) id=(\\d+)")
+// ["user=ada id=7", "ada", "7"]
+
+regex.captures("port", "(\\w+)(:(\\d+))?")
+// ["port", "port", null, null]
+
+regex.captures("nothing", "user=(\\w+)")
+// null
+</code></pre>
+<h3 id="regexcaptures_alltext-pattern---array"><a class="header" href="#regexcaptures_alltext-pattern---array">regex.captures_all(text, pattern) -&gt; array</a></h3>
+<p>Returns one array of groups (as <code>regex.captures</code> returns it) per non-overlapping match, in order; <code>[]</code> when nothing matches.</p>
+<pre><code class="language-forge">regex.captures_all("a=1, b=22", "(\\w)=(\\d+)")
+// [["a=1", "a", "1"], ["b=22", "b", "22"]]
+</code></pre>
 <h3 id="regexsplittext-pattern---array"><a class="header" href="#regexsplittext-pattern---array">regex.split(text, pattern) -&gt; array</a></h3>
 <p>Splits <code>text</code> by occurrences of <code>pattern</code> and returns an array of substrings.</p>
 <pre><code class="language-forge">regex.split("one,,two,,,three", ",+")
@@ -6760,7 +6819,7 @@ say resp.status
 <tr><td><code>body</code></td><td><code>any</code></td><td>Request body (auto-serialized as JSON)</td></tr>
 <tr><td><code>headers</code></td><td><code>object</code></td><td>Custom request headers</td></tr>
 <tr><td><code>auth</code></td><td><code>string</code></td><td>Bearer token (sets <code>Authorization: Bearer &lt;token&gt;</code>)</td></tr>
-<tr><td><code>timeout</code></td><td><code>int</code></td><td>Timeout in seconds (default: 30)</td></tr>
+<tr><td><code>timeout</code></td><td><code>int</code> or <code>float</code></td><td>Time limit for the whole request, in <strong>seconds</strong> (default: 30; <code>0.5</code> is half a second)</td></tr>
 </tbody>
 </table>
 </div>
@@ -6769,6 +6828,30 @@ say resp.status
     headers: { "Accept": "application/json" },
     timeout: 10
 })
+</code></pre>
+<h3 id="errors"><a class="header" href="#errors">Errors</a></h3>
+<p>A response with an error status (404, 500, …) is not an error: it is returned with <code>ok == false</code>. A request that gets no response raises a catchable error whose code says why:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Code</th><th><code>e.type</code></th><th>Message (after <code>http.get error: </code>)</th></tr>
+</thead>
+<tbody>
+<tr><td><code>E0036</code></td><td><code>TimeoutError</code></td><td><code>timed out after 10 seconds waiting for host:port</code></td></tr>
+<tr><td><code>E0037</code></td><td><code>ConnectionError</code></td><td><code>connection refused by host:port</code>, <code>cannot resolve host 'name': ...</code>, <code>TLS handshake failed with host:port: ...</code>, <code>could not connect to host:port: ...</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Other failures (an invalid URL, a private address, a rejected redirect, a body over <code>max_bytes</code>) are <code>E0016</code>. <code>fetch</code>, <code>http.download</code> (default timeout 300 seconds) and <code>http.crawl</code> report the same codes. E0036 and E0037 messages name the host and port, not the full URL (a query string can carry credentials).</p>
+<pre><code class="language-forge">try {
+    http.get("https://api.example.com/slow", { timeout: 2 })
+} catch e {
+    if e.code == "E0036" {
+        println("too slow, try again later")
+    } else if e.code == "E0037" {
+        println("server unreachable: {e.message}")
+    }
+}
 </code></pre>
 <h3 id="httpdownloadurl-destination---object"><a class="header" href="#httpdownloadurl-destination---object">http.download(url, destination?) -&gt; object</a></h3>
 <p>Downloads a file from <code>url</code> and saves it to <code>destination</code>. If no destination is provided, the filename is derived from the URL. Returns an object with <code>path</code>, <code>size</code>, and <code>status</code>.</p>
@@ -6797,13 +6880,37 @@ say result.size  // bytes downloaded
 say page.title
 say len(page.links)
 </code></pre>
+<h3 id="httpresponsestatus-body-headers---object"><a class="header" href="#httpresponsestatus-body-headers---object">http.response(status, body?, headers?) -&gt; object</a></h3>
+<p>Builds the response an HTTP handler returns when it needs a status code other than 200, response headers, or a body that is not JSON (see <a href="#server-decorators">Server Decorators</a>).</p>
+<ul>
+<li><code>status</code> — an Int from 200 to 599.</li>
+<li><code>body</code> — <code>null</code> (the default) sends no body; a String is sent as is, with <code>Content-Type: text/plain; charset=utf-8</code> unless <code>headers</code> sets one; any other value is sent as JSON (<code>application/json</code> unless set).</li>
+<li><code>headers</code> — an object of header names to values. A value may be a String, a number or a Bool, or an array of them (the header is sent once per element, e.g. <code>Set-Cookie</code>).</li>
+</ul>
+<p>Invalid arguments raise an error when the response is built: a status outside 200-599, a body with status 204 or 304, an invalid header name, a header value containing a line break or other control character (so a value can never inject a header), and <code>Content-Length</code>, <code>Transfer-Encoding</code> or <code>Connection</code>, which the server sets.</p>
+<pre><code class="language-forge">@post("/items")
+fn create(body) {
+    return http.response(201, { id: 7 }, { Location: "/items/7" })
+}
+
+@get("/health")
+fn health() {
+    return http.response(200, "ok")          // text/plain
+}
+
+@delete("/items/:id")
+fn remove(id) {
+    return http.response(204)                // no body
+}
+</code></pre>
+<p>The result is an object (<code>{ status, headers, body }</code> tagged as an <code>HttpResponse</code>); a handler may adjust its fields before returning it. It is validated again when it is sent; an invalid one answers 500.</p>
 <h3 id="httpprettyresponse---null"><a class="header" href="#httpprettyresponse---null">http.pretty(response) -&gt; null</a></h3>
 <p>Pretty-prints an HTTP response object to stderr with color formatting.</p>
 <pre><code class="language-forge">let resp = http.get("https://api.example.com/status")
 http.pretty(resp)
 </code></pre>
 <h2 id="server-decorators"><a class="header" href="#server-decorators">Server Decorators</a></h2>
-<p>Forge supports declarative HTTP servers using decorators. The <code>@server</code> decorator configures the server, and <code>@get</code>, <code>@post</code>, <code>@put</code>, <code>@delete</code> decorators define route handlers.</p>
+<p>Forge supports declarative HTTP servers using decorators. The <code>@server</code> decorator configures the server, and <code>@get</code>, <code>@post</code>, <code>@put</code>, <code>@patch</code>, <code>@delete</code> decorators define route handlers.</p>
 <pre><code class="language-forge">@server(port: 3000)
 
 @get("/")
@@ -6813,32 +6920,69 @@ fn index() {
 
 @get("/users/:id")
 fn get_user(id) {
+    if id == "0" {
+        return http.response(404, { error: "no such user" })
+    }
     return { id: id, name: "User " + id }
 }
 
 @post("/users")
-fn create_user(body) {
-    say "Creating user: " + body.name
-    return { ok: true, name: body.name }
+fn create_user(body, headers) {
+    if get(headers, "authorization") == null {
+        return http.response(401, { error: "unauthorized" })
+    }
+    return http.response(201, { ok: true, name: body.name }, { Location: "/users/1" })
 }
 
 @delete("/users/:id")
 fn delete_user(id) {
-    return { deleted: id }
+    return http.response(204)
 }
 </code></pre>
 <h3 id="handler-parameters"><a class="header" href="#handler-parameters">Handler Parameters</a></h3>
 <p>Handler functions receive arguments based on parameter names:</p>
 <ul>
 <li><strong>Path parameters</strong> (<code>:id</code>, <code>:name</code>) are passed by matching the parameter name.</li>
-<li><strong><code>body</code></strong> or <strong><code>data</code></strong> receives the parsed JSON request body.</li>
+<li><strong><code>body</code></strong> or <strong><code>data</code></strong> receives the request body (<code>{}</code> when the request has none).</li>
+<li><strong><code>raw_body</code></strong> receives the body’s exact text, before decoding (<code>""</code> when the request has none) — for example to check a webhook’s signature.</li>
 <li><strong><code>query</code></strong> or <strong><code>qs</code></strong> receives query string parameters as an object.</li>
+<li><strong><code>headers</code></strong> receives the request headers as an object with lower-case names (repeated headers joined with <code>, </code>).</li>
+<li><strong><code>req</code></strong> or <strong><code>request</code></strong> receives the whole request: <code>{ method, path, params, query, headers, body, raw_body }</code> (<code>body</code> is <code>null</code> and <code>raw_body</code> is <code>""</code> when there is none).</li>
+<li>Any other name receives the query parameter of that name, or <code>null</code>.</li>
 </ul>
+<p>Path, query and header values are Strings. Use <code>get(headers, "x-name")</code> for an optional header: indexing a missing key is an error.</p>
+<h3 id="request-bodies"><a class="header" href="#request-bodies">Request Bodies</a></h3>
+<p>The body is decoded by its <code>Content-Type</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Content type</th><th><code>body</code></th></tr>
+</thead>
+<tbody>
+<tr><td><code>application/json</code>, <code>*/*+json</code></td><td>the parsed JSON value</td></tr>
+<tr><td><code>application/x-www-form-urlencoded</code></td><td>an object of Strings</td></tr>
+<tr><td>anything else, or none</td><td>the body as a String</td></tr>
+</tbody>
+</table>
+</div>
+<p>Invalid JSON is answered <code>400</code> and a body that is not UTF-8 text <code>415</code> (whatever its content type, so <code>raw_body</code> is always the exact text), with a JSON <code>{"error": ...}</code> body, before the handler runs. Bodies are limited to 2 MiB (<code>413</code>).</p>
+<pre><code class="language-forge">@post("/webhook")
+fn webhook(raw_body, headers, body) {
+    let expected = crypto.sha256(env.get("WEBHOOK_SECRET", "") + raw_body)
+    if get(headers, "x-signature") != expected {
+        return http.response(401, { error: "bad signature" })
+    }
+    return { received: body.event }
+}
+</code></pre>
+<h3 id="responses"><a class="header" href="#responses">Responses</a></h3>
+<p>A returned value is sent as <code>200</code> JSON. <code>http.response(status, body?, headers?)</code> sets the status, headers and body. A runtime error in a handler answers <code>500 {"error": message}</code>.</p>
+<h3 id="databases"><a class="header" href="#databases">Databases</a></h3>
+<p>A database the program’s top level opens (<code>db.open</code>, <code>pg.connect</code>) is shared by all handlers. Statements of concurrent requests run one at a time on the connection; a transaction (<code>db.begin()</code> … <code>db.commit()</code>, or <code>BEGIN</code> in SQL) belongs to the request that opened it — other requests wait for it — and is rolled back if the request ends without committing. <code>db.last_insert_rowid()</code> returns the request’s own last insert. <code>db.open</code> or <code>db.close</code> inside a handler affects that request only.</p>
 <h3 id="server-features"><a class="header" href="#server-features">Server Features</a></h3>
 <ul>
-<li>Built on <strong>axum</strong> and <strong>tokio</strong> for production-grade async performance.</li>
-<li><strong>CORS</strong> is enabled by default (permissive policy).</li>
-<li>Return values are automatically serialized as JSON responses.</li>
+<li>Built on <strong>axum</strong> and <strong>tokio</strong>; each request runs in an isolated fork of the program, concurrently with other requests.</li>
+<li><strong>CORS</strong> is same-origin by default; <code>@server(cors: "permissive")</code> allows any origin.</li>
 <li>WebSocket support via the <code>@ws</code> decorator.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -7177,7 +7321,7 @@ term.table(users)
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="output-functions"><a class="header" href="#output-functions">Output Functions</a></h1>
-<p>Functions for printing to stdout. All output functions accept any number of arguments, which are converted to strings and joined with spaces.</p>
+<p>Functions for printing to stdout (and, with <code>eprint</code>/<code>eprintln</code>, to stderr). All output functions accept any number of arguments, which are converted to strings and joined with spaces.</p>
 <h2 id="printargs---null"><a class="header" href="#printargs---null">print(…args) -&gt; null</a></h2>
 <p>Prints arguments to stdout <strong>without</strong> a trailing newline.</p>
 <pre><code class="language-forge">print("loading")
@@ -7191,6 +7335,13 @@ print("\n")
 println("x =", 42)
 // Hello, world!
 // x = 42
+</code></pre>
+<h2 id="eprintargs---null"><a class="header" href="#eprintargs---null">eprint(…args) -&gt; null</a></h2>
+<p>Prints arguments to stderr <strong>without</strong> a trailing newline.</p>
+<h2 id="eprintlnargs---null"><a class="header" href="#eprintlnargs---null">eprintln(…args) -&gt; null</a></h2>
+<p>Prints arguments to stderr <strong>with</strong> a trailing newline. Use it for warnings and errors of command-line programs, so stdout carries only the program’s result.</p>
+<pre><code class="language-forge">eprintln("warning: skipped line", 3)
+// (on stderr) warning: skipped line 3
 </code></pre>
 <h2 id="sayargs---null"><a class="header" href="#sayargs---null">say(…args) -&gt; null</a></h2>
 <p>Alias for <code>println</code>. Prints arguments followed by a newline. This is the idiomatic Forge output function.</p>
@@ -7210,7 +7361,8 @@ say "The answer is", 42
 <h2 id="notes-6"><a class="header" href="#notes-6">Notes</a></h2>
 <ul>
 <li><code>print</code> and <code>println</code> are classic-style. <code>say</code>, <code>yell</code>, and <code>whisper</code> are Forge-style.</li>
-<li>All five functions write to stdout (not stderr). For stderr output, use the <code>log</code> module.</li>
+<li><code>print</code>, <code>println</code>, <code>say</code>, <code>yell</code> and <code>whisper</code> write to stdout; <code>eprint</code> and <code>eprintln</code> write the same text to stderr. <code>log.*</code> also writes to stderr, as structured events with a timestamp and level.</li>
+<li><code>eprint</code> and <code>eprintln</code> exist in every edition (edition 2027 removes <code>say</code>, <code>yell</code> and <code>whisper</code>).</li>
 <li>Arguments of any type are auto-converted to their string representation.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -8436,10 +8588,11 @@ runtime/server.rs builds axum Router
 axum + tokio serve requests
     |
     v
-Each request locks the Interpreter mutex,
-calls the handler function, serializes the return value as JSON
+Each request forks the program's state (VM template or interpreter),
+decodes the body, calls the handler on the blocking pool,
+and builds the response from its return value
 </code></pre>
-<p>The server implementation lives in <code>src/runtime/server.rs</code> (~354 lines).</p>
+<p>The server implementation lives in <code>src/runtime/server.rs</code>, with response values and body decoding in <code>src/runtime/http_response.rs</code>.</p>
 <h2 id="server-configuration"><a class="header" href="#server-configuration">Server Configuration</a></h2>
 <p>The <code>@server</code> decorator configures the server:</p>
 <pre><code class="language-forge">@server(port: 3000, host: "0.0.0.0")
@@ -8473,6 +8626,8 @@ fn create_user(body) {
 </code></pre>
 <h3 id="putpath"><a class="header" href="#putpath">@put(path?)</a></h3>
 <p>Registers a function as a PUT handler.</p>
+<h3 id="patchpath"><a class="header" href="#patchpath">@patch(path?)</a></h3>
+<p>Registers a function as a PATCH handler.</p>
 <h3 id="deletepath"><a class="header" href="#deletepath">@delete(path?)</a></h3>
 <p>Registers a function as a DELETE handler.</p>
 <h3 id="wspath"><a class="header" href="#wspath">@ws(path?)</a></h3>
@@ -8492,7 +8647,7 @@ fn get_user(id) {
 </code></pre>
 <p>The Forge path syntax (<code>:id</code>) is internally converted to axum’s brace syntax (<code>{id}</code>).</p>
 <h2 id="handler-parameters-1"><a class="header" href="#handler-parameters-1">Handler Parameters</a></h2>
-<p>Handler functions receive arguments based on their parameter names:</p>
+<p>Handler functions receive arguments based on their parameter names (<code>runtime::server::handler_args</code>, shared by both engines):</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -8500,20 +8655,27 @@ fn get_user(id) {
 </thead>
 <tbody>
 <tr><td>Name matching a path param</td><td>URL path parameter</td></tr>
-<tr><td><code>body</code> or <code>data</code></td><td>Parsed JSON request body</td></tr>
+<tr><td><code>body</code> or <code>data</code></td><td>Request body, decoded by content type (<code>{}</code> when absent)</td></tr>
 <tr><td><code>query</code> or <code>qs</code></td><td>Query string as an object</td></tr>
+<tr><td><code>headers</code></td><td>Request headers, lower-case names</td></tr>
+<tr><td><code>raw_body</code></td><td>The body’s exact text (<code>""</code> when there is none)</td></tr>
+<tr><td><code>req</code> or <code>request</code></td><td><code>{ method, path, params, query, headers, body, raw_body }</code></td></tr>
 <tr><td>Name matching a query param</td><td>Individual query parameter</td></tr>
 <tr><td>Other</td><td><code>null</code></td></tr>
 </tbody>
 </table>
 </div>
 <pre><code class="language-forge">@post("/search")
-fn search(body, query) {
+fn search(body, query, req) {
     say "Search body: " + str(body)
     say "Query params: " + str(query)
+    say "Method: " + req.method
     return { results: [] }
 }
 </code></pre>
+<p>Request bodies are decoded before the handler runs (<code>runtime::http_response::read_body</code>): a body that is not UTF-8 is refused (<code>415</code>), JSON content types are parsed (<code>400</code> if invalid), <code>application/x-www-form-urlencoded</code> becomes an object of Strings, and anything else is a String. The undecoded text is kept as <code>raw_body</code>. These errors, like every error the server answers itself, have a JSON <code>{"error": ...}</code> body.</p>
+<h2 id="responses-1"><a class="header" href="#responses-1">Responses</a></h2>
+<p>A handler’s return value is encoded as JSON on the engine that ran it, and the server builds the response from that JSON, so both engines answer byte-identically. A value built by <code>http.response(status, body?, headers?)</code> is an object tagged <code>__type__: "HttpResponse"</code>; the server validates it (<code>ResponseSpec::from_json</code>) and sends its status, headers and body (<code>null</code>: no body; String: as is, <code>text/plain</code> by default; anything else: JSON). Every other value is a <code>200</code> JSON body.</p>
 <h2 id="json-serialization"><a class="header" href="#json-serialization">JSON Serialization</a></h2>
 <p>Return values from handlers are automatically serialized to JSON:</p>
 <div class="table-wrapper">
@@ -8539,11 +8701,12 @@ fn search(body, query) {
 <p>If a handler function throws a runtime error, the server returns HTTP 500 with:</p>
 <pre><code class="language-json">{ "error": "error message here" }
 </code></pre>
+<p>An invalid response value (an out-of-range status, a header value with a line break, …) also answers 500, with <code>invalid http.response: ...</code>.</p>
 <h2 id="cors"><a class="header" href="#cors">CORS</a></h2>
-<p>CORS is enabled by default with a permissive policy (all origins, all methods, all headers). This is suitable for development; production deployments should add appropriate restrictions at the reverse proxy level.</p>
+<p>CORS is same-origin by default. <code>@server(cors: "permissive")</code> allows any origin, method and header.</p>
 <h2 id="concurrency-model"><a class="header" href="#concurrency-model">Concurrency Model</a></h2>
-<p>The interpreter is wrapped in an <code>Arc&lt;Mutex&lt;Interpreter&gt;&gt;</code>. Each incoming request acquires the mutex lock, calls the handler, and releases it. This means handlers execute serially – only one request is processed at a time.</p>
-<p>For high-throughput scenarios, consider running multiple Forge server instances behind a load balancer.</p>
+<p>Each request runs in its own fork of the program’s state after the top level ran (a frozen VM template, or the interpreter’s <code>fork_for_serving</code>), on tokio’s blocking pool. Handlers run in parallel; mutations a handler makes to top-level variables are private to its request.</p>
+<p>Database connections opened by the top level are shared by the forks (<code>stdlib::db_share</code>): a mutex serializes statements, and a transaction belongs to the request that opened it (other requests wait for it, at most 30 seconds) and is rolled back when that request ends.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="memory-model"><a class="header" href="#memory-model">Memory Model</a></h1>
 <p>Forge uses different memory management strategies depending on the execution tier.</p>
