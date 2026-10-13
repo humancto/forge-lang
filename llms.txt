@@ -198,6 +198,8 @@ println(u.describe())
 println(satisfies(u, Describable))
 ```
 
+A parameter declared with an interface (`fn show(d: Describable)`) accepts any struct that has the interface's methods, and passes on to another parameter of that interface, or of an interface whose methods it has (`fn report(d: Describable) { show(d) }`).
+
 ## Algebraic types and match
 
 ```forge
@@ -301,6 +303,8 @@ try {
     println(e.message)
 }
 ```
+
+The type checker narrows an optional value after a null test: in `if x != null { ... }`, after `if x == null { return ... }`, and on the right of `x != null && x > 0` / `x == null || v < x`, `x` is not null (no T0014 warning).
 
 There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 

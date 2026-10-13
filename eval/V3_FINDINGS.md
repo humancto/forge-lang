@@ -162,6 +162,27 @@ sudoku_solver (two small annotated functions called ~200,000 times): VM 0.71 s i
 seems to keep the functions out of the fast call path / JIT. Not a timeout today; worth
 measuring in `tools/bench.sh` with `--edition 2027`.
 
+**Fixed:** each check was an ordinary call (`__forge_call_method` on the `__types` module,
+then the native `__types.check`): two native calls with argument vectors and GC scopes, a
+linear scan of the builtin registry per native call, a copy of the module object's field
+map, a hashed lookup of the type string and three string constants materialized per
+check, about 1 µs in all. The JIT already compiled checked *pure* functions, but `fits`
+reads the top-level grid, so it stayed in the VM. The VM compiler now emits a `TypeCheck`
+opcode in front of every check of a common type (`Int`, `Float`, `String`, `Bool`,
+`Null`, `Object`, a struct/`type` name, arrays of scalars, `?T` of those;
+`src/vm/type_check.rs`): when the value certainly fits and nothing would be widened it
+takes the jump over the call, otherwise the unchanged call decides (errors, Int → Float).
+A statement check of a local (the argument checks) reads the local in place, so a passing
+argument check is one dispatched instruction. The JIT decides `TypeCheck` from the value's
+kind. The instrumentation also leaves out checks of results that always fit (`return
+false`, `return "..."`, `return null` for `?T`, comparisons for `Bool`). Debug build
+(opt-level 1) on the loaded 4-core host, median of 7 (min): sudoku_solver VM 1.11 s (1.03)
+in 2026; 2027 2.37 s (2.19) before, 1.14 s (1.07) after. `benchmarks/typed/sudoku.fg`
+(new `typed` suite of `tools/bench.sh`): 0.92 s (0.90) in 2026; 2027 2.29 s (1.99) before,
+1.20 s (1.05) after. `benchmarks/typed/geometry.fg` (struct, Option and widened Float
+arguments): 0.68 s (0.62) in 2026, 0.82 s (0.73) in 2027. `src/vm/type_check_tests.rs`
+compares the fast path with the call for 30 values × 25 types.
+
 ### 22. VM: two-level place push is slower than the interpreter
 
 ```forge
@@ -241,6 +262,14 @@ The checker treats the parameter's interface type as a struct named `Shape`.
 
 Suggested fix: when the argument's static type is the interface itself (or an interface
 that extends it), it satisfies it. Add a 2027 checker test.
+
+**Fixed:** the satisfaction check (`check_interface_satisfaction`) looked the interface up
+as a struct. A value of interface `I` now satisfies `I`, and another interface `J` when
+`I` declares every method of `J` with the same parameter count and a fitting declared
+return type (`check_interface_subsumes`; otherwise T0012 `interface 'Named' does not
+satisfy interface 'Shape': missing 'area'`), also inside arrays and options. Checker tests
+in both editions, `tests/edition2027/interface_params_test.fg` on both engines;
+typed_route_planner is no longer `known_failing`.
 
 ### 7. VM: interfaces cannot be imported by name
 
@@ -419,6 +448,14 @@ counter instead.
 
 Suggested fix: narrow `x` to non-null on the right of `x == null ||` (and in the `else` of
 `if x == null`), or do not treat a `null`-initialised binding as an Option.
+
+**Fixed:** the right operand of `&&` is checked with the left operand's null tests
+applied, and the right operand of `||` with what the left operand being false proves, so
+`lo == null || v < lo` and `x != null && x > 0` are clean. Conditions are now narrowed
+by what they prove when true *and* when false: `a || b` false proves both negations, so
+after `if best == null || v < best { return v }` `best` is not null; and the `else` of `if
+x != null && y != null`, which used to make both Null (a false certain error on `x + 1`
+there), narrows nothing.
 
 ---
 
