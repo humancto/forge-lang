@@ -1,0 +1,87 @@
+// Split 160,000 readings into 8 chunks, compute each chunk's statistics in
+// its own task (spawn + await_all, results in chunk order), then merge.
+
+fn stats(part) {
+    let mut n = 0
+    let mut bad = 0
+    let mut total = 0
+    // Not `let mut lo = null` with `lo == null || v < lo`: the type checker
+    // warns T0014 ("Option type used in operation") on the guarded comparison
+    // (eval/V3_FINDINGS.md, finding 18).
+    let mut lo = 0
+    let mut hi = 0
+    let mut sensors = {}
+    for line in part {
+        let f = split(line, ",")
+        let sensor = f[0]
+        let mut v = 0
+        try {
+            v = int(f[1])
+        } catch e {
+            bad += 1
+            continue
+        }
+        n += 1
+        total += v
+        if n == 1 || v < lo {
+            lo = v
+        }
+        if n == 1 || v > hi {
+            hi = v
+        }
+        if !has_key(sensors, sensor) {
+            sensors[sensor] = { n: 0, sum: 0 }
+        }
+        sensors[sensor].n += 1
+        sensors[sensor].sum += v
+    }
+    return { n: n, bad: bad, sum: total, min: lo, max: hi, sensors: sensors }
+}
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" })
+let size = (len(lines) + 7) / 8
+let tasks = map(range(0, 8), fn(i) {
+    let part = slice(lines, i * size, min((i + 1) * size, len(lines)))
+    return spawn {
+        return stats(part)
+    }
+})
+let results = await_all(tasks)
+
+let mut all = { n: 0, bad: 0, sum: 0 }
+let mut lo = null
+let mut hi = null
+let mut totals = {}
+for e in enumerate(results) {
+    let r = e.value
+    println("chunk {e.index + 1}: n={r.n} bad={r.bad} sum={r.sum} min={r.min} max={r.max}")
+    all.n += r.n
+    all.bad += r.bad
+    all.sum += r.sum
+    if lo == null || r.min < lo {
+        lo = r.min
+    }
+    if hi == null || r.max > hi {
+        hi = r.max
+    }
+    for s, v in r.sensors {
+        if !has_key(totals, s) {
+            totals[s] = { name: s, n: 0, sum: 0 }
+        }
+        totals[s].n += v.n
+        totals[s].sum += v.sum
+    }
+}
+println("all: n={all.n} bad={all.bad} sum={all.sum} min={lo} max={hi}")
+let ranked = sort(values(totals), fn(a, b) {
+    if a.sum != b.sum {
+        return b.sum - a.sum
+    }
+    if a.name < b.name {
+        return -1
+    }
+    return 1
+})
+for t in slice(ranked, 0, 3) + slice(ranked, len(ranked) - 3, len(ranked)) {
+    println("{t.name} n={t.n} sum={t.sum}")
+}
