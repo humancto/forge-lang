@@ -67,12 +67,8 @@ for line in lines {
         bal[a] = 0
     }
     if op == "transfer" {
-        // The key is bound to a local first: on the VM, `obj[xs[i]] = v` (a key that
-        // is itself an index or field read) copies the whole object on every write
-        // (eval/V3_FINDINGS.md, finding 3).
-        let b = f[2]
-        if !has_key(bal, b) {
-            bal[b] = 0
+        if !has_key(bal, f[2]) {
+            bal[f[2]] = 0
         }
     }
     let mut touched = ""

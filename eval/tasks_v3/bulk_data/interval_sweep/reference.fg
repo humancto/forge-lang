@@ -58,14 +58,10 @@ for line in fs.lines("/dev/stdin") {
     let s = int(f[1])
     let e = int(f[2])
     count += 1
-    // The key is bound to a local first: on the VM, `obj[xs[i]] = v` (a key that
-    // is itself an index or field read) copies the whole object on every write
-    // (eval/V3_FINDINGS.md, finding 3).
-    let room = f[0]
-    if !has_key(by_room, room) {
-        by_room[room] = []
+    if !has_key(by_room, f[0]) {
+        by_room[f[0]] = []
     }
-    by_room[room].push([s, e])
+    by_room[f[0]].push([s, e])
     all_iv.push([s, e])
     events.push(2 * s + 1)
     events.push(2 * e)

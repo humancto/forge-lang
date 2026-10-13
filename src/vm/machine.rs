@@ -1323,9 +1323,14 @@ impl VM {
                         self.push_element_local(frame_idx, base, a, ElemKey::Field(field), value)?;
                     }
                     OpCode::PeekLocal => {
-                        // Not shared: the copy is an argument of the
-                        // `CallPure` that follows (see the opcode docs).
+                        // Not shared: a snapshot used by the same statement
+                        // (see the opcode docs).
                         let value = self.read_local(frame_idx, base, b)?;
+                        if c == PEEK_SHARE_IF_CAPTURED
+                            && self.frames[frame_idx].open_upvalues.contains_key(&b)
+                        {
+                            self.gc.share(value);
+                        }
                         self.registers[base + a as usize] = value;
                     }
                     OpCode::UpdateSetLocal => {

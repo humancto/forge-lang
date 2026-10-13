@@ -64,11 +64,7 @@ for line in fs.lines("/dev/stdin") {
     }
     let cls = str(status / 100)
     classes[cls] = get(classes, cls, 0) + 1
-    // The key is bound to a local first: on the VM, `obj[xs[i]] = v` (a key that
-    // is itself an index or field read) copies the whole object on every write
-    // (eval/V3_FINDINGS.md, finding 3).
-    let ip = f[1]
-    clients[ip] = get(clients, ip, 0) + 1
+    clients[f[1]] = get(clients, f[1], 0) + 1
     let minute = substring(f[0], 0, 16)
     minutes[minute] = get(minutes, minute, 0) + 1
     total_bytes += int(f[6])

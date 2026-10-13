@@ -145,6 +145,23 @@ evaluate the key into a temporary register first. Separately, the GC should acco
 large garbage containers so a copy-per-iteration loop cannot reach gigabytes (with
 `--max-memory 1GB` the same loop stays at 1 GB, so the collector can keep up when pushed).
 
+**Fixed:** the write side (`SetIndexLocal`) already took any key; the copy came from the
+*read* `o[k]` (of `o[k] += 1`, or `get(o, k)`-style reads), which kept the in-place
+`GetIndexLocal` only for literal/variable/arithmetic keys and otherwise read the object
+with `GetLocal`, sharing it, so the next write copied it. Now a key that runs no code (index
+and field reads, interpolation, operators: `index_runs_no_code`) is evaluated first and read
+with `GetIndexLocal`; a key that may call (`o[str(i)]`) reads a `PeekLocal` snapshot of the
+local taken before the key runs (as the generic read does), then shares only the element
+(`GetIndex` + `Move`). The `CallPure` reads (`get`, `has_key`, `len`, `contains`, `m.get`)
+and `AddLocal`/`PushLocal`/`UpdateSetLocal` accept the same wider operands. In the repro
+extended with `o[it.sku] += 1`, `o[names[i]] += 1` takes 1 ms (was 1903 ms) and
+`o[it.sku] += 1` 1 ms (was 1392 ms); a plain store with a computed key
+(`o["k" + str(i)] = 7`) was already in place and was only slow behind the garbage of the
+copying loops. `benchmarks/vm/computed_keys.fg` (300k updates of a
+10k-key object) runs in 0.36 s and was killed for memory before. The GC accounting of large
+garbage containers was not changed. The bulk_data references index with `f[1]`, `it.sku`,
+`f[0]`, `f[2]` directly again.
+
 ### 4. VM: writing a top-level container from a function copies it
 
 ```forge

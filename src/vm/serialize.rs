@@ -7,7 +7,8 @@ const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
 /// 5: in-place local opcodes (`UpdateSetLocal`, `GetIndexLocal` .. `CallPure`).
 /// 6: `UpdateMapLocal`.
-const VERSION_MINOR: u8 = 6;
+/// 7: `PeekLocal` modes.
+const VERSION_MINOR: u8 = 7;
 
 #[derive(Debug)]
 pub struct SerializeError {

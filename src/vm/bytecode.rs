@@ -112,7 +112,8 @@ pub enum OpCode {
     /// (`GetIndex` semantics) without copying the local's reference into
     /// another register, so a uniquely owned container stays owned. The
     /// compiler emits it only when evaluating the index cannot change the
-    /// local (`is_simple_operand`); the element read out is shared.
+    /// local (`index_runs_no_code`: no calls, no in-place updates); the
+    /// element read out is shared.
     GetIndexLocal,
     /// A=dst, B=local register, C=field name constant: `R(A) = local.field`
     /// (`GetField` semantics), like `GetIndexLocal`.
@@ -134,9 +135,15 @@ pub enum OpCode {
     /// A=local register, B=field name constant, C=value register: statement
     /// `local.field.push(R(C))`, like `PushIndexLocal`.
     PushFieldLocal,
-    /// A=dst, B=local register: `R(A) = local` *without* sharing it. Only
-    /// emitted for an argument of the `CallPure` that immediately follows
-    /// the call's arguments, so the copy never outlives the call.
+    /// A=dst, B=local register, C=mode: `R(A) = local` *without* sharing
+    /// it: a snapshot that never outlives the statement using it (an
+    /// argument of the `CallPure` that immediately follows the call's
+    /// arguments, the receiver operand of `UpdateMapLocal`, or the
+    /// container of a `local[index]` read whose index may run code, read
+    /// with `GetIndex` and then shared with `Move`). With mode
+    /// `PEEK_SHARE_IF_CAPTURED` the value is shared when the local is
+    /// captured: code run while the snapshot is held (a call in the index
+    /// or key) could otherwise update it in place through the cell.
     PeekLocal,
     /// A=callee register, B=argument count, C=dst: like `Call`, for a call
     /// whose arguments may include `PeekLocal` copies. When the callee is
@@ -168,6 +175,10 @@ pub const SET_UPDATE_REMOVE: u8 = 1;
 /// `UpdateMapLocal` operations (its C operand).
 pub const MAP_UPDATE_SET: u8 = 0;
 pub const MAP_UPDATE_REMOVE: u8 = 1;
+
+/// `PeekLocal` modes (its C operand).
+pub const PEEK_PLAIN: u8 = 0;
+pub const PEEK_SHARE_IF_CAPTURED: u8 = 1;
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.

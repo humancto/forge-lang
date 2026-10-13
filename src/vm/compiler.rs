@@ -1583,7 +1583,7 @@ fn try_compile_pure_call(
     let Some((reg, _)) = c.resolve_local(var) else {
         return Ok(false);
     };
-    if !args[1..].iter().all(is_simple_operand) {
+    if !args[1..].iter().all(index_runs_no_code) {
         return Ok(false);
     }
     let saved = c.next_register;
@@ -1676,23 +1676,6 @@ fn try_compile_mutating_call(
     Ok(true)
 }
 
-/// An operand whose evaluation has no side effects and runs no user code
-/// (literals, variable reads, arithmetic on those, array, tuple and object
-/// literals of those). Evaluating it before rather than after reading a
-/// local therefore cannot change the result, which lets `AddLocal` /
-/// `PushLocal` read the local last. (Object literals matter: without them
-/// `rows.push({id: i})` in a loop copied the whole array on every push.)
-fn is_simple_operand(expr: &Expr) -> bool {
-    match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
-        Expr::Array(items) | Expr::Tuple(items) => items.iter().all(is_simple_operand),
-        Expr::Object(fields) => fields.iter().all(|(_, value)| is_simple_operand(value)),
-        Expr::BinOp { left, right, .. } => is_simple_operand(left) && is_simple_operand(right),
-        Expr::UnaryOp { operand, .. } => is_simple_operand(operand),
-        _ => false,
-    }
-}
-
 /// `x = x + e` (and `x += e`) on a mutable local with a simple `e`:
 /// one `AddLocal`, which appends in place to a string or array the local
 /// owns (`s = s + "x"`, `xs = xs + [v]`).
@@ -1712,7 +1695,7 @@ fn try_compile_add_local(
     else {
         return Ok(false);
     };
-    if !matches!(left.as_ref(), Expr::Ident(l) if l == name) || !is_simple_operand(right) {
+    if !matches!(left.as_ref(), Expr::Ident(l) if l == name) || !index_runs_no_code(right) {
         return Ok(false);
     }
     let Some((reg, true)) = c.resolve_local(name) else {
@@ -1752,7 +1735,7 @@ fn try_compile_push_assign(
     if !is_builtin_push
         || args.len() != 2
         || !matches!(&args[0], Expr::Ident(v) if v == name)
-        || !is_simple_operand(&args[1])
+        || !index_runs_no_code(&args[1])
     {
         return Ok(false);
     }
@@ -1879,7 +1862,7 @@ fn try_compile_set_update_statement(c: &mut Compiler, expr: &Expr) -> Result<boo
     let Expr::Ident(var) = receiver else {
         return Ok(false);
     };
-    if !is_simple_operand(value) {
+    if !index_runs_no_code(value) {
         return Ok(false);
     }
     let Some((reg, true)) = c.resolve_local(var) else {
@@ -1936,6 +1919,33 @@ fn has_no_inline_updates(expr: &Expr) -> bool {
     }
 }
 
+/// Whether evaluating `expr` runs no code beyond its own operators and
+/// reads: literals, variables, operators, interpolation, field and index
+/// reads, and array, tuple and object literals of those (no calls,
+/// lambdas or blocks). Evaluating it cannot change any variable or update
+/// any container, so evaluating it before rather than after reading a
+/// local cannot change the result: `local[expr]` reads the local last
+/// (`GetIndexLocal`: `o[names[i]]`, `o[it.sku]`, `o["k" + s]`), and so do
+/// `AddLocal` / `PushLocal` / `UpdateSetLocal` and the `PeekLocal` +
+/// `CallPure` reads. (Object literals matter: without them
+/// `rows.push({id: i})` in a loop copied the whole array on every push.)
+fn index_runs_no_code(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
+        Expr::StringInterp(parts) => parts.iter().all(|part| match part {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(e) => index_runs_no_code(e),
+        }),
+        Expr::Array(items) | Expr::Tuple(items) => items.iter().all(index_runs_no_code),
+        Expr::Object(fields) => fields.iter().all(|(_, e)| index_runs_no_code(e)),
+        Expr::BinOp { left, right, .. } => index_runs_no_code(left) && index_runs_no_code(right),
+        Expr::UnaryOp { operand, .. } => index_runs_no_code(operand),
+        Expr::FieldAccess { object, .. } => index_runs_no_code(object),
+        Expr::Index { object, index } => index_runs_no_code(object) && index_runs_no_code(index),
+        _ => false,
+    }
+}
+
 /// `m = m.set(k, v)` / `m = m.remove(k)` on a mutable local whose key and
 /// value expressions update no local in place (`has_no_inline_updates`):
 /// one `UpdateMapLocal`, which updates the map in place when the local
@@ -1982,7 +1992,14 @@ fn try_compile_map_update(
     let saved = c.next_register;
     let first = c.alloc_reg()?;
     if op == MAP_UPDATE_SET {
-        c.emit(encode_abc(OpCode::PeekLocal, first, reg, 0), 0);
+        // A call in the key or value could reach the local through its
+        // cell and update the map in place: share it first then.
+        let mode = if args.iter().all(index_runs_no_code) {
+            PEEK_PLAIN
+        } else {
+            PEEK_SHARE_IF_CAPTURED
+        };
+        c.emit(encode_abc(OpCode::PeekLocal, first, reg, mode), 0);
         for arg in args {
             let r = c.alloc_reg()?;
             compile_expr(c, arg, r)?;
@@ -2016,7 +2033,7 @@ fn try_compile_method_peek(
     let Expr::Ident(var) = receiver else {
         return Ok(false);
     };
-    if !arity_ok || !args.iter().all(is_simple_operand) {
+    if !arity_ok || !args.iter().all(index_runs_no_code) {
         return Ok(false);
     }
     let Some((reg, _)) = c.resolve_local(var) else {
@@ -3695,11 +3712,29 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             // without sharing the local's container (`counts[w]`).
             if let Expr::Ident(name) = object.as_ref() {
                 if let Some((reg, _)) = c.resolve_local(name) {
-                    if is_simple_operand(index) {
+                    if index_runs_no_code(index) {
                         let saved = c.next_register;
                         let ir = c.alloc_reg()?;
                         compile_expr(c, index, ir)?;
                         c.emit(encode_abc(OpCode::GetIndexLocal, dst, reg, ir), 0);
+                        c.free_to(saved);
+                        return Ok(());
+                    }
+                    if has_no_inline_updates(index) {
+                        // `counts[str(x)]`: the index may call functions,
+                        // so the local is read first (a snapshot, as the
+                        // generic read does), without sharing it; the
+                        // element read out of it is then shared (`Move`).
+                        let saved = c.next_register;
+                        let snap = c.alloc_reg()?;
+                        c.emit(
+                            encode_abc(OpCode::PeekLocal, snap, reg, PEEK_SHARE_IF_CAPTURED),
+                            0,
+                        );
+                        let ir = c.alloc_reg()?;
+                        compile_expr(c, index, ir)?;
+                        c.emit(encode_abc(OpCode::GetIndex, dst, snap, ir), 0);
+                        c.emit(encode_abc(OpCode::Move, dst, dst, 0), 0);
                         c.free_to(saved);
                         return Ok(());
                     }

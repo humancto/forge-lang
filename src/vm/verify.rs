@@ -46,7 +46,8 @@
 
 use super::bytecode::{
     decode_a, decode_b, decode_bx, decode_c, decode_op, decode_sbx, Chunk, Constant, OpCode,
-    UpvalueSource, MAP_UPDATE_REMOVE, MAP_UPDATE_SET, SET_UPDATE_ADD, SET_UPDATE_REMOVE,
+    UpvalueSource, MAP_UPDATE_REMOVE, MAP_UPDATE_SET, PEEK_PLAIN, PEEK_SHARE_IF_CAPTURED,
+    SET_UPDATE_ADD, SET_UPDATE_REMOVE,
 };
 use std::fmt;
 
@@ -458,6 +459,9 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
             PeekLocal => {
                 self.reg(ip, "destination", a)?;
                 self.reg(ip, "local", b)?;
+                if c != PEEK_PLAIN && c != PEEK_SHARE_IF_CAPTURED {
+                    return Err(self.fail(Some(ip), format!("PeekLocal has an unknown mode {}", c)));
+                }
             }
             CallPure => {
                 self.reg(ip, "callee", a)?;
@@ -799,6 +803,22 @@ mod tests {
         rejects(
             &with(encode_abx(OpCode::Closure, 0, 0)),
             "prototype index 0",
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_peek_modes() {
+        verify_chunk(&with(encode_abc(OpCode::PeekLocal, 0, 0, PEEK_PLAIN))).unwrap();
+        verify_chunk(&with(encode_abc(
+            OpCode::PeekLocal,
+            0,
+            0,
+            PEEK_SHARE_IF_CAPTURED,
+        )))
+        .unwrap();
+        rejects(
+            &with(encode_abc(OpCode::PeekLocal, 0, 0, 2)),
+            "unknown mode 2",
         );
     }
 

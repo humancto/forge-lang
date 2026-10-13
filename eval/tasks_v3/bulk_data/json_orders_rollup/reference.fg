@@ -65,11 +65,7 @@ for line in fs.lines("/dev/stdin") {
     let mut sub = 0
     for it in o.items {
         sub += it.qty * round(it.price * 100)
-        // The key is bound to a local first: on the VM, `obj[xs[i]] = v` (a key that
-        // is itself an index or field read) copies the whole object on every write
-        // (eval/V3_FINDINGS.md, finding 3).
-        let sku = it.sku
-        skus[sku] = get(skus, sku, 0) + it.qty
+        skus[it.sku] = get(skus, it.sku, 0) + it.qty
     }
     if o.coupon == "SAVE10" {
         sub -= (sub + 5) / 10
