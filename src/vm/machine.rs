@@ -191,6 +191,12 @@ pub struct VM {
     /// one again binds its globals instead of running it again (see
     /// `__forge_import_module`).
     pub(crate) loaded_modules: HashMap<std::path::PathBuf, Arc<LoadedModule>>,
+    /// Modules the program's VMs ran, shared with every VM forked for a
+    /// task, so a module runs once per program (`vm::module_share`).
+    pub(super) module_registry: Arc<super::module_share::ModuleRegistry>,
+    /// One list per module whose top level is running here: the modules
+    /// it imported (its snapshot's dependencies).
+    pub(super) module_imports: Vec<Vec<std::path::PathBuf>>,
     pub gc: Gc,
     pub output: Vec<String>,
     /// JIT tier state: specialization cache keyed by (prototype id, type
@@ -458,6 +464,8 @@ impl VM {
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
             loaded_modules: HashMap::new(),
+            module_registry: Arc::default(),
+            module_imports: Vec::new(),
             gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
@@ -726,8 +734,10 @@ impl VM {
 
         child.embedded_fields = self.embedded_fields.clone();
         // The task has copies of the modules' globals: it must not run
-        // them again when it imports one.
+        // them again when it imports one. A module neither has run yet runs
+        // once for the whole program (`vm::module_share`).
         child.loaded_modules = self.loaded_modules.clone();
+        child.module_registry = Arc::clone(&self.module_registry);
 
         for (name, defaults) in &self.struct_defaults {
             let mut child_defaults = IndexMap::new();

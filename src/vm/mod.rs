@@ -12,6 +12,7 @@ pub mod green;
 pub mod jit;
 mod local_ops; // local-variable access and in-place update opcodes
 pub mod machine;
+mod module_share; // a module runs once per program across spawned tasks
 pub mod nanbox;
 pub mod profiler;
 mod range_loop; // counting `for v in range(..)` / `repeat n times` loops

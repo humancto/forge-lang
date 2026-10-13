@@ -1042,11 +1042,17 @@ impl VM {
                     .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
                 let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
 
+                // A module the running module imports is one of its
+                // dependencies (`vm::module_share`).
+                if let Some(deps) = self.module_imports.last_mut() {
+                    deps.push(key.clone());
+                }
                 // A module runs once per program; importing it again (from
-                // here or another module) binds the globals it left.
+                // here, another module or another task) binds the globals it
+                // left.
                 let module = match self.loaded_modules.get(&key) {
                     Some(module) => Arc::clone(module),
-                    None => {
+                    None => self.import_module_once(&key, &file_path, |vm| {
                         // Read the path that was checked (resolved under a
                         // scoped grant).
                         let checked = crate::permissions::require_import(&file_path)
@@ -1059,16 +1065,11 @@ impl VM {
                             crate::typechecker::prepare_module(&source, &path, &file_path)
                                 .map_err(|e| VMError::new(&e))?;
 
-                        // Shared cycle detection (runtime/imports.rs).
-                        // Checked before compiling so a cycle is reported
-                        // once, not as a nested chain of compile/runtime
-                        // errors.
-                        let _import_guard = crate::runtime::imports::enter_import(&file_path)
-                            .map_err(|msg| VMError::new(&msg))?;
                         // The module's top-level names live under a private
                         // global prefix, so only the names imported here
                         // become visible to the importer (no leaking of
-                        // helpers it did not ask for).
+                        // helpers it did not ask for). Cycles were checked
+                        // when the module was claimed (`runtime::imports`).
                         let prefix = crate::vm::compiler::module_global_prefix(&resolved);
                         let chunk = crate::vm::compiler::compile_module_with(
                             &program,
@@ -1078,7 +1079,7 @@ impl VM {
                         .map_err(|e| {
                             VMError::new(&format!("import '{}' compile error: {}", path, e.message))
                         })?;
-                        self.execute_module(&chunk).map_err(|e| {
+                        vm.execute_module(&chunk).map_err(|e| {
                             if e.is_unwound_to_handler() || e.is_fatal() {
                                 // Control transfer (a `timeout` around the
                                 // import fired inside it) or a fatal limit:
@@ -1091,13 +1092,11 @@ impl VM {
                                 VMError::new(&format!("import '{}' runtime error: {}", path, e))
                             }
                         })?;
-                        let module = Arc::new(crate::vm::machine::LoadedModule {
+                        Ok(Arc::new(crate::vm::machine::LoadedModule {
                             program: Arc::new(program),
                             prefix,
-                        });
-                        self.loaded_modules.insert(key, Arc::clone(&module));
-                        module
-                    }
+                        }))
+                    })?,
                 };
 
                 for pair in &aliases {

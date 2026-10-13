@@ -1255,7 +1255,9 @@ pub(crate) struct LoadedModule {
     struct_defaults: HashMap<String, IndexMap<String, Value>>,
 }
 
-type ModuleCache = Arc<Mutex<HashMap<std::path::PathBuf, Arc<LoadedModule>>>>;
+/// Shared by every interpreter of a program; makes a module's top level run
+/// once even when tasks import it concurrently (`runtime::imports`).
+type ModuleCache = Arc<crate::runtime::imports::ModuleRegistry<Arc<LoadedModule>>>;
 
 /// Teardown: release this interpreter's own roots, and if it was the last
 /// interpreter on its heap, reclaim the scope cycles nothing else holds
@@ -1273,9 +1275,7 @@ impl Drop for Interpreter {
         // The last interpreter of a program releases its imported modules,
         // so their scope cycles are collected below.
         if Arc::strong_count(&self.modules) == 1 {
-            let modules =
-                std::mem::take(&mut *self.modules.lock().unwrap_or_else(|e| e.into_inner()));
-            drop(modules);
+            drop(self.modules.take_loaded());
         }
         if self.heap.detach() {
             self.heap.collect(&[]);
@@ -1430,15 +1430,26 @@ impl Interpreter {
         let file_path = crate::package::resolve_import_from(path, base_dir.as_deref())
             .ok_or_else(|| RuntimeError::new(&crate::semantics::import_not_found(path)))?;
         let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
-        let cached = self
-            .modules
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .cloned();
-        if let Some(module) = cached {
-            return Ok(module);
-        }
+        // A module runs once per program: the first import (on any thread)
+        // runs it, a concurrent one waits for it (cancellably), and every
+        // later one binds that instance.
+        let modules = Arc::clone(&self.modules);
+        let claim = modules.claim(
+            &key,
+            &file_path,
+            || {
+                if self.is_cancelled() {
+                    Err(RuntimeError::new("cancelled"))
+                } else {
+                    Ok(())
+                }
+            },
+            |message| RuntimeError::new(&message),
+        )?;
+        let claim = match claim {
+            crate::runtime::imports::Claim::Loaded(module) => return Ok(module),
+            crate::runtime::imports::Claim::Run(claim) => claim,
+        };
         // Read the path that was checked (resolved under a scoped grant).
         let checked = crate::permissions::require_import(&file_path)
             .map_err(|e| RuntimeError::new(&e.to_string()))?;
@@ -1447,12 +1458,9 @@ impl Interpreter {
         let program = crate::typechecker::prepare_module(&source, path, &file_path)
             .map_err(|e| RuntimeError::new(&e))?;
 
-        // Shared cycle detection (runtime/imports.rs); the guard keeps
-        // this module on the import chain while it runs.
-        let _import_guard = crate::runtime::imports::enter_import(&file_path)
-            .map_err(|msg| RuntimeError::new(&msg))?;
         // Same containment as ours: cancellation, output capture,
-        // and no host runtime (see `child_context`).
+        // and no host runtime (see `child_context`). The claim keeps this
+        // module on the import chain (cycle detection) while it runs.
         let mut import_interp = self.child_context();
         import_interp.source_file = Some(file_path.clone());
         import_interp.run(&program)?;
@@ -1465,15 +1473,7 @@ impl Interpreter {
             embedded_fields: import_interp.embedded_fields.clone(),
             struct_defaults: import_interp.struct_defaults.clone(),
         });
-        // Two tasks importing the module at once may both run it; the
-        // first to finish is the program's instance.
-        Ok(Arc::clone(
-            self.modules
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(key)
-                .or_insert(module),
-        ))
+        Ok(claim.finish(module))
     }
 
     /// The language edition this interpreter runs programs under.
