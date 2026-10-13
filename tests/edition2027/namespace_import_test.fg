@@ -1,0 +1,35 @@
+// Edition 2027: `import "path" as m` works as in 2026 (`as` is not a
+// reserved word); the module is type-checked when it is loaded, and
+// `m.f(x)` is checked against the module's signature.
+//   forge --edition 2027 test tests/edition2027 --engine both
+
+import "tests/parity/modules/namespace_geo.fg" as geo
+
+fn describe(s) -> String {
+    return match s {
+        geo.Circle(r) => "circle " + str(r),
+        geo.Square(w) => "square " + str(w),
+        geo.Dot => "dot",
+    }
+}
+
+@test
+fn namespace_members_work() {
+    assert_eq(geo.add(2, 3), 5)
+    assert_eq(geo.Point { x: 2, y: 3 }.sum(), 5)
+    assert_eq(describe(geo.Square(2.0)), "square 2")
+    assert_eq(describe(geo.Dot), "dot")
+}
+
+@test
+fn annotated_module_functions_check_their_arguments() {
+    let data = json.parse("\"two\"")
+    assert_throws(fn() { geo.add(data, 1) })
+}
+
+@test
+fn unknown_members_are_errors() {
+    let as = 1
+    assert_eq(as, 1)
+    assert_throws(fn() { geo.missing })
+}
