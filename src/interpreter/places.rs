@@ -114,7 +114,9 @@ pub(super) fn has_key_of(obj: Option<&Value>, key: Option<&Value>) -> Result<Val
         (Some(Value::Object(map)), Some(Value::String(key))) => {
             Ok(Value::Bool(map.contains_key(key)))
         }
-        _ => Err(RuntimeError::new("has_key() requires (object, key_string)")),
+        _ => Err(RuntimeError::new(
+            &crate::semantics::builtin_args::bad_args("has_key"),
+        )),
     }
 }
 
@@ -155,7 +157,7 @@ pub(super) fn get_of(
             Ok(arr.get(*idx as usize).cloned().unwrap_or_else(default))
         }
         _ => Err(RuntimeError::new(
-            "get() requires (object, key) or (array, index)",
+            &crate::semantics::builtin_args::bad_args("get"),
         )),
     }
 }
@@ -330,6 +332,13 @@ impl Interpreter {
             return Some(self.mutate_var_method(var, method, rest, want_result));
         }
         // The free forms `push(v, x)` (edition 2026) and `pop(v)`.
+        // In place only on an array: anything else takes the ordinary path
+        // (the builtin's argument error annotated with the argument types).
+        if matches!(method, "push" | "pop")
+            && !self.env.with_value(var, |v| matches!(v, Value::Array(_)))?
+        {
+            return None;
+        }
         match (method, rest.len()) {
             ("push", 1) => {
                 let val = match self.eval_expr(&rest[0]) {
@@ -339,7 +348,11 @@ impl Interpreter {
                 Some(self.update_var(var, |cur| {
                     match cur {
                         Value::Array(items) => items.push(val),
-                        _ => return Err(RuntimeError::new("push() first argument must be array")),
+                        _ => {
+                            return Err(RuntimeError::new(
+                                &crate::semantics::builtin_args::bad_args("push"),
+                            ))
+                        }
                     }
                     Ok(if want_result {
                         cur.clone()
@@ -350,7 +363,9 @@ impl Interpreter {
             }
             ("pop", 0) => Some(self.update_var(var, |cur| match cur {
                 Value::Array(items) => Ok(items.pop().unwrap_or(Value::Null)),
-                _ => Err(RuntimeError::new("pop() requires array")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("pop"),
+                )),
             })),
             _ => None,
         }
@@ -681,13 +696,16 @@ impl Interpreter {
                     },
                     None => None,
                 };
-                self.env.with_value(var, |v| {
+                let result = self.env.with_value(var, |v| {
                     if name == "len" {
                         len_of(Some(v))
                     } else {
                         contains_of(Some(v), needle.as_ref())
                     }
-                })
+                })?;
+                // Errors take the ordinary path, which annotates them with
+                // the argument types, as for `get`/`has_key` above.
+                result.ok().map(Ok)
             }
             _ => None,
         }

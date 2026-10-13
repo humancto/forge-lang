@@ -65,7 +65,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
             };
             let msg = match args.get(1) {
                 Some(Value::String(s)) => s.clone(),
-                Some(v @ Value::Object(_)) | Some(v @ Value::Array(_)) => v.to_json_string(),
+                Some(v @ Value::Object(_)) | Some(v @ Value::Array(_)) => {
+                    crate::stdlib::json_module::to_compact(v)?
+                }
                 _ => return Err("ws.send() requires a message string or object".to_string()),
             };
             ws_send(&id, &msg)

@@ -11,27 +11,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-/// Escape a string for safe JSON embedding. Handles backslashes, quotes,
-/// newlines, tabs, carriage returns, and control characters.
-fn escape_json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+/// Strings inside displayed collections are written as JSON literals (the
+/// same escapes as `json.stringify`, on both engines).
+use crate::stdlib::json_module::escape_json_string;
 
 /// Sender variant: bounded (sync_channel) or unbounded (channel)
 #[derive(Debug)]
@@ -45,7 +27,7 @@ pub enum ChannelSender {
 #[allow(dead_code)]
 pub struct ChannelInner {
     pub tx: std::sync::Mutex<Option<ChannelSender>>,
-    pub rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<Value>>>,
+    pub rx: std::sync::Mutex<Option<crate::semantics::channel::Receiver<Value>>>,
     pub capacity: Option<usize>,
 }
 
@@ -2392,9 +2374,9 @@ impl Interpreter {
                     Value::Channel(ch) => loop {
                         // `None` = channel closed; waits stay cancellable.
                         let next = self.wait_cancellable(|slice| {
-                            let rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
-                            match rx_guard.as_ref() {
-                                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
+                            let mut rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
+                            match rx_guard.as_mut() {
+                                Some(rx) => match rx.recv_timeout(slice) {
                                     Ok(v) => Some(Some(v)),
                                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -2899,10 +2881,10 @@ impl Interpreter {
             }
 
             Stmt::RetryBlock { count, body } => {
-                let max = match self.eval_expr(count)? {
-                    Value::Int(n) => n as usize,
-                    _ => 3,
-                };
+                let max = crate::semantics::retry_attempts(match self.eval_expr(count)? {
+                    Value::Int(n) => Some(n),
+                    _ => None,
+                });
                 let mut last_err = String::new();
                 for attempt in 0..max {
                     match self.exec_body(body) {
@@ -2918,9 +2900,8 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(RuntimeError::new(&format!(
-                    "retry failed after {} attempts: {}",
-                    max, last_err
+                Err(RuntimeError::new(&crate::semantics::retry_exhausted(
+                    max, &last_err,
                 )))
             }
 
@@ -4508,7 +4489,9 @@ impl Interpreter {
                                 self.env.set(var_name, new_arr.clone())?;
                                 return Ok(new_arr);
                             }
-                            return Err(RuntimeError::new("push() first argument must be array"));
+                            return Err(RuntimeError::new(
+                                &crate::semantics::builtin_args::bad_args("push"),
+                            ));
                         }
                         if method == "pop" && args.is_empty() {
                             let arr = self.eval_expr(object)?;
@@ -4517,7 +4500,9 @@ impl Interpreter {
                                 self.env.set(var_name, Value::Array(items))?;
                                 return Ok(popped);
                             }
-                            return Err(RuntimeError::new("pop() requires array"));
+                            return Err(RuntimeError::new(
+                                &crate::semantics::builtin_args::bad_args("pop"),
+                            ));
                         }
                     }
                 }
@@ -5981,31 +5966,6 @@ fn check_interface_satisfaction(value: &Value, methods: &[Value], env: &Environm
         }
     }
     true
-}
-
-fn json_to_value(v: serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::Null
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s),
-        serde_json::Value::Array(items) => {
-            Value::Array(items.into_iter().map(json_to_value).collect())
-        }
-        serde_json::Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, json_to_value(v)))
-                .collect(),
-        ),
-    }
 }
 
 /// Runtime error

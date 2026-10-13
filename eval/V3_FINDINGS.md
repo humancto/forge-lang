@@ -534,6 +534,20 @@ Suggested fix: raise these through shared helpers in `src/semantics/` (as `CLAUD
 asks), make `join` reject a non-string separator on the VM, and add one fixture per
 builtin family.
 
+**Fixed:** an audit of ~300 bad calls (every builtin in `CLAUDE.md`'s string, collection,
+functional and object lists, with Int/Null/Bool/Object/Array/String/Float arguments) found
+86 differences; there are none left. The argument errors of those builtins come from one
+table, `semantics::builtin_args::bad_args(name)`, on both engines (the VM maps its
+`get_string_arg` failures to it), and the VM now rejects what the interpreter rejected:
+`join` with a non-String separator, `starts_with`/`ends_with`/`replace` with non-Strings,
+`has_key`/`get`/`pick`/`omit`/`merge` on non-objects, `entries`/`from_entries` of the
+wrong kind. `get(array, i)` and dotted paths through arrays now work on the VM. The
+interpreter's missing `(got ...)` annotations came from fast paths in `places.rs`
+(`len`/`contains`/`push`/`pop` on a variable, and `null` parses as a variable) that raised
+their own error; they now fall back to the ordinary call. The audit table is the parity
+fixture `tests/parity/supported/builtin_arg_errors.fg` (engine_diff), and
+`tests/builtin_arg_errors_test.fg` pins the repro's texts.
+
 ### 18. T0014 false positive on a guarded comparison
 
 ```forge
@@ -639,6 +653,16 @@ Suggested fix: print whole Floats with `.0` in `json.stringify`/`compact` (str()
 its current form), keep `-0` an Int, and raise (or keep exactness) for integers that do
 not fit i64 instead of silently converting.
 
+**Fixed:** `json.stringify`/`compact`/`pretty` write a Float with a fraction or exponent
+(`1.0`, `100.0`, `1e+21`; the digits `serde_json` uses for HTTP responses, so both paths
+agree) and NaN/infinity as `null`; `json.parse` reads `-0` as the Int `0` (like `-0` in
+Forge source; a same-length pre-pass in `json_module::parse_str`, so request bodies and
+`fs.read_json` agree); `\b`/`\f` use the short escapes. Integers beyond i64 stay Floats:
+that matches Int arithmetic overflow (a too-large literal in source is a syntax error,
+which is not an option for data), and it is now documented in `llms.txt` and
+`spec/src/stdlib/json.md`. Tests: `tests/json_numbers_test.fg` (both engines),
+`json_module` unit tests, `tests/server_engine_parity.rs` (`2.0` and `\f` in a response).
+
 ### 16. `retry`, `timeout` and `schedule` are undocumented
 
 These innovation blocks are kept in edition 2027 (`docs/editions/2027.md`) and work on
@@ -652,6 +676,19 @@ finding 10 for fractions).
 Suggested fix: add a short section to `llms.txt` with the three blocks, their statement
 form, units and errors; give exhausted retries their own code.
 
+**Fixed:** `llms.txt` has a "Retry, timeout, schedule" section (statement form; values
+leave through a variable or `return`, and `return`/`break` leave without retrying; the
+100 ms, 200 ms, ... back-off; `timeout` units and E0031; `schedule` units, first run after
+one interval, its own copy of the variables, errors ignored), with examples run on both
+engines in both editions; `spec/src/dual-syntax/innovation.md` says the same. Exhausted
+retries are E0041 (finding 17). `retry` stays statement-only: an expression form would be
+a new `Expr` variant in both engines, the checker, hoisting and the formatter, while
+`return` inside the block already covers it. Writing the examples found a divergence:
+`forge run --interp` deferred `schedule`/`watch` start-up to the end of the top level even
+without a server, so a script's schedule never ran; it is now deferred only for `@server`
+programs, as on the VM (`tests/parity/supported/schedule_runs_during_top_level.fg`). Tests:
+`tests/retry_timeout_test.fg` (both engines, both editions).
+
 ### 17. Unclassified runtime errors
 
 Code E0000 (type `RuntimeError`) for `int("12x")`, `float("abc")`, any `json.parse` error,
@@ -663,6 +700,18 @@ JSON" from "bug" must match message prefixes.
 Suggested fix: classify conversion errors (E0015 or a new code), JSON parse errors and
 invalid patterns; list E0011 (and the codes error_code_report shows: E0016, E0021, E0026,
 E0031) in `llms.txt`.
+
+**Fixed:** four codes appended to `semantics::errors`, each raised through a shared helper
+and with a fixture in `tests/errors/`: E0038 text that is not a number (`int("12x")`,
+`float("abc")`; a value of the wrong kind such as `int([1])` stays E0015), E0039 invalid
+JSON (`json.parse`, `fs.read_json`, `sh_json`), E0040 invalid regex (now one line:
+`invalid regex '(': unclosed group`) and E0041 an exhausted `retry` (tried before every
+other class, so the quoted last error cannot re-code it). `e.type` is now a function of
+the code (`errors::error_type`), so a missing key and an unknown field are both
+`ReferenceError`; new category `ValueError` for E0038–E0040. `llms.txt` lists the runtime
+codes with their types (E0011, E0016, E0021, E0026, E0031 included). The E0000 fixture is
+now a `toml.parse` failure. Tests: `tests/error_classes_test.fg` (both engines, both
+editions), `helpers_classify_to_their_codes`, `error_type_follows_the_code`.
 
 ### 19. No Unicode escapes in string literals
 
@@ -705,3 +754,14 @@ in-band end marker (merge_streams specifies one).
 
 Suggested fix: return `[index, null]` (or a `Closed` marker) once for a channel that is
 closed and drained, or add `is_closed(ch)`; document it next to `select`.
+
+**Fixed:** `is_closed(ch)` (registry, both engines, type checker) is true once a channel
+is closed *and* drained, so "finished" can never be observed while a value is still
+buffered (a channel receiver with one value of lookahead, `semantics::channel`, so asking
+consumes nothing). `select`'s results are unchanged (backward compatible: `[index, value]`
+or `null`), but it now returns `null` at once on both engines when every channel is
+finished (the interpreter used to wait out the timeout, or forever without one, as in the
+repro's second call); after a `null`, `all(chs, is_closed)` tells finished from slow.
+`[index, null]` was rejected because `null` is a valid channel value. Documented in
+`llms.txt` (with a merge loop) and `spec/src/concurrency/channels.md`; tests in
+`tests/channel_closed_test.fg` (both engines).

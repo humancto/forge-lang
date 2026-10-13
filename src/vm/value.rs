@@ -3,29 +3,12 @@ use super::gc::Gc;
 use super::nanbox::NanBoxedValue;
 use indexmap::IndexMap;
 use std::fmt;
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::mpsc::{Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
-/// Escape a string for safe JSON embedding.
-fn escape_json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+/// Strings inside displayed collections: the interpreter's (and
+/// `json.stringify`'s) escapes.
+use crate::stdlib::json_module::escape_json_string;
 
 /// Sender half of a VM channel. Bounded uses SyncSender for backpressure.
 pub enum VmChannelSender {
@@ -37,7 +20,7 @@ pub enum VmChannelSender {
 /// Mutex<Option<...>> so `close()` can set sender to None.
 pub struct VmChannelInner {
     pub sender: Mutex<Option<VmChannelSender>>,
-    pub receiver: Mutex<Option<Receiver<SharedValue>>>,
+    pub receiver: Mutex<Option<crate::semantics::channel::Receiver<SharedValue>>>,
 }
 
 /// GC-free value representation for crossing thread boundaries.

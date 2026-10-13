@@ -313,12 +313,10 @@ pub fn read_body(content_type: Option<&str>, bytes: &[u8]) -> Result<RequestBody
         });
     };
     let decoded = if essence == "application/json" || essence.ends_with("+json") {
-        serde_json::from_str::<crate::stdlib::json_module::Ordered>(text)
-            .map(|v| v.0)
-            .map_err(|e| BodyError {
-                status: StatusCode::BAD_REQUEST,
-                message: format!("invalid JSON body: {}", e),
-            })?
+        crate::stdlib::json_module::parse_str(text).map_err(|e| BodyError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("invalid JSON body: {}", e),
+        })?
     } else if essence == "application/x-www-form-urlencoded" {
         let mut fields = IndexMap::new();
         for (k, v) in url::form_urlencoded::parse(bytes) {

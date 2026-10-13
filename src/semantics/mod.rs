@@ -16,6 +16,8 @@
 //! `interpreter/` or `vm/`.
 
 pub mod alloc;
+pub mod builtin_args;
+pub mod channel;
 pub mod edition;
 pub mod errors;
 pub mod hoist;
@@ -1086,6 +1088,51 @@ pub fn import_not_found(path: &str) -> String {
         "cannot import '{}': file not found (checked relative to the importing file, {0}, {0}.fg, forge_modules/{0}/main.fg)",
         path
     )
+}
+
+/// `int(text)` / `float(text)` on text that is not such a number (E0038).
+/// `target` is `Int` or `Float`.
+pub fn invalid_number(text: &str, target: &str) -> String {
+    format!("cannot convert '{}' to {}", text, target)
+}
+
+/// Headline of JSON text that does not parse (E0039); see
+/// `stdlib::json_module::parse_error`.
+pub const JSON_PARSE_ERROR: &str = "JSON parse error";
+
+/// A `regex.*` pattern that does not compile (E0040): `invalid regex '(':
+/// unclosed group`. The regex crate's multi-line report is reduced to its
+/// final `error: ...` line.
+pub fn invalid_regex(pattern: &str, error: &dyn std::fmt::Display) -> String {
+    let report = error.to_string();
+    let reason = report
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("error: "))
+        .unwrap_or_else(|| report.lines().next().unwrap_or("").trim());
+    format!("invalid regex '{}': {}", pattern, reason)
+}
+
+/// Start of the error a `retry n times { }` block raises when every
+/// attempt failed (E0041).
+pub const RETRY_EXHAUSTED_PREFIX: &str = "retry failed after ";
+
+/// How many times `retry <count> times { }` runs its block: an Int count
+/// as given (0 or less: no attempt, the block fails at once), anything else
+/// 3.
+pub fn retry_attempts(count: Option<i64>) -> i64 {
+    count.map_or(3, |n| n.max(0))
+}
+
+/// The error of an exhausted `retry` block: `retry failed after 3 attempts:
+/// <the last attempt's error>` (its headline only; a hint is not repeated).
+pub fn retry_exhausted(attempts: i64, last_error: &str) -> String {
+    let noun = if attempts == 1 { "attempt" } else { "attempts" };
+    let last = errors::headline(last_error);
+    if last.is_empty() {
+        return format!("{}{} {}", RETRY_EXHAUSTED_PREFIX, attempts, noun);
+    }
+    format!("{}{} {}: {}", RETRY_EXHAUSTED_PREFIX, attempts, noun, last)
 }
 
 #[cfg(test)]

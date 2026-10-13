@@ -1,0 +1,2 @@
+// An unclosed group in a pattern
+println(regex.test("a(b", "("))

@@ -62,11 +62,11 @@ retry 3 times {
 }
 ```
 
-If all retries fail, the error from the last attempt is raised.
+`retry` is a statement (not an expression): pass a value out through a variable declared before it, or `return` from inside it in a function. `return`, `break` and `continue` leave the block without retrying. Between attempts it waits 100 ms, 200 ms, ...; a count of 0 or less makes no attempt. If every attempt fails, it raises E0041 `retry failed after N attempts: <the last error>` (`e.type` is `RuntimeError`).
 
 ## timeout N seconds { }
 
-Limits execution time for a block. If the block does not complete within the time limit, it is interrupted and the block raises E0031 `timeout: operation exceeded N second limit` (N in seconds, as a Forge number: `0.5`, `2`), which `try`/`catch` can handle.
+Limits execution time for a block. If the block does not complete within the time limit, it is interrupted (waits, `receive`, loops and calls inside it included) and E0031 `timeout: operation exceeded N second limit` is raised (N in seconds, as a Forge number: `0.5`, `2`; `e.type` is `TimeoutError`), which `try`/`catch` can handle.
 
 ```forge
 timeout 5 seconds {
@@ -85,7 +85,7 @@ Duration units (for `wait`, `timeout` and `schedule every`): `milliseconds` / `m
 
 ## schedule every N units { }
 
-Runs a block repeatedly on a schedule (cron-like).
+Runs a block repeatedly in the background, first after one interval, while the program continues (in an `@server` program: after the top level, next to the server). It stops when the program ends. The block works on its own copy of the variables (kept between runs, invisible to the rest of the program), so it reports through channels, files or databases; an error in one run is ignored and the next run still happens.
 
 ```forge
 schedule every 5 minutes {

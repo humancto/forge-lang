@@ -290,7 +290,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 let content = std::fs::read_to_string(&path)
                     .map_err(|e| format!("fs.read_json error: {}", e))?;
                 crate::stdlib::json_module::parse_str(&content)
-                    .map_err(|e| format!("fs.read_json parse error: {}", e))
+                    .map_err(|e| crate::stdlib::json_module::parse_error("fs.read_json", &e))
             }
             _ => Err("fs.read_json() requires a file path string".to_string()),
         },

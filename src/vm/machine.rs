@@ -1016,10 +1016,10 @@ impl VM {
     ) -> Result<Option<SharedValue>, VMError> {
         use std::sync::mpsc::RecvTimeoutError;
         self.wait_cancellable(|slice| {
-            let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
+            let mut guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
                 None => Some(None),
-                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
+                Some(rx) => match rx.recv_timeout(slice) {
                     Ok(v) => Some(Some(v)),
                     Err(RecvTimeoutError::Disconnected) => Some(None),
                     Err(RecvTimeoutError::Timeout) => None,

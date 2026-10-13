@@ -33,7 +33,7 @@ pub fn create_module() -> Value {
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "json.parse" => match args.first() {
-            Some(Value::String(s)) => parse_str(s).map_err(|e| format!("JSON parse error: {}", e)),
+            Some(Value::String(s)) => parse_str(s).map_err(|e| parse_error("", &e)),
             _ => Err("json.parse() requires a string".to_string()),
         },
         "json.stringify" => match args.first() {
@@ -53,16 +53,16 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         "json.pretty" => match args.first() {
             Some(v) => {
                 validate_json_value(v)?;
-                let indent = args
-                    .get(1)
-                    .and_then(|v| {
-                        if let Value::Int(n) = v {
-                            Some(*n as usize)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(2);
+                let indent = match args.get(1) {
+                    None | Some(Value::Null) => 2,
+                    Some(Value::Int(n)) if (0..=MAX_INDENT).contains(n) => *n as usize,
+                    Some(_) => {
+                        return Err(format!(
+                            "json.pretty() requires an indent from 0 to {}",
+                            MAX_INDENT
+                        ))
+                    }
+                };
                 Ok(Value::String(forge_to_json_pretty(v, 0, indent)))
             }
             None => Err("json.pretty() requires a value".to_string()),
@@ -104,8 +104,96 @@ fn deep_merge(
 /// keeps its first position and its last value. Use this rather than
 /// `serde_json::Value` + [`json_to_forge`]: `serde_json::Value` objects
 /// (without the `preserve_order` feature) sort their keys.
+///
+/// Numbers: a number written without a fraction or exponent is an Int when
+/// it fits in 64 bits (`-0` is the Int `0`, as in Forge source); a larger
+/// one becomes a Float (precision may be lost), the way Int arithmetic that
+/// overflows becomes a Float. A number with `.` or an exponent is a Float
+/// (`1.0`, `1e2`, `-0.0`).
 pub fn parse_str(text: &str) -> Result<Value, serde_json::Error> {
-    serde_json::from_str::<Ordered>(text).map(|o| o.0)
+    let text = int_negative_zero(text);
+    serde_json::from_str::<Ordered>(&text).map(|o| o.0)
+}
+
+/// `json.compact(v)`: the JSON text a value is sent as (HTTP request
+/// bodies, `ws.send`).
+pub fn to_compact(v: &Value) -> Result<String, String> {
+    validate_json_value(v)?;
+    Ok(forge_to_json_line(v, &COMPACT))
+}
+
+/// Largest `json.pretty` indent (a bigger one is a mistake, and the
+/// padding is built per line).
+const MAX_INDENT: i64 = 16;
+
+/// The error for JSON text that does not parse (E0039, `semantics::errors`):
+/// `JSON parse error: ...`, after `context: ` when the text came from
+/// somewhere other than `json.parse` (`fs.read_json: JSON parse error: ...`).
+pub fn parse_error(context: &str, e: &serde_json::Error) -> String {
+    if context.is_empty() {
+        format!("{}: {}", crate::semantics::JSON_PARSE_ERROR, e)
+    } else {
+        format!("{}: {}: {}", context, crate::semantics::JSON_PARSE_ERROR, e)
+    }
+}
+
+/// JSON text of a Float. It always has a fraction or an exponent (`1.0`,
+/// `2.5`, `1e+21`), so it parses back as a Float; NaN and the infinities,
+/// which JSON cannot represent, are `null` (as in JavaScript). The digits
+/// are the shortest that round-trip, as in the HTTP server's responses
+/// (both go through `serde_json`).
+pub fn float_text(f: f64) -> String {
+    match serde_json::Number::from_f64(f) {
+        Some(n) => n.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+/// `serde_json` reads the integer `-0` as the Float `-0.0`, which the
+/// visitor cannot tell from `-0.0`. Rewrite each `-0` number token (one
+/// that starts a value and has no fraction or exponent) to ` 0`: same
+/// length, so error positions do not move. Strings are skipped.
+fn int_negative_zero(text: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let mut hits = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    // The last byte outside strings that was not whitespace.
+    let mut prev: Option<u8> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+                prev = Some(b);
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b' ' | b'\t' | b'\n' | b'\r' => continue,
+            b'-' if matches!(prev, None | Some(b'[' | b',' | b':'))
+                && bytes.get(i + 1) == Some(&b'0')
+                && !matches!(bytes.get(i + 2), Some(b'.' | b'e' | b'E' | b'0'..=b'9')) =>
+            {
+                hits.push(i);
+            }
+            _ => {}
+        }
+        prev = Some(b);
+    }
+    if hits.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = text.to_string().into_bytes();
+    for i in hits {
+        out[i] = b' ';
+    }
+    // Only ASCII `-` bytes were replaced by ASCII spaces.
+    std::borrow::Cow::Owned(String::from_utf8(out).expect("BUG: ASCII-for-ASCII replacement"))
 }
 
 /// A Forge value deserialized straight from JSON, object keys in document
@@ -206,8 +294,10 @@ pub fn json_to_forge(v: serde_json::Value) -> Value {
     }
 }
 
-/// Escape a string for safe JSON embedding.
-fn escape_json_string(s: &str) -> String {
+/// A string as a JSON string literal: `"` and `\` escaped, the short
+/// escapes `\b \f \n \r \t`, any other control character as `\u00XX`.
+/// Also how both engines show strings inside collections.
+pub fn escape_json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for ch in s.chars() {
@@ -217,6 +307,8 @@ fn escape_json_string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
             c if c < '\x20' => {
                 out.push_str(&format!("\\u{:04x}", c as u32));
             }
@@ -323,7 +415,7 @@ fn write_json_items<'a>(
 fn write_json_line(out: &mut String, v: &Value, sep: &Separators) {
     match v {
         Value::Int(n) => out.push_str(&n.to_string()),
-        Value::Float(n) => out.push_str(&format!("{}", n)),
+        Value::Float(n) => out.push_str(&float_text(*n)),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Null => out.push_str("null"),
         Value::String(s) => out.push_str(&escape_json_string(s)),
@@ -368,7 +460,7 @@ fn forge_to_json_pretty(v: &Value, depth: usize, indent: usize) -> String {
     let inner_pad = " ".repeat((depth + 1) * indent);
     match v {
         Value::Int(n) => n.to_string(),
-        Value::Float(n) => format!("{}", n),
+        Value::Float(n) => float_text(*n),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
         Value::String(s) => escape_json_string(s),
@@ -688,6 +780,82 @@ mod tests {
         let reparsed = call("json.parse", vec![stringified]).unwrap();
         let original = call("json.parse", vec![s(json_str)]).unwrap();
         assert_eq!(reparsed, original);
+    }
+
+    #[test]
+    fn numbers_keep_their_kind() {
+        let parse = |t: &str| call("json.parse", vec![s(t)]).unwrap();
+        assert_eq!(parse("1.0"), Value::Float(1.0));
+        assert_eq!(parse("1e2"), Value::Float(100.0));
+        assert_eq!(parse("-0"), Value::Int(0));
+        assert_eq!(
+            parse("[-0, -0.0, -0e1, -1.5]"),
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Float(-0.0),
+                Value::Float(-0.0),
+                Value::Float(-1.5),
+            ])
+        );
+        assert_eq!(parse("{\"-0\": -0}"), {
+            let mut m = IndexMap::new();
+            m.insert("-0".to_string(), Value::Int(0));
+            Value::Object(m)
+        });
+        assert_eq!(parse("9223372036854775807"), Value::Int(i64::MAX));
+        assert_eq!(
+            parse("9223372036854775808"),
+            Value::Float(9223372036854775808.0)
+        );
+        // `-0` inside an invalid document is left alone: same error.
+        assert!(call("json.parse", vec![s("[1 -0]")]).is_err());
+        assert!(call("json.parse", vec![s("-00")]).is_err());
+
+        let compact = |v: Value| call("json.compact", vec![v]).unwrap();
+        assert_eq!(compact(Value::Float(1.0)), s("1.0"));
+        assert_eq!(compact(Value::Float(-0.0)), s("-0.0"));
+        assert_eq!(compact(Value::Float(0.1)), s("0.1"));
+        assert_eq!(compact(Value::Float(1e21)), s("1e+21"));
+        assert_eq!(compact(Value::Float(f64::NAN)), s("null"));
+        assert_eq!(compact(Value::Float(f64::INFINITY)), s("null"));
+        assert_eq!(compact(Value::Int(1)), s("1"));
+        assert_eq!(
+            call("json.pretty", vec![Value::Array(vec![Value::Float(2.0)])]).unwrap(),
+            s("[\n  2.0\n]")
+        );
+        // Every Float survives a round trip as a Float.
+        for f in [1.0, -0.0, 2.5, 1e21, 1e-7, 123456789.0, f64::MAX] {
+            let Value::String(text) = compact(Value::Float(f)) else {
+                panic!("compact returns a String")
+            };
+            assert_eq!(parse(&text), Value::Float(f), "{text}");
+        }
+    }
+
+    #[test]
+    fn short_escapes() {
+        assert_eq!(
+            call("json.compact", vec![s("\u{8}\u{c}\n\r\t\u{1}")]).unwrap(),
+            s("\"\\b\\f\\n\\r\\t\\u0001\"")
+        );
+        assert_eq!(
+            call("json.parse", vec![s("\"\\b\\f\"")]).unwrap(),
+            s("\u{8}\u{c}")
+        );
+    }
+
+    #[test]
+    fn pretty_indent_is_checked() {
+        assert!(call("json.pretty", vec![Value::Int(1), Value::Int(-1)]).is_err());
+        assert!(call("json.pretty", vec![Value::Int(1), s("x")]).is_err());
+        assert_eq!(
+            call(
+                "json.pretty",
+                vec![Value::Array(vec![Value::Int(1)]), Value::Int(0)]
+            )
+            .unwrap(),
+            s("[\n1\n]")
+        );
     }
 
     #[test]

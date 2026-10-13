@@ -348,7 +348,38 @@ The type checker narrows an optional value after a null test: in `if x != null {
 
 There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 
-Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, `E0036` HTTP request timed out, `E0037` HTTP connection failed, ...); type-checker diagnostics are `T0001`–`T0021`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error `e` has `e.message` (without the hint), `e.type`, `e.code` and `e.hint` (the error's suggestion, or `null`). For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+Error codes: every runtime error has a stable code, the same on both engines; type-checker diagnostics are `T0001`–`T0021`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error `e` has `e.message` (without the hint), `e.code`, `e.hint` (the error's suggestion, or `null`) and `e.type`, a category that is the same for every error of a code (shown in the table). Branch on `e.code`, not on message text. The runtime codes:
+
+| code | `e.type` | raised by |
+|---|---|---|
+| `E0000` | RuntimeError | anything without a more specific code (e.g. `toml.parse` of bad text) |
+| `E0003` | ReferenceError | undefined name |
+| `E0004` / `E0005` | TypeError | calling a non-function / wrong argument count |
+| `E0006` | TypeError | assigning to an immutable binding |
+| `E0007` | TypeError | operator on unsupported types (`[1] * 2`) |
+| `E0008` | ArithmeticError | division or modulo by zero |
+| `E0009` | IndexError | index out of bounds (`xs[5]`) |
+| `E0010` | ReferenceError | missing key (`m["nope"]`) |
+| `E0011` | TypeError | value cannot be indexed that way (`null["x"]`, `5[0]`, `"abc"[0]`: use `substring`) |
+| `E0012` / `E0014` | TypeError | field access on `null` / on a non-object |
+| `E0013` | ReferenceError | unknown field or method |
+| `E0015` | TypeError | bad builtin argument (`len(5)`, `join([1], 5)`) |
+| `E0016` | RuntimeError | stdlib operation failed (`fs.read` of a missing file, a failed command) |
+| `E0017` | TypeError | value does not match its annotation (edition 2027, `--strict`) |
+| `E0019` / `E0020` | ReferenceError / RuntimeError | import failed / permission denied |
+| `E0021` | AssertionError | `assert`, `assert_eq`, ... failed |
+| `E0023` / `E0024` | RuntimeError | `unwrap` of `None`/`Err` / `?` on an `Err` at the top level |
+| `E0026` | RuntimeError | no `match` arm matched |
+| `E0030` | RuntimeError | `send` on a closed channel |
+| `E0031` | TimeoutError | `timeout` block expired, `--max-time`, cancelled |
+| `E0034` | TypeError | edition 2027: `"a" + 1` |
+| `E0036` / `E0037` | TimeoutError / ConnectionError | HTTP request timed out / could not connect |
+| `E0038` | ValueError | `int("12x")`, `float("abc")`: text is not a number |
+| `E0039` | ValueError | invalid JSON (`json.parse`, `fs.read_json`, `sh_json`) |
+| `E0040` | ValueError | invalid regex pattern |
+| `E0041` | RuntimeError | `retry n times` exhausted (the message ends with the last attempt's error) |
+
+For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
 ```forge
 try {
@@ -438,7 +469,7 @@ Other builtins: `exit(code)` (ends the program at once with that exit status; ou
 | ------ | -------------------------------------------- |
 | `math` | `sqrt(x)`, `pow(b, e)`, `abs`, `max(a, b)`, `min`, `floor`, `ceil`, `round`, `random_int(lo, hi)`, `pi`, `e` |
 | `fs` | `read(path)`, `write(path, text)`, `append`, `exists`, `list(dir)`, `remove`, `mkdir`, `copy(src, dst)`, `rename` |
-| `json` | `parse(text)` (keeps the document's key order), `stringify(value)` → `{"a": 1, "b": [1, 2]}`, `compact(value)` → `{"a":1,"b":[1,2]}` (no whitespace), `pretty(value, indent?)` |
+| `json` | `parse(text)` (keeps the document's key order), `stringify(value)` → `{"a": 1, "b": [1, 2]}`, `compact(value)` → `{"a":1,"b":[1,2]}` (no whitespace), `pretty(value, indent?)`; numbers keep their kind: integer syntax parses as Int (`-0` is `0`; beyond 64 bits a Float), `1.0`/`1e2` as Float, and a Float is written with a fraction (`json.compact(1.0)` is `1.0`, NaN/infinity `null`); strings use `\b \f \n \r \t \" \\` and `\u00XX` |
 | `regex` | `test(text, pattern)`, `find(text, pattern)` (first match or `null`), `find_all(text, pattern)`, `captures(text, pattern)` (first match's groups `[whole, g1, g2, ...]`, an unmatched group `null`; `null` when nothing matches), `captures_all(text, pattern)` (one such array per match), `replace(text, pattern, repl)` (`repl` may use `$1`, `$0`, `$$`, and `${name}` for `(?<name>...)` in a `"""..."""` string), `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
 | `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON; `timeout` is in seconds, default 30, `0.5` allowed); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body); a 4xx/5xx answer is a normal response with `ok == false`; no answer raises `E0036` (timed out) or `E0037` (refused, unknown host, TLS) |
@@ -503,9 +534,82 @@ let t = spawn {
 println(await_timeout(t, 10))  // null on timeout (milliseconds)
 ```
 
-Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `select(channels, timeout_ms?)` (`[index, value]` from the first channel with a value; `null` on timeout and also when the channels are closed), `close(ch)` (then `receive` returns `null` once the channel is drained). A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
+Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `close(ch)` (later `send`s fail with E0030; values sent before stay receivable, then `receive` returns `null`), `is_closed(ch)` (true once the channel is closed *and* drained: nothing more can arrive), `select(channels, timeout_ms?)` (`[index, value]` from the first channel with a value; skips finished channels; `null` on timeout, and at once when every channel is closed and drained). After `select` returns `null`, `all(chs, fn(c) { return is_closed(c) })` tells "all producers finished" from "timed out":
+
+```forge
+let a = channel()
+spawn {
+    send(a, 1)
+    close(a)
+}
+let mut got = []
+while true {
+    let r = select([a], 1000)
+    if r == null {
+        if is_closed(a) {
+            break       // finished, not slow
+        }
+        continue
+    }
+    got.push(r[1])
+}
+println(got)   // [1]
+```
+
+A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
 
 Tasks communicate through return values (`squad` results, `await`) and channels. Do not mutate captured variables from inside `spawn` and expect the parent to see it: the default VM gives each task its own copy (the `--interp` engine shares closure state).
+
+## Retry, timeout, schedule
+
+Three statement blocks (all editions). They are statements, not expressions: `let r = retry 3 times { ... }` does not parse. To get a value out, assign to a `let mut` declared before the block, or `return` from inside it in a function (a `return`, `break` or `continue` inside the block leaves it at once, without retrying).
+
+```forge
+let mut calls = 0
+fn flaky() {
+    calls += 1
+    if calls < 3 {
+        let empty = []
+        return empty[0]     // fails twice: index out of bounds
+    }
+    return "ok on attempt {calls}"
+}
+
+fn fetch_with_retry() {
+    retry 5 times {
+        return flaky()      // the first attempt that does not fail returns
+    }
+}
+println(fetch_with_retry())    // ok on attempt 3
+
+try {
+    retry 2 times {
+        assert(false, "still down")
+    }
+} catch e {
+    println("{e.code}: {e.message}")   // E0041: retry failed after 2 attempts: assertion failed: still down
+}
+
+try {
+    timeout 1 seconds {
+        wait(3)
+    }
+} catch e {
+    println("{e.code}: {e.message}")   // E0031: timeout: operation exceeded 1 second limit
+}
+```
+
+- `retry n times { body }` runs `body` until it finishes without an error, at most `n` times, waiting 100 ms, 200 ms, ... between attempts. Any runtime error is retried (resource limits are not). When every attempt fails it raises E0041 `retry failed after n attempts: <the last error>`. `n` is an Int (0 or less: the block never runs and the error is raised at once).
+- `timeout n seconds { body }` stops `body` (including waits, `receive`, loops and calls inside it) after `n` whole seconds and raises E0031 `timeout: operation exceeded n second limit`; catch it with `try`/`catch`.
+- `schedule every n seconds { body }` (or `minutes`, `hours`) runs `body` repeatedly in the background, first after one interval, while the rest of the program continues; it stops when the program ends (a script's top level returns, or never for an HTTP server). It works on its own copy of the program's variables (kept from one run to the next, never seen by the rest of the program), so report results through a channel, a file or a database, not by assigning variables. An error in one run is ignored; the next run still happens. In an `@server` program schedules start after the top level, next to the server.
+
+```forge
+let ticks = channel()
+schedule every 1 seconds {
+    send(ticks, "tick")
+}
+println(receive(ticks))   // after about a second: tick
+```
 
 ## HTTP server
 
