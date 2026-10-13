@@ -1,7 +1,7 @@
 // Canonical compact JSON with the integer/float distinction kept. Strings
-// are escaped by json.compact; numbers and containers are encoded here,
-// because json.compact prints the float 1.0 as `1` (eval/V3_FINDINGS.md,
-// finding 15).
+// are escaped by json.compact; numbers and containers are encoded here, so
+// the output format is spelled out by the task rather than by json.compact
+// (which also writes 1.0 as `1.0` since eval/V3_FINDINGS.md finding 15).
 
 fn encode(v) -> String {
     let t = typeof(v)

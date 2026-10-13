@@ -105,5 +105,5 @@ provided drivers, SQLite services under concurrent requests, 80,000-250,000-reco
 generated inputs, deep recursion, error handling with exit statuses and stderr, channel
 pipelines and CLI/text edge cases (`eval/README.md`, "Tier v3"). No solver has been
 scored on it yet. Writing the references found 22 issues
-([`V3_FINDINGS.md`](V3_FINDINGS.md)); six tasks are `known_failing` until their finding
-is fixed.
+([`V3_FINDINGS.md`](V3_FINDINGS.md)), all fixed in the same round, so every reference
+passes on both engines and both editions.

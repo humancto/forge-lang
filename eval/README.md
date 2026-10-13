@@ -389,11 +389,9 @@ json_orders_rollup 4 / 4 (40), interval_sweep 5 / 9 (45), customer_dedupe_join 7
 under 1 s (40), line_diff about 3 s per run (30), worker_pool 1.7 s against a serial
 6.4 s (limit 4). A quadratic solution of the bulk tasks needs hours.
 
-Writing the references found the problems in [`V3_FINDINGS.md`](V3_FINDINGS.md). Six
-tasks are `known_failing` because their reference uses a feature that is broken today
-(network_components, typed_route_planner, plugin_pipeline, stack_machine_modules,
-csvlite_package, word_tool_args); elsewhere a reference avoids a performance trap and a
-comment in it names the finding. The CPU-heavy tasks are `timed`, so they run one at a
+Writing the references found the problems in [`V3_FINDINGS.md`](V3_FINDINGS.md); all of
+them are fixed, so no task is `known_failing` and the references no longer work around them. The
+`known_failing` key stays available for the next tier. The CPU-heavy tasks are `timed`, so they run one at a
 time after the others and their limits are not eaten by contention.
 
 `validate --tier v3` takes about 5 minutes on 4 cores and `--quick` about 2.5 minutes.

@@ -15,6 +15,9 @@ Severity: **bug** (wrong result, crash, engine divergence), **perf** (natural co
 out or exhausts memory), **gap** (missing feature or behaviour a model cannot learn from
 `llms.txt`).
 
+All 22 findings are fixed (each section ends with a **Fixed** paragraph), and no task is
+`known_failing` any more.
+
 | # | Severity | Finding | Tasks |
 |---|---|---|---|
 | 1 | perf | `regex.*` compiles the pattern on every call (~40 µs); a few regex calls per line make a 150k-line log take 75-110 s | access_log_rollup, ledger_replay, interval_sweep, json_orders_rollup (workaround) |
@@ -196,7 +199,7 @@ copying when the cell holds the only reference.
 one owner (`GetUpvalue` shares what it copies out of a cell; every local access already
 went through the cell), so the top level updates a captured array in place, and a function
 binds each captured mutable variable it uses as a container to a hidden local aliasing the
-cell (new opcode `BindUpvalue`, bytecode format 1.7), so `parent[x] = r`, `parent[x]` and
+cell (new opcode `BindUpvalue`, bytecode format 1.9), so `parent[x] = r`, `parent[x]` and
 `graph[a].push(e)` inside the function use the in-place local opcodes. Snapshots held while
 a call may run (`PeekLocal` before a key with a call) share a captured local first
 (`PEEK_SHARE_IF_CAPTURED`), so a callee's write through the cell copies. The repro takes
