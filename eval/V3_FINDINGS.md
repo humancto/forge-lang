@@ -469,6 +469,16 @@ Suggested fix: print whole Floats with `.0` in `json.stringify`/`compact` (str()
 its current form), keep `-0` an Int, and raise (or keep exactness) for integers that do
 not fit i64 instead of silently converting.
 
+**Fixed:** `json.stringify`/`compact`/`pretty` write a Float with a fraction or exponent
+(`1.0`, `100.0`, `1e+21`; the digits `serde_json` uses for HTTP responses, so both paths
+agree) and NaN/infinity as `null`; `json.parse` reads `-0` as the Int `0` (like `-0` in
+Forge source; a same-length pre-pass in `json_module::parse_str`, so request bodies and
+`fs.read_json` agree); `\b`/`\f` use the short escapes. Integers beyond i64 stay Floats:
+that matches Int arithmetic overflow (a too-large literal in source is a syntax error,
+which is not an option for data), and it is now documented in `llms.txt` and
+`spec/src/stdlib/json.md`. Tests: `tests/json_numbers_test.fg` (both engines),
+`json_module` unit tests, `tests/server_engine_parity.rs` (`2.0` and `\f` in a response).
+
 ### 16. `retry`, `timeout` and `schedule` are undocumented
 
 These innovation blocks are kept in edition 2027 (`docs/editions/2027.md`) and work on

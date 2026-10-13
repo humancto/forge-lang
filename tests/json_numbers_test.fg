@@ -1,0 +1,51 @@
+// json_numbers_test.fg — JSON keeps the kind of a number (V3 finding 15).
+// A Float is written with a fraction or exponent, so it reads back as a
+// Float; integer syntax is an Int (`-0` too); integers beyond Int range
+// become Floats, like Int arithmetic that overflows. NaN/infinity are null.
+
+@test
+fn test_floats_are_written_as_floats() {
+    assert_eq(json.compact(1.0), "1.0")
+    assert_eq(json.stringify([1, 1.0, 2.5]), "[1, 1.0, 2.5]")
+    assert(json.pretty({ x: 3.0 }).contains("\"x\": 3.0"))
+    assert_eq(json.compact(0.1 + 0.2), "0.30000000000000004")
+    assert_eq(json.compact(math.inf), "null")
+}
+
+@test
+fn test_parse_keeps_the_kind() {
+    assert_eq(typeof(json.parse("1")), "Int")
+    assert_eq(typeof(json.parse("1.0")), "Float")
+    assert_eq(typeof(json.parse("1e2")), "Float")
+    assert_eq(json.parse("1e2"), 100.0)
+    assert_eq(typeof(json.parse("-0")), "Int")
+    assert_eq(json.parse("-0"), 0)
+    assert_eq(typeof(json.parse("-0.0")), "Float")
+    assert_eq(json.parse("[-0, [1, -0]]"), [0, [1, 0]])
+    assert_eq(json.parse("9223372036854775807"), 9223372036854775807)
+    assert_eq(typeof(json.parse("9223372036854775808")), "Float")
+}
+
+@test
+fn test_round_trip() {
+    let doc = { i: 7, f: 7.0, neg: -2.5, big: 1000000000000000000000.0, list: [0.5, 2] }
+    let back = json.parse(json.compact(doc))
+    assert_eq(back, doc)
+    assert_eq(typeof(back.f), "Float")
+    assert_eq(typeof(back.i), "Int")
+    assert_eq(json.compact(back), json.compact(doc))
+}
+
+@test
+fn test_short_escapes() {
+    let text = json.parse("\"a\\bb\\fc\\u0001\"")
+    assert_eq(len(text), 6)
+    assert_eq(json.compact(text), "\"a\\bb\\fc\\u0001\"")
+    assert_eq(json.compact("tab\tnl\n"), "\"tab\\tnl\\n\"")
+}
+
+@test
+fn test_pretty_indent_must_be_small_and_non_negative() {
+    assert_eq(json.pretty([1], 0), "[\n1\n]")
+    assert_throws(fn() { return json.pretty([1], -1) })
+}

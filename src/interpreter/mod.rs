@@ -10,27 +10,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-/// Escape a string for safe JSON embedding. Handles backslashes, quotes,
-/// newlines, tabs, carriage returns, and control characters.
-fn escape_json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+/// Strings inside displayed collections are written as JSON literals (the
+/// same escapes as `json.stringify`, on both engines).
+use crate::stdlib::json_module::escape_json_string;
 
 /// Sender variant: bounded (sync_channel) or unbounded (channel)
 #[derive(Debug)]
