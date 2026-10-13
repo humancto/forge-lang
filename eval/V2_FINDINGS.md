@@ -606,7 +606,7 @@ can only report errors on stdout plus an exit status.
 
 Suggested fix: `eprintln(...)` / `eprint(...)` builtins routed through `runtime::stdio::err`.
 
-**Fixed:** `eprintln(...)` / `eprint(...)` (registry, both engines, both editions, type checker, LSP) write like `println`/`print` to stderr through `runtime::stdio::err_line`/`err`, so a capture (the playground) records them as stderr and spawned tasks inherit it. Tests: `tests/cli_diagnostics.rs::eprintln_writes_to_stderr_on_both_engines`, `vm::parity_tests::eprintln_goes_to_the_captured_stderr_on_both_engines`, `tests/stderr_output_test.fg`.
+**Fixed:** `eprintln(...)` / `eprint(...)` (registry, both engines, both editions, type checker, LSP) write like `println`/`print` to stderr through `runtime::stdio::err_line`/`err`, so a capture (the playground) records them as stderr and spawned tasks inherit it. Tests: `tests/cli_diagnostics.rs::eprintln_writes_to_stderr_on_both_engines`, `vm::parity_tests::eprintln_goes_to_the_captured_stderr_on_both_engines`, `tests/stderr_output_test.fg`. `Sandbox`, `forge mcp` (`run_forge`, sessions, `forge mcp serve` tool calls) and the Python binding capture stderr now too: `eprint`/`eprintln` and `log.*` (as `[level] message` lines, not tracing events) come back as the run's stderr (`Output::stderr`, `structuredContent.stderr`, `Result.stderr`) under the same output budget as stdout, from spawned tasks as well. Tests: `sandbox::tests::captures_stderr_and_logs`, `max_output_counts_stderr_and_logs`, `mcp::tests::run_forge_returns_stderr`, `tests/mcp_stdio.rs::mcp_stderr_and_logs_are_returned_not_leaked`.
 
 ### 27. Channel pipeline slower on macOS
 

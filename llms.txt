@@ -538,7 +538,7 @@ fn weather(city: String, unit: String = "C") -> Result<Report, String> {
 fn cities() { return ["Oslo"] }
 ```
 
-`@tool` needs a description (`@tool("...")` also works); optional `name`, `title`, `timeout` (seconds), `read_only`, `destructive`, `idempotent`, `open_world`. `@param(name: "doc", ...)` documents parameters. Decorator arguments must be constants. Return `Err(msg)` for a tool error. The top level runs once at start-up; each call runs in a fresh sandboxed fork of it (deny-all plus the server's `--allow-*` grants, `--max-time`), so calls never share state. With plain `forge mcp`, `run_forge` takes an optional `session_id` that keeps top-level variables between calls; `reset_session` clears it.
+`@tool` needs a description (`@tool("...")` also works); optional `name`, `title`, `timeout` (seconds), `read_only`, `destructive`, `idempotent`, `open_world`. `@param(name: "doc", ...)` documents parameters. Decorator arguments must be constants. Return `Err(msg)` for a tool error. The top level runs once at start-up; each call runs in a fresh sandboxed fork of it (deny-all plus the server's `--allow-*` grants, `--max-time`), so calls never share state. With plain `forge mcp`, `run_forge` takes an optional `session_id` that keeps top-level variables between calls; `reset_session` clears it. `run_forge` returns what the program printed as `stdout` and what it wrote to stderr (`eprintln`, and `log.info/warn/error/debug` as `[level] message` lines) as `stderr`; both count against one output limit.
 
 ## Common mistakes
 
