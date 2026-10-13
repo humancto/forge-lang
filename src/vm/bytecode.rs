@@ -370,6 +370,12 @@ pub struct Chunk {
     /// v1.4+; older files are edition 2026) so a compiled program keeps its
     /// meaning: the CLI and AOT binaries run it under this edition.
     pub edition: crate::semantics::edition::Edition,
+    /// `(type, variant)` when this chunk is the compiler-generated
+    /// constructor of an ADT variant (`type T = Item(Int)`): how a
+    /// namespaced pattern `ns.Item(..)` learns which type the namespace's
+    /// member builds (`semantics::namespaced_variant_matches`). Serialized
+    /// (format v1.10+).
+    pub adt_variant: Option<(String, String)>,
 }
 
 /// Allocate a fresh, process-unique `Chunk::proto_id`.
@@ -396,6 +402,7 @@ impl Chunk {
             global_hints: Vec::new(),
             global_ids: GlobalIdCache::default(),
             edition: crate::semantics::edition::Edition::DEFAULT,
+            adt_variant: None,
         }
     }
 

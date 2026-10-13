@@ -2704,16 +2704,53 @@ fn compile_pattern(
             fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
             c.free_to(saved);
         }
-        Pattern::Constructor { name, fields } => {
+        Pattern::Constructor {
+            name,
+            fields,
+            namespace,
+        } => {
             let saved = c.next_register;
-            let variant_idx = c.const_str(name);
-            let vr = c.alloc_reg()?;
-            emit_get_field(c, vr, value, "__variant__")?;
-            let nr = c.alloc_reg()?;
-            c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
-            let cr = c.alloc_reg()?;
-            c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
-            fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
+            match namespace {
+                // `ns.Name(..)`: reading `ns.Name` raises the namespace's
+                // error for an unknown member; the intrinsic checks that the
+                // value is the variant that member builds
+                // (`semantics::namespaced_variant_matches`).
+                Some(ns) => {
+                    let member_reg = c.alloc_reg()?;
+                    compile_expr(
+                        c,
+                        &Expr::FieldAccess {
+                            object: Box::new(Expr::Ident(ns.clone())),
+                            field: name.clone(),
+                        },
+                        member_reg,
+                    )?;
+                    let ns_reg = c.alloc_reg()?;
+                    let ns_idx = c.const_str(ns);
+                    c.emit(encode_abx(OpCode::LoadConst, ns_reg, ns_idx), 0);
+                    let name_reg = c.alloc_reg()?;
+                    let name_idx = c.const_str(name);
+                    c.emit(encode_abx(OpCode::LoadConst, name_reg, name_idx), 0);
+                    let cr = c.alloc_reg()?;
+                    compile_hidden_call_from_regs(
+                        c,
+                        "__forge_variant_pattern",
+                        &[value, member_reg, ns_reg, name_reg],
+                        cr,
+                    )?;
+                    fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
+                }
+                None => {
+                    let variant_idx = c.const_str(name);
+                    let vr = c.alloc_reg()?;
+                    emit_get_field(c, vr, value, "__variant__")?;
+                    let nr = c.alloc_reg()?;
+                    c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
+                    let cr = c.alloc_reg()?;
+                    c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
+                    fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
+                }
+            }
             c.free_to(saved);
             for (i, field) in fields.iter().enumerate() {
                 let index = u8::try_from(i).map_err(|_| {
@@ -3402,13 +3439,21 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     .iter()
                     .map(|param| param.name.clone())
                     .collect::<Vec<_>>();
-                let constructor = Expr::Lambda {
-                    params,
-                    body: vec![SpannedStmt::unspanned(Stmt::Return(Some(
-                        variant_object_expr(name, &variant.name, &param_names),
-                    )))],
-                };
-                compile_set_global_expr(c, &variant.name, constructor)?;
+                let body = vec![SpannedStmt::unspanned(Stmt::Return(Some(
+                    variant_object_expr(name, &variant.name, &param_names),
+                )))];
+                // The constructor closure records which variant it builds
+                // (`Chunk::adt_variant`) for namespaced patterns.
+                let saved = c.next_register;
+                let reg = c.alloc_reg()?;
+                let mut lc = c.child("<lambda>");
+                compile_function_body(&mut lc, &params, &body)?;
+                lc.chunk.adt_variant = Some((name.clone(), variant.name.clone()));
+                let pi = c.finish_child(lc)?;
+                c.emit(encode_abx(OpCode::Closure, reg, pi), 0);
+                let name_idx = c.const_str(&c.global_name(&variant.name));
+                c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                c.free_to(saved);
             }
 
             // The type's name is a value too (its description), like a

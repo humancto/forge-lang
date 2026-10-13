@@ -155,9 +155,10 @@ pub enum Stmt {
         names: Option<Vec<ImportName>>,
     },
     /// `import "path" as name`: bind `name` to the module's namespace, an
-    /// object whose members are the module's top-level functions,
-    /// variables, variants and structs (`semantics::namespace_members`),
-    /// plus `__module__` (the path as written). The module itself runs
+    /// object whose members are every name the module's top level binds
+    /// (functions, variables, type names, variants, interfaces, structs and
+    /// re-exports: `semantics::namespace_members`), plus `__module__` (the
+    /// path as written). The module itself runs
     /// once per program, like any other import of it.
     ImportNamespace {
         path: String,
@@ -480,9 +481,14 @@ pub enum Pattern {
     Wildcard,
     Literal(Expr),
     Binding(String),
+    /// `Name(fields...)`, or `ns.Name(fields...)` with `namespace` set
+    /// (after `import "m.fg" as ns`): a namespaced pattern matches only
+    /// values built by that namespace's member `Name`
+    /// (`semantics::namespaced_variant_matches`).
     Constructor {
         name: String,
         fields: Vec<Pattern>,
+        namespace: Option<String>,
     },
     /// `p1 | p2 | ...`: matches when any alternative matches; the first
     /// matching alternative supplies the bindings. The parser requires

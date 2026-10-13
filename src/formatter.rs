@@ -718,6 +718,16 @@ mod tests {
     }
 
     #[test]
+    fn keeps_namespaced_variant_patterns_intact() {
+        let src = "import \"a.fg\" as a\nimport \"b.fg\" as b\nlet k = match v {\n    a.Item(n) | b.Item(n) => n,\n    Ok(a.Pair(x, b.Dot)) => x,\n    a.Mark => 0,\n    _ => -1,\n}\n";
+        assert_eq!(format_source(src), src);
+        assert_eq!(
+            format_source("let k = match v {\na.Item( n )=>n,\nb.Mark=>0\n}\n"),
+            "let k = match v {\n    a.Item(n) => n,\n    b.Mark => 0\n}\n"
+        );
+    }
+
+    #[test]
     fn formats_basic_indentation() {
         let input = "fn greet(name) {\nprintln(name)\n}\n";
         let result = format_source(input);

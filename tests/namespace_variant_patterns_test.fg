@@ -1,0 +1,107 @@
+// namespace_variant_patterns_test.fg — `ns.Variant(..)` in a pattern keeps
+// its namespace: it matches only values built by that namespace's member,
+// so same-named variants of different modules' types never match each
+// other (both engines). Bare `Variant(..)` still matches by name.
+
+import "tests/parity/modules/variant_a.fg" as a
+import "tests/parity/modules/variant_b.fg" as b
+import "tests/parity/modules/variant_reexport.fg" as r
+import { Item } from "tests/parity/modules/variant_b.fg"
+
+fn which(v) {
+    return match v {
+        a.Item(n) => "a " + str(n),
+        b.Item(n) => "b " + str(n),
+        a.Mark => "a mark",
+        b.Mark => "b mark",
+        _ => "other",
+    }
+}
+
+@test
+fn test_same_named_variants_of_different_modules() {
+    assert_eq(which(b.Item(2)), "b 2")
+    assert_eq(which(a.Item(1)), "a 1")
+    assert_eq(which(b.Mark), "b mark")
+    assert_eq(which(a.Mark), "a mark")
+    assert_eq(which(7), "other")
+    assert_eq(which({__variant__: "Item", _0: 1}), "other")
+}
+
+@test
+fn test_reexported_variants_match_their_type() {
+    assert_eq(which(r.Item(5)), "b 5")
+    let m = match b.Item(6) {
+        r.Item(n) => n,
+        _ => -1,
+    }
+    assert_eq(m, 6)
+    let none = match a.Item(6) {
+        r.Item(n) => n,
+        _ => -1,
+    }
+    assert_eq(none, -1)
+}
+
+@test
+fn test_nested_and_or_patterns() {
+    let nested = match Ok(b.Item(3)) {
+        Ok(a.Item(n)) => "a " + str(n),
+        Ok(b.Item(n)) => "b " + str(n),
+        _ => "other",
+    }
+    assert_eq(nested, "b 3")
+    let either = match b.Mark {
+        a.Item(_) | a.Mark => "a",
+        b.Item(_) | b.Mark => "b",
+    }
+    assert_eq(either, "b")
+}
+
+@test
+fn test_bare_variant_patterns_match_by_name() {
+    // `Item` is variant_b.fg's, but a bare pattern matches by name.
+    let bare = match a.Item(4) {
+        Item(n) => n,
+        _ => -1,
+    }
+    assert_eq(bare, 4)
+}
+
+@test
+fn test_unknown_member_in_a_pattern_is_an_error() {
+    try {
+        match a.Item(1) {
+            a.Nope(n) => n,
+            _ => 0,
+        }
+        assert(false)
+    } catch e {
+        assert_eq(e.message, "module 'tests/parity/modules/variant_a.fg' has no member 'Nope'")
+        assert_eq(e.code, "E0013")
+    }
+}
+
+@test
+fn test_member_that_is_not_a_variant_is_an_error() {
+    try {
+        match a.Item(1) {
+            a.helper(n) => n,
+            _ => 0,
+        }
+        assert(false)
+    } catch e {
+        assert_eq(e.message, "'a.helper' is not a variant")
+        assert_eq(e.code, "E0013")
+    }
+}
+
+@test
+fn test_an_earlier_arm_wins_before_a_bad_member_is_read() {
+    let v = match a.Item(1) {
+        a.Item(n) => n,
+        a.Nope(n) => n,
+        _ => 0,
+    }
+    assert_eq(v, 1)
+}

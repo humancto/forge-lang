@@ -2980,7 +2980,7 @@ impl Interpreter {
         arms: &'a [MatchArm],
     ) -> Result<Option<&'a MatchArm>, RuntimeError> {
         for arm in arms {
-            if !self.match_pattern(&arm.pattern, val) {
+            if !self.match_pattern(&arm.pattern, val)? {
                 continue;
             }
             self.env.push_scope();
@@ -5803,13 +5803,16 @@ impl Interpreter {
 
     // ========== Pattern Matching ==========
 
-    fn match_pattern(&self, pattern: &Pattern, value: &Value) -> bool {
+    /// Whether `value` matches `pattern`. Fails only for a namespaced
+    /// constructor pattern (`ns.Name(..)`) whose member is unknown or not
+    /// a variant.
+    fn match_pattern(&self, pattern: &Pattern, value: &Value) -> Result<bool, RuntimeError> {
         match pattern {
-            Pattern::Wildcard => true,
+            Pattern::Wildcard => Ok(true),
             Pattern::Binding(name) => {
                 // Native None matches by name
                 if name == "None" {
-                    return matches!(value, Value::None);
+                    return Ok(matches!(value, Value::None));
                 }
                 // If the binding name matches a known ADT unit variant, treat as constructor match
                 if let std::option::Option::Some(ref bound_val) = self.env.get(name) {
@@ -5821,23 +5824,20 @@ impl Interpreter {
                                 if let std::option::Option::Some(Value::String(val_variant)) =
                                     val_obj.get("__variant__")
                                 {
-                                    return bound_variant == val_variant;
+                                    return Ok(bound_variant == val_variant);
                                 }
                             }
-                            return false;
+                            return Ok(false);
                         }
                     }
                     // Native None check via binding
-                    if matches!(bound_val, Value::None) && matches!(value, Value::None) {
-                        return true;
-                    }
-                    if matches!(bound_val, Value::None) && !matches!(value, Value::None) {
-                        return false;
+                    if matches!(bound_val, Value::None) {
+                        return Ok(matches!(value, Value::None));
                     }
                 }
-                true
+                Ok(true)
             }
-            Pattern::Literal(expr) => match (expr, value) {
+            Pattern::Literal(expr) => Ok(match (expr, value) {
                 (Expr::Int(a), Value::Int(b)) => a == b,
                 (Expr::Float(a), Value::Float(b)) => a == b,
                 // Numbers match numerically, like `==` (and the VM's `Eq`).
@@ -5846,76 +5846,130 @@ impl Interpreter {
                 (Expr::StringLit(a), Value::String(b)) => a == b,
                 (Expr::Bool(a), Value::Bool(b)) => a == b,
                 _ => false,
-            },
-            Pattern::Constructor { name, fields } => {
+            }),
+            Pattern::Constructor {
+                name,
+                fields,
+                namespace: Some(ns),
+            } => {
+                // `ns.Name(..)`: reading the member raises the namespace's
+                // error for an unknown name; the value must be the variant
+                // that member builds (`semantics::namespaced_variant_matches`).
+                let member = self.namespace_member(ns, name)?;
+                let (value_type, value_variant) = match value {
+                    Value::Object(map) => (
+                        string_field(map, "__type__"),
+                        string_field(map, "__variant__"),
+                    ),
+                    _ => (None, None),
+                };
+                let matched = crate::semantics::namespaced_variant_matches(
+                    ns,
+                    name,
+                    variant_member(&member),
+                    value_type,
+                    value_variant,
+                )
+                .map_err(|e| RuntimeError::new(&e))?;
+                match value {
+                    Value::Object(map) if matched => self.match_variant_fields(fields, map),
+                    _ => Ok(false),
+                }
+            }
+            Pattern::Constructor {
+                name,
+                fields,
+                namespace: None,
+            } => {
                 match (name.as_str(), value) {
-                    ("Ok", Value::ResultOk(inner)) => {
-                        return fields.is_empty()
-                            || (fields.len() == 1
-                                && self.match_pattern(&fields[0], inner.as_ref()));
-                    }
-                    ("Err", Value::ResultErr(inner)) => {
-                        return fields.is_empty()
-                            || (fields.len() == 1
-                                && self.match_pattern(&fields[0], inner.as_ref()));
-                    }
-                    ("Some", Value::Some(inner)) => {
-                        return fields.is_empty()
-                            || (fields.len() == 1
-                                && self.match_pattern(&fields[0], inner.as_ref()));
+                    ("Ok", Value::ResultOk(inner))
+                    | ("Err", Value::ResultErr(inner))
+                    | ("Some", Value::Some(inner)) => {
+                        return Ok(fields.is_empty()
+                            || (fields.len() == 1 && self.match_pattern(&fields[0], inner)?));
                     }
                     ("None", Value::None) => {
-                        return fields.is_empty();
+                        return Ok(fields.is_empty());
                     }
                     _ => {}
                 }
 
                 if let Value::Object(map) = value {
-                    if let Some(Value::String(type_name)) = map.get("__type__") {
-                        if type_name == name {
-                            if fields.is_empty() {
-                                return true;
-                            }
-                            return fields.iter().enumerate().all(|(i, pat)| {
-                                let key = format!("_{}", i);
-                                map.get(&key)
-                                    .map(|field_val| self.match_pattern(pat, field_val))
-                                    .unwrap_or(false)
-                            });
-                        }
-                    }
-                    if let Some(Value::String(variant)) = map.get("__variant__") {
-                        if variant == name {
-                            if fields.is_empty() {
-                                return true;
-                            }
-                            return fields.iter().enumerate().all(|(i, pat)| {
-                                let key = format!("_{}", i);
-                                map.get(&key)
-                                    .map(|field_val| self.match_pattern(pat, field_val))
-                                    .unwrap_or(false)
-                            });
-                        }
+                    if string_field(map, "__type__") == Some(name.as_str())
+                        || string_field(map, "__variant__") == Some(name.as_str())
+                    {
+                        return self.match_variant_fields(fields, map);
                     }
                 }
-                false
+                Ok(false)
             }
-            Pattern::Or(alts) => alts.iter().any(|p| self.match_pattern(p, value)),
+            Pattern::Or(alts) => {
+                for p in alts {
+                    if self.match_pattern(p, value)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
         }
+    }
+
+    /// `ns.name` for a namespaced pattern, with the errors of reading it
+    /// as a field (an unknown member is E0013 `module '...' has no member`).
+    fn namespace_member(&self, ns: &str, name: &str) -> Result<Value, RuntimeError> {
+        let namespace = self
+            .env
+            .get(ns)
+            .ok_or_else(|| RuntimeError::new(&crate::semantics::undefined_variable(ns, None)))?;
+        let Value::Object(members) = &namespace else {
+            return Err(RuntimeError::new(
+                &crate::semantics::not_a_namespace_variant(ns, name),
+            ));
+        };
+        if let Some(member) = members.get(name) {
+            return Ok(member.clone());
+        }
+        let module = string_field(members, crate::semantics::NAMESPACE_MODULE_KEY);
+        Err(RuntimeError::new(&crate::semantics::missing_member(
+            module,
+            name,
+            members.keys().map(String::as_str),
+        )))
+    }
+
+    /// The fields of a constructor pattern against an ADT value's `_0`,
+    /// `_1`, ... (a missing field does not match).
+    fn match_variant_fields(
+        &self,
+        fields: &[Pattern],
+        map: &IndexMap<String, Value>,
+    ) -> Result<bool, RuntimeError> {
+        for (i, pat) in fields.iter().enumerate() {
+            match map.get(&format!("_{}", i)) {
+                Some(field_val) if self.match_pattern(pat, field_val)? => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, value: &Value) {
         match pattern {
             Pattern::Or(alts) => {
                 // The first matching alternative supplies the bindings.
-                if let Some(alt) = alts.iter().find(|p| self.match_pattern(p, value)) {
+                // `select_match_arm` already tested the pattern, so an
+                // alternative's test cannot fail here.
+                if let Some(alt) = alts
+                    .iter()
+                    .find(|p| matches!(self.match_pattern(p, value), Ok(true)))
+                {
                     self.bind_pattern(alt, value);
                 }
             }
             Pattern::Binding(name) => {
                 self.env.define(name.clone(), value.clone());
             }
-            Pattern::Constructor { name, fields } => {
+            Pattern::Constructor { name, fields, .. } => {
                 match (name.as_str(), value) {
                     ("Ok", Value::ResultOk(inner))
                     | ("Err", Value::ResultErr(inner))
@@ -5939,6 +5993,28 @@ impl Interpreter {
             }
             _ => {}
         }
+    }
+}
+
+/// A string-valued field of an object (`__type__`, `__variant__`, ...).
+fn string_field<'a>(map: &'a IndexMap<String, Value>, key: &str) -> Option<&'a str> {
+    match map.get(key) {
+        Some(Value::String(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// The `(type, variant)` a namespace member constructs: an ADT constructor
+/// (`adt:Type:Variant:n`) or a unit variant (an object holding only its
+/// `__type__` and `__variant__`). `None` for anything else.
+fn variant_member(member: &Value) -> Option<(&str, &str)> {
+    match member {
+        Value::BuiltIn(b) => crate::semantics::adt_constructor_parts(b),
+        Value::Object(map) if map.len() == 2 => Some((
+            string_field(map, "__type__")?,
+            string_field(map, "__variant__")?,
+        )),
+        _ => None,
     }
 }
 

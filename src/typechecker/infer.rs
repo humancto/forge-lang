@@ -2053,7 +2053,11 @@ impl<'a> Checker<'a> {
                     Pattern::Literal(Expr::Ident(n)) if n == "null" => {
                         Some(Narrowing::IsNull.apply(&st))
                     }
-                    Pattern::Constructor { name: c, .. } => match c.as_str() {
+                    Pattern::Constructor {
+                        name: c,
+                        namespace: None,
+                        ..
+                    } => match c.as_str() {
                         "Some" => Some(Narrowing::NonNull.apply(&st)),
                         "Ok" => Some(Narrowing::IsOk.apply(&st)),
                         "Err" => Some(Narrowing::IsErr.apply(&st)),
@@ -2118,18 +2122,22 @@ impl<'a> Checker<'a> {
                     self.pattern_bindings(alt, subject, out);
                 }
             }
-            Pattern::Constructor { name, fields } => {
+            Pattern::Constructor {
+                name,
+                fields,
+                namespace,
+            } => {
+                // `ns.Name(..)`: an unknown member is T0008, like reading
+                // `ns.Name` (the engines' E0013).
+                if let Some(ns) = namespace {
+                    self.namespace_member_type(ns, name);
+                }
                 let field_types: Vec<Ty> = match (name.as_str(), subject) {
+                    _ if namespace.is_some() => self.variant_fields(name),
                     ("Some", Ty::Option(inner)) => vec![*inner.clone()],
                     ("Ok", Ty::Result(ok, _)) => vec![*ok.clone()],
                     ("Err", Ty::Result(_, err)) => vec![*err.clone()],
-                    _ => self
-                        .variant_owner
-                        .get(name)
-                        .and_then(|owner| self.adts.get(owner))
-                        .and_then(|adt| adt.variants.iter().find(|(v, _)| v == name))
-                        .map(|(_, f)| f.clone())
-                        .unwrap_or_default(),
+                    _ => self.variant_fields(name),
                 };
                 for (i, f) in fields.iter().enumerate() {
                     let ty = field_types.get(i).cloned().unwrap_or(Ty::Any);
@@ -2137,6 +2145,16 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// The field types of the variant `name` (empty when unknown).
+    fn variant_fields(&self, name: &str) -> Vec<Ty> {
+        self.variant_owner
+            .get(name)
+            .and_then(|owner| self.adts.get(owner))
+            .and_then(|adt| adt.variants.iter().find(|(v, _)| v == name))
+            .map(|(_, f)| f.clone())
+            .unwrap_or_default()
     }
 
     fn is_unit_variant_pattern(&self, name: &str) -> bool {

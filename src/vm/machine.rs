@@ -146,6 +146,7 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_validate_impl",
     "__forge_call_method",
     "__forge_binding_matches",
+    "__forge_variant_pattern",
     "__forge_retry_count",
     "__forge_retry_wait",
     "__forge_retry_failed",

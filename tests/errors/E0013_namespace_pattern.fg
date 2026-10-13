@@ -1,0 +1,6 @@
+import "../parity/modules/variant_a.fg" as a
+let r = match a.Item(1) {
+    a.Nope(n) => n,
+    _ => 0,
+}
+println(r)

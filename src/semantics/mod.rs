@@ -1083,6 +1083,44 @@ pub fn not_a_namespace_struct(namespace: &str, name: &str) -> String {
     )
 }
 
+/// `ns.Name(..)` in a pattern where `ns.Name` is not a variant of a module
+/// namespace (E0013, like an unknown member).
+pub fn not_a_namespace_variant(namespace: &str, name: &str) -> String {
+    format!(
+        "'{}.{}' is not a variant\n  hint: `{}.{}(...)` in a pattern matches a variant of a type defined in the module imported with `import \"...\" as {}`",
+        namespace, name, namespace, name, namespace
+    )
+}
+
+/// The type and variant of an ADT constructor builtin's name
+/// (`adt:Type:Variant:field_count`, the interpreter's constructor values).
+pub fn adt_constructor_parts(name: &str) -> Option<(&str, &str)> {
+    let mut parts = name.strip_prefix("adt:")?.splitn(3, ':');
+    let type_name = parts.next()?;
+    let variant = parts.next()?;
+    parts.next()?;
+    Some((type_name, variant))
+}
+
+/// The test of a namespaced constructor pattern `ns.Name(..)` (both
+/// engines). `member` is the `(type, variant)` that the namespace's member
+/// `ns.Name` constructs (`None` when it is not a variant constructor or a
+/// unit variant: an error); the value matches only when it is that variant
+/// *of that type*, so `b.Item(n)` never selects a value built by `a.Item`
+/// when the two modules define different types with an `Item` variant.
+/// An unknown member is reported earlier, by reading `ns.Name`
+/// ([`no_module_member`]).
+pub fn namespaced_variant_matches(
+    namespace: &str,
+    name: &str,
+    member: Option<(&str, &str)>,
+    value_type: Option<&str>,
+    value_variant: Option<&str>,
+) -> Result<bool, String> {
+    let (type_name, variant) = member.ok_or_else(|| not_a_namespace_variant(namespace, name))?;
+    Ok(value_type == Some(type_name) && value_variant == Some(variant))
+}
+
 pub fn import_not_found(path: &str) -> String {
     format!(
         "cannot import '{}': file not found (checked relative to the importing file, {0}, {0}.fg, forge_modules/{0}/main.fg)",

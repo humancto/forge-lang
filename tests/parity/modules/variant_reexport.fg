@@ -1,0 +1,3 @@
+// Re-exports variant_b.fg's variants: `r.Item` builds (and matches) U's
+// `Item`, not T's.
+import { Item, Mark } from "variant_b.fg"

@@ -117,11 +117,14 @@ let kind = match geo.Square(1.0) {
 }
 ```
 
-The namespace is a read-only object. Its members are the module's top-level
-functions, `let` variables, variants and structs, in definition order, plus
-`__module__` (the path as written). Type names and interfaces are not
-members; their methods and tables come with the import as for every other
-form. The module is the same single run as every other import of the file,
+The namespace is a read-only object. Its members are every name the
+module's top level binds, in definition order, plus `__module__` (the path as
+written): functions, `let` variables (destructured names too), `type` names
+(the type's description, e.g. `geo.Shape.variants` is
+`["Circle", "Square", "Dot"]`; not when a variant has the type's name),
+variants, interfaces, structs, and the names the module's own imports bind
+(re-exports). Methods and type tables come with the import as for every
+other form. The module is the same single run as every other import of the file,
 so `geo.f()` and an `f` imported with `import { f } from "geo.fg"` share the
 module's state. A variable member is the variable's value when the import
 ran, like `import { TAU }`; read state that changes through a function.
@@ -134,6 +137,12 @@ ran, like `import { TAU }`; read state that changes through a function.
   namespace has no builtin methods (`geo.len()` is `E0013` too).
 * `geo.Name { ... }` requires `Name` to be a struct of the module
   (`'geo.Name' is not a struct`, `E0013`, otherwise).
+* `geo.Name(...)` (or `geo.Name`) in a pattern matches only values built by
+  the member `geo.Name`: that variant *of that type*. If another module's
+  type also has a `Name` variant, its values do not match. An unknown
+  member is `E0013` (`T0008` statically) when the arm is tried; a member
+  that is not a variant is `'geo.Name' is not a variant` (`E0013`). A bare
+  `Name(...)` pattern still matches any value whose variant is `Name`.
 * The namespace is a value: it can be passed to functions and stored;
   `typeof(geo)` is `Object`.
 * `import "math" as m` is error `E0019`: built-in modules keep their own
