@@ -24,7 +24,7 @@ that a model cannot guess from `llms.txt`).
 | 10 | perf (fixed) | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys). **Fixed** (`4ae27a6`) | data (latest_record_wins, word_freq_large, ...) |
 | 11 | perf (fixed) | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function). **Fixed** (`ebe7a6b`, any value: `4ae27a6`) | data |
 | 12 | perf (fixed) | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each). **Fixed** (`e9ec31c`) | data |
-| 13 | perf | `set`/`map` are linear lists: `st.has`, `st.add`, `m.get`, `m.set` are O(n) per call on both engines | data |
+| 13 | perf (fixed) | `set`/`map` are linear lists: `st.has`, `st.add`, `m.get`, `m.set` are O(n) per call on both engines. **Fixed** (sets, then maps: hash-indexed on both engines) | data |
 | 14 | perf (fixed) | Net effect: the textbook word count over 100,000 words takes 28 s (VM) / 30 s (interp); Python takes 0.03 s. **Fixed**: 0.13 s (VM) / 0.31 s (interp) | word_freq_large |
 | 15 | gap (fixed) | HTTP handlers cannot set a status code or response headers, and cannot read request headers | servers |
 | 16 | gap (fixed) | A database opened at the top level of a server is not visible in handlers ("no database connection open") | todo_sqlite |
@@ -368,6 +368,21 @@ reach for a set "for O(1) membership" get the opposite.
 Suggested fix: back `Set`/`Map` by hash maps (the interpreter's `Value` would need `Hash`
 or a key projection); `CLAUDE.md` already notes "hashed Set/Map indexes" as blocked on
 Arc-backed values.
+
+**Fixed:** sets and then maps use one insertion-ordered, hash-indexed container on both
+engines (`src/semantics/ordered_set.rs`; `Value::Set(SetItems)` / `Value::Map(MapEntries)`,
+VM `ObjKind::Set(VmSet)` / `ObjKind::Map(VmMap)`), hashed and compared with each engine's
+set rules, so `st.has`/`st.add`/`m.get`/`m.set`/`m.has`/`m.remove` are O(1) on average with
+the same order, printing and equality as before (including non-transitive Int/Float key
+equality: `get`/`set` see the oldest equal key). Updating a variable does not copy:
+`st.add(x)` (VM `UpdateSetLocal`) and `m = m.set(k, v)` / `m = m.remove(k)` (interpreter
+`try_update_map_ident`, VM `UpdateMapLocal`) update a collection the variable owns in place,
+and `m.get`/`m.has`/`m.len` borrow it. Building a 100,000-entry map with `m = m.set(k, v)`
+and looking every key up (`benchmarks/vm/map_build.fg`) takes 0.31 s on the VM and 0.38 s on
+the interpreter (was quadratic: 12 s / 35 s already at 20,000 entries; CPython 0.10 s); see
+`docs/BENCHMARKS.md`, "Maps". `let b = a.set(k, v)` still copies `a` once (value semantics).
+Tests: `tests/map_semantics_test.fg` (both engines), `tests/parity/supported/map_hash_index.fg`,
+`vm::map_index_tests`, `interpreter::tests::map_lookups_agree_with_a_linear_scan`.
 
 ### 14. What a model's natural solution costs
 
