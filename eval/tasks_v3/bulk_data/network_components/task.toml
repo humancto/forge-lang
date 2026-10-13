@@ -28,7 +28,10 @@ stdin_file = "input.txt"
 generator = "gen_input.py"
 generated_sha256 = { "input.txt" = "67c7fd3a40af59d41e93dd51b6b555075a8bf429fe2c092f6c2f0fb8df87f05b" }
 needs = []
-timeout = 40
+timeout = 15
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
 max_memory = "1GB"
 known_failing = "V3 finding 4"
 known_failing_on = ["forge-vm", "forge-vm-2027"]

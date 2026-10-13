@@ -51,6 +51,9 @@ generator = "gen_input.py"
 generated_sha256 = { "input.txt" = "c5701249c6fcf29f3108a350da9783240e80a56faae232cdf377bac45dbf9d32" }
 needs = []
 timeout = 40
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
 expected_stdout = """
 lines: 200000
 applied: 131628

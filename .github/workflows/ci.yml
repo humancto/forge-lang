@@ -144,7 +144,16 @@ jobs:
       - name: Validate every task's references (eval/README.md)
         # Forge on vm + interp, editions 2026 + 2027, plus the type checker;
         # Python references too.
-        run: python eval/forge_eval.py validate --forge bin/forge
+        run: |
+          python eval/forge_eval.py validate --tier v1 --forge bin/forge
+          python eval/forge_eval.py validate --tier v2 --forge bin/forge
+      - name: Validate tier v3 references (quick)
+        # The full v3 run (four Forge runs per task, ~5 min on 4 cores, mostly
+        # the large generated inputs) is too slow for this job; --quick runs
+        # the VM in the first and the interpreter in the last edition, plus
+        # the type check and Python. Known-failing tasks are reported, not
+        # failed (eval/V3_FINDINGS.md).
+        run: python eval/forge_eval.py validate --tier v3 --quick --forge bin/forge
       - name: Self-test the harness's scoring and failure classification
         run: python eval/forge_eval.py selftest --forge bin/forge
 

@@ -146,7 +146,8 @@ println("{time.now().unix_ms - t} ms")
 `echo 40000 | forge run uf.fg`: 4,077 ms and 2.4 GB RSS on the VM; 53 ms and 19 MB on the
 interpreter. Every write through the captured top-level binding copies the 40,000-element
 array. Union-find with path compression (network_components: 120,000 nodes) is killed by
-the OOM killer after ~18 s on the VM, and with `--max-memory 1GB` it times out; the
+the OOM killer at 11 GB RSS after ~16 s on the VM; with `--max-memory 1GB` (the task's
+`max_memory`) the collector keeps up and it takes 25 s against the task's 15 s limit; the
 interpreter needs 4 s. typed_route_planner's graph construction (`graph[a].push(edge)`
 from a function) is 1.5 s for 900 roads for the same reason.
 

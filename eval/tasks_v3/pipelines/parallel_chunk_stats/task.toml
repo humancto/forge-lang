@@ -22,7 +22,9 @@ generator = "gen_input.py"
 generated_sha256 = { "input.txt" = "c695bddba8aec06150bf2c1824e2835d3f4ea0caea1c10c6547cd0129b0142be" }
 needs = []
 timeout = 40
-timed = false
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
 expected_stdout = """
 chunk 1: n=19977 bad=23 sum=183718 min=-10000 max=10000
 chunk 2: n=19982 bad=18 sum=1471074 min=-10000 max=9999

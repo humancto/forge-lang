@@ -22,6 +22,9 @@ Texts can have 700 lines each; the program must finish within a few seconds.
 """
 needs = []
 timeout = 30
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
 generator = "gen_input.py"
 generated_sha256 = { "big.txt" = "26994e1507c5e850ecfccef40939f858091fb885a7801513592dceb698aaa83f" }
 

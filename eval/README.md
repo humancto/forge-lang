@@ -241,7 +241,7 @@ tolerance).
    stdin = """..."""            # optional; or stdin_file = "input.txt" (in the task dir)
    needs = []                   # any of "read", "write", "net", "env", "run", "db"
    timeout = 10                 # seconds (default 10)
-   timed = true                 # optional (default: true in `parallel`): the time limit proves
+   timed = true                 # optional (default: true in `parallel`/`pipelines`): the time limit proves
                                 # overlap, so the run goes alone, after the others
    expected_stdout = """..."""
    # optional: exit_code = 1    (the status the program must exit with; default 0)
@@ -365,6 +365,41 @@ Design rules:
 Writing the references surfaced the Forge bugs, performance cliffs and `llms.txt` gaps
 listed in [`V2_FINDINGS.md`](V2_FINDINGS.md); where a reference avoids one of them, a
 comment in it says so.
+
+## Tier v3
+
+Blind solvers score about 100% on tier v2, so `eval/tasks_v3/` adds 36 tasks aimed at
+what v2 does not reach: answers of several files, long-running services, inputs of
+80,000-250,000 records, deep recursion, and the edges of the CLI and text handling.
+
+| Category | Tasks | What it exercises |
+|---|---:|---|
+| `modules` | 5 | `answer = "files"`: the solver writes the modules a provided `main.fg` imports: struct methods and shared module state across importers, an interface implemented over five modules, an algebraic type and a generic struct across modules (2027), a `forge_modules` package with internal modules, `import { a as b }` with clashing names |
+| `services` | 6 | SQLite-backed servers with 201/204/304/400/401/403/404/405/409/412/415/422 answers, `Location`/`ETag`/`X-Total-Count`/`WWW-Authenticate` headers, bearer tokens, conditional requests, raw-body signatures, form and text bodies, a background `schedule` worker, and 20-40 concurrent requests (transactions must hold) |
+| `bulk_data` | 6 | generated inputs (`generator`): percentiles over an access log, a ledger replay, JSON lines, an interval sweep, a dedupe-and-join, union-find over 120,000 nodes; limits a linear solution meets with 5x+ headroom on the debug build |
+| `deep_algorithms` | 5 | a parser for lists nested 3,000 deep, a Lisp interpreter, backtracking sudoku, a typed route planner (2027, interfaces), big-integer arithmetic |
+| `failures` | 5 | a shared deadline over concurrent jobs, rolled-back SQLite batches, exit statuses with `expected_stderr`, runtime error codes, retries with per-attempt time limits |
+| `pipelines` | 3 | a bounded worker pool, merging producers with `select` and detecting stalled ones, per-chunk statistics in eight tasks |
+| `cli_text` | 6 | a diff tool (stdout, stderr, exit status), Unicode character handling, regex captures and redaction, a CSV export with BOM/CRLF/quoted line breaks, canonical JSON numbers, command-line options |
+
+Reference timings (debug build, this repository's 4-core machine, VM / interpreter):
+access_log_rollup 11 s / 7 s (limit 60), ledger_replay 5 / 5 (40),
+json_orders_rollup 4 / 4 (40), interval_sweep 5 / 9 (45), customer_dedupe_join 7 / 6
+(45), network_components 25 s (with `--max-memory 1GB`; 11 GB and killed without) / 4 s (limit 15), parallel_chunk_stats
+under 1 s (40), line_diff about 3 s per run (30), worker_pool 1.7 s against a serial
+6.4 s (limit 4). A quadratic solution of the bulk tasks needs hours.
+
+Writing the references found the problems in [`V3_FINDINGS.md`](V3_FINDINGS.md). Six
+tasks are `known_failing` because their reference uses a feature that is broken today
+(network_components, typed_route_planner, plugin_pipeline, stack_machine_modules,
+csvlite_package, word_tool_args); elsewhere a reference avoids a performance trap and a
+comment in it names the finding. The CPU-heavy tasks are `timed`, so they run one at a
+time after the others and their limits are not eaten by contention.
+
+`validate --tier v3` takes about 5 minutes on 4 cores and `--quick` about 2.5 minutes.
+CI's eval job therefore validates v1 and v2 fully and v3 with `--quick`;
+`cargo test --test eval_tasks` runs v1/v2 and (on Linux) v3 with `--quick`. Run the full
+v3 validation by hand after changing an engine.
 
 ## Notes
 

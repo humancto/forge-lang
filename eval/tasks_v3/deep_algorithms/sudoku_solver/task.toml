@@ -19,6 +19,9 @@ number the remaining lines 1, 2, ... in order. For puzzle k print one line:
 stdin_file = "puzzles.txt"
 needs = []
 timeout = 40
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
 expected_stdout = """
 puzzle 1: 534678912672195348198342567859761423426853791713924856961537284287419635345286179 unique
 puzzle 2: 519748632783652419426139875357986241264317598198524367975863124832491756641275983 unique

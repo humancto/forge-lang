@@ -47,6 +47,9 @@ Recursion in the programs goes about 1,000 calls deep.
 stdin_file = "program.txt"
 needs = []
 timeout = 30
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
 expected_stdout = """
 fact
 3628800
