@@ -65,6 +65,10 @@ pub struct MethodInfo {
     pub callable: Callable,
     /// The first parameter receives the instance (`fn area(it)`).
     pub has_receiver: bool,
+    /// The receiver is declared `mut it`: a call writes it back to the
+    /// receiver's place, which must be a mutable variable or a field/index
+    /// of one.
+    pub mut_receiver: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -595,6 +599,14 @@ impl<'a> Checker<'a> {
         self.report(code, span, message, None, Vec::new());
     }
 
+    /// [`Checker::simple`] for a message from a shared run-time rule: its
+    /// `\n  hint: ` line becomes the diagnostic's help.
+    fn simple_rule(&mut self, code: Code, span: Span, message: &str) {
+        let help = crate::semantics::errors::message_hint(message).map(str::to_string);
+        let headline = crate::semantics::errors::headline(message).to_string();
+        self.report(code, span, headline, help, Vec::new());
+    }
+
     /// Report a diagnostic whose code usually contradicts a declaration
     /// but that here rests on an inferred type: it stays a warning in
     /// every edition unless `--strict` (`SeverityPolicy::severity`).
@@ -1077,6 +1089,9 @@ impl<'a> Checker<'a> {
                                 MethodInfo {
                                     callable,
                                     has_receiver,
+                                    mut_receiver: params
+                                        .first()
+                                        .is_some_and(|p| p.kind == ParamKind::MutReceiver),
                                 },
                             );
                         }
@@ -1736,7 +1751,13 @@ impl<'a> Checker<'a> {
                 }
             }
             let declared = p.type_ann.as_ref().map(|_| ty.clone());
-            self.bind(&p.name, ty, declared, BindKind::Other);
+            // A method's plain receiver is read-only (`mut it` is not).
+            let kind = if p.kind == ParamKind::Receiver {
+                BindKind::Immutable
+            } else {
+                BindKind::Other
+            };
+            self.bind(&p.name, ty, declared, kind);
         }
         let ret = if declared_ret {
             Some(*callable.sig.ret.clone())
@@ -1804,12 +1825,10 @@ impl<'a> Checker<'a> {
                 if let Some(b) = &binding {
                     if b.kind == BindKind::Immutable {
                         let span = self.name_span(name, NameClass::Value);
-                        self.report(
+                        self.simple_rule(
                             Code::ImmutableAssign,
                             span,
-                            crate::semantics::immutable_reassign(name),
-                            None,
-                            Vec::new(),
+                            &crate::semantics::immutable_reassign(name),
                         );
                     }
                     if let Some(d) = &b.declared {
@@ -1883,10 +1902,10 @@ impl<'a> Checker<'a> {
                 .is_some_and(|b| b.kind == BindKind::Immutable)
             {
                 let span = self.name_span(name, NameClass::Value);
-                self.simple(
+                self.simple_rule(
                     Code::ImmutableAssign,
                     span,
-                    crate::semantics::immutable_reassign(name),
+                    &crate::semantics::immutable_reassign(name),
                 );
             }
         }
@@ -3643,6 +3662,19 @@ impl<'a> Checker<'a> {
             let type_name = type_name.clone();
             if let Some(m) = self.find_method(&type_name, method, 0) {
                 self.record_field_type(method, &Ty::Fn(m.callable.sig.clone()));
+                if m.mut_receiver {
+                    // The updated receiver is stored back into the place
+                    // the method is called on.
+                    if is_receiver_place(object) {
+                        self.check_mutable_root(object);
+                    } else {
+                        self.simple_rule(
+                            Code::ImmutableAssign,
+                            span,
+                            &crate::semantics::temporary_receiver(method),
+                        );
+                    }
+                }
                 if !has_spread {
                     // Called on an instance, the first parameter receives
                     // the instance whether or not it is named `it`.
@@ -3921,5 +3953,15 @@ fn collect_expr_names(expr: &Expr, out: &mut Vec<(String, NameClass)>) {
             collect_expr_names(value, out);
         }
         _ => {}
+    }
+}
+
+/// A variable or a field/index chain rooted at one: a place a method
+/// declared `mut it` can write its receiver back to.
+fn is_receiver_place(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(_) => true,
+        Expr::FieldAccess { object, .. } | Expr::Index { object, .. } => is_receiver_place(object),
+        _ => false,
     }
 }

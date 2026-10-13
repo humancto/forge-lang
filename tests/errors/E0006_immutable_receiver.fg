@@ -1,0 +1,10 @@
+struct Counter {
+    n: Int
+}
+impl Counter {
+    fn inc(it) {
+        it.n += 1
+    }
+}
+let mut c = Counter { n: 0 }
+c.inc()

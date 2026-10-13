@@ -406,10 +406,42 @@ pub fn undefined_variable(name: &str, similar: Option<&str>) -> String {
 
 /// Assigning to a binding declared without `mut`. Raised at run time by both
 /// engines (so `try`/`catch` can observe it).
+///
+/// `it` (or `self`) is usually a method's receiver, which is immutable
+/// unless the method declares `mut it`; the error says so in a hint.
 pub fn immutable_reassign(name: &str) -> String {
-    format!(
+    let message = format!(
         "cannot reassign immutable variable '{}' (use 'let mut' to make it mutable)",
         name
+    );
+    if is_receiver_name(name) {
+        format!(
+            "{}\n  hint: a method's receiver is read-only; declare it `mut {}` (`fn name(mut {}, ...)`) to update the value the method is called on, or work on a copy (`let mut copy = {}`)",
+            message, name, name, name
+        )
+    } else {
+        message
+    }
+}
+
+/// Whether a method's first parameter with this name is its receiver
+/// (`fn area(it)`; `self` is accepted too).
+pub fn is_receiver_name(name: &str) -> bool {
+    name == "it" || name == "self"
+}
+
+/// Parse error for `mut` on a parameter other than a method's receiver.
+pub const MUT_PARAM_NOT_RECEIVER: &str =
+    "only a method's receiver can be declared `mut`: write `fn name(mut it, ...)` inside an `impl` block (other parameters are already mutable copies)";
+
+/// A method declared `mut it` called on a value that is not a variable or
+/// a field/index chain rooted at one (`make().inc()`): there is no place to
+/// write the updated receiver back to, so the call is refused instead of
+/// silently losing the update. Classified E0006.
+pub fn temporary_receiver(method: &str) -> String {
+    format!(
+        "cannot update a temporary value: method '{}' updates its receiver (`mut it`)\n  hint: store the value in a `let mut` variable and call the method on that variable",
+        method
     )
 }
 
@@ -424,8 +456,19 @@ pub fn is_mutating_method(method: &str, arg_count: usize) -> bool {
 }
 
 /// One of the [`is_mutating_method`] methods called on a frozen value.
-pub fn frozen_method(method: &str) -> String {
-    format!("cannot {} a frozen value", method)
+/// `kind` names the frozen value (`"array"`, `"set"`, `"map"`; anything
+/// else reads "value"): `cannot remove from a frozen map`. Both engines
+/// raise every such error through this helper.
+pub fn frozen_method(method: &str, kind: &str) -> String {
+    let kind = match kind {
+        "array" | "set" | "map" => kind,
+        _ => "value",
+    };
+    match method {
+        "push" | "add" => format!("cannot {} to a frozen {}", method, kind),
+        "pop" | "remove" => format!("cannot {} from a frozen {}", method, kind),
+        _ => format!("cannot mutate a frozen {}", kind),
+    }
 }
 
 pub fn check_failed(displayed_value: &str) -> String {

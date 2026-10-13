@@ -198,6 +198,46 @@ println(u.describe())
 println(satisfies(u, Describable))
 ```
 
+Values are copied (structs, arrays, objects), and a method's receiver `it` is
+read-only. A method that updates its receiver declares it `mut it`; when it
+returns, the updated `it` is written back to the variable (or field/index of
+one) the method was called on:
+
+```forge
+struct Stack {
+    items: [Int]
+}
+
+impl Stack {
+    fn push(mut it, x: Int) {      // `mut it`: updates the receiver
+        it.items.push(x)
+    }
+    fn pop(mut it) {
+        return it.items.pop()
+    }
+    fn peek(it) {                  // plain `it`: read-only
+        return it.items[len(it.items) - 1]
+    }
+}
+
+let mut s = Stack { items: [] }    // the receiver must be `let mut`
+s.push(1)
+s.push(2)
+println(s.pop())                   // 2
+println(s.items)                   // [1]
+let mut stacks = { a: Stack { items: [] } }
+stacks.a.push(7)                   // fields and elements update in place too
+```
+
+- Assigning to a plain `it` (`it.n += 1`, `it.items.push(x)`, `it = ...`) is
+  an error (E0006 / T0017); copy it first (`let mut c = it`) to return a
+  modified value instead.
+- A `mut it` method on a `let` (immutable) binding is E0006; on a temporary
+  (`make().inc()`, `a.b().inc()`) it is E0006 "cannot update a temporary
+  value". Works the same for `type` (algebraic) methods and through interfaces.
+- The update is written back only when the method returns normally; an error
+  inside it leaves the receiver unchanged.
+
 ## Algebraic types and match
 
 ```forge
@@ -562,6 +602,7 @@ fn cities() { return ["Oslo"] }
 - Put non-String values into text with interpolation (`"total: {n}"`) or `str(n)`, never `"total: " + n`: edition 2027 rejects `+` between a String and a non-String (E0034; edition 2026 converts silently).
 - No format specs such as `{x:.2f}` or `%.2f`: write `"{to_fixed(x, 2)}"`.
 - Mutating a field or index requires a `let mut` binding.
+- A method that changes its receiver must be declared `fn name(mut it, ...)` and called on a `let mut` variable (or a field/index of one); a plain `fn name(it)` cannot assign to `it`.
 - `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.
 - Always pass user input to SQL as a params array: `db.query("... WHERE id = ?", [id])`.

@@ -162,16 +162,29 @@ pub(super) fn get_of(
 
 /// One step of a nested assignment target below its root variable:
 /// `.field` or `[index]` (index already evaluated).
-enum PlaceStep<'a> {
+pub(super) enum PlaceStep<'a> {
     Field(&'a str),
     Index(Value),
 }
 
-/// What a mutable variable currently holds, for choosing a set fast path.
-enum SetReceiver {
-    Set,
-    Frozen,
+/// What the receiver of a mutating method (`push`/`pop`/`add`/`remove`)
+/// holds: a collection the method updates in place, a frozen value (the
+/// frozen error, named after what it holds), or anything else (an ordinary
+/// method call).
+enum ReceiverShape {
+    InPlace,
+    Frozen(String),
     Other,
+}
+
+fn receiver_shape(value: &Value, method: &str) -> ReceiverShape {
+    match (value, method) {
+        (Value::Array(_), "push" | "pop") | (Value::Set(_), "add" | "remove") => {
+            ReceiverShape::InPlace
+        }
+        (Value::Frozen(inner), _) => ReceiverShape::Frozen(inner.type_name().to_ascii_lowercase()),
+        _ => ReceiverShape::Other,
+    }
 }
 
 impl Interpreter {
@@ -310,6 +323,13 @@ impl Interpreter {
         if self.env.is_mutable(var) != Some(true) {
             return None;
         }
+        if matches!(function.as_ref(), Expr::FieldAccess { .. }) {
+            if !crate::semantics::is_mutating_method(method, rest.len()) {
+                return None;
+            }
+            return Some(self.mutate_var_method(var, method, rest, want_result));
+        }
+        // The free forms `push(v, x)` (edition 2026) and `pop(v)`.
         match (method, rest.len()) {
             ("push", 1) => {
                 let val = match self.eval_expr(&rest[0]) {
@@ -332,46 +352,78 @@ impl Interpreter {
                 Value::Array(items) => Ok(items.pop().unwrap_or(Value::Null)),
                 _ => Err(RuntimeError::new("pop() requires array")),
             })),
-            ("add", 1) | ("remove", 1) => {
-                let receiver = self.env.with_value(var, |v| match v {
-                    Value::Set(_) => SetReceiver::Set,
-                    Value::Frozen(_) => SetReceiver::Frozen,
-                    _ => SetReceiver::Other,
-                })?;
-                match receiver {
-                    SetReceiver::Other => return None,
-                    SetReceiver::Frozen => {
-                        return Some(Err(RuntimeError::new(if method == "add" {
-                            "cannot add to a frozen set"
-                        } else {
-                            "cannot remove from a frozen set"
-                        })))
-                    }
-                    SetReceiver::Set => {}
-                }
-                let val = match self.eval_expr(&rest[0]) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let adding = method == "add";
-                Some(self.update_var(var, |cur| {
-                    let Value::Set(items) = cur else {
-                        return Err(RuntimeError::new(&format!("{}() requires a set", method)));
-                    };
-                    if adding {
-                        items.add_value(val);
-                    } else {
-                        items.remove_value(&val);
-                    }
-                    Ok(if want_result {
-                        cur.clone()
-                    } else {
-                        Value::Null
-                    })
-                }))
-            }
             _ => None,
         }
+    }
+
+    /// `v.push(x)`, `v.pop()`, `v.add(x)` and `v.remove(x)` on a mutable
+    /// variable `v` (the method form; both engines): the arguments are
+    /// evaluated first, then the variable is read. An array (`push`/`pop`)
+    /// or a set (`add`/`remove`) is updated in place; a frozen value is the
+    /// frozen error; anything else is an ordinary method call on the value
+    /// (a map's `remove`, a struct's own `push`, ...), whose updated
+    /// receiver is stored back when the method is declared `mut it`.
+    fn mutate_var_method(
+        &mut self,
+        var: &str,
+        method: &str,
+        args: &[Expr],
+        want_result: bool,
+    ) -> Result<Value, RuntimeError> {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(self.eval_expr(arg)?);
+        }
+        let shape = self
+            .env
+            .with_value(var, |v| receiver_shape(v, method))
+            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", var)))?;
+        match shape {
+            ReceiverShape::InPlace => self.update_var(var, |cur| {
+                apply_mutating_method(cur, method, values.pop(), want_result)
+            }),
+            ReceiverShape::Frozen(kind) => Err(RuntimeError::new(
+                &crate::semantics::frozen_method(method, &kind),
+            )),
+            ReceiverShape::Other => {
+                let receiver = self
+                    .env
+                    .get(var)
+                    .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", var)))?;
+                let (result, updated) = self.call_method_on_values(receiver, method, values)?;
+                if let Some(updated) = updated {
+                    self.assign_receiver_place(var, &[], updated)?;
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    /// Store the updated receiver of a method declared `mut it` into the
+    /// place the method was called on (`c`, `xs[i]`, `o.f`): like
+    /// `place = updated`, so an immutable root is the immutable-assignment
+    /// error.
+    pub(super) fn assign_receiver_place(
+        &mut self,
+        root: &str,
+        steps: &[PlaceStep<'_>],
+        updated: Value,
+    ) -> Result<(), RuntimeError> {
+        self.env
+            .with_binding_mut(root, |cur, mutable| {
+                if !mutable {
+                    return Err(RuntimeError::new(&crate::semantics::immutable_reassign(
+                        root,
+                    )));
+                }
+                let mut slot = cur;
+                for step in steps {
+                    slot = place_child(root, slot, step)?;
+                }
+                *slot = updated;
+                Ok(())
+            })
+            .unwrap_or_else(|| Err(RuntimeError::new(&format!("undefined: {}", root))))
     }
 
     /// `place.push(x)`, `place.pop()`, `place.add(x)` and `place.remove(x)`
@@ -428,12 +480,13 @@ impl Interpreter {
         let updated = self
             .env
             .with_binding_mut(root, |cur, mutable| {
-                let in_place = match (place_leaf(cur, &steps), method) {
-                    (Some(Value::Frozen(_)), _) => {
-                        return Err(RuntimeError::new(&crate::semantics::frozen_method(method)))
+                let in_place = match place_leaf(cur, &steps).map(|v| receiver_shape(v, method)) {
+                    Some(ReceiverShape::Frozen(kind)) => {
+                        return Err(RuntimeError::new(&crate::semantics::frozen_method(
+                            method, &kind,
+                        )))
                     }
-                    (Some(Value::Array(_)), "push" | "pop") => true,
-                    (Some(Value::Set(_)), "add" | "remove") => true,
+                    Some(ReceiverShape::InPlace) => true,
                     _ => false,
                 };
                 if !in_place {
@@ -466,18 +519,26 @@ impl Interpreter {
                 PlaceStep::Index(index) => Self::index_of(&receiver, index)?,
             };
         }
-        self.call_method_on_values(receiver, method, values)
+        let (result, updated) = self.call_method_on_values(receiver, method, values)?;
+        if let Some(updated) = updated {
+            self.assign_receiver_place(root, &steps, updated)?;
+        }
+        Ok(result)
     }
 
-    /// `receiver.method(args...)` for already-evaluated values, through the
-    /// ordinary method dispatch (bound to hidden names in a scratch scope,
-    /// so nothing is evaluated twice).
+    /// `receiver.method(args...)` for already-evaluated values: a user
+    /// method directly (with its updated receiver when it is declared
+    /// `mut it`), anything else through the ordinary method dispatch (bound
+    /// to hidden names in a scratch scope, so nothing is evaluated twice).
     fn call_method_on_values(
         &mut self,
         receiver: Value,
         method: &str,
         args: Vec<Value>,
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<(Value, Option<Value>), RuntimeError> {
+        if let Some(found) = self.user_method_of(&receiver, method) {
+            return self.call_found_method(found, &receiver, method, args);
+        }
         const RECEIVER: &str = "\u{0}receiver";
         self.env.push_scope();
         self.env
@@ -497,7 +558,7 @@ impl Interpreter {
         };
         let result = self.eval_expr(&call);
         self.env.pop_scope();
-        result
+        Ok((result?, None))
     }
 
     /// Apply `f` to the mutable variable `var` in place.

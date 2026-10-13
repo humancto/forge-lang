@@ -109,6 +109,10 @@ pub struct Compiler {
     /// it) accessed as globals. A top-level `let` of such a name, compiled
     /// afterwards, defines a global instead of a register local.
     toplevel_refs: HashSet<String>,
+    /// The register of `it` while compiling the body of a method declared
+    /// `mut it`: every return first hands its final value to
+    /// `__forge_receiver_out` (see [`emit_receiver_out`]).
+    mut_receiver: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +189,7 @@ impl Compiler {
             toplevel_mixed: Arc::new(HashSet::new()),
             toplevel_globals: HashMap::new(),
             toplevel_refs: HashSet::new(),
+            mut_receiver: None,
         }
     }
 
@@ -2067,7 +2072,7 @@ fn try_compile_method_peek(
     };
     let saved = c.next_register;
     let fr = c.alloc_reg()?;
-    compile_expr(c, &Expr::Ident("__forge_call_method".to_string()), fr)?;
+    compile_expr(c, &Expr::Ident("__forge_call_method_at".to_string()), fr)?;
     let recv = c.alloc_reg()?;
     c.emit(encode_abc(OpCode::PeekLocal, recv, reg, 0), 0);
     let method_reg = c.alloc_reg()?;
@@ -2081,6 +2086,115 @@ fn try_compile_method_peek(
         encode_abc(OpCode::CallPure, fr, (args.len() + 2) as u8, dst),
         0,
     );
+    // A struct's own `get`/`has`/`len` declared `mut it`: store its
+    // updated receiver back into the local.
+    let updated = c.alloc_reg()?;
+    let skip = c.emit_jump(OpCode::TakeReceiver, updated, 0);
+    compile_store_variable(c, var, updated)?;
+    c.patch_jump(skip);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// Write the final value of `it` to `__forge_receiver_out` when compiling
+/// a method declared `mut it` (before each of its returns).
+fn emit_receiver_out(c: &mut Compiler) -> Result<(), CompileError> {
+    let Some(reg) = c.mut_receiver else {
+        return Ok(());
+    };
+    let saved = c.next_register;
+    let dst = c.alloc_reg()?;
+    compile_hidden_call_from_regs(c, "__forge_receiver_out", &[reg], dst)?;
+    c.free_to(saved);
+    Ok(())
+}
+
+/// `place.method(args)` where `place` is a variable or a field/index chain
+/// rooted at one (`c.inc()`, `xs[i].inc()`, `o.f.inc()`), for any method:
+/// the call goes through `__forge_call_method_at`, and when the method was
+/// declared `mut it` its updated receiver is stored back into the place
+/// (`TakeReceiver`), exactly like `place = updated`: on an immutable root
+/// that is the immutable-assignment error. The interpreter's rule is
+/// `Interpreter::call_method_at_place`.
+///
+/// Order: the index expressions, then the receiver is read, then the
+/// arguments (the generic receiver-first order); the store re-reads the
+/// containers along the place, so it only replaces the receiver itself.
+///
+/// The builtin modules (`math.sqrt(x)`) keep the plain call, which the JIT
+/// understands: their members never update a receiver.
+fn try_compile_receiver_place_call(
+    c: &mut Compiler,
+    object: &Expr,
+    method: &str,
+    args: &[Expr],
+    dst: u8,
+) -> Result<bool, CompileError> {
+    let Some((root, steps)) = place_path(object) else {
+        return Ok(false);
+    };
+    let is_builtin_module =
+        crate::semantics::BUILTIN_MODULES.contains(&root) && c.binding_mutability(root).is_none();
+    if is_builtin_module {
+        return Ok(false);
+    }
+    let saved = c.next_register;
+    let mut keys = Vec::with_capacity(steps.len());
+    for step in &steps {
+        keys.push(match step {
+            Ok(field) => PlaceKey::Field(field),
+            Err(index) => {
+                let r = c.alloc_reg()?;
+                compile_expr(c, index, r)?;
+                PlaceKey::Index(r)
+            }
+        });
+    }
+    let fn_reg = c.alloc_reg()?;
+    let fn_idx = c.const_str("__forge_call_method_at");
+    c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
+    let recv_reg = c.alloc_reg()?;
+    if keys.is_empty() {
+        compile_expr(c, object, recv_reg)?;
+    } else {
+        compile_expr(c, &Expr::Ident(root.to_string()), recv_reg)?;
+        for key in &keys {
+            emit_place_read(c, recv_reg, recv_reg, key)?;
+        }
+    }
+    let method_reg = c.alloc_reg()?;
+    let method_idx = c.const_str(method);
+    c.emit(encode_abx(OpCode::LoadConst, method_reg, method_idx), 0);
+    for arg in args {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+    }
+    c.emit(
+        encode_abc(OpCode::Call, fn_reg, (args.len() + 2) as u8, dst),
+        0,
+    );
+    // Only after a `mut it` method: store the updated receiver.
+    let updated = c.alloc_reg()?;
+    let skip = c.emit_jump(OpCode::TakeReceiver, updated, 0);
+    if keys.is_empty() {
+        compile_store_variable(c, root, updated)?;
+    } else {
+        let mut levels = Vec::with_capacity(keys.len());
+        for _ in 0..keys.len() {
+            levels.push(c.alloc_reg()?);
+        }
+        compile_expr(c, &Expr::Ident(root.to_string()), levels[0])?;
+        for i in 1..keys.len() {
+            emit_place_read(c, levels[i], levels[i - 1], &keys[i - 1])?;
+        }
+        let last = keys.len() - 1;
+        emit_place_write(c, levels[last], &keys[last], updated)?;
+        for i in (0..last).rev() {
+            emit_place_write(c, levels[i], &keys[i], levels[i + 1])?;
+        }
+        compile_store_variable(c, root, levels[0])?;
+    }
+    c.patch_jump(skip);
     c.free_to(saved);
     Ok(true)
 }
@@ -2475,7 +2589,13 @@ fn compile_function_body(
     fc.begin_scope();
     let mut param_regs = Vec::with_capacity(params.len());
     for param in params {
-        param_regs.push(fc.add_local(&param.name, true)?);
+        // A method's plain receiver `it` is immutable (E0006); `mut it` is
+        // written back by the caller from `__forge_receiver_out`.
+        let reg = fc.add_local(&param.name, param.is_mutable())?;
+        if param.kind == ParamKind::MutReceiver {
+            fc.mut_receiver = Some(reg);
+        }
+        param_regs.push(reg);
     }
     // Default values: evaluated in the callee (so they can use earlier
     // parameters) only when the caller did not pass that argument, like the
@@ -2501,6 +2621,7 @@ fn compile_function_body(
             if let Stmt::Expression(expr) = &s.stmt {
                 let dst = fc.alloc_reg()?;
                 compile_expr(fc, expr, dst)?;
+                emit_receiver_out(fc)?;
                 fc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
                 fc.free_to(dst);
             } else if crate::semantics::is_value_tail(&s.stmt) {
@@ -2508,14 +2629,19 @@ fn compile_function_body(
                 // of the branch taken (shared rule: semantics::is_value_tail).
                 let dst = fc.alloc_reg()?;
                 compile_stmt_value(fc, &s.stmt, dst)?;
+                emit_receiver_out(fc)?;
                 fc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
                 fc.free_to(dst);
             } else {
                 compile_stmt(fc, &s.stmt)?;
+                emit_receiver_out(fc)?;
                 fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             }
         }
-        None => fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0),
+        None => {
+            emit_receiver_out(fc)?;
+            fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0)
+        }
     }
     fc.chunk.arity = params.len() as u8;
     fc.chunk.min_arity =
@@ -2660,9 +2786,11 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 let saved = c.next_register;
                 let reg = c.alloc_reg()?;
                 compile_expr(c, e, reg)?;
+                emit_receiver_out(c)?;
                 c.emit(encode_abc(OpCode::Return, reg, 0, 0), 0);
                 c.free_to(saved);
             } else {
+                emit_receiver_out(c)?;
                 c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             }
             Ok(())
@@ -2904,10 +3032,8 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     .fields
                     .iter()
                     .enumerate()
-                    .map(|(index, type_ann)| Param {
-                        name: format!("field{}", index),
-                        type_ann: Some(type_ann.clone()),
-                        default: None,
+                    .map(|(index, type_ann)| {
+                        Param::plain(format!("field{}", index), Some(type_ann.clone()), None)
                     })
                     .collect();
                 let param_names = params
@@ -3686,6 +3812,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                 if try_compile_mutating_call(c, object, field, args, dst)?
                     || try_compile_place_method(c, object, field, args, dst)?
                     || try_compile_method_peek(c, object, field, args, dst)?
+                    || try_compile_receiver_place_call(c, object, field, args, dst)?
                 {
                     return Ok(());
                 }
@@ -3857,6 +3984,9 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             let saved = c.next_register;
             let sr = c.alloc_reg()?;
             compile_expr(c, inner, sr)?;
+            // `?` may return from here: hand over the receiver first (a
+            // later return hands over its final value again).
+            emit_receiver_out(c)?;
             c.emit(encode_abc(OpCode::Try, dst, sr, 0), 0);
             c.free_to(saved);
         }

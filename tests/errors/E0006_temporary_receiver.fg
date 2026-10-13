@@ -1,0 +1,12 @@
+struct Counter {
+    n: Int
+}
+impl Counter {
+    fn inc(mut it) {
+        it.n += 1
+    }
+}
+fn make() {
+    return Counter { n: 0 }
+}
+make().inc()

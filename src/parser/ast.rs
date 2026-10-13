@@ -352,6 +352,51 @@ pub struct Param {
     pub name: String,
     pub type_ann: Option<TypeAnn>,
     pub default: Option<Expr>,
+    /// Whether this is a method's receiver (`it`), and whether it is
+    /// declared `mut it`.
+    pub kind: ParamKind,
+}
+
+/// How a parameter binds its argument.
+///
+/// The first parameter of a method in an `impl`/`give` block, when it is
+/// named `it` (or `self`), is the method's *receiver*: the value the method
+/// is called on. A plain receiver is immutable inside the method (assigning
+/// to it or to one of its fields is E0006 / T0017). A `mut it` receiver may
+/// be updated, and when the method returns normally its final value is
+/// written back to the place the method was called on (`c.inc()`,
+/// `xs[i].inc()`, `o.f.inc()`; see `semantics::temporary_receiver`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParamKind {
+    /// An ordinary (mutable) parameter.
+    #[default]
+    Plain,
+    /// A method's receiver declared `it`: immutable.
+    Receiver,
+    /// A method's receiver declared `mut it`: mutable, written back.
+    MutReceiver,
+}
+
+impl Param {
+    /// An ordinary parameter.
+    pub fn plain(
+        name: impl Into<String>,
+        type_ann: Option<TypeAnn>,
+        default: Option<Expr>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            type_ann,
+            default,
+            kind: ParamKind::Plain,
+        }
+    }
+
+    /// Whether the parameter is bound mutably (everything but a plain
+    /// receiver).
+    pub fn is_mutable(&self) -> bool {
+        self.kind != ParamKind::Receiver
+    }
 }
 
 #[derive(Debug, Clone)]

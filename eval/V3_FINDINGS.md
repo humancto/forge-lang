@@ -21,13 +21,13 @@ out or exhausts memory), **gap** (missing feature or behaviour a model cannot le
 | 2 | perf | Interpreter: passing a top-level/captured array to a builtin (`slice(chars, i, j)`) copies the whole array per call: quadratic | nested_list_parser (workaround) |
 | 3 | perf | VM: `obj[xs[i]] = v`, `obj[o.f] += 1`, `obj["k" + s] = v` copy the whole object per write (and grow RSS to GBs); `let k = xs[i]; obj[k] = v` is O(1) | all bulk_data tasks (workaround) |
 | 4 | perf | VM: a function that writes an element of a top-level array/object copies the whole container per write; RSS grows to GBs | network_components (**known failing** on the VM), typed_route_planner |
-| 5 | bug | A method cannot change its receiver: `it.n += 1` / `it.items.push(x)` in an `impl` method is silently lost | (any stateful struct) |
+| 5 | bug | **Fixed.** A method cannot change its receiver: `it.n += 1` / `it.items.push(x)` in an `impl` method is silently lost | (any stateful struct) |
 | 6 | bug | Type checker: a parameter declared with an interface type cannot be passed to another parameter of that interface (T0012 "struct 'Metric' does not satisfy interface 'Metric'"), an error in 2027 | typed_route_planner (**known failing**) |
 | 7 | bug | VM: `import { Plugin } from "api.fg"` of an interface fails (E0019 "does not export"); the interpreter imports it (**fixed**) | plugin_pipeline |
 | 8 | bug | An algebraic type's name cannot be imported (`import { Shape } from "m.fg"` → E0019, both engines), so `fn f(s: Shape)` in another module is T0015 (error in 2027) (**fixed**) | stack_machine_modules |
 | 9 | bug | VM: a name a module imports cannot be imported from it (re-export through a package entry); the interpreter allows it (**fixed**) | csvlite_package |
 | 10 | bug | `timeout 0.5 seconds { }` truncates the limit to 0 and fails at once ("exceeded 0 second limit"); there is no millisecond unit | retry_with_timeouts (workaround) |
-| 11 | bug | Interpreter: a struct method named `push` is dispatched to the builtin (`E0015 push() first argument must be array`); the VM calls the method | (any struct with `push`) |
+| 11 | bug | **Fixed.** Interpreter: a struct method named `push` is dispatched to the builtin (`E0015 push() first argument must be array`); the VM calls the method | (any struct with `push`) |
 | 12 | bug | Builtin argument errors differ between engines: `join([1, 2], 5)` is `"152"` on the VM and E0015 on the interpreter; `split`/`keys`/`push` error texts differ | error_code_report (avoids them) |
 | 13 | gap | Programs cannot receive command-line arguments: `forge run main.fg --top 3` is a usage error, `io.args()` is the host's whole argv (forge's own flags included) and empty under `--sandbox` | word_tool_args (**known failing**) |
 | 14 | gap | `1e2` is not a number literal: it lexes as `1` followed by the name `e2` (T0006 warning, then E0003 at run time) | json_canonical |
@@ -211,6 +211,40 @@ Suggested fix: either write the receiver back when the call's receiver is a plac
 a mutable binding (like the nested method updates of v2 finding 1), or reject the
 assignment to `it` (a T-code and a run-time error). At the least, document "methods return
 a new value; write `c = c.bump()`".
+
+**Fixed:** a method that updates its receiver declares it `mut it` (`fn bump(mut it)`), and
+a plain receiver is read-only. Decisions (both engines, both editions, `llms.txt` "Structs,
+methods, interfaces", spec `type-system/method-blocks.md`):
+
+- *Opt-in and visible.* `mut` is allowed only on a method's receiver (the first parameter
+  of an `impl`/`give` method, named `it` or `self`; anywhere else it is a syntax error).
+  `it.n += 1`, `it.items.push(x)` or `it = ...` in a method declared `fn m(it)` is E0006
+  `cannot reassign immutable variable 'it'` with a hint to declare `mut it` (T0017 from
+  the checker), so the silent loss above is now an error. A method that wants to return a
+  modified copy copies first (`let mut c = it`).
+- *Write-back.* When a `mut it` method returns normally (explicit `return`, tail value, or
+  a `?` early return), its final `it` is assigned to the place the call was made on: a
+  variable, or a field/index chain rooted at one (`c.bump()`, `xs[i].bump()`,
+  `o.f.bump()`; index expressions evaluated once, before the arguments). It is an ordinary
+  assignment, so an immutable root is E0006 (T0017 statically), checked after the method
+  returned. An error inside the method writes nothing back. Aliases are unaffected.
+- *Temporaries.* `make().bump()` (any receiver that is not a place) is E0006 `cannot update
+  a temporary value` (T0017 statically) rather than an allowed-but-discarded update: a
+  discarded update is exactly the silent loss this finding is about, and Swift makes the
+  same choice. Methods without `mut it` work on temporaries as before.
+- *Everywhere a method can be found.* Struct methods, algebraic-type methods (`it = Green`
+  replaces the receiver), calls through an interface-typed value (dispatch is dynamic, so
+  the implementing method's `mut it` decides; interface signatures do not mention the
+  receiver), embedded delegation (`outer.hit()` updates `outer.inner`), and the fast paths
+  that end in a method call (`s.push(x)` on a struct, `g[k].push(x)`, `m.get(k)`).
+- *Implementation.* Interpreter: `bind_params` binds a plain receiver immutably;
+  `call_function_inner` hands a `mut it` method's final receiver to the dispatch that called
+  it (`call_user_method`), which assigns it to the place (`assign_receiver_place`). VM: the
+  compiler binds a plain receiver immutably and, in a `mut it` method, calls
+  `__forge_receiver_out(it)` before each return; method calls on places go through
+  `__forge_call_method_at` followed by the new `TakeReceiver` opcode, which stores the
+  receiver back only after a `mut it` method (`.fgc` format 1.7). Calls on builtin modules
+  (`math.sqrt(x)`) keep the plain path the JIT understands.
 
 ### 6. Interface-typed parameters cannot be passed on
 
@@ -404,6 +438,27 @@ routes the mutating-method form to the builtin before looking at the struct's me
 
 Suggested fix: look up user methods first in the interpreter's nested-method path, and
 add the case to the parity fixtures.
+
+**Fixed:** on a mutable variable the interpreter now treats `v.push(x)`, `v.pop()`,
+`v.add(x)` and `v.remove(x)` like the VM: the arguments are evaluated, then the variable
+is read; an array (`push`/`pop`) or set (`add`/`remove`) is updated in place, a frozen
+value is the frozen error, and anything else (a struct's own `push`, a map's `remove`) is
+an ordinary method call, with write-back when the method is declared `mut it`
+(`tests/mut_receiver_test.fg`).
+
+Two map divergences found on the way are fixed with it:
+
+- `m = m.remove(g())` where `g` reassigns `m`: the VM read the map after the argument, the
+  interpreter before. The rule both engines already applied to `push`/`pop`/`add`/`remove`
+  on a mutable variable (arguments first, then the variable, so an argument's update is not
+  overwritten; v2's differential fuzzer found the original bug) now holds whatever the
+  variable contains, so the interpreter changed. Every other method call still evaluates its
+  receiver before its arguments.
+- Removing from a frozen map said `cannot remove a frozen value` (VM) and `cannot remove
+  from a frozen set` (interpreter). Every frozen `push`/`pop`/`add`/`remove` error now comes
+  from `semantics::frozen_method(method, kind)`: `cannot remove from a frozen map`, `cannot
+  add to a frozen set`, `cannot push to a frozen array`, `cannot pop from a frozen array`
+  (all E0029; the interpreter's set messages used to be unclassified E0000).
 
 ### 12. Builtin argument errors differ between engines
 
