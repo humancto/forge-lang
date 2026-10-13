@@ -1,0 +1,50 @@
+// expect: [b1, [(9007199254740993, f), (9007199254740992, b0)], Map(), [(1, Float), (NaN, Float), (a, String), ([1, 2], Array), ({ "x": 1 }, Object), (set(1, 2), Set), (0, Float)], [0, 4, 8, 12, 16, 1], [Map(x => 1), Map(y => 2), Map(x => 1, y => 2, z => 3)], Map(a => 3, b => 2, c => 1), 500, 499, true, 7, true]
+// Maps are hash-indexed by key; every lookup must agree with the linear
+// definition: Int/Float keys that compare equal are one key, NaN finds
+// NaN, nested containers compare by content, equality that is not
+// transitive (two large Ints equal to one Float) sees the oldest key, and
+// `set`/`remove` on a variable never change an alias.
+
+let big = 9007199254740992
+let mut m = map()
+m = m.set(big + 1, "b1")
+m = m.set(big, "b0")
+let oldest = m.get(9007199254740992.0)
+m = m.set(9007199254740992.0, "f")
+let replaced = m.to_array()
+m = m.remove(9007199254740992.0)
+
+let nan = math.sqrt(-1.0)
+let mut keys = map()
+for k in [1, 1.0, nan, nan, "a", [1, 2], [1.0, 2], {x: 1}, {x: 1.0}, set([1, 2]), 0, -0.0] {
+    keys = keys.set(k, typeof(k))
+}
+
+let mut r = map()
+for i in range(20) { r = r.set(i, i * i) }
+for i in range(20) {
+    if i % 4 != 0 { r = r.remove(i) }
+}
+r = r.set(1, "back")
+let mut order = []
+for k, v in r { order.push(k) }
+
+let mut a = map([("x", 1)])
+let alias = a
+a = a.set("y", 2)
+let b = a.set("z", 3)
+a = a.remove("x")
+
+let mut counts = map()
+for w in ["a", "b", "a", "c", "b", "a"] {
+    if counts.has(w) { counts = counts.set(w, counts.get(w) + 1) } else { counts = counts.set(w, 1) }
+}
+
+let mut many = map()
+for i in range(500) { many = many.set(i * 2, i) }
+let mut found = 0
+for i in range(1000) {
+    if many.has(i) { found = found + 1 }
+}
+
+[oldest, replaced, m, keys.to_array(), order, [alias, a, b], counts, found, many.get(998), map([(1, "x"), (2, "y")]) == map([(2.0, "y"), (1, "x")]), keys.keys().len(), contains(keys, [1.0, 2.0])]
