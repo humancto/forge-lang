@@ -29,13 +29,19 @@ struct McpServer {
 impl McpServer {
     /// `forge mcp --engine <engine> <args>`.
     fn spawn(engine: &str, args: &[&str], dir: Option<&Path>) -> Self {
+        Self::spawn_with_stderr(engine, args, dir, Stdio::null())
+    }
+
+    /// Like [`McpServer::spawn`], with the server's own stderr sent to
+    /// `stderr`.
+    fn spawn_with_stderr(engine: &str, args: &[&str], dir: Option<&Path>, stderr: Stdio) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_forge"));
         cmd.args(["mcp", "--engine", engine])
             .args(args)
             .env("NO_COLOR", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(stderr);
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
@@ -652,6 +658,107 @@ fn spam() { while true { say "spam spam spam spam" } }
     let run = server.call("run_forge", json!({"code": "say 6 * 7"}));
     assert_eq!(text(&run), "42\n");
     assert!(server.close_and_wait().success());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mcp_stderr_and_logs_are_returned_not_leaked() {
+    for engine in ENGINES {
+        eprintln!("engine: {engine}");
+        mcp_stderr_and_logs_are_returned_not_leaked_on(engine);
+    }
+}
+
+fn mcp_stderr_and_logs_are_returned_not_leaked_on(engine: &str) {
+    let dir = temp_dir("stderr");
+    let tools = dir.join("tools.fg");
+    std::fs::write(
+        &tools,
+        r#"eprintln("loading tools")
+
+@tool(description: "Add one, noisily")
+fn noisy(n: Int) -> Int {
+    eprintln("noisy err")
+    log.info("noisy log", n)
+    return n + 1
+}
+
+@tool(description: "Fail after a warning")
+fn fails() {
+    log.warn("about to fail")
+    let x = 1 / 0
+}
+"#,
+    )
+    .expect("write tools");
+    let log_path = dir.join("server-stderr.log");
+    let log_file = std::fs::File::create(&log_path).expect("create log");
+    let mut server = McpServer::spawn_with_stderr(
+        engine,
+        &["serve", tools.to_str().expect("utf8"), "--with-code-tools"],
+        None,
+        Stdio::from(log_file),
+    );
+    server.initialize();
+
+    let run = server.call(
+        "run_forge",
+        json!({"code": "say \"out\"\neprintln(\"run err\")\nlog.error(\"run log\")"}),
+    );
+    assert_eq!(structured(&run)["stdout"], "out\n", "{run}");
+    assert_eq!(
+        structured(&run)["stderr"],
+        "run err\n[error] run log\n",
+        "{run}"
+    );
+    assert_eq!(text(&run), "out\n");
+    assert_eq!(
+        run["content"][1]["text"], "stderr:\nrun err\n[error] run log\n",
+        "{run}"
+    );
+
+    // A session step returns its stderr too.
+    let step = server.call(
+        "run_forge",
+        json!({"code": "eprintln(\"step err\")", "session_id": "s"}),
+    );
+    assert_eq!(structured(&step)["stderr"], "step err\n", "{step}");
+
+    let noisy = server.call("noisy", json!({"n": 41}));
+    assert_eq!(structured(&noisy)["result"], 42, "{noisy}");
+    let blocks: Vec<&str> = noisy["content"]
+        .as_array()
+        .expect("content")
+        .iter()
+        .filter_map(|c| c["text"].as_str())
+        .collect();
+    assert!(
+        blocks.contains(&"stderr:\nnoisy err\n[info] noisy log 41\n"),
+        "{noisy}"
+    );
+
+    let fails = server.call("fails", json!({}));
+    assert_eq!(fails["isError"], true, "{fails}");
+    assert!(
+        text(&fails).contains("stderr before the error:\n[warn] about to fail"),
+        "{fails}"
+    );
+    assert!(server.close_and_wait().success());
+
+    // The operator sees what loading wrote; nothing a call wrote reaches
+    // the server's own stderr.
+    let log = std::fs::read_to_string(&log_path).expect("read log");
+    assert!(log.contains("loading tools"), "{log}");
+    for leaked in [
+        "run err",
+        "run log",
+        "step err",
+        "noisy err",
+        "noisy log",
+        "about to fail",
+    ] {
+        assert!(!log.contains(leaked), "{leaked} leaked: {log}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

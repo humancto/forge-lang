@@ -49,7 +49,7 @@ use crate::parser::ast::{
 use crate::permissions::{Capabilities, Capability};
 use crate::runtime::limits::Limits;
 use crate::sandbox::{
-    prepare_source, CancelHandle, Engine, JobError, RunScope, Sandbox, SandboxError,
+    prepare_source, CancelHandle, Engine, JobError, Output, RunScope, Sandbox, SandboxError,
 };
 use crate::vm::embed;
 use crate::vm::serve::VmTemplate;
@@ -1058,9 +1058,11 @@ fn declarations(
     Ok((tools, resources))
 }
 
-/// What loading printed and how long it took, for the operator's log.
+/// What loading printed, for the operator's log.
 pub struct LoadReport {
     pub stdout: String,
+    /// What the top level wrote to stderr (`eprintln`, `log.*`, ...).
+    pub stderr: String,
 }
 
 impl ToolSet {
@@ -1105,15 +1107,15 @@ impl ToolSet {
             &CancelHandle::new(),
             move |(), scope| build_template(scope, engine, &program, source, file, &functions),
         );
-        let (template, stdout) = match run.result {
-            Ok(((template, missing), stdout)) => match missing {
+        let (template, output) = match run.result {
+            Ok(((template, missing), output)) => match missing {
                 Some(function) => {
                     return Err(format!(
                         "{}: `{}` is not a function after the top level ran (was it redefined?)",
                         label, function
                     ))
                 }
-                None => (template, stdout),
+                None => (template, output),
             },
             Err(SandboxError::Runtime { message, .. }) if message.starts_with(STREAM_PREFIX) => {
                 return Err(format!("{}: {}", label, &message[STREAM_PREFIX.len()..]))
@@ -1129,7 +1131,10 @@ impl ToolSet {
                 limits,
                 path: label,
             },
-            LoadReport { stdout },
+            LoadReport {
+                stdout: output.stdout,
+                stderr: output.stderr,
+            },
         ))
     }
 
@@ -1259,7 +1264,7 @@ impl ToolSet {
         args: Vec<Value>,
         limit: Duration,
         cancel: &CancelHandle,
-    ) -> Result<(Produced, String), SandboxError> {
+    ) -> Result<(Produced, Output), SandboxError> {
         let sandbox = Sandbox::with_capabilities(self.caps.clone())
             .max_time(limit)
             .max_output(CAPTURE_LIMIT)
@@ -1372,14 +1377,18 @@ impl ToolSet {
             }
         };
         let limit = tool.timeout.map_or(max_time, |t| t.min(max_time));
-        let (produced, stdout) = match self.invoke(&tool.function, values, limit, cancel) {
+        let (produced, output) = match self.invoke(&tool.function, values, limit, cancel) {
             Ok(r) => r,
             Err(e) => return failure(&e, max_response_bytes),
         };
         let mut content = Vec::new();
-        if !stdout.is_empty() {
-            content
-                .push(json!({ "type": "text", "text": truncate_utf8(stdout, max_response_bytes) }));
+        if !output.stdout.is_empty() {
+            let stdout = truncate_utf8(output.stdout, max_response_bytes);
+            content.push(json!({ "type": "text", "text": stdout }));
+        }
+        if !output.stderr.is_empty() {
+            let stderr = truncate_utf8(output.stderr, max_response_bytes);
+            content.push(json!({ "type": "text", "text": format!("{}{}", STDERR_LABEL, stderr) }));
         }
         let value = match produced {
             Produced::Err(v) => {
@@ -1429,7 +1438,7 @@ impl ToolSet {
         let Some(res) = self.resources.iter().find(|r| r.uri == uri) else {
             return Err(format!("unknown resource `{}`", uri));
         };
-        let (produced, _stdout) = self
+        let (produced, _output) = self
             .invoke(&res.function, Vec::new(), max_time, cancel)
             .map_err(|e| format!("reading `{}` failed: {}", uri, e))?;
         let value = match produced {
@@ -1471,6 +1480,9 @@ fn render_text(v: &Json) -> String {
     }
 }
 
+/// The text block that carries a tool call's stderr starts with this.
+const STDERR_LABEL: &str = "stderr:\n";
+
 /// A failed tool call, with whatever it printed first.
 fn failure(e: &SandboxError, max_response_bytes: usize) -> Json {
     let mut text = e.to_string();
@@ -1478,6 +1490,11 @@ fn failure(e: &SandboxError, max_response_bytes: usize) -> Json {
     if !stdout.is_empty() {
         text.push_str("\n\nOutput before the error:\n");
         text.push_str(&truncate_utf8(stdout.to_string(), max_response_bytes));
+    }
+    let stderr = e.stderr();
+    if !stderr.is_empty() {
+        text.push_str("\n\nstderr before the error:\n");
+        text.push_str(&truncate_utf8(stderr.to_string(), max_response_bytes));
     }
     let mut error = json!({ "kind": e.kind(), "message": e.to_string() });
     if let SandboxError::Runtime { line, message, .. } = e {

@@ -30,8 +30,11 @@
 //!   detached and [`SandboxError::Timeout`] is returned anyway.
 //! * **Captured output.** `say`/`println`/`print`/`io.print` output —
 //!   including from `spawn`ed tasks, `timeout` blocks and imported modules —
-//!   is captured into [`Output::stdout`] instead of the host's stdout.
-//!   [`Sandbox::max_output`] bounds how much a program may print.
+//!   is captured into [`Output::stdout`] instead of the host's stdout, and
+//!   stderr output (`eprint`/`eprintln`, `log.*` as `[level] message`
+//!   lines, `sus` and `term.*` chrome) into [`Output::stderr`] instead of
+//!   the host's stderr. [`Sandbox::max_output`] bounds how much a program
+//!   may print to both streams together.
 //! * **Cancellation.** [`Sandbox::run_source_cancellable`] takes a
 //!   [`CancelHandle`] the host can trigger from another thread.
 //! * **Resource limits** ([`Sandbox::limits`], `runtime::limits`):
@@ -67,7 +70,6 @@
 //! * HTTP servers, `schedule` and `watch` blocks are host-runtime features
 //!   and are not started.
 //! * Call depth is bounded by the engine's recursion limit.
-//! * stderr output (`eprintln`, `log`, `term`, warnings) is not captured.
 //! * The host's stdin is only readable with the `process` capability
 //!   (denied by default): without it `input()` / `io.prompt` see an empty
 //!   stream, so a script can never consume a host's stdin (e.g. the
@@ -137,21 +139,29 @@ impl CancelHandle {
 }
 
 /// What a successful run produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Output {
     /// Everything the program printed with `say`/`println`/`print`.
     pub stdout: String,
+    /// Everything the program wrote to stderr: `eprint`/`eprintln`, `log.*`
+    /// (one `[level] message` line per call), `sus` and `term.*` chrome.
+    pub stderr: String,
 }
 
-/// Why a run failed. Every variant carries the output printed before the
-/// failure.
+/// Why a run failed. Every variant but `Syntax` and `Type` (which never
+/// run) carries the output printed before the failure: `stdout` and
+/// `stderr`, as in [`Output`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxError {
     /// The source did not lex or parse.
     Syntax { message: String },
     /// The program tried something its policy does not grant. `message` is
     /// the standard `permission denied: ...` text.
-    PermissionDenied { message: String, stdout: String },
+    PermissionDenied {
+        message: String,
+        stdout: String,
+        stderr: String,
+    },
     /// The program contradicts types it declares (edition 2027:
     /// docs/editions/2027.md), so it did not run. `diagnostics` lists every
     /// type error, in source order.
@@ -161,22 +171,44 @@ pub enum SandboxError {
         message: String,
         line: usize,
         stdout: String,
+        stderr: String,
     },
     /// The program exceeded [`Sandbox::max_time`].
-    Timeout { limit: Duration, stdout: String },
-    /// The program printed more than [`Sandbox::max_output`] bytes and was
-    /// stopped. `stdout` holds the first `limit` bytes.
-    OutputLimit { limit: usize, stdout: String },
+    Timeout {
+        limit: Duration,
+        stdout: String,
+        stderr: String,
+    },
+    /// The program printed more than [`Sandbox::max_output`] bytes (stdout
+    /// and stderr together) and was stopped. `stdout` and `stderr` hold the
+    /// first `limit` bytes it wrote.
+    OutputLimit {
+        limit: usize,
+        stdout: String,
+        stderr: String,
+    },
     /// The host cancelled the run through its [`CancelHandle`].
-    Cancelled { stdout: String },
+    Cancelled { stdout: String, stderr: String },
     /// The program used up its [`Sandbox::max_fuel`] budget.
-    FuelExhausted { limit: u64, stdout: String },
+    FuelExhausted {
+        limit: u64,
+        stdout: String,
+        stderr: String,
+    },
     /// The program needed more than [`Sandbox::max_memory`] bytes.
-    MemoryLimit { limit: usize, stdout: String },
+    MemoryLimit {
+        limit: usize,
+        stdout: String,
+        stderr: String,
+    },
     /// The program exceeded another resource limit (open handles, value
     /// size, imports) and did not catch the error. `message` starts with
     /// `resource limit exceeded:`.
-    ResourceLimit { message: String, stdout: String },
+    ResourceLimit {
+        message: String,
+        stdout: String,
+        stderr: String,
+    },
 }
 
 /// One type error that kept a program from running ([`SandboxError::Type`]).
@@ -212,10 +244,26 @@ impl SandboxError {
             | SandboxError::Runtime { stdout, .. }
             | SandboxError::Timeout { stdout, .. }
             | SandboxError::OutputLimit { stdout, .. }
-            | SandboxError::Cancelled { stdout }
+            | SandboxError::Cancelled { stdout, .. }
             | SandboxError::FuelExhausted { stdout, .. }
             | SandboxError::MemoryLimit { stdout, .. }
             | SandboxError::ResourceLimit { stdout, .. } => stdout,
+        }
+    }
+
+    /// stderr output written before the failure (empty for syntax and type
+    /// errors).
+    pub fn stderr(&self) -> &str {
+        match self {
+            SandboxError::Syntax { .. } | SandboxError::Type { .. } => "",
+            SandboxError::PermissionDenied { stderr, .. }
+            | SandboxError::Runtime { stderr, .. }
+            | SandboxError::Timeout { stderr, .. }
+            | SandboxError::OutputLimit { stderr, .. }
+            | SandboxError::Cancelled { stderr, .. }
+            | SandboxError::FuelExhausted { stderr, .. }
+            | SandboxError::MemoryLimit { stderr, .. }
+            | SandboxError::ResourceLimit { stderr, .. } => stderr,
         }
     }
 
@@ -374,8 +422,9 @@ impl Sandbox {
         self
     }
 
-    /// Stop the program once it has printed more than `bytes` bytes, so a
-    /// runaway print loop cannot exhaust host memory.
+    /// Stop the program once it has printed more than `bytes` bytes to
+    /// stdout and stderr together, so a runaway print (or `eprintln`, or
+    /// `log.*`) loop cannot exhaust host memory.
     pub fn max_output(mut self, bytes: usize) -> Self {
         self.max_output = Some(bytes);
         self
@@ -472,7 +521,7 @@ impl Sandbox {
             },
         )
         .result
-        .map(|((), stdout)| Output { stdout })
+        .map(|((), output)| output)
     }
 
     /// Run `job` on the interpreter `make_interp` returns, under this
@@ -531,8 +580,13 @@ impl Sandbox {
         };
         let host_cancel = cancel;
         if host_cancel.is_cancelled() {
-            let stdout = String::new();
-            return refuse(SandboxError::Cancelled { stdout }, Some(make_state()));
+            return refuse(
+                SandboxError::Cancelled {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                Some(make_state()),
+            );
         }
         if self.limits.max_memory.is_some() && !limits::allocation_meter_installed() {
             return refuse(
@@ -542,6 +596,7 @@ impl Sandbox {
                         .to_string(),
                     line: 0,
                     stdout: String::new(),
+                    stderr: String::new(),
                 },
                 Some(make_state()),
             );
@@ -554,11 +609,12 @@ impl Sandbox {
         // The flag the engines poll. Separate from the host's handle, so a
         // timeout or output-limit stop is not reported as a cancel.
         let run_cancel = Arc::new(AtomicBool::new(false));
-        // The output capture, shared by every thread of the run (it is
-        // inherited like the policy and the budget). Past `max_output` it
-        // drops output and stops the run at its next safe point.
+        // The output capture (stdout and stderr, one budget), shared by
+        // every thread of the run (it is inherited like the policy and the
+        // budget). Past `max_output` it drops output and stops the run at
+        // its next safe point.
         let capture_limit = self.max_output.map_or(usize::MAX, |l| l.saturating_add(1));
-        let sink = stdio::Sink::stdout_only(capture_limit, Some(run_cancel.clone()));
+        let sink = stdio::Sink::bounded(capture_limit, Some(run_cancel.clone()));
         let caps = Arc::new(self.caps.clone());
         let (tx, rx) = mpsc::channel::<(Result<T, JobError>, S)>();
 
@@ -585,18 +641,24 @@ impl Sandbox {
             });
         if let Err(e) = spawned {
             let message = format!("failed to start sandbox thread: {}", e);
-            let stdout = String::new();
             return refuse(
                 SandboxError::Runtime {
                     message,
                     line: 0,
-                    stdout,
+                    stdout: String::new(),
+                    stderr: String::new(),
                 },
                 None,
             );
         }
 
-        let collect = || sink.snapshot().text(stdio::Stream::Stdout);
+        let collect = || {
+            let captured = sink.snapshot();
+            Output {
+                stdout: captured.text(stdio::Stream::Stdout),
+                stderr: captured.text(stdio::Stream::Stderr),
+            }
+        };
         // The sink keeps one byte more than the limit, so "printed more
         // than the limit" is visible in its byte count, or in its
         // truncation flag when the cut fell inside a multibyte character
@@ -617,9 +679,13 @@ impl Sandbox {
             state,
             memory_held: budget.memory_used(),
         };
-        let output_limit = |limit: usize| SandboxError::OutputLimit {
-            limit,
-            stdout: truncate_utf8(collect(), limit),
+        let output_limit = |limit: usize| {
+            let (stdout, stderr) = sink.snapshot().split_within(limit);
+            SandboxError::OutputLimit {
+                limit,
+                stdout,
+                stderr,
+            }
         };
 
         let deadline = self.max_time.map(|limit| (limit, Instant::now() + limit));
@@ -631,14 +697,19 @@ impl Sandbox {
             }
             if host_cancel.is_cancelled() {
                 let state = stop();
-                let stdout = collect();
-                return finish(Err(SandboxError::Cancelled { stdout }), state);
+                let Output { stdout, stderr } = collect();
+                return finish(Err(SandboxError::Cancelled { stdout, stderr }), state);
             }
             if let Some((limit, at)) = deadline {
                 if Instant::now() >= at {
                     let state = stop();
-                    let stdout = collect();
-                    return finish(Err(SandboxError::Timeout { limit, stdout }), state);
+                    let Output { stdout, stderr } = collect();
+                    let timeout = SandboxError::Timeout {
+                        limit,
+                        stdout,
+                        stderr,
+                    };
+                    return finish(Err(timeout), state);
                 }
             }
             if let Some(limit) = self.max_output.filter(|_| over_output()) {
@@ -653,20 +724,22 @@ impl Sandbox {
         let result = if let Some(limit) = self.max_output.filter(|_| over_output()) {
             Err(output_limit(limit))
         } else if host_cancel.is_cancelled() && outcome.as_ref().is_some_and(|r| r.is_err()) {
-            Err(SandboxError::Cancelled { stdout: collect() })
+            let Output { stdout, stderr } = collect();
+            Err(SandboxError::Cancelled { stdout, stderr })
         } else if let Some(trip) = budget.tripped() {
             // A fatal limit is reported even if a builtin swallowed the
             // error (the budget remembers the trip).
             Err(self.limit_error(trip, collect()))
         } else {
-            let stdout = collect();
+            let output = collect();
             match outcome {
-                Some(Ok(value)) => Ok((value, stdout)),
-                Some(Err(e)) => Err(self.classify_error(e.message, e.line, stdout)),
+                Some(Ok(value)) => Ok((value, output)),
+                Some(Err(e)) => Err(self.classify_error(e.message, e.line, output)),
                 None => Err(SandboxError::Runtime {
                     message: "sandbox worker panicked".to_string(),
                     line: 0,
-                    stdout,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
                 }),
             }
         };
@@ -683,20 +756,32 @@ impl Sandbox {
     }
 
     /// Map an interpreter error to the sandbox error a host sees.
-    fn classify_error(&self, message: String, line: usize, stdout: String) -> SandboxError {
-        match limits::classify(&message) {
-            Some(LimitKind::Fuel) => return self.limit_error(Trip::Fuel, stdout),
-            Some(LimitKind::Memory) => return self.limit_error(Trip::Memory, stdout),
-            Some(LimitKind::Resource) => return SandboxError::ResourceLimit { message, stdout },
-            None => {}
+    fn classify_error(&self, message: String, line: usize, output: Output) -> SandboxError {
+        let kind = limits::classify(&message);
+        match kind {
+            Some(LimitKind::Fuel) => return self.limit_error(Trip::Fuel, output),
+            Some(LimitKind::Memory) => return self.limit_error(Trip::Memory, output),
+            _ => {}
         }
-        if message.starts_with("permission denied:") {
-            SandboxError::PermissionDenied { message, stdout }
+        let Output { stdout, stderr } = output;
+        if matches!(kind, Some(LimitKind::Resource)) {
+            SandboxError::ResourceLimit {
+                message,
+                stdout,
+                stderr,
+            }
+        } else if message.starts_with("permission denied:") {
+            SandboxError::PermissionDenied {
+                message,
+                stdout,
+                stderr,
+            }
         } else {
             SandboxError::Runtime {
                 message,
                 line,
                 stdout,
+                stderr,
             }
         }
     }
@@ -705,7 +790,7 @@ impl Sandbox {
 /// What [`Sandbox::run_interpreter`] produced.
 pub(crate) struct InterpreterRun<T> {
     /// The job's value and everything the run printed, or why it failed.
-    pub result: Result<(T, String), SandboxError>,
+    pub result: Result<(T, Output), SandboxError>,
     /// The interpreter, with whatever state the run left in it. `None` when
     /// the worker had to be abandoned (it did not stop within the grace
     /// period after a timeout or cancel) or panicked.
@@ -719,7 +804,7 @@ pub(crate) struct InterpreterRun<T> {
 /// What [`Sandbox::run_contained`] produced.
 pub(crate) struct ContainedRun<T, S> {
     /// The job's value and everything the run printed, or why it failed.
-    pub result: Result<(T, String), SandboxError>,
+    pub result: Result<(T, Output), SandboxError>,
     /// The job's state, as the run left it. `None` when the worker had to
     /// be abandoned (it did not stop within the grace period after a
     /// timeout or cancel) or panicked.
@@ -927,15 +1012,18 @@ pub(crate) fn parse_source(source: &str) -> Result<crate::parser::ast::Program, 
 }
 
 impl Sandbox {
-    fn limit_error(&self, trip: Trip, stdout: String) -> SandboxError {
+    fn limit_error(&self, trip: Trip, output: Output) -> SandboxError {
+        let Output { stdout, stderr } = output;
         match trip {
             Trip::Fuel => SandboxError::FuelExhausted {
                 limit: self.limits.max_fuel.unwrap_or(0),
                 stdout,
+                stderr,
             },
             Trip::Memory => SandboxError::MemoryLimit {
                 limit: self.limits.max_memory.unwrap_or(0),
                 stdout,
+                stderr,
             },
         }
     }
@@ -1237,7 +1325,7 @@ mod tests {
                 })
         };
         let small = run(1 << 20);
-        assert_eq!(small.result.expect("fits").1, "100\n");
+        assert_eq!(small.result.expect("fits").1.stdout, "100\n");
         assert!(small.memory_held >= 1 << 20);
         let full = run(64 << 20);
         assert!(
@@ -1262,7 +1350,7 @@ mod tests {
             &CancelHandle::new(),
             move |i| i.run(&program).map(|_| ()),
         );
-        assert_eq!(run.result.expect("runs").1, "42\n");
+        assert_eq!(run.result.expect("runs").1.stdout, "42\n");
         // After a timeout the interpreter still comes back when the worker
         // stops within the grace period.
         let sb = Sandbox::new().max_time(Duration::from_millis(200));
@@ -1372,7 +1460,7 @@ mod tests {
             .max_time(Duration::from_secs(20))
             .run_source("while true { say \"spam spam spam\" }");
         match r {
-            Err(SandboxError::OutputLimit { limit, stdout }) => {
+            Err(SandboxError::OutputLimit { limit, stdout, .. }) => {
                 assert_eq!(limit, 1000);
                 assert!(
                     stdout.len() <= 1000 && stdout.starts_with("spam"),
@@ -1401,11 +1489,125 @@ mod tests {
                 .max_output(1)
                 .run_source("say \"\u{1F600}\"")
             {
-                Err(SandboxError::OutputLimit { limit, stdout }) => {
+                Err(SandboxError::OutputLimit { limit, stdout, .. }) => {
                     assert_eq!(limit, 1);
                     assert_eq!(stdout, "");
                 }
                 other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn captures_stderr_and_logs() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            let out = Sandbox::new()
+                .engine(engine)
+                .run_source(
+                    "println(\"out\")\neprintln(\"err\", 1)\neprint(\"x\")\n\
+                     log.info(\"ready\", 2)\nlog.warn(\"careful\")\nlog.error(\"bad\")\n\
+                     log.debug(\"detail\")\nsay \"done\"",
+                )
+                .expect("runs");
+            assert_eq!(out.stdout, "out\ndone\n", "{engine}");
+            assert_eq!(
+                out.stderr, "err 1\nx[info] ready 2\n[warn] careful\n[error] bad\n[debug] detail\n",
+                "{engine}"
+            );
+        }
+    }
+
+    #[test]
+    fn stderr_from_tasks_and_timeouts_is_captured() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            let out = Sandbox::new()
+                .engine(engine)
+                .run_source(
+                    "let h = spawn { eprintln(\"from task\")\n log.info(\"task log\") }\nawait h\n\
+                     timeout 5 seconds { eprintln(\"in timeout\") }\n\
+                     let r = squad { spawn { eprintln(\"in squad\")\n 1 } }",
+                )
+                .expect("runs");
+            assert_eq!(
+                out.stderr, "from task\n[info] task log\nin timeout\nin squad\n",
+                "{engine}"
+            );
+        }
+    }
+
+    #[test]
+    fn failures_carry_stderr() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            match Sandbox::new()
+                .engine(engine)
+                .run_source("say \"a\"\neprintln(\"b\")\nlog.error(\"c\")\nlet x = 1 / 0")
+            {
+                Err(e @ SandboxError::Runtime { .. }) => {
+                    assert_eq!(e.stdout(), "a\n", "{engine}");
+                    assert_eq!(e.stderr(), "b\n[error] c\n", "{engine}");
+                }
+                other => panic!("{engine}: {other:?}"),
+            }
+            match Sandbox::new()
+                .engine(engine)
+                .max_time(Duration::from_millis(300))
+                .run_source("eprintln(\"start\")\nwhile true { }")
+            {
+                Err(e @ SandboxError::Timeout { .. }) => {
+                    assert_eq!(e.stderr(), "start\n", "{engine}")
+                }
+                other => panic!("{engine}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn max_output_counts_stderr_and_logs() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            for src in [
+                "while true { eprintln(\"spam spam spam\") }",
+                "while true { log.info(\"spam spam spam\") }",
+                "let h = spawn { while true { eprint(\"spam\") } }\nawait h",
+            ] {
+                let start = std::time::Instant::now();
+                match Sandbox::new()
+                    .engine(engine)
+                    .max_output(1000)
+                    .max_time(Duration::from_secs(20))
+                    .run_source(src)
+                {
+                    Err(SandboxError::OutputLimit {
+                        limit,
+                        stdout,
+                        stderr,
+                    }) => {
+                        assert_eq!(limit, 1000);
+                        assert_eq!(stdout, "", "{engine}: {src}");
+                        assert!(stderr.len() <= 1000, "{engine}: {src}");
+                        assert!(
+                            stderr.starts_with("spam") || stderr.starts_with("[info] spam"),
+                            "{engine}: {src}: {stderr}"
+                        );
+                    }
+                    other => panic!("{engine}: {src}: {other:?}"),
+                }
+                assert!(start.elapsed() < Duration::from_secs(10), "{engine}: {src}");
+            }
+            // One budget for both streams, cut in write order.
+            match Sandbox::new()
+                .engine(engine)
+                .max_output(12)
+                .run_source("print(\"12345678\")\neprint(\"abcdefgh\")")
+            {
+                Err(SandboxError::OutputLimit { stdout, stderr, .. }) => {
+                    assert_eq!(stdout, "12345678", "{engine}");
+                    assert_eq!(stderr, "abcd", "{engine}");
+                }
+                other => panic!("{engine}: {other:?}"),
             }
         }
     }
@@ -1593,7 +1795,9 @@ mod tests {
             .engine(Engine::Vm)
             .run_source("@cache\nfn f() { return 1 }\nsay f()\nsh(\"echo escaped\")");
         match r {
-            Err(SandboxError::PermissionDenied { message, stdout }) => {
+            Err(SandboxError::PermissionDenied {
+                message, stdout, ..
+            }) => {
                 assert_eq!(stdout, "1\n");
                 assert!(message.starts_with("permission denied: run"), "{message}");
             }
@@ -1673,7 +1877,7 @@ mod tests {
         let second = sb.run_source(COUNTER);
         match (&first, &second) {
             (
-                Err(SandboxError::FuelExhausted { limit, stdout }),
+                Err(SandboxError::FuelExhausted { limit, stdout, .. }),
                 Err(SandboxError::FuelExhausted { stdout: again, .. }),
             ) => {
                 assert_eq!(*limit, 20_000);

@@ -17,6 +17,14 @@
 //!
 //! This dual-output pattern matches the server's startup banner
 //! decision: structured event always, human-friendly extras on TTY.
+//!
+//! Inside an output capture that takes stderr (a `Sandbox` run, `forge
+//! mcp`), neither happens: the call writes one plain `[level] message`
+//! line into the capture, so the host (an agent) sees its program's logs
+//! and they count against the run's output budget. The process's tracing
+//! subscriber writes to the host's stderr, outside both. The browser
+//! playground (no `host` feature, no subscriber) keeps its timestamped
+//! line.
 use crate::interpreter::Value;
 use indexmap::IndexMap;
 use std::io::IsTerminal;
@@ -31,8 +39,24 @@ pub fn create_module() -> Value {
 }
 
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
+    let level = match name {
+        "log.info" => "info",
+        "log.warn" => "warn",
+        "log.error" => "error",
+        "log.debug" => "debug",
+        _ => return Err(format!("unknown log function: {}", name)),
+    };
     let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
     let message = text.join(" ");
+
+    // A capture that takes stderr gets the line, and nothing reaches the
+    // tracing subscriber (the host's stderr, unbounded by the run's
+    // output budget).
+    #[cfg(feature = "host")]
+    if crate::runtime::stdio::captures(crate::runtime::stdio::Stream::Stderr) {
+        crate::runtime::stdio::err_line(&captured_line(level, &message));
+        return Ok(Value::Null);
+    }
 
     // Ensure a tracing subscriber is installed. Idempotent -- the server
     // path also calls this on boot. Without this call, log.info from a
@@ -50,8 +74,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         "log.info" => tracing::info!(target: "forge.user", message = %message),
         "log.warn" => tracing::warn!(target: "forge.user", message = %message),
         "log.error" => tracing::error!(target: "forge.user", message = %message),
-        "log.debug" => tracing::debug!(target: "forge.user", message = %message),
-        _ => return Err(format!("unknown log function: {}", name)),
+        _ => tracing::debug!(target: "forge.user", message = %message),
     }
 
     // 2. On a TTY only, also print the original colored line. Keeps
@@ -61,10 +84,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     //    is the only output and is always written.
     if std::io::stderr().is_terminal() || !cfg!(feature = "host") {
         let now = chrono::Local::now().format("%H:%M:%S");
-        let (code, label, pad) = match name {
-            "log.info" => ("32", "INFO", "  "),
-            "log.warn" => ("33", "WARN", "  "),
-            "log.error" => ("31", "ERROR", " "),
+        let (code, label, pad) = match level {
+            "info" => ("32", "INFO", "  "),
+            "warn" => ("33", "WARN", "  "),
+            "error" => ("31", "ERROR", " "),
             _ => ("90", "DEBUG", " "),
         };
         // Only the prefix is chrome; the message is the program's data and
@@ -78,4 +101,40 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     }
 
     Ok(Value::Null)
+}
+
+/// The line `log.*` writes into an output capture: `[info] message`.
+pub(crate) fn captured_line(level: &str, message: &str) -> String {
+    format!("[{}] {}", level, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::stdio::{self, Stream};
+
+    #[test]
+    fn logs_go_to_a_stderr_capture_as_plain_lines() {
+        let guard = stdio::capture(1024);
+        call(
+            "log.info",
+            vec![Value::String("ready".into()), Value::Int(3)],
+        )
+        .expect("info");
+        call("log.warn", vec![Value::String("careful".into())]).expect("warn");
+        call("log.error", vec![Value::String("bad".into())]).expect("error");
+        call("log.debug", vec![Value::String("detail".into())]).expect("debug");
+        assert!(call("log.nope", vec![]).is_err());
+        let got = guard.finish();
+        assert_eq!(got.text(Stream::Stdout), "");
+        let stderr = got.text(Stream::Stderr);
+        if cfg!(feature = "host") {
+            assert_eq!(
+                stderr,
+                "[info] ready 3\n[warn] careful\n[error] bad\n[debug] detail\n"
+            );
+        } else {
+            assert!(stderr.contains("ready 3"), "{stderr}");
+        }
+    }
 }

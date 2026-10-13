@@ -416,8 +416,13 @@ fn load_mcp_tools(
         .grant_import_root("forge_modules");
     let (tools, report) =
         mcp::ToolSet::load(file, &source, caps, max_time, limits.clone(), engine)?;
+    // stdout is the protocol stream: everything loading printed goes to
+    // the operator's stderr.
     if !report.stdout.is_empty() {
         eprint!("{}", report.stdout);
+    }
+    if !report.stderr.is_empty() {
+        eprint!("{}", report.stderr);
     }
     Ok(tools)
 }
