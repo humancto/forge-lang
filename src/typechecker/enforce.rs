@@ -489,6 +489,48 @@ impl Instrumenter<'_> {
     }
 }
 
+/// Is `value` certainly a value that `ty` (a canonical type literal)
+/// accepts unchanged, whatever runs before it? Then its check is the
+/// identity and is left out. Only syntax that has one result kind on both
+/// engines counts: literals, `null`, interpolations (String) and
+/// comparisons, `&&`, `||`, `!` (Bool, or a run-time error before any check).
+fn statically_fits(value: &Expr, ty: &Expr) -> bool {
+    use crate::interpreter::Value;
+    let Expr::StringLit(ty) = ty else {
+        return false;
+    };
+    let v = match value {
+        Expr::Int(n) => Value::Int(*n),
+        Expr::Float(f) => Value::Float(*f),
+        Expr::Bool(b) => Value::Bool(*b),
+        Expr::StringLit(_) | Expr::StringInterp(_) => Value::String(String::new()),
+        Expr::Ident(n) if n == "null" => Value::Null,
+        Expr::BinOp {
+            op:
+                BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::LtEq
+                | BinOp::GtEq
+                | BinOp::And
+                | BinOp::Or,
+            ..
+        }
+        | Expr::UnaryOp {
+            op: UnaryOp::Not, ..
+        } => Value::Bool(true),
+        _ => return false,
+    };
+    match crate::semantics::types::parse_cached(ty) {
+        Ok(t) => {
+            crate::semantics::types::fits(&v, &t)
+                && crate::semantics::types::widen(&v, &t).is_none()
+        }
+        Err(_) => false,
+    }
+}
+
 /// Wrap every `return` of this function (not of nested functions, lambdas
 /// or detached bodies) in a check.
 fn wrap_returns(body: &mut [SpannedStmt], ty: &Expr, context: &str) {
@@ -501,7 +543,11 @@ fn wrap_returns_stmt(stmt: &mut Stmt, ty: &Expr, context: &str) {
     match stmt {
         Stmt::Return(value) => {
             let v = value.take().unwrap_or(Expr::Ident("null".to_string()));
-            *value = Some(check_call(v, ty, context));
+            *value = Some(if statically_fits(&v, ty) {
+                v
+            } else {
+                check_call(v, ty, context)
+            });
         }
         Stmt::If {
             condition,
@@ -564,8 +610,10 @@ fn wrap_tail(body: &mut Vec<SpannedStmt>, ty: &Expr, context: &str, line: usize,
     };
     match &mut last.stmt {
         Stmt::Expression(e) => {
-            let value = std::mem::replace(e, Expr::Ident("null".to_string()));
-            *e = check_call(value, ty, context);
+            if !statically_fits(e, ty) {
+                let value = std::mem::replace(e, Expr::Ident("null".to_string()));
+                *e = check_call(value, ty, context);
+            }
         }
         Stmt::Return(_) => {}
         Stmt::If {

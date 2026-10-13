@@ -1713,6 +1713,34 @@ fn prepare_instruments_annotated_code_from_2027() {
 }
 
 #[test]
+fn instrumentation_leaves_out_checks_of_values_that_always_fit() {
+    let checks = |src: &str| {
+        let (program, _) = prepare(
+            src,
+            &CheckOptions {
+                edition: Some(Edition::E2027),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("prepares");
+        format!("{:?}", program).matches("__types").count()
+    };
+    // Literals and Bool-valued operators fit their declared result.
+    assert_eq!(
+        checks("fn f(x: Int) -> Bool {\n  if x > 1 { return true }\n  return x == 0 || x < -5\n}"),
+        1
+    );
+    assert_eq!(checks("fn f() -> String { return \"a{1}\" }"), 0);
+    assert_eq!(checks("fn f() -> ?Int { return null }"), 0);
+    assert_eq!(checks("fn f() -> Int { 7 }"), 0);
+    // A literal that would be widened keeps its check.
+    assert_eq!(checks("fn f() -> Float { return 1 }"), 1);
+    assert_eq!(checks("fn f() -> Float { return 1.5 }"), 0);
+    // Anything else is checked.
+    assert_eq!(checks("fn f(x) -> Int { return x + 1 }"), 1);
+}
+
+#[test]
 fn prepare_refuses_declared_type_errors_from_2027() {
     let src = "fn f(x: Int) { return x }\nf(\"a\")";
     let options = |edition| CheckOptions {
