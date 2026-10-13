@@ -40,23 +40,17 @@ fn parse_value(depth: Int) {
         return parse_list(depth + 1)
     }
     if c == "-" || is_digit(c) {
-        // The number's text is collected while scanning, not with
-        // `join(slice(chars, start, pos), "")`: on the interpreter `slice`
-        // copies all of `chars` first, which makes a long line quadratic
-        // (eval/V3_FINDINGS.md, finding 2).
-        let mut text = ""
+        let start = pos
         if c == "-" {
-            text = "-"
             pos += 1
         }
         if !is_digit(peek()) {
             return unexpected()
         }
         while is_digit(peek()) {
-            text += peek()
             pos += 1
         }
-        let n = int(text)
+        let n = int(join(slice(chars, start, pos), ""))
         ints += 1
         weighted += n * depth
         return Ok(null)

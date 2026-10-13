@@ -104,6 +104,16 @@ interpreter for a 16,000-character line, 0.35 s on the VM.
 Suggested fix: let builtins that only read an array argument (`slice`, `len`, `index_of`,
 `contains`, `join`, ...) borrow it (`Environment::with_value`) instead of cloning.
 
+**Fixed:** a call of `slice`, `first`, `last`, `join`, `index_of`, `last_index_of`,
+`substring`, `starts_with`, `ends_with` (and, as before, `len`, `contains`, `get`,
+`has_key`) whose first argument is a variable or a field/index chain of one
+(`slice(chars, i, j)`, `len(o.items)`), and the array-method forms (`xs.slice(i, j)`,
+`xs.join(",")`), runs the builtin on a reference to the value under the scope lock when the
+other arguments are effect-free (`places::read_only_builtin`, shared with the builtin
+itself; errors take the ordinary path). The repro is 2-3 ms for every n (was 703 / 1112 /
+2191 ms); `benchmarks/interp/slice_scan.fg` went from 121 s to 0.12 s. nested_list_parser
+uses `join(slice(chars, start, pos), "")` again.
+
 ### 3. VM: an object key that is an index or field read copies the object
 
 ```forge

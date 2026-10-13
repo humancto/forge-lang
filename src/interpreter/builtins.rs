@@ -190,6 +190,12 @@ impl Interpreter {
             "contains" => super::places::contains_of(args.first(), args.get(1)),
             "has_key" => super::places::has_key_of(args.first(), args.get(1)),
             "get" => super::places::get_of(args.first(), args.get(1), args.get(2)),
+            // Shared with the borrowed-argument form (`places`).
+            "slice" | "first" | "last" | "join" | "index_of" | "last_index_of" | "substring"
+            | "starts_with" | "ends_with" => {
+                super::places::read_only_builtin(name, args.first(), args.get(1..).unwrap_or(&[]))
+                    .unwrap_or_else(|| Err(RuntimeError::new("BUG: not a read-only builtin")))
+            }
             "pick" => match (args.first(), args.get(1)) {
                 (Some(Value::Object(map)), Some(Value::Array(field_list))) => {
                     let mut result = IndexMap::new();
@@ -688,14 +694,6 @@ impl Interpreter {
                     "sort_by() requires (array, key_function)",
                 )),
             },
-            "first" => match args.first() {
-                Some(Value::Array(items)) => Ok(items.first().cloned().unwrap_or(Value::Null)),
-                _ => Err(RuntimeError::new("first() requires an array")),
-            },
-            "last" => match args.first() {
-                Some(Value::Array(items)) => Ok(items.last().cloned().unwrap_or(Value::Null)),
-                _ => Err(RuntimeError::new("last() requires an array")),
-            },
             "compact" => match args.first() {
                 Some(Value::Array(items)) => {
                     let filtered: Vec<Value> = items
@@ -768,41 +766,12 @@ impl Interpreter {
                     "split() requires (string, delimiter_string)",
                 )),
             },
-            "join" => match (args.first(), args.get(1)) {
-                (Some(Value::Array(items)), Some(Value::String(sep))) => {
-                    let parts: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
-                    Ok(Value::String(parts.join(sep)))
-                }
-                (Some(Value::Array(items)), None) => {
-                    let parts: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
-                    Ok(Value::String(parts.join("")))
-                }
-                _ => Err(RuntimeError::new(
-                    "join() requires (array[, separator_string])",
-                )),
-            },
             "replace" => match (args.first(), args.get(1), args.get(2)) {
                 (Some(Value::String(s)), Some(Value::String(from)), Some(Value::String(to))) => {
                     Ok(Value::String(s.replace(from.as_str(), to.as_str())))
                 }
                 _ => Err(RuntimeError::new(
                     "replace() requires (string, from_string, to_string)",
-                )),
-            },
-            "starts_with" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(prefix))) => {
-                    Ok(Value::Bool(s.starts_with(prefix.as_str())))
-                }
-                _ => Err(RuntimeError::new(
-                    "starts_with() requires (string, prefix_string)",
-                )),
-            },
-            "ends_with" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(suffix))) => {
-                    Ok(Value::Bool(s.ends_with(suffix.as_str())))
-                }
-                _ => Err(RuntimeError::new(
-                    "ends_with() requires (string, suffix_string)",
                 )),
             },
             "is_some" => match args.first() {
@@ -948,59 +917,6 @@ impl Interpreter {
                 }
             }
             // ===== String Operations =====
-            "substring" => match args.first() {
-                Some(Value::String(s)) => {
-                    let start = match args.get(1) {
-                        Some(Value::Int(n)) => *n as usize,
-                        _ => {
-                            return Err(RuntimeError::new(
-                                "substring() requires (string, start, end?)",
-                            ))
-                        }
-                    };
-                    let chars: Vec<char> = s.chars().collect();
-                    let end = match args.get(2) {
-                        Some(Value::Int(n)) => (*n as usize).min(chars.len()),
-                        _ => chars.len(),
-                    };
-                    // `end` is clamped to the length, so this also covers a
-                    // start past the end (and `start > end`, which used to panic).
-                    if start >= end {
-                        return Ok(Value::String(String::new()));
-                    }
-                    Ok(Value::String(chars[start..end].iter().collect()))
-                }
-                _ => Err(RuntimeError::new(
-                    "substring() requires a string as first argument",
-                )),
-            },
-            "index_of" => match args.first() {
-                Some(Value::String(s)) => match args.get(1) {
-                    Some(Value::String(substr)) => Ok(Value::Int(
-                        s.find(substr.as_str()).map(|i| i as i64).unwrap_or(-1),
-                    )),
-                    _ => Err(RuntimeError::new("index_of() requires (string, substring)")),
-                },
-                Some(Value::Array(arr)) => {
-                    let needle = match args.get(1) {
-                        Some(v) => v,
-                        None => return Err(RuntimeError::new("index_of() requires 2 arguments")),
-                    };
-                    let idx = arr.iter().position(|v| v == needle);
-                    Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
-                }
-                _ => Err(RuntimeError::new(
-                    "index_of() requires a string or array as first argument",
-                )),
-            },
-            "last_index_of" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(substr))) => Ok(Value::Int(
-                    s.rfind(substr.as_str()).map(|i| i as i64).unwrap_or(-1),
-                )),
-                _ => Err(RuntimeError::new(
-                    "last_index_of() requires (string, substring)",
-                )),
-            },
             "pad_start" => match (args.first(), args.get(1)) {
                 (Some(Value::String(s)), Some(Value::Int(target_len))) => {
                     let pad_char = match args.get(2) {
@@ -1333,68 +1249,6 @@ impl Interpreter {
                     Ok(Value::Array(chunks))
                 }
                 _ => Err(RuntimeError::new("chunk() requires (array, size)")),
-            },
-            "slice" => match args.first() {
-                Some(Value::Array(arr)) => {
-                    let start = match args.get(1) {
-                        Some(Value::Int(n)) => {
-                            let s = *n;
-                            if s < 0 {
-                                (arr.len() as i64 + s).max(0) as usize
-                            } else {
-                                s as usize
-                            }
-                        }
-                        _ => 0,
-                    };
-                    let end = match args.get(2) {
-                        Some(Value::Int(n)) => {
-                            let e = *n;
-                            if e < 0 {
-                                (arr.len() as i64 + e).max(0) as usize
-                            } else {
-                                (e as usize).min(arr.len())
-                            }
-                        }
-                        _ => arr.len(),
-                    };
-                    if start >= end || start >= arr.len() {
-                        return Ok(Value::Array(vec![]));
-                    }
-                    Ok(Value::Array(arr[start..end].to_vec()))
-                }
-                Some(Value::String(s)) => {
-                    let chars: Vec<char> = s.chars().collect();
-                    let start = match args.get(1) {
-                        Some(Value::Int(n)) => {
-                            let st = *n;
-                            if st < 0 {
-                                (chars.len() as i64 + st).max(0) as usize
-                            } else {
-                                st as usize
-                            }
-                        }
-                        _ => 0,
-                    };
-                    let end = match args.get(2) {
-                        Some(Value::Int(n)) => {
-                            let e = *n;
-                            if e < 0 {
-                                (chars.len() as i64 + e).max(0) as usize
-                            } else {
-                                (e as usize).min(chars.len())
-                            }
-                        }
-                        _ => chars.len(),
-                    };
-                    if start >= end || start >= chars.len() {
-                        return Ok(Value::String(String::new()));
-                    }
-                    Ok(Value::String(chars[start..end].iter().collect()))
-                }
-                _ => Err(RuntimeError::new(
-                    "slice() requires an array or string as first argument",
-                )),
             },
             // ===== Channel Operations =====
             "try_send" => {
