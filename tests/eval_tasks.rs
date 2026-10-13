@@ -55,14 +55,7 @@ fn harness(args: &[&str]) {
 
 #[test]
 fn eval_references_pass_on_both_engines() {
-    // On macOS CI the `staged_pipeline` reference runs far slower on the VM
-    // than on Linux (eval/V2_FINDINGS.md, finding 27): it is checked on
-    // Linux only until that is explained.
-    if cfg!(target_os = "macos") {
-        harness(&["validate", "--quick", "--exclude", "staged_pipeline"]);
-    } else {
-        harness(&["validate", "--quick"]);
-    }
+    harness(&["validate", "--quick"]);
 }
 
 #[test]
