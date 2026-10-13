@@ -2333,6 +2333,12 @@ impl<'a> Checker<'a> {
         let Some(required) = self.interfaces.get(iface).cloned() else {
             return true;
         };
+        if type_name == iface {
+            return true;
+        }
+        if let Some(provided) = self.interfaces.get(type_name).cloned() {
+            return self.check_interface_subsumes(type_name, &provided, iface, &required, span);
+        }
         let fields: Vec<FieldInfo> = self
             .structs
             .get(type_name)
@@ -2383,6 +2389,64 @@ impl<'a> Checker<'a> {
                         format!(
                             "method '{}' on '{}' returns {} but interface '{}' expects {}",
                             m.name, type_name, actual, iface, expected_ret
+                        ),
+                    );
+                }
+            }
+        }
+        ok
+    }
+
+    /// A value declared with interface `have_name` passed where interface
+    /// `iface` is required: every required method must be in `have` with
+    /// the same parameter count and a fitting declared return type (an
+    /// unannotated return is unknown, so it fits). Interfaces have no
+    /// fields and no `extends`, so this is the whole rule (V3 finding 6).
+    fn check_interface_subsumes(
+        &mut self,
+        have_name: &str,
+        have: &[IfaceMethod],
+        iface: &str,
+        required: &[IfaceMethod],
+        span: Span,
+    ) -> bool {
+        let mut ok = true;
+        for m in required {
+            let Some(h) = have.iter().find(|h| h.name == m.name) else {
+                ok = false;
+                self.simple(
+                    Code::InterfaceNotSatisfied,
+                    span,
+                    format!(
+                        "interface '{}' does not satisfy interface '{}': missing '{}'",
+                        have_name, iface, m.name
+                    ),
+                );
+                continue;
+            };
+            if h.param_count != m.param_count {
+                ok = false;
+                self.simple(
+                    Code::InterfaceNotSatisfied,
+                    span,
+                    format!(
+                        "method '{}' of interface '{}' has {} parameter(s) but interface '{}' requires {}",
+                        m.name, have_name, h.param_count, iface, m.param_count
+                    ),
+                );
+            }
+            if let (Some(expected_ret), Some(actual)) = (&m.ret, &h.ret) {
+                let snap = self.cx.snapshot();
+                let fits = self.cx.assign(expected_ret, actual);
+                self.cx.rollback(snap);
+                if !fits {
+                    ok = false;
+                    self.simple(
+                        Code::InterfaceNotSatisfied,
+                        span,
+                        format!(
+                            "method '{}' of interface '{}' returns {} but interface '{}' expects {}",
+                            m.name, have_name, actual, iface, expected_ret
                         ),
                     );
                 }

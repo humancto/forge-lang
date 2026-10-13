@@ -264,6 +264,65 @@ fn interface_multi_method() {
     );
 }
 
+// V3 finding 6: a value declared with an interface type satisfies that
+// interface, and any interface whose methods it has.
+const IFACE_PRELUDE: &str = "interface Shape { fn area() -> Int }\ninterface Named { fn name() -> String }\ninterface Both {\n  fn area() -> Int\n  fn name() -> String\n}\ninterface Loose { fn area() }\ninterface Wide { fn area(scale: Int) -> Int }\ninterface Stringy { fn area() -> String }\nfn inner(x: Shape) -> Int { return x.area() }\n";
+
+#[test]
+fn interface_value_satisfies_its_interface() {
+    for body in [
+        "fn outer(x: Shape) -> Int { return inner(x) }",
+        "fn outer(x: Both) -> Int { return inner(x) }",
+        // An unannotated return is unknown: it may be an Int.
+        "fn outer(x: Loose) -> Int { return inner(x) }",
+        "fn outer(xs: [Shape]) -> [Shape] { return xs }",
+        "fn outer(xs: [Both]) -> [Shape] { return xs }",
+        "fn outer(x: Shape) -> ?Shape { return x }",
+    ] {
+        let src = format!("{}{}", IFACE_PRELUDE, body);
+        for edition in [Edition::E2026, Edition::E2027] {
+            let d = check_in(&src, false, edition);
+            assert!(
+                d.is_empty(),
+                "{:?} in {:?}: {:?}",
+                body,
+                edition,
+                d.iter().map(|w| &w.message).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn interface_value_missing_methods_is_t0012() {
+    for (body, needle) in [
+        (
+            "fn outer(x: Named) -> Int { return inner(x) }",
+            "missing 'area'",
+        ),
+        ("fn outer(x: Wide) -> Int { return inner(x) }", "parameter"),
+        (
+            "fn outer(x: Stringy) -> Int { return inner(x) }",
+            "returns String",
+        ),
+        (
+            "fn outer(xs: [Named]) -> [Shape] { return xs }",
+            "missing 'area'",
+        ),
+    ] {
+        let src = format!("{}{}", IFACE_PRELUDE, body);
+        let d = check_in(&src, false, Edition::E2027);
+        assert!(
+            d.iter().any(|w| w.code == Code::InterfaceNotSatisfied
+                && w.is_error()
+                && w.message.contains(needle)),
+            "{:?}: {:?}",
+            body,
+            d.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+}
+
 // ========== M3.3: Option<T> Type Checking ==========
 
 #[test]
