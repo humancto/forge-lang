@@ -78,6 +78,16 @@ impl VM {
             return Ok(self.registers[base + slot as usize]);
         }
         let Some(uv_ref) = open.get(&slot).copied() else {
+            if let Some(id) = open.global(&slot) {
+                // An alias of a global (`BindGlobal`), which checked that
+                // it is defined; globals are never removed.
+                let value = self
+                    .globals
+                    .get_id(id)
+                    .ok_or_else(|| VMError::new("BUG: alias of an undefined global"))?;
+                self.registers[base + slot as usize] = value;
+                return Ok(value);
+            }
             return Ok(self.registers[base + slot as usize]);
         };
         let value = self
@@ -107,16 +117,34 @@ impl VM {
                     *value = val;
                 }
             }
+        } else if let Some(id) = open.global(&slot) {
+            self.globals.set_id(id, val);
         }
     }
 
     /// Whether local `slot` may hold a uniquely owned object. Every local
     /// can: a captured local's register and its upvalue cell are one owner
     /// (every access goes through `read_local` / `write_local`, and
-    /// `GetUpvalue` shares what it copies out of a cell).
+    /// `GetUpvalue` shares what it copies out of a cell), and so are an
+    /// alias register and its global slot (`GetGlobal` shares too).
     #[inline]
     fn local_can_own(&self, _frame_idx: usize, _slot: u8) -> bool {
         true
+    }
+
+    /// `BindGlobal`: make register `slot` an alias of global `id` (defined)
+    /// until the statement's `CloseUpvalues`. The register mirrors the
+    /// slot: not a second reference.
+    pub(super) fn bind_global(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        id: super::globals::GlobalId,
+        value: Value,
+    ) {
+        self.frames[frame_idx].open_upvalues.insert_global(slot, id);
+        self.registers[base + slot as usize] = value;
     }
 
     /// `BindUpvalue`: make local `slot` an alias of the closure's captured

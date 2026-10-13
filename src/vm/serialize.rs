@@ -7,7 +7,7 @@ const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
 /// 5: in-place local opcodes (`UpdateSetLocal`, `GetIndexLocal` .. `CallPure`).
 /// 6: `UpdateMapLocal`.
-/// 7: `BindUpvalue`, `PushPlaceLocal`, `PeekLocal` modes.
+/// 7: `BindUpvalue`, `BindGlobal`, `PushPlaceLocal`, `PeekLocal` modes.
 const VERSION_MINOR: u8 = 7;
 
 #[derive(Debug)]

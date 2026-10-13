@@ -202,9 +202,12 @@ a call may run (`PeekLocal` before a key with a call) share a captured local fir
 (`PEEK_SHARE_IF_CAPTURED`), so a callee's write through the cell copies. The repro takes
 60 ms (was 3438 ms with the same debug build); `benchmarks/vm/captured_writes.fg`
 (union-find, 50k nodes) went from 15.4 s to 0.25 s, and network_components passes on the
-VM (no longer `known_failing`). **Still open:** a top-level `let` that a function
-references *before* its declaration is a VM global, and globals are never owned (`GetGlobal`
-does not share), so a function written above the data it updates still copies per write.
+VM (no longer `known_failing`). A top-level `let` that a function references *before*
+its declaration is a VM global; a global slot can own its value too (`GetGlobal` shares),
+and a statement updating its container aliases it with a temporary register (`BindGlobal`),
+so a function written above the data it updates no longer copies either: the repro with
+`set_root` above the `let` takes 20 ms (was 3427 ms), `benchmarks/vm/global_writes.fg` 11.4 s
+-> 0.16 s.
 
 ### 21. VM, edition 2027: annotated hot code is ~3x slower
 

@@ -419,7 +419,7 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                 self.reg(ip, "A", a)?;
                 self.reg(ip, "B", b)?;
             }
-            GetGlobal | SetGlobal => {
+            GetGlobal | SetGlobal | BindGlobal => {
                 self.reg(ip, "value", a)?;
                 self.name_constant(ip, bx)?;
             }
@@ -759,6 +759,7 @@ mod tests {
             "constant index 9",
         );
         rejects(&with(encode_abx(OpCode::SetGlobal, 0, 0)), "not a string");
+        rejects(&with(encode_abx(OpCode::BindGlobal, 0, 0)), "not a string");
         rejects(&with(encode_abc(OpCode::GetField, 0, 0, 0)), "not a string");
         rejects(
             &with(encode_abc(OpCode::SetField, 0, 7, 0)),

@@ -1044,6 +1044,7 @@ impl VM {
         self.cancel_scopes_from(guard.scope_depth);
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
+        frame.open_upvalues.clear_globals();
         frame.ip = guard.catch_ip;
         // The safe point that called us has already refilled the countdown,
         // so the catch path's `PopTimeout` runs before the next poll.
@@ -1247,7 +1248,21 @@ impl VM {
                                 let name = self.globals.names().name_of(id);
                                 return Err(self.undefined_global(chunk, pc, &name));
                             };
+                            // Copying a reference out of the slot, which may
+                            // own it (see `BindGlobal`).
+                            self.gc.share(val);
                             self.registers[base + a as usize] = val;
+                        }
+                    }
+                    OpCode::BindGlobal => {
+                        // `GetGlobal`'s check, then an alias instead of a copy.
+                        if let Some(id) = chunk.global_id(bx, self.globals.names()) {
+                            let Some(val) = self.globals.get_id(id) else {
+                                let pc = self.frames[frame_idx].ip - 1;
+                                let name = self.globals.names().name_of(id);
+                                return Err(self.undefined_global(chunk, pc, &name));
+                            };
+                            self.bind_global(frame_idx, base, a, id, val);
                         }
                     }
                     OpCode::SetGlobal => {
@@ -2672,6 +2687,8 @@ impl VM {
 
                 let err_value = self.runtime_error_value(&err);
                 let base = self.frames[frame_idx].base;
+                // The statement that failed may have left a global alias.
+                self.frames[frame_idx].open_upvalues.clear_globals();
                 self.registers[base + handler.error_register as usize] = err_value;
                 self.frames[frame_idx].ip = handler.catch_ip;
                 return Ok(frame_idx);

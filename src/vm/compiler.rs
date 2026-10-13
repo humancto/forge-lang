@@ -1098,6 +1098,43 @@ fn emit_forward_definedness_check(c: &mut Compiler, name: &str) -> Result<(), Co
     Ok(())
 }
 
+/// Whether `object` names a mutable top-level variable that is a global
+/// here (a function compiled above its `let`, or code reading it before
+/// the `let`), whose container a statement may update through a
+/// `BindGlobal` alias (`bind_global_alias` .. `end_global_alias`).
+fn global_alias_root<'e>(c: &Compiler, object: &'e Expr) -> Option<&'e str> {
+    let Expr::Ident(name) = object else {
+        return None;
+    };
+    let global = c.resolve_local(name).is_none()
+        && c.resolve_upvalue(name).is_none()
+        && c.resolve_in_parent(name).is_none()
+        && c.resolve_parent_upvalue(name).is_none()
+        && !c.outer_names.contains(name.as_str())
+        && !c.toplevel_mixed.contains(name.as_str());
+    (global && c.toplevel_global_mutability(name) == Some(true)).then_some(name.as_str())
+}
+
+/// `BindGlobal` of `name` into a fresh register, with `GetGlobal`'s
+/// undefined-variable check and hint. The caller runs exactly one
+/// container operation on the register (no code that could leave the
+/// statement in between) and then `end_global_alias`.
+fn bind_global_alias(c: &mut Compiler, name: &str) -> Result<u8, CompileError> {
+    c.note_global_access(name);
+    let reg = c.alloc_reg()?;
+    let idx = c.const_str(&c.global_name(name));
+    let pc = c.chunk.code.len();
+    c.emit(encode_abx(OpCode::BindGlobal, reg, idx), 0);
+    if let Some(hint) = c.visible_name_hint(name) {
+        c.chunk.global_hints.push((pc, hint));
+    }
+    Ok(reg)
+}
+
+fn end_global_alias(c: &mut Compiler, reg: u8) {
+    c.emit(encode_abc(OpCode::CloseUpvalues, reg, reg, 0), 0);
+}
+
 /// Store `src` into an assignment target.
 ///
 /// Collections have value semantics (as in the interpreter): `SetIndex` and
@@ -1138,6 +1175,31 @@ fn compile_store(c: &mut Compiler, target: &Expr, src: u8) -> Result<(), Compile
             let idx_reg = c.alloc_reg()?;
             compile_expr(c, index, idx_reg)?;
             c.emit(encode_abc(OpCode::SetIndexLocal, reg, idx_reg, src), 0);
+            c.free_to(saved);
+            Ok(())
+        }
+        // The same on a global (a function above the `let`): through a
+        // `BindGlobal` alias, after the index (as for a local).
+        Expr::FieldAccess { object, field }
+            if global_alias_root(c, object).is_some() && field_operand(c, field).is_some() =>
+        {
+            let name = global_alias_root(c, object).expect("BUG: checked by the guard");
+            let k = field_operand(c, field).expect("BUG: checked by the guard");
+            let saved = c.next_register;
+            let reg = bind_global_alias(c, name)?;
+            c.emit(encode_abc(OpCode::SetFieldLocal, reg, k, src), 0);
+            end_global_alias(c, reg);
+            c.free_to(saved);
+            Ok(())
+        }
+        Expr::Index { object, index } if global_alias_root(c, object).is_some() => {
+            let name = global_alias_root(c, object).expect("BUG: checked by the guard");
+            let saved = c.next_register;
+            let idx_reg = c.alloc_reg()?;
+            compile_expr(c, index, idx_reg)?;
+            let reg = bind_global_alias(c, name)?;
+            c.emit(encode_abc(OpCode::SetIndexLocal, reg, idx_reg, src), 0);
+            end_global_alias(c, reg);
             c.free_to(saved);
             Ok(())
         }
@@ -1625,13 +1687,21 @@ fn try_compile_pure_call(
     let Some(Expr::Ident(var)) = args.first() else {
         return Ok(false);
     };
-    let Some((reg, _)) = c.resolve_local(var) else {
-        return Ok(false);
-    };
     if !args[1..].iter().all(index_runs_no_code) {
         return Ok(false);
     }
     let saved = c.next_register;
+    // A global (a function above the `let`) is read through an alias.
+    let (reg, alias) = match c.resolve_local(var) {
+        Some((reg, _)) => (reg, None),
+        None => match global_alias_root(c, &args[0]) {
+            Some(name) => {
+                let reg = bind_global_alias(c, name)?;
+                (reg, Some(reg))
+            }
+            None => return Ok(false),
+        },
+    };
     let fr = c.alloc_reg()?;
     compile_expr(c, function, fr)?;
     let first = c.alloc_reg()?;
@@ -1641,6 +1711,9 @@ fn try_compile_pure_call(
         compile_expr(c, arg, ar)?;
     }
     c.emit(encode_abc(OpCode::CallPure, fr, args.len() as u8, dst), 0);
+    if let Some(reg) = alias {
+        end_global_alias(c, reg);
+    }
     c.free_to(saved);
     Ok(true)
 }
@@ -1844,6 +1917,46 @@ fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, Com
             try_compile_place_method(c, receiver, "push", std::slice::from_ref(value), dst, true)?;
         c.free_to(saved);
         return Ok(done);
+    }
+    // `g.push(v)`, `g[k].push(v)`, `g.f.push(v)` on a global (a function
+    // above the `let`): the same opcodes on a `BindGlobal` alias, bound after
+    // the index and the value are evaluated (as a local is read last).
+    let alias_root = match receiver {
+        Expr::Ident(_) => global_alias_root(c, receiver),
+        Expr::Index { object, .. } | Expr::FieldAccess { object, .. } if method_form => {
+            global_alias_root(c, object)
+        }
+        _ => None,
+    };
+    if let Some(name) = alias_root {
+        let field = match receiver {
+            Expr::FieldAccess { field, .. } => match field_operand(c, field) {
+                Some(k) => Some(k),
+                None => return Ok(false),
+            },
+            _ => None,
+        };
+        let saved = c.next_register;
+        let index_reg = match receiver {
+            Expr::Index { index, .. } => {
+                let r = c.alloc_reg()?;
+                compile_expr(c, index, r)?;
+                Some(r)
+            }
+            _ => None,
+        };
+        let value_reg = c.alloc_reg()?;
+        compile_expr(c, value, value_reg)?;
+        let reg = bind_global_alias(c, name)?;
+        let inst = match (index_reg, field) {
+            (Some(i), _) => encode_abc(OpCode::PushIndexLocal, reg, i, value_reg),
+            (None, Some(k)) => encode_abc(OpCode::PushFieldLocal, reg, k, value_reg),
+            (None, None) => encode_abc(OpCode::PushLocal, reg, value_reg, 0),
+        };
+        c.emit(inst, 0);
+        end_global_alias(c, reg);
+        c.free_to(saved);
+        return Ok(true);
     }
     match receiver {
         Expr::Ident(var) => {
@@ -3826,6 +3939,16 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                     }
                 }
             }
+            if let Some(name) = global_alias_root(c, object) {
+                if let Some(k) = field_operand(c, field) {
+                    let saved = c.next_register;
+                    let reg = bind_global_alias(c, name)?;
+                    c.emit(encode_abc(OpCode::GetFieldLocal, dst, reg, k), 0);
+                    end_global_alias(c, reg);
+                    c.free_to(saved);
+                    return Ok(());
+                }
+            }
             let saved = c.next_register;
             let or = c.alloc_reg()?;
             compile_expr(c, object, or)?;
@@ -3863,6 +3986,20 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                         c.free_to(saved);
                         return Ok(());
                     }
+                }
+            }
+            // A global's element (`parent[x]` in a function above the
+            // `let`): read through an alias, so the global stays owned.
+            if let Some(name) = global_alias_root(c, object) {
+                if index_runs_no_code(index) {
+                    let saved = c.next_register;
+                    let reg = bind_global_alias(c, name)?;
+                    let ir = c.alloc_reg()?;
+                    compile_expr(c, index, ir)?;
+                    c.emit(encode_abc(OpCode::GetIndexLocal, dst, reg, ir), 0);
+                    end_global_alias(c, reg);
+                    c.free_to(saved);
+                    return Ok(());
                 }
             }
             let saved = c.next_register;

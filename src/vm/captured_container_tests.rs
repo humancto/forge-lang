@@ -386,6 +386,79 @@ fn deep_push_falls_back_to_the_generic_update() {
 }
 
 #[test]
+fn globals_written_by_functions_above_the_let_keep_value_semantics() {
+    // `put` and friends are compiled before the `let`s, so `parent` and
+    // `groups` are VM globals, updated through `BindGlobal` aliases.
+    assert_output(
+        r#"
+        fn put(x, r) {
+            parent[x] = r
+            return null
+        }
+        fn add(k, v) {
+            if !has_key(groups, k) {
+                groups[k] = []
+            }
+            groups[k].push(v)
+            groups.total.push(v)
+            return len(groups[k])
+        }
+        fn root(x) {
+            return parent[x]
+        }
+        let mut parent = [0, 1, 2]
+        let mut groups = { total: [] }
+        let before = parent
+        put(0, 2)
+        let mid = parent
+        put(1, root(0))
+        parent[2] = 9
+        let g0 = groups
+        add("a", 1)
+        let inner = groups.a
+        add("a", 2)
+        try {
+            parent[10] = 1
+        } catch e {
+            println("caught")
+        }
+        let after = [1]
+        parent.push(3)
+        println(before)
+        println(mid)
+        println(parent)
+        println(after)
+        println(g0)
+        println(inner)
+        println(groups)
+        "#,
+        &[
+            "caught",
+            "[0, 1, 2]",
+            "[2, 1, 2]",
+            "[2, 2, 9, 3]",
+            "[1]",
+            r#"{ "total": [] }"#,
+            "[1]",
+            r#"{ "total": [1, 2], "a": [1, 2] }"#,
+        ],
+    );
+}
+
+#[test]
+fn a_global_used_before_its_let_is_undefined() {
+    let src = "fn put(x) {\n parent[x] = 1\n}\nput(0)\nlet mut parent = [0]\n";
+    let chunk = compiler::compile(&parse_program(src)).expect("compile error");
+    let err = VM::new().execute(&chunk).expect_err("must fail");
+    assert!(
+        err.message.contains("undefined variable"),
+        "{}",
+        err.message
+    );
+    assert!(uses_op(src, OpCode::BindGlobal));
+}
+
+#[test]
 fn captured_writes_do_not_copy_per_step() {
     // A function writing a top-level array (union-find style).
     let uf = |n: usize| {
@@ -394,6 +467,17 @@ fn captured_writes_do_not_copy_per_step() {
         )
     };
     assert!(extra_allocations(uf) < 200, "{}", extra_allocations(uf));
+    // The same with the function above the `let` (a global).
+    let global = |n: usize| {
+        format!(
+            "fn put(x, r) {{\n parent[x] = r\n return parent[x]\n}}\nlet mut parent = range(0, {n})\nfor i in range(0, {n}) {{\n put(i, 0)\n if len(parent) < 0 {{\n parent.push(1)\n }}\n}}\n"
+        )
+    };
+    assert!(
+        extra_allocations(global) < 200,
+        "{}",
+        extra_allocations(global)
+    );
     // The declaring frame writing an array a function captures.
     let main = |n: usize| {
         format!(

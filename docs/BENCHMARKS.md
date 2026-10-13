@@ -28,7 +28,7 @@ tools/bench_compare.py --base /path/to/old/forge --head target/release/forge
 
 | Suite | Programs | Engine |
 |---|---|---|
-| `vm` | `benchmarks/vm/*.fg`: `loop` (20M-iteration `while`), `fib` (recursive fib(30)), `string_build` (200k `s = s + "x"`), `array_push` (100k `push`), `map_filter` (map/filter/reduce over 1M items), `mandelbrot` (200×200 grid, 50 iterations, pure Float loops), `spectral_norm` (n = 100, Float helper called from array loops), `nbody` (5 bodies, 20k steps over Float arrays), `repeat_loop` / `range_loop` (5M-iteration top-level `repeat` / `for i in range(..)`), `toplevel_loop` / `toplevel_loop_fn` (the same 5M-iteration `while` at the top level and inside a function), `toplevel_string` (`string_build` at the top level), `toplevel_captured` (2M calls of a top-level `fn` that updates a captured top-level variable), `global_calls` (2M iterations reading two builtins as globals), and the higher-order collection shapes: `reduce_lambda` (`reduce` over 1M items with an arithmetic lambda), `sort_comparator` (`sort` of 200k pseudo-random ints with a comparator lambda), `stream_chain` (a lazy `.stream()` filter/map/reduce over 1M items), `records_pipeline` (300k objects built with `map`, then `.filter`/`.map`/`.reduce` reading their fields), and container building: `word_count` (100k words, 5,000 distinct, `counts[w] = get(counts, w, 0) + 1` at the top level), `object_build` (an object with 50k computed keys, `ob[k] = v`), `push_records` (100k `recs.push({ id: i, name: ... })`), `map_build` (a `Map` with 100k computed String keys built with `m = m.set(k, v)`, then every key looked up with `m.has`/`m.get`), `computed_keys` (300k `o[names[i]] += 1` / `o[r.sku] += 1` / `o[str(i)] += 1` on a 10k-key object), `captured_writes` (union-find over 50k nodes in top-level arrays updated by a function), `deep_push` (200k `r[k].lat.push(i)`), `regex_lines` (50k lines, five `regex` calls each) | default (VM with JIT tier-up) |
+| `vm` | `benchmarks/vm/*.fg`: `loop` (20M-iteration `while`), `fib` (recursive fib(30)), `string_build` (200k `s = s + "x"`), `array_push` (100k `push`), `map_filter` (map/filter/reduce over 1M items), `mandelbrot` (200×200 grid, 50 iterations, pure Float loops), `spectral_norm` (n = 100, Float helper called from array loops), `nbody` (5 bodies, 20k steps over Float arrays), `repeat_loop` / `range_loop` (5M-iteration top-level `repeat` / `for i in range(..)`), `toplevel_loop` / `toplevel_loop_fn` (the same 5M-iteration `while` at the top level and inside a function), `toplevel_string` (`string_build` at the top level), `toplevel_captured` (2M calls of a top-level `fn` that updates a captured top-level variable), `global_calls` (2M iterations reading two builtins as globals), and the higher-order collection shapes: `reduce_lambda` (`reduce` over 1M items with an arithmetic lambda), `sort_comparator` (`sort` of 200k pseudo-random ints with a comparator lambda), `stream_chain` (a lazy `.stream()` filter/map/reduce over 1M items), `records_pipeline` (300k objects built with `map`, then `.filter`/`.map`/`.reduce` reading their fields), and container building: `word_count` (100k words, 5,000 distinct, `counts[w] = get(counts, w, 0) + 1` at the top level), `object_build` (an object with 50k computed keys, `ob[k] = v`), `push_records` (100k `recs.push({ id: i, name: ... })`), `map_build` (a `Map` with 100k computed String keys built with `m = m.set(k, v)`, then every key looked up with `m.has`/`m.get`), `computed_keys` (300k `o[names[i]] += 1` / `o[r.sku] += 1` / `o[str(i)] += 1` on a 10k-key object), `captured_writes` (union-find over 50k nodes in top-level arrays updated by a function), `global_writes` (the same with the function written above the arrays, which makes them VM globals), `deep_push` (200k `r[k].lat.push(i)`), `regex_lines` (50k lines, five `regex` calls each) | default (VM with JIT tier-up) |
 | `interp` | `benchmarks/interp/*.fg`: array reads, deep recursion, fib, push via method and reassignment, set building, string building, and the `vm` suite's `word_count`, `object_build`, `push_records`, `map_build`, `captured_writes`, `regex_lines`; `slice_scan` (a function scanning a 20k-element top-level array with `slice`/`join`/`first`) | `--interp` |
 | `startup` | `benchmarks/startup/hello.fg` run 20 times per sample (`STARTUP_BATCH`) | default |
 | `peers` | `benchmarks/peers/*.{py,js,lua}`: line-for-line ports of the `vm` suite | `python3`, `node`, `lua`/`luajit` |
@@ -396,7 +396,9 @@ performance cliffs that made natural code time out or exhaust memory:
   call read a `PeekLocal` snapshot. A captured local and its upvalue cell
   are one owner (`GetUpvalue` shares), and functions alias the captured
   containers they use with `BindUpvalue`, so the local in-place opcodes
-  apply. `PushPlaceLocal` pushes through chains of two or more steps.
+  apply; a global slot owns its value too (`GetGlobal` shares) and one
+  statement aliases it with `BindGlobal`. `PushPlaceLocal` pushes through
+  chains of two or more steps.
 
 ### Numbers
 
@@ -411,8 +413,10 @@ compile jobs: absolute times are pessimistic).
 | `slice_scan`: 20k `slice`+`join` on a captured array | | | 121.1 | 0.12 |
 | `computed_keys`: 300k updates, 10k-key object | killed (memory) | 0.36 | | |
 | `captured_writes`: union-find, 50k nodes | 15.4 | 0.25 | 0.72 | 0.62 |
+| `global_writes`: the same, `find` above the `let`s | 11.4 | 0.16 | | |
 | `deep_push`: 200k `r[k].lat.push(i)` | 10.8 | 0.31 | | |
 
-Still copying: a top-level `let` that a function uses *before* its
-declaration is a VM global, and globals are never owned, so a function
-written above the data it updates copies it per write.
+The other `vm` benchmarks (`fib`, `global_calls`, `toplevel_captured`,
+`map_filter`, `string_build`, `push_records`, `records_pipeline`,
+`stream_chain`) were unchanged within this host's noise (two interleaved
+rounds of 3 runs).
