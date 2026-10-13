@@ -98,11 +98,7 @@ fn drop_top<T>(s: Stack<T>, k: Int) -> Stack<T> {
 
 // file: vm/machine.fg
 // Runs a program and collects what it prints.
-// `import "ops.fg"`, not `import { Op, Push, ... } from "ops.fg"`: an
-// algebraic type's name cannot be imported by name (E0019 "does not export
-// 'Op'"), and without it `op: Op` is an unknown type (T0015, an error in
-// edition 2027) (eval/V3_FINDINGS.md, finding 8).
-import "ops.fg"
+import { Op, Push, Pop, Add, Sub, Mul, Div, Dup, Swap, Over, Jz, Jmp, Print, Halt } from "ops.fg"
 import { Stack, empty_stack, push_value, depth, peek_at, drop_top } from "stack.fg"
 
 fn needs(name: String) -> Int {

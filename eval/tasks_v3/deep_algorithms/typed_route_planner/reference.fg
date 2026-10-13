@@ -116,11 +116,7 @@ fn dijkstra(src: String, metric: Metric) -> Search {
     return Search { dist: dist, prev: prev }
 }
 
-// `metric` is not annotated `Metric`: passing a parameter declared with an
-// interface type on to `dijkstra(.., metric: Metric)` is rejected by the
-// type checker (T0012, "struct 'Metric' does not satisfy interface
-// 'Metric'"), an error in edition 2027 (eval/V3_FINDINGS.md, finding 6).
-fn route(a: String, b: String, metric) -> String {
+fn route(a: String, b: String, metric: Metric) -> String {
     let none = "no route from {a} to {b}"
     if !has_key(graph, a) || !has_key(graph, b) {
         return none

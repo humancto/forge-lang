@@ -12,10 +12,7 @@ fn describe(p: Plugin) -> String {
 
 // file: plugins/text.fg
 // Plugins that rewrite every line.
-// `import "api.fg"`, not `import { Plugin } from "api.fg"`: the VM cannot
-// import an interface by name (E0019 "does not export"; eval/V3_FINDINGS.md,
-// finding 7).
-import "api.fg"
+import { Plugin } from "api.fg"
 
 struct Trim {
     id: String = "trim"
@@ -61,10 +58,7 @@ impl Plugin for Upper {
 
 // file: plugins/filters.fg
 // Plugins that keep or drop whole lines.
-// `import "api.fg"`, not `import { Plugin } from "api.fg"`: the VM cannot
-// import an interface by name (E0019 "does not export"; eval/V3_FINDINGS.md,
-// finding 7).
-import "api.fg"
+import { Plugin } from "api.fg"
 
 struct Dedupe {
     id: String = "dedupe"

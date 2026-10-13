@@ -1,22 +1,8 @@
 // file: forge_modules/csvlite/main.fg
-// Package entry. The functions live in src/; the entry wraps them because
-// on the VM a name a module only imports (a re-export) cannot be imported
-// from it (E0019; the interpreter allows it) (eval/V3_FINDINGS.md, finding 9).
-import { parse_table } from "src/table.fg"
-import { render } from "src/format.fg"
-import { describe } from "src/stats.fg"
-
-fn read_table(text: String) {
-    return parse_table(text)
-}
-
-fn format_table(t) -> String {
-    return render(t)
-}
-
-fn describe_column(t, name: String) -> String {
-    return describe(t, name)
-}
+// Package entry: re-exports the functions that live in src/.
+import { read_table } from "src/table.fg"
+import { format_table } from "src/format.fg"
+import { describe_column } from "src/stats.fg"
 
 // file: forge_modules/csvlite/src/table.fg
 // The table type and the CSV reader.
@@ -37,7 +23,7 @@ impl Table {
     }
 }
 
-fn parse_table(text: String) {
+fn read_table(text: String) {
     let rows = filter(csv.parse(text, { header: false, types: false }), fn(r) {
         return !(len(r) == 1 && r[0] == "") && len(r) > 0
     })
@@ -65,7 +51,7 @@ fn is_number(s: String) -> Bool {
 // Fixed-width rendering; numbers right-aligned.
 import { is_number } from "numbers.fg"
 
-fn render(t) -> String {
+fn format_table(t) -> String {
     let mut widths = map(t.headers, fn(h) { return len(h) })
     for r in t.rows {
         for i in range(0, len(r)) {
@@ -97,7 +83,7 @@ fn render(t) -> String {
 // Column summaries.
 import { is_number } from "numbers.fg"
 
-fn describe(t, name: String) -> String {
+fn describe_column(t, name: String) -> String {
     let col = t.column(name)
     if len(col) > 0 && all(col, fn(v) { return is_number(v) }) {
         let xs = map(col, fn(v) { return float(v) })

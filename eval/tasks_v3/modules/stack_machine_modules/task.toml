@@ -3,6 +3,8 @@ category = "modules"
 title = "Typed stack machine split into instruction, stack and machine modules"
 answer = "files"
 editions = ["2027"]
+# Importing the algebraic type `Op` by name fails (E0019) on both engines.
+known_failing = "V3 finding 8"
 prompt = '''
 The working directory already contains this `main.fg`, which you must not change (it is
 provided as is when your files are run):

@@ -2,6 +2,9 @@ id = "plugin_pipeline"
 category = "modules"
 title = "Plugins behind an interface, spread over five modules"
 answer = "files"
+# The VM cannot import the interface `Plugin` by name (E0019).
+known_failing = "V3 finding 7"
+known_failing_on = ["forge-vm", "forge-vm-2027"]
 prompt = '''
 The working directory already contains this `main.fg`, which you must not change (it is
 provided as is when your files are run):

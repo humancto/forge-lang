@@ -2,6 +2,10 @@ id = "csvlite_package"
 category = "modules"
 title = "Write a local package with internal modules for a provided program"
 answer = "files"
+# On the VM a name the package entry imports (a re-export) cannot be
+# imported from the package (E0019); the interpreter allows it.
+known_failing = "V3 finding 9"
+known_failing_on = ["forge-vm", "forge-vm-2027"]
 prompt = '''
 The working directory already contains this `main.fg`, which you must not change (it is
 provided as is when your files are run):
