@@ -33,8 +33,6 @@ timeout = 15
 # eaten by contention on a small machine.
 timed = true
 max_memory = "1GB"
-known_failing = "V3 finding 4"
-known_failing_on = ["forge-vm", "forge-vm-2027"]
 expected_stdout = """
 links: 100000 merges: 91284
 components: 28716

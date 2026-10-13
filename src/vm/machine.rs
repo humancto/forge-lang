@@ -1333,6 +1333,9 @@ impl VM {
                         }
                         self.registers[base + a as usize] = value;
                     }
+                    OpCode::BindUpvalue => {
+                        self.bind_upvalue(frame_idx, base, a, b)?;
+                    }
                     OpCode::UpdateSetLocal => {
                         let value = self.registers[base + b as usize];
                         self.update_set_local(frame_idx, base, a, value, c == SET_UPDATE_REMOVE)?;
@@ -1495,10 +1498,17 @@ impl VM {
                                 if let ObjKind::Closure(closure) = &obj.kind {
                                     if uv_idx < closure.upvalues.len() {
                                         let uv_ref = closure.upvalues[uv_idx];
-                                        if let Some(uv_obj) = self.gc.get(uv_ref) {
-                                            if let ObjKind::Upvalue(uv) = &uv_obj.kind {
-                                                self.registers[base + a as usize] = uv.value;
-                                            }
+                                        let value = match self.gc.get(uv_ref).map(|o| &o.kind) {
+                                            Some(ObjKind::Upvalue(uv)) => Some(uv.value),
+                                            _ => None,
+                                        };
+                                        if let Some(value) = value {
+                                            // Copying a reference out of the
+                                            // cell, which may own it (a
+                                            // captured local can own its
+                                            // value, see `vm::local_ops`).
+                                            self.gc.share(value);
+                                            self.registers[base + a as usize] = value;
                                         }
                                     }
                                 }

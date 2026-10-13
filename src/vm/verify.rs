@@ -558,6 +558,10 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                 self.upvalue(ip, a)?;
                 self.reg(ip, "source", b)?;
             }
+            BindUpvalue => {
+                self.reg(ip, "local", a)?;
+                self.upvalue(ip, b)?;
+            }
             CloseUpvalues => {
                 self.reg(ip, "first", a)?;
                 self.reg(ip, "last", b)?;
@@ -820,6 +824,15 @@ mod tests {
             &with(encode_abc(OpCode::PeekLocal, 0, 0, 2)),
             "unknown mode 2",
         );
+    }
+
+    #[test]
+    fn rejects_bad_bind_upvalue() {
+        rejects(
+            &with(encode_abc(OpCode::BindUpvalue, 0, 0, 0)),
+            "upvalue index 0",
+        );
+        rejects(&with(encode_abc(OpCode::BindUpvalue, 200, 0, 0)), "200");
     }
 
     #[test]

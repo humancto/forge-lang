@@ -166,6 +166,15 @@ pub enum OpCode {
     /// generic `__forge_method_mut` lowering does. In place when the local
     /// owns a map; otherwise exactly that lowering.
     UpdateMapLocal,
+    /// A=local register, B=upvalue index: make local `A` of this frame an
+    /// alias of the closure's captured variable `B`, by registering the
+    /// upvalue's cell as the local's open upvalue (as if this frame had
+    /// declared it). Every local access (`GetLocal`, `SetLocal` and the
+    /// in-place opcodes) then reads and writes the cell, so a function can
+    /// update a captured container in place (`vm::local_ops`). Emitted at
+    /// function entry, after the parameters, for the captured mutable
+    /// variables the body uses as containers.
+    BindUpvalue,
 }
 
 /// `UpdateSetLocal` operations (its C operand).
@@ -182,7 +191,7 @@ pub const PEEK_SHARE_IF_CAPTURED: u8 = 1;
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::UpdateMapLocal as u8 + 1 == 79);
+const _: () = assert!(OpCode::BindUpvalue as u8 + 1 == 80);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -268,6 +277,7 @@ impl TryFrom<u8> for OpCode {
             76 => Ok(OpCode::PeekLocal),
             77 => Ok(OpCode::CallPure),
             78 => Ok(OpCode::UpdateMapLocal),
+            79 => Ok(OpCode::BindUpvalue),
             _ => Err(value),
         }
     }
@@ -508,10 +518,11 @@ mod tests {
         assert_eq!(OpCode::try_from(75u8), Ok(OpCode::PushFieldLocal));
         assert_eq!(OpCode::try_from(77u8), Ok(OpCode::CallPure));
         assert_eq!(OpCode::try_from(78u8), Ok(OpCode::UpdateMapLocal));
-        assert_eq!(OpCode::try_from(79u8), Err(79));
+        assert_eq!(OpCode::try_from(79u8), Ok(OpCode::BindUpvalue));
+        assert_eq!(OpCode::try_from(80u8), Err(80));
         // Every byte below the count decodes to the variant with that
         // discriminant.
-        for byte in 0..79u8 {
+        for byte in 0..80u8 {
             let op = OpCode::try_from(byte).expect("BUG: valid opcode byte");
             assert_eq!(op as u8, byte);
         }

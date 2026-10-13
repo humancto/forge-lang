@@ -13,6 +13,9 @@ struct Local {
     /// that release a captured local emit `CloseUpvalues` so the next binding
     /// in the same register (e.g. the next loop iteration) gets a fresh cell.
     captured: bool,
+    /// An alias of a captured variable of an enclosing function, bound at
+    /// function entry with `BindUpvalue` (`bind_captured_containers`).
+    mirror: bool,
 }
 
 struct LoopContext {
@@ -366,7 +369,7 @@ impl Compiler {
     fn redeclared_captured_local(&self, name: &str) -> Option<usize> {
         let index = self.locals.iter().rposition(|l| l.name == name)?;
         let local = &self.locals[index];
-        (local.depth == self.scope_depth && local.captured).then_some(index)
+        (local.depth == self.scope_depth && local.captured && !local.mirror).then_some(index)
     }
 
     /// The runtime global name for a user-visible top-level name.
@@ -564,6 +567,7 @@ impl Compiler {
             register: reg,
             mutable,
             captured: false,
+            mirror: false,
         });
         Ok(reg)
     }
@@ -1880,9 +1884,11 @@ fn try_compile_set_update_statement(c: &mut Compiler, expr: &Expr) -> Result<boo
 /// frame: only operands, operators, field/index reads and calls that are
 /// not one of the mutating method forms (`push`/`pop`/`add`/`remove`,
 /// which may update a local in place). Calls may run any code, but other
-/// frames reach this frame's locals only through upvalue cells, which keep
-/// a local from owning its value; so evaluating such an expression cannot
-/// update an owned container of this frame's locals in place.
+/// frames reach this frame's locals only through upvalue cells: so
+/// evaluating such an expression cannot update an owned container of an
+/// uncaptured local of this frame in place, and a snapshot of a captured
+/// one stays valid when it is taken with `PEEK_SHARE_IF_CAPTURED` (which
+/// makes a callee's update through the cell copy instead).
 fn has_no_inline_updates(expr: &Expr) -> bool {
     let all = |items: &[Expr]| items.iter().all(has_no_inline_updates);
     match expr {
@@ -2461,6 +2467,7 @@ fn compile_function_body(
             fc.patch_jump(skip);
         }
     }
+    bind_captured_containers(fc, params, body)?;
     let (init, last) = match body.split_last() {
         Some((last, init)) => (init, Some(last)),
         None => (body, None),
@@ -2494,6 +2501,69 @@ fn compile_function_body(
     fc.chunk.arity = params.len() as u8;
     fc.chunk.min_arity =
         crate::semantics::required_params(params.iter().map(|p| p.default.is_some())) as u8;
+    Ok(())
+}
+
+/// Most captured variables one function binds with `BindUpvalue`.
+const MAX_BOUND_CAPTURES: usize = 16;
+
+/// At function entry: bind each captured *mutable* variable of an
+/// enclosing function that the body uses as a container
+/// (`semantics::hoist::container_roots`: `xs[i] = v`, `g[k].push(x)`,
+/// `len(xs)`, ...) to a local register that aliases its cell
+/// (`BindUpvalue`). The body then compiles those names as locals, so the
+/// in-place opcodes (`SetIndexLocal`, `PushIndexLocal`, `GetIndexLocal`,
+/// ...) update a captured container that the cell owns instead of copying
+/// it per write. Reads and writes of the alias go to the cell, exactly as
+/// `GetUpvalue` / `SetUpvalue` would, and a nested closure capturing it
+/// shares the same cell.
+///
+/// Skipped: parameters (they shadow), immutable captures (never updated),
+/// names that are globals here, top-level names declared both with and
+/// without `mut` (their writes are unsupported on the VM), and names
+/// beyond `MAX_BOUND_CAPTURES` or near the register limit.
+fn bind_captured_containers(
+    fc: &mut Compiler,
+    params: &[Param],
+    body: &[SpannedStmt],
+) -> Result<(), CompileError> {
+    if fc.is_top_level {
+        return Ok(());
+    }
+    let mut names: Vec<String> = crate::semantics::hoist::container_roots(params, body)
+        .into_iter()
+        .filter(|name| !params.iter().any(|p| &p.name == name))
+        .collect();
+    // Deterministic register assignment.
+    names.sort();
+    let mut bound = 0;
+    for name in names {
+        if bound == MAX_BOUND_CAPTURES || fc.next_register > 200 {
+            break;
+        }
+        if fc.resolve_local(&name).is_some() || fc.toplevel_mixed.contains(&name) {
+            continue;
+        }
+        let mutable = fc
+            .upvalues
+            .iter()
+            .find(|u| u.name == name)
+            .map(|u| u.mutable)
+            .or_else(|| fc.resolve_in_parent(&name).map(|(_, m)| m))
+            .or_else(|| fc.resolve_parent_upvalue(&name).map(|(_, m)| m));
+        if mutable != Some(true) {
+            continue;
+        }
+        let Some(uv) = fc.resolve_capture(&name) else {
+            continue;
+        };
+        let reg = fc.add_local(&name, true)?;
+        if let Some(local) = fc.locals.last_mut() {
+            local.mirror = true;
+        }
+        fc.emit(encode_abc(OpCode::BindUpvalue, reg, uv, 0), 0);
+        bound += 1;
+    }
     Ok(())
 }
 
@@ -3346,6 +3416,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 register: catch_reg,
                 mutable: false,
                 captured: false,
+                mirror: false,
             });
             for s in catch_body {
                 c.set_span(s);

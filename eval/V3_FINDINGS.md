@@ -192,6 +192,20 @@ Suggested fix: give upvalue/global containers the single-owner treatment locals 
 (`GcObject::unique` on the cell's value), or store the updated container back without
 copying when the cell holds the only reference.
 
+**Fixed (captured variables):** a captured local's register and its upvalue cell are now
+one owner (`GetUpvalue` shares what it copies out of a cell; every local access already
+went through the cell), so the top level updates a captured array in place, and a function
+binds each captured mutable variable it uses as a container to a hidden local aliasing the
+cell (new opcode `BindUpvalue`, bytecode format 1.7), so `parent[x] = r`, `parent[x]` and
+`graph[a].push(e)` inside the function use the in-place local opcodes. Snapshots held while
+a call may run (`PeekLocal` before a key with a call) share a captured local first
+(`PEEK_SHARE_IF_CAPTURED`), so a callee's write through the cell copies. The repro takes
+60 ms (was 3438 ms with the same debug build); `benchmarks/vm/captured_writes.fg`
+(union-find, 50k nodes) went from 15.4 s to 0.25 s, and network_components passes on the
+VM (no longer `known_failing`). **Still open:** a top-level `let` that a function
+references *before* its declaration is a VM global, and globals are never owned (`GetGlobal`
+does not share), so a function written above the data it updates still copies per write.
+
 ### 21. VM, edition 2027: annotated hot code is ~3x slower
 
 sudoku_solver (two small annotated functions called ~200,000 times): VM 0.71 s in 2026,

@@ -110,11 +110,39 @@ impl VM {
         }
     }
 
-    /// Whether local `slot` may hold a uniquely owned object: a captured
-    /// local's value is also referenced by its upvalue cell.
+    /// Whether local `slot` may hold a uniquely owned object. Every local
+    /// can: a captured local's register and its upvalue cell are one owner
+    /// (every access goes through `read_local` / `write_local`, and
+    /// `GetUpvalue` shares what it copies out of a cell).
     #[inline]
-    fn local_can_own(&self, frame_idx: usize, slot: u8) -> bool {
-        !self.frames[frame_idx].open_upvalues.contains_key(&slot)
+    fn local_can_own(&self, _frame_idx: usize, _slot: u8) -> bool {
+        true
+    }
+
+    /// `BindUpvalue`: make local `slot` an alias of the closure's captured
+    /// variable `uv_idx` (its cell becomes the local's open upvalue).
+    pub(super) fn bind_upvalue(
+        &mut self,
+        frame_idx: usize,
+        base: usize,
+        slot: u8,
+        uv_idx: u8,
+    ) -> Result<(), VMError> {
+        let closure = self.frames[frame_idx].closure;
+        let cell = match self.gc.get(closure).map(|o| &o.kind) {
+            Some(ObjKind::Closure(c)) => c.upvalues.get(uv_idx as usize).copied(),
+            _ => None,
+        }
+        .ok_or_else(|| VMError::new("invalid upvalue"))?;
+        let value = match self.gc.get(cell).map(|o| &o.kind) {
+            Some(ObjKind::Upvalue(uv)) => uv.value,
+            _ => return Err(VMError::new("invalid upvalue")),
+        };
+        self.frames[frame_idx].open_upvalues.insert(slot, cell);
+        // The register mirrors the cell (as for a captured local): not a
+        // second reference.
+        self.registers[base + slot as usize] = value;
+        Ok(())
     }
 
     /// The object `value` refers to, when it is uniquely owned by local
@@ -353,10 +381,11 @@ impl VM {
     /// average, where `set` returns an O(len) copy.
     ///
     /// Nothing the key and value expressions can run updates an owned
-    /// container of this local in place (the compiler admits no nested
-    /// statements there, and other frames reach the local only through an
-    /// upvalue cell, which makes it unownable), so the same owned object
-    /// still has the snapshot's entries.
+    /// container of this local in place: the compiler admits no nested
+    /// statements there, and other frames reach the local only through its
+    /// upvalue cell, which the snapshot shares first when the key or value
+    /// may call (`PEEK_SHARE_IF_CAPTURED`), so such an update copies. The
+    /// same owned object therefore still has the snapshot's entries.
     pub(super) fn map_set_local(
         &mut self,
         frame_idx: usize,
