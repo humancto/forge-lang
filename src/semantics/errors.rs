@@ -404,6 +404,9 @@ Fix: correct the name. To read a field that may be absent, use
         matches: |h| {
             starts_with_any(h, &["no field '", "no method '", "unknown method"])
                 || (h.starts_with("cannot call '") && h.contains("' on "))
+                // `semantics::no_module_member`, `not_a_namespace_struct`
+                || (h.starts_with("module '") && h.contains("' has no member '"))
+                || (h.starts_with('\'') && h.ends_with("' is not a struct"))
         },
     },
     ErrorCode {
@@ -1188,6 +1191,9 @@ mod tests {
             (s::invalid_index_assign("Set"), "E0011"),
             (s::field_access("name", "Null"), "E0012"),
             (s::no_field("nmae", ["name"]), "E0013"),
+            (s::no_module_member("m.fg", "ad", ["add"]), "E0013"),
+            (s::not_a_namespace_struct("m", "add"), "E0013"),
+            (s::namespace_of_builtin_module("math", "m"), "E0019"),
             (s::field_access("x", "Int"), "E0014"),
             (
                 "len() requires string, array, tuple, set, map, or object".to_string(),

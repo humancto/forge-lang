@@ -269,6 +269,24 @@ fn symbol_of(doc: &Arc<Doc>, occ: OccId) -> Option<Symbol> {
             let def = top_level_def(&target, &name)?;
             Some(Symbol { doc: target, def })
         }
+        // `m.f` with `import "path" as m`: the module's `f`.
+        Resolved::Member => {
+            let path = namespace_path_of_member(a, occ)?;
+            let target = doc_for_path(&resolve_import_path(doc, &path)?)?;
+            let def = top_level_def(&target, &name)?;
+            Some(Symbol { doc: target, def })
+        }
+        _ => None,
+    }
+}
+
+/// For a member occurrence `f` of `m.f`, the import path when `m` is a
+/// module namespace (`import "path" as m`).
+fn namespace_path_of_member(a: &crate::typechecker::Analysis, occ: OccId) -> Option<String> {
+    let receiver = a.index.receiver_of(occ)?;
+    let def = a.resolution.definition(receiver)?;
+    match a.index.occurrences[def].def_kind() {
+        Some(DefKind::Namespace { path }) => Some(path.clone()),
         _ => None,
     }
 }
@@ -308,14 +326,16 @@ fn occurrences_in(doc: &Arc<Doc>, sym: &Symbol) -> Vec<OccId> {
                     matches!(k, DefKind::Import { path, name: exported }
                         if *exported == name && imports_target(path))
                 }),
-            // The module's name in `import { a as b }`.
+            // The module's name in `import { a as b }`, and `m.name`
+            // through `import "path" as m`.
             Resolved::Member if matches!(occ.role, Role::Field) => {
-                a.index.occurrences.iter().any(|d| {
-                    d.stmt == occ.stmt
-                        && d.name != name
-                        && matches!(d.def_kind(), Some(DefKind::Import { path, name: exported })
-                            if *exported == name && imports_target(path))
-                })
+                namespace_path_of_member(a, id).is_some_and(|path| imports_target(&path))
+                    || a.index.occurrences.iter().any(|d| {
+                        d.stmt == occ.stmt
+                            && d.name != name
+                            && matches!(d.def_kind(), Some(DefKind::Import { path, name: exported })
+                                if *exported == name && imports_target(path))
+                    })
             }
             Resolved::Imported(i) => a
                 .wildcard_imports
@@ -664,6 +684,7 @@ fn describe_def(doc: &Doc, def: OccId) -> String {
         Some(DefKind::NativeImport { path }) => {
             format!("(native plugin) {} from \"{}\"", o.name, path)
         }
+        Some(DefKind::Namespace { path }) => format!("import \"{}\" as {}", path, o.name),
         Some(DefKind::Struct) => {
             let fields: Vec<String> = a
                 .index

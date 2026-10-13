@@ -1,0 +1,2 @@
+import "../parity/modules/namespace_geo.fg" as geo
+println(geo.ad(1, 2))

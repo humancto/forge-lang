@@ -3277,6 +3277,35 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
             Ok(())
         }
 
+        Stmt::ImportNamespace { path, name } => {
+            // A built-in module is refused at run time (as in the
+            // interpreter); a file is resolved now, like every import.
+            let resolved = if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                String::new()
+            } else {
+                resolve_import_path(c, path)?.display().to_string()
+            };
+            let namespace_reg = c.alloc_reg()?;
+            compile_hidden_call(
+                c,
+                "__forge_import_namespace",
+                vec![
+                    Expr::StringLit(resolved),
+                    Expr::StringLit(path.clone()),
+                    Expr::StringLit(name.clone()),
+                ],
+                namespace_reg,
+            )?;
+            let local_reg = c.add_local(name, false)?;
+            c.emit(encode_abc(OpCode::Move, local_reg, namespace_reg, 0), 0);
+            if c.scope_depth == 1 {
+                // Top-level imports are also globals, as in the interpreter.
+                let name_idx = c.const_str(&c.global_name(name));
+                c.emit(encode_abx(OpCode::SetGlobal, local_reg, name_idx), 0);
+            }
+            Ok(())
+        }
+
         Stmt::ImportNative { path, binding } => {
             // Loading happens at run time in the shared `plugins::import`
             // (resolution, `ffi` check, registry); the bound names are known
@@ -3623,14 +3652,24 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             let pi = c.finish_child(lc)?;
             c.emit(encode_abx(OpCode::Closure, dst, pi), 0);
         }
-        Expr::StructInit { name, fields } => {
+        Expr::StructInit {
+            name,
+            fields,
+            namespace,
+        } => {
             let provided_fields = Expr::Object(fields.clone());
-            compile_hidden_call(
-                c,
-                "__forge_new_struct",
-                vec![Expr::StringLit(name.clone()), provided_fields],
-                dst,
-            )?;
+            let mut args = vec![Expr::StringLit(name.clone()), provided_fields];
+            if let Some(ns) = namespace {
+                // `m.Point { ... }`: reading `m.Point` raises the
+                // namespace's error for an unknown member; the builtin
+                // checks that it is the struct.
+                args.push(Expr::FieldAccess {
+                    object: Box::new(Expr::Ident(ns.clone())),
+                    field: name.clone(),
+                });
+                args.push(Expr::StringLit(ns.clone()));
+            }
+            compile_hidden_call(c, "__forge_new_struct", args, dst)?;
         }
         Expr::Block(stmts) => compile_block_value(c, stmts, dst)?,
         Expr::Await(inner) => {

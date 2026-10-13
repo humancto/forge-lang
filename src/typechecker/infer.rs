@@ -89,6 +89,22 @@ struct Binding {
     declared: Option<Ty>,
     kind: BindKind,
     id: usize,
+    /// Bound by `import "path" as name` (see `Checker::namespaces`).
+    namespace: bool,
+}
+
+/// What the checker knows about a module namespace (`import "path" as m`).
+#[derive(Debug, Clone, Default)]
+struct NamespaceInfo {
+    /// The path as written (named in diagnostics, like the engines do).
+    path: String,
+    /// The module's functions, with their signatures (`m.f(x)`).
+    functions: HashMap<String, Callable>,
+    /// Every member name (`semantics::namespace_members`); `None` when the
+    /// module could not be read (members are then unknown, not missing).
+    members: Option<Vec<String>>,
+    /// The module's structs (`m.Point { ... }`).
+    structs: HashSet<String>,
 }
 
 struct FnFrame {
@@ -238,6 +254,9 @@ pub struct Checker<'a> {
     /// (`import_declarations`): their names resolve in that module, not in
     /// the file being checked.
     foreign: Option<ForeignModule>,
+    /// Module namespaces of the file's top-level `import "path" as m`,
+    /// by binding name (`import_namespace`).
+    namespaces: HashMap<String, NamespaceInfo>,
 }
 
 /// Name resolution for an imported module's function bodies. The syntax
@@ -281,6 +300,7 @@ impl<'a> Checker<'a> {
             functions: HashMap::new(),
             unknown_wildcard: false,
             foreign: None,
+            namespaces: HashMap::new(),
             cx: InferCtx::default(),
             scopes: vec![HashMap::new()],
             frames: Vec::new(),
@@ -379,6 +399,127 @@ impl<'a> Checker<'a> {
         self.mute = mute;
         self.diagnostics = before;
         self.foreign = saved_foreign;
+    }
+
+    /// Bring in `import "path" as binding`: the module's structs, types,
+    /// interfaces and methods are declared under their own names (both
+    /// engines register them by name), its functions only as members of
+    /// the namespace (`m.f(x)` is checked against the module's signature).
+    /// `program` is `None` when the module could not be read.
+    pub fn import_namespace(&mut self, binding: &str, path: &str, program: Option<&Program>) {
+        let Some(program) = program else {
+            self.namespaces.insert(
+                binding.to_string(),
+                NamespaceInfo {
+                    path: path.to_string(),
+                    ..NamespaceInfo::default()
+                },
+            );
+            return;
+        };
+        let decls: Vec<SpannedStmt> = program
+            .statements
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.stmt,
+                    Stmt::StructDef { .. }
+                        | Stmt::TypeDef { .. }
+                        | Stmt::InterfaceDef { .. }
+                        | Stmt::ImplBlock { .. }
+                        | Stmt::FnDef { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        let types: Vec<SpannedStmt> = decls
+            .iter()
+            .filter(|s| !matches!(s.stmt, Stmt::FnDef { .. }))
+            .cloned()
+            .collect();
+        self.collect_declarations(&types);
+        // The module's functions live in their own table while their
+        // signatures are collected and their bodies inferred (names in
+        // them resolve in the module, `ForeignModule`).
+        let saved_functions = std::mem::take(&mut self.functions);
+        let fns: Vec<SpannedStmt> = decls
+            .iter()
+            .filter(|s| matches!(s.stmt, Stmt::FnDef { .. }))
+            .cloned()
+            .collect();
+        self.collect_declarations(&fns);
+        let (binders, unknown) = crate::semantics::hoist::module_binders(&program.statements);
+        let kept: HashSet<String> = self.functions.keys().cloned().collect();
+        let saved_foreign = self.foreign.replace(ForeignModule {
+            binders,
+            unknown,
+            kept,
+        });
+        let before = std::mem::take(&mut self.diagnostics);
+        let mute = std::mem::replace(&mut self.mute, true);
+        self.infer_return_types(&decls);
+        self.mute = mute;
+        self.diagnostics = before;
+        self.foreign = saved_foreign;
+        let functions = std::mem::replace(&mut self.functions, saved_functions);
+        let members = crate::semantics::namespace_members(program);
+        let structs = members
+            .iter()
+            .filter_map(|m| match m {
+                crate::semantics::NamespaceMember::Struct(n) => Some(n.clone()),
+                crate::semantics::NamespaceMember::Value(_) => None,
+            })
+            .collect();
+        self.namespaces.insert(
+            binding.to_string(),
+            NamespaceInfo {
+                path: path.to_string(),
+                functions,
+                members: Some(members.iter().map(|m| m.name().to_string()).collect()),
+                structs,
+            },
+        );
+    }
+
+    /// The namespace `name` denotes here (a visible `import ... as name`).
+    fn namespace_here(&self, name: &str) -> Option<&NamespaceInfo> {
+        match self.lookup(name) {
+            Some(b) if b.namespace => self.namespaces.get(name),
+            _ => None,
+        }
+    }
+
+    /// The type of namespace member `m.field`, reporting an unknown member
+    /// (T0010, the engines' E0013).
+    fn namespace_member_type(&mut self, ns: &str, field: &str) -> Ty {
+        let Some(info) = self.namespace_here(ns).cloned() else {
+            return Ty::Any;
+        };
+        let Some(members) = &info.members else {
+            return Ty::Any;
+        };
+        let ty = if field == crate::semantics::NAMESPACE_MODULE_KEY {
+            Ty::String
+        } else if let Some(c) = info.functions.get(field) {
+            Ty::Fn(c.sig.clone())
+        } else if members.iter().any(|m| m == field) {
+            self.variant_value_type(field).unwrap_or(Ty::Any)
+        } else {
+            let mut candidates = members.clone();
+            candidates.sort();
+            let (help, fixes) = self.unknown_member_fix(field, &candidates);
+            let span = self.name_span(field, NameClass::Field);
+            self.report(
+                Code::UnknownMember,
+                span,
+                format!("module '{}' has no member '{}'", info.path, field),
+                help,
+                fixes,
+            );
+            Ty::Any
+        };
+        self.record_field_type(field, &ty);
+        ty
     }
 
     fn walk_program(&mut self, program: &Program) {
@@ -668,6 +809,7 @@ impl<'a> Checker<'a> {
                     declared,
                     kind,
                     id,
+                    namespace: false,
                 },
             );
         }
@@ -1430,6 +1572,13 @@ impl<'a> Checker<'a> {
                 (self.cx.join(&t1, &t2), flow)
             }
             Stmt::Import { .. } => (Ty::Null, Flow::Normal),
+            Stmt::ImportNamespace { name, .. } => {
+                self.bind(name, Ty::Object, None, BindKind::Immutable);
+                if let Some(b) = self.scopes.last_mut().and_then(|s| s.get_mut(name)) {
+                    b.namespace = true;
+                }
+                (Ty::Null, Flow::Normal)
+            }
             Stmt::ImportNative { binding, .. } => {
                 // Plugin functions are untyped at the ABI: everything is Any.
                 match binding {
@@ -2376,7 +2525,37 @@ impl<'a> Checker<'a> {
                 };
                 self.infer_call(&callee, args)
             }
-            Expr::StructInit { name, fields } => self.infer_struct_init(name, fields),
+            Expr::StructInit {
+                name,
+                fields,
+                namespace,
+            } => {
+                if let Some(ns) = namespace {
+                    let known = self.namespace_here(ns).cloned();
+                    if let Some(NamespaceInfo {
+                        path,
+                        members: Some(_),
+                        structs,
+                        ..
+                    }) = known
+                    {
+                        if !structs.contains(name) {
+                            let span = self.name_span(name, NameClass::Field);
+                            let mut candidates: Vec<String> = structs.into_iter().collect();
+                            candidates.sort();
+                            let (help, fixes) = self.unknown_member_fix(name, &candidates);
+                            self.report(
+                                Code::UnknownMember,
+                                span,
+                                format!("module '{}' has no struct '{}'", path, name),
+                                help,
+                                fixes,
+                            );
+                        }
+                    }
+                }
+                self.infer_struct_init(name, fields)
+            }
             Expr::Block(stmts) => {
                 let (t, _) = self.check_body(stmts);
                 t
@@ -2619,6 +2798,10 @@ impl<'a> Checker<'a> {
     fn infer_field_access(&mut self, object: &Expr, field: &str) -> Ty {
         // Module member: `math.sqrt`.
         if let Expr::Ident(module) = object {
+            // Namespace member: `import "m.fg" as m; m.f`.
+            if self.namespace_here(module).is_some() {
+                return self.namespace_member_type(module, field);
+            }
             if self.is_global_here(module) {
                 if let Some(info) = builtins::module(module) {
                     let ty = if info.members.contains(field) {
@@ -3299,6 +3482,18 @@ impl<'a> Checker<'a> {
         let span = self.name_span(method, NameClass::Field);
         // Module function: `math.sqrt(x)`.
         if let Expr::Ident(module) = object {
+            // Namespace function: `import "m.fg" as m; m.f(x)`, checked
+            // against the module's signature like a direct import.
+            if self.namespace_here(module).is_some() {
+                let ft = self.namespace_member_type(module, method);
+                let label = format!("{}.{}", module, method);
+                return match self.cx.resolve(&ft) {
+                    Ty::Fn(f) => {
+                        self.call_signature(&label, &f, args, has_spread, span, CallKind::User)
+                    }
+                    other => self.call_value(&other, &label, args, has_spread, span, true),
+                };
+            }
             if self.is_global_here(module) && builtins::module(module).is_some() {
                 let ft = self.infer_field_access(object, method);
                 return match ft {
@@ -3596,8 +3791,18 @@ fn collect_expr_names(expr: &Expr, out: &mut Vec<(String, NameClass)>) {
                 collect_expr_names(v, out);
             }
         }
-        Expr::StructInit { name, fields } => {
-            out.push((name.clone(), NameClass::Type));
+        Expr::StructInit {
+            name,
+            fields,
+            namespace,
+        } => {
+            match namespace {
+                Some(ns) => {
+                    out.push((ns.clone(), NameClass::Value));
+                    out.push((name.clone(), NameClass::Field));
+                }
+                None => out.push((name.clone(), NameClass::Type)),
+            }
             for (k, v) in fields {
                 out.push((k.clone(), NameClass::Field));
                 collect_expr_names(v, out);

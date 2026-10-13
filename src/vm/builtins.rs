@@ -463,12 +463,23 @@ impl VM {
                 Ok(marker)
             }
             "__forge_new_struct" => {
-                if args.len() != 2 {
+                // (name, provided_fields[, member, namespace]): with a
+                // namespace (`m.Point { ... }`), `member` is `m.Point`,
+                // which must be the module's struct `Point`.
+                if args.len() != 2 && args.len() != 4 {
                     return Err(VMError::new(
-                        "__forge_new_struct() requires (name, provided_fields)",
+                        "__forge_new_struct() requires (name, provided_fields[, member, namespace])",
                     ));
                 }
                 let type_name = self.get_string_arg(&args, 0)?;
+                if args.len() == 4 {
+                    let namespace = self.get_string_arg(&args, 3)?;
+                    if self.struct_marker_name(&args[2]).as_deref() != Some(type_name.as_str()) {
+                        return Err(VMError::new(&crate::semantics::not_a_namespace_struct(
+                            &namespace, &type_name,
+                        )));
+                    }
+                }
                 let mut fields = self
                     .struct_defaults
                     .get(&type_name)
@@ -985,6 +996,53 @@ impl VM {
                         .map_err(|e| VMError::new(&e))?;
                 self.from_interp_checked(&namespace)
             }
+            "__forge_import_namespace" => {
+                // (resolved_path, path_as_written, name): the namespace
+                // object of `import "path" as name` (same members and
+                // order as the interpreter's, `semantics::namespace_members`).
+                if args.len() != 3 {
+                    return Err(VMError::new(
+                        "__forge_import_namespace() requires (path, display_path, name)",
+                    ));
+                }
+                let path = self.get_string_arg(&args, 1)?;
+                if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                    let name = self.get_string_arg(&args, 2)?;
+                    return Err(VMError::new(
+                        &crate::semantics::namespace_of_builtin_module(&path, &name),
+                    ));
+                }
+                let resolved = self.get_string_arg(&args, 0)?;
+                let module = self.import_module_once(&resolved, &path)?;
+                let mut members = IndexMap::new();
+                let module_key = self.alloc_string(&path);
+                members.insert(
+                    crate::semantics::NAMESPACE_MODULE_KEY.to_string(),
+                    module_key,
+                );
+                for member in crate::semantics::namespace_members(&module.program) {
+                    match member {
+                        crate::semantics::NamespaceMember::Value(name) => {
+                            let value = self
+                                .globals
+                                .get(&format!("{}{}", module.prefix, name))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    VMError::new(&crate::semantics::import_missing_name(
+                                        &path, &name,
+                                    ))
+                                })?;
+                            members.insert(name, value);
+                        }
+                        crate::semantics::NamespaceMember::Struct(name) => {
+                            let marker = self.make_struct_marker(&name);
+                            members.insert(name, marker);
+                        }
+                    }
+                }
+                let r = self.gc.alloc(ObjKind::Object(members));
+                Ok(Value::obj(r))
+            }
             "__forge_import_module" => {
                 // (resolved_path, names | false, path_as_written, [[name, alias], ...]?)
                 if args.is_empty() || args.len() > 4 {
@@ -1038,67 +1096,7 @@ impl VM {
                     Some(_) => self.get_string_arg(&args, 2)?,
                     None => resolved.clone(),
                 };
-                let file_path = crate::package::resolve_import(&resolved)
-                    .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(&path)))?;
-                let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
-
-                // A module runs once per program; importing it again (from
-                // here or another module) binds the globals it left.
-                let module = match self.loaded_modules.get(&key) {
-                    Some(module) => Arc::clone(module),
-                    None => {
-                        // Read the path that was checked (resolved under a
-                        // scoped grant).
-                        let checked = crate::permissions::require_import(&file_path)
-                            .map_err(|e| VMError::new(&e.to_string()))?;
-                        let source = std::fs::read_to_string(&checked).map_err(|e| {
-                            VMError::new(&format!("cannot import '{}': {}", path, e))
-                        })?;
-
-                        let program =
-                            crate::typechecker::prepare_module(&source, &path, &file_path)
-                                .map_err(|e| VMError::new(&e))?;
-
-                        // Shared cycle detection (runtime/imports.rs).
-                        // Checked before compiling so a cycle is reported
-                        // once, not as a nested chain of compile/runtime
-                        // errors.
-                        let _import_guard = crate::runtime::imports::enter_import(&file_path)
-                            .map_err(|msg| VMError::new(&msg))?;
-                        // The module's top-level names live under a private
-                        // global prefix, so only the names imported here
-                        // become visible to the importer (no leaking of
-                        // helpers it did not ask for).
-                        let prefix = crate::vm::compiler::module_global_prefix(&resolved);
-                        let chunk = crate::vm::compiler::compile_module_with(
-                            &program,
-                            file_path.parent(),
-                            Some(&prefix),
-                        )
-                        .map_err(|e| {
-                            VMError::new(&format!("import '{}' compile error: {}", path, e.message))
-                        })?;
-                        self.execute_module(&chunk).map_err(|e| {
-                            if e.is_unwound_to_handler() || e.is_fatal() {
-                                // Control transfer (a `timeout` around the
-                                // import fired inside it) or a fatal limit:
-                                // propagate as is.
-                                e
-                            } else if e.message.starts_with("circular import: ") {
-                                // Propagate the cycle report unwrapped.
-                                VMError::new(&e.message)
-                            } else {
-                                VMError::new(&format!("import '{}' runtime error: {}", path, e))
-                            }
-                        })?;
-                        let module = Arc::new(crate::vm::machine::LoadedModule {
-                            program: Arc::new(program),
-                            prefix,
-                        });
-                        self.loaded_modules.insert(key, Arc::clone(&module));
-                        module
-                    }
-                };
+                let module = self.import_module_once(&resolved, &path)?;
 
                 for pair in &aliases {
                     if let [name, alias] = pair.as_slice() {
@@ -3937,6 +3935,76 @@ impl VM {
         }
     }
 
+    /// Run the module at `resolved` (the canonical path the compiler found;
+    /// `path` is the path as written, for messages) unless it already ran
+    /// in this VM: a module runs once per program, and every import of it
+    /// binds from that run.
+    fn import_module_once(
+        &mut self,
+        resolved: &str,
+        path: &str,
+    ) -> Result<Arc<crate::vm::machine::LoadedModule>, VMError> {
+        let file_path = crate::package::resolve_import(resolved)
+            .ok_or_else(|| VMError::new(&crate::semantics::import_not_found(path)))?;
+        let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
+
+        // A module runs once per program; importing it again (from
+        // here or another module) binds the globals it left.
+        match self.loaded_modules.get(&key) {
+            Some(module) => Ok(Arc::clone(module)),
+            None => {
+                // Read the path that was checked (resolved under a
+                // scoped grant).
+                let checked = crate::permissions::require_import(&file_path)
+                    .map_err(|e| VMError::new(&e.to_string()))?;
+                let source = std::fs::read_to_string(&checked)
+                    .map_err(|e| VMError::new(&format!("cannot import '{}': {}", path, e)))?;
+
+                let program = crate::typechecker::prepare_module(&source, &path, &file_path)
+                    .map_err(|e| VMError::new(&e))?;
+
+                // Shared cycle detection (runtime/imports.rs).
+                // Checked before compiling so a cycle is reported
+                // once, not as a nested chain of compile/runtime
+                // errors.
+                let _import_guard = crate::runtime::imports::enter_import(&file_path)
+                    .map_err(|msg| VMError::new(&msg))?;
+                // The module's top-level names live under a private
+                // global prefix, so only the names imported here
+                // become visible to the importer (no leaking of
+                // helpers it did not ask for).
+                let prefix = crate::vm::compiler::module_global_prefix(resolved);
+                let chunk = crate::vm::compiler::compile_module_with(
+                    &program,
+                    file_path.parent(),
+                    Some(&prefix),
+                )
+                .map_err(|e| {
+                    VMError::new(&format!("import '{}' compile error: {}", path, e.message))
+                })?;
+                self.execute_module(&chunk).map_err(|e| {
+                    if e.is_unwound_to_handler() || e.is_fatal() {
+                        // Control transfer (a `timeout` around the
+                        // import fired inside it) or a fatal limit:
+                        // propagate as is.
+                        e
+                    } else if e.message.starts_with("circular import: ") {
+                        // Propagate the cycle report unwrapped.
+                        VMError::new(&e.message)
+                    } else {
+                        VMError::new(&format!("import '{}' runtime error: {}", path, e))
+                    }
+                })?;
+                let module = Arc::new(crate::vm::machine::LoadedModule {
+                    program: Arc::new(program),
+                    prefix,
+                });
+                self.loaded_modules.insert(key, Arc::clone(&module));
+                Ok(module)
+            }
+        }
+    }
+
     fn make_struct_marker(&mut self, type_name: &str) -> Value {
         let mut marker = IndexMap::new();
         marker.insert("__kind__".to_string(), self.alloc_string("struct"));
@@ -4305,6 +4373,17 @@ impl VM {
             if let Some(func) = fields.get(method_name).cloned() {
                 self.check_user_method_arity(func, method_name, extra_args.len(), false)?;
                 return self.call_value(func, extra_args.to_vec());
+            }
+            // A module namespace has only its members: no builtin methods.
+            if let Some(module) = fields
+                .get(crate::semantics::NAMESPACE_MODULE_KEY)
+                .and_then(|v| self.get_string(v))
+            {
+                return Err(VMError::new(&crate::semantics::no_module_member(
+                    &module,
+                    method_name,
+                    fields.keys().map(String::as_str),
+                )));
             }
         }
 

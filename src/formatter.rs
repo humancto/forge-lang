@@ -708,6 +708,16 @@ mod tests {
     }
 
     #[test]
+    fn keeps_namespace_imports_intact() {
+        let src = "import \"geo.fg\" as geo\nlet p = geo.Point { x: 1 }\nmatch s {\n    geo.Circle(r) => r,\n    geo.Dot => 0,\n}\n";
+        assert_eq!(format_source(src), src);
+        assert_eq!(
+            format_source("import \"geo.fg\"   as   geo\nlet p = geo.Point{x:1}\n"),
+            "import \"geo.fg\" as geo\nlet p = geo.Point { x: 1 }\n"
+        );
+    }
+
+    #[test]
     fn formats_basic_indentation() {
         let input = "fn greet(name) {\nprintln(name)\n}\n";
         let result = format_source(input);

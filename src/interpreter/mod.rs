@@ -554,6 +554,33 @@ impl Value {
     }
 }
 
+/// The struct a static method call `Type.method()` is made on: a struct
+/// name (`struct:Point`) or a struct marker read from a module namespace
+/// (`{__kind__: "struct", name: "Point"}`, `m.Point`).
+fn static_struct_name(value: &Value) -> Option<String> {
+    match value {
+        Value::BuiltIn(tag) => tag.strip_prefix("struct:").map(str::to_string),
+        Value::Object(map) => struct_marker_name(map).map(str::to_string),
+        _ => None,
+    }
+}
+
+/// `{__kind__: "struct", name: N}` (a namespace's struct member) → `N`.
+fn struct_marker_name(map: &IndexMap<String, Value>) -> Option<&str> {
+    match (map.get("__kind__"), map.get("name")) {
+        (Some(Value::String(kind)), Some(Value::String(name))) if kind == "struct" => Some(name),
+        _ => None,
+    }
+}
+
+/// The path of a module namespace object (its `__module__` key).
+fn namespace_module(map: &IndexMap<String, Value>) -> Option<&str> {
+    match map.get(crate::semantics::NAMESPACE_MODULE_KEY) {
+        Some(Value::String(path)) => Some(path),
+        _ => None,
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2448,6 +2475,52 @@ impl Interpreter {
                 Ok(Signal::None)
             }
 
+            Stmt::ImportNamespace { path, name } => {
+                if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                    return Err(RuntimeError::new(
+                        &crate::semantics::namespace_of_builtin_module(path, name),
+                    ));
+                }
+                let module = self.load_module(path)?;
+                // The same members, in the same order, as the VM's
+                // namespace (`semantics::namespace_members`).
+                let mut members = IndexMap::new();
+                members.insert(
+                    crate::semantics::NAMESPACE_MODULE_KEY.to_string(),
+                    Value::String(path.clone()),
+                );
+                for member in crate::semantics::namespace_members(&module.program) {
+                    match member {
+                        crate::semantics::NamespaceMember::Value(n) => {
+                            let val = module.env.get(&n).ok_or_else(|| {
+                                RuntimeError::new(&crate::semantics::import_missing_name(path, &n))
+                            })?;
+                            members.insert(n, val);
+                        }
+                        crate::semantics::NamespaceMember::Struct(n) => {
+                            let mut marker = IndexMap::new();
+                            marker.insert("__kind__".to_string(), Value::String("struct".into()));
+                            marker.insert("name".to_string(), Value::String(n.clone()));
+                            members.insert(n, Value::Object(marker));
+                        }
+                    }
+                }
+                // Type metadata travels with the import, as for the other
+                // forms (values built here dispatch through it).
+                for spanned in &module.program.statements {
+                    if let Stmt::TypeDef { name, .. } = &spanned.stmt {
+                        let meta_key = format!("__type_{}__", name);
+                        if let Some(val) = module.env.get(&meta_key) {
+                            self.env.define(meta_key, val);
+                        }
+                    }
+                }
+                self.absorb_type_tables(&module);
+                self.env
+                    .define_with_mutability(name.clone(), Value::Object(members), false);
+                Ok(Signal::None)
+            }
+
             Stmt::ImportNative { path, binding } => {
                 // Shared with the VM (`__forge_import_native`): resolution,
                 // the `ffi` check, loading and the namespace object.
@@ -3524,9 +3597,19 @@ impl Interpreter {
                             // Safety: guarded by `is_some()` above; use unwrap_or for defence-in-depth
                             map.get(field).cloned().unwrap_or(Value::Null)
                         }
-                        // Static method call: Type.method(args)
-                        Value::BuiltIn(ref tag) if tag.starts_with("struct:") => {
-                            let type_name = tag[7..].to_string();
+                        // A module namespace has only its members: no
+                        // builtin methods.
+                        Value::Object(map) if namespace_module(map).is_some() => {
+                            return Err(RuntimeError::new(&crate::semantics::no_module_member(
+                                namespace_module(map).unwrap_or_default(),
+                                field,
+                                map.keys().map(String::as_str),
+                            )));
+                        }
+                        // Static method call: Type.method(args), also through
+                        // a namespace's struct marker (`m.Point.new()`).
+                        _ if static_struct_name(&obj).is_some() => {
+                            let type_name = static_struct_name(&obj).unwrap_or_default();
                             let func_opt = self
                                 .static_methods
                                 .get(&type_name)
@@ -3992,7 +4075,26 @@ impl Interpreter {
                 closure: Arc::new(std::sync::Mutex::new(self.capture_env())),
             }),
 
-            Expr::StructInit { name, fields } => {
+            Expr::StructInit {
+                name,
+                fields,
+                namespace,
+            } => {
+                if let Some(ns) = namespace {
+                    // `m.Point { ... }`: `m.Point` must be the module's
+                    // struct (an unknown member is the namespace's error).
+                    let member = self.eval_expr(&Expr::FieldAccess {
+                        object: Box::new(Expr::Ident(ns.clone())),
+                        field: name.clone(),
+                    })?;
+                    let is_struct = matches!(&member, Value::Object(m)
+                        if struct_marker_name(m) == Some(name.as_str()));
+                    if !is_struct {
+                        return Err(RuntimeError::new(
+                            &crate::semantics::not_a_namespace_struct(ns, name),
+                        ));
+                    }
+                }
                 let mut map = IndexMap::new();
                 // Apply defaults first, then override with provided fields
                 if let Some(defaults) = self.struct_defaults.get(name).cloned() {
@@ -4313,7 +4415,8 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(RuntimeError::new(&crate::semantics::no_field(
+                Err(RuntimeError::new(&crate::semantics::missing_member(
+                    namespace_module(map),
                     field,
                     map.keys().map(String::as_str),
                 )))

@@ -456,6 +456,7 @@ impl Free {
             Stmt::TypeDef { .. }
             | Stmt::InterfaceDef { .. }
             | Stmt::Import { .. }
+            | Stmt::ImportNamespace { .. }
             | Stmt::ImportNative { .. }
             | Stmt::Break
             | Stmt::Continue => {}
@@ -511,8 +512,15 @@ impl Free {
                     self.expr(e);
                 }
             }
-            Expr::StructInit { name, fields } => {
+            Expr::StructInit {
+                name,
+                fields,
+                namespace,
+            } => {
                 self.use_name(name);
+                if let Some(ns) = namespace {
+                    self.use_name(ns);
+                }
                 for (_, e) in fields {
                     self.expr(e);
                 }
@@ -676,6 +684,7 @@ fn collect_binders(stmt: &Stmt, in_function: bool, b: &mut Binders) {
             }
             None => b.everything = true,
         },
+        Stmt::ImportNamespace { name, .. } => add(name, b),
         Stmt::ImportNative { binding, .. } => match binding {
             NativeBinding::Namespace(name) => add(name, b),
             NativeBinding::Names(names) => {

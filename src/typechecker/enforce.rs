@@ -295,6 +295,7 @@ impl Instrumenter<'_> {
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Import { .. }
+            | Stmt::ImportNamespace { .. }
             | Stmt::ImportNative { .. }
             | Stmt::PromptDef { .. }
             | Stmt::AgentDef { .. } => {}
@@ -320,7 +321,7 @@ impl Instrumenter<'_> {
                     self.expr(e);
                 }
             }
-            Expr::StructInit { name, fields } => {
+            Expr::StructInit { name, fields, .. } => {
                 for (field, e) in fields.iter_mut() {
                     self.expr(e);
                     // Fields declared Float take Ints as Floats.

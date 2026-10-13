@@ -368,7 +368,7 @@ fn collect_vm_incompatible_stmt(stmt: &Stmt, issues: &mut std::collections::BTre
         Stmt::DecoratorStmt(decorator) => {
             issues.extend(vm_unsupported_decorator(decorator, true));
         }
-        Stmt::Import { .. } | Stmt::ImportNative { .. } => {}
+        Stmt::Import { .. } | Stmt::ImportNamespace { .. } | Stmt::ImportNative { .. } => {}
         Stmt::FnDef {
             body, decorators, ..
         } => {

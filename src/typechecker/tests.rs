@@ -1800,6 +1800,94 @@ fn renaming_a_type_in_an_import_is_reported() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// `import "path" as m`: `m.f(x)` is checked against the module's signature
+// (arity and argument types, as for a direct import), an unknown member is
+// T0008 with a suggestion, and `m.S { ... }` / `m.V(...)` patterns resolve
+// to the module's struct and variants.
+#[test]
+fn namespace_imports_are_checked_against_the_module() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_namespace_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("geo.fg"),
+        "let mut count = 0\n\
+         fn add(a: Int, b: Int) -> Int { return a + b }\n\
+         fn bump() {\n    count = count + 1\n    return count\n}\n\
+         struct Point { x: Int, y: Int = 0 }\n\
+         type Shape = Circle(Float) | Dot\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    let check = |source: &str, edition| {
+        analyze(
+            source,
+            &CheckOptions {
+                file: Some(main.clone()),
+                edition: Some(edition),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("parses")
+        .diagnostics
+    };
+    // Correct uses are silent in both editions.
+    let ok = "import \"geo.fg\" as geo\n\
+              let n: Int = geo.add(1, 2) + geo.bump()\n\
+              let p = geo.Point { x: n }\n\
+              let k = match geo.Circle(1.0) {\n    geo.Circle(r) => r,\n    geo.Dot => 0.0,\n}\n\
+              println(p.x, k, geo.count, geo.__module__)\n";
+    for edition in [Edition::E2026, Edition::E2027] {
+        let ds = check(ok, edition);
+        assert!(ds.is_empty(), "{edition:?}: {ds:?}");
+    }
+    let found = |source: &str| -> Vec<(String, String)> {
+        check(source, Edition::E2027)
+            .iter()
+            .map(|d| (d.code.as_str().to_string(), d.message.clone()))
+            .collect()
+    };
+    // Arity and argument types, as for `import { add }`.
+    let ds = found("import \"geo.fg\" as geo\nprintln(geo.add(1))\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0004", "{ds:?}");
+    let ds = found("import \"geo.fg\" as geo\nprintln(geo.add(1, \"x\"))\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0002", "{ds:?}");
+    // An unknown member, with the module's closest name.
+    let ds = check(
+        "import \"geo.fg\" as geo\nprintln(geo.ad(1, 2))\n",
+        Edition::E2027,
+    );
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].code.as_str(), "T0008");
+    assert_eq!(ds[0].message, "module 'geo.fg' has no member 'ad'");
+    assert_eq!(ds[0].help.as_deref(), Some("did you mean 'add'?"));
+    assert_eq!((ds[0].span.start.line, ds[0].span.start.col), (2, 13));
+    let ds = found("import \"geo.fg\" as geo\nlet p = geo.Pointt { x: 1 }\n");
+    assert_eq!(
+        ds,
+        vec![(
+            "T0008".to_string(),
+            "module 'geo.fg' has no struct 'Pointt'".to_string()
+        )]
+    );
+    // The namespace binding is immutable.
+    let ds = found("import \"geo.fg\" as geo\ngeo.count = 3\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0017", "{ds:?}");
+    // A local of the same name shadows the namespace.
+    assert!(check(
+        "import \"geo.fg\" as geo\nfn f(geo) { return geo.anything }\nprintln(f({anything: 1}))\n",
+        Edition::E2027
+    )
+    .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn imports_are_not_resolved_when_skipped() {
     let ds = analyze(
