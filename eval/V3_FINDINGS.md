@@ -456,6 +456,23 @@ returns only them (script name first, like `sys.argv`); allow them under `--sand
 (they come from the caller, not the host environment). word_tool_args is marked known
 failing until then.
 
+**Fixed:** `forge run file.fg [args...]` passes everything after the script path to the
+program, flags included (clap trailing var args): forge's own flags go before the file
+(`forge --interp run x.fg`, `forge run --allow-run x.fg`), and `forge run x.fg --interp`
+gives `--interp` to the program. `io.args()` is exactly the program's command line, like
+`sys.argv`: the script path as given, then the arguments (`["main.fg", "--top", "3"]`);
+`io.args_parse`/`args_get`/`args_has` look at the arguments after the path, up to a `--`.
+The arguments live in `runtime::program_args` (set once by the CLI, overridable per thread,
+carried into spawned tasks by `permissions::inherit`), never in the host's argv, so they do
+not depend on the `process` capability and `--sandbox` runs get them. A `Sandbox` sees only
+`Sandbox::args` (default empty), whatever its capabilities; MCP `run_forge` takes an optional
+`args` array (`io.args()` is `["<run_forge>", ...args]`). Binaries from `forge build --aot`
+/ `--native` see their own argv (the launcher fallback passes it to `forge run`).
+word_tool_args is no longer known failing (its reference reads `slice(io.args(), 1, ...)`).
+Tests: `tests/program_args_cli.rs` (both engines, with and without `--sandbox`),
+`run_forge_passes_program_arguments` (MCP), `host_stdin_and_argv_are_not_readable_without_process`
+(security), `runtime::program_args::tests`.
+
 ### 14. Exponent literals
 
 ```forge

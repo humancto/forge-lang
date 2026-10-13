@@ -79,7 +79,7 @@ outside the sandbox (see SEC-15); side channels (timing).
 | `exit`, `cd` | `process` | `builtins.rs` | `vm/builtins.rs` |
 | `input`, `io.prompt` | `process` (else empty stream) | `builtins.rs` / shared | `vm/builtins.rs` / shared |
 | **`term.confirm`, `term.menu`** | **`process`** (else `false` / `null`, no read) | shared | shared |
-| **`io.args`, `io.args_parse`, `io.args_get`, `io.args_has`** | **`process`** (else empty) | shared | shared |
+| **`io.args`, `io.args_parse`, `io.args_get`, `io.args_has`** | none: the program's own arguments (`runtime::program_args`), never the host's; a sandbox sees only `Sandbox::args` (default empty) | shared | shared |
 | `ask` | `ai` | `interpreter/mod.rs` | `vm/machine.rs` |
 | `import "file"` | import root or `fs.read`; **reads the checked path** | `interpreter/mod.rs` | `vm/builtins.rs` |
 | **`watch "path"`** | **`fs.read`** | `runtime/host.rs` | `vm/machine.rs` (same helper) |
@@ -317,7 +317,12 @@ panic in embedders. Now an ordinary error.
 
 In an embedding host, `io.args()` returned the *host process's* argv
 (a Python program's arguments, which may hold tokens). It now requires
-`process` and is empty otherwise, like stdin.
+`process` and is empty otherwise, like stdin. Later (V3 finding 13) `io.args*`
+stopped reading the process's argv at all: they return the *program's*
+arguments (`runtime::program_args`), which the CLI sets from what follows the
+script path and a `Sandbox` sets to `Sandbox::args` (default empty) on its
+worker, whatever its capabilities. Test:
+`host_stdin_and_argv_are_not_readable_without_process`.
 
 ### SEC-14 Output cap enforced by polling (Medium, fixed)
 

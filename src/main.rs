@@ -541,13 +541,19 @@ enum McpCommand {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run a Forge source file (.fg) or compiled bytecode (.fgc)
+    /// Run a Forge source file (.fg) or compiled bytecode (.fgc). Everything
+    /// after the file goes to the program (`io.args()`), flags included:
+    /// give forge's own flags before the file.
     Run {
-        /// Path to a .fg or .fgc file (reads entry from forge.toml if omitted)
-        file: Option<PathBuf>,
         /// Allow shell execution (same as the top-level --allow-run)
         #[arg(long = "allow-run")]
         allow_run: bool,
+        /// Path to a .fg or .fgc file (reads entry from forge.toml if omitted)
+        file: Option<PathBuf>,
+        /// Arguments for the program: `io.args()` is the file path followed
+        /// by these
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Parse and type-check a file without running it. Exits 1 when it has
     /// errors (syntax errors, or any type diagnostic under --strict).
@@ -946,7 +952,7 @@ async fn async_main() {
     }
 
     match cli.command {
-        Some(Command::Run { file, .. }) => {
+        Some(Command::Run { file, args, .. }) => {
             let file = match file {
                 Some(f) => f,
                 None => {
@@ -972,6 +978,13 @@ async fn async_main() {
                     }
                 }
             };
+            // The program's command line (`io.args()`): its path as given,
+            // then everything after it.
+            runtime::program_args::set_process(
+                std::iter::once(file.display().to_string())
+                    .chain(args)
+                    .collect(),
+            );
             if file.extension().map(|e| e == "fgc").unwrap_or(false) {
                 run_bytecode_file(&file, profile);
                 return;

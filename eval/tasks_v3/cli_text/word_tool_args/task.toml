@@ -20,7 +20,6 @@ ascending by code point) as the count right-aligned in 4 characters, a space and
 Then print `<number of distinct counted words> distinct words` to standard error.
 """
 needs = []
-known_failing = "V3 finding 13"
 
 [[case]]
 name = "defaults"

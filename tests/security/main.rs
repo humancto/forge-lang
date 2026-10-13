@@ -669,13 +669,22 @@ fn host_stdin_and_argv_are_not_readable_without_process_on(engine: Engine) {
         )
         .expect("not errors");
     assert_eq!(out.stdout, "false\nnull\n[]\nfalse\n");
-    // With `process`, the arguments are the host's.
+    // Even with `process`, the arguments are never the host's: only what
+    // the host passed with `Sandbox::args`.
     let out = Sandbox::new()
         .engine(engine)
         .allow(Capability::Process)
-        .run_source("say len(io.args()) > 0")
+        .run_source("say io.args()")
         .expect("runs");
-    assert_eq!(out.stdout, "true\n");
+    assert_eq!(out.stdout, "[]\n");
+    let out = Sandbox::new()
+        .engine(engine)
+        .args(["tool.fg", "--top", "3"])
+        .run_source(
+            "say io.args()\nsay io.args_get(\"--top\")\nlet t = spawn { io.args() }\nsay await t",
+        )
+        .expect("runs");
+    assert_eq!(out.stdout, "[tool.fg, --top, 3]\n3\n[tool.fg, --top, 3]\n");
 }
 
 #[test]

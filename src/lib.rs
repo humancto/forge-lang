@@ -82,6 +82,12 @@ pub extern "C" fn forge_execute_bytecode(bytecode_ptr: *const u8, bytecode_len: 
     }
 
     let bytecode = unsafe { std::slice::from_raw_parts(bytecode_ptr, bytecode_len) };
+    // A standalone binary's program arguments are its own command line.
+    runtime::program_args::set_process(
+        std::env::args_os()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect(),
+    );
 
     // Catch panics so we don't abort the process
     let result = panic::catch_unwind(|| {
@@ -142,6 +148,12 @@ pub unsafe extern "C" fn forge_execute_source(
         return 1;
     }
 
+    // A standalone binary's program arguments are its own command line.
+    runtime::program_args::set_process(
+        std::env::args_os()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect(),
+    );
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let source_bytes = unsafe { std::slice::from_raw_parts(source_ptr, source_len) };
         let source = match std::str::from_utf8(source_bytes) {

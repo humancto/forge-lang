@@ -114,6 +114,8 @@ pub struct Sandbox {
     engine: Engine,
     /// `None`: the edition in effect where the run starts.
     edition: Option<Edition>,
+    /// What `io.args()` returns (see [`Sandbox::args`]).
+    args: Arc<[String]>,
 }
 
 /// Lets a host stop a running program from another thread. Cheap to clone;
@@ -354,6 +356,7 @@ impl Sandbox {
             memory_baseline: 0,
             engine: Engine::default(),
             edition: None,
+            args: Arc::from(Vec::new()),
         }
     }
 
@@ -491,6 +494,19 @@ impl Sandbox {
         self.edition.unwrap_or_else(edition::current)
     }
 
+    /// The program's command line, as `io.args()` returns it: by convention
+    /// a program name, then its arguments (`["tool.fg", "--top", "3"]`).
+    /// Default: empty. A sandboxed program never sees the host process's
+    /// own command line, whatever its capabilities.
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args = args.into_iter().map(Into::into).collect::<Vec<_>>().into();
+        self
+    }
+
     /// Run Forge source to completion under this sandbox's policy.
     pub fn run_source(&self, source: &str) -> Result<Output, SandboxError> {
         self.run_source_cancellable(source, &CancelHandle::new())
@@ -624,6 +640,7 @@ impl Sandbox {
         let worker_sink = sink.clone();
         let worker_budget = budget.clone();
         let run_edition = self.selected_edition();
+        let run_args = self.args.clone();
         let spawned = std::thread::Builder::new()
             .name("forge-sandbox".to_string())
             .stack_size(WORKER_STACK_SIZE)
@@ -631,6 +648,7 @@ impl Sandbox {
                 crate::runtime::recursion::register_thread_stack(WORKER_STACK_SIZE);
                 let _policy = permissions::scope(caps);
                 let _edition = edition::scope(Some(run_edition));
+                let _args = crate::runtime::program_args::scope(Some(run_args));
                 let _limits = limits::scope(Some(worker_budget));
                 let _output = stdio::scope(Some(worker_sink));
                 let mut state = make_state();
